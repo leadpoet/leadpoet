@@ -287,6 +287,11 @@ class RoundDefaults:
     cost_per_company_microusd: int = DEFAULT_COST_PER_COMPANY_MICROUSD
     scoring_cap_microusd: int = 50_000_000
     runner_hotkeys: Tuple[str, ...] = ()
+    # The service freezes its public execution ceiling into each new round.
+    # RUNNER_SLOT_CEILING is only the public maximum; a runner declaration can
+    # never raise this authority cap.
+    runner_slot_ceiling: int = 8
+    parallel_twenty_icp_execution: bool = False
     baseline_hotkey: str = ""
     baseline_source_url: str = DEFAULT_BASELINE_SOURCE_URL
     stage_minutes: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_STAGE_MINUTES))
@@ -355,6 +360,16 @@ class ServiceConfig:
     ] = None
 
     def __post_init__(self) -> None:
+        if (
+            isinstance(self.defaults.runner_slot_ceiling, bool)
+            or not isinstance(self.defaults.runner_slot_ceiling, int)
+            or not 1
+            <= self.defaults.runner_slot_ceiling
+            <= contracts.RUNNER_SLOT_CEILING
+        ):
+            raise ServiceError("runner_slot_ceiling_invalid", 500)
+        if not isinstance(self.defaults.parallel_twenty_icp_execution, bool):
+            raise ServiceError("parallel_twenty_icp_execution_invalid", 500)
         if self.defaults.integrity_from is not None:
             try:
                 activation = datetime.fromisoformat(self.defaults.integrity_from.replace("Z", "+00:00"))
@@ -668,6 +683,18 @@ class ArenaService:
             raise ServiceError(
                 "successful_call_cost_schema_unavailable", 500
             ) from exc
+        if (
+            getattr(
+                self._config.defaults, "parallel_twenty_icp_execution", False
+            )
+            is True
+        ):
+            try:
+                self._store.parallel_execution_schema()
+            except ArenaStoreError as exc:
+                raise ServiceError(
+                    "parallel_execution_schema_unavailable", 500
+                ) from exc
         today = int(self.now().strftime("%Y%m%d"))
         source = self._config.daily_icp_source(set_id=today, active_at=self.now())
         if not isinstance(source, Mapping) or source.get("status") not in (
@@ -821,7 +848,7 @@ class ArenaService:
             "stage_2_icp_count": contracts.STAGE_2_ICP_COUNT,
             "finalist_count": contracts.FINALIST_COUNT,
             "max_challengers": int(defaults.max_challengers),
-            "runner_slot_ceiling": contracts.RUNNER_SLOT_CEILING,
+            "runner_slot_ceiling": int(defaults.runner_slot_ceiling),
             "max_attempts_per_assignment": contracts.MAX_ATTEMPTS_PER_ASSIGNMENT,
             "lease_ttl_seconds": contracts.LEASE_TTL_SECONDS,
             "companies_per_icp": 5,
@@ -845,6 +872,8 @@ class ArenaService:
             "banned_hotkeys": banned_hotkeys,
             "reward_constants": rewards.reward_constants_document(int(defaults.pool_percent)),
         }
+        if defaults.parallel_twenty_icp_execution:
+            document["parallel_twenty_icp_execution"] = True
         if defaults.integrity_from is not None and cutoff >= datetime.fromisoformat(defaults.integrity_from.replace("Z", "+00:00")):
             self._require_integrity_schema()
             document["integrity_policy"] = integrity.POLICY
@@ -1784,14 +1813,40 @@ class ArenaService:
         self.benchmark_icps(round_id)
         positions = list(contracts.stage_positions(stage))
         rows = [{"submission_id": p["submission_id"], "miner_hotkey": p["miner_hotkey"]} for p in participants]
+        if (round_row.get("configuration_doc") or {}).get(
+            "parallel_twenty_icp_execution"
+        ):
+            if stage == 1:
+                return self._store.open_parallel_execution(round_id, rows)
+            return self._store.activate_preexecuted_stage2(round_id)
         return self._store.open_stage(round_id, stage, rows, positions)
 
     def stage_is_complete(self, round_id: str, stage: int) -> bool:
-        runs = self._store.list_runs(round_id, stage=stage, kind="execute")
+        round_row = self._round(round_id)
+        parallel_twenty = bool(
+            (round_row.get("configuration_doc") or {}).get(
+                "parallel_twenty_icp_execution"
+            )
+        )
+        runs = self._store.list_runs(
+            round_id,
+            stage=None if parallel_twenty and stage == 1 else stage,
+            kind="execute",
+        )
         return bool(runs) and all(run["status"] in ("accepted", "failed") for run in runs)
 
     def close_stage(self, round_id: str, stage: int) -> Dict[str, Any]:
-        closed = self._store.close_stage(round_id, stage)
+        round_row = self._round(round_id)
+        parallel_twenty = bool(
+            (round_row.get("configuration_doc") or {}).get(
+                "parallel_twenty_icp_execution"
+            )
+        )
+        closed = (
+            self._store.close_parallel_execution(round_id)
+            if parallel_twenty and stage == 1
+            else self._store.close_stage(round_id, stage)
+        )
         if closed.get("status") != "closed":
             return closed
         return self.commit_scoring_plan(round_id, stage)
@@ -3217,6 +3272,9 @@ class ArenaService:
             raise ServiceError("declared_parallelism_invalid", 400)
         configuration = round_row["configuration_doc"]
         snapshot = self._benchmark_snapshot()
+        if (configuration.get("parallel_twenty_icp_execution") is True
+                and body.get("proxy_execution_version") != contracts.PROXY_EXECUTION_VERSION):
+            raise ServiceError("validator_proxy_execution_upgrade_required", 409)
         response = None
         try:
             uid = self._benchmark_validator_uid(snapshot, validated["hotkey"])
@@ -3337,6 +3395,8 @@ class ArenaService:
                 ),
             }
         )
+        if configuration.get("parallel_twenty_icp_execution") is True:
+            lease["parallel_twenty_icp_execution"] = True
         return lease
 
     def _run_context(self, run_id: str, lease_token: str) -> Tuple[Dict[str, Any], broker_module.RunContext]:

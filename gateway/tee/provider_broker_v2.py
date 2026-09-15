@@ -20,13 +20,18 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import weakref
 import zlib
 
+from leadpoet_canonical.proxy_transport import (
+    ProxyTransportError,
+    validate_http_connect_proxy_url,
+)
+
 from httpx import SyncByteStream
 
 from gateway.tee.egress_framing import (
     TUNNEL_FRAMING_HEADER,
     TUNNEL_FRAMING_MODE,
 )
-from gateway.tee.egress_policy import normalize_destination, normalize_proxy_destination
+from gateway.tee.egress_policy import normalize_destination
 from gateway.tee.egress_proxy import DEFAULT_IDLE_TIMEOUT_SECONDS
 from gateway.tee.inter_enclave_tls import MAX_FRAME_BYTES, REPLAY_WAIT_SECONDS
 from gateway.tee.rpc_authority import (
@@ -577,43 +582,10 @@ def credential_value_hash(value: str) -> str:
 
 
 def _validated_tls_proxy_url(value: str) -> str:
-    normalized = str(value or "")
-    parsed = urlsplit(normalized)
-    scheme = parsed.scheme.lower()
     try:
-        parsed_port = parsed.port
-        port = (
-            parsed_port
-            if parsed_port is not None
-            else (443 if scheme == "https" else 80)
-        )
-    except ValueError as exc:
-        raise ProviderBrokerV2Error("worker egress proxy port is invalid") from exc
-    if (
-        scheme not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.path not in {"", "/"}
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise ProviderBrokerV2Error(
-            "worker egress proxy must be an HTTP CONNECT or HTTPS proxy URL"
-        )
-    try:
-        normalize_proxy_destination(parsed.hostname, port)
-    except ValueError as exc:
-        raise ProviderBrokerV2Error(
-            "worker egress proxy destination is invalid"
-        ) from exc
-    if (parsed.username is None) != (parsed.password is None):
-        raise ProviderBrokerV2Error("worker egress proxy credentials are incomplete")
-    if any(
-        "\x00" in str(item) or "\r" in str(item) or "\n" in str(item)
-        for item in (parsed.username, parsed.password)
-        if item is not None
-    ):
-        raise ProviderBrokerV2Error("worker egress proxy credentials are invalid")
-    return normalized
+        return validate_http_connect_proxy_url(value)
+    except ProxyTransportError as exc:
+        raise ProviderBrokerV2Error(str(exc)) from exc
 
 
 def _nonsecret_headers(headers: Mapping[str, Any]) -> Dict[str, str]:

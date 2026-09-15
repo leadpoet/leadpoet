@@ -28,7 +28,8 @@ BENCHMARK_ICP_COUNT = STAGE_1_ICP_COUNT + STAGE_2_ICP_COUNT
 FINALIST_COUNT = 10
 MAX_CHALLENGERS = 256  # one entry per registered miner; each round pins its own admitted ceiling at or below this
 DEFAULT_MAX_CHALLENGERS = 20  # admitted challengers per daily round, excluding the baseline
-RUNNER_SLOT_CEILING = 8
+RUNNER_SLOT_CEILING = BENCHMARK_ICP_COUNT
+PROXY_EXECUTION_VERSION = "webshare_parallel_v1"
 MAX_ATTEMPTS_PER_ASSIGNMENT = 2
 LAB_ARENA_POOL_PERCENT = 25  # default share of total emissions for the king's pool; LAB_ARENA_POOL_PERCENT overrides it per round
 # The pool is a share of total emissions, not of what remains after the other
@@ -694,6 +695,9 @@ ROUND_CONFIGURATION_FIELDS = (
     F("finalist_count", "int", minimum=1),
     F("max_challengers", "int", minimum=1),
     F("runner_slot_ceiling", "int", minimum=1),
+    # New daily rounds can make both ten-ICP execution stages claimable before
+    # stage-one scoring. Absence preserves every historical round's schedule.
+    F("parallel_twenty_icp_execution", "bool", required=False),
     F("max_attempts_per_assignment", "int", minimum=1, maximum=2),
     F("lease_ttl_seconds", "int", minimum=60),
     F("companies_per_icp", "int", minimum=1, maximum=50),
@@ -1059,6 +1063,19 @@ RUN_RESULT_FIELDS = (
             F("stdout_bytes", "int", minimum=0),
             F("stderr_bytes", "int", minimum=0),
             F("provider_call_count", "int", minimum=0),
+            F("web_egress", "object", required=False, fields=(
+                F("policy_version", "str", choices=(PROXY_EXECUTION_VERSION,)),
+                F("worker_slot", "int", minimum=0, maximum=250),
+                F("exit_fingerprint", "str", minimum=16, maximum=16),
+                F("connection_count", "int", minimum=0),
+                F("upload_bytes", "int", minimum=0),
+                F("download_bytes", "int", minimum=0),
+                F("failure_count", "int", minimum=0),
+                F("active_limit_rejection_count", "int", minimum=0, required=False),
+                F("total_limit_rejection_count", "int", minimum=0, required=False),
+                F("byte_limit_rejection_count", "int", minimum=0, required=False),
+                F("cleanup_block_rejection_count", "int", minimum=0, required=False),
+            )),
         ),
     ),
     F("started_at", "iso8601"),

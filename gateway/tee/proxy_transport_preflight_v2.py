@@ -7,6 +7,12 @@ import threading
 import time
 from typing import Any, Callable, Mapping, Sequence
 
+from leadpoet_canonical.proxy_transport import (
+    ProxyTransportCleanupError,
+    ProxyTransportError,
+    open_http_connect_tunnel,
+)
+
 from gateway.tee.egress_proxy import (
     EnclaveEgressProxy,
     EnclaveEgressProxyCleanupError,
@@ -137,6 +143,52 @@ class _HostProxyProbe(EnclaveEgressProxy):
                 ) from primary_error
             raise
         return connection
+
+    def _open_upstream_proxy_tunnel(
+        self,
+        *,
+        proxy_url: str,
+        destination_host: str,
+        destination_port: int,
+        tunnel_framing: str = "",
+    ) -> Any:
+        if tunnel_framing:
+            raise WorkerProxyTransportPreflightV2Error(
+                "host proxy preflight does not use tunnel framing"
+            )
+
+        def tls_context():
+            import certifi
+            import ssl
+
+            return ssl.create_default_context(cafile=certifi.where())
+
+        try:
+            return open_http_connect_tunnel(
+                proxy_url,
+                destination_host,
+                destination_port,
+                connector=lambda host, port: self._open_parent_tunnel(
+                    host,
+                    port,
+                    purpose="upstream_proxy",
+                ),
+                timeout_seconds=self._host_timeout_seconds,
+                tls_context_factory=tls_context,
+            )
+        except ProxyTransportCleanupError as exc:
+            for resource in exc.resources:
+                self._retain_cleanup_resource(
+                    resource,
+                    stage=exc.stage,
+                )
+            raise EnclaveEgressProxyCleanupError(
+                stage=exc.stage,
+                primary_error=exc.primary_error,
+                resources=exc.resources,
+            ) from exc.primary_error
+        except ProxyTransportError as exc:
+            raise WorkerProxyTransportPreflightV2Error(str(exc)) from exc
 
 
 def verify_tls_proxy_connect_v2(

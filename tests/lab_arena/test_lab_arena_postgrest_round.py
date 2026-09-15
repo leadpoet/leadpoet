@@ -139,6 +139,9 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
             response = harness.transport.rpc(function, params)
             assert response["status"] == "unavailable"
             continue
+        if function == "lab_arena_next_closed_deepline_reconciliation_v1":
+            assert harness.transport.rpc(function, params) == {"status": "none"}
+            continue
         if function == "lab_arena_weight_state_schema_v1":
             assert harness.transport.rpc(function, params)["version"] == 202
             continue
@@ -156,6 +159,18 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
             continue
         if function == "lab_arena_twenty_icp_promotion_schema_v1":
             assert harness.transport.rpc(function, params)["version"] == 251
+            continue
+        if function == "lab_arena_baseline_cost_eligibility_schema_v1":
+            assert harness.transport.rpc(function, params)["version"] == 254
+            continue
+        if function == "lab_arena_parallel_execution_schema_v1":
+            assert harness.transport.rpc(function, params) == {
+                "schema_version": (
+                    "leadpoet.lab_arena.parallel_execution_schema.v1"
+                ),
+                "version": 255,
+                "max_parallel_icps": 20,
+            }
             continue
         if function == "lab_arena_contact_schema_v1":
             assert harness.transport.rpc(function, params)["version"] == 215

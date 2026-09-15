@@ -4,8 +4,10 @@ One fresh gVisor sandbox per ICP: an executable runsc on a Linux x86_64 host,
 cgroup CPU, memory, and pid limits, a
 read-only model rootfs, uid/gid 65534, no new privileges, no network
 interface (``runsc --network=none``), a bounded writable ``/output`` backed
-by a size-bound host tmpfs, and exactly one Unix socket bind-mounted at
-``/run/lab_arena/worker.sock``. The OCI document mirrors the enclave's proven
+by a size-bound host tmpfs, and one paid-provider Unix socket at
+``/run/lab_arena/worker.sock``. New parallel execution rounds also mount a
+separate attempt-owned web socket and a credential-free private-loopback
+bridge. The OCI document mirrors the enclave's proven
 shape in ``gateway/tee/model_sandbox_v2.py`` without importing it.
 
 Differences from the enclave, on purpose: the platform is ``systrap`` (the
@@ -19,9 +21,9 @@ Host contract: Linux x86_64, root (rootful runsc and tmpfs mounts), and an
 executable runsc. ``RunscRuntime`` verifies that at
 construction and fails closed; ``run_sandbox`` is the pure orchestration with
 injectable process runner, clock, and sleep so it is testable anywhere.
-Defense in depth: the OCI seccomp rule allows ``socket`` only for AF_UNIX,
-matching the enclave; runsc may ignore OCI seccomp, which is why network
-isolation never relies on it.
+Defense in depth: OCI seccomp restricts socket families to AF_UNIX for the
+scorer and historical runs; the web bridge additionally permits IPv4 inside
+gVisor's private loopback. Direct network isolation remains --network=none.
 """
 
 from __future__ import annotations
@@ -54,6 +56,8 @@ SANDBOX_AGENT_DIR = "/agent"
 SANDBOX_AGENT_SOURCE_DIR = SANDBOX_AGENT_DIR + "/source"
 SANDBOX_AGENT_DEPENDENCY_DIR = SANDBOX_AGENT_DIR + "/deps"
 SANDBOX_AGENT_ENTRYPOINT_PATH = SANDBOX_AGENT_DIR + "/entrypoint.py"
+SANDBOX_WEB_BRIDGE_PATH = SANDBOX_AGENT_DIR + "/web_egress_bridge.py"
+SANDBOX_WEB_SOCKET_NAME = "web.sock"
 SANDBOX_INPUT_DIR = "/input"
 SANDBOX_OUTPUT_DIR = "/output"
 SANDBOX_SOCKET_DIR = "/run/lab_arena"
@@ -90,6 +94,7 @@ DEFAULT_PIDS_LIMIT = 256
 DEFAULT_PLATFORM = "systrap"
 RUNSC_PLATFORMS = ("systrap", "ptrace", "kvm")
 LINUX_AF_UNIX = 1
+LINUX_AF_INET = 2
 PIPE_CHUNK_BYTES = 65536
 PROCESS_ENV: Mapping[str, str] = MappingProxyType({"PATH": "/usr/local/bin:/usr/bin:/bin"})
 PROVIDER_BASE_URLS: Mapping[str, str] = MappingProxyType(
@@ -160,6 +165,9 @@ class SandboxSpec:
     source_dir: Optional[Path] = None
     dependency_dir: Optional[Path] = None
     agent_entrypoint_path: Optional[Path] = None
+    # Only newly opted-in execute leases receive this credential-free bridge.
+    # runsc still has no external network; AF_INET permits its private loopback.
+    web_bridge_path: Optional[Path] = None
     working_dir: str = ""
     cpu_quota: int = DEFAULT_CPU_QUOTA
     cpu_period: int = DEFAULT_CPU_PERIOD
@@ -204,6 +212,11 @@ class SandboxSpec:
             if not value.is_absolute():
                 raise SandboxSpecError("%s must be absolute" % name)
             object.__setattr__(self, name, value)
+        if self.web_bridge_path is not None:
+            bridge = Path(self.web_bridge_path)
+            if not bridge.is_absolute() or self.source_dir is None:
+                raise SandboxSpecError("web bridge requires an absolute trusted path and agent source")
+            object.__setattr__(self, "web_bridge_path", bridge)
         if self.socket_path.name != SANDBOX_SOCKET_NAME:
             raise SandboxSpecError("worker socket must be named %s" % SANDBOX_SOCKET_NAME)
         command = tuple(self.entry_command) if isinstance(self.entry_command, (list, tuple)) else ()
@@ -268,6 +281,8 @@ def sandbox_environment(spec: SandboxSpec) -> Dict[str, str]:
         "LAB_ARENA_WORKER_SOCKET": SANDBOX_SOCKET_PATH,
     })
     environment.update(PROVIDER_BASE_URLS)
+    if spec.web_bridge_path is not None:
+        environment["LAB_ARENA_WEB_EGRESS_SOCKET"] = SANDBOX_SOCKET_DIR + "/" + SANDBOX_WEB_SOCKET_NAME
     for name, value in spec.extra_environment.items():
         if name == "SCRAPINGDOG_API_KEY":
             # Only the lease-selected public handle may enter the sandbox.
@@ -348,6 +363,13 @@ def oci_spec(spec: SandboxSpec) -> Dict[str, Any]:
                 },
             ]
         )
+    if spec.web_bridge_path is not None:
+        mounts.append({
+            "destination": SANDBOX_WEB_BRIDGE_PATH,
+            "type": "bind",
+            "source": str(spec.web_bridge_path),
+            "options": ["bind", "ro", "nosuid", "nodev", "noexec"],
+        })
     linux = {
         # No "network" namespace: runsc --network=none is the isolation.
         "namespaces": [
@@ -399,7 +421,9 @@ def oci_spec(spec: SandboxSpec) -> Dict[str, Any]:
                     "names": ["socket"],
                     "action": "SCMP_ACT_ERRNO",
                     "errnoRet": 1,
-                    "args": [{"index": 0, "value": LINUX_AF_UNIX, "op": "SCMP_CMP_NE"}],
+                    "args": ([{"index": 0, "value": LINUX_AF_INET, "op": "SCMP_CMP_GT"}]
+                             if spec.web_bridge_path is not None
+                             else [{"index": 0, "value": LINUX_AF_UNIX, "op": "SCMP_CMP_NE"}]),
                 },
                 {
                     "names": ["mount", "pivot_root", "ptrace", "bpf", "keyctl", "perf_event_open"],
@@ -674,6 +698,16 @@ def prepare_sandbox_access(
     os.chmod(input_file, 0o400)
     os.chmod(spec.socket_dir, 0o700)
     os.chmod(spec.socket_path, 0o600)
+    if spec.web_bridge_path is not None:
+        web_socket = spec.socket_dir / SANDBOX_WEB_SOCKET_NAME
+        try:
+            web_info = os.lstat(web_socket)
+        except OSError as exc:
+            raise SandboxSpecError("sandbox web socket is unavailable") from exc
+        if not stat.S_ISSOCK(web_info.st_mode):
+            raise SandboxSpecError("sandbox web socket has an unsafe type")
+        chown(web_socket, spec.uid, spec.gid)
+        os.chmod(web_socket, 0o600)
 
 
 def require_safe_agent_mounts(spec: SandboxSpec) -> None:
@@ -696,6 +730,13 @@ def require_safe_agent_mounts(spec: SandboxSpec) -> None:
         or stat.S_ISLNK(entrypoint_info.st_mode)
     ):
         raise SandboxSpecError("agent source mount has an unsafe type")
+    if spec.web_bridge_path is not None:
+        try:
+            bridge_info = os.lstat(spec.web_bridge_path)
+        except OSError as exc:
+            raise SandboxSpecError("trusted web bridge is unavailable") from exc
+        if not stat.S_ISREG(bridge_info.st_mode) or bridge_info.st_mode & 0o222:
+            raise SandboxSpecError("trusted web bridge must be a read-only regular file")
 
 
 def run_sandbox(

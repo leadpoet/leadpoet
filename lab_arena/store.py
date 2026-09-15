@@ -42,6 +42,9 @@ COMPANY_QUALITY_SCHEMA_VERSION = "leadpoet.lab_arena.company_quality_schema.v1"
 SUCCESSFUL_CALL_COST_SCHEMA_VERSION = (
     "leadpoet.lab_arena.successful_call_cost_schema.v1"
 )
+PARALLEL_EXECUTION_SCHEMA_VERSION = (
+    "leadpoet.lab_arena.parallel_execution_schema.v1"
+)
 SERVICE_ROLE_NAME = "lab_arena_service"
 
 # Parameter order and PostgreSQL casts for every service-callable function.
@@ -75,6 +78,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_integrity_schema_v1": (),
     "lab_arena_twenty_icp_promotion_schema_v1": (),
     "lab_arena_baseline_cost_eligibility_schema_v1": (),
+    "lab_arena_parallel_execution_schema_v1": (),
     "lab_arena_contact_schema_v1": (),
     "lab_arena_company_quality_schema_v1": (),
     "lab_arena_successful_call_cost_schema_v1": (),
@@ -126,6 +130,9 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_actual_microusd", "bigint"),
     ),
     "lab_arena_open_stage": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_participants", "jsonb"), ("p_icp_positions", "integer[]")),
+    "lab_arena_open_parallel_execution_v1": (("p_round_id", "text"), ("p_participants", "jsonb")),
+    "lab_arena_close_parallel_execution_v1": (("p_round_id", "text"),),
+    "lab_arena_activate_preexecuted_stage2_v1": (("p_round_id", "text"),),
     "lab_arena_claim_assignment": (("p_round_id", "text"), ("p_runner_hotkey", "text"), ("p_declared_parallelism", "integer"), ("p_slot_ceiling", "integer"), ("p_excluded_miner_hotkeys", "text[]"), ("p_request_id", "text"), ("p_request_hash", "text"), ("p_lease_token_hash", "text"), ("p_lease_ttl_seconds", "integer")),
     "lab_arena_reserve_call": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text"), ("p_operation_id", "text"), ("p_provider", "text"), ("p_funding_source", "text"), ("p_amount_microusd", "bigint"), ("p_call_doc", "jsonb"), ("p_lease_ttl_seconds", "integer")),
     "lab_arena_mark_dispatched": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_call_identity", "text")),
@@ -756,6 +763,21 @@ class ArenaStore:
             raise ArenaStoreError("successful-call cost schema mismatch")
         return result
 
+    def parallel_execution_schema(self) -> Dict[str, Any]:
+        """Require the migration-255 parallel execution RPC and SQL guards."""
+
+        result = _require_mapping(
+            self._transport.rpc("lab_arena_parallel_execution_schema_v1", {}),
+            "parallel_execution_schema",
+        )
+        if result != {
+            "schema_version": PARALLEL_EXECUTION_SCHEMA_VERSION,
+            "version": 255,
+            "max_parallel_icps": 20,
+        }:
+            raise ArenaStoreError("parallel execution schema mismatch")
+        return result
+
     # -- accepted weight state ------------------------------------------
 
     def has_recent_participation(
@@ -1155,6 +1177,38 @@ class ArenaStore:
                 },
             ),
             "open_stage",
+        )
+
+    def open_parallel_execution(
+        self, round_id: str, participants: Sequence[Mapping[str, Any]]
+    ) -> Dict[str, Any]:
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_open_parallel_execution_v1",
+                {
+                    "p_round_id": round_id,
+                    "p_participants": [dict(item) for item in participants],
+                },
+            ),
+            "open_parallel_execution",
+        )
+
+    def close_parallel_execution(self, round_id: str) -> Dict[str, Any]:
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_close_parallel_execution_v1",
+                {"p_round_id": round_id},
+            ),
+            "close_parallel_execution",
+        )
+
+    def activate_preexecuted_stage2(self, round_id: str) -> Dict[str, Any]:
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_activate_preexecuted_stage2_v1",
+                {"p_round_id": round_id},
+            ),
+            "activate_preexecuted_stage2",
         )
 
     def claim_assignment(

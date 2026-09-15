@@ -142,11 +142,12 @@ def test_unplanned_validator_discovers_and_completes_work_while_primary_is_full(
             tmp_path,
             key_label="svc-runner-alpha",
             round_id=working_round_id,
-            parallelism=contracts.RUNNER_SLOT_CEILING,
+            parallelism=frozen_configuration["runner_slot_ceiling"],
         )
         try:
             primary_leases = [
-                primary.claim_one() for _ in range(contracts.RUNNER_SLOT_CEILING)
+                primary.claim_one()
+                for _ in range(frozen_configuration["runner_slot_ceiling"])
             ]
             assert {lease["status"] for lease in primary_leases} == {"leased"}
 
@@ -157,7 +158,7 @@ def test_unplanned_validator_discovers_and_completes_work_while_primary_is_full(
                 run["status"] == "leased"
                 and run["runner_hotkey"] == harness.runner_keys[0]
                 for run in before
-            ) == contracts.RUNNER_SLOT_CEILING
+            ) == frozen_configuration["runner_slot_ceiling"]
             assert sum(run["status"] == "pending" for run in before) > 0
             assert not any(
                 run["runner_hotkey"] == external_key.ss58_address
@@ -229,7 +230,7 @@ def test_unplanned_validator_discovers_and_completes_work_while_primary_is_full(
         run["status"] == "leased"
         and run["runner_hotkey"] == harness.runner_keys[0]
         for run in after
-    ) == contracts.RUNNER_SLOT_CEILING
+    ) == frozen_configuration["runner_slot_ceiling"]
     assert sum(run["status"] == "pending" for run in after) > 0
     assert sum(
         run["status"] == "accepted"

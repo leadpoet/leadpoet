@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -14,10 +15,35 @@ SOURCE_DIR = Path("/agent/source")
 DEPENDENCY_DIR = Path("/agent/deps")
 INPUT_PATH = Path("/input/icp.json")
 OUTPUT_PATH = Path("/output/companies.json")
+WEB_BRIDGE_PATH = Path("/agent/web_egress_bridge.py")
 
 
 class AgentContractError(RuntimeError):
     """The submitted harness does not implement the public boundary."""
+
+
+@contextmanager
+def _web_access():
+    socket_path = os.environ.get("LAB_ARENA_WEB_EGRESS_SOCKET", "")
+    if not socket_path:
+        yield
+        return
+    specification = importlib.util.spec_from_file_location("_arena_web_bridge", WEB_BRIDGE_PATH)
+    if specification is None or specification.loader is None:
+        raise AgentContractError("trusted web bridge is unavailable")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    with module.LoopbackWebEgressBridge(socket_path) as bridge:
+        previous = {name: os.environ.get(name) for name in bridge.proxy_environment}
+        os.environ.update(bridge.proxy_environment)
+        try:
+            yield
+        finally:
+            for name, value in previous.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
 
 
 def _load_run_icp(source_dir: Path) -> Any:
@@ -97,7 +123,8 @@ def run(
 
 
 def main() -> int:
-    run()
+    with _web_access():
+        run()
     return 0
 
 

@@ -958,7 +958,8 @@ def test_frame_validation_rejects_identity_fields_and_unknown_operations(tmp_pat
 
 
 def test_parallelism_env_and_http_boundary():
-    assert rn.max_parallel_runs_from_environment({}) == 8 and rn.max_parallel_runs_from_environment({rn.MAX_PARALLEL_ENV: "4"}) == 4
+    proxies = {"LAB_ARENA_WEBSHARE_PROXY_%d" % i: "http://user:pass@proxy%d.example.com:8080" % i for i in range(1, 10)}
+    assert rn.max_parallel_runs_from_environment(proxies) == 10
     with pytest.raises(rn.RunnerError):
         rn.max_parallel_runs_from_environment({rn.MAX_PARALLEL_ENV: "0"})
     with pytest.raises(rn.RunnerError):

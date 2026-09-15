@@ -29,6 +29,8 @@ _REASONS = {
     "unsafe_work_directory": "runner directories must be real directories at a dedicated path",
     "work_directory_unwritable": "check runner directory ownership, permissions and available storage",
     "sandbox_launch_failed": "runsc exited before sandbox creation completed",
+    "parallel_memory_insufficient": "configured proxy slots exceed available memory; provide 2 GiB per sandbox plus host reserve",
+    "parallel_memory_unavailable": "the host memory limit could not be verified",
 }
 _LOG_PATH = re.compile(r"/[A-Za-z0-9_./ -]{0,511}\Z")
 
@@ -79,6 +81,47 @@ def require_linux_x86_64() -> None:
         "amd64",
     ):
         raise RuntimeHostError(reason="unsupported_host")
+
+
+def require_parallel_memory(slots: int, sandbox_bytes: int, *, meminfo_path: Path = Path("/proc/meminfo"), cgroup_root: Path = Path("/sys/fs/cgroup"), membership_path: Path = Path("/proc/self/cgroup")) -> None:
+    """Refuse an overcommitted fleet before claiming work; weights stay independent."""
+    try:
+        values = {parts[0].rstrip(":"): int(parts[1]) * 1024
+                  for line in meminfo_path.read_text().splitlines()
+                  if len(parts := line.split()) >= 2 and parts[0] in ("MemTotal:", "MemAvailable:")}
+        available = min(values["MemTotal"], values["MemAvailable"])
+        # Normal service installations use the unified cgroup hierarchy. A
+        # tighter systemd/container limit must take precedence over host RAM.
+        memberships = membership_path.read_text().splitlines()
+        for membership in memberships:
+            _hierarchy, controllers, group = membership.split(":", 2)
+            unified = membership.startswith("0::")
+            if not unified and "memory" not in controllers.split(","):
+                continue
+            memory_root = cgroup_root if unified else cgroup_root / "memory"
+            limit_name = "memory.max" if unified else "memory.limit_in_bytes"
+            used_name = "memory.current" if unified else "memory.usage_in_bytes"
+            relative = Path(group.lstrip("/"))
+            if ".." in relative.parts:
+                raise ValueError("invalid cgroup membership")
+            directory = memory_root / relative
+            while True:
+                limit_path = directory / limit_name
+                if limit_path.is_file():
+                    limit = limit_path.read_text().strip()
+                    if limit != "max":
+                        used = int((directory / used_name).read_text())
+                        available = min(available, max(0, int(limit) - used))
+                if directory == memory_root:
+                    break
+                directory = directory.parent
+        if slots < 1 or sandbox_bytes < 1:
+            raise ValueError("invalid sandbox memory limits")
+    except (OSError, ValueError, KeyError):
+        raise RuntimeHostError(reason="parallel_memory_unavailable") from None
+    reserve = 2 * 1024 ** 3 + slots * 128 * 1024 ** 2
+    if slots * sandbox_bytes + reserve > available:
+        raise RuntimeHostError(reason="parallel_memory_insufficient")
 
 
 def require_rootful_runtime() -> None:

@@ -9,12 +9,12 @@ from lab_arena import capacity, contracts
 from lab_arena.service import ArenaService, DEFAULT_STAGE_MINUTES
 
 
-def configuration(*, runners=1, minutes=None):
+def configuration(*, runners=1, minutes=None, slots=8):
     service = object.__new__(ArenaService)
     service._config = SimpleNamespace(defaults=SimpleNamespace(stage_minutes=minutes or DEFAULT_STAGE_MINUTES))
     return {
         "schedule": service.build_schedule(datetime(2026, 9, 10, tzinfo=timezone.utc)),
-        "runner_slot_ceiling": contracts.RUNNER_SLOT_CEILING,
+        "runner_slot_ceiling": slots,
         "runner_hotkeys": ["runner-%d" % index for index in range(runners)],
         "max_attempts_per_assignment": contracts.MAX_ATTEMPTS_PER_ASSIGNMENT,
         "stage_1_icp_count": contracts.STAGE_1_ICP_COUNT,

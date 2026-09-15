@@ -19,6 +19,7 @@ TARGET_REQUEST="${VALIDATOR_DEPLOY_COMMIT:-origin/main}"
 STAGE=""
 ROLLBACK=""
 CANDIDATE_SERVICE_ENV=""
+SNAPSHOT_SERVICE_ENV=""
 OLD_ACTIVE=0
 DRAINED=0
 PROMOTED=0
@@ -62,6 +63,9 @@ cleanup() {
   if [ -n "$CANDIDATE_SERVICE_ENV" ]; then
     sudo rm -f -- "$CANDIDATE_SERVICE_ENV"
   fi
+  if [ -n "$SNAPSHOT_SERVICE_ENV" ]; then
+    rm -f -- "$SNAPSHOT_SERVICE_ENV"
+  fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -98,7 +102,18 @@ fi
 [ "$(stat -c %u "$ENV_FILE")" = "$(id -u)" ] || fail "operator Arena environment owner differs from restart identity"
 [ "$(stat -c %a "$ENV_FILE")" = "600" ] || fail "operator Arena environment must have mode 0600"
 CANDIDATE_SERVICE_ENV="${SERVICE_ENV}.candidate.$$"
-sudo install -m 0600 -o root -g root "$ENV_FILE" "$CANDIDATE_SERVICE_ENV"
+SNAPSHOT_SERVICE_ENV="$RELEASE_ROOT/.service-env-snapshot.$$"
+( cd "$RELEASE" && PYTHONPATH="$RELEASE" "$PYTHON" - "$ENV_FILE" "$SNAPSHOT_SERVICE_ENV" <<'PY'
+import sys
+from pathlib import Path
+from scripts.run_arena_validator import write_environment_snapshot
+
+write_environment_snapshot(Path(sys.argv[1]), Path(sys.argv[2]))
+PY
+)
+sudo install -m 0600 -o root -g root "$SNAPSHOT_SERVICE_ENV" "$CANDIDATE_SERVICE_ENV"
+rm -f -- "$SNAPSHOT_SERVICE_ENV"
+SNAPSHOT_SERVICE_ENV=""
 
 # Parse configuration as data, and create only the named durable directories.
 read -r STATE_PATH RUNNER_PATH < <(

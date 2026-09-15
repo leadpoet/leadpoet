@@ -18,6 +18,10 @@ import re
 from typing import Any, Dict, Tuple
 
 from gateway.tee.egress_framing import TUNNEL_FRAMING_MODE
+from leadpoet_canonical.proxy_transport import (
+    ProxyTransportError,
+    normalize_proxy_destination as _normalize_proxy_destination,
+)
 
 
 EGRESS_POLICY_VERSION = "leadpoet.gateway_enclave_egress.v2"
@@ -109,23 +113,7 @@ def normalize_destination(host: Any, port: Any) -> Tuple[str, int]:
 def normalize_proxy_destination(host: Any, port: Any) -> Tuple[str, int]:
     """Validate a public proxy endpoint without relaxing provider port policy."""
 
-    raw_host = str(host or "").strip().rstrip(".")
-    if not raw_host or any(character.isspace() for character in raw_host):
-        raise EgressPolicyError("egress proxy host is invalid")
     try:
-        address = ipaddress.ip_address(raw_host.strip("[]"))
-    except ValueError:
-        normalized_host, _ = normalize_destination(raw_host, 443)
-    else:
-        if not address.is_global:
-            raise EgressPolicyError(
-                "egress proxy IP literal is not globally routable"
-            )
-        normalized_host = address.compressed.lower()
-    try:
-        normalized_port = int(port)
-    except (TypeError, ValueError) as exc:
-        raise EgressPolicyError("egress proxy port is invalid") from exc
-    if not 1 <= normalized_port <= 65535:
-        raise EgressPolicyError("egress proxy port is invalid")
-    return normalized_host, normalized_port
+        return _normalize_proxy_destination(host, port)
+    except ProxyTransportError as exc:
+        raise EgressPolicyError(str(exc)) from exc

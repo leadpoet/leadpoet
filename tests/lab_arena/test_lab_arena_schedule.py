@@ -6,8 +6,7 @@ from lab_arena import contracts
 from lab_arena import service as svc
 
 
-def _parallel_minutes(assignments: int, seconds_per_run: int) -> int:
-    slots = contracts.RUNNER_SLOT_CEILING
+def _parallel_minutes(assignments: int, seconds_per_run: int, *, slots: int) -> int:
     batches = (assignments + slots - 1) // slots
     return (batches * seconds_per_run + 59) // 60
 
@@ -38,18 +37,22 @@ def test_conservative_capacity_estimate_fits_the_default_daily_windows():
     assert _parallel_minutes(
         stage_1_runs * contracts.MAX_ATTEMPTS_PER_ASSIGNMENT,
         contracts.ICP_WALL_CLOCK_SECONDS + ATTEMPT_OVERHEAD_SECONDS,
+        slots=configuration()["runner_slot_ceiling"],
     ) <= svc.DEFAULT_STAGE_MINUTES["stage_1"]
     assert _parallel_minutes(
         stage_2_runs * contracts.MAX_ATTEMPTS_PER_ASSIGNMENT,
         contracts.ICP_WALL_CLOCK_SECONDS + ATTEMPT_OVERHEAD_SECONDS,
+        slots=configuration()["runner_slot_ceiling"],
     ) <= svc.DEFAULT_STAGE_MINUTES["stage_2"]
     assert _parallel_minutes(
         stage_1_runs * contracts.MAX_ATTEMPTS_PER_ASSIGNMENT,
         contracts.SCORING_WALL_CLOCK_SECONDS + ATTEMPT_OVERHEAD_SECONDS,
+        slots=configuration()["runner_slot_ceiling"],
     ) <= svc.DEFAULT_STAGE_MINUTES["stage_1_scoring"]
     assert _parallel_minutes(
         stage_2_runs * contracts.MAX_ATTEMPTS_PER_ASSIGNMENT,
         contracts.SCORING_WALL_CLOCK_SECONDS + ATTEMPT_OVERHEAD_SECONDS,
+        slots=configuration()["runner_slot_ceiling"],
     ) <= svc.DEFAULT_STAGE_MINUTES["final_scoring"]
 
 

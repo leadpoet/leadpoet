@@ -1,5 +1,21 @@
 # Agent Instructions
 
+## Scoped production authorization: proxy-backed parallel ICP execution
+
+On 2026-09-14 the user explicitly authorized implementing and proving dynamic
+parallel Arena ICP execution using the existing Webshare configuration,
+connection checks, and worker design. Derive capacity from configured verified
+proxies plus the coordinator's native exit. Cover nine proxies with two groups
+of ten ICPs and nineteen proxies with all twenty executions together. Preserve
+sandbox isolation, brokered paid calls, cost accounting and limits, independent
+attempt recovery, frozen historical rounds, scoring, persistence, and weights.
+This includes protected production and credential inspection, narrow source
+and validator configuration changes, exact committed migrations if required,
+pushes and safe merges, canonical gateway and normal-validator restarts, and
+complete production testing with the configured paid providers. Do not restore
+retired orchestration or embed validator secrets in models. This scope ends
+only after the production flow and its unchanged safeguards are verified.
+
 ## Scoped production authorization: retained Webshare proxies and dynamic capacity
 
 On 2026-09-14 the user explicitly authorized removing all retired Webshare

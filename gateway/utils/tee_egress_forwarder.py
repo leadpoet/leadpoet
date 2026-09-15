@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import errno
 import hashlib
-import ipaddress
 import json
 import logging
 import os
@@ -19,6 +18,14 @@ import socket
 import threading
 import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+
+from leadpoet_canonical.proxy_transport import (
+    ProxyTransportCleanupError,
+    ProxyTransportError,
+    connect_public_destination as _shared_connect_public_destination,
+    global_address_infos as _shared_global_address_infos,
+    shutdown_and_close_socket as _shared_shutdown_and_close_socket,
+)
 
 from gateway.tee.egress_policy import (
     destination_policy_hash,
@@ -78,20 +85,7 @@ class TEEEgressForwarderCleanupError(TEEEgressForwarderError):
 def _shutdown_and_close_socket(candidate: Any) -> bool:
     """Attempt full-duplex shutdown and require descriptor release."""
 
-    if candidate is None:
-        return True
-    try:
-        candidate.shutdown(socket.SHUT_RDWR)
-    except Exception:
-        # A connected peer may already be half-closed and listening sockets
-        # commonly reject shutdown.  close() is the ownership boundary.
-        pass
-    try:
-        # socket.close() returns None.  Test doubles and adapters may return
-        # False explicitly when they still own the underlying descriptor.
-        return candidate.close() is not False
-    except Exception:
-        return False
+    return _shared_shutdown_and_close_socket(candidate)
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -121,31 +115,9 @@ def _global_address_infos(
     resolver: Callable[..., Iterable[Tuple[Any, ...]]] = socket.getaddrinfo,
 ) -> List[Tuple[Any, ...]]:
     try:
-        infos = list(resolver(host, port, type=socket.SOCK_STREAM))
-    except Exception as exc:
-        raise TEEEgressForwarderError("egress destination DNS resolution failed") from exc
-    usable = []
-    observed_addresses = set()
-    for info in infos:
-        if len(info) != 5:
-            continue
-        family, socktype, protocol, _canonical_name, sockaddr = info
-        if socktype != socket.SOCK_STREAM or not isinstance(sockaddr, tuple) or not sockaddr:
-            continue
-        address = str(sockaddr[0])
-        try:
-            parsed = ipaddress.ip_address(address)
-        except ValueError as exc:
-            raise TEEEgressForwarderError("egress DNS returned an invalid address") from exc
-        if not parsed.is_global:
-            raise TEEEgressForwarderError("egress DNS returned a non-global address")
-        key = (family, protocol, sockaddr)
-        if key not in observed_addresses:
-            observed_addresses.add(key)
-            usable.append((family, socktype, protocol, "", sockaddr))
-    if not usable:
-        raise TEEEgressForwarderError("egress destination has no global address")
-    return usable
+        return _shared_global_address_infos(host, port, resolver=resolver)
+    except ProxyTransportError as exc:
+        raise TEEEgressForwarderError(str(exc)) from exc
 
 
 def _connect_public_destination(
@@ -155,26 +127,22 @@ def _connect_public_destination(
     resolver: Callable[..., Iterable[Tuple[Any, ...]]] = socket.getaddrinfo,
     socket_factory: Callable[..., Any] = socket.socket,
 ) -> Any:
-    last_error = None
-    for family, socktype, protocol, _canonical_name, sockaddr in _global_address_infos(
-        host,
-        port,
-        resolver=resolver,
-    ):
-        candidate = socket_factory(family, socktype, protocol)
-        try:
-            candidate.settimeout(CONNECT_TIMEOUT_SECONDS)
-            candidate.connect(sockaddr)
-            candidate.settimeout(None)
-            return candidate
-        except Exception as exc:
-            last_error = exc
-            if not _shutdown_and_close_socket(candidate):
-                raise TEEEgressForwarderCleanupError(
-                    primary_error=exc,
-                    resource=candidate,
-                ) from exc
-    raise TEEEgressForwarderError("egress destination connection failed") from last_error
+    try:
+        return _shared_connect_public_destination(
+            host,
+            port,
+            resolver=resolver,
+            socket_factory=socket_factory,
+            timeout_seconds=CONNECT_TIMEOUT_SECONDS,
+        )
+    except ProxyTransportCleanupError as exc:
+        resource = exc.resources[0] if exc.resources else None
+        raise TEEEgressForwarderCleanupError(
+            primary_error=exc.primary_error,
+            resource=resource,
+        ) from exc.primary_error
+    except ProxyTransportError as exc:
+        raise TEEEgressForwarderError(str(exc)) from exc
 
 
 def _relay_bidirectional(

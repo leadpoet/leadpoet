@@ -411,6 +411,10 @@ def build_service_from_environment(mode: str):
     rewards_enabled = _rewards_enabled_from_environment()
     defaults = RoundDefaults(
         runner_hotkeys=runners,
+        # Each eligible validator derives its declaration from its own proxy
+        # inventory. The gateway publishes one common maximum for all of them.
+        runner_slot_ceiling=contracts.RUNNER_SLOT_CEILING,
+        parallel_twenty_icp_execution=True,
         baseline_hotkey=_required("LAB_ARENA_BASELINE_HOTKEY"),
         baseline_source_url=_baseline_source_url_from_environment(mode),
         max_challengers=_max_challengers_from_environment(),
@@ -501,6 +505,19 @@ def build_runner_from_environment(args, *, keypair=None):
     # This runs only inside the retryable scoring loop, never the weight loop.
     prepare_scoring_host(Path(args.runsc_path), Path(args.work_dir))
     from lab_arena import runner as runner_module
+    from lab_arena.proxy_workers import ProxyWorkerPool, preflight_proxy_workers, proxy_workers_from_environment
+    from lab_arena.validator_proxy_environment import validator_proxy_environment
+
+    proxy_environment = validator_proxy_environment(os.environ)
+    if str(proxy_environment.get(runner_module.MAX_PARALLEL_ENV) or "").strip():
+        raise ServiceError("LAB_ARENA_MAX_PARALLEL_RUNS is retired; use indexed Webshare proxies", 500)
+    verified_proxies = preflight_proxy_workers(proxy_workers_from_environment(proxy_environment))
+    parallelism = min(verified_proxies.total_process_capacity, contracts.RUNNER_SLOT_CEILING)
+    from lab_arena.runtime_host import require_parallel_memory
+    require_parallel_memory(parallelism, runtime.DEFAULT_MEMORY_LIMIT_BYTES)
+    proxy_pool = ProxyWorkerPool(verified_proxies)
+    print("Arena proxy workers verified: proxies=%d; execution_slots=%d; native_coordinator=1" % (
+        verified_proxies.webshare_worker_count, parallelism), flush=True)
 
     if keypair is None:
         from bittensor_wallet import Wallet
@@ -527,7 +544,7 @@ def build_runner_from_environment(args, *, keypair=None):
     round_id = str(getattr(args, "round_id", "") or "").strip() or None
     runner_config = runner_module.RunnerConfig(
         round_id=round_id, identity=identity, api=api, sandbox_runtime=sandbox_runtime, image_cache=cache, source_cache=source_cache,
-        work_dir=runs_work, max_parallel_runs=runner_module.max_parallel_runs_from_environment(),
+        work_dir=runs_work, max_parallel_runs=parallelism, proxy_worker_pool=proxy_pool,
     )
     if round_id is not None:
         api.round(round_id)

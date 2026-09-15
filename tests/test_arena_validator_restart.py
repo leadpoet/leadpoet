@@ -16,7 +16,9 @@ def test_restart_script_is_valid_bash():
 def test_restart_sources_exact_release_and_preflights_before_stop():
     text = SCRIPT.read_text()
     stop = text.index('timeout "$STOP_TIMEOUT" sudo systemctl stop "$SERVICE"')
-    preflight = text.index('( cd "$RELEASE"')
+    snapshot = text.index('( cd "$RELEASE" && PYTHONPATH="$RELEASE" "$PYTHON" - "$ENV_FILE"')
+    preflight = text.index('( cd "$RELEASE" && sudo env PYTHONDONTWRITEBYTECODE=1')
+    assert snapshot < preflight
     assert preflight < stop
     assert 'git archive --format=tar "$TARGET_SHA"' in text
     assert 'git merge-base --is-ancestor "$TARGET_SHA" origin/main' in text
@@ -29,7 +31,7 @@ def test_restart_sources_exact_release_and_preflights_before_stop():
 
 def test_preflight_failure_cannot_reach_service_stop(tmp_path):
     text = SCRIPT.read_text()
-    start = text.index('( cd "$RELEASE"')
+    start = text.index('( cd "$RELEASE" && sudo env PYTHONDONTWRITEBYTECODE=1')
     end = text.index('\n\nif [ -e "$CURRENT_LINK"', start)
     preflight = text[start:end]
     fake_bin = tmp_path / "bin"
@@ -78,7 +80,9 @@ def test_restart_requires_local_wallet_preflight_and_stable_supervision():
     assert 'systemctl show -p MainPID --value "$SERVICE"' in text
     assert 'stable_since=$SECONDS' in text
     assert '"$((SECONDS - stable_since))" -ge 10' in text
-    assert 'install -m 0600 -o root -g root "$ENV_FILE" "$CANDIDATE_SERVICE_ENV"' in text
+    assert "write_environment_snapshot(Path(sys.argv[1]), Path(sys.argv[2]))" in text
+    assert 'install -m 0600 -o root -g root "$SNAPSHOT_SERVICE_ENV" "$CANDIDATE_SERVICE_ENV"' in text
+    assert 'install -m 0600 -o root -g root "$ENV_FILE" "$CANDIDATE_SERVICE_ENV"' not in text
     assert 'sudo mv -f "$CANDIDATE_SERVICE_ENV" "$SERVICE_ENV"' in text
     assert 'WorkingDirectory=$CURRENT_LINK' in text
     unit = (ROOT / "deploy/leadpoet-arena-validator.service").read_text()
@@ -239,6 +243,8 @@ exec /bin/mv "$@"
     stage.mkdir()
     candidate_env = tmp_path / "candidate.env"
     candidate_env.write_text("candidate\n")
+    snapshot_env = tmp_path / "snapshot.env"
+    snapshot_env.write_text("snapshot\n")
     call_log = tmp_path / "calls.log"
     values = {
         "SERVICE": "validator.service",
@@ -246,6 +252,7 @@ exec /bin/mv "$@"
         "RELEASE_ROOT": str(release_root),
         "STAGE": str(stage),
         "CANDIDATE_SERVICE_ENV": str(candidate_env),
+        "SNAPSHOT_SERVICE_ENV": str(snapshot_env),
         "DRAINED": "1",
         "ACTIVATED": "0",
         "PROMOTED": "1",
@@ -278,6 +285,7 @@ cleanup
         assert not unit_path.exists()
     assert not stage.exists()
     assert not candidate_env.exists()
+    assert not snapshot_env.exists()
     calls = call_log.read_text().splitlines()
     assert "systemctl stop validator.service" in calls
     assert "systemctl daemon-reload" in calls

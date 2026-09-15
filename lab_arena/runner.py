@@ -43,10 +43,11 @@ from lab_arena.contracts import ArenaContractError
 from lab_arena.output import OutputInvalid, output_document_from_bytes
 from lab_arena.runtime_host import DEFAULT_RUNNER_SOCKET_ROOT, RuntimeHostError, runtime_host_diagnostic
 
-DEFAULT_MAX_PARALLEL_RUNS = contracts.RUNNER_SLOT_CEILING
+DEFAULT_MAX_PARALLEL_RUNS = 8  # compatibility for direct test/embedded configurations
 MAX_PARALLEL_ENV = "LAB_ARENA_MAX_PARALLEL_RUNS"
 DEFAULT_SOCKET_ROOT = str(DEFAULT_RUNNER_SOCKET_ROOT)
 AGENT_ENTRYPOINT_PATH = Path(__file__).with_name("agent_entrypoint.py").resolve()
+WEB_BRIDGE_PATH = Path(__file__).with_name("web_egress_bridge.py").resolve()
 MAX_REFUSED_FRAMES = 25  # after this many refused calls the worker answers a run's frames locally
 # A request on the worker socket is either a length-prefixed operation frame
 # (first byte 0x00: the judge shim) or an HTTP request (an ASCII method).
@@ -245,11 +246,13 @@ class SignatureFn(Protocol):
     def __call__(self, message: str) -> str: ...
 
 
-def _stage_agent_entrypoint(source_path: Path, run_dir: Path) -> Path:
+def _stage_agent_entrypoint(source_path: Path, run_dir: Path, *, filename: str = "agent-entrypoint.py") -> Path:
     """Copy the trusted entrypoint without changing its deployed permissions."""
 
     source_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
-    destination = Path(run_dir) / "agent-entrypoint.py"
+    if filename not in ("agent-entrypoint.py", "web-egress-bridge.py"):
+        raise RunnerError("trusted runtime filename is invalid")
+    destination = Path(run_dir) / filename
     source_fd = destination_fd = None
     destination_created = False
     try:
@@ -1497,6 +1500,10 @@ class RunnerConfig:
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     socket_root: Path = Path(DEFAULT_SOCKET_ROOT)
     agent_entrypoint_path: Path = AGENT_ENTRYPOINT_PATH
+    web_bridge_path: Path = WEB_BRIDGE_PATH
+    # Production always supplies verified slots. Direct test configurations may
+    # omit the pool but cannot execute new proxy-enabled assignments.
+    proxy_worker_pool: Any = None
     # Waits between retries of the same signed claim after a transport or
     # server failure. The service replays a committed claim by request ID.
     claim_retry_seconds: Tuple[float, ...] = (2.0, 5.0)
@@ -1514,23 +1521,31 @@ class RunnerConfig:
         self.work_dir = Path(self.work_dir)
         self.socket_root = Path(self.socket_root)
         self.agent_entrypoint_path = Path(self.agent_entrypoint_path)
+        self.web_bridge_path = Path(self.web_bridge_path)
         self.socket_root.mkdir(parents=True, exist_ok=True)
 
 
 def max_parallel_runs_from_environment(environ: Mapping[str, str] = os.environ) -> int:
     raw = str(environ.get(MAX_PARALLEL_ENV) or "").strip()
-    if not raw:
-        return DEFAULT_MAX_PARALLEL_RUNS
+    if raw:
+        raise RunnerError("%s is retired; capacity follows verified Webshare proxies" % MAX_PARALLEL_ENV)
+    from lab_arena.proxy_workers import proxy_workers_from_environment
+    inventory = proxy_workers_from_environment(environ)
+    return min(inventory.total_process_capacity, contracts.RUNNER_SLOT_CEILING)
+
+
+@contextmanager
+def _attempt_web_egress(server: Any, worker: Any) -> Iterator[Any]:
+    """Release an exit only after all attempt connections are proved closed."""
     try:
-        value = int(raw)
-    except ValueError as exc:
-        raise RunnerError("%s must be a positive integer" % MAX_PARALLEL_ENV) from exc
-    if not 1 <= value <= contracts.RUNNER_SLOT_CEILING:
-        raise RunnerError(
-            "%s must be between 1 and %d"
-            % (MAX_PARALLEL_ENV, contracts.RUNNER_SLOT_CEILING)
-        )
-    return value
+        server.start()
+        yield server
+    finally:
+        try:
+            server.stop()
+        except BaseException:
+            worker.quarantine()
+            raise
 
 
 class AssignmentExecutor:
@@ -1564,6 +1579,8 @@ class AssignmentExecutor:
         failure_detail: Any = ""
         output_document: Optional[Dict[str, Any]] = None
         result: Optional[runtime.SandboxResult] = None
+        web_server = None
+        worker = None
         evaluation_date = str(lease.get("evaluation_date") or config.evaluation_date)
         try:
             if scoring_run:
@@ -1655,6 +1672,19 @@ class AssignmentExecutor:
                             lease.get("source_size_bytes"),
                         )
                     )
+                staged_web_bridge = None
+                if not scoring_run and lease.get("parallel_twenty_icp_execution") is True:
+                    if config.proxy_worker_pool is None:
+                        raise RunnerError("verified proxy worker pool is required")
+                    from lab_arena.web_egress import WebEgressServer
+                    worker = resources.enter_context(config.proxy_worker_pool.acquire(timeout=5.0))
+                    staged_web_bridge = _stage_agent_entrypoint(
+                        config.web_bridge_path, run_dir, filename="web-egress-bridge.py"
+                    )
+                    web_server = resources.enter_context(_attempt_web_egress(WebEgressServer(
+                        socket_dir / runtime.SANDBOX_WEB_SOCKET_NAME,
+                        proxy_url=worker.proxy_url,
+                    ), worker))
                 spec = runtime.SandboxSpec(
                     sandbox_id="arena-%s" % contracts.document_hash(lease["run_id"])[7:39],
                     rootfs_path=rootfs,
@@ -1666,6 +1696,7 @@ class AssignmentExecutor:
                     agent_entrypoint_path=(
                         staged_agent_entrypoint
                     ),
+                    web_bridge_path=staged_web_bridge,
                     entry_command=runtime.SCORER_ENTRY_COMMAND if scoring_run else runtime.AGENT_ENTRY_COMMAND,
                     working_dir=runtime.SCORER_WORKING_DIR if scoring_run else runtime.AGENT_WORKING_DIR,
                     evaluation_date=evaluation_date,
@@ -1799,6 +1830,21 @@ class AssignmentExecutor:
             "finished_at": finished_at,
             "terminal_status": terminal,
         }
+        if web_server is not None and worker is not None:
+            counters = web_server.summary
+            run_result["resource_summary"]["web_egress"] = {
+                "policy_version": contracts.PROXY_EXECUTION_VERSION,
+                "worker_slot": worker.slot_index,
+                "exit_fingerprint": worker.exit_ip_fingerprint,
+                "connection_count": counters["accepted_connection_count"],
+                "upload_bytes": counters["client_to_web_bytes"],
+                "download_bytes": counters["web_to_client_bytes"],
+                "failure_count": counters["failure_count"],
+                "active_limit_rejection_count": counters["active_limit_rejection_count"],
+                "total_limit_rejection_count": counters["total_limit_rejection_count"],
+                "byte_limit_rejection_count": counters["byte_limit_rejection_count"],
+                "cleanup_block_rejection_count": counters["cleanup_block_rejection_count"],
+            }
         if scoring_run and terminal in ("judge_error", "judge_timeout"):
             # Only fixed, contract-validated codes are persisted. The bounded,
             # redacted detail stays in the private operator log.
@@ -1898,11 +1944,15 @@ class Runner:
         round_id = round_id or self.round_id
         if round_id is None:
             return {"status": "no_open_round"}
+        capacity = self._usable_parallelism()
+        if capacity < 1:
+            return {"status": "no_pending"}
         envelope = contracts.build_signed_request(
             scope=contracts.SCOPE_CLAIM,
             round_id=round_id,
             hotkey=config.identity.hotkey,
-            body={"declared_parallelism": config.max_parallel_runs},
+            body={"declared_parallelism": capacity,
+                  "proxy_execution_version": contracts.PROXY_EXECUTION_VERSION},
             timestamp=int(config.clock().timestamp()),
             sign_message=config.identity.sign,
         )
@@ -1916,6 +1966,19 @@ class Runner:
                 except StopIteration:
                     raise exc from None
                 time.sleep(max(0.0, float(delay)))
+
+    def _usable_parallelism(self) -> int:
+        """Return the current claim limit after permanent route quarantine."""
+
+        config = self._config
+        capacity = config.max_parallel_runs
+        if config.proxy_worker_pool is not None:
+            capacity = min(
+                capacity,
+                config.proxy_worker_pool.capacity
+                - config.proxy_worker_pool.quarantined,
+            )
+        return max(0, capacity)
 
     def _run_lease(self, lease: Mapping[str, Any]) -> None:
         try:
@@ -2027,6 +2090,21 @@ class Runner:
             while taken < max_claims:
                 if stop_event is not None and stop_event.is_set():
                     break
+                done = {future for future in futures if future.done()}
+                futures.difference_update(done)
+                for future in done:
+                    future.result()
+                usable_parallelism = self._usable_parallelism()
+                if usable_parallelism < 1:
+                    break
+                if len(futures) >= usable_parallelism:
+                    done, futures = wait(
+                        futures,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    for future in done:
+                        future.result()
+                    continue
                 if not self._slots.acquire(blocking=False):
                     if not futures:
                         break

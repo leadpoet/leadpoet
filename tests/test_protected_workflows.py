@@ -214,6 +214,9 @@ def test_external_protected_source_staging_rejects_mismatched_existing_file(
 
 
 def test_scoring_receipt_failure_policy_is_protected():
+    assert PROTECTED_SYMBOLS["leadpoet_canonical/proxy_transport.py"] == (
+        "__module__",
+    )
     assert {
         "_DIRECT_SUPABASE_SIDECAR_NAMESPACES",
         "_job_input_limit_bytes",

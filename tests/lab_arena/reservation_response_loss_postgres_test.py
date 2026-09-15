@@ -139,24 +139,27 @@ def test_committed_dynamic_reservation_is_recovered_settled_and_budget_reused(
         for _ in range(2)
     ]
     wrapped = _ResponseLossStore(store, commit_first=True)
-    transport = FakeTransport([(200, {"results": []}), (200, {"results": []})])
+    transport = FakeTransport([
+        (200, {"results": [], "billing": {"credits_charged": 0.02}}),
+        (200, {"results": []}),
+    ])
     broker = _broker(wrapped, transport)
 
     first = _execute(broker, _context(*leases[0], round_id), 0, "first")
     assert first.status == 200 and first.call["outcome"] == "settled"
     assert first.call["reserved_microusd"] == 50_000_000
-    assert first.call["actual_microusd"] == 0
+    assert first.call["actual_microusd"] == 2_000
     assert wrapped.reserve_attempts == 2
     assert wrapped.committed_reservation["amount_microusd"] == 50_000_000
     first_rows = store.list_ledger(call_identity=first.call["call_identity"])
     assert [row["entry_kind"] for row in first_rows] == [
         "reservation", "dispatch", "settlement",
     ]
-    assert first_rows[-1]["amount_microusd"] == 0
+    assert first_rows[-1]["amount_microusd"] == 2_000
 
     second = _execute(broker, _context(*leases[1], round_id), 0, "second")
     assert second.status == 200 and second.call["outcome"] == "settled"
-    assert second.call["reserved_microusd"] == 50_000_000
+    assert second.call["reserved_microusd"] == 49_998_000
     assert leases[1][0]["run_id"] != leases[0][0]["run_id"]
     assert leases[1][0]["icp_position"] != leases[0][0]["icp_position"]
     assert second.call["call_identity"] != first.call["call_identity"]
@@ -194,34 +197,35 @@ def test_concurrent_recovery_has_one_atomic_dispatch_and_one_provider_post(datab
     context = _context(run, token, round_id)
     committed = threading.Event()
     reservations_ready = threading.Barrier(2)
+    readbacks_ready = threading.Barrier(2)
     dispatches_ready = threading.Barrier(2)
-    first_lock = threading.Lock()
-    first = True
 
     class RacingStore:
         def __init__(self, inner, *, waits_for_commit):
             self.inner = inner
             self.waits_for_commit = waits_for_commit
+            self.lost_response = False
 
         def reserve_call(self, **kwargs):
-            nonlocal first
             if self.waits_for_commit:
                 assert committed.wait(timeout=5)
             result = self.inner.reserve_call(**kwargs)
-            with first_lock:
-                lose_response = first
-                if first:
-                    first = False
-            if lose_response:
-                committed.set()
+            if not self.lost_response:
+                self.lost_response = True
+                if not self.waits_for_commit:
+                    committed.set()
                 raise ArenaStoreUnavailable("synthetic reserve response loss")
             reservations_ready.wait(timeout=5)
             return result
 
-        def mark_dispatched(self, **kwargs):
-            result = self.inner.mark_dispatched(**kwargs)
-            dispatches_ready.wait(timeout=5)
+        def list_ledger(self, **kwargs):
+            result = self.inner.list_ledger(**kwargs)
+            readbacks_ready.wait(timeout=5)
             return result
+
+        def mark_dispatched(self, **kwargs):
+            dispatches_ready.wait(timeout=5)
+            return self.inner.mark_dispatched(**kwargs)
 
         def __getattr__(self, name):
             return getattr(self.inner, name)

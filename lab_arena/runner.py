@@ -2097,7 +2097,9 @@ class Runner:
                 usable_parallelism = self._usable_parallelism()
                 if usable_parallelism < 1:
                     break
-                if len(futures) >= usable_parallelism:
+                if not self._slots.acquire(blocking=False):
+                    if not futures:
+                        break
                     done, futures = wait(
                         futures,
                         return_when=FIRST_COMPLETED,
@@ -2105,9 +2107,8 @@ class Runner:
                     for future in done:
                         future.result()
                     continue
-                if not self._slots.acquire(blocking=False):
-                    if not futures:
-                        break
+                if len(futures) >= usable_parallelism:
+                    self._slots.release()
                     done, futures = wait(
                         futures,
                         return_when=FIRST_COMPLETED,

@@ -248,7 +248,9 @@ def _seed_observed_sep15(connection, objects=None):
                     accepted_challenger.append((execute_id, submission_id,
                                                 hotkeys[index], stage, position))
                 score_id = "old-score-%d-%d" % (index, position)
-                score_failed = index > 0 and len(accepted_challenger) <= 10
+                # The protected original has ten stage-two miner-account
+                # failures and no accepted replacement for those executions.
+                score_failed = index == 1 and stage == 2
                 value = qualification = None
                 if objects is not None:
                     value, qualification = _proof_execution(
@@ -263,7 +265,7 @@ def _seed_observed_sep15(connection, objects=None):
                     "%s,%s,%s,%s,%s,%s)",
                     (score_id, score_id, ROUND, submission_id, hotkeys[index],
                      stage, position, "failed" if score_failed else "accepted",
-                    execute_id, "budget_exhausted" if score_failed else "accepted",
+                    execute_id, "credential_error" if score_failed else "accepted",
                      "arena/score/%s.json" % score_id, hotkeys[10],
                      "old-score-0-0" if 0 < len(accepted_challenger) <= 79 else None),
                 )
@@ -700,6 +702,9 @@ def test_exact_rerun_replays_both_stages_and_publishes_positive_cost_gated_resul
             assert service_instance.close_scoring(ROUND, stage)["status"] == "closed"
             outcome = service_instance.score_stage(ROUND, stage)
             assert outcome["status"] == "ok", outcome
+            assert outcome["ineligible_submissions"] == (
+                [] if stage == 1 else [ids[1]]
+            )
             with connection.cursor() as cursor:
                 cursor.execute(
                     "SELECT public.lab_arena_sep15_challenger_seals_valid_v1()",

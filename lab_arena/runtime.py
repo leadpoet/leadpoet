@@ -31,7 +31,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import resource
 import shutil
 import stat
 import subprocess
@@ -608,10 +607,79 @@ def _drain(stream: Any, capture: _BoundedCapture) -> None:
             pass
 
 
-def _children_rusage() -> Tuple[float, int]:
-    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+def _rusage_values(usage: Any) -> Tuple[float, int]:
     rss = int(usage.ru_maxrss) if sys.platform == "darwin" else int(usage.ru_maxrss) * 1024
     return float(usage.ru_utime + usage.ru_stime), rss
+
+
+class _RusagePopen(subprocess.Popen):
+    """Capture resource usage when this exact child is reaped.
+
+    ``RUSAGE_CHILDREN`` is process-wide, so before/after deltas include unrelated
+    sandboxes under parallel execution.  Override both Popen wait paths with
+    ``wait4`` so polling cannot consume the exit status before the launcher PID's
+    usage is recorded.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.child_rusage: Optional[Tuple[float, int]] = None
+        super().__init__(*args, **kwargs)
+
+    def _try_wait(
+        self,
+        wait_flags: int,
+        _wait4: Any = os.wait4,
+        _values: Any = _rusage_values,
+    ) -> Tuple[int, int]:
+        # CPython requires callers of _try_wait to hold Popen._waitpid_lock.
+        try:
+            pid, status, usage = _wait4(self.pid, wait_flags)
+        except ChildProcessError:
+            # Match Popen's behavior when another process owner or SIGCHLD
+            # policy has already reaped the child.  The missing measurement is
+            # rejected by run_sandbox instead of using shared child totals.
+            return self.pid, 0
+        if pid == self.pid:
+            self.child_rusage = _values(usage)
+        return pid, status
+
+    def _internal_poll(
+        self,
+        _deadstate: Optional[int] = None,
+        _wnohang: int = os.WNOHANG,
+    ) -> Optional[int]:
+        # Popen.poll() otherwise calls waitpid directly and would consume the
+        # one opportunity to collect this child's wait4 usage.
+        if self.returncode is None:
+            if not self._waitpid_lock.acquire(False):
+                return None
+            try:
+                if self.returncode is None:
+                    pid, status = self._try_wait(_wnohang)
+                    if pid == self.pid:
+                        self._handle_exitstatus(status)
+            except OSError:
+                if _deadstate is None:
+                    raise
+                self.returncode = _deadstate
+            finally:
+                self._waitpid_lock.release()
+        return self.returncode
+
+
+def _completed_process_rusage(
+    process: Any,
+    *,
+    injected_rusage: Optional[Callable[[], Tuple[float, int]]] = None,
+    injected_cpu_before: Optional[float] = None,
+) -> Tuple[float, int]:
+    child_rusage = getattr(process, "child_rusage", None)
+    if child_rusage is not None:
+        return child_rusage
+    if injected_rusage is not None and injected_cpu_before is not None:
+        cpu_after, max_rss = injected_rusage()
+        return max(0.0, cpu_after - injected_cpu_before), max_rss
+    raise ArenaRuntimeError("sandbox launcher resource usage unavailable")
 
 
 def _run_command(process_runner: ProcessRunner, argv: Sequence[str], *, timeout: float) -> int:
@@ -746,7 +814,7 @@ def run_sandbox(
     process_runner: ProcessRunner = subprocess.Popen,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
-    rusage: Callable[[], Tuple[float, int]] = _children_rusage,
+    rusage: Optional[Callable[[], Tuple[float, int]]] = None,
 ) -> SandboxResult:
     """Run one sandbox to completion or timeout and always clean up.
 
@@ -786,9 +854,15 @@ def run_sandbox(
 
         stdout_capture = _BoundedCapture(MAX_LOG_BYTES)
         stderr_capture = _BoundedCapture(MAX_LOG_BYTES)
-        cpu_before, _ = rusage()
+        # ``rusage`` remains an explicit fake-process test seam.  Production's
+        # default Popen is replaced only for the sandbox launcher, whose wait4
+        # result cannot include another concurrently completing sandbox.
+        injected_cpu_before = rusage()[0] if rusage is not None else None
         started = clock()
-        process = process_runner(
+        launcher_runner = (
+            _RusagePopen if process_runner is subprocess.Popen else process_runner
+        )
+        process = launcher_runner(
             runsc_run_command(
                 config,
                 runsc_root,
@@ -847,7 +921,11 @@ def run_sandbox(
             raise RuntimeHostError(
                 reason="sandbox_launch_failed", runsc_path=config.runsc_path,
             )
-        cpu_after, max_rss = rusage()
+        cpu_seconds, max_rss = _completed_process_rusage(
+            process,
+            injected_rusage=rusage,
+            injected_cpu_before=injected_cpu_before,
+        )
         output_bytes: Optional[bytes] = None
         output_error: Optional[str] = None
         try:
@@ -862,7 +940,7 @@ def run_sandbox(
             stdout_truncated=stdout_capture.truncated,
             stderr_truncated=stderr_capture.truncated,
             wall_seconds=wall_seconds,
-            cpu_seconds=max(0.0, cpu_after - cpu_before),
+            cpu_seconds=max(0.0, cpu_seconds),
             max_rss_bytes=max_rss,
             output_bytes=output_bytes,
             output_path=str(spec.output_path),

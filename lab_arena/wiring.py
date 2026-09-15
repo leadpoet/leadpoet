@@ -453,6 +453,7 @@ def build_service_from_environment(mode: str):
         return broker_module.Broker(
             store=store, key_for=key_for, judge_models=judge_models,
             price_table=price_table, transport=broker_module.HttpxProviderTransport(),
+            lease_ttl_seconds=int(round_row["configuration_doc"]["lease_ttl_seconds"]),
             credential_for=submission_keys.credential_for,
             funding_source_for=submission_keys.funding_source_for,
             provider_funding_source_for=(

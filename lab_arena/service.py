@@ -684,6 +684,10 @@ class ArenaService:
             raise ServiceError(
                 "successful_call_cost_schema_unavailable", 500
             ) from exc
+        try:
+            self._store.submission_replacement_schema()
+        except ArenaStoreError as exc:
+            raise ServiceError("submission_replacement_schema_unavailable", 500) from exc
         if (
             getattr(
                 self._config.defaults, "parallel_twenty_icp_execution", False
@@ -1002,7 +1006,7 @@ class ArenaService:
         return None
 
     def active_rounds(self) -> List[Dict[str, Any]]:
-        """Every round that is not published or cancelled, oldest first: ids and statuses only.
+        """Every active round, oldest first, with its public pinned output policy.
 
         Rounds overlap (one open for submissions while the previous one runs),
         so the driver advances each of them on every tick.
@@ -1016,6 +1020,7 @@ class ArenaService:
                 "round_id": row["round_id"],
                 "status": row["status"],
                 "schedule": dict((row.get("configuration_doc") or {}).get("schedule") or {}),
+                **self._public_round_output_policy(row.get("configuration_doc") or {}),
             }]
 
         network_name, netuid = self._chain_scope()
@@ -1046,6 +1051,7 @@ class ArenaService:
                 "round_id": row["round_id"],
                 "status": row["status"],
                 "schedule": dict((row.get("configuration_doc") or {}).get("schedule") or {}),
+                **self._public_round_output_policy(row.get("configuration_doc") or {}),
             }
             for row in reversed(rows)
         ]
@@ -1155,6 +1161,8 @@ class ArenaService:
             "submission_id": submission_id,
             "status": row["status"],
             "rejection_rule": row.get("rejection_rule"),
+            "replaces_submission_id": row.get("replaces_submission_id"),
+            "replaced_by_submission_id": row.get("replaced_by_submission_id"),
             "code_review": self._public_code_review(row),
         }
 
@@ -1196,6 +1204,10 @@ class ArenaService:
         candidates = []
         for active in self.active_rounds():
             round_row = self._round(active["round_id"])
+            # Review only after source replacements close. The database repeats
+            # this check under its admission lock before reserving review spend.
+            if round_row["status"] == "open" and self.now() < self._submission_replacement_cutoff(round_row):
+                continue
             for status in ("accepted", "frozen"):
                 for row in self._store.list_submissions(round_row["round_id"], status=status):
                     if self._is_daily_baseline(row, round_row) or row.get("code_review_status") in ("passed", "rejected"):
@@ -1205,6 +1217,11 @@ class ArenaService:
             results = list(pool.map(reviewer.review, candidates))
         reviewed = sum(result.get("status") in ("passed", "rejected", "error", "ok") for result in results)
         return {"reviewed": reviewed}
+
+    @staticmethod
+    def _submission_replacement_cutoff(round_row: Mapping[str, Any]) -> datetime:
+        schedule = (round_row.get("configuration_doc") or {}).get("schedule") or {}
+        return _parse_iso(schedule["submission_cutoff"]) - timedelta(hours=1)
 
     def _require_submission_window(self, round_row: Mapping[str, Any]) -> None:
         if round_row["status"] != "open":
@@ -1274,11 +1291,15 @@ class ArenaService:
         except ArenaStoreError as exc:
             if "lab_arena_submission_owner_changed" in str(exc):
                 raise ServiceError("submission_owner_changed", 409) from exc
+            if "lab_arena_submission_replacement_ineligible" in str(exc):
+                raise ServiceError("submission_replacement_ineligible", 409) from exc
             if "lab_arena_submission_conflict" in str(exc):
                 raise ServiceError("submission_conflict", 409) from exc
             raise
         if registration.get("status") == "window_closed":
             raise ServiceError("submission_window_closed", 409)
+        if registration.get("status") == "replacement_closed":
+            raise ServiceError("submission_replacement_closed", 409)
         if registration.get("status") not in ("registered", "existing"):
             raise ServiceError("submission_registration_failed", 500)
         submission_id = str(registration.get("submission_id") or submission_id)
@@ -1397,6 +1418,8 @@ class ArenaService:
             if row.get("rejection_rule") == "source_replaced":
                 raise ServiceError("submission_superseded", 409)
             raise ServiceError("submission_not_uploading", 409)
+        if row.get("replaces_submission_id") and self.now() >= self._submission_replacement_cutoff(round_row):
+            raise ServiceError("submission_replacement_closed", 409)
         self._enforce_submission_request_limit(validated["hotkey"])
         try:
             self._validate_uploaded_source(
@@ -1444,6 +1467,17 @@ class ArenaService:
         except ArenaStoreError as exc:
             if "lab_arena_submission_credentials_immutable" in str(exc):
                 raise ServiceError("submission_credentials_immutable", 409) from exc
+            if "lab_arena_submission_replacement_closed" in str(exc):
+                raise ServiceError("submission_replacement_closed", 409) from exc
+            if "lab_arena_submission_window_closed" in str(exc):
+                raise ServiceError("submission_window_closed", 409) from exc
+            if "lab_arena_submission_replacement_ineligible" in str(exc):
+                raise ServiceError("submission_replacement_ineligible", 409) from exc
+            if any(code in str(exc) for code in (
+                "lab_arena_submission_replacement_stale",
+                "lab_arena_submission_not_uploading",
+            )):
+                raise ServiceError("submission_superseded", 409) from exc
             if "lab_arena_round_full" not in str(exc):
                 raise
             self._store.update_submission(
@@ -1453,6 +1487,8 @@ class ArenaService:
             raise ServiceError("submission_rejected:capacity.round_full", 409) from exc
         if result.get("status") == "window_closed":
             raise ServiceError("submission_window_closed", 409)
+        if result.get("status") == "replacement_closed":
+            raise ServiceError("submission_replacement_closed", 409)
         if result.get("status") not in ("ok", "existing"):
             raise ServiceError("submission_finalize_failed", 500)
         return {"status": "accepted", "submission_id": submission_id}
@@ -4252,6 +4288,20 @@ class ArenaService:
         rows = self._store.list_chain_outcomes(network, netuid, int(epoch))
         return {"outcomes": [dict(row["outcome_doc"]) for row in rows], "lookup_ok": True}
 
+    @staticmethod
+    def _public_round_output_policy(configuration: Mapping[str, Any]) -> Dict[str, str]:
+        """Expose the output contract and replacement deadline, never ICPs."""
+
+        cutoff = (configuration.get("schedule") or {}).get("submission_cutoff")
+        return {
+            **({"submission_replacement_cutoff": (_parse_iso(cutoff) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")} if cutoff else {}),
+            "output_schema_version": contact_policy.output_schema(configuration),
+            **({"integrity_policy": integrity.POLICY} if integrity.enabled(configuration) else {}),
+            **({"contact_policy": contact_policy.POLICY} if contact_policy.enabled(configuration) else {}),
+            **({"company_quality_policy": quality_policy.POLICY} if quality_policy.enabled(configuration) else {}),
+            **({"intent_details_policy": intent_details_policy.POLICY} if intent_details_policy.enabled(configuration) else {}),
+        }
+
     def public_round(self, round_id: str) -> Dict[str, Any]:
         row = self._round(round_id)
         configuration = row.get("configuration_doc") or {}
@@ -4269,6 +4319,7 @@ class ArenaService:
             "round_id": round_id,
             "status": row["status"],
             "schedule": dict(configuration.get("schedule") or {}),
+            **self._public_round_output_policy(configuration),
             "participants": participants,
             "finalists": row.get("finalists") if row["status"] == "published" else None,
             "publication": row.get("publication_doc"), "king_outcome": row.get("king_outcome"), "king_hotkey": row.get("king_hotkey"),
@@ -4278,8 +4329,6 @@ class ArenaService:
         if row["status"] == "published":
             publication = row.get("publication_doc") or {}
             view.update({"final_ranking": publication.get("final_ranking"), "king_decision": publication.get("king_decision")})
-        if integrity.enabled(configuration):
-            view["integrity_policy"] = integrity.POLICY
         return view
 
     def _public_icp_disclosure(self, row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:

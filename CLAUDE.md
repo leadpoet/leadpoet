@@ -1,5 +1,21 @@
 # Agent Instructions
 
+## Scoped production authorization: queued submission replacement and policy disclosure
+
+On 2026-09-15 the user explicitly authorized own-hotkey replacement of queued
+Arena submissions until one hour before the next UTC submission cutoff, only
+before evaluation begins. The latest valid replacement must be selected
+atomically, with source and credential history retained and no duplicate jobs,
+scoring, or spend. Expose each round's active output/schema policies publicly
+without private ICPs. Confirm the current lifecycle and preserve existing
+scoring, costs, rewards, ownership, disclosure protections, and concurrent work.
+Authority includes protected production and credential inspection, narrow
+source changes and exact committed migrations, pushes to main, canonical
+gateway/normal-validator restarts, and isolated end-to-end production tests
+through the overnight operational permissions. Do not change real miners'
+submissions or fabricate competition scores. Continue until cutoff, replacement,
+policy disclosure, and unaffected live flows are verified.
+
 ## Scoped production authorization: Tyche baseline and September 15 rerun
 
 On 2026-09-15 the user explicitly authorized adapting and rigorously testing

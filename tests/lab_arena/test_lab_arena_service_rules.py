@@ -1192,7 +1192,10 @@ def test_round_selection_and_direct_access_are_scoped_to_service_mode():
     assert service.current_round()["round_id"] == "live-round"
     assert service.open_round()["round_id"] == "live-round"
     assert service.active_rounds() == [
-        {"round_id": "live-round", "status": "open", "schedule": {}}
+        {
+            "round_id": "live-round", "status": "open", "schedule": {},
+            "output_schema_version": "leadpoet.lab_arena.output.v1",
+        }
     ]
     with pytest.raises(ServiceError, match="round_mode_mismatch"):
         service._round("shadow-round")
@@ -1261,6 +1264,8 @@ def test_runtime_round_pin_rejects_alien_shadow_rounds_and_scopes_discovery():
             "round_id": pinned["round_id"],
             "status": "open",
             "schedule": {"submission_cutoff": "2026-09-08T00:00:00Z"},
+            "submission_replacement_cutoff": "2026-09-07T23:00:00Z",
+            "output_schema_version": "leadpoet.lab_arena.output.v1",
         }
     ]
     assert service.latest_published_round() is None
@@ -1317,7 +1322,8 @@ def test_round_discovery_filters_before_limits_and_pages_every_active_round():
             "live-active-%02d" % index,
             "open" if index == 44 else "committed",
             "live",
-            "2026-09-%02dT00:00:00Z" % (index + 1),
+            (datetime(2026, 9, 1, tzinfo=timezone.utc) + timedelta(days=index))
+            .isoformat().replace("+00:00", "Z"),
         )
         for index in range(45)
     ]
@@ -1417,6 +1423,12 @@ def test_round_discovery_filters_before_limits_and_pages_every_active_round():
     assert [item["round_id"] for item in active] == [
         "live-active-%02d" % index for index in range(45)
     ]
+    assert all(item["output_schema_version"] == "leadpoet.lab_arena.output.v1" for item in active)
+    assert all(
+        _parse_iso(item["submission_replacement_cutoff"])
+        == _parse_iso(item["schedule"]["submission_cutoff"]) - timedelta(hours=1)
+        for item in active
+    )
     assert [call["offset"] for call in Store.calls] == [0, 20, 40]
     assert all(call["mode"] == "live" for call in Store.calls)
     assert all(
@@ -1620,8 +1632,12 @@ def test_public_views_never_serialize_source_or_private_runtime_fields():
         "round_id": "arena-2026-09-03",
         "status": "open",
         "schedule": schedule,
+        "submission_replacement_cutoff": "2026-09-02T00:00:00Z",
+        "output_schema_version": "leadpoet.lab_arena.output.v1",
     }
     assert current["published_round"] is None
+    assert round_view["submission_replacement_cutoff"] == "2026-09-02T00:00:00Z"
+    assert round_view["output_schema_version"] == "leadpoet.lab_arena.output.v1"
     assert round_view["participants"] == [
         {
             "submission_id": "sub-random",

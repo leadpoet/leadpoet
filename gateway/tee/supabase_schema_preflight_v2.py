@@ -12,8 +12,10 @@ ORIGINAL_JUDGMENTS_MIGRATION = "scripts/221-lab-arena-participation-original-jud
 SUCCESSFUL_CALL_COST_MIGRATION = "scripts/230-lab-arena-successful-call-cost-permissions.sql"
 DEEPLINE_RECONCILIATION_MIGRATION = "scripts/243-lab-arena-deepline-delayed-cost-reconciliation.sql"
 DEEPLINE_INTERRUPTION_MIGRATION = "scripts/248-lab-arena-closed-scoring-reservation-admission.sql"
-PRIVATE_ARENA_MIGRATIONS = frozenset({CODE_REVIEW_MIGRATION, PARTICIPATION_MIGRATION, ORIGINAL_JUDGMENTS_MIGRATION, SUCCESSFUL_CALL_COST_MIGRATION, DEEPLINE_RECONCILIATION_MIGRATION, DEEPLINE_INTERRUPTION_MIGRATION})
+SUBMISSION_REPLACEMENT_MIGRATION = "scripts/258-lab-arena-queued-submission-replacement.sql"
+PRIVATE_ARENA_MIGRATIONS = frozenset({SUBMISSION_REPLACEMENT_MIGRATION, CODE_REVIEW_MIGRATION, PARTICIPATION_MIGRATION, ORIGINAL_JUDGMENTS_MIGRATION, SUCCESSFUL_CALL_COST_MIGRATION, DEEPLINE_RECONCILIATION_MIGRATION, DEEPLINE_INTERRUPTION_MIGRATION})
 REQUIRED_SUPABASE_V2_SCHEMA = (
+    (SUBMISSION_REPLACEMENT_MIGRATION, "lab_arena_submissions", ("replaces_submission_id", "replaced_by_submission_id")),
     (PARTICIPATION_MIGRATION, "lab_arena_runs", ("runner_hotkey", "participation_accepted_at")),
     (CODE_REVIEW_MIGRATION, "lab_arena_submissions", ("submission_id", "code_review_status", "code_review_doc")),
     ("scripts/125-research-lab-artifact-key-lineage.sql", "research_lab_provider_evidence_cache_v2", ("artifact_master_key_ref_hash",)),
@@ -24,6 +26,7 @@ REQUIRED_SUPABASE_V2_SCHEMA = (
     ("scripts/202-arena-accepted-weight-state.sql", "lab_arena_chain_outcomes", ("network", "netuid", "epoch", "validator_hotkey", "request_id", "extrinsic_hash", "outcome_doc", "created_at")),
 )
 REQUIRED_SUPABASE_V2_RPCS = (
+    (SUBMISSION_REPLACEMENT_MIGRATION, "lab_arena_submission_replacement_schema_v1"),
     (PARTICIPATION_MIGRATION, "lab_arena_has_recent_participation_v1"),
     (ORIGINAL_JUDGMENTS_MIGRATION, "lab_arena_participation_schema_v1"),
     (CODE_REVIEW_MIGRATION, "lab_arena_code_review_schema_v1"),
@@ -56,6 +59,11 @@ SCHEMA_CAPABILITIES = (
     ("lab_arena_schema_version_v1", {"schema_version": "leadpoet.lab_arena.schema_version.v1", "version": 197}),
     ("lab_arena_weight_state_schema_v1", {"schema_version": "leadpoet.lab_arena.weight_state_schema.v1", "version": 202}),
     ("lab_arena_incentive_retirement_schema_v1", {"schema_version": "leadpoet.lab_arena.incentive_retirement_schema.v1", "version": 203}),
+    ("lab_arena_submission_replacement_schema_v1", {
+        "schema_version": "leadpoet.lab_arena.submission_replacement_schema.v1",
+        "version": 258,
+        "replacement_freeze_seconds": 3600,
+    }),
     ("lab_arena_successful_call_cost_schema_v1", {
         "schema_version": "leadpoet.lab_arena.successful_call_cost_schema.v1",
         "version": 230,
@@ -67,7 +75,7 @@ SCHEMA_CAPABILITIES = (
     }),
 )
 POSTGRES_IDENTIFIER_MAX_BYTES = 63
-PRIVATE_ARENA_CAPABILITIES = frozenset({"lab_arena_code_review_schema_v1", "lab_arena_participation_schema_v1", "lab_arena_successful_call_cost_schema_v1", "lab_arena_deepline_cost_reconciliation_schema_v1"})
+PRIVATE_ARENA_CAPABILITIES = frozenset({"lab_arena_submission_replacement_schema_v1", "lab_arena_code_review_schema_v1", "lab_arena_participation_schema_v1", "lab_arena_successful_call_cost_schema_v1", "lab_arena_deepline_cost_reconciliation_schema_v1"})
 
 class SupabaseSchemaPreflightV2Error(RuntimeError):
     """The selected release cannot use the live PostgREST schema."""

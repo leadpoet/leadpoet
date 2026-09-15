@@ -1,5 +1,28 @@
 # Agent Instructions
 
+## Scoped production authorization: Tyche baseline and September 15 rerun
+
+On 2026-09-15 the user explicitly authorized adapting and rigorously testing
+latest Tyche for the existing Arena baseline interface, then publishing the
+tested model to the existing pydantic-harness main and lab branches. Preserve
+the baseline repository, latest-lab source selection, and champion promotion
+mechanism. Competition changes are limited to a 45-minute hard per-ICP
+execution deadline, safe complete partial-output/checkpoint handling, and the
+lease/timing support required for that contract. Only the model chooses when
+to finalize; Arena evaluates valid output saved by the deadline.
+
+After the model is tested and pushed, override and rerun arena-2026-09-15 on
+its original twenty September 15 ICPs using existing proxy-backed parallel
+execution. This explicit same-day override supersedes earlier no-rerun rules
+for this exact round. Preserve audit evidence of prior results, other rounds,
+miner submissions, source archives, credential references, actual costs,
+scoring rules, reward/weight integrity and concurrent work. Authority includes
+protected credential and production-state access, necessary exact committed
+migrations, narrow tested code, pushes/merges, canonical gateway and normal
+validator restarts, paid provider tests, and monitoring through genuine
+positive score publication on the subnet. Do not fabricate or relax scoring
+criteria. Continue narrow recovery of proven blockers until completion.
+
 ## Scoped production authorization: scorer response audit and deployment
 
 On 2026-09-14 the user authorized a broader audit for scorer response-handling

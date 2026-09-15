@@ -9,6 +9,26 @@ from lab_arena.store import ArenaStore, ArenaStoreError, FUNCTION_SIGNATURES, Po
 from lab_arena.store import ArenaStoreUnavailable
 
 
+@pytest.mark.parametrize('limit', [None, 0, 2, True, '1', 1])
+def test_startup_requires_exact_one_replacement_attempt_capability(limit):
+    capability = {
+        'schema_version': 'leadpoet.lab_arena.submission_replacement_schema.v1',
+        'version': 258, 'replacement_freeze_seconds': 3600,
+    }
+    if limit is not None:
+        capability['max_replacement_attempts'] = limit
+    class Transport:
+        def rpc(self, name, args):
+            assert name == 'lab_arena_submission_replacement_schema_v1' and args == {}
+            return capability
+    store = ArenaStore(Transport())
+    if type(limit) is int and limit == 1:
+        assert store.submission_replacement_schema() == capability
+    else:
+        with pytest.raises(ArenaStoreError, match='submission replacement schema mismatch'):
+            store.submission_replacement_schema()
+
+
 @pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError])
 @pytest.mark.parametrize("recovers", [True, False])
 def test_select_retries_one_read_failure_without_changing_query(error_type, recovers):

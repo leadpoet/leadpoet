@@ -99,6 +99,8 @@ def test_replacement_deadline_matches_both_public_endpoints_and_is_not_cached():
     expected = '2026-09-15T23:00:00.123456Z'
     assert current.json()['open_round']['submission_replacement_cutoff'] == expected
     assert details.json()['submission_replacement_cutoff'] == expected
+    assert current.json()['open_round']['max_replacement_attempts'] == 1
+    assert details.json()['max_replacement_attempts'] == 1
     assert current.headers['cache-control'] == details.headers['cache-control'] == 'no-store'
 
 
@@ -112,3 +114,22 @@ def test_final_database_deadline_failure_is_a_clear_conflict(code):
         response = http.post('/arena/v1/submissions/sub-new/finalize', json={'body': {'submission_id': 'sub-new'}})
     assert response.status_code == 409
     assert response.json()['code'] == code
+
+
+def test_used_replacement_allowance_denies_a_new_upload_before_source_or_provider_work():
+    svc, counts = _service(CUTOFF - timedelta(hours=1))
+    hotkey = '5' + 'A' * 47
+    svc._config.chain = SimpleNamespace(uid_for_hotkey=lambda _: 1)
+    svc._request_round = lambda *a, **kw: ({'hotkey': hotkey, 'body': {
+        'source_size_bytes': 100, 'consent': {'public_rerun': True},
+    }}, ROUND)
+    svc._store.register_submission = lambda *a: {'status': 'replacement_limit_reached'}
+    def no_upload(*a, **kw):
+        pytest.fail('An exhausted replacement allowance must not issue an upload URL')
+    svc._objects = SimpleNamespace(presign_put=no_upload)
+    with TestClient(create_app(svc)) as http:
+        response = http.post('/arena/v1/submissions/presign', json={})
+    assert response.status_code == 409
+    assert response.json()['code'] == 'submission_replacement_limit_reached'
+    assert 'even if upload or validation fails' in response.json()['detail']
+    assert counts == {'source': 0, 'credentials': 0, 'accept': 0}

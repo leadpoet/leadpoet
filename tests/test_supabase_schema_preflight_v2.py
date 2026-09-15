@@ -80,6 +80,7 @@ def _opener(
             "schema_version": "leadpoet.lab_arena.submission_replacement_schema.v1",
             "version": 258,
             "replacement_freeze_seconds": 3600,
+            "max_replacement_attempts": 1,
         },
         "lab_arena_participation_schema_v1": {
             "schema_version": "leadpoet.lab_arena.participation_schema.v1",

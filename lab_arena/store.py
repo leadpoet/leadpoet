@@ -1053,7 +1053,9 @@ class ArenaStore:
         if (result.get("schema_version")
                 != "leadpoet.lab_arena.submission_replacement_schema.v1"
                 or result.get("version") != 258
-                or result.get("replacement_freeze_seconds") != 3600):
+                or result.get("replacement_freeze_seconds") != 3600
+                or type(result.get("max_replacement_attempts")) is not int
+                or result["max_replacement_attempts"] != 1):
             raise ArenaStoreError("submission replacement schema mismatch")
         return result
 

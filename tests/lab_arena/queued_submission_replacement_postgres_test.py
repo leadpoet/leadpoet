@@ -113,8 +113,8 @@ def test_rejected_pending_replacement_does_not_remove_accepted_fallback(store):
         {"rejection_rule": "source_checksum_mismatch"},
     )["status"] == "ok"
     assert store.get_submission("sub-first")["status"] == "accepted"
-    assert store.register_submission(round_id, "sub-third", miner, _doc(round_id, "sub-third", 125))["status"] == "registered"
-    assert store.get_submission("sub-third")["replaces_submission_id"] == "sub-first"
+    assert store.register_submission(round_id, "sub-third", miner, _doc(round_id, "sub-third", 125))["status"] == "replacement_limit_reached"
+    assert store.get_submission("sub-third") is None
 
 
 def test_legacy_same_size_new_checksum_gets_new_pending_object(store):
@@ -311,7 +311,7 @@ def test_migration_replay_is_safe_and_capability_is_service_only(database):
     psycopg2, dsn = database
     migration = (
         Path(__file__).resolve().parents[2]
-        / "scripts/258-lab-arena-queued-submission-replacement.sql"
+        / "scripts/262-lab-arena-one-replacement-attempt.sql"
     ).read_text()
     with psycopg2.connect(**dsn) as connection:
         connection.autocommit = True
@@ -360,7 +360,7 @@ def _wait_for_lock(observer, label):
     raise AssertionError(f"{label} did not wait on the round lock")
 
 
-def test_newer_registration_wins_before_stale_pending_finalize(store, database):
+def test_extra_registration_cannot_supersede_the_one_pending_replacement(store, database):
     round_id = "arena-2098-05-08-newer"
     miner = _hotkey("queued-newer-miner")
     store.create_round(round_id, _config(round_id, cutoff_after=timedelta(hours=3)))
@@ -390,11 +390,11 @@ def test_newer_registration_wins_before_stale_pending_finalize(store, database):
             _wait_for_lock(observer, "queued-newer-finalize")
             blocker.commit()
             new_result, stale_result = newer.result(timeout=10), stale.result(timeout=10)
-        assert new_result["status"] == "registered"
-        assert "submission_not_uploading" in stale_result["error"]
-        assert store.get_submission("sub-b")["status"] == "rejected"
-        assert store.get_submission("sub-c")["status"] == "uploading"
-        assert store.get_submission("sub-a")["status"] == "accepted"
+        assert new_result["status"] == "replacement_limit_reached"
+        assert stale_result["status"] == "ok"
+        assert store.get_submission("sub-b")["status"] == "accepted"
+        assert store.get_submission("sub-c") is None
+        assert store.get_submission("sub-a")["status"] == "rejected"
     finally:
         blocker.close()
         observer.close()

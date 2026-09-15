@@ -164,7 +164,7 @@ Every miner submission must pass a full-code review before evaluation. The gatew
 Do not include keys or `.env` files in the source directory. Placeholder-only `.env.example`, `.env.sample`, and `.env.template` files are allowed. `LICENSE.txt` or `LICENSE.md` can replace `LICENSE`, but it must stay beside `harness.py` and contain the same complete AGPL-3.0 text. Source limits are 10 MiB compressed, 50 MiB unpacked, and 1,000 files.
 
 Each hotkey can have one accepted model per daily round. To replace your queued
-model, run the same submission command again before the public
+model, run the same submission command once more with the same hotkey before the public
 `submission_replacement_cutoff`: **23:00 UTC**, one hour before the next 00:00 UTC
 round boundary. Upload and final source, license, and credential validation must
 finish before that cutoff. Replacement is refused at or after 23:00 UTC, or
@@ -173,6 +173,8 @@ checks fail or finalization does not finish in time. Each revision has its own
 source archive; prior review charges and replacement links remain in the audit
 history. New code reviews start only after replacement closes. The selected
 revision must still pass review before evaluation.
+
+Only one replacement attempt is allowed per hotkey per daily round: reserving its upload uses the allowance even if the upload is abandoned or validation fails, and the last accepted model remains selected if the replacement fails.
 
 For example, a queued model submitted at 09:00 UTC on December 9 can be replaced using the same submission command and hotkey with updated source, as long as upload and validation finish before 23:00 UTC that day.
 

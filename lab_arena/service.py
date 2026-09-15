@@ -1300,6 +1300,8 @@ class ArenaService:
             raise ServiceError("submission_window_closed", 409)
         if registration.get("status") == "replacement_closed":
             raise ServiceError("submission_replacement_closed", 409)
+        if registration.get("status") == "replacement_limit_reached":
+            raise ServiceError("submission_replacement_limit_reached", 409)
         if registration.get("status") not in ("registered", "existing"):
             raise ServiceError("submission_registration_failed", 500)
         submission_id = str(registration.get("submission_id") or submission_id)
@@ -4289,11 +4291,12 @@ class ArenaService:
         return {"outcomes": [dict(row["outcome_doc"]) for row in rows], "lookup_ok": True}
 
     @staticmethod
-    def _public_round_output_policy(configuration: Mapping[str, Any]) -> Dict[str, str]:
+    def _public_round_output_policy(configuration: Mapping[str, Any]) -> Dict[str, Any]:
         """Expose the output contract and replacement deadline, never ICPs."""
 
         cutoff = (configuration.get("schedule") or {}).get("submission_cutoff")
         return {
+            "max_replacement_attempts": 1,
             **({"submission_replacement_cutoff": (_parse_iso(cutoff) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")} if cutoff else {}),
             "output_schema_version": contact_policy.output_schema(configuration),
             **({"integrity_policy": integrity.POLICY} if integrity.enabled(configuration) else {}),

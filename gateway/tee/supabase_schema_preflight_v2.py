@@ -12,7 +12,7 @@ ORIGINAL_JUDGMENTS_MIGRATION = "scripts/221-lab-arena-participation-original-jud
 SUCCESSFUL_CALL_COST_MIGRATION = "scripts/230-lab-arena-successful-call-cost-permissions.sql"
 DEEPLINE_RECONCILIATION_MIGRATION = "scripts/243-lab-arena-deepline-delayed-cost-reconciliation.sql"
 DEEPLINE_INTERRUPTION_MIGRATION = "scripts/248-lab-arena-closed-scoring-reservation-admission.sql"
-SUBMISSION_REPLACEMENT_MIGRATION = "scripts/258-lab-arena-queued-submission-replacement.sql"
+SUBMISSION_REPLACEMENT_MIGRATION = "scripts/262-lab-arena-one-replacement-attempt.sql"
 PRIVATE_ARENA_MIGRATIONS = frozenset({SUBMISSION_REPLACEMENT_MIGRATION, CODE_REVIEW_MIGRATION, PARTICIPATION_MIGRATION, ORIGINAL_JUDGMENTS_MIGRATION, SUCCESSFUL_CALL_COST_MIGRATION, DEEPLINE_RECONCILIATION_MIGRATION, DEEPLINE_INTERRUPTION_MIGRATION})
 REQUIRED_SUPABASE_V2_SCHEMA = (
     (SUBMISSION_REPLACEMENT_MIGRATION, "lab_arena_submissions", ("replaces_submission_id", "replaced_by_submission_id")),
@@ -63,6 +63,7 @@ SCHEMA_CAPABILITIES = (
         "schema_version": "leadpoet.lab_arena.submission_replacement_schema.v1",
         "version": 258,
         "replacement_freeze_seconds": 3600,
+        "max_replacement_attempts": 1,
     }),
     ("lab_arena_successful_call_cost_schema_v1", {
         "schema_version": "leadpoet.lab_arena.successful_call_cost_schema.v1",

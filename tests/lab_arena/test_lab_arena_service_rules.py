@@ -1194,6 +1194,7 @@ def test_round_selection_and_direct_access_are_scoped_to_service_mode():
     assert service.active_rounds() == [
         {
             "round_id": "live-round", "status": "open", "schedule": {},
+            "max_replacement_attempts": 1,
             "output_schema_version": "leadpoet.lab_arena.output.v1",
         }
     ]
@@ -1265,6 +1266,7 @@ def test_runtime_round_pin_rejects_alien_shadow_rounds_and_scopes_discovery():
             "status": "open",
             "schedule": {"submission_cutoff": "2026-09-08T00:00:00Z"},
             "submission_replacement_cutoff": "2026-09-07T23:00:00Z",
+            "max_replacement_attempts": 1,
             "output_schema_version": "leadpoet.lab_arena.output.v1",
         }
     ]
@@ -1633,6 +1635,7 @@ def test_public_views_never_serialize_source_or_private_runtime_fields():
         "status": "open",
         "schedule": schedule,
         "submission_replacement_cutoff": "2026-09-02T00:00:00Z",
+        "max_replacement_attempts": 1,
         "output_schema_version": "leadpoet.lab_arena.output.v1",
     }
     assert current["published_round"] is None

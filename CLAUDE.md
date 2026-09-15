@@ -16,6 +16,12 @@ through the overnight operational permissions. Do not change real miners'
 submissions or fabricate competition scores. Continue until cutoff, replacement,
 policy disclosure, and unaffected live flows are verified.
 
+The user renewed this scope to allow only one replacement attempt per hotkey
+per daily round, consumed when the replacement upload is reserved even if
+upload or validation fails. Preserve the accepted fallback, cutoff, disclosure,
+audit history, and all concurrent changes. Test, push to main, and deploy the
+latest integrated release through the same canonical production controls.
+
 ## Scoped production authorization: Tyche baseline and September 15 rerun
 
 On 2026-09-15 the user explicitly authorized adapting and rigorously testing

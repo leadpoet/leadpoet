@@ -111,6 +111,12 @@ def create_app(service: ArenaService) -> FastAPI:
             )
         if exc.code == "submission_replacement_ineligible":
             content["detail"] = "This submission is already under review or evaluation and cannot be replaced."
+        if exc.code == "submission_replacement_limit_reached":
+            content["detail"] = (
+                "Only one replacement attempt is allowed per hotkey per daily round, "
+                "even if upload or validation fails. This hotkey has already used its attempt. "
+                "The last accepted submission is unchanged."
+            )
         return JSONResponse(status_code=exc.status, content=content)
 
     @app.exception_handler(ArenaContractError)

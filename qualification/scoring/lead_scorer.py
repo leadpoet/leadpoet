@@ -557,7 +557,7 @@ _PUBLIC_STAGE_PROOF_PATTERNS = (
         re.I,
     ),
     re.compile(
-        r"\b(?:listed(?:\s+company)?|traded)\s+on\s+(?:the\s+)?(?:nasdaq|nyse|new\s+york\s+"
+        r"\blisted(?:\s+company)?\s+on\s+(?:the\s+)?(?:nasdaq|nyse|new\s+york\s+"
         r"stock\s+exchange|london\s+stock\s+exchange|lse|euronext|tsx|asx|"
         r"hkex|hong\s+kong\s+stock\s+exchange|tokyo\s+stock\s+exchange|"
         r"dubai\s+financial\s+market)\b",
@@ -576,6 +576,29 @@ _PUBLIC_STAGE_PROOF_PATTERNS = (
         r"\b(?:ipo|initial\s+public\s+offering)\s+(?:closed|completed)\b",
         re.I,
     ),
+)
+_PUBLIC_EXCHANGE_TRADING_STAGE_PROOF_PATTERNS = (
+    re.compile(
+        r"\b(?:traded|trades)\s+on\s+(?:the\s+)?(?:nasdaq|nyse|new\s+york\s+"
+        r"stock\s+exchange|london\s+stock\s+exchange|lse|euronext|tsx|asx|"
+        r"hkex|hong\s+kong\s+stock\s+exchange|tokyo\s+stock\s+exchange|"
+        r"dubai\s+financial\s+market)\b",
+        re.I,
+    ),
+)
+_PUBLIC_NON_EQUITY_TRADING_CONTEXT_RE = re.compile(
+    r"\b(?:bonds?(?:\s+(?:issues?|securit(?:y|ies)))?|"
+    r"debt(?:\s+(?:instruments?|issues?|securit(?:y|ies)))?|notes?|funds?|etfs?)\b"
+    r"\s+(?:(?:is|are|was|were)\s+)?(?:currently\s+)?"
+    r"(?:traded|trades)\s+on\b",
+    re.I,
+)
+_PUBLIC_CONDITIONAL_EXCHANGE_TRADING_CONTEXT_RE = re.compile(
+    r"(?:\b(?:if|unless|conditionally)\b|\bsubject\s+to\b)"
+    r"[^.!?;:\n]{0,100}\b(?:traded|trades)\s+on\b|"
+    r"\b(?:traded|trades)\s+on\b[^.!?;:\n]{0,100}"
+    r"(?:\b(?:if|unless|conditionally)\b|\bsubject\s+to\b)",
+    re.I,
 )
 _PUBLIC_TICKER_STAGE_PROOF_PATTERNS = (
     re.compile(
@@ -749,6 +772,17 @@ def _stage_quote_supports_observation(observed: str, quote: str) -> bool:
         reject_historical=True,
         supersession_patterns=_PUBLIC_STAGE_SUPERSESSION_PATTERNS,
     )
+    if (
+        not public
+        and not _PUBLIC_NON_EQUITY_TRADING_CONTEXT_RE.search(text)
+        and not _PUBLIC_CONDITIONAL_EXCHANGE_TRADING_CONTEXT_RE.search(text)
+    ):
+        public = _has_affirmed_stage_proof(
+            text,
+            _PUBLIC_EXCHANGE_TRADING_STAGE_PROOF_PATTERNS,
+            reject_historical=True,
+            supersession_patterns=_PUBLIC_STAGE_SUPERSESSION_PATTERNS,
+        )
     if not public and not _PUBLIC_NON_EQUITY_TICKER_CONTEXT_RE.search(text):
         public = _has_affirmed_stage_proof(
             text,

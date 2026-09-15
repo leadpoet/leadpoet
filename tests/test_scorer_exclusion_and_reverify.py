@@ -11,6 +11,7 @@ import pytest
 from gateway.qualification.models import CompanyOutput, ICPPrompt
 from qualification.scoring.lead_scorer import (
     INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS,
+    _decision_from_observed_stage,
     _industry_evidence_decision,
     _llm_reverify_company,
     _matches_exclusion_list,
@@ -961,6 +962,58 @@ def test_completed_acquisition_must_belong_to_private_equity_affiliate(quote):
 )
 def test_exchange_listing_statement_preserves_current_public_stage_guards(quote, expected):
     assert _stage_quote_supports_observation("public", quote) is expected
+
+
+def test_sprouts_raw_verdict_accepts_current_active_nasdaq_trading_proof():
+    verdict = {
+        "observed_company_stage": "Public",
+        "stage_matches": True,
+        "stage_evidence_url": (
+            "https://www.reveliolabs.com/companies/"
+            "sprouts-farmers-market/employees"
+        ),
+        "stage_evidence_quote": "trades on the NASDAQ",
+    }
+
+    assert _decision_from_observed_stage(verdict, "public") == COMPANY_FIT_MATCH
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "The company is traded on the NASDAQ.",
+        "The company trades on the LSE.",
+    ],
+)
+def test_current_exchange_trading_is_public_stage_proof(quote):
+    assert _stage_quote_supports_observation("public", quote) is True
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "The bank's bonds are traded on the NASDAQ.",
+        "The bank's debt securities are traded on the NASDAQ.",
+        "The bank's debt security currently trades on the NASDAQ.",
+        "The bank's bond issue trades on the NASDAQ.",
+        "The bank's note trades on the NASDAQ.",
+        "The exchange-traded fund trades on the NASDAQ.",
+        "The ETF trades on the NASDAQ.",
+        "The company does not trade on the NASDAQ.",
+        "The company no longer trades on the NASDAQ.",
+        "Formerly, the company trades on the NASDAQ.",
+        "The company plans to trade on the NASDAQ next year.",
+        "The company will be traded on the NASDAQ.",
+        "The company trades on the NASDAQ next year as planned.",
+        "If approved, the company trades on the NASDAQ.",
+        "The company trades on the NASDAQ if approved.",
+        "Subject to regulatory approval, the company trades on the NASDAQ.",
+        "The company trades on the NASDAQ, then was delisted.",
+        "The company trades on the OTCQX.",
+    ],
+)
+def test_exchange_trading_preserves_public_stage_guards(quote):
+    assert _stage_quote_supports_observation("public", quote) is False
 
 
 @pytest.mark.parametrize(

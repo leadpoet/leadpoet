@@ -1034,9 +1034,11 @@ def _reservation_readback_matches(
     rows = store.list_ledger(call_identity=identity, limit=64)
     if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes, bytearray)):
         return False
-    entries = [row for row in rows if isinstance(row, Mapping)]
+    if not rows or any(not isinstance(row, Mapping) for row in rows):
+        return False
+    entries = list(rows)
     reservations = [row for row in entries if row.get("entry_kind") == "reservation"]
-    if len(reservations) != 1 or not entries:
+    if len(reservations) != 1 or entries[0].get("entry_kind") != "reservation":
         return False
     reservation = reservations[0]
     expected = {
@@ -1046,7 +1048,26 @@ def _reservation_readback_matches(
         "provider": reservation_arguments.get("provider"),
         "funding_source": reservation_arguments.get("funding_source"),
     }
-    if any(reservation.get(key) != value for key, value in expected.items()):
+    prior_entry_id = 0
+    allowed_kinds = {
+        "reservation", "dispatch", "settlement", "uncertain", "recovery",
+    }
+    for entry in entries:
+        entry_id = entry.get("entry_id")
+        amount = entry.get("amount_microusd")
+        if (
+            any(entry.get(key) != value for key, value in expected.items())
+            or isinstance(entry_id, bool)
+            or not isinstance(entry_id, int)
+            or entry_id <= prior_entry_id
+            or entry.get("entry_kind") not in allowed_kinds
+            or isinstance(amount, bool)
+            or not isinstance(amount, int)
+            or amount < 0
+        ):
+            return False
+        prior_entry_id = entry_id
+    if len({entry.get("entry_kind") for entry in entries}) != len(entries):
         return False
     call_doc = reservation.get("entry_doc")
     expected_call_doc = reservation_arguments.get("call_doc")
@@ -2007,11 +2028,21 @@ class Broker:
                 summary.update({"outcome": "not_dispatched", "reason": "budget_busy"})
                 return _error_result("provider_unavailable", summary)
             time.sleep(min(0.2, max(0.0, reserve_deadline - time.monotonic())))
-        if reserve_readback_used and not _reservation_readback_matches(
-            self._store, reservation_arguments, reserved
+        status = reserved.get("status")
+        # Terminal admission replies such as stale and refused do not create a
+        # reservation. Preserve their normal classification. States backed by
+        # a durable reservation must match the exact replayed call before the
+        # broker can reuse them or send a paid provider request.
+        if (
+            reserve_readback_used
+            and status in {
+                "reserved", "dispatched", "settled", "uncertain", "recovered",
+            }
+            and not _reservation_readback_matches(
+                self._store, reservation_arguments, reserved
+            )
         ):
             return _error_result("broker_unavailable", summary)
-        status = reserved.get("status")
         if status == "stale":
             return _error_result("lease_stale", summary)
         if status == "champion_restart_required":

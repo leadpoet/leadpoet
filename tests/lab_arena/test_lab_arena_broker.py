@@ -4094,6 +4094,52 @@ def test_persistent_reservation_transport_failure_never_dispatches_provider():
 
 
 @pytest.mark.parametrize(
+    ("reserve_result", "expected_status", "expected_code"),
+    [
+        ({"status": "stale"}, 409, "lease_stale"),
+        (
+            {"status": "refused", "reason": "per_icp_quota"},
+            402,
+            "budget_refused",
+        ),
+    ],
+)
+def test_reservation_response_loss_preserves_nonreservation_terminal_status(
+    reserve_result, expected_status, expected_code,
+):
+    class TerminalAfterLossStore(FakeLedgerStore):
+        def __init__(self):
+            super().__init__()
+            self.reserve_attempts = 0
+            self.readbacks = 0
+
+        def reserve_call(self, **kwargs):
+            self.reserve_attempts += 1
+            if self.reserve_attempts == 1:
+                raise ArenaStoreUnavailable("synthetic reservation response loss")
+            return dict(reserve_result)
+
+        def list_ledger(self, **kwargs):
+            self.readbacks += 1
+            return super().list_ledger(**kwargs)
+
+    store = TerminalAfterLossStore()
+    broker, _store, transport = make_broker(store=store)
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=35,
+        timeout_ms=1000,
+    )
+
+    assert result.status == expected_status
+    assert json.loads(result.body) == {"error": {"code": expected_code}}
+    assert store.reserve_attempts == 2 and store.readbacks == 0
+    assert transport.sent == []
+
+
+@pytest.mark.parametrize(
     ("field", "replacement"),
     [
         ("run_id", "other-run"),
@@ -4133,6 +4179,47 @@ def test_ambiguous_reservation_readback_rejects_binding_mismatch(
         action_sequence=33,
         timeout_ms=1000,
     )
+    assert result.status == 503
+    assert json.loads(result.body) == {"error": {"code": "broker_unavailable"}}
+    assert transport.sent == [] and store.log.count("dispatch") == 0
+
+
+@pytest.mark.parametrize("corruption", ["non_mapping", "wrong_second_identity", "unordered"])
+def test_ambiguous_reservation_readback_rejects_malformed_ledger_chain(corruption):
+    class CorruptLedgerStore(FakeLedgerStore):
+        def __init__(self):
+            super().__init__()
+            self.first = True
+
+        def reserve_call(self, **kwargs):
+            result = super().reserve_call(**kwargs)
+            if self.first:
+                self.first = False
+                raise ArenaStoreUnavailable("synthetic response loss")
+            return result
+
+        def list_ledger(self, **kwargs):
+            rows = super().list_ledger(**kwargs)
+            extra = dict(rows[0], entry_id=2, entry_kind="dispatch")
+            rows.append(extra)
+            if corruption == "non_mapping":
+                rows.append("invalid")
+            elif corruption == "wrong_second_identity":
+                rows[1]["call_identity"] = "sha256:" + "0" * 64
+            else:
+                rows[1]["entry_id"] = rows[0]["entry_id"]
+            return rows
+
+    store = CorruptLedgerStore()
+    broker, _store, transport = make_broker(store=store)
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=36,
+        timeout_ms=1000,
+    )
+
     assert result.status == 503
     assert json.loads(result.body) == {"error": {"code": "broker_unavailable"}}
     assert transport.sent == [] and store.log.count("dispatch") == 0

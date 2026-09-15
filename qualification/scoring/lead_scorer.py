@@ -605,13 +605,14 @@ _PUBLIC_CONDITIONAL_EXCHANGE_TRADING_CONTEXT_RE = re.compile(
     re.I,
 )
 _PUBLIC_TICKER_STAGE_PROOF_PATTERNS = (
+    # XNAS and XNYS are the Nasdaq and NYSE market identifier codes.
     re.compile(
         r"\b(?i:ticker)\s*:\s*[A-Z][A-Z0-9.-]{0,9}\s*"
-        r"\((?i:nasdaq|nyse)\)(?!\s*/)",
+        r"\((?i:nasdaq|nyse|xnas|xnys)\)(?!\s*/)",
     ),
     re.compile(
         r"\b(?i:ticker)\s*/\s*(?i:isin)\s*:\s*"
-        r"[A-Z][A-Z0-9.-]{0,9}\s*\((?i:nasdaq|nyse)\)\s*/\s*"
+        r"[A-Z][A-Z0-9.-]{0,9}\s*\((?i:nasdaq|nyse|xnas|xnys)\)\s*/\s*"
         r"[A-Z]{2}[A-Z0-9]{9}[0-9]\b",
     ),
 )
@@ -1716,6 +1717,7 @@ async def _refresh_linkedin_employee_size_observation(
             )
         return unavailable
 
+    profile_identity = verified_homepage_identity
     anchor_slug = str(
         verified_homepage_identity.get("linkedin_company_slug") or ""
     ).strip().casefold()
@@ -1738,6 +1740,14 @@ async def _refresh_linkedin_employee_size_observation(
             )
             and receipt.get("observed_linkedin_slug") == evidence_slug
         )
+        if identity_matches:
+            # The same independently verified identity can bind either the
+            # current page or its exact-domain structured-profile fallback.
+            profile_identity = {
+                "normalized_name": receipt["observed_name"],
+                "registrable_dns_domain": receipt["observed_domain"],
+                "linkedin_company_slug": receipt["observed_linkedin_slug"],
+            }
     if not identity_matches:
         # A model-supplied profile that cannot bind to the observed company is
         # unusable evidence. No profile request failed in this path.
@@ -1793,13 +1803,13 @@ async def _refresh_linkedin_employee_size_observation(
         and current_quote
     )
     anchor_domain = str(
-        verified_homepage_identity.get("registrable_dns_domain") or ""
+        profile_identity.get("registrable_dns_domain") or ""
     ).strip()
     anchor_name = str(
-        verified_homepage_identity.get("normalized_name") or ""
+        profile_identity.get("normalized_name") or ""
     ).strip()
     anchor_slug = str(
-        verified_homepage_identity.get("linkedin_company_slug") or ""
+        profile_identity.get("linkedin_company_slug") or ""
     ).strip().casefold()
     if (
         not current_web_evidence_usable

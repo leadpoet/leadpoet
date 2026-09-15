@@ -11,7 +11,10 @@ import pytest
 from qualification.intent_details import validate_intent_details_text
 from qualification.scoring import intent_details, verification_helpers, lead_scorer
 from qualification.scoring.company_fit_decision import company_fit_match
-from qualification.scoring.competition import scorer_breakdown_has_retryable_infrastructure_failure
+from qualification.scoring.competition import (
+    scorer_breakdown_has_company_local_verification_failure,
+    scorer_breakdown_has_retryable_infrastructure_failure,
+)
 
 
 PARAGRAPH = (
@@ -221,6 +224,7 @@ def test_malformed_review_is_retryable_not_a_terminal_zero(monkeypatch, response
     assert receipt["decision"] == "unavailable"
     assert receipt["failure_reason_code"] == "malformed_response"
     assert scorer_breakdown_has_retryable_infrastructure_failure({"verifier_gate_receipts": [receipt]})
+    assert not scorer_breakdown_has_company_local_verification_failure({"verifier_gate_receipts": [receipt]})
 
 
 def test_provider_error_retains_retry_without_leaking_exception(monkeypatch):
@@ -231,14 +235,13 @@ def test_provider_error_retains_retry_without_leaking_exception(monkeypatch):
     assert receipt["decision"] == "unavailable"
     assert receipt["failure_reason_code"] == "provider_error"
     assert "private provider diagnostic" not in json.dumps(receipt)
+    assert not scorer_breakdown_has_company_local_verification_failure({"verifier_gate_receipts": [receipt]})
 
 
 @pytest.mark.parametrize("coverage", [
     [{"matched_icp_signal": 0, "paragraph_quote": PARAGRAPH}],
     [{"matched_icp_signal": 0, "paragraph_quote": PARAGRAPH},
      {"matched_icp_signal": 1, "paragraph_quote": ""}],
-    [{"matched_icp_signal": 0, "paragraph_quote": PARAGRAPH},
-     {"matched_icp_signal": 1, "paragraph_quote": "Words absent from the paragraph"}],
     [{"matched_icp_signal": 0, "paragraph_quote": PARAGRAPH},
      {"matched_icp_signal": 2, "paragraph_quote": PARAGRAPH}],
 ])
@@ -250,6 +253,65 @@ def test_coverage_requires_an_exact_passage_for_each_verified_signal(monkeypatch
     receipt = asyncio.run(intent_details.review_intent_details(*inputs()))
     assert receipt["decision"] == "mismatch"
     assert receipt["checks"]["verified_signals_covered"] is False
+
+
+def test_invented_coverage_quote_is_retryable_not_a_company_mismatch(monkeypatch):
+    async def judge(*args, **kwargs):
+        return json.dumps({**{name: True for name in intent_details._CHECKS},
+                           "signal_coverage": [
+                               {"matched_icp_signal": 0, "paragraph_quote": PARAGRAPH},
+                               {"matched_icp_signal": 1, "paragraph_quote": "Acme opened an office in Berlin."},
+                           ]})
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(*inputs()))
+    assert receipt["decision"] == "unavailable"
+    assert receipt["failure_reason_code"] == "malformed_response"
+    assert receipt["failure_class"] == "intent_details_invalid_coverage_quote"
+    assert scorer_breakdown_has_retryable_infrastructure_failure({"verifier_gate_receipts": [receipt]})
+
+
+@pytest.mark.parametrize("recovers", [True, False])
+def test_coverage_quote_retry_preserves_other_companies_and_stops_at_existing_limit(monkeypatch, recovers):
+    from lab_arena.scoring import score_work_item
+    from qualification.scoring.competition import scorer_breakdown_is_terminal_company_verification_failure
+
+    judge_calls = 0
+    batches = []
+
+    async def judge(*args, **kwargs):
+        nonlocal judge_calls
+        judge_calls += 1
+        quote = PARAGRAPH if recovers and judge_calls > 1 else "Acme opened an office in Berlin."
+        return json.dumps({**{name: True for name in intent_details._CHECKS},
+                           "signal_coverage": [
+                               {"matched_icp_signal": 0, "paragraph_quote": PARAGRAPH},
+                               {"matched_icp_signal": 1, "paragraph_quote": quote},
+                           ]})
+
+    async def scorer(companies, _icp, _reference):
+        batches.append([c["company_name"] for c in companies])
+        results = []
+        for company in companies:
+            if company["company_name"] == "Unaffected":
+                results.append({"final_score": 7.0})
+                continue
+            receipt = await intent_details.review_intent_details(*inputs())
+            results.append({"final_score": 5.0 if receipt["decision"] == "match" else 0.0,
+                            "verifier_gate_receipts": [receipt]})
+        return results
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    rows = score_work_item({"scored_run_id": "coverage-quote-test"}, icp={"employee_count": ["51-200"]},
+                           companies=[{"company_name": name, "employee_count": "51-200"}
+                                      for name in ("Affected", "Unaffected")],
+                           scorer=scorer, max_retries=3)
+    assert judge_calls == (2 if recovers else 3)
+    assert batches == [["Affected", "Unaffected"]] + [["Affected"]] * (judge_calls - 1)
+    assert [r["final_score"] for r in rows] == [5.0 if recovers else 0.0, 7.0]
+    assert not scorer_breakdown_has_retryable_infrastructure_failure(rows[0])
+    if not recovers:
+        assert scorer_breakdown_is_terminal_company_verification_failure(rows[0])
+        assert rows[0]["verifier_gate_receipts"][0]["failure_reason_code"] == "malformed_response"
 
 
 @pytest.mark.parametrize("decision", ["match", "mismatch", "unavailable"])

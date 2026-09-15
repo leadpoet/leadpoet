@@ -1152,10 +1152,20 @@ def _intent_detail_has_source_local_failure(detail: Any) -> bool:
     return True
 
 
+def _company_local_gate_failure(receipt: Mapping[str, Any]) -> bool:
+    return receipt.get("decision") == "unavailable" and (
+        (receipt.get("gate") == "company_fit"
+         and receipt.get("failure_reason_code") == _SOURCE_LOCAL_FAILURE_REASON)
+        or (receipt.get("gate") == "intent_details"
+            and receipt.get("failure_class") == "intent_details_invalid_coverage_quote"
+            and receipt.get("failure_reason_code") == "malformed_response")
+    )
+
+
 def scorer_breakdown_has_company_local_verification_failure(
     breakdown: Mapping[str, Any],
 ) -> bool:
-    """Return true only for a typed failure tied to one company's sources."""
+    """Return true only for a typed failure tied to one company's evidence."""
 
     if not isinstance(breakdown, Mapping):
         return False
@@ -1173,11 +1183,7 @@ def scorer_breakdown_has_company_local_verification_failure(
                 terminal_gates.add(str(receipt.get("gate") or ""))
                 source_local = True
                 continue
-            if (
-                receipt.get("gate") == "company_fit"
-                and receipt.get("failure_reason_code")
-                == _SOURCE_LOCAL_FAILURE_REASON
-            ):
+            if _company_local_gate_failure(receipt):
                 source_local = True
                 continue
             if failure_class in _NON_RETRYABLE_UNAVAILABLE_FAILURE_CLASSES:
@@ -1258,7 +1264,7 @@ def scorer_breakdown_is_terminal_company_verification_failure(
 def terminal_company_verification_breakdown(
     breakdown: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Convert one exhausted source-local verification into a stable zero."""
+    """Convert one exhausted company-local verification into a stable zero."""
 
     if not scorer_breakdown_has_company_local_verification_failure(breakdown):
         raise CompetitionScorerInputError(
@@ -1284,11 +1290,7 @@ def terminal_company_verification_breakdown(
             continue
         if receipt.get("failure_class") == COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS:
             marked = True
-        elif (
-            receipt.get("gate") == "company_fit"
-            and receipt.get("decision") == "unavailable"
-            and receipt.get("failure_reason_code") == _SOURCE_LOCAL_FAILURE_REASON
-        ):
+        elif _company_local_gate_failure(receipt):
             receipt["failure_class"] = COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS
             marked = True
     has_terminal_intent = any(

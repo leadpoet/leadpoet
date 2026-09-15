@@ -2736,3 +2736,71 @@ def test_complete_sonar_identity_can_bind_profile_without_homepage_anchor(monkey
 
     assert result.decision == COMPANY_FIT_MATCH
     assert fetches == ["https://www.linkedin.com/company/acme"]
+
+
+@pytest.mark.parametrize("needs_repair", [False, True])
+def test_complete_sonar_identity_can_bind_structured_size_fallback(monkeypatch, needs_repair):
+    fetches = []
+    structured_fetches = []
+    provider_calls = []
+
+    async def provider(**_kwargs):
+        provider_calls.append(_kwargs["telemetry_purpose"])
+        verdict = _verdict()
+        if needs_repair and len(provider_calls) == 1:
+            verdict["industry_matches"] = None
+        return verdict, ""
+
+    async def fetch(url, **_kwargs):
+        fetches.append(url)
+        return {"outcome": "insufficient_evidence", "url": url}
+
+    async def structured_fetch(domain, url, **_kwargs):
+        structured_fetches.append((domain, url))
+        return {
+            "employee_count": "11-50",
+            "provider": "harvestapi_get_company",
+            "source_field": "employeeCountRange",
+            "url": url,
+            "website": "https://acme.example.com/",
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", fetch)
+    monkeypatch.setattr(lead_scorer, "fetch_structured_linkedin_company_size", structured_fetch)
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _company(linkedin=""), _icp(), require_company_fit_dimensions=True,
+    ))
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert fetches == ["https://www.linkedin.com/company/acme"]
+    assert structured_fetches == [("acme.example.com", "https://www.linkedin.com/company/acme")]
+    assert len(provider_calls) == (2 if needs_repair else 1)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("observed_company_name", "Other Company"),
+    ("observed_company_name", ""),
+    ("observed_company_website", "https://other.example.com"),
+    ("observed_company_website", ""),
+    ("observed_company_linkedin", "https://www.linkedin.com/company/other"),
+    ("observed_company_linkedin", ""),
+])
+def test_structured_size_fallback_requires_complete_matching_web_identity(monkeypatch, field, value):
+    calls = []
+
+    async def unexpected_fetch(*args, **kwargs):
+        calls.append(args)
+        return None
+
+    verdict = _verdict()
+    verdict[field] = value
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", unexpected_fetch)
+    monkeypatch.setattr(lead_scorer, "fetch_structured_linkedin_company_size", unexpected_fetch)
+    result = asyncio.run(lead_scorer._refresh_linkedin_employee_size_observation(
+        verdict, _company(), _icp(), verified_homepage_identity={}, invocation_cache={},
+    ))
+
+    assert result["observed_employee_count"] is None
+    assert calls == []

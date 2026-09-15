@@ -1056,6 +1056,11 @@ def test_exchange_trading_preserves_public_stage_guards(quote):
         "Ticker: GXO(NYSE)",
         "Ticker : GXO (NYSE)",
         "TICKER / ISIN: GXO(NYSE)/US36262G1013",
+        "Public Company ... Ticker: ALKT (xnas)",
+        "Ticker: ALKT(XNAS)",
+        "Ticker : GXO (xnys)",
+        "TICKER / ISIN: GXO(XNYS)/US36262G1013",
+        "Ticker/ISIN: FISV(xnas)/US3377381088",
     ],
 )
 def test_label_bound_ticker_first_is_public_stage_proof(quote):
@@ -1085,6 +1090,52 @@ def test_label_bound_ticker_first_is_public_stage_proof(quote):
 )
 def test_label_bound_ticker_first_preserves_public_stage_guards(quote):
     assert _stage_quote_supports_observation("public", quote) is False
+
+
+@pytest.mark.parametrize("exchange", ["XNAS", "xnys"])
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "ALKT({exchange})",
+        "Ticker: ALKT({exchange}X)",
+        "Ticker: alkt({exchange})",
+        "Ticker/ISIN: ALKT({exchange})",
+        "Ticker/ISIN: ALKT({exchange})/US123",
+        "Ticker: ALKT({exchange})/US3377381088",
+        "The planned listing has Ticker: ALKT({exchange}).",
+        "Formerly, Ticker: ALKT({exchange}).",
+        "Ticker: ALKT({exchange}), delisted in 2024.",
+        "Bond Ticker/ISIN: XYZ28({exchange})/US0000000002",
+        "Company debt Ticker: XYZ28({exchange})",
+    ],
+)
+def test_mic_ticker_stage_proof_preserves_public_stage_guards(exchange, quote):
+    assert _stage_quote_supports_observation("public", quote.format(exchange=exchange)) is False
+
+
+@pytest.mark.parametrize("exchange", ["XXXX", "UNKNOWN", "XNASX", "XNYSX"])
+def test_mic_ticker_stage_proof_rejects_unknown_exchange(exchange):
+    assert _stage_quote_supports_observation("public", f"Ticker: ALKT({exchange})") is False
+
+
+@pytest.mark.parametrize("identity_matches", [True, False])
+def test_mic_ticker_stage_proof_reverify_preserves_company_identity(identity_matches):
+    verdict = _explicitly_unproven_fit_verdict()
+    verdict.update(
+        observed_company_name="Acme" if identity_matches else "Other Company",
+        observed_company_website="https://acme.com" if identity_matches else "https://other.com",
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url="https://evidence.example/stage",
+        stage_evidence_quote="Public Company ... Ticker: ALKT (xnas)",
+    )
+    result = _reverify_decision(
+        verdict, "", "public", icp=_icp(company_stage="Public"), company=_company()
+    )
+    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MATCH
+    expected = COMPANY_FIT_MATCH if identity_matches else COMPANY_FIT_MISMATCH
+    assert result.details["identity_decision"] == expected
+    assert result.decision == expected
 
 
 @pytest.mark.parametrize(

@@ -36,7 +36,13 @@ _RESPONSE_FORMAT = {
                         "type": "object", "additionalProperties": False,
                         "properties": {
                             "matched_icp_signal": {"type": "integer"},
-                            "paragraph_quote": {"type": "string"},
+                            "paragraph_quote": {
+                                "type": "string",
+                                "description": (
+                                    "Copy an exact contiguous substring of intent_details; "
+                                    "do not rewrite or quote a source. Empty if the activity is absent."
+                                ),
+                            },
                         },
                         "required": ["matched_icp_signal", "paragraph_quote"],
                     },
@@ -228,11 +234,18 @@ missing review into an accepted paragraph or a terminal company mismatch.
             raise ValueError("invalid signal coverage")
         expected = {item["matched_icp_signal"] for item in document["verified_signals"]}
         observed = {item["matched_icp_signal"] for item in coverage}
+        if any(
+            item["paragraph_quote"].strip()
+            and not _quote_is_contained(item["paragraph_quote"], document["intent_details"])
+            for item in coverage
+        ):
+            # The judge must copy the submitted text. A rewritten quote is a
+            # malformed review, not evidence that the company omitted a signal.
+            return {**receipt, "decision": "unavailable",
+                    "failure_class": "intent_details_invalid_coverage_quote",
+                    "failure_reason_code": "malformed_response"}
         complete = len(coverage) == len(expected) and observed == expected and all(
             item["paragraph_quote"].strip()
-            and _quote_is_contained(
-                item["paragraph_quote"], document["intent_details"]
-            )
             for item in coverage
         )
         checks["verified_signals_covered"] = checks["verified_signals_covered"] and bool(complete)

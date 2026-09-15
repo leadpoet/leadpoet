@@ -2672,9 +2672,21 @@ async def _llm_reverify_company(
             "for the anchored company. Do not assume that the two domains are "
             "aliases and do not substitute a same-name company."
         )
+    stage_proof_repair = (
+        "\nSTAGE EVIDENCE REPAIR: find proof of the company's actual current "
+        "stage. For Public, quote a current stock-listing/trading statement "
+        "or company-attributed exchange and ticker; a Public Company profile "
+        "label is insufficient. For a venture stage, quote the named completed "
+        "round, not only a funding amount. For Private Equity, quote current "
+        "majority ownership or control, not merely an investor name. Do not "
+        "force a match; report a different stage or leave it unresolved when "
+        "the evidence requires that."
+        if "stage" in incomplete else ""
+    )
     repair_prompt = (
         prompt
         + identity_conflict_repair
+        + stage_proof_repair
         + "\nSCHEMA REPAIR: the prior response was incomplete or invalid for "
         + ", ".join(incomplete)
         + ". Perform a fresh independent web lookup and return the FULL JSON "

@@ -1036,6 +1036,57 @@ def test_fit_url_alone_cannot_replace_independent_dimension_proof(monkeypatch):
     assert len(calls) == 2
 
 
+@pytest.mark.parametrize(
+    ("stage", "weak_quote", "strong_quote"),
+    [
+        ("Public", "Public Company", "Acme (NYSE: ACM)"),
+        ("Series C+", "Acme raised $330 million.", "Acme raised a Series G round."),
+    ],
+)
+@pytest.mark.parametrize("repair_proves_stage", [False, True])
+def test_stage_evidence_repair_keeps_two_call_limit_and_requires_proof(
+    monkeypatch, stage, weak_quote, strong_quote, repair_proves_stage,
+):
+    calls = []
+
+    async def request(**kwargs):
+        calls.append(kwargs)
+        verdict = _complete_verdict()
+        verdict.update(
+            observed_company_stage=stage,
+            stage_matches=True,
+            stage_evidence_quote=(
+                strong_quote if len(calls) == 2 and repair_proves_stage else weak_quote
+            ),
+        )
+        return verdict, ""
+
+    async def unchanged_size(verdict, *_args, **_kwargs):
+        return verdict
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer._request_company_reverify_json", request,
+    )
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer._refresh_linkedin_employee_size_observation",
+        unchanged_size,
+    )
+    result = asyncio.run(_llm_reverify_company(
+        _company(company_stage=stage),
+        _icp().model_copy(update={"company_stage": stage}),
+        require_company_fit_dimensions=True,
+    ))
+
+    assert len(calls) == 2
+    assert "STAGE EVIDENCE REPAIR" not in calls[0]["prompt"]
+    assert "STAGE EVIDENCE REPAIR" in calls[1]["prompt"]
+    assert "Do not force a match" in calls[1]["prompt"]
+    assert result.decision == (
+        COMPANY_FIT_MATCH if repair_proves_stage else COMPANY_FIT_UNAVAILABLE
+    )
+
+
 def test_wrong_web_identity_still_fails_with_submitted_fit_url(monkeypatch):
     async def request(**_kwargs):
         return _complete_verdict(

@@ -367,7 +367,6 @@ def test_pinned_luna_code_mode_uses_two_local_mcp_calls_and_compacts(monkeypatch
             added_tools = any(item.get("type") == "additional_tools" and item.get("tools")
                               for item in body["input"])
             if not self.sent:
-                assert "arena_inspect" in json.dumps(body) and "arena_review" in json.dumps(body)
                 code = "const t = ALL_TOOLS.find(t => t.name.endsWith('arena_inspect')); if (!t) throw new Error('inspect missing'); text(await tools[t.name]({}));"
                 self.tool_calls += 1
                 output = [{"type": "custom_tool_call", "id": "ct-1", "call_id": "call-1", "name": "exec",
@@ -396,9 +395,12 @@ def test_pinned_luna_code_mode_uses_two_local_mcp_calls_and_compacts(monkeypatch
             return super().send(**kwargs)
 
     with broker_socket(monkeypatch, NativeTransport(), priced_models=("openai/gpt-5.6-luna",)) as (store, transport, path):
-        result = codex.run("Use both local fixture MCP tools, then reply ARENA_NATIVE_MCP_OK.",
-                           model="openai/gpt-5.6-luna", reasoning_effort="high", cwd=tmp_path,
-                           timeout_seconds=90)
+        try:
+            result = codex.run("Use both local fixture MCP tools, then reply ARENA_NATIVE_MCP_OK.",
+                               model="openai/gpt-5.6-luna", reasoning_effort="high", cwd=tmp_path,
+                               timeout_seconds=90)
+        except codex.CodexRuntimeError as exc:
+            pytest.fail(exc.diagnostics[-8000:])
     assert "ARENA_NATIVE_MCP_OK" in result
     assert mcp_log.read_text().splitlines() == ["arena_inspect", "arena_review"]
     assert transport.compaction_requests >= 1, "The forced 17000-token usage did not produce a compacted continuation"

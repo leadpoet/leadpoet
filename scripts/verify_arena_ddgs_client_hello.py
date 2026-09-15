@@ -2,10 +2,10 @@
 """Verify pinned DDGS TLS handshakes against the Arena CONNECT inspector.
 
 This explicit Linux/root probe installs the submitted requirement through the
-normal SourceCache path. It makes no web requests: a local proxy captures the
-ClientHello from every browser profile that DDGS 9.8.0 can select, plus its
-explicit DuckDuckGo backend, and checks the visible SNI with the production
-Arena parser.
+normal SourceCache path. It makes no web requests. A local proxy attempts every
+browser profile that DDGS 9.8.0 advertises, reports profiles that the installed
+platform wheel does not implement, and checks all emitted ClientHellos. It also
+requires the explicit DuckDuckGo backend to use matching public SNI.
 """
 
 from __future__ import annotations
@@ -29,36 +29,75 @@ from lab_arena.web_egress import _read_client_hello  # noqa: E402
 
 
 DDGS_VERSION = "9.8.0"
-DESTINATION_HOST = "public.example"
+PRIMP_VERSION = "0.15.0"
+DESTINATION_HOST = "example.com"
+EXPECTED_PROFILE_COUNT = 43
+MAX_PROFILE_CONNECTIONS = 4
+MAX_BACKEND_CONNECTIONS = 16
 
-CLIENT = r"""
+PROFILE_INVENTORY_CLIENT = r"""
 import json
 from importlib.metadata import version
-import socket
 import sys
 
 sys.path.insert(0, sys.argv[1])
-from ddgs import DDGS
 from ddgs.http_client import HttpClient
+
+if version("ddgs") != sys.argv[2]:
+    raise RuntimeError("installed DDGS version does not match the probe pin")
+if version("primp") != sys.argv[3]:
+    raise RuntimeError("installed primp version does not match the probe pin")
+print(json.dumps({
+    "version": version("ddgs"),
+    "primp_version": version("primp"),
+    "labels": HttpClient._impersonates,
+}))
+"""
+
+PROFILE_CLIENT = r"""
+import json
+from importlib.metadata import version
+import sys
+
+sys.path.insert(0, sys.argv[1])
 import primp
 
 if version("ddgs") != sys.argv[2]:
     raise RuntimeError("installed DDGS version does not match the probe pin")
 proxy_url = sys.argv[3]
-destination = sys.argv[4]
-labels = []
-for profile in HttpClient._impersonates:
-    labels.append(profile)
-    try:
-        primp.Client(
-            proxy=proxy_url,
-            timeout=2,
-            impersonate=profile,
-            verify=False,
-        ).get("https://" + destination + "/")
-    except Exception:
-        pass
-labels.append("duckduckgo-httpx")
+profile = sys.argv[4]
+destination = sys.argv[5]
+error_type = ""
+error_detail = ""
+try:
+    primp.Client(
+        proxy=proxy_url,
+        timeout=2,
+        impersonate=profile,
+        verify=False,
+    ).get("https://" + destination + "/")
+except Exception as exc:
+    error_type = type(exc).__name__
+    error_detail = str(exc)[:200]
+print(json.dumps({
+    "version": version("ddgs"),
+    "profile": profile,
+    "client_error_type": error_type,
+    "client_error_detail": error_detail,
+}))
+"""
+
+DDGS_CLIENT = r"""
+import json
+from importlib.metadata import version
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from ddgs import DDGS
+
+if version("ddgs") != sys.argv[2]:
+    raise RuntimeError("installed DDGS version does not match the probe pin")
+proxy_url = sys.argv[3]
 try:
     DDGS(proxy=proxy_url, timeout=2, verify=False).text(
         "arena proxy compatibility",
@@ -67,7 +106,7 @@ try:
     )
 except Exception:
     pass
-print(json.dumps({"version": version("ddgs"), "labels": labels}))
+print(json.dumps({"version": version("ddgs"), "backend": "duckduckgo"}))
 """
 
 
@@ -78,7 +117,7 @@ def _source_archive(root: Path) -> bytes:
         "def run_icp(icp):\n    return []\n", encoding="utf-8"
     )
     (source / "requirements.txt").write_text(
-        "ddgs==%s\n" % DDGS_VERSION, encoding="utf-8"
+        "ddgs==%s\nprimp==%s\n" % (DDGS_VERSION, PRIMP_VERSION), encoding="utf-8"
     )
     archive = root / "source.tar.gz"
     source_bundle.write_source_archive(source, archive)
@@ -86,10 +125,13 @@ def _source_archive(root: Path) -> bytes:
 
 
 def _capture(
-    listener: socket.socket, done: threading.Event, observed: list[object]
+    listener: socket.socket,
+    done: threading.Event,
+    observed: list[object],
+    maximum_connections: int,
 ) -> None:
     listener.settimeout(0.2)
-    while not done.is_set():
+    while not done.is_set() and len(observed) < maximum_connections:
         try:
             connection, _address = listener.accept()
         except socket.timeout:
@@ -110,11 +152,169 @@ def _capture(
                 b"HTTP/1.1 200 Connection Established\r\nConnection: close\r\n\r\n"
             )
             _raw, server_name = _read_client_hello(connection)
-            observed.append(server_name)
+            request_line = bytes(headers).split(b"\r\n", 1)[0]
+            parts = request_line.split(b" ")
+            authority = (
+                parts[1].decode("ascii")
+                if len(parts) == 3 and parts[0] == b"CONNECT"
+                else ""
+            )
+            observed.append({"authority": authority, "server_name": server_name})
         except Exception as exc:
-            observed.append({"error_type": type(exc).__name__, "detail": str(exc)})
+            observed.append({"error_type": type(exc).__name__})
         finally:
             connection.close()
+
+
+def _capture_client(
+    dependencies: Path,
+    client_source: str,
+    *client_arguments: str,
+    maximum_connections: int,
+) -> tuple[dict[str, object], list[object]]:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(maximum_connections)
+    proxy_url = "http://127.0.0.1:%d" % listener.getsockname()[1]
+    done = threading.Event()
+    observed: list[object] = []
+    thread = threading.Thread(
+        target=_capture,
+        args=(listener, done, observed, maximum_connections),
+        daemon=True,
+    )
+    thread.start()
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                client_source,
+                str(dependencies),
+                DDGS_VERSION,
+                proxy_url,
+                *client_arguments,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=180,
+            check=False,
+            text=True,
+        )
+    finally:
+        done.set()
+        listener.close()
+        thread.join(timeout=5)
+    if result.returncode != 0:
+        raise RuntimeError("DDGS ClientHello probe process failed")
+    try:
+        report = json.loads(result.stdout)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("DDGS ClientHello probe report is invalid") from exc
+    if not isinstance(report, dict):
+        raise RuntimeError("DDGS ClientHello probe report is invalid")
+    return report, observed
+
+
+def _profile_inventory(dependencies: Path) -> dict[str, object]:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            PROFILE_INVENTORY_CLIENT,
+            str(dependencies),
+            DDGS_VERSION,
+            PRIMP_VERSION,
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        check=False,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("DDGS browser profile inventory process failed")
+    try:
+        report = json.loads(result.stdout)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("DDGS browser profile inventory is invalid") from exc
+    if not isinstance(report, dict):
+        raise RuntimeError("DDGS browser profile inventory is invalid")
+    return report
+
+
+def _authority_host(value: object) -> str:
+    authority = str(value or "")
+    host, separator, port = authority.rpartition(":")
+    if not separator or port != "443":
+        return ""
+    return host.lower().rstrip(".")
+
+
+def _validated_profile_inventory(labels: object) -> list[str]:
+    if (
+        not isinstance(labels, list)
+        or len(labels) != EXPECTED_PROFILE_COUNT
+        or any(not isinstance(label, str) or not label for label in labels)
+    ):
+        raise RuntimeError("DDGS browser profile inventory does not match the pin")
+    return labels
+
+
+def _validated_profile_connection_count(profile: str, observed: list[object]) -> int:
+    if not observed:
+        raise RuntimeError(
+            "DDGS browser profile did not use its explicit proxy: " + profile
+        )
+    if len(observed) > MAX_PROFILE_CONNECTIONS:
+        raise RuntimeError(
+            "DDGS browser profile exceeded the connection bound: " + profile
+        )
+    for item in observed:
+        if not isinstance(item, dict):
+            raise RuntimeError(
+                "DDGS browser profile ClientHello is invalid: " + profile
+            )
+        authority_host = _authority_host(item.get("authority"))
+        if (
+            authority_host != DESTINATION_HOST
+            or item.get("server_name") != authority_host
+        ):
+            raise RuntimeError(
+                "DDGS browser profile failed Arena SNI inspection: " + profile
+            )
+    return len(observed)
+
+
+def _is_unsupported_linux_profile(profile: str, report: dict[str, object]) -> bool:
+    return (
+        report.get("client_error_type") == "BuilderError"
+        and report.get("client_error_detail") == 'Invalid impersonate: "%s"' % profile
+    )
+
+
+def _validated_backend_count(observed: list[object]) -> int:
+    if not observed:
+        raise RuntimeError("DDGS DuckDuckGo backend did not use its explicit proxy")
+    if len(observed) > MAX_BACKEND_CONNECTIONS:
+        raise RuntimeError("DDGS DuckDuckGo backend exceeded the connection bound")
+    for item in observed:
+        if not isinstance(item, dict):
+            raise RuntimeError("DDGS DuckDuckGo ClientHello is invalid")
+        authority_host = _authority_host(item.get("authority"))
+        if (
+            not (
+                authority_host == "duckduckgo.com"
+                or authority_host.endswith(".duckduckgo.com")
+            )
+            or item.get("server_name") != authority_host
+        ):
+            raise RuntimeError("DDGS DuckDuckGo backend failed Arena SNI inspection")
+    return len(observed)
 
 
 def main() -> int:
@@ -132,63 +332,75 @@ def main() -> int:
             "ddgs-" + DDGS_VERSION,
             len(payload),
         ) as (_source, dependencies):
-            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            listener.bind(("127.0.0.1", 0))
-            listener.listen(64)
-            proxy_url = "http://127.0.0.1:%d" % listener.getsockname()[1]
-            done = threading.Event()
-            observed: list[object] = []
-            thread = threading.Thread(
-                target=_capture, args=(listener, done, observed), daemon=True
+            inventory_report = _profile_inventory(dependencies)
+            profiles = _validated_profile_inventory(inventory_report.get("labels"))
+            profile_connection_count = 0
+            supported_profile_count = 0
+            unsupported_profile_count = 0
+            for profile in profiles:
+                profile_report, profile_hellos = _capture_client(
+                    dependencies,
+                    PROFILE_CLIENT,
+                    profile,
+                    DESTINATION_HOST,
+                    maximum_connections=MAX_PROFILE_CONNECTIONS,
+                )
+                if (
+                    profile_report.get("version") != DDGS_VERSION
+                    or profile_report.get("profile") != profile
+                ):
+                    raise RuntimeError(
+                        "DDGS browser profile report does not match the pin"
+                    )
+                if not profile_hellos and _is_unsupported_linux_profile(
+                    profile, profile_report
+                ):
+                    unsupported_profile_count += 1
+                    continue
+                if not profile_hellos and profile_report.get("client_error_type"):
+                    raise RuntimeError(
+                        "DDGS browser profile did not open its explicit proxy: %s (%s)"
+                        % (
+                            profile,
+                            "%s: %s"
+                            % (
+                                profile_report["client_error_type"],
+                                profile_report.get("client_error_detail", ""),
+                            ),
+                        )
+                    )
+                supported_profile_count += 1
+                profile_connection_count += _validated_profile_connection_count(
+                    profile, profile_hellos
+                )
+            if supported_profile_count + unsupported_profile_count != len(profiles):
+                raise RuntimeError("DDGS browser profile accounting is incomplete")
+            backend_report, backend_hellos = _capture_client(
+                dependencies,
+                DDGS_CLIENT,
+                maximum_connections=MAX_BACKEND_CONNECTIONS,
             )
-            thread.start()
-            try:
-                result = subprocess.run(
-                    [
-                        sys.executable,
-                        "-I",
-                        "-c",
-                        CLIENT,
-                        str(dependencies),
-                        DDGS_VERSION,
-                        proxy_url,
-                        DESTINATION_HOST,
-                    ],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=180,
-                    check=False,
-                    text=True,
-                )
-            finally:
-                done.set()
-                listener.close()
-                thread.join(timeout=5)
-            if result.returncode != 0:
-                raise RuntimeError("DDGS ClientHello probe process failed")
-            report = json.loads(result.stdout)
-            labels = report["labels"]
-            if len(observed) != len(labels):
-                raise RuntimeError(
-                    "DDGS ClientHello count does not match profile count"
-                )
-            failures = [
-                label
-                for label, server_name in zip(labels, observed)
-                if server_name != DESTINATION_HOST
-            ]
-            if failures:
-                raise RuntimeError(
-                    "DDGS ClientHello failed Arena SNI inspection for: "
-                    + ", ".join(failures)
-                )
+            backend_count = _validated_backend_count(backend_hellos)
+            if (
+                inventory_report.get("version") != DDGS_VERSION
+                or inventory_report.get("primp_version") != PRIMP_VERSION
+                or backend_report.get("version") != DDGS_VERSION
+                or backend_report.get("backend") != "duckduckgo"
+            ):
+                raise RuntimeError("DDGS ClientHello report does not match the pin")
             print(
                 json.dumps(
                     {
-                        "ddgs_version": report["version"],
-                        "client_hello_count": len(labels),
-                        "matching_visible_sni_count": len(observed),
+                        "browser_profile_connection_count": profile_connection_count,
+                        "browser_profile_count": len(profiles),
+                        "browser_profile_matching_sni_count": profile_connection_count,
+                        "browser_profile_supported_count": supported_profile_count,
+                        "browser_profile_unsupported_linux_count": unsupported_profile_count,
+                        "ddgs_backend": "duckduckgo",
+                        "ddgs_backend_connection_count": backend_count,
+                        "ddgs_backend_matching_sni_count": backend_count,
+                        "ddgs_version": DDGS_VERSION,
+                        "primp_version": PRIMP_VERSION,
                         "source_cache_install": "passed",
                     },
                     sort_keys=True,

@@ -62,3 +62,42 @@ def test_rounding_counts_full_retry_waves_and_baseline():
     assert waves * (900 + capacity.ATTEMPT_OVERHEAD_SECONDS) <= 390 * 60
     too_many_waves = math.ceil((allowed + 2) * 10 * 2 / 8)
     assert too_many_waves * (900 + capacity.ATTEMPT_OVERHEAD_SECONDS) > 390 * 60
+
+
+def parallel_45_minute_configuration(**minute_overrides):
+    # Six participants (five challengers plus the baseline) need two full
+    # attempts across twenty executions and both ten-ICP scoring phases.
+    minutes = {
+        **DEFAULT_STAGE_MINUTES,
+        "stage_1": 1012,          # 22 waves at 45 minutes + one minute.
+        "stage_1_scoring": 192,   # 12 waves at 15 minutes + one minute.
+        "stage_2": 1,             # Activation of preexecuted stage-two runs.
+        "final_scoring": 192,
+    }
+    minutes.update(minute_overrides)
+    config = configuration(minutes=minutes, slots=11)
+    config["parallel_twenty_icp_execution"] = True
+    config["icp_wall_clock_seconds"] = 2700
+    return config
+
+
+def test_parallel_twenty_supports_five_challengers_on_eleven_slots_without_stage_two_reruns():
+    config = parallel_45_minute_configuration()
+    assert config["schedule"]["final_scoring_close"] == "2026-09-10T23:47:02Z"
+    assert capacity.daily_challenger_capacity(config) == 5
+    # The same one-minute stage-two execution window cannot support a
+    # sequential round, where ten more executions are genuinely required.
+    assert capacity.daily_challenger_capacity({
+        key: value for key, value in config.items()
+        if key != "parallel_twenty_icp_execution"
+    }) == 0
+
+
+def test_parallel_twenty_preserves_all_execution_and_both_scoring_retry_budgets():
+    for phase, shorter_minutes in (
+        ("stage_1", 966),
+        ("stage_1_scoring", 160),
+        ("final_scoring", 160),
+    ):
+        shorter = parallel_45_minute_configuration(**{phase: shorter_minutes})
+        assert capacity.daily_challenger_capacity(shorter) == 4, phase

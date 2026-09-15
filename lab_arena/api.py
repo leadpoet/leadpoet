@@ -103,6 +103,20 @@ def create_app(service: ArenaService) -> FastAPI:
                 "harness.py. Required text: %s"
                 % source_bundle.REQUIRED_LICENSE_REFERENCE
             )
+        if exc.code == "submission_replacement_closed":
+            content["detail"] = (
+                "Queued submissions can be replaced only before "
+                "submission_replacement_cutoff (one hour before the round boundary) "
+                "and before evaluation starts. The accepted submission is unchanged."
+            )
+        if exc.code == "submission_replacement_ineligible":
+            content["detail"] = "This submission is already under review or evaluation and cannot be replaced."
+        if exc.code == "submission_replacement_limit_reached":
+            content["detail"] = (
+                "Only one replacement attempt is allowed per hotkey per daily round, "
+                "even if upload or validation fails. This hotkey has already used its attempt. "
+                "The last accepted submission is unchanged."
+            )
         return JSONResponse(status_code=exc.status, content=content)
 
     @app.exception_handler(ArenaContractError)
@@ -125,7 +139,7 @@ def create_app(service: ArenaService) -> FastAPI:
 
     @app.get("/arena/v1/current")
     async def current() -> Any:
-        return await run_in_threadpool(service.public_current)
+        return await no_store_public_call(service.public_current)
 
     @app.get("/arena/v1/competition")
     async def competition() -> Any:
@@ -151,7 +165,7 @@ def create_app(service: ArenaService) -> FastAPI:
 
     @app.get("/arena/v1/rounds/{round_id}")
     async def round_view(round_id: str) -> Any:
-        return await run_in_threadpool(service.public_round, round_id)
+        return await no_store_public_call(service.public_round, round_id)
 
     @app.get("/arena/v1/rounds/{round_id}/benchmark")
     async def round_benchmark(round_id: str) -> JSONResponse:

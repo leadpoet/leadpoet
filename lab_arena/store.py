@@ -89,6 +89,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_twenty_icp_promotion_schema_v1": (),
     "lab_arena_baseline_cost_eligibility_schema_v1": (),
     "lab_arena_parallel_execution_schema_v1": (),
+    "lab_arena_submission_replacement_schema_v1": (),
     "lab_arena_contact_schema_v1": (),
     "lab_arena_company_quality_schema_v1": (),
     "lab_arena_successful_call_cost_schema_v1": (),
@@ -238,7 +239,7 @@ class ArenaStoreError(RuntimeError):
 
 
 class ArenaStoreUnavailable(ArenaStoreError):
-    """A transient database read failed after one bounded retry."""
+    """A transient database transport failure; RPC transport errors are not replayed."""
 
 
 class ArenaRoleError(ArenaStoreError):
@@ -367,6 +368,10 @@ class PostgrestTransport(StoreTransport):
         for attempt in range(DEADLOCK_RETRIES + 1):
             try:
                 response = self._client.post("%s/rest/v1/rpc/%s" % (self._base_url, function), headers=self._headers, content=content)
+            except httpx.TransportError as exc:
+                # A mutating RPC may have committed before its response failed.
+                # Surface availability to the API, but never replay the POST.
+                raise ArenaStoreUnavailable("rpc %s transport failure: %s" % (function, type(exc).__name__)) from exc
             except httpx.HTTPError as exc:
                 raise ArenaStoreError("rpc %s transport failure: %s" % (function, type(exc).__name__)) from exc
             if response.status_code >= 400 and attempt < DEADLOCK_RETRIES:
@@ -1043,6 +1048,20 @@ class ArenaStore:
         return activated[:limit]
 
     # -- submissions ------------------------------------------------------
+
+    def submission_replacement_schema(self) -> Dict[str, Any]:
+        result = _require_mapping(
+            self._transport.rpc("lab_arena_submission_replacement_schema_v1", {}),
+            "submission_replacement_schema",
+        )
+        if (result.get("schema_version")
+                != "leadpoet.lab_arena.submission_replacement_schema.v1"
+                or result.get("version") != 258
+                or result.get("replacement_freeze_seconds") != 3600
+                or type(result.get("max_replacement_attempts")) is not int
+                or result["max_replacement_attempts"] != 1):
+            raise ArenaStoreError("submission replacement schema mismatch")
+        return result
 
     def register_submission(
         self,

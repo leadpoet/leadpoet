@@ -128,6 +128,13 @@ Rounds that announce `contact_policy: "contacts_v1"` also require one contact pe
 
 Rounds that announce `company_quality_policy: "company_quality_v1"` require a matching company LinkedIn URL and the headquarters state for U.S. companies. They share individual verification judgments and account for the fraction of requested companies that qualify within each buyer request. Missing new details zero only the affected company. See [company quality, scoring and activation](docs/arena-company-quality.md).
 
+Before submission, `/arena/v1/current` (`open_round`) and
+`/arena/v1/rounds/{round_id}` expose the round's pinned
+`output_schema_version` and its enabled policy markers. An absent marker means
+that policy is disabled for the round. The version matches the schema used to
+validate model output; historical rounds continue to report their frozen
+version.
+
 Scoring checks company fit, intent, and supporting evidence across all 20 ICPs. A model must beat the daily baseline score by at least 1.0 point on the 0–100 scale to qualify for promotion. The gateway promotes winning code to `main` and `lab` for the next baseline. Rewards activate separately through settlement. By default, the champion receives **25%, 20%, 15%, 10%, then 5%** of subnet emissions in successive reward weeks of 140 epochs each. The share remains at 5% from week five onward, subject to registration and continued eligibility.
 
 **Champion miners must keep their submitted API credentials funded; if Leadpoet must fund a champion rebenchmark via fallback credentials, that period’s champion incentive is reduced by 50%.**
@@ -154,7 +161,27 @@ For automation, set `OPENROUTER_API_KEY`, `OPENROUTER_MANAGEMENT_KEY`, and `DEEP
 
 Every miner submission must pass a full-code review before evaluation. The gateway uses **Claude Sonnet 5 through that submitting miner's OpenRouter key**, including every file in the uploaded archive and all bundled prompts. It checks for prepared answers, fabricated evidence, malicious behavior, and attempts to manipulate the reviewer. Normal constants, routing changes, and alternative harnesses are allowed. Review charges are recorded separately in the existing cost ledger. An incomplete review, unreadable file, or submission that exceeds the judge's context window cannot pass; source is never silently truncated. The submission status API reports review progress and cost.
 
-Do not include keys or `.env` files in the source directory. Placeholder-only `.env.example`, `.env.sample`, and `.env.template` files are allowed. `LICENSE.txt` or `LICENSE.md` can replace `LICENSE`, but it must stay beside `harness.py` and contain the same complete AGPL-3.0 text. Source limits are 10 MiB compressed, 50 MiB unpacked, and 1,000 files. Each hotkey can have one accepted model per daily round, with no replacement. Hotkeys under the same coldkey may each submit. Each round admits up to 20 challengers, plus the baseline. Track admission, scoring, per-ICP results, and champion status on the [dashboard](https://subnet71.com).
+Do not include keys or `.env` files in the source directory. Placeholder-only `.env.example`, `.env.sample`, and `.env.template` files are allowed. `LICENSE.txt` or `LICENSE.md` can replace `LICENSE`, but it must stay beside `harness.py` and contain the same complete AGPL-3.0 text. Source limits are 10 MiB compressed, 50 MiB unpacked, and 1,000 files.
+
+Each hotkey can have one accepted model per daily round. To replace your queued
+model, run the same submission command once more with the same hotkey before the public
+`submission_replacement_cutoff`: **23:00 UTC**, one hour before the next 00:00 UTC
+round boundary. Upload and final source, license, and credential validation must
+finish before that cutoff. Replacement is refused at or after 23:00 UTC, or
+once evaluation starts. The previous accepted model remains selected if these
+checks fail or finalization does not finish in time. Each revision has its own
+source archive; prior review charges and replacement links remain in the audit
+history. New code reviews start only after replacement closes. The selected
+revision must still pass review before evaluation.
+
+Only one replacement attempt is allowed per hotkey per daily round: reserving its upload uses the allowance even if the upload is abandoned or validation fails, and the last accepted model remains selected if the replacement fails.
+
+For example, a queued model submitted at 09:00 UTC on December 9 can be replaced using the same submission command and hotkey with updated source, as long as upload and validation finish before 23:00 UTC that day.
+
+First submissions retain the normal 00:00 UTC submission deadline. Hotkeys
+under the same coldkey may each submit. Each round admits up to 20 challengers,
+plus the baseline. Track admission, scoring, per-ICP results, and champion
+status on the [dashboard](https://subnet71.com).
 
 ## Public input example
 

@@ -17,6 +17,7 @@ import pytest
 
 from lab_arena import broker as br
 from lab_arena import contracts, operations
+from lab_arena.store import ArenaStoreUnavailable
 
 KEY = "sk-or-v1-" + "k" * 40
 DL_KEY = "dl_secret_" + "e" * 30
@@ -56,7 +57,9 @@ class FakeLedgerStore:
             "status": {"reservation": "reserved", "dispatch": "dispatched", "settlement": "settled", "uncertain": "uncertain", "recovery": "recovered", "refusal": "refused"}[call["kind"]],
             "idempotent": True,
             "call_identity": call["identity"],
-            "amount_microusd": call["amount"],
+            "amount_microusd": (
+                call["actual"] if call["kind"] == "settlement" else call["amount"]
+            ),
             "terminal_response": call.get("terminal"),
             "reason": call.get("reason"),
             "account_failure_evidence": (
@@ -101,12 +104,40 @@ class FakeLedgerStore:
                 "kind": "reservation",
                 "identity": call_identity,
                 "amount": amount_microusd,
+                "run_id": run_id,
+                "operation_id": operation_id,
                 "provider": provider,
                 "call_doc": dict(call_doc),
             }
             self.calls[call_identity]["funding_source"] = funding_source
             self.calls[call_identity]["reserve_remaining"] = reserve_remaining
             return {"status": "reserved", "idempotent": False, "call_identity": call_identity, "amount_microusd": amount_microusd}
+
+    def list_ledger(self, *, call_identity=None, limit=None, **_kwargs):
+        with self.lock:
+            call = self.calls.get(call_identity)
+            if call is None:
+                return []
+            reservation = {
+                "entry_id": 1,
+                "entry_kind": "reservation",
+                "run_id": call["run_id"],
+                "call_identity": call["identity"],
+                "operation_id": call["operation_id"],
+                "provider": call["provider"],
+                "funding_source": call["funding_source"],
+                "amount_microusd": call["amount"],
+                "entry_doc": dict(call["call_doc"]),
+            }
+            if call["kind"] == "reservation":
+                return [reservation]
+            head = {
+                **reservation,
+                "entry_id": 2,
+                "entry_kind": call["kind"],
+                "amount_microusd": call.get("actual", call["amount"]),
+            }
+            return [reservation, head]
 
     def mark_dispatched(self, *, run_id, lease_token_hash, call_identity):
         with self.lock:
@@ -807,8 +838,149 @@ def test_http_transport_absolute_deadline_cancels_before_response_headers(
     assert str(raised.value) == "ReadTimeout"
     assert raised.value.openrouter_generation_id is None
     assert raised.value.deepline_job_id is None
+    assert raised.value.observed_status is None
     assert handler_cancelled.is_set()
     assert secret not in caplog.text
+
+
+@pytest.mark.parametrize("status", [200, 202, 429, 503])
+def test_http_transport_retains_only_bounded_status_after_headers(status):
+    transport = br.HttpxProviderTransport(
+        client_factory=_async_client_factory(
+            lambda _request: httpx.Response(
+                status, stream=_ReadTimeoutAfterHeaders()
+            )
+        )
+    )
+    try:
+        with pytest.raises(br.ProviderTransportError) as raised:
+            transport.send(
+                method="GET",
+                url="https://api.scrapingdog.com/google",
+                headers={}, body=b"", timeout_seconds=1,
+            )
+    finally:
+        transport.close()
+    assert raised.value.observed_status == status
+    assert str(raised.value) == "ReadTimeout"
+
+
+@pytest.mark.parametrize("invalid", [0, 99, 600, True, "200"])
+def test_transport_error_rejects_untrusted_or_invalid_status(invalid):
+    assert br.ProviderTransportError(
+        "ReadTimeout", observed_status=invalid
+    ).observed_status is None
+
+
+def _scrapingdog_timeout_transport(status):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        if status is None:
+            raise httpx.ConnectTimeout("synthetic pre-header timeout")
+        return httpx.Response(status, stream=_ReadTimeoutAfterHeaders())
+
+    return br.HttpxProviderTransport(
+        client_factory=_async_client_factory(respond)
+    ), requests
+
+
+@pytest.mark.parametrize("status", [200, 202])
+def test_scrapingdog_post_header_success_timeout_settles_known_charge(status):
+    transport, requests = _scrapingdog_timeout_transport(status)
+    broker, store, _ = make_broker(transport=transport)
+    try:
+        result = broker.execute(
+            CONTEXT, operation_id="scrapingdog.google",
+            parameters={"query": "acme"}, action_sequence=0,
+            timeout_ms=90_000,
+        )
+        replay = broker.execute(
+            CONTEXT, operation_id="scrapingdog.google",
+            parameters={"query": "acme"}, action_sequence=0,
+            timeout_ms=90_000,
+        )
+    finally:
+        transport.close()
+
+    assert len(requests) == 1
+    assert result.status == replay.status == 502
+    assert result.body == operations.GENERIC_UNAVAILABLE_BODY
+    assert result.call["outcome"] == "settled"
+    assert result.call["status"] == 502
+    assert result.call["provider_status"] == status
+    assert result.call["actual_microusd"] == 250
+    assert result.call["observed_provider_status"] == status
+    assert result.call["transport_error_class"] == "ReadTimeout"
+    assert store.log == ["reserve", "dispatch", "settle", "reserve"]
+    call = store.calls[result.call["call_identity"]]
+    assert call["kind"] == "settlement" and call["actual"] == 250
+    assert call["terminal"]["status"] == 502
+    assert call["terminal"]["call_succeeded"] is False
+    assert replay.body == base64.b64decode(call["terminal"]["body_b64"])
+    assert replay.call["actual_microusd"] == 250
+    assert call["terminal"]["provider_cost"] == {
+        "basis": "scrapingdog_approved_operation_fallback",
+        "units": "5", "unit_name": "credits",
+        "operation": "scrapingdog.google",
+    }
+
+
+@pytest.mark.parametrize("status", [None, 429, 503])
+def test_scrapingdog_without_observed_success_stays_uncertain(status):
+    transport, requests = _scrapingdog_timeout_transport(status)
+    broker, store, _ = make_broker(transport=transport)
+    try:
+        result = broker.execute(
+            CONTEXT, operation_id="scrapingdog.google",
+            parameters={"query": "acme"}, action_sequence=0,
+            timeout_ms=90_000,
+        )
+    finally:
+        transport.close()
+
+    assert len(requests) == 1
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    call = store.calls[result.call["call_identity"]]
+    assert call["kind"] == "uncertain" and call["amount"] == 250
+    assert call["uncertain_doc"] == {
+        "reason": "transport_failure", "call_succeeded": False,
+        "transport_error_class": (
+            "ConnectTimeout" if status is None else "ReadTimeout"
+        ),
+        **({} if status is None else {"observed_provider_status": status}),
+    }
+
+
+def test_scrapingdog_known_charge_survives_settlement_failure():
+    class FailingSettlementStore(FakeLedgerStore):
+        def settle_call(self, **kwargs):
+            self.log.append("settle")
+            raise br.ArenaStoreError("synthetic settlement failure")
+
+    transport, requests = _scrapingdog_timeout_transport(200)
+    store = FailingSettlementStore()
+    broker, _, _ = make_broker(store=store, transport=transport)
+    try:
+        result = broker.execute(
+            CONTEXT, operation_id="scrapingdog.google",
+            parameters={"query": "acme"}, action_sequence=0,
+            timeout_ms=90_000,
+        )
+    finally:
+        transport.close()
+
+    assert len(requests) == 1
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    uncertain = store.calls[result.call["call_identity"]]["uncertain_doc"]
+    assert uncertain["reason"] == "settle_failure"
+    assert uncertain["call_succeeded"] is False
+    assert uncertain["known_actual_microusd"] == 250
+    assert uncertain["provider_cost"]["operation"] == "scrapingdog.google"
+    assert uncertain["observed_provider_status"] == 200
+    assert uncertain["transport_error_class"] == "ReadTimeout"
+    assert store.log == ["reserve", "dispatch", "settle", "settle", "settle", "uncertain"]
 
 
 @pytest.mark.parametrize(
@@ -915,6 +1087,8 @@ def test_stream_timeout_generation_header_credential_echo_is_not_persisted(
     assert diagnostic == {
         "reason": "transport_failure",
         "call_succeeded": False,
+        "transport_error_class": "ReadTimeout",
+        "observed_provider_status": 200,
     }
     assert exception_messages == ["ReadTimeout"]
     assert secret not in caplog.text and secret not in retained
@@ -923,6 +1097,21 @@ def test_stream_timeout_generation_header_credential_echo_is_not_persisted(
 
 CONTEXT = br.RunContext(run_id="r1", assignment_id="arena-2026-09-02:s1:1:0", icp_position=0, lease_token_hash=contracts.document_hash("lease"), miner_hotkey="5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", submission_id="s1", stage=1)
 CHAT = {"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "find fintech companies"}], "max_tokens": 200}
+
+
+def test_persistent_reservation_store_unavailable_propagates_after_one_readback():
+    class UnavailableReservation(FakeLedgerStore):
+        def reserve_call(self, **kwargs):
+            self.log.append("reserve")
+            raise ArenaStoreUnavailable("synthetic RPC transport failure")
+
+    broker, store, transport = make_broker(store=UnavailableReservation())
+    with pytest.raises(ArenaStoreUnavailable):
+        broker.execute(CONTEXT, operation_id="openrouter.chat", parameters=CHAT,
+                       action_sequence=0, timeout_ms=5000)
+    assert store.log == ["reserve", "reserve"]
+    assert store.calls == {}
+    assert transport.sent == []
 
 
 def test_deepline_call_uses_the_host_key_and_settles():
@@ -1891,7 +2080,9 @@ def test_stream_timeout_generation_settles_exact_cost_without_second_post(caplog
         "openrouter_generation_id": generation_id,
         "credential_fingerprint": br._credential_fingerprint(KEY),
         "transport_failure": True,
-    }
+        "transport_error_class": "ReadTimeout",
+        "observed_provider_status": 200,
+        }
     assert methods == ["POST"]
     assert stream.closed.is_set()
     assert KEY not in caplog.text
@@ -3827,6 +4018,267 @@ def test_fault_injection_points_produce_single_accounting_results():
     assert result.status == 409 and json.loads(result.body) == {"error": {"code": "lease_stale"}} and transport.sent == []
 
 
+@pytest.mark.parametrize("commits_before_timeout", [False, True])
+def test_reservation_transport_timeout_uses_exact_idempotent_readback_once(
+    commits_before_timeout,
+):
+    class AmbiguousReservationStore(FakeLedgerStore):
+        def __init__(self):
+            super().__init__()
+            self.reserve_attempts = 0
+
+        def reserve_call(self, **kwargs):
+            self.reserve_attempts += 1
+            if self.reserve_attempts == 1:
+                if commits_before_timeout:
+                    super().reserve_call(**kwargs)
+                raise ArenaStoreUnavailable("synthetic reservation response loss")
+            return super().reserve_call(**kwargs)
+
+    store = AmbiguousReservationStore()
+    broker, _store, transport = make_broker(
+        store=store, transport=FakeTransport([(200, {"results": []})])
+    )
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=29,
+        timeout_ms=1000,
+    )
+
+    assert result.status == 200
+    assert store.reserve_attempts == 2
+    assert store.log.count("reserve") == (2 if commits_before_timeout else 1)
+    assert store.log.count("dispatch") == 1
+    assert store.log.count("settle") == 1
+    assert [request["method"] for request in transport.sent].count("POST") == 1
+    persisted = store.calls[result.call["call_identity"]]
+    assert persisted["kind"] == "settlement"
+    assert persisted["actual"] == result.call["actual_microusd"] == 0
+    independent = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "independent"}},
+        action_sequence=32,
+        timeout_ms=1000,
+    )
+    assert independent.status == 200
+    assert independent.call["call_identity"] != result.call["call_identity"]
+    assert [request["method"] for request in transport.sent].count("POST") == 2
+    assert store.log.count("settle") == 2
+
+
+def test_persistent_reservation_transport_failure_never_dispatches_provider():
+    class DownStore(FakeLedgerStore):
+        def __init__(self):
+            super().__init__()
+            self.reserve_attempts = 0
+
+        def reserve_call(self, **kwargs):
+            self.reserve_attempts += 1
+            raise ArenaStoreUnavailable("synthetic database unavailable")
+
+    store = DownStore()
+    broker, _store, transport = make_broker(store=store, transport=FakeTransport([]))
+    with pytest.raises(ArenaStoreUnavailable):
+        broker.execute(
+            CONTEXT,
+            operation_id="deepline.execute",
+            parameters={"tool": "exa_search", "payload": {"query": "x"}},
+            action_sequence=30,
+            timeout_ms=1000,
+        )
+    assert store.reserve_attempts == 2
+    assert store.calls == {} and store.log == [] and transport.sent == []
+
+
+@pytest.mark.parametrize(
+    ("reserve_result", "expected_status", "expected_code"),
+    [
+        ({"status": "stale"}, 409, "lease_stale"),
+        (
+            {"status": "refused", "reason": "per_icp_quota"},
+            402,
+            "budget_refused",
+        ),
+    ],
+)
+def test_reservation_response_loss_preserves_nonreservation_terminal_status(
+    reserve_result, expected_status, expected_code,
+):
+    class TerminalAfterLossStore(FakeLedgerStore):
+        def __init__(self):
+            super().__init__()
+            self.reserve_attempts = 0
+            self.readbacks = 0
+
+        def reserve_call(self, **kwargs):
+            self.reserve_attempts += 1
+            if self.reserve_attempts == 1:
+                raise ArenaStoreUnavailable("synthetic reservation response loss")
+            return dict(reserve_result)
+
+        def list_ledger(self, **kwargs):
+            self.readbacks += 1
+            return super().list_ledger(**kwargs)
+
+    store = TerminalAfterLossStore()
+    broker, _store, transport = make_broker(store=store)
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=35,
+        timeout_ms=1000,
+    )
+
+    assert result.status == expected_status
+    assert json.loads(result.body) == {"error": {"code": expected_code}}
+    assert store.reserve_attempts == 2 and store.readbacks == 0
+    assert transport.sent == []
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("run_id", "other-run"),
+        ("operation_id", "scrapingdog.google"),
+        ("provider", "scrapingdog"),
+        ("funding_source", "miner_key"),
+        ("amount_microusd", -1),
+        ("entry_doc", {"request_hash": "wrong"}),
+    ],
+)
+def test_ambiguous_reservation_readback_rejects_binding_mismatch(
+    field, replacement,
+):
+    class MismatchedReadbackStore(FakeLedgerStore):
+        def __init__(self):
+            super().__init__()
+            self.first = True
+
+        def reserve_call(self, **kwargs):
+            result = super().reserve_call(**kwargs)
+            if self.first:
+                self.first = False
+                raise ArenaStoreUnavailable("synthetic response loss")
+            return result
+
+        def list_ledger(self, **kwargs):
+            rows = super().list_ledger(**kwargs)
+            rows[0][field] = replacement
+            return rows
+
+    store = MismatchedReadbackStore()
+    broker, _store, transport = make_broker(store=store, transport=FakeTransport([]))
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=33,
+        timeout_ms=1000,
+    )
+    assert result.status == 503
+    assert json.loads(result.body) == {"error": {"code": "broker_unavailable"}}
+    assert transport.sent == [] and store.log.count("dispatch") == 0
+
+
+@pytest.mark.parametrize("corruption", ["non_mapping", "wrong_second_identity", "unordered"])
+def test_ambiguous_reservation_readback_rejects_malformed_ledger_chain(corruption):
+    class CorruptLedgerStore(FakeLedgerStore):
+        def __init__(self):
+            super().__init__()
+            self.first = True
+
+        def reserve_call(self, **kwargs):
+            result = super().reserve_call(**kwargs)
+            if self.first:
+                self.first = False
+                raise ArenaStoreUnavailable("synthetic response loss")
+            return result
+
+        def list_ledger(self, **kwargs):
+            rows = super().list_ledger(**kwargs)
+            extra = dict(rows[0], entry_id=2, entry_kind="dispatch")
+            rows.append(extra)
+            if corruption == "non_mapping":
+                rows.append("invalid")
+            elif corruption == "wrong_second_identity":
+                rows[1]["call_identity"] = "sha256:" + "0" * 64
+            else:
+                rows[1]["entry_id"] = rows[0]["entry_id"]
+            return rows
+
+    store = CorruptLedgerStore()
+    broker, _store, transport = make_broker(store=store)
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=36,
+        timeout_ms=1000,
+    )
+
+    assert result.status == 503
+    assert json.loads(result.body) == {"error": {"code": "broker_unavailable"}}
+    assert transport.sent == [] and store.log.count("dispatch") == 0
+
+
+def test_duplicate_same_identity_has_one_atomic_dispatch_and_one_paid_post():
+    class RacingStore(FakeLedgerStore):
+        def __init__(self):
+            super().__init__()
+            self.reserved = threading.Barrier(2)
+            self.dispatched = threading.Barrier(2)
+
+        def reserve_call(self, **kwargs):
+            result = super().reserve_call(**kwargs)
+            self.reserved.wait(timeout=2)
+            return result
+
+        def mark_dispatched(self, **kwargs):
+            result = super().mark_dispatched(**kwargs)
+            self.dispatched.wait(timeout=2)
+            return result
+
+    store = RacingStore()
+    transports = [FakeTransport([(200, {"results": []})]) for _ in range(2)]
+    brokers = [make_broker(store=store, transport=transport)[0]
+               for transport in transports]
+    results = []
+    failures = []
+
+    def execute(broker):
+        try:
+            results.append(broker.execute(
+                CONTEXT,
+                operation_id="deepline.execute",
+                parameters={"tool": "exa_search", "payload": {"query": "same"}},
+                action_sequence=31,
+                timeout_ms=1000,
+            ))
+        except Exception as exc:
+            failures.append(exc)
+
+    threads = [threading.Thread(target=execute, args=(broker,)) for broker in brokers]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+
+    assert not failures and all(not thread.is_alive() for thread in threads)
+    assert sorted(result.status for result in results) == [200, 409]
+    uncertain = next(result for result in results if result.status == 409)
+    assert json.loads(uncertain.body) == {"error": {"code": "call_uncertain"}}
+    assert sum(len(transport.sent) for transport in transports) == 1
+    assert store.log.count("dispatch") == 2
+    assert store.log.count("settle") == 1
+    assert len(store.calls) == 1
+    call = next(iter(store.calls.values()))
+    assert call["kind"] == "settlement" and call["actual"] == 0
+
+
 def test_cancelled_settlement_uses_the_store_authoritative_failed_delivery():
     class CancelledStore(FakeLedgerStore):
         def settle_call(self, **kwargs):
@@ -3997,13 +4449,196 @@ def test_a_store_that_rejects_the_settlement_leaves_the_call_uncertain():
     store.settle_call = refusing_settle
     result = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "acme"}}, action_sequence=0, timeout_ms=30000)
     assert result.status == 502 and result.call["outcome"] == "uncertain" and store.log[-1] == "uncertain"
-    assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
-        "reason": "settle_failure",
-        "call_succeeded": False,
-        "failure_stage": "settlement",
-        "error_class": "ArenaContractError",
-    }
+    call_doc = store.calls[result.call["call_identity"]]["uncertain_doc"]
+    assert call_doc["reason"] == "settle_failure"
+    assert call_doc["failure_stage"] == "settlement"
+    assert call_doc["error_class"] == "ArenaContractError"
+    assert call_doc["call_succeeded"] is True
+    assert call_doc["known_actual_microusd"] == 0
+    assert call_doc["deepline_request_id"] == transport.sent[0]["headers"]["x-deepline-request-id"]
+    assert call_doc["deepline_operation"] == "exa_search"
     store.settle_call = original
+
+
+def test_store_settlement_retry_reuses_paid_reply_and_releases_the_budget():
+    envelope = {
+        "job_id": "settle-retry-job", "status": "completed",
+        "result": {"data": {"results": []}},
+        "billing": {"credits_charged": 0.02},
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, envelope), (200, envelope)])
+    )
+    original = store.settle_call
+    attempts = []
+
+    def one_store_failure(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise br.ArenaStoreError("transient ledger RPC failure")
+        return original(**kwargs)
+
+    store.settle_call = one_store_failure
+    parameters = {"tool": "exa_search", "payload": {"query": "synthetic"}}
+    first = broker.execute(
+        CONTEXT, operation_id="deepline.execute", parameters=parameters,
+        action_sequence=0, timeout_ms=5000,
+    )
+    assert first.status == 200 and first.call["outcome"] == "settled"
+    assert first.call["actual_microusd"] == 2_000
+    assert len(attempts) == 2 and attempts[0] == attempts[1]
+    assert len(transport.sent) == 1 and store.log == ["reserve", "dispatch", "settle"]
+    assert store.openrouter_capacity == 10_000_000 - 2_000
+
+    next_context = br.RunContext(**{
+        **CONTEXT.__dict__, "run_id": "next-icp-run",
+        "icp_position": CONTEXT.icp_position + 1,
+    })
+    second = broker.execute(
+        next_context, operation_id="deepline.execute", parameters=parameters,
+        action_sequence=0, timeout_ms=5000,
+    )
+    assert second.status == 200 and second.call["outcome"] == "settled"
+    assert len(transport.sent) == 2  # exactly one paid POST per distinct ICP
+
+
+@pytest.mark.parametrize(
+    ("operation_id", "parameters", "reply", "actual"),
+    (
+        (
+            "openrouter.chat", CHAT,
+            {"model": "openai/gpt-4o-mini", "choices": [],
+             "usage": {"cost": "0.0000123"}},
+            13,
+        ),
+        (
+            "scrapingdog.scrape", {"url": "https://example.com/about"},
+            b"<html>synthetic page</html>", 250,
+        ),
+    ),
+)
+def test_other_provider_settlement_retries_only_the_store(
+    operation_id, parameters, reply, actual,
+):
+    broker, store, transport = make_broker(transport=FakeTransport([(200, reply)]))
+    original = store.settle_call
+    attempts = []
+
+    def one_store_failure(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise br.ArenaStoreError("transient settlement RPC failure")
+        return original(**kwargs)
+
+    store.settle_call = one_store_failure
+    result = broker.execute(
+        CONTEXT, operation_id=operation_id, parameters=parameters,
+        action_sequence=0, timeout_ms=5000,
+    )
+    assert result.status == 200 and result.call["outcome"] == "settled"
+    assert result.call["actual_microusd"] == actual
+    assert len(attempts) == 2 and attempts[0] == attempts[1]
+    assert len(transport.sent) == 1
+    assert store.calls[result.call["call_identity"]]["actual"] == actual
+
+
+def test_store_settlement_lost_reply_accepts_only_the_same_committed_terminal():
+    envelope = {
+        "job_id": "lost-settle-reply", "status": "completed",
+        "result": {"data": {"results": []}},
+        "billing": {"credits_charged": 0.02},
+    }
+    broker, store, transport = make_broker(transport=FakeTransport([(200, envelope)]))
+    original = store.settle_call
+    attempts = []
+
+    def lost_reply(**kwargs):
+        attempts.append(kwargs)
+        result = original(**kwargs)
+        if len(attempts) == 1:
+            raise br.ArenaStoreError("settlement reply lost after commit")
+        return result
+
+    store.settle_call = lost_reply
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "synthetic"}},
+        action_sequence=0, timeout_ms=5000,
+    )
+    assert result.status == 200 and result.call["outcome"] == "settled"
+    assert len(attempts) == 2 and attempts[0] == attempts[1]
+    assert store.log == ["reserve", "dispatch", "settle", "settle"]
+    assert len(transport.sent) == 1
+    assert store.openrouter_capacity == 10_000_000 - 2_000
+
+
+def test_store_settlement_retry_rejects_a_different_idempotent_terminal():
+    envelope = {
+        "job_id": "conflicting-settle-reply", "status": "completed",
+        "result": {"data": {"results": []}},
+        "billing": {"credits_charged": 0.02},
+    }
+    broker, store, transport = make_broker(transport=FakeTransport([(200, envelope)]))
+    attempts = []
+
+    def conflicting_reply(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise br.ArenaStoreError("settlement reply lost")
+        return {
+            "status": "settled", "idempotent": True,
+            "amount_microusd": kwargs["actual_microusd"] + 1,
+            "terminal_response": kwargs["terminal_response"],
+        }
+
+    store.settle_call = conflicting_reply
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "synthetic"}},
+        action_sequence=0, timeout_ms=5000,
+    )
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert len(attempts) == 2 and len(transport.sent) == 1
+    assert store.calls[result.call["call_identity"]]["kind"] == "uncertain"
+    assert store.openrouter_capacity == 0
+
+
+def test_persistent_store_settlement_failure_keeps_the_known_receipt_uncertain():
+    envelope = {
+        "job_id": "unsettled-known-receipt", "status": "completed",
+        "result": {"data": {"results": []}},
+        "billing": {"credits_charged": 0.02},
+    }
+    broker, store, transport = make_broker(transport=FakeTransport([(200, envelope)]))
+    attempts = []
+
+    def unavailable_store(**kwargs):
+        attempts.append(kwargs)
+        raise br.ArenaStoreError("ledger RPC unavailable")
+
+    store.settle_call = unavailable_store
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "synthetic"}},
+        action_sequence=0, timeout_ms=5000,
+    )
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert len(attempts) == br._SETTLEMENT_STORE_MAX_ATTEMPTS
+    assert all(attempt == attempts[0] for attempt in attempts)
+    assert len(transport.sent) == 1 and store.log[-1] == "uncertain"
+    call = store.calls[result.call["call_identity"]]
+    assert call["kind"] == "uncertain" and store.openrouter_capacity == 0
+    doc = call["uncertain_doc"]
+    assert doc["reason"] == "settle_failure"
+    assert doc["failure_stage"] == "settlement" and doc["error_class"] == "ArenaStoreError"
+    assert doc["call_succeeded"] is True and doc["provider_status"] == 200
+    assert doc["known_actual_microusd"] == 2_000
+    assert doc["deepline_request_id"] == transport.sent[0]["headers"]["x-deepline-request-id"]
+    assert doc["deepline_operation"] == "exa_search"
+    assert doc["credential_fingerprint"].startswith("sha256:")
+    assert doc["deepline_job_id"] == envelope["job_id"]
+    assert doc["provider_cost"] == attempts[0]["terminal_response"]["provider_cost"]
+    assert "terminal_response" not in doc and DL_KEY not in json.dumps(doc)
 
 
 def test_response_adaptation_failure_retains_only_safe_class_and_stage(monkeypatch):

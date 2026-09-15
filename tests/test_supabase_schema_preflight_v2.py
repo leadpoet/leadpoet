@@ -76,6 +76,12 @@ def _opener(
         service_role_paths.pop(f"/rpc/{missing}", None)
         arena_paths.pop(f"/rpc/{missing}", None)
     capabilities = {
+        "lab_arena_submission_replacement_schema_v1": {
+            "schema_version": "leadpoet.lab_arena.submission_replacement_schema.v1",
+            "version": 258,
+            "replacement_freeze_seconds": 3600,
+            "max_replacement_attempts": 1,
+        },
         "lab_arena_participation_schema_v1": {
             "schema_version": "leadpoet.lab_arena.participation_schema.v1",
             "version": 221,
@@ -112,6 +118,7 @@ def _opener(
             or path.endswith("/lab_arena_runs")
             or path.endswith("/rpc/lab_arena_code_review_schema_v1")
             or path.endswith("/rpc/lab_arena_participation_schema_v1")
+            or path.endswith("/rpc/lab_arena_submission_replacement_schema_v1")
             or path.endswith("/rpc/lab_arena_successful_call_cost_schema_v1")
             or path.endswith("/rpc/lab_arena_deepline_cost_reconciliation_schema_v1")
         )
@@ -191,6 +198,7 @@ def test_preflight_accepts_current_schema_without_retired_host_receipt_storage()
     "lab_arena_publish_weight_state_v1",
     "lab_arena_has_recent_participation_v1",
     "lab_arena_participation_schema_v1",
+    "lab_arena_submission_replacement_schema_v1",
     "lab_arena_successful_call_cost_schema_v1",
     "lab_arena_list_deepline_cost_reconciliations_v1",
     "lab_arena_reconcile_deepline_cost_v1",
@@ -300,3 +308,11 @@ def test_arena_table_probes_execute_against_committed_migration_202():
     finally:
         connection.close()
         database.close()
+
+
+def test_preflight_rejects_missing_replacement_guards_before_cutover():
+    with pytest.raises(SupabaseSchemaPreflightV2Error, match="submission_replacement_schema_v1 capability differs"):
+        verify_required_supabase_v2_schema(
+            _environment(),
+            opener=_opener(bad_capability="lab_arena_submission_replacement_schema_v1"),
+        )

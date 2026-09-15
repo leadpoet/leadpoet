@@ -34,6 +34,7 @@ import httpx
 
 from lab_arena import contracts, operations, provider_costs, scoring_provider_compat
 from lab_arena.contracts import ArenaContractError
+from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable
 
 PRICE_TABLE_SCHEMA_VERSION = "leadpoet.lab_arena.openrouter_price_table.v1"
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
@@ -88,6 +89,7 @@ _DEEPLINE_BILLING_POLL_SECONDS = 2.0
 _OPENROUTER_BILLING_MAX_ATTEMPTS = 6
 _OPENROUTER_BILLING_POLL_SECONDS = 2.0
 OPENROUTER_DELAYED_RECONCILIATION_TIMEOUT_SECONDS = 5.0
+_SETTLEMENT_STORE_MAX_ATTEMPTS = 3
 DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS = 5.0
 _DEEPLINE_REQUEST_ID_RE = re.compile(r"^ctx-tool-[0-9a-f]{32}$")
 _DEEPLINE_BILLING_REQUEST_ID_RE = re.compile(
@@ -139,6 +141,7 @@ class ProviderTransportError(RuntimeError):
         *,
         openrouter_generation_id: Optional[str] = None,
         deepline_job_id: Optional[str] = None,
+        observed_status: Optional[int] = None,
     ) -> None:
         super().__init__(message)
         self.openrouter_generation_id = (
@@ -152,6 +155,13 @@ class ProviderTransportError(RuntimeError):
         self.deepline_job_id = (
             deepline_job_id if isinstance(deepline_job_id, str)
             and _DEEPLINE_BILLING_REQUEST_ID_RE.fullmatch(deepline_job_id)
+            else None
+        )
+        self.observed_status = (
+            observed_status
+            if isinstance(observed_status, int)
+            and not isinstance(observed_status, bool)
+            and 100 <= observed_status <= 599
             else None
         )
 
@@ -641,12 +651,14 @@ class HttpxProviderTransport:
                 "ReadTimeout",
                 openrouter_generation_id=openrouter_generation_id,
                 deepline_job_id=deepline_job_id,
+                observed_status=status,
             ) from exc
         except httpx.HTTPError as exc:
             raise ProviderTransportError(
                 type(exc).__name__,
                 openrouter_generation_id=openrouter_generation_id,
                 deepline_job_id=deepline_job_id,
+                observed_status=status,
             ) from exc
         finally:
             _PROVIDER_HTTP_IN_FLIGHT.reset(log_token)
@@ -1006,6 +1018,83 @@ class CallStore(Protocol):
     def reconcile_deepline_cost(self, **kwargs: Any) -> Dict[str, Any]: ...
 
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]: ...
+
+    def list_ledger(self, **kwargs: Any) -> Sequence[Dict[str, Any]]: ...
+
+
+def _reservation_readback_matches(
+    store: CallStore,
+    reservation_arguments: Mapping[str, Any],
+    state: Mapping[str, Any],
+) -> bool:
+    """Validate the durable reservation and current state after response loss."""
+
+    identity = reservation_arguments.get("call_identity")
+    if state.get("call_identity") != identity:
+        return False
+    rows = store.list_ledger(call_identity=identity, limit=64)
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes, bytearray)):
+        return False
+    if not rows or any(not isinstance(row, Mapping) for row in rows):
+        return False
+    entries = list(rows)
+    reservations = [row for row in entries if row.get("entry_kind") == "reservation"]
+    if len(reservations) != 1 or entries[0].get("entry_kind") != "reservation":
+        return False
+    reservation = reservations[0]
+    expected = {
+        "run_id": reservation_arguments.get("run_id"),
+        "call_identity": identity,
+        "operation_id": reservation_arguments.get("operation_id"),
+        "provider": reservation_arguments.get("provider"),
+        "funding_source": reservation_arguments.get("funding_source"),
+    }
+    prior_entry_id = 0
+    allowed_kinds = {
+        "reservation", "dispatch", "settlement", "uncertain", "recovery",
+    }
+    for entry in entries:
+        entry_id = entry.get("entry_id")
+        amount = entry.get("amount_microusd")
+        if (
+            any(entry.get(key) != value for key, value in expected.items())
+            or isinstance(entry_id, bool)
+            or not isinstance(entry_id, int)
+            or entry_id <= prior_entry_id
+            or entry.get("entry_kind") not in allowed_kinds
+            or isinstance(amount, bool)
+            or not isinstance(amount, int)
+            or amount < 0
+        ):
+            return False
+        prior_entry_id = entry_id
+    if len({entry.get("entry_kind") for entry in entries}) != len(entries):
+        return False
+    call_doc = reservation.get("entry_doc")
+    expected_call_doc = reservation_arguments.get("call_doc")
+    if not isinstance(call_doc, Mapping) or dict(call_doc) != dict(expected_call_doc):
+        return False
+    reserved_amount = reservation.get("amount_microusd")
+    if isinstance(reserved_amount, bool) or not isinstance(reserved_amount, int) or reserved_amount < 0:
+        return False
+    dynamic = call_doc.get("reserve_remaining_budget") is True
+    if not dynamic and reserved_amount != reservation_arguments.get("amount_microusd"):
+        return False
+    kind_to_status = {
+        "reservation": "reserved", "dispatch": "dispatched",
+        "settlement": "settled", "uncertain": "uncertain",
+        "recovery": "recovered", "refusal": "refused",
+    }
+    head = entries[-1]
+    if state.get("status") != kind_to_status.get(head.get("entry_kind")):
+        return False
+    state_amount = state.get("amount_microusd")
+    return (
+        not isinstance(state_amount, bool)
+        and isinstance(state_amount, int)
+        and state_amount >= 0
+        and state_amount == head.get("amount_microusd")
+    )
 
 
 def _validated_response_url(value: Any, *, secret: str = "") -> str:
@@ -1926,8 +2015,20 @@ class Broker:
             float(effective_operation.timeout_seconds),
         )
         reserve_deadline = time.monotonic() + operations.BUDGET_ADMISSION_MAX_SECONDS
+        reserve_readback_used = False
         while True:
-            reserved = self._store.reserve_call(**reservation_arguments)
+            try:
+                reserved = self._store.reserve_call(**reservation_arguments)
+            except ArenaStoreUnavailable:
+                if reserve_readback_used:
+                    raise
+                # The RPC can commit even when its HTTP response times out.
+                # Repeating the exact deterministic call identity serializes
+                # behind that transaction and returns its durable state (or
+                # creates the reservation if the first transaction rolled
+                # back). This never sends the paid provider request.
+                reserve_readback_used = True
+                continue
             if reserved.get("status") != "budget_busy":
                 break
             if time.monotonic() >= reserve_deadline:
@@ -1935,6 +2036,20 @@ class Broker:
                 return _error_result("provider_unavailable", summary)
             time.sleep(min(0.2, max(0.0, reserve_deadline - time.monotonic())))
         status = reserved.get("status")
+        # Terminal admission replies such as stale and refused do not create a
+        # reservation. Preserve their normal classification. States backed by
+        # a durable reservation must match the exact replayed call before the
+        # broker can reuse them or send a paid provider request.
+        if (
+            reserve_readback_used
+            and status in {
+                "reserved", "dispatched", "settled", "uncertain", "recovered",
+            }
+            and not _reservation_readback_matches(
+                self._store, reservation_arguments, reserved
+            )
+        ):
+            return _error_result("broker_unavailable", summary)
         if status == "stale":
             return _error_result("lease_stale", summary)
         if status == "champion_restart_required":
@@ -2081,7 +2196,10 @@ class Broker:
         if dispatched.get("status") == "stale":
             # The marker did not commit (stage closed or lease lost): the request is not sent.
             return _error_result("lease_stale", summary)
-        if dispatched.get("status") != "dispatched":
+        if (
+            dispatched.get("status") != "dispatched"
+            or dispatched.get("idempotent") is not False
+        ):
             summary["outcome"] = "uncertain"
             return _error_result("call_uncertain", summary)
         # Build the outbound request from the constant table and inject the credential.
@@ -2100,6 +2218,7 @@ class Broker:
         openrouter_effective_response: Optional[ProviderResponse] = None
         openrouter_generation_present = False
         openrouter_generation_id: Optional[str] = None
+        scrapingdog_observed_success_status: Optional[int] = None
         try:
             url, headers = inject_credential(outbound, secret)
             if deepline_request_id is not None:
@@ -2249,7 +2368,31 @@ class Broker:
                             ),
                         )
             except ProviderTransportError as exc:
-                # Outcome unknown after send: consume the full reservation.
+                # A status read from the pinned transport is bounded evidence,
+                # even when the response body never completed.
+                transport_error_class = (
+                    str(exc) if str(exc) in _TRANSPORT_ERROR_CLASSES
+                    else "ProviderTransportError"
+                )
+                summary["transport_error_class"] = transport_error_class
+                if exc.observed_status is not None:
+                    summary["observed_provider_status"] = exc.observed_status
+                if (
+                    effective_operation.provider == "scrapingdog"
+                    and exc.observed_status is not None
+                    and 200 <= exc.observed_status < 300
+                ):
+                    # Scrapingdog has a fixed charge for an authenticated 2xx.
+                    # A lost body is still a failed model call; normal settlement
+                    # records the known charge without replaying the paid GET.
+                    scrapingdog_observed_success_status = exc.observed_status
+                    summary["provider_status"] = exc.observed_status
+                    response = ProviderResponse(
+                        502, {"content-type": "application/json"},
+                        operations.GENERIC_UNAVAILABLE_BODY,
+                    )
+                # With no observed success, the charge remains unknown and the
+                # full reservation stays uncertain.
                 uncertain_doc: Dict[str, Any] = {
                     "reason": "transport_failure",
                     "call_succeeded": False,
@@ -2290,10 +2433,6 @@ class Broker:
                         "deepline_request_id": deepline_request_id,
                         "deepline_operation": deepline_operation,
                         "credential_fingerprint": provider_credential_fingerprint,
-                        "transport_error_class": (
-                            str(exc) if str(exc) in _TRANSPORT_ERROR_CLASSES
-                            else "ProviderTransportError"
-                        ),
                     })
                     deepline_readback_cost = _deepline_ledger_readback(
                         transport=self._transport,
@@ -2306,19 +2445,26 @@ class Broker:
                             + DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS
                         ),
                     )
-                if deepline_readback_cost is None:
+                uncertain_doc["transport_error_class"] = transport_error_class
+                if exc.observed_status is not None:
+                    uncertain_doc["observed_provider_status"] = exc.observed_status
+                if (
+                    deepline_readback_cost is None
+                    and scrapingdog_observed_success_status is None
+                ):
                     self._store.mark_uncertain(
                         run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
                         call_doc=uncertain_doc, lease_ttl_seconds=self._lease_ttl_seconds,
                     )
                     summary.update({"outcome": "uncertain", "actual_microusd": amount})
                     return _error_result("provider_unavailable", summary)
-                # A billed request with a lost result is still a failed provider
-                # call. Settle its authenticated cost without repeating the POST.
-                response = ProviderResponse(
-                    502, {"content-type": "application/json"},
-                    operations.GENERIC_UNAVAILABLE_BODY,
-                )
+                if deepline_readback_cost is not None:
+                    # A billed request with a lost result is still a failed
+                    # provider call. Do not repeat the paid request.
+                    response = ProviderResponse(
+                        502, {"content-type": "application/json"},
+                        operations.GENERIC_UNAVAILABLE_BODY,
+                    )
         finally:
             secret = ""
             del secret
@@ -2345,7 +2491,10 @@ class Broker:
                 or deepline_readback_cost
             )
             raw_actual = None if raw_cost is None else raw_cost.microusd
-        elif effective_operation.provider == "scrapingdog" and 200 <= response.status < 300:
+        elif effective_operation.provider == "scrapingdog" and (
+            200 <= response.status < 300
+            or scrapingdog_observed_success_status is not None
+        ):
             raw_cost = provider_costs.scrapingdog_cost(
                 effective_operation_id, effective_normalized
             )
@@ -2389,6 +2538,11 @@ class Broker:
                     if openrouter_effective_response is not None
                     else _openrouter_effective_response(response)
                 )
+            provider_status_for_summary = (
+                scrapingdog_observed_success_status
+                if scrapingdog_observed_success_status is not None
+                else int(response.status)
+            )
             call_succeeded = _provider_call_succeeded(
                 effective_operation.provider,
                 response,
@@ -2515,12 +2669,29 @@ class Broker:
                     else None
                 ),
             )
-            payload = dict(summary, outcome="settled", status=sanitized_status, provider_status=int(response.status), actual_microusd=actual, response_hash=contracts.hash_bytes(sanitized_body))
+            payload = dict(summary, outcome="settled", status=sanitized_status, provider_status=provider_status_for_summary, actual_microusd=actual, response_hash=contracts.hash_bytes(sanitized_body))
             failure_stage = "settlement"
-            settled = self._store.settle_call(
-                run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
-                actual_microusd=actual, terminal_response=terminal, lease_ttl_seconds=self._lease_ttl_seconds,
+            settlement = dict(
+                run_id=context.run_id, lease_token_hash=context.lease_token_hash,
+                call_identity=call_identity, actual_microusd=actual,
+                terminal_response=terminal, lease_ttl_seconds=self._lease_ttl_seconds,
             )
+            for attempt in range(_SETTLEMENT_STORE_MAX_ATTEMPTS):
+                try:
+                    settled = self._store.settle_call(**settlement)
+                except ArenaStoreError:
+                    if attempt + 1 == _SETTLEMENT_STORE_MAX_ATTEMPTS:
+                        raise
+                    continue
+                if attempt and settled.get("status") == "settled":
+                    # A lost RPC reply can leave a committed settlement. The
+                    # idempotent view must describe this exact paid call.
+                    saved_amount = settled.get(
+                        "amount_microusd" if settled.get("idempotent") else "actual_microusd"
+                    )
+                    if saved_amount != actual or settled.get("terminal_response") != terminal:
+                        raise ArenaContractError("settlement retry returned a different terminal")
+                break
         except Exception as exc:
             # A reply the sanitizer refuses (not JSON, oversized) or a settlement
             # the store rejects must not leave the call dispatched forever, which
@@ -2559,15 +2730,38 @@ class Broker:
                         )
                 except Exception:
                     pass
+            uncertain_doc: Dict[str, Any] = {
+                "reason": "settle_failure",
+                "call_succeeded": False,
+                "failure_stage": failure_stage,
+                "error_class": _safe_exception_class(exc),
+            }
+            if failure_stage == "settlement":
+                uncertain_doc = _missing_provider_cost_call_doc(
+                    response, raw_document, call_succeeded=call_succeeded,
+                    deepline_request_id=deepline_request_id,
+                    deepline_response_request_id=deepline_response_request_id,
+                    deepline_operation=deepline_operation,
+                    openrouter_generation_id=openrouter_generation_id,
+                    credential_fingerprint=provider_credential_fingerprint,
+                )
+                uncertain_doc.update({
+                    "reason": "settle_failure", "failure_stage": failure_stage,
+                    "error_class": _safe_exception_class(exc),
+                })
+                if raw_actual is not None:
+                    uncertain_doc["known_actual_microusd"] = raw_actual
+                if cost_record is not None:
+                    uncertain_doc["provider_cost"] = cost_record
+            if scrapingdog_observed_success_status is not None:
+                uncertain_doc.update({
+                    "observed_provider_status": scrapingdog_observed_success_status,
+                    "transport_error_class": summary["transport_error_class"],
+                })
             try:
                 self._store.mark_uncertain(
                     run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
-                    call_doc={
-                        "reason": "settle_failure",
-                        "call_succeeded": False,
-                        "failure_stage": failure_stage,
-                        "error_class": _safe_exception_class(exc),
-                    },
+                    call_doc=uncertain_doc,
                     lease_ttl_seconds=self._lease_ttl_seconds,
                 )
                 summary.update({"outcome": "uncertain", "actual_microusd": amount})
@@ -2576,14 +2770,14 @@ class Broker:
             return _error_result("provider_unavailable", summary)
         settle_status = settled.get("status")
         if settle_status == "settled" and miner_credential_failure:
-            summary.update({"outcome": "settled", "actual_microusd": actual, "provider_status": int(response.status)})
+            summary.update({"outcome": "settled", "actual_microusd": actual, "provider_status": provider_status_for_summary})
             return _error_result("miner_credentials_unavailable", summary)
         if settle_status == "settled" and operations.provider_status_is_infrastructure(response.status):
             # An organizer account failure or upstream outage is infrastructure.
-            summary.update({"outcome": "settled", "actual_microusd": actual, "status": sanitized_status, "provider_status": int(response.status), "response_hash": payload["response_hash"]})
+            summary.update({"outcome": "settled", "actual_microusd": actual, "status": sanitized_status, "provider_status": provider_status_for_summary, "response_hash": payload["response_hash"]})
             return _error_result("provider_unavailable", summary)
         if settle_status == "settled":
-            summary.update({"outcome": "settled", "actual_microusd": actual, "status": sanitized_status, "provider_status": int(response.status), "response_hash": payload["response_hash"]})
+            summary.update({"outcome": "settled", "actual_microusd": actual, "status": sanitized_status, "provider_status": provider_status_for_summary, "response_hash": payload["response_hash"]})
             return BrokerResult(sanitized_status, sanitized_headers, sanitized_body, summary)
         if settle_status == "stale":
             # The lease or stage ended while the request was in flight: the

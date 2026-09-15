@@ -34,6 +34,7 @@ import httpx
 
 from lab_arena import contracts, operations, provider_costs, scoring_provider_compat
 from lab_arena.contracts import ArenaContractError
+from lab_arena.store import ArenaStoreError
 
 PRICE_TABLE_SCHEMA_VERSION = "leadpoet.lab_arena.openrouter_price_table.v1"
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
@@ -88,6 +89,7 @@ _DEEPLINE_BILLING_POLL_SECONDS = 2.0
 _OPENROUTER_BILLING_MAX_ATTEMPTS = 6
 _OPENROUTER_BILLING_POLL_SECONDS = 2.0
 OPENROUTER_DELAYED_RECONCILIATION_TIMEOUT_SECONDS = 5.0
+_SETTLEMENT_STORE_MAX_ATTEMPTS = 3
 DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS = 5.0
 _DEEPLINE_REQUEST_ID_RE = re.compile(r"^ctx-tool-[0-9a-f]{32}$")
 _DEEPLINE_BILLING_REQUEST_ID_RE = re.compile(
@@ -2510,10 +2512,27 @@ class Broker:
             )
             payload = dict(summary, outcome="settled", status=sanitized_status, provider_status=int(response.status), actual_microusd=actual, response_hash=contracts.hash_bytes(sanitized_body))
             failure_stage = "settlement"
-            settled = self._store.settle_call(
-                run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
-                actual_microusd=actual, terminal_response=terminal, lease_ttl_seconds=self._lease_ttl_seconds,
+            settlement = dict(
+                run_id=context.run_id, lease_token_hash=context.lease_token_hash,
+                call_identity=call_identity, actual_microusd=actual,
+                terminal_response=terminal, lease_ttl_seconds=self._lease_ttl_seconds,
             )
+            for attempt in range(_SETTLEMENT_STORE_MAX_ATTEMPTS):
+                try:
+                    settled = self._store.settle_call(**settlement)
+                except ArenaStoreError:
+                    if attempt + 1 == _SETTLEMENT_STORE_MAX_ATTEMPTS:
+                        raise
+                    continue
+                if attempt and settled.get("status") == "settled":
+                    # A lost RPC reply can leave a committed settlement. The
+                    # idempotent view must describe this exact paid call.
+                    saved_amount = settled.get(
+                        "amount_microusd" if settled.get("idempotent") else "actual_microusd"
+                    )
+                    if saved_amount != actual or settled.get("terminal_response") != terminal:
+                        raise ArenaContractError("settlement retry returned a different terminal")
+                break
         except Exception as exc:
             # A reply the sanitizer refuses (not JSON, oversized) or a settlement
             # the store rejects must not leave the call dispatched forever, which
@@ -2552,15 +2571,33 @@ class Broker:
                         )
                 except Exception:
                     pass
+            uncertain_doc: Dict[str, Any] = {
+                "reason": "settle_failure",
+                "call_succeeded": False,
+                "failure_stage": failure_stage,
+                "error_class": _safe_exception_class(exc),
+            }
+            if failure_stage == "settlement":
+                uncertain_doc = _missing_provider_cost_call_doc(
+                    response, raw_document, call_succeeded=call_succeeded,
+                    deepline_request_id=deepline_request_id,
+                    deepline_response_request_id=deepline_response_request_id,
+                    deepline_operation=deepline_operation,
+                    openrouter_generation_id=openrouter_generation_id,
+                    credential_fingerprint=provider_credential_fingerprint,
+                )
+                uncertain_doc.update({
+                    "reason": "settle_failure", "failure_stage": failure_stage,
+                    "error_class": _safe_exception_class(exc),
+                })
+                if raw_actual is not None:
+                    uncertain_doc["known_actual_microusd"] = raw_actual
+                if cost_record is not None:
+                    uncertain_doc["provider_cost"] = cost_record
             try:
                 self._store.mark_uncertain(
                     run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
-                    call_doc={
-                        "reason": "settle_failure",
-                        "call_succeeded": False,
-                        "failure_stage": failure_stage,
-                        "error_class": _safe_exception_class(exc),
-                    },
+                    call_doc=uncertain_doc,
                     lease_ttl_seconds=self._lease_ttl_seconds,
                 )
                 summary.update({"outcome": "uncertain", "actual_microusd": amount})

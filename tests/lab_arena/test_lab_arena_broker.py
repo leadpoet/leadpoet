@@ -56,7 +56,9 @@ class FakeLedgerStore:
             "status": {"reservation": "reserved", "dispatch": "dispatched", "settlement": "settled", "uncertain": "uncertain", "recovery": "recovered", "refusal": "refused"}[call["kind"]],
             "idempotent": True,
             "call_identity": call["identity"],
-            "amount_microusd": call["amount"],
+            "amount_microusd": (
+                call["actual"] if call["kind"] == "settlement" else call["amount"]
+            ),
             "terminal_response": call.get("terminal"),
             "reason": call.get("reason"),
             "account_failure_evidence": (
@@ -3997,13 +3999,156 @@ def test_a_store_that_rejects_the_settlement_leaves_the_call_uncertain():
     store.settle_call = refusing_settle
     result = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "acme"}}, action_sequence=0, timeout_ms=30000)
     assert result.status == 502 and result.call["outcome"] == "uncertain" and store.log[-1] == "uncertain"
-    assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
-        "reason": "settle_failure",
-        "call_succeeded": False,
-        "failure_stage": "settlement",
-        "error_class": "ArenaContractError",
-    }
+    call_doc = store.calls[result.call["call_identity"]]["uncertain_doc"]
+    assert call_doc["reason"] == "settle_failure"
+    assert call_doc["failure_stage"] == "settlement"
+    assert call_doc["error_class"] == "ArenaContractError"
+    assert call_doc["call_succeeded"] is True
+    assert call_doc["known_actual_microusd"] == 0
+    assert call_doc["deepline_request_id"] == transport.sent[0]["headers"]["x-deepline-request-id"]
+    assert call_doc["deepline_operation"] == "exa_search"
     store.settle_call = original
+
+
+def test_store_settlement_retry_reuses_paid_reply_and_releases_the_budget():
+    envelope = {
+        "job_id": "settle-retry-job", "status": "completed",
+        "result": {"data": {"results": []}},
+        "billing": {"credits_charged": 0.02},
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, envelope), (200, envelope)])
+    )
+    original = store.settle_call
+    attempts = []
+
+    def one_store_failure(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise br.ArenaStoreError("transient ledger RPC failure")
+        return original(**kwargs)
+
+    store.settle_call = one_store_failure
+    parameters = {"tool": "exa_search", "payload": {"query": "synthetic"}}
+    first = broker.execute(
+        CONTEXT, operation_id="deepline.execute", parameters=parameters,
+        action_sequence=0, timeout_ms=5000,
+    )
+    assert first.status == 200 and first.call["outcome"] == "settled"
+    assert first.call["actual_microusd"] == 2_000
+    assert len(attempts) == 2 and attempts[0] == attempts[1]
+    assert len(transport.sent) == 1 and store.log == ["reserve", "dispatch", "settle"]
+    assert store.openrouter_capacity == 10_000_000 - 2_000
+
+    next_context = br.RunContext(**{
+        **CONTEXT.__dict__, "run_id": "next-icp-run",
+        "icp_position": CONTEXT.icp_position + 1,
+    })
+    second = broker.execute(
+        next_context, operation_id="deepline.execute", parameters=parameters,
+        action_sequence=0, timeout_ms=5000,
+    )
+    assert second.status == 200 and second.call["outcome"] == "settled"
+    assert len(transport.sent) == 2  # exactly one paid POST per distinct ICP
+
+
+def test_store_settlement_lost_reply_accepts_only_the_same_committed_terminal():
+    envelope = {
+        "job_id": "lost-settle-reply", "status": "completed",
+        "result": {"data": {"results": []}},
+        "billing": {"credits_charged": 0.02},
+    }
+    broker, store, transport = make_broker(transport=FakeTransport([(200, envelope)]))
+    original = store.settle_call
+    attempts = []
+
+    def lost_reply(**kwargs):
+        attempts.append(kwargs)
+        result = original(**kwargs)
+        if len(attempts) == 1:
+            raise br.ArenaStoreError("settlement reply lost after commit")
+        return result
+
+    store.settle_call = lost_reply
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "synthetic"}},
+        action_sequence=0, timeout_ms=5000,
+    )
+    assert result.status == 200 and result.call["outcome"] == "settled"
+    assert len(attempts) == 2 and attempts[0] == attempts[1]
+    assert store.log == ["reserve", "dispatch", "settle", "settle"]
+    assert len(transport.sent) == 1
+    assert store.openrouter_capacity == 10_000_000 - 2_000
+
+
+def test_store_settlement_retry_rejects_a_different_idempotent_terminal():
+    envelope = {
+        "job_id": "conflicting-settle-reply", "status": "completed",
+        "result": {"data": {"results": []}},
+        "billing": {"credits_charged": 0.02},
+    }
+    broker, store, transport = make_broker(transport=FakeTransport([(200, envelope)]))
+    attempts = []
+
+    def conflicting_reply(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise br.ArenaStoreError("settlement reply lost")
+        return {
+            "status": "settled", "idempotent": True,
+            "amount_microusd": kwargs["actual_microusd"] + 1,
+            "terminal_response": kwargs["terminal_response"],
+        }
+
+    store.settle_call = conflicting_reply
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "synthetic"}},
+        action_sequence=0, timeout_ms=5000,
+    )
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert len(attempts) == 2 and len(transport.sent) == 1
+    assert store.calls[result.call["call_identity"]]["kind"] == "uncertain"
+    assert store.openrouter_capacity == 0
+
+
+def test_persistent_store_settlement_failure_keeps_the_known_receipt_uncertain():
+    envelope = {
+        "job_id": "unsettled-known-receipt", "status": "completed",
+        "result": {"data": {"results": []}},
+        "billing": {"credits_charged": 0.02},
+    }
+    broker, store, transport = make_broker(transport=FakeTransport([(200, envelope)]))
+    attempts = []
+
+    def unavailable_store(**kwargs):
+        attempts.append(kwargs)
+        raise br.ArenaStoreError("ledger RPC unavailable")
+
+    store.settle_call = unavailable_store
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "synthetic"}},
+        action_sequence=0, timeout_ms=5000,
+    )
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert len(attempts) == br._SETTLEMENT_STORE_MAX_ATTEMPTS
+    assert all(attempt == attempts[0] for attempt in attempts)
+    assert len(transport.sent) == 1 and store.log[-1] == "uncertain"
+    call = store.calls[result.call["call_identity"]]
+    assert call["kind"] == "uncertain" and store.openrouter_capacity == 0
+    doc = call["uncertain_doc"]
+    assert doc["reason"] == "settle_failure"
+    assert doc["failure_stage"] == "settlement" and doc["error_class"] == "ArenaStoreError"
+    assert doc["call_succeeded"] is True and doc["provider_status"] == 200
+    assert doc["known_actual_microusd"] == 2_000
+    assert doc["deepline_request_id"] == transport.sent[0]["headers"]["x-deepline-request-id"]
+    assert doc["deepline_operation"] == "exa_search"
+    assert doc["credential_fingerprint"].startswith("sha256:")
+    assert doc["deepline_job_id"] == envelope["job_id"]
+    assert doc["provider_cost"] == attempts[0]["terminal_response"]["provider_cost"]
+    assert "terminal_response" not in doc and DL_KEY not in json.dumps(doc)
 
 
 def test_response_adaptation_failure_retains_only_safe_class_and_stage(monkeypatch):

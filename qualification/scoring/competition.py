@@ -320,10 +320,7 @@ def _normalized_company(
         "state": row["state"],
         "description": "" if simplified_intent else row["fit_summary"][:500],
         "fit_evidence_urls": (
-            # V5 removed the separate fit-URL field. Its existing event pages
-            # can still help locate company facts; the fit verifier must
-            # independently fetch them and verify each required dimension.
-            fit_evidence_url_hints([signal["url"] for signal in signals])
+            []
             if simplified_intent
             else (
                 fit_evidence_url_hints(row["fit_evidence_urls"])

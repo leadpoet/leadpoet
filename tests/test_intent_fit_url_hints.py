@@ -71,7 +71,10 @@ def test_current_hints_use_existing_deduplication_and_bound_without_losing_signa
 
     projected = _normalized_company(row, integrity_policy=True)
 
-    assert projected["fit_evidence_urls"] == [urls[0], urls[2], urls[4]]
+    assert projected["fit_evidence_urls"] == []
+    assert lead_scorer._fit_evidence_url_hints(CompanyOutput(**projected)) == [
+        urls[0], urls[2], urls[4]
+    ]
     assert len(projected["intent_signals"]) == 5
     assert {item["url"] for item in projected["intent_signals"]} == set(urls)
 

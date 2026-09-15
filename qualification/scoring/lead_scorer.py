@@ -1192,7 +1192,14 @@ def _valid_web_evidence_url(value: Any) -> str:
 def _fit_evidence_url_hints(company: CompanyOutput) -> list[str]:
     """Return bounded, prompt-safe public URLs as untrusted lookup hints."""
 
-    return fit_evidence_url_hints(company.fit_evidence_urls)
+    # V5 already carries event links. Reuse them for independent discovery
+    # without restoring a separate model-supplied fit-URL field.
+    values = (
+        [signal.url for signal in company.intent_signals]
+        if company.intent_details is not None
+        else company.fit_evidence_urls
+    )
+    return fit_evidence_url_hints(values)
 
 
 def _verified_homepage_identity_anchor(

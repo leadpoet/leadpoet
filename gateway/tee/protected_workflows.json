@@ -2117,7 +2117,7 @@
       "symbol": "TEEEgressForwarderCleanupError"
     },
     {
-      "ast_sha256": "sha256:2f5ea0148b72fba354d2d9baa7b997aaecbe9b6979c5dc85887781b91639a9d8",
+      "ast_sha256": "sha256:941de0634faaef82a623160a521c87b9e710b992ad114b1f53d8b440d97b26b4",
       "path": "gateway/utils/tee_egress_forwarder.py",
       "symbol": "_connect_public_destination"
     },
@@ -2127,7 +2127,7 @@
       "symbol": "_handle_connection"
     },
     {
-      "ast_sha256": "sha256:4332a15377be3a658cef20b5e5e3b5b38232a0d7c214ecc48f1549ad19361af1",
+      "ast_sha256": "sha256:82358bc0c9688745f0a8f6541332823885bb8384c856a86bd6fa4b33e69b35fc",
       "path": "gateway/utils/tee_egress_forwarder.py",
       "symbol": "_shutdown_and_close_socket"
     },
@@ -2492,6 +2492,11 @@
       "symbol": "validate_production_parity_boundary_v2"
     },
     {
+      "ast_sha256": "sha256:65576b8b23747c00aba7e0b408429855cf21b4f2050b3db4580b5a8001b372e2",
+      "path": "leadpoet_canonical/proxy_transport.py",
+      "symbol": "__module__"
+    },
+    {
       "ast_sha256": "sha256:d4fd38930680026d18f3e90f3e9fe8ef667a5e6e525ebb3f4bc6bab576c74f12",
       "path": "leadpoet_canonical/subtensor_events_v2.py",
       "symbol": "__module__"
@@ -2797,7 +2802,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:ac36feb29d79c4ca5f4e3b811e181680c750db2e70349886b5bb744ebd8faa07",
-  "protected_source_commit": "96da249e09f112bc7e45050da7add61dc7d43cee",
+  "manifest_hash": "sha256:012b5b719658826640319be0287e7d0288164ed8d4c4ae44ff23ce637c9084df",
+  "protected_source_commit": "55845c678a89ca3692d82ef7927be8bdfe78d40e",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -290,8 +290,9 @@ class RoundDefaults:
     # The service freezes its public execution ceiling into each new round.
     # RUNNER_SLOT_CEILING is only the public maximum; a runner declaration can
     # never raise this authority cap.
-    runner_slot_ceiling: int = 8
+    runner_slot_ceiling: int = contracts.RUNNER_SLOT_CEILING
     parallel_twenty_icp_execution: bool = False
+    checkpoint_deadline_enabled: bool = True
     baseline_hotkey: str = ""
     baseline_source_url: str = DEFAULT_BASELINE_SOURCE_URL
     stage_minutes: Mapping[str, int] = field(default_factory=lambda: dict(DEFAULT_STAGE_MINUTES))
@@ -850,12 +851,18 @@ class ArenaService:
             "max_challengers": int(defaults.max_challengers),
             "runner_slot_ceiling": int(defaults.runner_slot_ceiling),
             "max_attempts_per_assignment": contracts.MAX_ATTEMPTS_PER_ASSIGNMENT,
-            "lease_ttl_seconds": contracts.LEASE_TTL_SECONDS,
+            "lease_ttl_seconds": (
+                contracts.CHECKPOINT_LEASE_TTL_SECONDS
+                if defaults.checkpoint_deadline_enabled else contracts.LEASE_TTL_SECONDS
+            ),
             "companies_per_icp": 5,
             "providers": list(contracts.PROVIDERS),
             "call_quotas": dict(contracts.CALL_QUOTAS_PER_ICP),
             "scoring_call_quotas": dict(contracts.SCORING_CALL_QUOTAS_PER_WORK_ITEM),
-            "icp_wall_clock_seconds": contracts.ICP_WALL_CLOCK_SECONDS,
+            "icp_wall_clock_seconds": (
+                contracts.CHECKPOINT_WALL_CLOCK_SECONDS
+                if defaults.checkpoint_deadline_enabled else contracts.ICP_WALL_CLOCK_SECONDS
+            ),
             "scoring_wall_clock_seconds": contracts.SCORING_WALL_CLOCK_SECONDS,
             "scorer_policy": self._scorer_policy,
             "execution_cap_microusd": defaults.execution_cap_microusd,
@@ -874,6 +881,8 @@ class ArenaService:
         }
         if defaults.parallel_twenty_icp_execution:
             document["parallel_twenty_icp_execution"] = True
+        if defaults.checkpoint_deadline_enabled:
+            document["checkpoint_deadline_policy"] = contracts.CHECKPOINT_DEADLINE_POLICY
         if defaults.integrity_from is not None and cutoff >= datetime.fromisoformat(defaults.integrity_from.replace("Z", "+00:00")):
             self._require_integrity_schema()
             document["integrity_policy"] = integrity.POLICY
@@ -3275,6 +3284,9 @@ class ArenaService:
         if (configuration.get("parallel_twenty_icp_execution") is True
                 and body.get("proxy_execution_version") != contracts.PROXY_EXECUTION_VERSION):
             raise ServiceError("validator_proxy_execution_upgrade_required", 409)
+        if (configuration.get("checkpoint_deadline_policy") == contracts.CHECKPOINT_DEADLINE_POLICY
+                and body.get("checkpoint_deadline_policy") != contracts.CHECKPOINT_DEADLINE_POLICY):
+            raise ServiceError("validator_checkpoint_upgrade_required", 409)
         response = None
         try:
             uid = self._benchmark_validator_uid(snapshot, validated["hotkey"])
@@ -3325,6 +3337,15 @@ class ArenaService:
         if not contact_policy.enabled(configuration):
             lease_icp.pop("contact_policy", None)
         lease = dict(response, icp=lease_icp, lease_token=token, round_id=round_id, evaluation_date=str(round_row.get("evaluation_date") or ""))
+        lease["icp_wall_clock_seconds"] = int(configuration.get(
+            "icp_wall_clock_seconds", contracts.ICP_WALL_CLOCK_SECONDS
+        ))
+        lease["scoring_wall_clock_seconds"] = int(configuration.get(
+            "scoring_wall_clock_seconds", contracts.SCORING_WALL_CLOCK_SECONDS
+        ))
+        lease["lease_ttl_seconds"] = int(configuration["lease_ttl_seconds"])
+        if configuration.get("checkpoint_deadline_policy") == contracts.CHECKPOINT_DEADLINE_POLICY:
+            lease["checkpoint_deadline_policy"] = contracts.CHECKPOINT_DEADLINE_POLICY
         if integrity.enabled(configuration):
             lease["integrity_policy"] = integrity.POLICY
         if contact_policy.enabled(configuration):

@@ -214,6 +214,7 @@ class ChampionHarness(Harness):
                 banned_hotkeys_source=lambda: list(self.banned),
                 broker_factory=broker_factory,
                 defaults=svc.RoundDefaults(
+                    checkpoint_deadline_enabled=False, runner_slot_ceiling=8,
                     runner_hotkeys=tuple(self.runner_keys),
                     baseline_hotkey=self.baseline_hotkey,
                     baseline_source_url=svc.DEFAULT_BASELINE_SOURCE_URL,

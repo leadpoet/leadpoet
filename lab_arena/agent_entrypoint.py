@@ -52,6 +52,7 @@ def _load_run_icp(source_dir: Path) -> Any:
         raise AgentContractError("harness.py is missing")
     sys.path.insert(0, str(DEPENDENCY_DIR))
     sys.path.insert(0, str(source_dir))
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
     specification = importlib.util.spec_from_file_location(
         "_lab_arena_submission_harness", harness_path
     )
@@ -116,10 +117,9 @@ def run(
         raise AgentContractError("harness.run_icp must be synchronous")
     if not isinstance(result, list) or any(not isinstance(item, dict) for item in result):
         raise AgentContractError("harness.run_icp must return a list of company objects")
-    output_path.write_text(
-        json.dumps({"companies": result}, sort_keys=True, separators=(",", ":")),
-        encoding="utf-8",
-    )
+    import lab_arena_checkpoint
+
+    lab_arena_checkpoint.write(result, output_path=output_path)
 
 
 def main() -> int:

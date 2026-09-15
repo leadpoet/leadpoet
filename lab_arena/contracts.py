@@ -54,6 +54,9 @@ SCORING_CALL_QUOTAS_PER_WORK_ITEM = {"scrapingdog": 150, "deepline": 40, "openro
 # scores one output on one ICP with the Arena judge.
 ASSIGNMENT_KINDS = ("execute", "score")
 ICP_WALL_CLOCK_SECONDS = 300
+CHECKPOINT_DEADLINE_POLICY = "atomic_checkpoint_45m_v1"
+CHECKPOINT_WALL_CLOCK_SECONDS = 45 * 60
+CHECKPOINT_LEASE_TTL_SECONDS = 3600
 # A judge run reads pages and calls several models per company against live
 # providers; it gets its own wall clock, longer than a model's, under the same
 # lease; provider calls refresh the lease while the judge is working.
@@ -705,6 +708,9 @@ ROUND_CONFIGURATION_FIELDS = (
     F("call_quotas", "object", fields=tuple(F(provider, "int", minimum=1) for provider in PROVIDERS)),
     F("scoring_call_quotas", "object", fields=tuple(F(provider, "int", minimum=1) for provider in PROVIDERS)),
     F("icp_wall_clock_seconds", "int", minimum=30),
+    # An opted-in round freezes one common deadline and checkpoint protocol.
+    # Absence preserves every previously signed round's execution behavior.
+    F("checkpoint_deadline_policy", "str", required=False, choices=(CHECKPOINT_DEADLINE_POLICY,)),
     F("scoring_wall_clock_seconds", "int", minimum=30),
     F("scorer_policy", "object"),
     F("execution_cap_microusd", "int", minimum=1),
@@ -743,6 +749,11 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
     has_contacts = contact_policy.enabled(config)
     has_quality = quality_policy.enabled(config)
     has_intent_details = intent_details_policy.enabled(config)
+    if config.get("checkpoint_deadline_policy") == CHECKPOINT_DEADLINE_POLICY:
+        if config["icp_wall_clock_seconds"] != CHECKPOINT_WALL_CLOCK_SECONDS:
+            raise ArenaContractError("checkpoint deadline round must freeze 45 minutes")
+        if config["lease_ttl_seconds"] != CHECKPOINT_LEASE_TTL_SECONDS:
+            raise ArenaContractError("checkpoint deadline round must freeze its full lease")
     if has_quality and not is_integrity:
         raise ArenaContractError("company quality policy requires integrity policy")
     if has_quality != quality_policy.scorer_enabled(config["scorer_policy"]):

@@ -82,6 +82,41 @@ company objects. The public baseline README gives the full input and output
 example:
 [`leadpoet/pydantic-harness`](https://github.com/leadpoet/pydantic-harness).
 
+## Execution checkpoint deadline
+
+New rounds freeze `atomic_checkpoint_45m_v1`, a 2700-second model execution
+limit, and a 3600-second lease. Existing rounds without this marker retain
+their signed execution limit and lease. The runner reads the duration from the
+lease; a validator without the checkpoint capability cannot claim work in a
+marked round. Scoring uses the round's separate pinned judge limit.
+
+A submitted harness may import the read-only host module
+`lab_arena_checkpoint` and call `write(companies)` whenever it has a complete
+list of validated company objects. The helper atomically replaces
+`/output/companies.json` with `{"companies": [...]}`. The model chooses its own
+work and checkpoint times. The host does not ask it to finalize.
+
+The 45-minute clock starts at the gVisor sandbox creation boundary; runsc
+startup has a separate 120-second limit. While the model runs, the host reads
+bounded output at 50-ms intervals and validates each changed complete document
+against the round's normal output schema. It keeps the last valid bytes it
+observed before the monotonic cutoff. A malformed or oversized later file does
+not erase an earlier valid checkpoint. At the hard cutoff, the host freezes
+those bytes before killing or cleaning the sandbox. A valid frozen checkpoint
+can complete a timed-out execution; without one, timeout remains a failure.
+Provider, credential, budget, and unsettled-cost checks still govern completion.
+No file first observed at or after the cutoff is accepted, including output
+written during kill or cleanup. A file published within the final poll interval
+may miss observation and is therefore not guaranteed to be accepted.
+
+On a Linux x86_64 root validator host, use
+`scripts/probe_arena_checkpoint_gvisor.py` with the exact candidate checkout,
+installed trusted Python rootfs, runsc path, and an isolated short workdir.
+Its two five-second runs check the helper mount/import, valid checkpoint before
+timeout, malformed replacement, and a valid file written only during kill.
+This local probe has no providers or database writes; it does not prove a live
+paid Arena completion.
+
 Vendored Python modules run directly from the read-only source mount. An
 optional `requirements.txt` can contain package names and version constraints.
 The runner installs binary wheels only into a bounded cache and mounts those

@@ -22,7 +22,9 @@ from pathlib import Path
 import pytest
 
 from lab_arena import contracts
+from lab_arena import lab_arena_checkpoint
 from lab_arena import runtime as rt
+from lab_arena.output import OutputInvalid, output_document_from_bytes
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -600,6 +602,101 @@ def test_timeout_kills_deletes_and_never_keeps_output(tmp_path):
     # A timed-out model's partial output is still surfaced to the caller for
     # the invalid_output decision, but the directory itself never survives.
     assert result.output_bytes == b"{}"
+
+
+def _checkpoint_spec(tmp_path, *, seconds=10):
+    def valid(candidate):
+        try:
+            output_document_from_bytes(candidate)
+        except OutputInvalid:
+            return False
+        return True
+
+    return make_spec(
+        tmp_path, wall_clock_seconds=seconds,
+        checkpoint_deadline_policy=contracts.CHECKPOINT_DEADLINE_POLICY,
+        checkpoint_validator=valid,
+    )
+
+
+def test_checkpoint_deadline_keeps_last_schema_valid_bytes_before_kill(tmp_path):
+    config = make_config(tmp_path)
+    spec = _checkpoint_spec(tmp_path)
+    clock = FakeClock()
+    first = b'{"companies":[]}'
+    latest = (
+        b'{"schema_version":"' + contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION.encode()
+        + b'","companies":[]}'
+    )
+    deeply_nested = b"[" * 1500 + b"0" + b"]" * 1500
+    events = [(1002.0, first), (1008.0, latest), (1008.5, b"{"),
+              (1009.0, deeply_nested),
+              (1010.0, b'{"companies":[],"late":true}')]
+    emitted = set()
+
+    def sleep(seconds):
+        clock.sleep(seconds)
+        for index, (at, payload) in enumerate(events):
+            if clock() >= at and index not in emitted:
+                spec.output_path.write_bytes(payload)
+                emitted.add(index)
+
+    runner = FakeRunner(
+        clock, run_process=lambda argv: FakeProcess(argv, clock=clock, finish_at=None),
+    )
+    result = rt.run_sandbox(
+        config, spec, process_runner=runner, clock=clock, sleep=sleep,
+        rusage=lambda: (0.0, 0),
+    )
+    assert result.timed_out and result.output_bytes == latest
+    assert result.wall_seconds == pytest.approx(10.0, abs=0.05)
+    assert runner.kinds() == ["mount", "run", "kill", "delete", "umount"]
+
+
+def test_checkpoint_deadline_rejects_output_first_observed_at_cutoff(tmp_path):
+    config = make_config(tmp_path)
+    spec = _checkpoint_spec(tmp_path)
+    clock = FakeClock()
+
+    def sleep(seconds):
+        clock.sleep(seconds)
+        if clock() >= 1010.0:
+            spec.output_path.write_bytes(b'{"companies":[]}')
+
+    result = rt.run_sandbox(
+        config, spec,
+        process_runner=FakeRunner(
+            clock, run_process=lambda argv: FakeProcess(argv, clock=clock, finish_at=None),
+        ),
+        clock=clock, sleep=sleep, rusage=lambda: (0.0, 0),
+    )
+    assert result.timed_out and result.output_bytes is None
+
+
+def test_checkpoint_startup_without_sandbox_creation_is_bounded(tmp_path):
+    config = make_config(tmp_path)
+    spec = _checkpoint_spec(tmp_path)
+    clock = FakeClock()
+    runner = FakeRunner(
+        clock, sandbox_created=False,
+        run_process=lambda argv: FakeProcess(argv, clock=clock, finish_at=None),
+    )
+    with pytest.raises(rt.RuntimeHostError):
+        rt.run_sandbox(
+            config, spec, process_runner=runner, clock=clock,
+            sleep=clock.sleep, rusage=lambda: (0.0, 0),
+        )
+    assert clock() == pytest.approx(1000 + rt.SANDBOX_STARTUP_TIMEOUT_SECONDS, abs=0.05)
+    assert not spec.output_dir.exists()
+
+
+def test_checkpoint_writer_preserves_previous_complete_file_on_failed_write(tmp_path):
+    path = tmp_path / "companies.json"
+    lab_arena_checkpoint.write([], output_path=path)
+    assert path.read_bytes() == b'{"companies":[]}'
+    with pytest.raises(TypeError):
+        lab_arena_checkpoint.write([{"bad": object()}], output_path=path)
+    assert path.read_bytes() == b'{"companies":[]}'
 
 
 def test_cleanup_runs_even_when_the_launcher_raises(tmp_path):

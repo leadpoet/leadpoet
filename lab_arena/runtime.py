@@ -55,6 +55,7 @@ SANDBOX_AGENT_DIR = "/agent"
 SANDBOX_AGENT_SOURCE_DIR = SANDBOX_AGENT_DIR + "/source"
 SANDBOX_AGENT_DEPENDENCY_DIR = SANDBOX_AGENT_DIR + "/deps"
 SANDBOX_AGENT_ENTRYPOINT_PATH = SANDBOX_AGENT_DIR + "/entrypoint.py"
+SANDBOX_AGENT_CHECKPOINT_PATH = SANDBOX_AGENT_DIR + "/lab_arena_checkpoint.py"
 SANDBOX_WEB_BRIDGE_PATH = SANDBOX_AGENT_DIR + "/web_egress_bridge.py"
 SANDBOX_WEB_SOCKET_NAME = "web.sock"
 SANDBOX_INPUT_DIR = "/input"
@@ -80,6 +81,7 @@ SCORER_WORKING_DIR = "/model"
 MAX_OUTPUT_BYTES = 512 * 1024
 MAX_LOG_BYTES = 64 * 1024
 TIMEOUT_GRACE_SECONDS = 10
+SANDBOX_STARTUP_TIMEOUT_SECONDS = 120
 STOP_GRACE_SECONDS = 5.0
 CLEANUP_COMMAND_TIMEOUT_SECONDS = 30
 OUTPUT_TMPFS_BYTES = 64 * 1024 * 1024
@@ -164,6 +166,7 @@ class SandboxSpec:
     source_dir: Optional[Path] = None
     dependency_dir: Optional[Path] = None
     agent_entrypoint_path: Optional[Path] = None
+    checkpoint_module_path: Optional[Path] = None
     # Only newly opted-in execute leases receive this credential-free bridge.
     # runsc still has no external network; AF_INET permits its private loopback.
     web_bridge_path: Optional[Path] = None
@@ -173,6 +176,9 @@ class SandboxSpec:
     memory_limit_bytes: int = DEFAULT_MEMORY_LIMIT_BYTES
     pids_limit: int = DEFAULT_PIDS_LIMIT
     wall_clock_seconds: int = contracts.ICP_WALL_CLOCK_SECONDS
+    checkpoint_deadline_policy: Optional[str] = None
+    # Trusted host validation callback. Never included in OCI or model input.
+    checkpoint_validator: Optional[Callable[[bytes], bool]] = None
     uid: int = SANDBOX_UID
     gid: int = SANDBOX_GID
     output_tmpfs_bytes: int = OUTPUT_TMPFS_BYTES
@@ -211,6 +217,11 @@ class SandboxSpec:
             if not value.is_absolute():
                 raise SandboxSpecError("%s must be absolute" % name)
             object.__setattr__(self, name, value)
+        if self.checkpoint_module_path is not None:
+            checkpoint_path = Path(self.checkpoint_module_path)
+            if not checkpoint_path.is_absolute() or self.source_dir is None:
+                raise SandboxSpecError("checkpoint module requires an absolute trusted path and agent source")
+            object.__setattr__(self, "checkpoint_module_path", checkpoint_path)
         if self.web_bridge_path is not None:
             bridge = Path(self.web_bridge_path)
             if not bridge.is_absolute() or self.source_dir is None:
@@ -226,6 +237,11 @@ class SandboxSpec:
             value is not None for value in agent_paths
         ):
             raise SandboxSpecError("agent source mounts are required")
+        if self.checkpoint_deadline_policy is not None:
+            if (self.checkpoint_deadline_policy != contracts.CHECKPOINT_DEADLINE_POLICY
+                    or command != AGENT_ENTRY_COMMAND
+                    or self.checkpoint_validator is None):
+                raise SandboxSpecError("checkpoint deadline requires the trusted agent runtime and validator")
         working_dir = str(self.working_dir or "")
         if working_dir and (not working_dir.startswith("/") or len(working_dir) > 4096 or "\x00" in working_dir or "\n" in working_dir):
             raise SandboxSpecError("working directory is invalid")
@@ -367,6 +383,13 @@ def oci_spec(spec: SandboxSpec) -> Dict[str, Any]:
             "destination": SANDBOX_WEB_BRIDGE_PATH,
             "type": "bind",
             "source": str(spec.web_bridge_path),
+            "options": ["bind", "ro", "nosuid", "nodev", "noexec"],
+        })
+    if spec.checkpoint_module_path is not None:
+        mounts.append({
+            "destination": SANDBOX_AGENT_CHECKPOINT_PATH,
+            "type": "bind",
+            "source": str(spec.checkpoint_module_path),
             "options": ["bind", "ro", "nosuid", "nodev", "noexec"],
         })
     linux = {
@@ -552,19 +575,25 @@ def read_output(spec: SandboxSpec, *, max_bytes: int = MAX_OUTPUT_BYTES) -> Opti
     """
 
     path = spec.output_path
+    descriptor = None
     try:
-        info = os.lstat(path)
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
         return None
     except OSError as exc:
         raise SandboxOutputError("output is unreadable") from exc
-    if not os.path.isfile(path) or os.path.islink(path) or info.st_size > max_bytes:
-        raise SandboxOutputError("output is not a bounded regular file")
     try:
-        with open(path, "rb") as handle:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
+            raise SandboxOutputError("output is not a bounded regular file")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = None
             data = handle.read(max_bytes + 1)
     except OSError as exc:
         raise SandboxOutputError("output is unreadable") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
     if len(data) > max_bytes:
         raise SandboxOutputError("output exceeds %d bytes" % max_bytes)
     return data
@@ -805,6 +834,13 @@ def require_safe_agent_mounts(spec: SandboxSpec) -> None:
             raise SandboxSpecError("trusted web bridge is unavailable") from exc
         if not stat.S_ISREG(bridge_info.st_mode) or bridge_info.st_mode & 0o222:
             raise SandboxSpecError("trusted web bridge must be a read-only regular file")
+    if spec.checkpoint_module_path is not None:
+        try:
+            checkpoint_info = os.lstat(spec.checkpoint_module_path)
+        except OSError as exc:
+            raise SandboxSpecError("trusted checkpoint module is unavailable") from exc
+        if not stat.S_ISREG(checkpoint_info.st_mode) or checkpoint_info.st_mode & 0o222:
+            raise SandboxSpecError("trusted checkpoint module must be a read-only regular file")
 
 
 def run_sandbox(
@@ -818,10 +854,11 @@ def run_sandbox(
 ) -> SandboxResult:
     """Run one sandbox to completion or timeout and always clean up.
 
-    Writes the bundle, mounts the bounded output tmpfs, runs runsc with a hard
-    deadline of ``wall_clock_seconds + TIMEOUT_GRACE_SECONDS``, kills on
-    timeout, requires runsc's container-creation pid file, reads
-    ``companies.json`` into the result, then deletes the sandbox, unmounts,
+    Writes the bundle, mounts the bounded output tmpfs, and runs runsc. An
+    opted-in checkpoint execution starts its hard clock when runsc creates the
+    sandbox pid file; its last host-validated checkpoint is frozen no later
+    than the deadline, before any kill or cleanup. Historical sandboxes retain
+    their original wall-clock grace. Requires the pid file, then deletes the sandbox, unmounts,
     and removes the output and bundle directories. Cleanup runs every step
     even after a failure and raises ``SandboxCleanupError`` if any step failed.
     """
@@ -858,7 +895,38 @@ def run_sandbox(
         # default Popen is replaced only for the sandbox launcher, whose wait4
         # result cannot include another concurrently completing sandbox.
         injected_cpu_before = rusage()[0] if rusage is not None else None
-        started = clock()
+        launcher_started = clock()
+        checkpoint_execution = (
+            spec.checkpoint_deadline_policy == contracts.CHECKPOINT_DEADLINE_POLICY
+        )
+        execution_started: Optional[float] = None
+        last_pid_absence_at: Optional[float] = None
+        checkpoint_bytes: Optional[bytes] = None
+        observed_bytes: Optional[bytes] = None
+
+        def observe_checkpoint(deadline: float) -> None:
+            nonlocal checkpoint_bytes, observed_bytes
+            if clock() >= deadline:
+                return
+            try:
+                candidate = read_output(spec)
+            except SandboxOutputError:
+                return
+            # Both the open and full read must finish before the hard cutoff.
+            if candidate is None or clock() >= deadline:
+                return
+            if candidate == observed_bytes:
+                return
+            observed_bytes = candidate
+            try:
+                valid = spec.checkpoint_validator(candidate)
+            except Exception:
+                # An adversarial malformed document must not erase an earlier
+                # complete checkpoint or fail the worker before its cutoff.
+                return
+            if valid:
+                checkpoint_bytes = candidate
+
         launcher_runner = (
             _RusagePopen if process_runner is subprocess.Popen else process_runner
         )
@@ -881,20 +949,61 @@ def run_sandbox(
             thread = threading.Thread(target=_drain, args=(stream, capture), daemon=True)
             thread.start()
             threads.append(thread)
-        deadline = started + float(spec.wall_clock_seconds) + TIMEOUT_GRACE_SECONDS
+        deadline = (
+            launcher_started + float(spec.wall_clock_seconds) + TIMEOUT_GRACE_SECONDS
+            if not checkpoint_execution else None
+        )
         timed_out = False
         while process.poll() is None:
+            if checkpoint_execution and execution_started is None:
+                if pid_file.is_file():
+                    # The pid file can appear during a poll sleep. Use the
+                    # last observed absence as a conservative start bound so
+                    # a 50-ms observation lag never extends model execution.
+                    execution_started = (
+                        last_pid_absence_at if last_pid_absence_at is not None
+                        else clock()
+                    )
+                    deadline = execution_started + float(spec.wall_clock_seconds)
+                elif clock() >= launcher_started + SANDBOX_STARTUP_TIMEOUT_SECONDS:
+                    raise RuntimeHostError(
+                        reason="sandbox_launch_failed", runsc_path=config.runsc_path,
+                    )
+                else:
+                    last_pid_absence_at = clock()
+            if deadline is None:
+                sleep(0.05)
+                continue
             if clock() >= deadline:
                 timed_out = True
                 break
-            sleep(0.05)
+            if checkpoint_execution:
+                observe_checkpoint(deadline)
+                sleep(min(0.05, max(0.0, deadline - clock())))
+            else:
+                sleep(0.05)
+        if checkpoint_execution:
+            if execution_started is None and pid_file.is_file():
+                execution_started = (
+                    last_pid_absence_at if last_pid_absence_at is not None
+                    else clock()
+                )
+                deadline = execution_started + float(spec.wall_clock_seconds)
+            if deadline is not None and clock() >= deadline:
+                timed_out = True
+            elif deadline is not None:
+                # A normal exit can write its final output between poll ticks.
+                observe_checkpoint(deadline)
         if timed_out:
             try:
                 _run_command(process_runner, runsc_kill_command(config, runsc_root, spec.sandbox_id), timeout=config.cleanup_timeout_seconds)
             except ArenaRuntimeError as exc:
                 cleanup_errors.append("kill: %s" % exc)
             _stop_process(process, grace=STOP_GRACE_SECONDS)
-        wall_seconds = max(0.0, clock() - started)
+        wall_seconds = max(0.0, clock() - (
+            execution_started if checkpoint_execution and execution_started is not None
+            else launcher_started
+        ))
         for thread in threads:
             thread.join(STOP_GRACE_SECONDS)
         if any(thread.is_alive() for thread in threads):
@@ -928,10 +1037,13 @@ def run_sandbox(
         )
         output_bytes: Optional[bytes] = None
         output_error: Optional[str] = None
-        try:
-            output_bytes = read_output(spec)
-        except SandboxOutputError as exc:
-            output_error = str(exc)
+        if checkpoint_execution:
+            output_bytes = checkpoint_bytes
+        else:
+            try:
+                output_bytes = read_output(spec)
+            except SandboxOutputError as exc:
+                output_error = str(exc)
         result = SandboxResult(
             exit_code=None if timed_out else int(process.returncode),
             timed_out=timed_out,

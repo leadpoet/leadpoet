@@ -2093,6 +2093,34 @@ def test_claim_accepts_eligible_validator_absent_from_runner_configuration():
     assert service.handle_claim({}) == {"status": "empty"}
 
 
+def test_checkpoint_round_fences_old_validator_claims_before_leasing():
+    service = _runner_claim_service(
+        registered=True, role="validator", configured=True,
+    )
+    original = service._request_round
+    capable = False
+
+    def checkpoint_round(*args, **kwargs):
+        validated, round_row = original(*args, **kwargs)
+        validated["body"] = dict(validated["body"])
+        if capable:
+            validated["body"]["checkpoint_deadline_policy"] = (
+                contracts.CHECKPOINT_DEADLINE_POLICY
+            )
+        round_row["configuration_doc"] = dict(round_row["configuration_doc"])
+        round_row["configuration_doc"]["checkpoint_deadline_policy"] = (
+            contracts.CHECKPOINT_DEADLINE_POLICY
+        )
+        return validated, round_row
+
+    service._request_round = checkpoint_round
+    with pytest.raises(ServiceError) as rejected:
+        service.handle_claim({})
+    assert rejected.value.code == "validator_checkpoint_upgrade_required"
+    capable = True
+    assert service.handle_claim({}) == {"status": "empty"}
+
+
 def test_standalone_service_default_authority_uses_its_finalized_metagraph(
     monkeypatch,
 ):

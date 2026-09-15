@@ -47,6 +47,7 @@ DEFAULT_MAX_PARALLEL_RUNS = 8  # compatibility for direct test/embedded configur
 MAX_PARALLEL_ENV = "LAB_ARENA_MAX_PARALLEL_RUNS"
 DEFAULT_SOCKET_ROOT = str(DEFAULT_RUNNER_SOCKET_ROOT)
 AGENT_ENTRYPOINT_PATH = Path(__file__).with_name("agent_entrypoint.py").resolve()
+CHECKPOINT_MODULE_PATH = Path(__file__).with_name("lab_arena_checkpoint.py").resolve()
 WEB_BRIDGE_PATH = Path(__file__).with_name("web_egress_bridge.py").resolve()
 MAX_REFUSED_FRAMES = 25  # after this many refused calls the worker answers a run's frames locally
 # A request on the worker socket is either a length-prefixed operation frame
@@ -135,6 +136,7 @@ _KNOWN_CLAIM_DENIAL_CODES = frozenset(
         "runner_stake_below_minimum",
         "runner_validator_authority_unavailable",
         "runner_validator_required",
+        "validator_checkpoint_upgrade_required",
         "signature_invalid",
     }
 )
@@ -250,7 +252,7 @@ def _stage_agent_entrypoint(source_path: Path, run_dir: Path, *, filename: str =
     """Copy the trusted entrypoint without changing its deployed permissions."""
 
     source_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
-    if filename not in ("agent-entrypoint.py", "web-egress-bridge.py"):
+    if filename not in ("agent-entrypoint.py", "web-egress-bridge.py", "lab_arena_checkpoint.py"):
         raise RunnerError("trusted runtime filename is invalid")
     destination = Path(run_dir) / filename
     source_fd = destination_fd = None
@@ -1500,6 +1502,7 @@ class RunnerConfig:
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     socket_root: Path = Path(DEFAULT_SOCKET_ROOT)
     agent_entrypoint_path: Path = AGENT_ENTRYPOINT_PATH
+    checkpoint_module_path: Path = CHECKPOINT_MODULE_PATH
     web_bridge_path: Path = WEB_BRIDGE_PATH
     # Production always supplies verified slots. Direct test configurations may
     # omit the pool but cannot execute new proxy-enabled assignments.
@@ -1521,6 +1524,7 @@ class RunnerConfig:
         self.work_dir = Path(self.work_dir)
         self.socket_root = Path(self.socket_root)
         self.agent_entrypoint_path = Path(self.agent_entrypoint_path)
+        self.checkpoint_module_path = Path(self.checkpoint_module_path)
         self.web_bridge_path = Path(self.web_bridge_path)
         self.socket_root.mkdir(parents=True, exist_ok=True)
 
@@ -1574,6 +1578,43 @@ class AssignmentExecutor:
         started_at = _timestamp(config.clock)
         kind = str(lease.get("kind") or "execute")
         scoring_run = kind == "score"
+        checkpoint_policy = lease.get("checkpoint_deadline_policy")
+        if checkpoint_policy not in (None, contracts.CHECKPOINT_DEADLINE_POLICY):
+            raise RunnerError("lease checkpoint deadline policy is unsupported")
+        if checkpoint_policy == contracts.CHECKPOINT_DEADLINE_POLICY:
+            if (
+                lease.get("icp_wall_clock_seconds") != contracts.CHECKPOINT_WALL_CLOCK_SECONDS
+                or lease.get("lease_ttl_seconds") != contracts.CHECKPOINT_LEASE_TTL_SECONDS
+            ):
+                raise RunnerError("lease checkpoint deadline differs from its signed round")
+        signed_wall = lease.get(
+            "scoring_wall_clock_seconds" if scoring_run else "icp_wall_clock_seconds"
+        )
+        if signed_wall is not None and (
+            isinstance(signed_wall, bool)
+            or not isinstance(signed_wall, int)
+            or signed_wall < 30
+        ):
+            raise RunnerError("lease sandbox duration is invalid")
+        wall_clock_seconds = (
+            signed_wall if signed_wall is not None else (
+                contracts.SCORING_WALL_CLOCK_SECONDS if scoring_run
+                else config.wall_clock_seconds
+            )
+        )
+
+        def valid_checkpoint(candidate: bytes) -> bool:
+            try:
+                output_document_from_bytes(
+                    candidate,
+                    expected_schema_version=contact_policy.output_schema(lease),
+                    require_intent_dates=(
+                        lease.get("integrity_policy") != integrity.POLICY
+                    ),
+                )
+            except (OutputInvalid, RecursionError):
+                return False
+            return True
         terminal = "judge_error" if scoring_run else "model_error"
         failure_diagnostic: Optional[Dict[str, str]] = None
         failure_detail: Any = ""
@@ -1636,6 +1677,12 @@ class AssignmentExecutor:
                 if scoring_run
                 else _stage_agent_entrypoint(config.agent_entrypoint_path, run_dir)
             )
+            staged_checkpoint_module = (
+                None if scoring_run else _stage_agent_entrypoint(
+                    config.checkpoint_module_path, run_dir,
+                    filename="lab_arena_checkpoint.py",
+                )
+            )
             # Both assignment kinds use the service-selected trusted Python
             # image. Execute assignments add the admitted source bundle under
             # read-only mounts; no miner image metadata is accepted.
@@ -1696,17 +1743,28 @@ class AssignmentExecutor:
                     agent_entrypoint_path=(
                         staged_agent_entrypoint
                     ),
+                    checkpoint_module_path=staged_checkpoint_module,
                     web_bridge_path=staged_web_bridge,
                     entry_command=runtime.SCORER_ENTRY_COMMAND if scoring_run else runtime.AGENT_ENTRY_COMMAND,
                     working_dir=runtime.SCORER_WORKING_DIR if scoring_run else runtime.AGENT_WORKING_DIR,
                     evaluation_date=evaluation_date,
                     random_seed=int(contracts.document_hash(lease["assignment_id"])[7:15], 16) % (2 ** 32),
-                    wall_clock_seconds=contracts.SCORING_WALL_CLOCK_SECONDS if scoring_run else config.wall_clock_seconds,
+                    wall_clock_seconds=wall_clock_seconds,
+                    checkpoint_deadline_policy=(
+                        checkpoint_policy if not scoring_run else None
+                    ),
+                    checkpoint_validator=(
+                        valid_checkpoint if checkpoint_policy and not scoring_run
+                        else None
+                    ),
                     extra_environment=extra_environment,
                 )
                 server.start()
                 result = config.sandbox_runtime.run_icp(spec)
-            if result.timed_out:
+            if result.timed_out and not (
+                checkpoint_policy == contracts.CHECKPOINT_DEADLINE_POLICY
+                and not scoring_run and result.output_bytes is not None
+            ):
                 terminal = "judge_timeout" if scoring_run else "model_timeout"
                 if scoring_run:
                     failure_diagnostic = {
@@ -1952,7 +2010,8 @@ class Runner:
             round_id=round_id,
             hotkey=config.identity.hotkey,
             body={"declared_parallelism": capacity,
-                  "proxy_execution_version": contracts.PROXY_EXECUTION_VERSION},
+                  "proxy_execution_version": contracts.PROXY_EXECUTION_VERSION,
+                  "checkpoint_deadline_policy": contracts.CHECKPOINT_DEADLINE_POLICY},
             timestamp=int(config.clock().timestamp()),
             sign_message=config.identity.sign,
         )

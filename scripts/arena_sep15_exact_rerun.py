@@ -301,7 +301,7 @@ def _audit(service: Any) -> dict[str, Any]:
     return result
 
 
-def _adopt_sep16(service: Any, dry_run: bool) -> dict[str, Any]:
+def _adopt_sep16(service: Any, args: argparse.Namespace) -> dict[str, Any]:
     from lab_arena import capacity, contracts
 
     row = service.store.get_round(SEP16_ROUND)
@@ -310,7 +310,21 @@ def _adopt_sep16(service: Any, dry_run: bool) -> dict[str, Any]:
     config = dict(row.get("configuration_doc") or {})
     if config.get("parallel_twenty_icp_execution") is True:
         raise ExactRerunRefused("Sep16 already adopted; inspect audit before replay")
+    try:
+        forward_schedule = json.loads(args.forward_schedule_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise ExactRerunRefused("Sep16 forward schedule file is invalid") from exc
+    original_schedule = config.get("schedule") or {}
+    if not isinstance(forward_schedule, dict) or set(forward_schedule) != set(original_schedule) or any(
+        forward_schedule.get(field) != original_schedule.get(field)
+        for field in ("submission_open", "submission_cutoff", "benchmark_deadline", "stage_1_start")
+    ):
+        raise ExactRerunRefused("Sep16 forward schedule must preserve intake and stage-one start")
+    verified_slots = args.verified_parallel_runner_slots
+    if not 1 <= verified_slots <= 20 or len(config.get("runner_hotkeys") or []) != 1:
+        raise ExactRerunRefused("Sep16 needs one frozen runner and 1..20 verified physical slots")
     config.update(
+        schedule=forward_schedule,
         icp_wall_clock_seconds=2700,
         lease_ttl_seconds=3600,
         runner_slot_ceiling=20,
@@ -321,23 +335,38 @@ def _adopt_sep16(service: Any, dry_run: bool) -> dict[str, Any]:
     accepted = len(service.store.list_submissions(
         SEP16_ROUND, status="accepted", columns="submission_id"
     ))
-    configured_slots = 20 * len(set(config["runner_hotkeys"]))
+    modeled = dict(config, runner_slot_ceiling=verified_slots)
+    configured_slots = verified_slots
     attempts = int(config["max_attempts_per_assignment"])
-    first_phase_waves = math.ceil(20 * (accepted + 1) * attempts / configured_slots)
+    first_phase_waves = attempts * math.ceil(20 * (accepted + 1) / configured_slots)
+    scoring_waves = attempts * math.ceil(10 * (accepted + 1) / configured_slots)
     stage1_start = datetime.fromisoformat(
         config["schedule"]["stage_1_start"].replace("Z", "+00:00")
     )
     stage1_close = datetime.fromisoformat(
         config["schedule"]["stage_1_close"].replace("Z", "+00:00")
     )
-    if (stage1_close - stage1_start).total_seconds() < first_phase_waves * 2760:
+    if (stage1_close - max(stage1_start, datetime.now(timezone.utc))).total_seconds() < first_phase_waves * 2760:
         raise ExactRerunRefused(
             "Sep16 accepted parallel workload exceeds the frozen stage1 window"
         )
-    supported = capacity.daily_challenger_capacity(config)
-    if supported < 1:
-        raise ExactRerunRefused("Sep16 configured runner capacity is insufficient")
-    transport = service.store._transport
+    scoring_wave_seconds = int(config["scoring_wall_clock_seconds"]) + 60
+    stage1_scoring_close = datetime.fromisoformat(
+        config["schedule"]["stage_1_scoring_close"].replace("Z", "+00:00")
+    )
+    stage2_close = datetime.fromisoformat(
+        config["schedule"]["stage_2_close"].replace("Z", "+00:00")
+    )
+    final_scoring_close = datetime.fromisoformat(
+        config["schedule"]["final_scoring_close"].replace("Z", "+00:00")
+    )
+    if (stage1_scoring_close - stage1_close).total_seconds() < scoring_waves * scoring_wave_seconds or (
+        final_scoring_close - stage2_close
+    ).total_seconds() < scoring_waves * scoring_wave_seconds:
+        raise ExactRerunRefused("Sep16 accepted scoring workload exceeds phase window")
+    supported = capacity.daily_challenger_capacity(modeled)
+    if supported < 1 or accepted > supported:
+        raise ExactRerunRefused("Sep16 measured runner capacity is below accepted workload")
     proof = {
         "round_id": SEP16_ROUND,
         "validated_by": "arena_service_capacity_v1",
@@ -345,17 +374,25 @@ def _adopt_sep16(service: Any, dry_run: bool) -> dict[str, Any]:
         "checkpoint_deadline_policy": contracts.CHECKPOINT_DEADLINE_POLICY,
         "icp_wall_clock_seconds": 2700,
         "runner_slot_ceiling": 20,
+        "verified_parallel_runner_slots": verified_slots,
         "configured_challenger_capacity": supported,
+        "already_accepted_challengers": accepted,
         "runner_hotkeys": config["runner_hotkeys"],
         "schedule": config["schedule"],
         "configuration_doc": config,
     }
-    if dry_run:
+    if args.dry_run:
         return {"status": "preflight_ok", "round_id": SEP16_ROUND,
                 "configured_challenger_capacity": supported,
                 "already_accepted_challengers": accepted,
-                "first_phase_retry_reserved_waves_at_configured_ceiling":
-                    first_phase_waves}
+                "verified_parallel_runner_slots": verified_slots,
+                "max_challengers": config["max_challengers"],
+                "future_admissions_may_exceed_measured_capacity":
+                    int(config["max_challengers"]) > supported,
+                "first_phase_retry_reserved_waves_at_verified_slots":
+                    first_phase_waves,
+                "scoring_retry_reserved_waves_per_stage": scoring_waves}
+    transport = service.store._transport
     result = transport.rpc("lab_arena_adopt_sep16_open_config_v1", {
         "p_capacity_doc": proof,
     })
@@ -378,6 +415,8 @@ def build_parser() -> argparse.ArgumentParser:
     scoring.add_argument("--stage", type=int, choices=(1, 2), required=True)
     commands.add_parser("audit")
     sep16 = commands.add_parser("adopt-sep16")
+    sep16.add_argument("--forward-schedule-file", type=Path, required=True)
+    sep16.add_argument("--verified-parallel-runner-slots", type=int, required=True)
     sep16.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -401,7 +440,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "audit":
             result = _audit(service)
         else:
-            result = _adopt_sep16(service, args.dry_run)
+            result = _adopt_sep16(service, args)
         print(json.dumps(result, sort_keys=True, default=str))
         return 0
     except ExactRerunRefused as exc:

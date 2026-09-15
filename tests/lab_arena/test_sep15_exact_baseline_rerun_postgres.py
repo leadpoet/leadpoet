@@ -866,7 +866,7 @@ def test_exact_rerun_replays_both_stages_and_publishes_positive_cost_gated_resul
         generator.close()
 
 
-def test_sep16_adoption_changes_only_open_execution_limits(connect):
+def test_sep16_adoption_changes_only_open_execution_limits(connect, tmp_path):
     connection = connect()
     try:
         hotkeys = [Keypair.create_from_uri("//Sep16Proof%d" % n).ss58_address
@@ -919,8 +919,11 @@ def test_sep16_adoption_changes_only_open_execution_limits(connect):
                         parallel_twenty_icp_execution=True,
                         checkpoint_deadline_policy=contracts.CHECKPOINT_DEADLINE_POLICY)
         contracts.validate_round_configuration(proposed)
-        supported = capacity.daily_challenger_capacity(proposed)
-        assert supported >= 1
+        # This fixture intentionally tests the installed 257 function before
+        # 259 replaces it. Its old formula models separate ten-ICP execution
+        # phases; the corrected Python parallel model counts all twenty in one.
+        assert capacity.daily_challenger_capacity(proposed) == 6
+        supported = 13
         proof = {
             "round_id": "arena-2026-09-16",
             "validated_by": "arena_service_capacity_v1",
@@ -952,9 +955,15 @@ def test_sep16_adoption_changes_only_open_execution_limits(connect):
                 {"submission_id": "short-%d" % index} for index in range(3)
             ],
         )
+        short_schedule_file = tmp_path / "short-sep16-forward-schedule.json"
+        short_schedule_file.write_text(json.dumps(short_schedule), encoding="utf-8")
         with pytest.raises(operator.ExactRerunRefused,
                            match="accepted parallel workload exceeds the frozen stage1 window"):
-            operator._adopt_sep16(SimpleNamespace(store=short_store), True)
+            operator._adopt_sep16(SimpleNamespace(store=short_store), SimpleNamespace(
+                forward_schedule_file=short_schedule_file,
+                verified_parallel_runner_slots=20,
+                dry_run=True,
+            ))
         with connection.cursor() as cursor:
             cursor.execute("SAVEPOINT unsafe_sep16_window")
             cursor.execute(

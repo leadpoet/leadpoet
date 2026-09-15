@@ -47,6 +47,9 @@ class FakeService:
     def promote_pending_baselines(self):
         return {"promoted": 0}
 
+    def reconcile_closed_provider_costs(self):
+        return {"status": "idle"}
+
     def ensure_daily_round(self):
         self.ensured += 1
         if self._ensure_error is not None:

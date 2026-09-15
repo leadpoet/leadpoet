@@ -181,7 +181,7 @@ _INTENT_INJECTION_PATTERNS = [
         r"<\|(?:im_(?:start|end)|endoftext|fim_[a-z]+|begin_of_text|end_of_text)\|>",
         re.IGNORECASE,
     ),
-    re.compile(r"(?:^|\n)\s*(?:system|assistant|user)\s*[:>]", re.IGNORECASE),
+    re.compile(r"(?:^|[\r\n])\s*(?:system|assistant|user)\s*[:>]", re.IGNORECASE),
     re.compile(
         r"\b(?:return|respond|reply|output|give|set|make|use|score|assign)\s+"
         r"(?:with\s+|this\s+|a\s+|the\s+)?(?:score|value|rating)?\s*"
@@ -241,12 +241,19 @@ def _contains_prompt_control(value: str) -> bool:
     )
 
 
-def validate_candidate_prompt_text(text: str, field_name: str) -> str:
+def validate_candidate_prompt_text(
+    text: str, field_name: str, *, allow_layout_whitespace: bool = False
+) -> str:
     """Reject candidate controls, role markers, and known prompt steering."""
 
     if not isinstance(text, str):
         raise ValueError(f"{field_name} must be a string")
-    if _contains_prompt_control(text):
+    allowed_controls = "\t\n\r" if allow_layout_whitespace else ""
+    if any(
+        character not in allowed_controls
+        and unicodedata.category(character) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
+        for character in text
+    ):
         raise ValueError(f"{field_name} contains control or format characters")
     _scan_for_prompt_injection(text, field_name)
     return text
@@ -472,9 +479,9 @@ class IntentSignal(BaseModel):
          phrases ("ignore previous instructions", ChatML control tokens,
          direct score steering, role-hijacking lines, etc.).  Any match
          raises a ``ValueError``, which causes the parent model to fail
-         validation. Blanket length caps
-         (description ≤ 350, snippet ≤ 600) tightened from prior values
-         to reduce the room for crafted attacks.
+         validation. This shared model accepts up to 4,096 characters; Arena
+         enforces its tighter 4,096-byte string boundary before constructing
+         the shared model.
 
       2. **LLM-call defenses** (in ``qualification/scoring/verification_helpers.py``
          and ``lead_scorer.py``): system/user message separation, neutral
@@ -485,10 +492,10 @@ class IntentSignal(BaseModel):
          score" — there is no output channel that escapes the schema.
     """
     source: IntentSignalSource
-    description: str = Field(..., max_length=350, description="Description of the intent signal")
+    description: str = Field(..., max_length=4096, description="Description of the intent signal")
     url: str = Field(..., description="URL to the source of the intent signal")
     date: Optional[str] = Field(None, description="Date of the signal in ISO 8601 format (YYYY-MM-DD), or null if no verifiable date")
-    snippet: str = Field(..., max_length=600, description="Relevant text snippet extracted from source URL")
+    snippet: str = Field(..., max_length=4096, description="Relevant text snippet extracted from source URL")
     # REQUIRED on miner submission: index into the ICP's intent_signals list
     # for the signal that this evidence is meant to satisfy. The scorer
     # rejects any signal with matched_icp_signal == -1 or out of range
@@ -513,13 +520,15 @@ class IntentSignal(BaseModel):
     @field_validator('description')
     @classmethod
     def validate_description_no_injection(cls, v: str) -> str:
-        validate_candidate_prompt_text(v, "description")
+        validate_candidate_prompt_text(
+            v, "description", allow_layout_whitespace=True
+        )
         return v
 
     @field_validator('snippet')
     @classmethod
     def validate_snippet_no_injection(cls, v: str) -> str:
-        validate_candidate_prompt_text(v, "snippet")
+        validate_candidate_prompt_text(v, "snippet", allow_layout_whitespace=True)
         return v
 
     @field_validator('date')

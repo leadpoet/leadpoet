@@ -13,6 +13,7 @@ from tests.lab_arena.arena_20260912_recovery_postgres_test import _row_hash
 from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
+    prepare_historical_confirmation_bank,
 )
 from tests.lab_arena.test_lab_arena_migration_postgres import (
     claim,
@@ -100,7 +101,12 @@ def _scope(position: int) -> dict[str, object]:
     return {**body, "cache_key": contracts.document_hash(body)}
 
 
-def _prepare(database, *, reservation_amount: int = 49_945_650):
+def _prepare(
+    database,
+    *,
+    reservation_amount: int = 49_945_650,
+    prepare_confirmation: bool = False,
+):
     connection = _connect(database)
     connection.autocommit = True
     transport = PsycopgTransport(lambda: _connect(database))
@@ -136,6 +142,13 @@ def _prepare(database, *, reservation_amount: int = 49_945_650):
         }
     )
     assert store.create_round(ROUND_ID, config)["status"] == "created"
+    if prepare_confirmation:
+        assert prepare_historical_confirmation_bank(
+            store,
+            ROUND_ID,
+            f"arena/{ROUND_ID}/confirmation/{'c' * 64}.json",
+            "sha256:" + "c" * 64,
+        )["status"] == "ok"
     participant_docs = []
     for submission_id, miner, is_king in PARTICIPANTS:
         owner = None if is_king else OwnerAdmission(

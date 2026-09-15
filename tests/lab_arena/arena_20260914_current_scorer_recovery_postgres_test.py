@@ -58,11 +58,10 @@ PRODUCTION_SCHEDULE = {
 
 @pytest.fixture(scope="module")
 def database():
-    pre_promotion = tuple(
-        migration
-        for migration in CURRENT_SERVICE_MIGRATIONS
-        if migration != "251-lab-arena-twenty-icp-promotion.sql"
+    promotion = CURRENT_SERVICE_MIGRATIONS.index(
+        "251-lab-arena-twenty-icp-promotion.sql"
     )
+    pre_promotion = CURRENT_SERVICE_MIGRATIONS[:promotion]
     yield from database_with_lab_arena_migration(pre_promotion)
 
 
@@ -166,7 +165,9 @@ def _prepare_terminal(database):
             "lab_arena_integrity_round_guard"
         )
     bootstrap.close()
-    connection, store, transport = _prepare_current(database)
+    connection, store, transport = _prepare_current(
+        database, prepare_confirmation=False
+    )
     with connection.cursor() as cursor:
         cursor.execute(PRIOR_MIGRATION.read_text(encoding="utf-8"))
         cursor.execute(

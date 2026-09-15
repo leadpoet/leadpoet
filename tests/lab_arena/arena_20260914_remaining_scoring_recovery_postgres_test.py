@@ -56,13 +56,20 @@ ORIGINAL_SCHEDULE = {
 
 @pytest.fixture(scope="module")
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    promotion = CURRENT_SERVICE_MIGRATIONS.index(
+        "251-lab-arena-twenty-icp-promotion.sql"
+    )
+    yield from database_with_lab_arena_migration(
+        CURRENT_SERVICE_MIGRATIONS[:promotion]
+    )
 
 
-def _prepare_current(database):
+def _prepare_current(database, *, prepare_confirmation: bool = True):
     """Build the exact cancelled post-recovery244 run shape."""
 
-    connection, store, transport = _prepare(database)
+    connection, store, transport = _prepare(
+        database, prepare_confirmation=prepare_confirmation
+    )
     with connection.cursor() as cursor:
         cursor.execute(PRIOR_MIGRATION.read_text(encoding="utf-8"))
         cursor.execute(

@@ -98,7 +98,10 @@ def _proof_breakdown(company, score):
 
 def _proof_execution(objects, icp, index, position, execute_id, score_id=None):
     company = _proof_company(icp, index, position)
-    document = output.output_document_from_bytes(json.dumps({"companies": [company]}).encode())
+    document = output.output_document_from_bytes(
+        json.dumps({"companies": [company]}).encode(),
+        expected_schema_version=contact_policy.OUTPUT_SCHEMA,
+    )
     objects.put("arena/output/%s.json" % execute_id, json.dumps(document).encode())
     breakdown = _proof_breakdown(company, 40 if index == 0 else 20)
     if score_id is not None:
@@ -207,11 +210,19 @@ def _seed_observed_sep15(connection, objects=None):
             cursor.execute(
                 "INSERT INTO public.lab_arena_submissions (submission_id,round_id,"
                 "miner_hotkey,status,is_king,source_ref,source_size_bytes,consent,"
-                "submission_doc,frozen_at) VALUES (%s,%s,%s,'frozen',%s,%s,%s,"
-                "'{\"public_rerun\":true}'::jsonb,'{}'::jsonb,now())",
+                "submission_doc,frozen_at,code_review_status,code_review_attempts,"
+                "code_review_doc,code_review_claim,code_review_started_at) VALUES "
+                "(%s,%s,%s,'frozen',%s,%s,%s,"
+                "'{\"public_rerun\":true}'::jsonb,'{}'::jsonb,now(),"
+                "%s,%s,%s::jsonb,%s,CASE WHEN %s THEN now() ELSE NULL END)",
                 (submission_id, ROUND, hotkeys[index], index == 0,
                  participants[index]["source_ref"],
-                 participants[index]["source_size_bytes"]),
+                 participants[index]["source_size_bytes"],
+                 "pending" if index == 0 else "passed",
+                 0 if index == 0 else 1,
+                 None if index == 0 else json.dumps({"decision": "passed"}),
+                 None if index == 0 else "sha256:" + ("%064x" % (index + 7000)),
+                 index != 0),
             )
         for n in range(9):
             cursor.execute(
@@ -247,7 +258,13 @@ def _seed_observed_sep15(connection, objects=None):
                 if index > 0:
                     accepted_challenger.append((execute_id, submission_id,
                                                 hotkeys[index], stage, position))
-                score_id = "old-score-%d-%d" % (index, position)
+                score_assignment = (
+                    "old-score-%d-%d" % (index, position) if index == 0 else
+                    "%s:%s:%d:%d:score" % (ROUND, submission_id, stage, position)
+                )
+                score_id = (
+                    score_assignment if index == 0 else score_assignment + ":1"
+                )
                 # The protected original has ten stage-two miner-account
                 # failures and no accepted replacement for those executions.
                 score_failed = index == 1 and stage == 2
@@ -263,7 +280,7 @@ def _seed_observed_sep15(connection, objects=None):
                     "scored_run_id,terminal_cause,output_ref,runner_hotkey,"
                     "judgment_cache_source_run_id) VALUES (%s,%s,%s,%s,%s,%s,%s,1,'score',"
                     "%s,%s,%s,%s,%s,%s)",
-                    (score_id, score_id, ROUND, submission_id, hotkeys[index],
+                    (score_id, score_assignment, ROUND, submission_id, hotkeys[index],
                      stage, position, "failed" if score_failed else "accepted",
                     execute_id, "credential_error" if score_failed else "accepted",
                      "arena/score/%s.json" % score_id, hotkeys[10],
@@ -698,6 +715,48 @@ def test_exact_rerun_replays_both_stages_and_publishes_positive_cost_gated_resul
 
         assert service_instance.close_stage(ROUND, 1)["status"] == "ok"
         for stage in (1, 2):
+            # The ordinary daily driver can reach this closed stage first.
+            # Its historical :score IDs still belong to archived challenger
+            # evidence, so its attempted write must fail as one transaction.
+            closed = service_instance.store.get_round(ROUND)
+            assert closed["status"] == "stage%d_closed" % stage
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s "
+                    "AND kind='score' AND submission_id<>%s",
+                    (ROUND, BASELINE),
+                )
+                old_challenger_scores = cursor.fetchone()[0]
+                cursor.execute(
+                    "SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s "
+                    "AND kind='score' AND submission_id=%s AND stage=%s "
+                    "AND assignment_id LIKE '%%:score:rerun256'",
+                    (ROUND, BASELINE, stage),
+                )
+                assert cursor.fetchone()[0] == 0
+            with pytest.raises(Exception, match="duplicate key"):
+                service_instance.open_scoring(ROUND, stage)
+            rolled_back = service_instance.store.get_round(ROUND)
+            assert rolled_back["status"] == closed["status"]
+            assert rolled_back["status_generation"] == closed["status_generation"]
+            assert rolled_back["stage_generation"] == closed["stage_generation"]
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s "
+                    "AND kind='score' AND submission_id<>%s",
+                    (ROUND, BASELINE),
+                )
+                assert cursor.fetchone()[0] == old_challenger_scores
+                cursor.execute(
+                    "SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s "
+                    "AND kind='score' AND submission_id=%s AND stage=%s",
+                    (ROUND, BASELINE, stage),
+                )
+                assert cursor.fetchone()[0] == 0
+                cursor.execute(
+                    "SELECT public.lab_arena_sep15_challenger_seals_valid_v1()",
+                )
+                assert cursor.fetchone()[0] is True
             items = _scoring_items(connection, stage, hotkeys)
             with connection.cursor() as cursor:
                 cursor.execute(

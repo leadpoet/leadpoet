@@ -145,6 +145,67 @@ def test_daily_capacity_defaults_are_bounded(monkeypatch):
     assert wiring._max_challengers_from_environment() < wiring.contracts.MAX_CHALLENGERS
 
 
+def test_runner_wiring_keeps_proxy_inventory_but_uses_memory_supported_slots(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    from lab_arena import proxy_workers, runner, runtime
+    from lab_arena import validator_proxy_environment as proxy_environment_module
+
+    inventory = SimpleNamespace(total_process_capacity=11, webshare_worker_count=10)
+    pool = SimpleNamespace(inventory=inventory)
+    captured = {}
+    monkeypatch.setattr(wiring, "prepare_scoring_host", lambda *_args: None)
+    monkeypatch.setattr(
+        proxy_environment_module, "validator_proxy_environment", lambda _env: {}
+    )
+    monkeypatch.setattr(
+        proxy_workers, "proxy_workers_from_environment", lambda _env: object()
+    )
+    monkeypatch.setattr(proxy_workers, "preflight_proxy_workers", lambda _raw: inventory)
+    monkeypatch.setattr(proxy_workers, "ProxyWorkerPool", lambda verified: pool)
+    monkeypatch.setattr(
+        wiring,
+        "parallel_memory_capacity",
+        lambda ceiling, sandbox_bytes: captured.update(
+            ceiling=ceiling, sandbox_bytes=sandbox_bytes
+        )
+        or 10,
+    )
+    monkeypatch.setattr(runtime, "RunscRuntime", lambda _config: object())
+    monkeypatch.setattr(wiring, "registry_client_from_environment", lambda: object())
+    monkeypatch.setattr(runner, "registry_image_exporter", lambda _client: object())
+    monkeypatch.setattr(runner, "ImageCache", lambda *_args: object())
+    monkeypatch.setattr(
+        runner,
+        "HttpArenaApiClient",
+        lambda _url: SimpleNamespace(source=lambda *_args: None),
+    )
+    monkeypatch.setattr(runner, "SourceCache", lambda *_args: object())
+    monkeypatch.setattr(runner, "Runner", lambda config: config)
+
+    args = SimpleNamespace(
+        runsc_path="/usr/local/bin/runsc",
+        work_dir=str(tmp_path),
+        api_base_url="https://arena.example",
+        round_id="",
+    )
+    keypair = SimpleNamespace(
+        ss58_address="5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+        sign=lambda _message: b"sig",
+    )
+    config = wiring.build_runner_from_environment(args, keypair=keypair)
+
+    assert captured == {
+        "ceiling": 11,
+        "sandbox_bytes": runtime.DEFAULT_MEMORY_LIMIT_BYTES,
+    }
+    assert pool.inventory.total_process_capacity == 11
+    assert config.proxy_worker_pool is pool
+    assert config.max_parallel_runs == 10
+
+
 def test_stage_minutes_override_is_complete_and_testnet_shadow_only(monkeypatch):
     override = {
         "benchmark": 1,

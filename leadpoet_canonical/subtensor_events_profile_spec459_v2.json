@@ -16,10 +16,10 @@
   "genesis_hash": "0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03",
   "measurement": {
     "archive_host": "archive.chain.opentensor.ai",
-    "block_hash": "7bba3b9266cd3b01e39020c8018b3c604973c27d0036ee07b24fe8a2db36730a",
+    "block_hash": "0x7bba3b9266cd3b01e39020c8018b3c604973c27d0036ee07b24fe8a2db36730a",
     "block_number": 9076006,
     "metadata_raw_bytes": 336358,
-    "parent_hash": "280f9df419ed126ab7429dc7da8fc0e9de25f89750169320c7e44ed9a1f377c2",
+    "parent_hash": "0x280f9df419ed126ab7429dc7da8fc0e9de25f89750169320c7e44ed9a1f377c2",
     "system_event_count": 325,
     "system_event_count_raw_sha256": "39a74af739962774bf1070f8562892396a2f34e4e5b8ee57091dd142131fbd91",
     "system_events_bytes": 16523,

@@ -186,7 +186,27 @@ def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
     assert profile["metadata_raw_sha256"] == metadata_sha256
     assert profile["runtime_code_storage_hash"] == runtime_code_hash
     assert profile["measurement"]["block_hash"] == fixture["block_hash"]
+    if "archive_host" in fixture:
+        assert profile["measurement"]["archive_host"] == fixture["archive_host"]
+    if "block_number" in fixture:
+        assert profile["measurement"]["block_number"] == fixture["block_number"]
+    if "parent_hash" in fixture:
+        assert profile["measurement"]["parent_hash"] == "0x" + fixture["parent_hash"]
     assert profile["measurement"]["system_event_count"] == event_count
+    if "metadata_raw_bytes" in fixture:
+        assert profile["measurement"]["metadata_raw_bytes"] == fixture[
+            "metadata_raw_bytes"
+        ]
+    assert profile["measurement"]["system_events_bytes"] == len(events_raw)
+    assert profile["measurement"]["system_event_count"] == int.from_bytes(
+        event_count_raw, "little"
+    )
+    assert profile["measurement"]["system_events_sha256"] == hashlib.sha256(
+        events_raw
+    ).hexdigest()
+    assert profile["measurement"]["system_event_count_raw_sha256"] == hashlib.sha256(
+        event_count_raw
+    ).hexdigest()
     assert hashlib.sha256(events_raw).hexdigest() == (
         profile["measurement"]["system_events_sha256"]
     )

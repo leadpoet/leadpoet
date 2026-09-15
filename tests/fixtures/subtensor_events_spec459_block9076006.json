@@ -1,6 +1,9 @@
 {
   "block_hash": "0x7bba3b9266cd3b01e39020c8018b3c604973c27d0036ee07b24fe8a2db36730a",
   "block_number": 9076006,
+  "archive_host": "archive.chain.opentensor.ai",
+  "metadata_raw_bytes": 336358,
+  "parent_hash": "280f9df419ed126ab7429dc7da8fc0e9de25f89750169320c7e44ed9a1f377c2",
   "expected": {
     "account_id_hex": "1c48e0d403f66d66588149c4e2d4571c3be19491c5a4b15261f352746fd56761",
     "netuid": 71,

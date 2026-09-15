@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from lab_arena import contracts
 from lab_arena.api import MAX_JSON_BODY_BYTES, create_app
 from lab_arena.service import ArenaService, ServiceConfig, ServiceError
-from lab_arena.store import ArenaStore, PostgrestTransport
+from lab_arena.store import ArenaStore, ArenaStoreError, ArenaStoreUnavailable, PostgrestTransport
 
 
 class StubStore:
@@ -139,6 +139,50 @@ def client():
     service = StubService()
     app = create_app(service)
     return TestClient(app), service
+
+
+def test_provider_rpc_transport_timeout_is_sanitized_and_next_request_is_healthy():
+    """A timed-out reservation RPC must not replay or escape the API handler."""
+    requests = []
+    healthy = {"status": "reserved", "call_identity": "sha256:" + "b" * 64}
+
+    def handler(request):
+        requests.append(request)
+        assert request.method == "POST"
+        assert request.url.path == "/rest/v1/rpc/lab_arena_reserve_call"
+        if len(requests) == 1:
+            raise httpx.ReadTimeout("private database diagnostic", request=request)
+        return httpx.Response(200, json=healthy)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as database:
+        transport = PostgrestTransport("https://project.example", anon_key="anon", service_jwt="a.b.c", http_client=database)
+        store = ArenaStore(transport)
+
+        class RpcService(StubService):
+            def handle_provider(self, run_id, lease_token, frame):
+                self.calls["provider"] = (run_id, lease_token, frame)
+                return store.reserve_call(
+                    run_id=run_id, lease_token_hash="sha256:" + "a" * 64,
+                    call_identity="sha256:" + "b" * 64,
+                    operation_id="scrapingdog.google", provider="scrapingdog",
+                    funding_source="miner_key", amount_microusd=0,
+                    call_doc={}, lease_ttl_seconds=3600,
+                )
+
+        with TestClient(create_app(RpcService()), raise_server_exceptions=False) as api:
+            kwargs = {"headers": {"x-lab-arena-lease": "a" * 64}, "json": {"operation_id": "scrapingdog.google"}}
+            first = api.post("/arena/v1/runs/run-1/provider", **kwargs)
+            assert len(requests) == 1  # no ambiguous RPC replay
+            second = api.post("/arena/v1/runs/run-1/provider", **kwargs)
+
+    assert issubclass(ArenaStoreUnavailable, ArenaStoreError)
+    assert first.status_code == 503
+    assert first.json() == {"status": "unavailable", "code": "arena_store_unavailable"}
+    assert first.headers["cache-control"] == "no-store"
+    assert first.headers["retry-after"] == "1"
+    assert "private database diagnostic" not in first.text
+    assert second.status_code == 200 and second.json() == healthy
+    assert len(requests) == 2
 
 
 @pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError])

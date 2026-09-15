@@ -17,6 +17,7 @@ import pytest
 
 from lab_arena import broker as br
 from lab_arena import contracts, operations
+from lab_arena.store import ArenaStoreUnavailable
 
 KEY = "sk-or-v1-" + "k" * 40
 DL_KEY = "dl_secret_" + "e" * 30
@@ -1068,6 +1069,21 @@ def test_stream_timeout_generation_header_credential_echo_is_not_persisted(
 
 CONTEXT = br.RunContext(run_id="r1", assignment_id="arena-2026-09-02:s1:1:0", icp_position=0, lease_token_hash=contracts.document_hash("lease"), miner_hotkey="5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", submission_id="s1", stage=1)
 CHAT = {"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "find fintech companies"}], "max_tokens": 200}
+
+
+def test_reservation_store_unavailable_propagates_before_paid_dispatch():
+    class UnavailableReservation(FakeLedgerStore):
+        def reserve_call(self, **kwargs):
+            self.log.append("reserve")
+            raise ArenaStoreUnavailable("synthetic RPC transport failure")
+
+    broker, store, transport = make_broker(store=UnavailableReservation())
+    with pytest.raises(ArenaStoreUnavailable):
+        broker.execute(CONTEXT, operation_id="openrouter.chat", parameters=CHAT,
+                       action_sequence=0, timeout_ms=5000)
+    assert store.log == ["reserve"]
+    assert store.calls == {}
+    assert transport.sent == []
 
 
 def test_deepline_call_uses_the_host_key_and_settles():

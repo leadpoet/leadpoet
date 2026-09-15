@@ -495,8 +495,9 @@ def _present_tense_raise_proof_pattern(label: str) -> re.Pattern:
     amount = r"(?:(?:US)?[$£€]\s*)?\d[\d,.]*\s*(?:[KMB]|million|billion)"
     return re.compile(
         rf"(?:^|[.!;:\n]\s*)"
-        rf"(?![^.!?;:\n]*\b(?:if|whether|conditional(?:ly)?|subject\s+to)\b)"
-        rf"(?![^.!;:\n]*\?)"
+        rf"(?!(?:[^.!?;:\n]|\.(?=\d))*"
+        rf"\b(?:if|whether|conditional(?:ly)?|subject\s+to)\b)"
+        rf"(?!(?:[^.!;:\n]|\.(?=\d))*\?)"
         rf"[^.!?;:\n]{{1,80}}\braises\s+"
         rf"(?:(?:an?|its|the)\s+)?(?:{amount}\s+(?:in\s+)?)?"
         rf"\b{label}\b(?:\s+(?:financing|funding|round))?",

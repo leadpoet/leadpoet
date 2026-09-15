@@ -821,11 +821,18 @@ def test_stage_decision_requires_category_specific_proof(
         ("series b", "If Acme raises $40M Series B, it will expand.", False),
         ("series b", "Acme raises concerns about Series B financing.", False),
         ("series b", "Acme raises $40M Series B?", False),
+        ("series b", "Acme raises $40.5M Series B?", False),
         (
             "series b",
             "Acme raises $40M Series B subject to closing conditions.",
             False,
         ),
+        (
+            "series b",
+            "Acme raises $40.5M Series B subject to closing conditions.",
+            False,
+        ),
+        ("series b", "Acme raises $40.5M Series B.", True),
         ("series b", "Acme is raising $40M Series B", False),
         ("series b", "Acme plans to raise $40M Series B", False),
         ("series b", "Acme is seeking $40M Series B funding", False),

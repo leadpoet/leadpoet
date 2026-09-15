@@ -4052,6 +4052,46 @@ def test_store_settlement_retry_reuses_paid_reply_and_releases_the_budget():
     assert len(transport.sent) == 2  # exactly one paid POST per distinct ICP
 
 
+@pytest.mark.parametrize(
+    ("operation_id", "parameters", "reply", "actual"),
+    (
+        (
+            "openrouter.chat", CHAT,
+            {"model": "openai/gpt-4o-mini", "choices": [],
+             "usage": {"cost": "0.0000123"}},
+            13,
+        ),
+        (
+            "scrapingdog.scrape", {"url": "https://example.com/about"},
+            b"<html>synthetic page</html>", 250,
+        ),
+    ),
+)
+def test_other_provider_settlement_retries_only_the_store(
+    operation_id, parameters, reply, actual,
+):
+    broker, store, transport = make_broker(transport=FakeTransport([(200, reply)]))
+    original = store.settle_call
+    attempts = []
+
+    def one_store_failure(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) == 1:
+            raise br.ArenaStoreError("transient settlement RPC failure")
+        return original(**kwargs)
+
+    store.settle_call = one_store_failure
+    result = broker.execute(
+        CONTEXT, operation_id=operation_id, parameters=parameters,
+        action_sequence=0, timeout_ms=5000,
+    )
+    assert result.status == 200 and result.call["outcome"] == "settled"
+    assert result.call["actual_microusd"] == actual
+    assert len(attempts) == 2 and attempts[0] == attempts[1]
+    assert len(transport.sent) == 1
+    assert store.calls[result.call["call_identity"]]["actual"] == actual
+
+
 def test_store_settlement_lost_reply_accepts_only_the_same_committed_terminal():
     envelope = {
         "job_id": "lost-settle-reply", "status": "completed",

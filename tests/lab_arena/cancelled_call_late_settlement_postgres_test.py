@@ -108,6 +108,33 @@ def _kinds(store: ArenaStore, identity: str):
     return [row["entry_kind"] for row in store.list_ledger(call_identity=identity)]
 
 
+def test_normal_settlement_reply_replay_has_exact_cost_and_one_charge(resources):
+    """The real RPC's replay view is the broker retry's cost/terminal proof."""
+
+    store, connect = resources
+    call = _dispatched_call(store, "ordinaryreplay", amount=900_000)
+    terminal = _terminal(marker="b3JkaW5hcnktcmVwbGF5")
+    settlement = {
+        "run_id": call["run"]["run_id"],
+        "lease_token_hash": call["token_hash"],
+        "call_identity": call["identity"],
+        "actual_microusd": 123_456,
+        "terminal_response": terminal,
+    }
+    first = store.settle_call(**settlement)
+    replay = store.settle_call(**settlement)  # the first RPC reply could be lost
+    assert first["status"] == "settled" and first["idempotent"] is False
+    assert first["actual_microusd"] == 123_456
+    assert first["terminal_response"] == terminal
+    assert replay["status"] == "settled" and replay["idempotent"] is True
+    assert replay["amount_microusd"] == 123_456
+    assert replay["terminal_response"] == terminal
+    assert _kinds(store, call["identity"]) == [
+        "reservation", "dispatch", "settlement",
+    ]
+    assert _spend(connect, call["submission_id"]) == 123_456
+
+
 def test_settlement_that_locks_first_remains_the_only_terminal(resources):
     store, connect = resources
     call = _dispatched_call(store, "settlefirst", amount=900_000)

@@ -1,5 +1,8 @@
 import asyncio
+from unittest.mock import Mock
 
+import aiohttp
+from aiohttp.base_protocol import BaseProtocol
 import pytest
 
 from gateway.qualification.models import CompanyOutput
@@ -23,9 +26,12 @@ from qualification.scoring.lead_scorer import (
 class _Content:
     def __init__(self, payload: bytes) -> None:
         self._payload = payload
+        self._offset = 0
 
-    async def read(self, _limit: int) -> bytes:
-        return self._payload
+    async def read(self, limit: int) -> bytes:
+        start = self._offset
+        self._offset = min(len(self._payload), start + limit)
+        return self._payload[start : self._offset]
 
 
 class _Response:
@@ -54,6 +60,13 @@ class _Session:
 
     def get(self, *_args, **_kwargs):
         return self._response
+
+
+def _stream_reader():
+    loop = asyncio.get_running_loop()
+    protocol = BaseProtocol(loop)
+    protocol.connection_made(Mock(spec=asyncio.Transport))
+    return aiohttp.StreamReader(protocol, limit=2**16)
 
 
 def test_default_http_company_url_upgrades_to_https():
@@ -123,8 +136,11 @@ async def _verify_with_response(
     company_linkedin: str = "https://www.linkedin.com/company/example-company",
     final_url: str = "",
     require_https_transport: bool = False,
+    content=None,
 ):
     response = _Response(status, payload, final_url)
+    if content is not None:
+        response.content = content
     monkeypatch.setattr(
         "qualification.scoring.company_verification._registrable_domain",
         lambda _url: "example.co.uk",
@@ -139,6 +155,74 @@ async def _verify_with_response(
         company_linkedin=company_linkedin,
         require_https_transport=require_https_transport,
     )
+
+
+@pytest.mark.parametrize("first_chunk_size", [159 * 1024, 229 * 1024])
+def test_homepage_identity_in_later_stream_chunk_is_verified(
+    monkeypatch, first_chunk_size
+):
+    async def run():
+        title = b"<title>Example Company</title>"
+        footer = (
+            b'<footer><a href="https://www.linkedin.com/company/example-company">'
+            b"LinkedIn</a></footer>"
+        )
+        payload = title + b" " * (408 * 1024 - len(title) - len(footer)) + footer
+        loop = asyncio.get_running_loop()
+        stream = _stream_reader()
+        stream.feed_data(payload[:first_chunk_size])
+        loop.call_soon(stream.feed_data, payload[first_chunk_size:])
+        loop.call_soon(stream.feed_eof)
+
+        result = await _verify_with_response(monkeypatch, 200, b"", content=stream)
+
+        assert result.decision == COMPANY_FIT_MATCH, result.reason
+        assert result.details["identity"]["evidence_source"] == "company_homepage"
+        assert stream.at_eof()
+
+    asyncio.run(run())
+
+
+def test_homepage_read_stops_at_body_cap_without_waiting_for_eof(monkeypatch):
+    from qualification.scoring.company_verification import _MAX_BYTES
+
+    async def run():
+        identity = (
+            b"<title>Example Company</title>"
+            b'<a href="https://www.linkedin.com/company/example-company">LinkedIn</a>'
+        )
+        stream = _stream_reader()
+        stream.feed_data(identity.ljust(_MAX_BYTES, b" "))
+        # The server keeps the connection open after the permitted body prefix.
+        result = await asyncio.wait_for(
+            _verify_with_response(monkeypatch, 200, b"", content=stream),
+            timeout=1,
+        )
+
+        assert result.decision == COMPANY_FIT_MATCH
+        assert not stream.is_eof()
+
+    asyncio.run(run())
+
+
+def test_homepage_body_error_does_not_accept_partial_identity(monkeypatch):
+    async def run():
+        loop = asyncio.get_running_loop()
+        stream = _stream_reader()
+        stream.feed_data(
+            b"<title>Example Company</title>"
+            b'<a href="https://www.linkedin.com/company/example-company">LinkedIn</a>'
+        )
+        loop.call_soon(
+            stream.set_exception, aiohttp.ClientPayloadError("incomplete body")
+        )
+
+        result = await _verify_with_response(monkeypatch, 200, b"", content=stream)
+
+        assert result.decision == COMPANY_FIT_UNAVAILABLE
+        assert "ClientPayloadError" in result.reason
+
+    asyncio.run(run())
 
 
 def test_homepage_name_is_a_match(monkeypatch):
@@ -480,10 +564,14 @@ def test_homepage_identity_after_body_cap_remains_unavailable(monkeypatch):
         b'<a href="https://www.linkedin.com/company/example-company">LinkedIn</a>'
     )
 
-    result = asyncio.run(_verify_with_response(monkeypatch, 200, over_cap_identity))
+    content = _Content(over_cap_identity)
+    result = asyncio.run(
+        _verify_with_response(monkeypatch, 200, b"", content=content)
+    )
 
     assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert "company name metadata not found" in (result.reason or "")
+    assert content._offset == _MAX_BYTES
 
 
 def test_homepage_legal_alias_requires_bound_root_organization(monkeypatch):

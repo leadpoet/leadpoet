@@ -612,9 +612,14 @@ async def verify_company_exists(
                         observed_url = str(
                             getattr(resp, "url", request_url) or request_url
                         )
-                        # Read at most _MAX_BYTES so a giant single-page-app
-                        # download can't stall the scorer.
-                        raw = await resp.content.read(_MAX_BYTES)
+                        # A stream read can return before EOF. Collect the body
+                        # up to the existing cap, including later footer chunks.
+                        raw = bytearray()
+                        while len(raw) < _MAX_BYTES:
+                            chunk = await resp.content.read(_MAX_BYTES - len(raw))
+                            if not chunk:
+                                break
+                            raw.extend(chunk)
                         try:
                             text = raw.decode("utf-8", errors="replace")
                         except Exception:

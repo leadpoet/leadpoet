@@ -355,7 +355,11 @@ def test_published_submissions_expose_judged_stage1_and_final_scores():
 
         @staticmethod
         def list_runs(_round_id, **filters):
-            assert filters == {"stage": 1, "kind": "execute"}
+            assert filters == {
+                "stage": 1,
+                "kind": "execute",
+                "columns": "submission_id,icp_position,attempt,per_icp_score",
+            }
             return runs
 
     service = SimpleNamespace(

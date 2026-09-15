@@ -27,6 +27,7 @@ CURRENT_RUNTIME_FIXTURES = {
     456: ROOT / "tests" / "fixtures" / "subtensor_events_spec456_block9066646.json",
     457: ROOT / "tests" / "fixtures" / "subtensor_events_spec457_block9067004.json",
     458: ROOT / "tests" / "fixtures" / "subtensor_events_spec458_block9067366.json",
+    459: ROOT / "tests" / "fixtures" / "subtensor_events_spec459_block9076006.json",
 }
 
 
@@ -162,6 +163,12 @@ def test_real_spec455_archive_events_prove_exact_adjacent_reveal():
             "0x2fdb28e5c3fe4e79844b25dee09ed960e90004432ea2bd98079aba4c5530c51a",
             287,
         ),
+        (
+            459,
+            "52256b0b4a5c682e94e1d68a7b7a5dc1ba4114cfde4fb39057be808a8443673d",
+            "0x558275958401c026fa4a4159466d49eabd08c761f0c801390593fcba91dee69b",
+            325,
+        ),
     ),
 )
 def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
@@ -179,7 +186,27 @@ def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
     assert profile["metadata_raw_sha256"] == metadata_sha256
     assert profile["runtime_code_storage_hash"] == runtime_code_hash
     assert profile["measurement"]["block_hash"] == fixture["block_hash"]
+    if "archive_host" in fixture:
+        assert profile["measurement"]["archive_host"] == fixture["archive_host"]
+    if "block_number" in fixture:
+        assert profile["measurement"]["block_number"] == fixture["block_number"]
+    if "parent_hash" in fixture:
+        assert profile["measurement"]["parent_hash"] == "0x" + fixture["parent_hash"]
     assert profile["measurement"]["system_event_count"] == event_count
+    if "metadata_raw_bytes" in fixture:
+        assert profile["measurement"]["metadata_raw_bytes"] == fixture[
+            "metadata_raw_bytes"
+        ]
+    assert profile["measurement"]["system_events_bytes"] == len(events_raw)
+    assert profile["measurement"]["system_event_count"] == int.from_bytes(
+        event_count_raw, "little"
+    )
+    assert profile["measurement"]["system_events_sha256"] == hashlib.sha256(
+        events_raw
+    ).hexdigest()
+    assert profile["measurement"]["system_event_count_raw_sha256"] == hashlib.sha256(
+        event_count_raw
+    ).hexdigest()
     assert hashlib.sha256(events_raw).hexdigest() == (
         profile["measurement"]["system_events_sha256"]
     )
@@ -227,7 +254,7 @@ def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
 
 def test_unknown_runtime_profile_fails_closed():
     with pytest.raises(SubtensorEventsV2Error, match="unavailable"):
-        load_subtensor_events_profile_v2(spec_version=459)
+        load_subtensor_events_profile_v2(spec_version=460)
 
 
 @pytest.mark.parametrize(

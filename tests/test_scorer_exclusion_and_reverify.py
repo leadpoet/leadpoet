@@ -992,6 +992,39 @@ def test_current_exchange_trading_is_public_stage_proof(quote):
 @pytest.mark.parametrize(
     "quote",
     [
+        'Academy Sports + Outdoors ("Academy" or the "Company") (Nasdaq: ASO)',
+        "Academy Sports + Outdoors (Nasdaq: ASO)",
+        'Academy Sports Outdoors ("Academy" or the "Company") (Nasdaq: ASO)',
+        "Acme & Partners (NYSE: ACP)",
+    ],
+)
+def test_company_listing_accepts_name_punctuation_and_press_release_alias(quote):
+    assert _stage_quote_supports_observation("public", quote) is True
+    assert _stage_quote_supports_observation("private equity", quote) is False
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "Formerly Academy Sports + Outdoors (Nasdaq: ASO)",
+        'Formerly Academy Sports + Outdoors ("Academy" or the "Company") (Nasdaq: ASO)',
+        "Academy Sports + Outdoors (Nasdaq: ASO), delisted in 2024.",
+        'Academy Sports + Outdoors ("Academy" or the "Company") (Nasdaq: ASO), then taken private.',
+        "Academy Sports + Outdoors (Nasdaq: ASO) listing is planned for next year.",
+        "Academy Sports + Outdoors bonds (Nasdaq: ASO)",
+        "Academy Sports + Outdoors (OTCQX: ASO)",
+        "Academy Sports + Outdoors (Nasdaq:)",
+        "(Nasdaq: ASO)",
+        "Public Company",
+    ],
+)
+def test_company_listing_name_syntax_does_not_admit_weak_or_superseded_proof(quote):
+    assert _stage_quote_supports_observation("public", quote) is False
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
         "The bank's bonds are traded on the NASDAQ.",
         "The bank's debt securities are traded on the NASDAQ.",
         "The bank's debt security currently trades on the NASDAQ.",
@@ -1804,9 +1837,9 @@ def test_company_fit_accepts_exact_identity_on_verified_root_child_subdomain(
         )
     )
 
-    # The identity false negative is repaired, but the saved weak Public-stage
-    # citation remains unavailable and still keeps this row at zero.
-    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    # The independent identity and company-attributed exchange listing both
+    # remain valid when the company name contains a standalone plus sign.
+    assert result.decision == COMPANY_FIT_MATCH
     identity = result.details["dimension_evidence"]["identity"]
     assert identity["homepage_identity_decision"] == COMPANY_FIT_UNAVAILABLE
     assert identity["web_identity_receipt"]["observed_domain"] == "academy.com"
@@ -1814,7 +1847,7 @@ def test_company_fit_accepts_exact_identity_on_verified_root_child_subdomain(
         "corporate.academy.com"
     )
     assert result.details["company_fit_dimensions"]["stage"] == (
-        COMPANY_FIT_UNAVAILABLE
+        COMPANY_FIT_MATCH
     )
 
 

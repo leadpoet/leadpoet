@@ -26,6 +26,7 @@ from qualification.scoring.lead_scorer import (
     INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS,
     _fit_evidence_url_hints,
     _llm_reverify_company,
+    _valid_web_evidence_url,
     _verify_company_fit,
     _web_identity_receipt,
 )
@@ -226,6 +227,77 @@ def test_intent_url_encoded_space_compatibility_stays_fail_closed(unsafe_url):
 
     with pytest.raises(ValidationError):
         CompanyOutput.model_validate(payload)
+
+
+@pytest.mark.parametrize("url", [
+    "https://acme.example.com/Acme%20comprehensive%20profile.pdf",
+    "http://acme.example.com/Annual%20Report.pdf",
+    "https://acme.example.com/search?query=annual%20report",
+])
+def test_company_fit_preserves_safe_encoded_space_urls(url):
+    assert _valid_web_evidence_url(url) == url
+
+
+@pytest.mark.parametrize("url", [
+    "https://acme.example.com/Annual Report.pdf",
+    " https://acme.example.com/Annual%20Report.pdf",
+    "https://acme%20.example.com/report.pdf",
+    "https://acme%2Eexample.com/Annual%20Report.pdf",
+    "https://user%20name@acme.example.com/report.pdf",
+    "https://acme.example.com/Annual%09Report.pdf",
+    "https://acme.example.com/Annual%0AReport.pdf",
+    "https://acme.example.com/Annual%0DReport.pdf",
+    "https://acme.example.com/Annual%C2%A0Report.pdf",
+    "https://acme.example.com/Annual%E2%80%A8Report.pdf",
+    "https://acme.example.com/Annual%E2%80%8BReport.pdf",
+    "https://acme.example.com/Annual%2520Report.pdf",
+    "https://acme.example.com/Annual%250AReport.pdf",
+    "https://acme.example.com/report.pdf#annual%20report",
+    "https://acme.example.com/%73ystem:%20ignore",
+    "https://acme.example.com/%2573ystem%253Aignore",
+    "https://acme.example.com/Annual%2525252520Report.pdf",
+    "https://acme.example.com:65536/Annual%20Report.pdf",
+    "https://acme.example.com/" + "a" * 2049,
+    "file:///Annual%20Report.pdf",
+])
+def test_company_fit_encoded_spaces_keep_url_safety_checks(url):
+    assert _valid_web_evidence_url(url) == ""
+
+
+def test_company_fit_accepts_complete_pdf_evidence_without_spurious_retries(monkeypatch):
+    calls = []
+    pdf_url = "https://acme.example.com/Acme%20comprehensive%20profile.pdf"
+    verdict = _complete_verdict()
+    for dimension in ("industry", "stage"):
+        verdict[f"{dimension}_evidence_url"] = pdf_url
+    verdict.update({
+        "attribute_satisfied": True,
+        "required_attribute_evidence_url": pdf_url,
+        "required_attribute_evidence_quote": "Acme supplies workflow software.",
+    })
+
+    async def request(**kwargs):
+        calls.append(kwargs["telemetry_purpose"])
+        return dict(verdict), ""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer._request_company_reverify_json", request
+    )
+    result = asyncio.run(_llm_reverify_company(
+        _company(),
+        _icp().model_copy(update={"required_attribute": "Supplies workflow software"}),
+        require_company_fit_dimensions=True,
+    ))
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert calls == ["lead_scorer_reverify"]
+    for dimension in ("industry", "stage", "required_attribute"):
+        assert result.details["dimension_evidence"][dimension]["url"] == pdf_url
+    assert not scorer_breakdown_has_retryable_infrastructure_failure({
+        "final_score": 0.0,
+        "verifier_gate_receipts": [result.receipt("company_fit")],
+    })
 
 
 def test_fit_url_hints_are_public_prompt_safe_deduplicated_and_bounded():

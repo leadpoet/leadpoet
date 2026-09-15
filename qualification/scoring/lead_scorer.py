@@ -1161,12 +1161,11 @@ def _valid_web_evidence_url(value: Any) -> str:
         )
     ):
         return ""
-    decoded = unquote(raw)
-    if any(
-        character.isspace()
-        or unicodedata.category(character) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
-        for character in decoded
-    ):
+    try:
+        # Use the same safe encoded-space rules as submitted evidence URLs.
+        # Ordinary %20 in PDF paths is valid; encoded controls remain invalid.
+        canonical_candidate_prompt_url(raw, "company_fit_evidence_url")
+    except ValueError:
         return ""
     try:
         parsed = urlsplit(raw)

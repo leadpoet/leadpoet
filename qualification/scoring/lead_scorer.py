@@ -605,13 +605,14 @@ _PUBLIC_CONDITIONAL_EXCHANGE_TRADING_CONTEXT_RE = re.compile(
     re.I,
 )
 _PUBLIC_TICKER_STAGE_PROOF_PATTERNS = (
+    # XNAS and XNYS are the Nasdaq and NYSE market identifier codes.
     re.compile(
         r"\b(?i:ticker)\s*:\s*[A-Z][A-Z0-9.-]{0,9}\s*"
-        r"\((?i:nasdaq|nyse)\)(?!\s*/)",
+        r"\((?i:nasdaq|nyse|xnas|xnys)\)(?!\s*/)",
     ),
     re.compile(
         r"\b(?i:ticker)\s*/\s*(?i:isin)\s*:\s*"
-        r"[A-Z][A-Z0-9.-]{0,9}\s*\((?i:nasdaq|nyse)\)\s*/\s*"
+        r"[A-Z][A-Z0-9.-]{0,9}\s*\((?i:nasdaq|nyse|xnas|xnys)\)\s*/\s*"
         r"[A-Z]{2}[A-Z0-9]{9}[0-9]\b",
     ),
 )

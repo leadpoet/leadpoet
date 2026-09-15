@@ -274,10 +274,16 @@ def test_published_evidence_requires_all_twenty_unique_outputs_scores_and_costs(
     assert document["execution_timing"] == {
         "accepted_interval_count": 20,
         "invalid_result_count": 0,
+        "failed_attempt_interval_count": 0,
+        "invalid_failed_attempt_interval_count": 0,
         "runner_hotkeys": ["runner-hotkey"],
         "worker_slots": list(range(10)),
         "exit_fingerprint_count": 10,
+        "concurrency_evidence": "overlapping_valid_attempt_intervals",
+        "physical_concurrency_evidence": "operator_sandbox_pid_observations_required",
         "concurrency_high_water_lower_bound": 10,
+        "first_batch_concurrency_high_water_lower_bound": 10,
+        "second_batch_concurrency_high_water_lower_bound": 10,
         "first_batch_latest_finish": "2026-09-14T00:00:10Z",
         "second_batch_earliest_start": "2026-09-14T00:00:10Z",
         "second_batch_started_after_first_finished": True,
@@ -429,6 +435,101 @@ def test_published_evidence_rejects_early_second_batch_and_wrong_high_water():
 
     assert document["proof"]["complete"] is False
     assert "execution_high_water" in document["proof"]["errors"]
+    assert "execution_batch_barrier" in document["proof"]["errors"]
+
+
+def test_published_evidence_rejects_sequential_first_batch_before_parallel_second():
+    service = Service()
+    execution = [run for run in service.store.runs if run["kind"] == "execute"]
+    for position in range(10):
+        execution[position]["result_doc"]["started_at"] = (
+            "2026-09-14T00:00:%02dZ" % position
+        )
+        execution[position]["result_doc"]["finished_at"] = (
+            "2026-09-14T00:00:%02dZ" % (position + 1)
+        )
+
+    document = verification._evidence(service, ROUND_ID)
+
+    assert document["execution_timing"][
+        "first_batch_concurrency_high_water_lower_bound"
+    ] == 1
+    assert document["execution_timing"][
+        "second_batch_concurrency_high_water_lower_bound"
+    ] == 10
+    assert "execution_first_batch_high_water" in document["proof"]["errors"]
+    assert "execution_second_batch_high_water" not in document["proof"]["errors"]
+
+
+def test_failed_initial_attempt_keeps_real_first_wave_overlap_in_proof():
+    service = Service()
+    execution = [run for run in service.store.runs if run["kind"] == "execute"]
+    accepted_retry = execution[0]
+    accepted_retry["result_doc"]["started_at"] = "2026-09-14T00:00:10Z"
+    accepted_retry["result_doc"]["finished_at"] = "2026-09-14T00:00:20Z"
+    for run in execution[10:]:
+        run["result_doc"]["started_at"] = "2026-09-14T00:00:20Z"
+        run["result_doc"]["finished_at"] = "2026-09-14T00:00:30Z"
+    failed_initial = {
+        **accepted_retry,
+        "run_id": "execute-0-initial-failed",
+        "status": "failed",
+        "output_ref": "",
+        "per_icp_score": None,
+        "result_doc": {
+            **accepted_retry["result_doc"],
+            "terminal_status": "model_error",
+            "started_at": "2026-09-14T00:00:00Z",
+            "finished_at": "2026-09-14T00:00:10Z",
+        },
+    }
+    service.store.runs.append(failed_initial)
+
+    document = verification._evidence(service, ROUND_ID)
+
+    assert document["proof"] == {"complete": True, "errors": []}
+    assert document["execution"]["failed_attempts"] == 1
+    assert document["execution_timing"]["failed_attempt_interval_count"] == 1
+    assert document["execution_timing"][
+        "first_batch_concurrency_high_water_lower_bound"
+    ] == 10
+    assert document["execution_timing"][
+        "second_batch_concurrency_high_water_lower_bound"
+    ] == 10
+
+
+def test_failed_second_batch_attempt_cannot_hide_an_early_batch_start():
+    service = Service()
+    accepted_second = next(
+        run
+        for run in service.store.runs
+        if run["kind"] == "execute" and run["icp_position"] == 10
+    )
+    failed_early = {
+        **accepted_second,
+        "run_id": "execute-10-initial-failed",
+        "status": "failed",
+        "output_ref": "",
+        "per_icp_score": None,
+        "result_doc": {
+            **accepted_second["result_doc"],
+            "terminal_status": "model_error",
+            "started_at": "2026-09-14T00:00:09Z",
+            "finished_at": "2026-09-14T00:00:10Z",
+        },
+    }
+    service.store.runs.append(failed_early)
+
+    document = verification._evidence(service, ROUND_ID)
+
+    assert document["execution_timing"]["failed_attempt_interval_count"] == 1
+    assert (
+        document["execution_timing"]["second_batch_earliest_start"]
+        == "2026-09-14T00:00:09Z"
+    )
+    assert document["execution_timing"][
+        "second_batch_started_after_first_finished"
+    ] is False
     assert "execution_batch_barrier" in document["proof"]["errors"]
 
 

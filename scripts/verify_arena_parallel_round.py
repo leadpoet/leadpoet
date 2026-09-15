@@ -269,8 +269,33 @@ def _parse_result_time(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _interval_high_water(
+    intervals: list[tuple[datetime, datetime]],
+) -> int:
+    """Return a conservative lower bound from second-resolution intervals."""
+
+    events: list[tuple[datetime, int]] = []
+    for started, finished in intervals:
+        if finished > started:
+            events.extend(((started, 1), (finished, -1)))
+    active = 0
+    high_water = 0
+    # Process finishes before starts at the same timestamp. This avoids
+    # claiming overlap that the one-second result timestamps cannot prove.
+    for _timestamp, delta in sorted(events, key=lambda event: (event[0], event[1])):
+        active += delta
+        high_water = max(high_water, active)
+    return high_water
+
+
 def _execution_timing(runs: list[Mapping[str, Any]]) -> dict[str, Any]:
-    """Build conservative proof from the immutable accepted result documents."""
+    """Build conservative attempt-overlap evidence from immutable results.
+
+    Timestamp overlap does not prove physical sandbox concurrency. The paid
+    operator run must retain its independent sandbox PID observations.
+    """
+
+    from lab_arena import contracts
 
     accepted = [
         row
@@ -313,38 +338,95 @@ def _execution_timing(runs: list[Mapping[str, Any]]) -> dict[str, Any]:
         exit_fingerprints.add(fingerprint)
         runner_hotkeys.add(runner)
 
-    # The runner timestamps have one-second resolution. Excluding zero-length
-    # intervals and processing finishes before starts at equal timestamps makes
-    # this a lower bound on real concurrency instead of an inflated estimate.
-    events: list[tuple[datetime, int]] = []
-    for started, finished in intervals:
-        if finished > started:
-            events.extend(((started, 1), (finished, -1)))
-    active = 0
-    high_water = 0
-    for _timestamp, delta in sorted(events, key=lambda event: (event[0], event[1])):
-        active += delta
-        high_water = max(high_water, active)
+    attempt_intervals: list[tuple[int, datetime, datetime]] = [
+        (position, interval[0], interval[1])
+        for position, interval in by_position.items()
+        if position in range(contracts.BENCHMARK_ICP_COUNT)
+    ]
+    failed_attempt_interval_count = 0
+    invalid_failed_attempt_interval_count = 0
+    reported_failures = contracts.MODEL_CAUSED_TERMINAL_CAUSES | {"provider_error"}
+    for row in runs:
+        if row.get("kind") != "execute" or row.get("status") != "failed":
+            continue
+        result = row.get("result_doc") or {}
+        started = _parse_result_time(result.get("started_at"))
+        finished = _parse_result_time(result.get("finished_at"))
+        web_egress = (result.get("resource_summary") or {}).get("web_egress") or {}
+        position = row.get("icp_position")
+        slot = web_egress.get("worker_slot")
+        fingerprint = str(web_egress.get("exit_fingerprint") or "")
+        runner = str(row.get("runner_hotkey") or "")
+        if (
+            result.get("terminal_status") not in reported_failures
+            or started is None
+            or finished is None
+            or finished < started
+            or isinstance(position, bool)
+            or not isinstance(position, int)
+            or position not in range(contracts.BENCHMARK_ICP_COUNT)
+            or isinstance(slot, bool)
+            or not isinstance(slot, int)
+            or slot not in worker_slots
+            or fingerprint not in exit_fingerprints
+            or runner not in runner_hotkeys
+        ):
+            invalid_failed_attempt_interval_count += 1
+            continue
+        attempt_intervals.append((position, started, finished))
+        failed_attempt_interval_count += 1
 
+    all_attempt_intervals = [
+        (started, finished) for _position, started, finished in attempt_intervals
+    ]
+    first_batch_attempt_intervals = [
+        (started, finished)
+        for position, started, finished in attempt_intervals
+        if position < 10
+    ]
+    second_batch_attempt_intervals = [
+        (started, finished)
+        for position, started, finished in attempt_intervals
+        if position >= 10
+    ]
+
+    # The barrier opens only after every first-batch position has an accepted
+    # result. Its other edge is the earliest valid attempt in the second batch,
+    # including an attempt that failed before its accepted retry.
     first_batch = [by_position.get(position) for position in range(10)]
-    second_batch = [by_position.get(position) for position in range(10, 20)]
     first_finished = (
         max(interval[1] for interval in first_batch if interval is not None)
         if all(interval is not None for interval in first_batch)
         else None
     )
     second_started = (
-        min(interval[0] for interval in second_batch if interval is not None)
-        if all(interval is not None for interval in second_batch)
+        min(interval[0] for interval in second_batch_attempt_intervals)
+        if second_batch_attempt_intervals
         else None
     )
     return {
         "accepted_interval_count": len(intervals),
         "invalid_result_count": invalid_results,
+        "failed_attempt_interval_count": failed_attempt_interval_count,
+        "invalid_failed_attempt_interval_count": (
+            invalid_failed_attempt_interval_count
+        ),
         "runner_hotkeys": sorted(runner_hotkeys),
         "worker_slots": sorted(worker_slots),
         "exit_fingerprint_count": len(exit_fingerprints),
-        "concurrency_high_water_lower_bound": high_water,
+        "concurrency_evidence": "overlapping_valid_attempt_intervals",
+        "physical_concurrency_evidence": (
+            "operator_sandbox_pid_observations_required"
+        ),
+        "concurrency_high_water_lower_bound": _interval_high_water(
+            all_attempt_intervals
+        ),
+        "first_batch_concurrency_high_water_lower_bound": _interval_high_water(
+            first_batch_attempt_intervals
+        ),
+        "second_batch_concurrency_high_water_lower_bound": _interval_high_water(
+            second_batch_attempt_intervals
+        ),
         "first_batch_latest_finish": (
             first_finished.isoformat().replace("+00:00", "Z")
             if first_finished is not None
@@ -627,6 +709,16 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
             errors.append("execution_exit_fingerprints")
         if execution_timing["concurrency_high_water_lower_bound"] != 10:
             errors.append("execution_high_water")
+        if (
+            execution_timing["first_batch_concurrency_high_water_lower_bound"]
+            != 10
+        ):
+            errors.append("execution_first_batch_high_water")
+        if (
+            execution_timing["second_batch_concurrency_high_water_lower_bound"]
+            != 10
+        ):
+            errors.append("execution_second_batch_high_water")
         if not execution_timing["second_batch_started_after_first_finished"]:
             errors.append("execution_batch_barrier")
         if len(final_results) != 1 or final_results[0].get("final_score") is None:

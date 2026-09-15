@@ -59,6 +59,23 @@ def test_probe_root_is_independent_and_contains_closed_shim(tmp_path):
     assert (rootfs / "model/lab_arena/shim.py").is_file()
 
 
+def test_agent_probe_mounts_the_current_checkpoint_module_read_only(tmp_path):
+    spec = probe.make_agent_spec(tmp_path)
+    checkpoint = spec.checkpoint_module_path
+    assert checkpoint is not None
+    assert checkpoint.parent == tmp_path / "agent/run"
+    assert checkpoint.read_bytes() == (
+        probe.ROOT / "lab_arena/lab_arena_checkpoint.py"
+    ).read_bytes()
+    mounts = probe.runtime.oci_spec(spec)["mounts"]
+    checkpoint_mount = next(
+        mount for mount in mounts
+        if mount["destination"] == probe.runtime.SANDBOX_AGENT_CHECKPOINT_PATH
+    )
+    assert checkpoint_mount["source"] == str(checkpoint)
+    assert "ro" in checkpoint_mount["options"]
+
+
 def test_probe_cleanup_keeps_directory_when_bind_unmount_failed(tmp_path, monkeypatch):
     work = tmp_path / "probe work"
     (work / "host-rootfs/usr").mkdir(parents=True)

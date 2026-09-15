@@ -181,10 +181,15 @@ def make_agent_spec(work: Path, *, rootfs_path: Path = Path("/")) -> runtime.San
     (source_dir / "harness.py").write_text(AGENT_HARNESS, encoding="utf-8")
     (input_dir / runtime.INPUT_FILE_NAME).write_text(json.dumps({"schema_version": "leadpoet.lab_arena.icp_input.v1", "icp": {"prompt": "probe", "max_companies": 5}, "evaluation_date": "2026-09-02", "company_limit": 5, "provider_operations": sorted(__import__("lab_arena.operations", fromlist=["OPERATIONS"]).OPERATIONS)}), encoding="utf-8")
     entrypoint = _stage_agent_entrypoint(ROOT / "lab_arena" / "agent_entrypoint.py", run_dir)
+    checkpoint = _stage_agent_entrypoint(
+        ROOT / "lab_arena" / "lab_arena_checkpoint.py", run_dir,
+        filename="lab_arena_checkpoint.py",
+    )
     return runtime.SandboxSpec(
         sandbox_id="lab-arena-probe-agent", rootfs_path=rootfs_path, input_dir=input_dir, output_dir=output_dir,
         socket_path=socket_dir / runtime.SANDBOX_SOCKET_NAME, source_dir=source_dir, dependency_dir=dependency_dir,
         agent_entrypoint_path=entrypoint, entry_command=runtime.AGENT_ENTRY_COMMAND, working_dir=runtime.AGENT_WORKING_DIR,
+        checkpoint_module_path=checkpoint,
         evaluation_date="2026-09-02", random_seed=7, wall_clock_seconds=60,
     )
 

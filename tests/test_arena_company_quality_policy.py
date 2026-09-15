@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from itertools import permutations
+import json
 from urllib.parse import urlsplit
 
 import pytest
@@ -541,6 +542,63 @@ def test_context_clears_contact_credit_when_primary_signal_does_not_qualify():
     contact_policy.validate_contact_breakdown(result)
 
 
+def test_lucid_paragraph_mismatch_cannot_qualify_or_reserve_company():
+    from qualification.scoring.competition import _merge_contact_breakdown
+    from tests.test_arena_contact_scoring import (
+        _contact,
+        _contact_result,
+        _paragraph_failure,
+        _v5_company,
+    )
+
+    rows = [_v5_company(contact=_contact()), _v5_company(contact=_contact())]
+    failed = _paragraph_failure("mismatch")
+    valid = _positive_breakdown("Lucid Bots", "lucidbots.com", "lucid-bots")
+    valid["verifier_gate_receipts"].append(
+        {"gate": "intent_details", "decision": "match"}
+    )
+    for raw in (failed, valid):
+        contact = _contact_result(qualified=True, email_status="valid")
+        contact["contact_verification"]["subchecks"] = {
+            key: {"status": "pass"}
+            for key in (
+                "claim",
+                "identity",
+                "source",
+                "company",
+                "role",
+                "location",
+                "email_attribution",
+                "email_verification",
+            )
+        }
+        _merge_contact_breakdown(raw, contact)
+
+    result = apply_company_judgment_context(
+        rows, [failed, valid], contacts_required=True
+    )
+
+    assert [row["company_qualified"] for row in result] == [False, True]
+    assert [row["contact_qualified"] for row in result] == [False, True]
+    assert [row["duplicate_company"] for row in result] == [False, False]
+    assert result[0]["final_score"] == 0.0
+    assert result[0]["failure_reason"] == (
+        "Intent Details do not satisfy the grounded client paragraph contract"
+    )
+    assert result[0]["intent_signals_detail"][0]["after_decay"] == 60.0
+    assert result[0]["contact_verification"]["decision"] == "not_evaluated"
+    assert result[1]["final_score"] == 60.0
+    assert json.loads(json.dumps(result, allow_nan=False)) == result
+    assert scoring.validate_breakdowns_for_item(
+        result,
+        icp=_icp(),
+        companies=rows,
+        integrity_policy=True,
+        contacts_required=True,
+        company_quality=True,
+    ) == result
+
+
 def test_verified_contact_binding_keeps_multiword_claim_name():
     from qualification.scoring.competition import _verified_company_for_contact
     from qualification.scoring.contact_verification import (
@@ -602,6 +660,7 @@ def test_first_failed_contact_does_not_block_one_later_verified_duplicate(
     assert [row["final_score"] for row in result] == [0, 60]
     assert [row["company_qualified"] for row in result] == [False, True]
     assert not any(row["duplicate_company"] for row in result)
+    assert result[0]["contact_verification"]["decision"] == "mismatch"
 
 
 @pytest.mark.parametrize(

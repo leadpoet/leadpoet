@@ -718,6 +718,18 @@ def _verified_domain_name_hq_key(
     return ("verified_domain_name_hq", domain, name, country, state)
 
 
+def _intent_details_gate_passed(breakdown: Mapping[str, Any]) -> bool:
+    """Reject an explicit paragraph mismatch or unavailable decision."""
+    receipts = breakdown.get("verifier_gate_receipts")
+    if not isinstance(receipts, Sequence) or isinstance(receipts, (str, bytes)):
+        return True
+    return not any(
+        isinstance(receipt, Mapping)
+        and receipt.get("gate") == "intent_details"
+        and receipt.get("decision") != "match" for receipt in receipts
+    )
+
+
 def apply_company_judgment_context(
     companies: Sequence[Mapping[str, Any]],
     raw_breakdowns: Sequence[Mapping[str, Any]],
@@ -748,9 +760,10 @@ def apply_company_judgment_context(
         company_ready = bool(
             fit
             and has_verified_primary_intent(row.get("intent_signals_detail") or [])
+            and _intent_details_gate_passed(row)
             and not scorer_breakdown_is_terminal_company_verification_failure(row)
         )
-        qualified = bool(company_ready)
+        qualified = bool(company_ready and float(row.get("final_score") or 0) > 0)
         if contacts_required:
             qualified = qualified and row.get("contact_qualified") is True
         identity_keys: list[tuple[str, ...]] = []
@@ -992,8 +1005,13 @@ class CompetitionCompanyScorer:
                 primary_verified = has_verified_primary_intent(
                     breakdown.get("intent_signals_detail") or []
                 )
+                paragraph_verified = _intent_details_gate_passed(breakdown)
                 company_qualified = bool(
-                    fit_verified and primary_verified and not duplicate_company
+                    fit_verified
+                    and primary_verified
+                    and paragraph_verified
+                    and float(breakdown.get("final_score") or 0) > 0
+                    and not duplicate_company
                 )
                 breakdown.update({
                     "company_index": company_index,
@@ -1002,7 +1020,7 @@ class CompetitionCompanyScorer:
                     "company_qualified": company_qualified,
                     "duplicate_company": duplicate_company,
                 })
-                if fit_verified and not duplicate_company:
+                if fit_verified and paragraph_verified and not duplicate_company:
                     for alias in identity_alias_keys:
                         verified_identity_key_by_alias[alias] = identity_key
             if self.contacts_required:

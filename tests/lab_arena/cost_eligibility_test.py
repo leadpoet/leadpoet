@@ -186,6 +186,43 @@ def _cost_service(
     return service, row, submission_id, runs
 
 
+def test_paragraph_failed_company_is_excluded_from_qualified_cost_count():
+    service, row, submission_id, runs = _cost_service(
+        amount=500_000, populated_positions={0}
+    )
+    row["configuration_doc"]["scorer_policy"] = {
+        "max_scored_companies": 0
+    }
+    service.evaluation_icps = lambda _round_id: [
+        {"employee_count": ["1-10"], "max_companies": 5}
+    ]
+    service._scoring_outputs = lambda _round_id, _stage: {
+        runs[0]["run_id"]: {"status": "accepted"}
+    }
+    failed = {
+        "company_index": 0,
+        "company_identity_key": "linkedin:lucid-bots",
+        "company_qualified": False,
+        "duplicate_company": False,
+        "final_score": 0.0,
+        "verifier_gate_receipts": [
+            {"gate": "intent_details", "decision": "mismatch"}
+        ],
+    }
+
+    def verified_breakdowns(_run, *, icp, companies, policy):
+        assert icp == service.evaluation_icps(ROUND_ID)[0]
+        assert companies[0]["company_name"] == "Company 0 0"
+        assert policy["max_scored_companies"] == 0
+        return [failed]
+
+    service._verified_breakdowns = verified_breakdowns
+
+    assert service._qualified_company_count(
+        row, submission_id, runs, positions=[0]
+    ) == 0
+
+
 @pytest.mark.parametrize(
     ("amount", "eligible", "reason"),
     [

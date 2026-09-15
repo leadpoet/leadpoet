@@ -130,6 +130,46 @@ def _positive_breakdown(
     }
 
 
+def _paragraph_failure(decision: str = "mismatch") -> dict:
+    row = _positive_breakdown("Lucid Bots", "lucidbots.com", "lucid-bots")
+    for field in (
+        "icp_fit",
+        "decision_maker",
+        "intent_signal_raw",
+        "intent_signal_final",
+        "cost_penalty",
+        "time_penalty",
+        "final_score",
+    ):
+        row[field] = 0.0
+    row["failure_reason"] = (
+        "Intent Details do not satisfy the grounded client paragraph contract"
+        if decision == "mismatch"
+        else "Intent Details judge unavailable"
+    )
+    row["verifier_gate_receipts"].append(
+        {"gate": "intent_details", "decision": decision}
+    )
+    return row
+
+
+def _v5_company(**updates: object) -> dict:
+    row = _company(
+        "Lucid Bots",
+        "lucidbots.com",
+        company_linkedin="https://linkedin.com/company/lucid-bots",
+    )
+    row.pop("fit_summary")
+    row.pop("fit_evidence_urls")
+    row["intent_details"] = (
+        "Lucid Bots is hiring an engineer for its drone tether program."
+    )
+    row["intent_signals"][0].pop("why_now")
+    row["intent_signals"][0].pop("snippet")
+    row.update(updates)
+    return row
+
+
 def _contact_result(*, qualified: bool, email_status: str = "unknown") -> dict:
     decision = "verified" if qualified else "mismatch"
     reason = "contact_verified" if qualified else "contact_email_mismatch"
@@ -250,6 +290,111 @@ def test_base_failure_skips_contact_and_emits_complete_not_evaluated_fields(monk
         "decision": "not_evaluated",
         "reason": "company_not_qualified",
     }
+
+
+@pytest.mark.parametrize("decision", ["mismatch", "unavailable"])
+def test_paragraph_failure_skips_contact_and_does_not_reserve_company(
+    monkeypatch, decision
+) -> None:
+    score_calls = 0
+    contact_calls = 0
+
+    async def score_company(**_kwargs):
+        nonlocal score_calls
+        score_calls += 1
+        return (
+            _paragraph_failure(decision)
+            if score_calls == 1
+            else _positive_breakdown(
+                "Lucid Bots", "lucidbots.com", "lucid-bots"
+            )
+        )
+
+    async def verify(*_args, **_kwargs):
+        nonlocal contact_calls
+        contact_calls += 1
+        return _contact_result(qualified=True, email_status="valid")
+
+    monkeypatch.setattr(
+        lead_scorer, "score_company_competition_intent", score_company
+    )
+    monkeypatch.setattr(contact_verification, "verify_contact", verify)
+
+    rows = asyncio.run(
+        CompetitionCompanyScorer(contacts_required=True).score_with_breakdowns(
+            [_v5_company(), _v5_company()], _icp(), False
+        )
+    )
+
+    assert score_calls == 2
+    assert contact_calls == 1
+    assert [row["company_qualified"] for row in rows] == [False, True]
+    assert [row["duplicate_company"] for row in rows] == [False, False]
+    assert rows[0]["contact_verification"]["decision"] == "not_evaluated"
+    assert rows[1]["contact_verification"]["decision"] == "verified"
+    assert rows[1]["final_score"] == 60.0
+
+
+def test_primary_failure_keeps_legacy_identity_reservation(monkeypatch) -> None:
+    score_calls = 0
+
+    async def score_company(**_kwargs):
+        nonlocal score_calls
+        score_calls += 1
+        row = _positive_breakdown()
+        row["intent_signals_detail"][0]["after_decay"] = 0.0
+        row["final_score"] = 0.0
+        return row
+
+    async def should_not_run(*_args, **_kwargs):
+        raise AssertionError("contact verification ran after company failure")
+
+    monkeypatch.setattr(
+        lead_scorer, "score_company_competition_intent", score_company
+    )
+    monkeypatch.setattr(contact_verification, "verify_contact", should_not_run)
+
+    rows = asyncio.run(
+        CompetitionCompanyScorer(contacts_required=True).score_with_breakdowns(
+            [_company(), _company()], _icp(), False
+        )
+    )
+
+    assert score_calls == 1
+    assert rows[0]["company_qualified"] is False
+    assert rows[1]["duplicate_company"] is True
+
+
+def test_contact_failure_keeps_legacy_identity_reservation(monkeypatch) -> None:
+    score_calls = 0
+    contact_calls = 0
+
+    async def score_company(**_kwargs):
+        nonlocal score_calls
+        score_calls += 1
+        return _positive_breakdown()
+
+    async def verify(*_args, **_kwargs):
+        nonlocal contact_calls
+        contact_calls += 1
+        return _contact_result(qualified=False)
+
+    monkeypatch.setattr(
+        lead_scorer, "score_company_competition_intent", score_company
+    )
+    monkeypatch.setattr(contact_verification, "verify_contact", verify)
+
+    rows = asyncio.run(
+        CompetitionCompanyScorer(contacts_required=True).score_with_breakdowns(
+            [_company(), _company()], _icp(), False
+        )
+    )
+
+    assert score_calls == 1
+    assert contact_calls == 1
+    assert rows[0]["contact_verification"]["decision"] == "mismatch"
+    assert rows[1]["duplicate_company"] is True
+    assert rows[1]["contact_verification"]["decision"] == "not_evaluated"
 
 
 def test_contact_rejection_keeps_base_breakdown_and_false_positive_penalty_logic(monkeypatch) -> None:

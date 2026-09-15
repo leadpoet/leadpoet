@@ -617,6 +617,10 @@ class Harness:
         so a test can resubmit fresh source under an existing miner.
         """
 
+        # Signed fixture submissions use the same current time as the real
+        # disposable database. Tests may still set a later boundary explicitly.
+        if self.clock() < datetime.now(timezone.utc):
+            self.clock.now = datetime.now(timezone.utc)
         schedule = self.service.store.get_round(round_id)["configuration_doc"]["schedule"]
         submission_open = datetime.strptime(schedule["submission_open"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
         if self.clock() < submission_open:
@@ -732,7 +736,7 @@ def test_startup_checks_require_the_current_arena_schema(connect, tmp_path):
 
 def test_benchmark_commit_refreshes_a_delayed_open_round_scorer_before_jobs(connect, tmp_path):
     harness = Harness(connect, tmp_path, challengers=["Refresh"], runners=["alpha"])
-    cutoff = datetime.now(timezone.utc) + timedelta(hours=12)
+    cutoff = datetime.now(timezone.utc) + timedelta(minutes=30)
     configuration = harness.service.create_round(
         cutoff, round_id="arena-2026-09-25-refresh"
     )
@@ -820,7 +824,7 @@ def test_round_advances_from_cutoff_on_readiness_without_nominal_idle_gaps(
 
     service.build_schedule = postgres_fractional_schedule
     configuration = service.create_round(
-        datetime.now(timezone.utc) + timedelta(hours=12),
+        datetime.now(timezone.utc) + timedelta(minutes=30),
         round_id="arena-2026-09-27-continuous",
     )
     harness.round_id = configuration["round_id"]
@@ -1022,7 +1026,7 @@ def test_full_round_publishes_results_and_next_day_uses_the_public_baseline(conn
     harness.clock.now = datetime.now(timezone.utc)
     harness.chain.epoch = 24820
     configuration = harness.service.create_round(
-        datetime.now(timezone.utc) + timedelta(hours=12),
+        datetime.now(timezone.utc) + timedelta(minutes=30),
         round_id="arena-2026-10-02",
     )
     harness.round_id = configuration["round_id"]
@@ -1249,7 +1253,7 @@ def test_publish_cancels_an_existing_scored_state_with_no_valid_baseline(
 def test_restart_finishes_a_partial_participant_freeze_without_changing_baseline(connect, tmp_path):
     harness = Harness(connect, tmp_path, challengers=["Restart-A", "Restart-B"], runners=["alpha"])
     configuration = harness.service.create_round(
-        datetime.now(timezone.utc) + timedelta(hours=12),
+        datetime.now(timezone.utc) + timedelta(minutes=30),
         round_id="arena-2026-10-04-restart",
     )
     harness.round_id = configuration["round_id"]
@@ -1291,7 +1295,7 @@ def test_infrastructure_gap_cancels_and_model_failures_score_zero(connect, tmp_p
     harness = Harness(connect, tmp_path, challengers=["Echo", "Foxtrot"], runners=["alpha", "beta"])
     service = harness.service
     configuration = service.create_round(
-        datetime.now(timezone.utc) + timedelta(hours=12),
+        datetime.now(timezone.utc) + timedelta(minutes=30),
         round_id="arena-2026-10-05-gap",
     )
     harness.round_id = configuration["round_id"]
@@ -1328,7 +1332,7 @@ def test_infrastructure_gap_cancels_and_model_failures_score_zero(connect, tmp_p
     # work completes and does not cancel the round.
     harness.clock.now = datetime.now(timezone.utc)
     configuration = service.create_round(
-        datetime.now(timezone.utc) + timedelta(hours=12),
+        datetime.now(timezone.utc) + timedelta(minutes=30),
         round_id="arena-2026-10-06-zero",
     )
     harness.round_id = configuration["round_id"]
@@ -1384,7 +1388,7 @@ def test_shadow_round_uses_the_same_two_stage_flow_without_rewards(connect, tmp_
     harness.build_service = build_shadow
     harness.service = build_shadow()
     configuration = harness.service.create_round(
-        datetime.now(timezone.utc) + timedelta(hours=12),
+        datetime.now(timezone.utc) + timedelta(minutes=30),
         round_id="arena-2026-10-20-shadow",
     )
     assert configuration["mode"] == "shadow"
@@ -1436,7 +1440,7 @@ def test_admission_exempts_baseline_and_rejects_overflow_before_acceptance(conne
     harness.service = harness.build_service()  # the cap is a round default, read when the service is built
     harness.chain.epoch = 29000
     service = harness.service
-    configuration = service.create_round(datetime.now(timezone.utc) + timedelta(hours=12), round_id="arena-2026-09-03-cap")
+    configuration = service.create_round(datetime.now(timezone.utc) + timedelta(minutes=30), round_id="arena-2026-09-03-cap")
     assert configuration["max_challengers"] == 2
     harness.round_id = configuration["round_id"]
     round_id = harness.round_id
@@ -1476,7 +1480,10 @@ def _start_round(harness: Harness, *, day: int = 9, epoch: int = 30000) -> int:
 
     service = harness.service
     harness.chain.epoch = epoch
-    cutoff = datetime.now(timezone.utc) + timedelta(hours=12)
+    # Begin between the replacement freeze and submission cutoff. The real
+    # database clock and signed service clock must agree for fixture reviews.
+    harness.clock.now = datetime.now(timezone.utc)
+    cutoff = datetime.now(timezone.utc) + timedelta(minutes=30)
     configuration = service.create_round(cutoff, round_id="arena-2026-10-%02d" % day)
     harness.round_id = configuration["round_id"]
     for flavor in harness.challengers:
@@ -2309,7 +2316,7 @@ def test_a_prior_miner_winner_submits_fresh_source_as_a_challenger(connect, tmp_
     harness.chain.epoch = 30040
     harness.clock.now = datetime.now(timezone.utc)
     configuration = service.create_round(
-        datetime.now(timezone.utc) + timedelta(hours=12),
+        datetime.now(timezone.utc) + timedelta(minutes=30),
         round_id="arena-2026-10-17-fresh",
     )
     harness.round_id = configuration["round_id"]
@@ -2535,7 +2542,7 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path, monkey
     harness.api_factory = lambda: rn.HttpArenaApiClient("http://localhost", client=client)
     harness.clock.now = datetime.now(timezone.utc)
     configuration = harness.service.create_round(
-        datetime.now(timezone.utc) + timedelta(hours=12),
+        datetime.now(timezone.utc) + timedelta(minutes=30),
         round_id="arena-2026-10-13-http",
     )
     harness.round_id = configuration["round_id"]
@@ -2656,7 +2663,7 @@ def test_rounds_overlap_and_every_request_names_its_round(connect, tmp_path):
         service.cancel(row["round_id"], reason)
 
     harness.clock.now = datetime.now(timezone.utc)
-    cutoff = datetime.now(timezone.utc) + timedelta(hours=12)
+    cutoff = datetime.now(timezone.utc) + timedelta(minutes=30)
     first = service.create_round(cutoff, round_id="arena-2026-11-02-over")
     harness.round_id = first["round_id"]
     for flavor in harness.challengers:
@@ -2670,7 +2677,7 @@ def test_rounds_overlap_and_every_request_names_its_round(connect, tmp_path):
 
     harness.clock.now = datetime.now(timezone.utc)
     second = service.create_round(
-        datetime.now(timezone.utc) + timedelta(hours=12),
+        datetime.now(timezone.utc) + timedelta(minutes=30),
         round_id="arena-2026-11-03-over",
     )
     second_id = second["round_id"]
@@ -2830,7 +2837,7 @@ def test_result_writes_retry_after_transient_object_store_failures(connect, tmp_
     harness.objects = flaky
     harness.service = harness.build_service()
     configuration = harness.service.create_round(
-        datetime.now(timezone.utc) + timedelta(hours=12),
+        datetime.now(timezone.utc) + timedelta(minutes=30),
         round_id="arena-2026-10-15-flaky",
     )
     harness.round_id = configuration["round_id"]

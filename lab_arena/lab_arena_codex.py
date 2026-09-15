@@ -29,6 +29,8 @@ MAX_REQUEST_BYTES = 1_000_000
 MAX_RESPONSE_BYTES = 4 * 1_048_576
 MAX_LOG_BYTES = 64 * 1024
 SOCKET_TIMEOUT_SECONDS = 185
+DEFAULT_MAX_OUTPUT_TOKENS = 16_384
+MAX_OUTPUT_TOKENS = 32_768
 
 
 class CodexRuntimeError(RuntimeError):
@@ -77,7 +79,7 @@ def _dispatch(socket_path: str, parameters: dict[str, Any]) -> tuple[int, bytes]
 def response_events(document: dict[str, Any]) -> Iterator[bytes]:
     """Replay terminal Responses items without translating their tool protocol."""
 
-    if (document.get("object") != "response"
+    if (not isinstance(document, dict) or document.get("object") != "response"
             or document.get("status") not in ("completed", "incomplete", "failed")
             or not isinstance(document.get("output"), list)):
         raise CodexRuntimeError("invalid Responses reply")
@@ -101,6 +103,8 @@ def response_events(document: dict[str, Any]) -> Iterator[bytes]:
                 if not isinstance(part, dict):
                     raise CodexRuntimeError("invalid Responses content")
                 if part.get("type") == "output_text":
+                    if not isinstance(part.get("text"), str):
+                        raise CodexRuntimeError("invalid Responses text")
                     fields = dict(item_id=item.get("id", ""), output_index=index, content_index=part_index)
                     yield event("response.content_part.added", **fields, part=dict(part, text=""))
                     yield event("response.output_text.delta", **fields, delta=part["text"])
@@ -113,7 +117,9 @@ def response_events(document: dict[str, Any]) -> Iterator[bytes]:
 class ResponsesBridge:
     """Attempt-local listener. The only upstream is the bound worker socket."""
 
-    def __init__(self, socket_path: str) -> None:
+    def __init__(self, socket_path: str, *, max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS) -> None:
+        if type(max_output_tokens) is not int or not 1 <= max_output_tokens <= MAX_OUTPUT_TOKENS:
+            raise CodexRuntimeError("invalid Codex output token limit")
         self.socket_path = socket_path
         self.token = secrets.token_urlsafe(32)
         self._active = threading.BoundedSemaphore(1)
@@ -164,9 +170,18 @@ class ResponsesBridge:
                         raise ValueError("stateful request")
                     # Codex client telemetry is not part of OpenRouter's API.
                     body.pop("client_metadata", None)
+                    # Codex omits this field. Make the reasoning + visible-output
+                    # allowance explicit before the broker reserves its cost.
+                    requested = body.get("max_output_tokens", max_output_tokens)
+                    if type(requested) is not int or not 1 <= requested <= max_output_tokens:
+                        raise ValueError("invalid output token limit")
+                    body["max_output_tokens"] = requested
                     status, response = _dispatch(owner.socket_path, body)
                     if 200 <= status < 300 and streaming:
-                        response = b"".join(response_events(json.loads(response)))
+                        try:
+                            response = b"".join(response_events(json.loads(response)))
+                        except (ValueError, TypeError, KeyError, CodexRuntimeError):
+                            raise CodexRuntimeError("invalid Responses reply") from None
                         self.reply(status, response, "text/event-stream")
                     else:
                         self.reply(status, response)
@@ -195,7 +210,7 @@ class ResponsesBridge:
 
 
 @contextmanager
-def session(*, model: str, reasoning_effort: str = "medium") -> Iterator[dict[str, str]]:
+def session(*, model: str, reasoning_effort: str = "medium", max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS) -> Iterator[dict[str, str]]:
     """Yield an isolated child environment for a Codex CLI or SDK launcher.
 
     Call only inside an Arena execute sandbox with private loopback enabled.
@@ -205,9 +220,9 @@ def session(*, model: str, reasoning_effort: str = "medium") -> Iterator[dict[st
     socket_path = os.environ.get("LAB_ARENA_WORKER_SOCKET")
     if not socket_path or not os.environ.get("LAB_ARENA_WEB_EGRESS_SOCKET"):
         raise CodexRuntimeError("Codex requires an Arena execute sandbox with private loopback")
-    if not model or "/" not in model or reasoning_effort not in ("none", "minimal", "low", "medium", "high", "xhigh"):
+    if not isinstance(model, str) or not model or "/" not in model or reasoning_effort not in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
         raise CodexRuntimeError("invalid Codex model or reasoning effort")
-    with tempfile.TemporaryDirectory(prefix="arena-codex-") as directory, ResponsesBridge(socket_path) as bridge:
+    with tempfile.TemporaryDirectory(prefix="arena-codex-") as directory, ResponsesBridge(socket_path, max_output_tokens=max_output_tokens) as bridge:
         home = Path(directory)
         config = '\n'.join([
             "model = " + json.dumps(model),
@@ -218,11 +233,15 @@ def session(*, model: str, reasoning_effort: str = "medium") -> Iterator[dict[st
             'sandbox_mode = "danger-full-access"',
             'web_search = "disabled"',
             'check_for_update_on_startup = false',
+            '[agents]',
+            'enabled = false',
             '[features]',
             'enable_request_compression = false',
             'shell_snapshot = false',
             'multi_agent = false',
+            'multi_agent_v2 = false',
             'apps = false',
+            'image_generation = false',
             '[model_providers.arena]',
             'name = "Arena"',
             'base_url = ' + json.dumps(bridge.base_url),
@@ -256,14 +275,14 @@ def session(*, model: str, reasoning_effort: str = "medium") -> Iterator[dict[st
         yield environment
 
 
-def run(prompt: str, *, model: str, cwd: str | Path, reasoning_effort: str = "medium", timeout_seconds: float = 2700) -> str:
+def run(prompt: str, *, model: str, cwd: str | Path, reasoning_effort: str = "medium", max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS, timeout_seconds: float = 2700) -> str:
     """Run Codex once and return its final message; the harness owns JSON output."""
 
     if not isinstance(prompt, str) or not prompt or len(prompt.encode()) > MAX_REQUEST_BYTES:
         raise CodexRuntimeError("invalid Codex prompt")
     if not 0 < timeout_seconds <= 2700:
         raise CodexRuntimeError("invalid Codex timeout")
-    with session(model=model, reasoning_effort=reasoning_effort) as environment:
+    with session(model=model, reasoning_effort=reasoning_effort, max_output_tokens=max_output_tokens) as environment:
         final_path = Path(environment["CODEX_HOME"]) / "final.txt"
         with tempfile.TemporaryFile() as prompt_file:
             prompt_file.write(prompt.encode())

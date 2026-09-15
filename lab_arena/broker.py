@@ -329,8 +329,9 @@ def openrouter_normalized(parameters: Mapping[str, Any]) -> Dict[str, Any]:
 
     token_field = "max_output_tokens" if "input" in parameters else "max_tokens"
     requested = parameters.get(token_field)
-    cap = operations.OPENROUTER_MAX_OUTPUT_TOKENS
-    max_tokens = cap if requested is None else min(int(requested), cap)
+    cap = (operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS
+           if token_field == "max_output_tokens" else operations.OPENROUTER_MAX_OUTPUT_TOKENS)
+    max_tokens = operations.OPENROUTER_MAX_OUTPUT_TOKENS if requested is None else min(int(requested), cap)
     if max_tokens < 1:
         raise BrokerError("invalid_request")
     normalized = dict(parameters)

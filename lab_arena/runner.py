@@ -253,7 +253,7 @@ def _stage_agent_entrypoint(source_path: Path, run_dir: Path, *, filename: str =
     """Copy the trusted entrypoint without changing its deployed permissions."""
 
     source_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
-    if filename not in ("agent-entrypoint.py", "web-egress-bridge.py", "lab_arena_checkpoint.py"):
+    if filename not in ("agent-entrypoint.py", "web-egress-bridge.py", "lab_arena_checkpoint.py", "lab_arena_codex.py"):
         raise RunnerError("trusted runtime filename is invalid")
     destination = Path(run_dir) / filename
     source_fd = destination_fd = None

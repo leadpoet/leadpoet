@@ -430,7 +430,8 @@ def _record_verifier_failure(
 _STAGE_PROOF_NEGATED_OR_UNCERTAIN_RE = re.compile(
     r"\b(?:not|never|no|without|unconfirmed|rumou?red|plans?|planned|"
     r"planning|proposed|future|seeks?|seeking|expects?|expected|targets?|"
-    r"targeted|pending|might|could|would|will)\b(?:\W+\w+){0,6}\W*$",
+    r"targeted|pending|conditional(?:ly)?|might|could|would|will)\b"
+    r"(?:\W+\w+){0,6}\W*$",
     re.I,
 )
 _STAGE_PROOF_HISTORICAL_RE = re.compile(
@@ -476,7 +477,7 @@ def _has_stage_proof_uncertainty(value: str) -> bool:
 def _series_stage_proof_patterns(label: str) -> tuple[re.Pattern, ...]:
     return (
         re.compile(
-            rf"\b(?:raised|closed|secured|completed|announc(?:ed|ing)|received)\b"
+            rf"\b(?:raises|raised|closed|secured|completed|announc(?:ed|ing)|received)\b"
             rf".{{0,60}}\b{label}\b",
             re.I,
         ),
@@ -512,7 +513,7 @@ def _series_stage_statement_patterns(label: str) -> tuple[re.Pattern, ...]:
 _VENTURE_STAGE_PROOF_PATTERNS = {
     "seed": (
         re.compile(
-            r"\b(?:raised|closed|secured|completed|announced|received)\b.{0,40}"
+            r"\b(?:raises|raised|closed|secured|completed|announced|received)\b.{0,40}"
             r"\b(?:pre[- ]seed|seed)\b",
             re.I,
         ),

@@ -2090,6 +2090,7 @@ class Broker:
         openrouter_native_cost: Optional[provider_costs.ProviderCost] = None
         openrouter_readback_cost: Optional[provider_costs.ProviderCost] = None
         openrouter_insured_cost: Optional[provider_costs.ProviderCost] = None
+        openrouter_effective_response: Optional[ProviderResponse] = None
         openrouter_generation_present = False
         openrouter_generation_id: Optional[str] = None
         try:
@@ -2125,6 +2126,16 @@ class Broker:
                         "credential_echo",
                     )
                 if effective_operation.provider == "openrouter":
+                    # Normalize the provider status before billing classification,
+                    # while retaining the raw body for strict insurance checks and
+                    # the terminal response. Invalid envelopes still flow through
+                    # the existing fail-closed response handling below.
+                    try:
+                        openrouter_effective_response = _openrouter_effective_response(
+                            response
+                        )
+                    except operations.OperationResponseError:
+                        openrouter_effective_response = None
                     try:
                         raw_document = json.loads(response.body.decode("utf-8"))
                     except (UnicodeDecodeError, ValueError):
@@ -2167,7 +2178,11 @@ class Broker:
                                 self._price_table["models"][
                                     effective_normalized["model"]
                                 ],
-                                response.status,
+                                (
+                                    openrouter_effective_response.status
+                                    if openrouter_effective_response is not None
+                                    else response.status
+                                ),
                                 raw_document,
                             )
                         )
@@ -2362,7 +2377,11 @@ class Broker:
         call_succeeded = False
         try:
             if effective_operation.provider == "openrouter":
-                response = _openrouter_effective_response(response)
+                response = (
+                    openrouter_effective_response
+                    if openrouter_effective_response is not None
+                    else _openrouter_effective_response(response)
+                )
             call_succeeded = _provider_call_succeeded(
                 effective_operation.provider,
                 response,

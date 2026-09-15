@@ -1436,6 +1436,73 @@ def test_openrouter_plain_non_byok_502_uses_insured_zero_and_keeps_provider_erro
     assert transport.sent[0]["headers"]["x-openrouter-metadata"] == "enabled"
 
 
+def test_openrouter_http_200_body_502_uses_insured_zero_and_keeps_raw_provider_error():
+    payload = _insured_openrouter_error()
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, payload)])
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=0,
+        timeout_ms=30000,
+    )
+
+    assert result.status == 502
+    assert json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
+    assert result.call["provider_status"] == 502
+    assert result.call["actual_microusd"] == 0
+    assert result.call["cost_basis"] == "openrouter_zero_completion_insurance_error_20260911"
+    assert store.log == ["reserve", "dispatch", "settle"]
+    terminal = store.calls[result.call["call_identity"]]["terminal"]
+    assert terminal["provider_cost"]["basis"] == (
+        "openrouter_zero_completion_insurance_error_20260911"
+    )
+    assert transport.sent[0]["headers"]["x-openrouter-metadata"] == "enabled"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "error": {
+                "code": 500,
+                "message": "upstream failure",
+                "metadata": {"error_code": 502},
+            },
+            "openrouter_metadata": {
+                "requested": "openai/gpt-4o-mini",
+                "is_byok": False,
+                "attempt": 1,
+                "attempts": [{"provider": "OpenAI", "status": 500}],
+            },
+        },
+        {
+            "metadata": {"error_code": 502},
+            "choices": [{"finish_reason": "stop", "message": {"content": "ok"}}],
+        },
+    ],
+)
+def test_openrouter_http_200_ignores_arbitrary_nested_error_code(payload):
+    broker, store, _transport = make_broker(
+        transport=FakeTransport([(200, payload)])
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=0,
+        timeout_ms=30000,
+    )
+
+    assert result.call["actual_microusd"] == result.call["reserved_microusd"]
+    assert result.call["outcome"] == "uncertain"
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+
+
 @pytest.mark.parametrize("model", ("openai/gpt-5.6-sol", "openai/gpt-5.5"))
 @pytest.mark.parametrize("unproven", (None, "request_fee", "byok", "pipeline", "missing_metadata"))
 def test_pydantic_model_error_insurance_keeps_cost_uncertain_without_full_proof(model, unproven):

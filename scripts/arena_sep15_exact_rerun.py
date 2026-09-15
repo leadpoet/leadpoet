@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import sys
 from datetime import datetime, timezone
@@ -85,7 +86,8 @@ def _source_proof(service: Any, expected_commit: str) -> tuple[bytes, str, str]:
     return payload, _sha256(payload), observed_commit
 
 
-def _schedule_proof(row: Mapping[str, Any], path: Path) -> dict[str, Any]:
+def _schedule_proof(row: Mapping[str, Any], path: Path,
+                    verified_parallel_runner_slots: int) -> dict[str, Any]:
     from lab_arena import contracts
 
     try:
@@ -93,6 +95,8 @@ def _schedule_proof(row: Mapping[str, Any], path: Path) -> dict[str, Any]:
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         raise ExactRerunRefused("forward schedule file is invalid") from exc
     config = dict(row.get("configuration_doc") or {})
+    if not 1 <= verified_parallel_runner_slots <= 20:
+        raise ExactRerunRefused("verified parallel runner slots must be 1..20")
     original = config.get("schedule") or {}
     if not isinstance(schedule, dict) or set(schedule) != set(original) or (
         schedule.get("submission_open") != original.get("submission_open")
@@ -105,14 +109,29 @@ def _schedule_proof(row: Mapping[str, Any], path: Path) -> dict[str, Any]:
         lease_ttl_seconds=3600,
         runner_slot_ceiling=20,
         parallel_twenty_icp_execution=True,
+        checkpoint_deadline_policy=contracts.CHECKPOINT_DEADLINE_POLICY,
     )
     contracts.validate_round_configuration(config)
     now = datetime.now(timezone.utc)
     close = datetime.fromisoformat(schedule["stage_1_close"].replace("Z", "+00:00"))
-    if (close - now).total_seconds() < 2700 + 60:
-        raise ExactRerunRefused("Sep15 execution window cannot hold a 45-minute attempt")
-    if 20 * len(set(config["runner_hotkeys"])) < 20:
-        raise ExactRerunRefused("Sep15 configured runner slots cannot hold twenty ICPs")
+    execution_waves = math.ceil(20 / verified_parallel_runner_slots)
+    if (close - now).total_seconds() < execution_waves * (2700 + 60):
+        raise ExactRerunRefused("Sep15 execution window cannot hold all twenty 45-minute runs")
+    first_scoring_close = datetime.fromisoformat(
+        schedule["stage_1_scoring_close"].replace("Z", "+00:00")
+    )
+    final_scoring_close = datetime.fromisoformat(
+        schedule["final_scoring_close"].replace("Z", "+00:00")
+    )
+    stage2_close = datetime.fromisoformat(
+        schedule["stage_2_close"].replace("Z", "+00:00")
+    )
+    scoring_waves = 2 * math.ceil(10 / verified_parallel_runner_slots)
+    scoring_wave_seconds = int(config["scoring_wall_clock_seconds"]) + 60
+    if (first_scoring_close - close).total_seconds() < scoring_waves * scoring_wave_seconds or (
+        final_scoring_close - stage2_close
+    ).total_seconds() < scoring_waves * scoring_wave_seconds:
+        raise ExactRerunRefused("Sep15 baseline scoring windows need two attempt waves")
     return schedule
 
 
@@ -124,24 +143,22 @@ def _prepare(service: Any, args: argparse.Namespace) -> dict[str, Any]:
         raise ExactRerunRefused("original Sep15 publication differs")
     bank_hash = _bank_proof(service, row)
     source, source_hash, commit = _source_proof(service, args.expected_lab_commit)
-    schedule = _schedule_proof(row, args.forward_schedule_file)
+    schedule = _schedule_proof(row, args.forward_schedule_file,
+                               args.verified_parallel_runner_slots)
     if args.dry_run:
         return {
             "status": "preflight_ok", "round_id": SEP15_ROUND,
             "bank_sha256": bank_hash, "source_sha256": source_hash,
             "source_commit": commit, "source_size_bytes": len(source),
+            "verified_parallel_runner_slots": args.verified_parallel_runner_slots,
         }
-    # A different, write-once source key keeps the original source evidence.
     try:
         existing = _read_bounded(
             service.config.object_store, SEP15_SOURCE_REF, len(source) + 1
         )
-    except Exception:
-        service.config.object_store.put(SEP15_SOURCE_REF, source)
-    else:
-        if existing != source:
-            raise ExactRerunRefused("rerun source object holds different bytes")
-    if _read_bounded(service.config.object_store, SEP15_SOURCE_REF, len(source) + 1) != source:
+    except Exception as exc:
+        raise ExactRerunRefused("rerun source must be staged before release authority") from exc
+    if existing != source:
         raise ExactRerunRefused("rerun source readback differs")
     result = service.store._transport.rpc("lab_arena_prepare_sep15_baseline_rerun_v1", {
         "p_source_size_bytes": len(source),
@@ -153,6 +170,40 @@ def _prepare(service: Any, args: argparse.Namespace) -> dict[str, Any]:
     if not isinstance(result, dict) or result.get("status") not in ("prepared", "existing"):
         raise ExactRerunRefused("Sep15 prepare RPC did not acknowledge the exact override")
     return dict(result)
+
+
+def _stage_source(service: Any, args: argparse.Namespace) -> dict[str, Any]:
+    row = service.store.get_round(SEP15_ROUND)
+    if row is None or row.get("status") != "published" or (
+        row.get("reward_basis_hash") != SEP15_BASIS_HASH
+    ):
+        raise ExactRerunRefused("original Sep15 publication differs")
+    bank_hash = _bank_proof(service, row)
+    source, source_hash, commit = _source_proof(service, args.expected_lab_commit)
+    _schedule_proof(row, args.forward_schedule_file,
+                    args.verified_parallel_runner_slots)
+    result = {
+        "status": "source_preflight_ok" if args.dry_run else "source_staged",
+        "round_id": SEP15_ROUND, "bank_sha256": bank_hash,
+        "source_sha256": source_hash, "source_commit": commit,
+        "source_size_bytes": len(source), "source_ref": SEP15_SOURCE_REF,
+        "verified_parallel_runner_slots": args.verified_parallel_runner_slots,
+    }
+    if args.dry_run:
+        return result
+    try:
+        existing = _read_bounded(service.config.object_store,
+                                 SEP15_SOURCE_REF, len(source) + 1)
+    except Exception:
+        # This object key is new and delete-denied; a duplicate write fails.
+        service.config.object_store.put(SEP15_SOURCE_REF, source)
+    else:
+        if existing != source:
+            raise ExactRerunRefused("rerun source object holds different bytes")
+    if _read_bounded(service.config.object_store,
+                     SEP15_SOURCE_REF, len(source) + 1) != source:
+        raise ExactRerunRefused("rerun source readback differs")
+    return result
 
 
 def _open_scoring(service: Any, stage: int) -> dict[str, Any]:
@@ -204,6 +255,7 @@ def _adopt_sep16(service: Any, dry_run: bool) -> dict[str, Any]:
         lease_ttl_seconds=3600,
         runner_slot_ceiling=20,
         parallel_twenty_icp_execution=True,
+        checkpoint_deadline_policy=contracts.CHECKPOINT_DEADLINE_POLICY,
     )
     contracts.validate_round_configuration(config)
     supported = capacity.daily_challenger_capacity(config)
@@ -214,6 +266,7 @@ def _adopt_sep16(service: Any, dry_run: bool) -> dict[str, Any]:
         "round_id": SEP16_ROUND,
         "validated_by": "arena_service_capacity_v1",
         "parallel_twenty_icp_execution": True,
+        "checkpoint_deadline_policy": contracts.CHECKPOINT_DEADLINE_POLICY,
         "icp_wall_clock_seconds": 2700,
         "runner_slot_ceiling": 20,
         "configured_challenger_capacity": supported,
@@ -236,10 +289,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Exact Sep15 Arena baseline rerun")
     parser.add_argument("--environment-file", type=Path, required=True)
     commands = parser.add_subparsers(dest="command", required=True)
-    prepare = commands.add_parser("prepare")
-    prepare.add_argument("--expected-lab-commit", required=True)
-    prepare.add_argument("--forward-schedule-file", type=Path, required=True)
-    prepare.add_argument("--dry-run", action="store_true")
+    for command in ("stage-source", "prepare"):
+        source_step = commands.add_parser(command)
+        source_step.add_argument("--expected-lab-commit", required=True)
+        source_step.add_argument("--forward-schedule-file", type=Path, required=True)
+        source_step.add_argument("--verified-parallel-runner-slots", type=int, required=True)
+        source_step.add_argument("--dry-run", action="store_true")
     scoring = commands.add_parser("open-scoring")
     scoring.add_argument("--stage", type=int, choices=(1, 2), required=True)
     sep16 = commands.add_parser("adopt-sep16")
@@ -257,7 +312,9 @@ def main(argv: list[str] | None = None) -> int:
         if os.environ.get("LAB_ARENA_MODE", "").strip().lower() != "live":
             raise ExactRerunRefused("live Arena environment is required")
         service, _app = build_service_from_environment("live")
-        if args.command == "prepare":
+        if args.command == "stage-source":
+            result = _stage_source(service, args)
+        elif args.command == "prepare":
             result = _prepare(service, args)
         elif args.command == "open-scoring":
             result = _open_scoring(service, args.stage)

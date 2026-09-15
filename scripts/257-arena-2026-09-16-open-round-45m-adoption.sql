@@ -43,10 +43,15 @@ DECLARE
   v_audit public.lab_arena_sep16_open_config_audit%ROWTYPE;
   v_new_config JSONB;
   v_concurrent_submissions BIGINT;
+  v_slots INTEGER;
+  v_attempts INTEGER;
+  v_scoring_wave_seconds INTEGER;
+  v_supported INTEGER;
 BEGIN
   IF pg_catalog.jsonb_typeof(p_capacity_doc) IS DISTINCT FROM 'object'
      OR p_capacity_doc ->> 'round_id' <> 'arena-2026-09-16'
      OR p_capacity_doc ->> 'parallel_twenty_icp_execution' <> 'true'
+     OR p_capacity_doc ->> 'checkpoint_deadline_policy' <> 'atomic_checkpoint_45m_v1'
      OR (p_capacity_doc ->> 'icp_wall_clock_seconds')::INTEGER <> 2700
      OR (p_capacity_doc ->> 'runner_slot_ceiling')::INTEGER <> 20
      OR (p_capacity_doc ->> 'configured_challenger_capacity')::INTEGER < 1
@@ -83,6 +88,7 @@ BEGIN
      OR v_round.configuration_doc ->> 'contact_policy' <> 'contacts_v1'
      OR v_round.configuration_doc ->> 'intent_details_policy' <> 'intent_details_v1'
      OR v_round.configuration_doc ? 'parallel_twenty_icp_execution'
+     OR v_round.configuration_doc ? 'checkpoint_deadline_policy'
      OR (v_round.configuration_doc ->> 'icp_wall_clock_seconds')::INTEGER <> 300
      OR (v_round.configuration_doc ->> 'lease_ttl_seconds')::INTEGER <> 1200
      OR (v_round.configuration_doc ->> 'runner_slot_ceiling')::INTEGER <> 8
@@ -110,8 +116,48 @@ BEGIN
     'icp_wall_clock_seconds', 2700,
     'lease_ttl_seconds', 3600,
     'runner_slot_ceiling', 20,
-    'parallel_twenty_icp_execution', TRUE
+    'parallel_twenty_icp_execution', TRUE,
+    'checkpoint_deadline_policy', 'atomic_checkpoint_45m_v1'
   );
+  SELECT 20 * pg_catalog.count(DISTINCT hotkey)::INTEGER INTO v_slots
+  FROM pg_catalog.jsonb_array_elements_text(
+    v_new_config -> 'runner_hotkeys'
+  ) AS hotkey;
+  v_attempts := (v_new_config ->> 'max_attempts_per_assignment')::INTEGER;
+  v_scoring_wave_seconds :=
+    (v_new_config ->> 'scoring_wall_clock_seconds')::INTEGER + 60;
+  IF v_slots < 20 OR v_attempts NOT BETWEEN 1 AND 2
+     OR v_scoring_wave_seconds <= 60
+     OR EXTRACT(EPOCH FROM (
+       (v_new_config #>> '{schedule,publication_deadline}')::TIMESTAMPTZ
+       - (v_new_config #>> '{schedule,submission_cutoff}')::TIMESTAMPTZ
+     )) >= 86400 THEN
+    RAISE EXCEPTION 'sep16 capacity schedule invalid' USING ERRCODE = '55000';
+  END IF;
+  v_supported := GREATEST(0, LEAST(
+    (pg_catalog.floor(EXTRACT(EPOCH FROM (
+      (v_new_config #>> '{schedule,stage_1_close}')::TIMESTAMPTZ
+      - (v_new_config #>> '{schedule,stage_1_start}')::TIMESTAMPTZ
+    )) / 2760)::INTEGER * v_slots) / (v_attempts * 10) - 1,
+    (pg_catalog.floor(EXTRACT(EPOCH FROM (
+      (v_new_config #>> '{schedule,stage_1_scoring_close}')::TIMESTAMPTZ
+      - (v_new_config #>> '{schedule,stage_1_close}')::TIMESTAMPTZ
+    )) / v_scoring_wave_seconds)::INTEGER * v_slots) / (v_attempts * 10) - 1,
+    (pg_catalog.floor(EXTRACT(EPOCH FROM (
+      (v_new_config #>> '{schedule,stage_2_close}')::TIMESTAMPTZ
+      - (v_new_config #>> '{schedule,stage_2_start}')::TIMESTAMPTZ
+    )) / 2760)::INTEGER * v_slots) / (v_attempts * 10) - 1,
+    (pg_catalog.floor(EXTRACT(EPOCH FROM (
+      (v_new_config #>> '{schedule,final_scoring_close}')::TIMESTAMPTZ
+      - (v_new_config #>> '{schedule,stage_2_close}')::TIMESTAMPTZ
+    )) / v_scoring_wave_seconds)::INTEGER * v_slots) / (v_attempts * 10) - 1
+  ));
+  IF v_supported < 1
+     OR (p_capacity_doc ->> 'configured_challenger_capacity')::INTEGER
+          IS DISTINCT FROM v_supported THEN
+    RAISE EXCEPTION 'sep16 capacity proof differs from frozen schedule'
+      USING ERRCODE = '55000';
+  END IF;
   -- The operator's capacity result must bind the unchanged runner set and
   -- schedule as well as the exact proposed configuration.
   IF p_capacity_doc -> 'runner_hotkeys' IS DISTINCT FROM

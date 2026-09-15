@@ -44,12 +44,12 @@ def _schedule():
         "submission_cutoff": "2026-09-15T00:00:00Z",
         "benchmark_deadline": "2026-09-15T00:30:00Z",
         "stage_1_start": "2026-09-15T00:31:00Z",
-        "stage_1_close": future(hours=1),
-        "stage_1_scoring_close": future(hours=2),
-        "stage_2_start": future(hours=2, minutes=1),
-        "stage_2_close": future(hours=3),
-        "final_scoring_close": future(hours=4),
-        "publication_deadline": future(hours=4, minutes=1),
+        "stage_1_close": future(hours=2),
+        "stage_1_scoring_close": future(hours=3),
+        "stage_2_start": future(hours=3, minutes=1),
+        "stage_2_close": future(hours=4),
+        "final_scoring_close": future(hours=5),
+        "publication_deadline": future(hours=5, minutes=1),
     }
 
 
@@ -94,6 +94,16 @@ def _seed_observed_sep15(connection):
          "source_size_bytes": 123204 if index == 0 else 4096}
         for index, submission_id in enumerate(ids)
     ]
+    publication = {
+        "king_decision": {"outcome": "no_king", "king_hotkey": ""},
+        "final_ranking": [
+            {"submission_id": submission_id, "is_baseline": index == 0,
+             "eligible": False,
+             "eligibility_reason": "cost_per_company_exceeded",
+             "final_score": 0.0}
+            for index, submission_id in enumerate(ids[:7])
+        ],
+    }
     with connection.cursor() as cursor:
         for table in ("lab_arena_rounds", "lab_arena_submissions",
                       "lab_arena_runs", "lab_arena_ledger"):
@@ -109,7 +119,7 @@ def _seed_observed_sep15(connection):
             "%s,%s)",
             (ROUND, json.dumps(config), json.dumps(participants),
              "arena/arena-2026-09-15/benchmark.json", "2026-09-15",
-             "2026-09-14", json.dumps(ids[1:]), json.dumps({}),
+             "2026-09-14", json.dumps(ids[1:]), json.dumps(publication),
              BASIS_HASH, json.dumps({"round_id": ROUND,
                                     "king_outcome": "no_king",
                                     "effective_reward_epoch": 25183,
@@ -209,6 +219,26 @@ def test_exact_sep15_prepare_archives_old_evidence_and_reuses_challengers(connec
                 cursor.execute(
                     "SELECT public.lab_arena_prepare_sep15_baseline_rerun_v1("
                     "4096,%s,%s,%s,%s::jsonb)",
+                    ("a" * 64, "b" * 40, BANK_HASH, json.dumps(schedule)),
+                )
+        connection.rollback()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO public.lab_arena_sep15_rerun_release_authority "
+                "(round_id,source_ref,source_size_bytes,source_sha256,"
+                "source_commit,bank_sha256,verified_parallel_runner_slots,"
+                "forward_schedule) "
+                "VALUES (%s,%s,4096,%s,%s,%s,11,%s::jsonb)",
+                (ROUND,
+                 "arena/arena-2026-09-15/sources/baseline-2026-09-15-rerun256.tar.gz",
+                 "a" * 64, "b" * 40, BANK_HASH, json.dumps(schedule)),
+            )
+        connection.commit()
+        with connection.cursor() as cursor:
+            with pytest.raises(Exception):
+                cursor.execute(
+                    "SELECT public.lab_arena_prepare_sep15_baseline_rerun_v1("
+                    "4096,%s,%s,%s,%s::jsonb)",
                     ("a" * 64, "b" * 40, "0" * 64, json.dumps(schedule)),
                 )
         connection.rollback()
@@ -224,6 +254,11 @@ def test_exact_sep15_prepare_archives_old_evidence_and_reuses_challengers(connec
                 "FROM public.lab_arena_rounds WHERE round_id=%s", (ROUND,)
             )
             assert cursor.fetchone() == (ROUND, "stage1", BASIS_HASH, "no_king")
+            cursor.execute(
+                "SELECT configuration_doc ->> 'checkpoint_deadline_policy' "
+                "FROM public.lab_arena_rounds WHERE round_id=%s", (ROUND,)
+            )
+            assert cursor.fetchone()[0] == contracts.CHECKPOINT_DEADLINE_POLICY
             cursor.execute(
                 "SELECT round_id FROM public.lab_arena_reward_basis_v1 WHERE round_id=%s",
                 (ROUND,),
@@ -391,7 +426,8 @@ def test_sep16_adoption_changes_only_open_execution_limits(connect):
         contracts.validate_round_configuration(config)
         proposed = dict(config, icp_wall_clock_seconds=2700,
                         lease_ttl_seconds=3600, runner_slot_ceiling=20,
-                        parallel_twenty_icp_execution=True)
+                        parallel_twenty_icp_execution=True,
+                        checkpoint_deadline_policy=contracts.CHECKPOINT_DEADLINE_POLICY)
         contracts.validate_round_configuration(proposed)
         supported = capacity.daily_challenger_capacity(proposed)
         assert supported >= 1
@@ -399,6 +435,7 @@ def test_sep16_adoption_changes_only_open_execution_limits(connect):
             "round_id": "arena-2026-09-16",
             "validated_by": "arena_service_capacity_v1",
             "parallel_twenty_icp_execution": True,
+            "checkpoint_deadline_policy": contracts.CHECKPOINT_DEADLINE_POLICY,
             "icp_wall_clock_seconds": 2700,
             "runner_slot_ceiling": 20,
             "configured_challenger_capacity": supported,
@@ -432,6 +469,14 @@ def test_sep16_adoption_changes_only_open_execution_limits(connect):
                 cursor.execute(
                     "SELECT public.lab_arena_adopt_sep16_open_config_v1(%s::jsonb)",
                     (json.dumps(bad),),
+                )
+        connection.rollback()
+        with connection.cursor() as cursor:
+            with pytest.raises(Exception):
+                forged = dict(proof, configured_challenger_capacity=supported + 1)
+                cursor.execute(
+                    "SELECT public.lab_arena_adopt_sep16_open_config_v1(%s::jsonb)",
+                    (json.dumps(forged),),
                 )
         connection.rollback()
         with connection.cursor() as cursor:

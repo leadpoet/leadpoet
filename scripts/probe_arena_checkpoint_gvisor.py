@@ -84,17 +84,27 @@ def _run_case(config: runtime.RuntimeConfig, rootfs: Path, name: str, harness: s
             checkpoint_deadline_policy=contracts.CHECKPOINT_DEADLINE_POLICY,
             checkpoint_validator=_valid_output,
         )
+        launcher_processes = []
         def runner(argv, **kwargs):
             if inject_late and "kill" in argv and "--root=" in " ".join(argv):
                 # Host-side race simulation: after the monotonic cutoff, before
                 # runsc receives KILL, the output becomes valid. It must not
                 # replace the snapshot frozen before cleanup.
                 spec.output_path.write_bytes(VALID)
+            if "run" in argv and any(token.startswith("--bundle=") for token in argv):
+                launcher = runtime._RusagePopen(argv, **kwargs)
+                launcher_processes.append(launcher)
+                return launcher
             return subprocess.Popen(argv, **kwargs)
 
         result = runtime.RunscRuntime(config).run_icp(
             spec, process_runner=runner,
         )
+        if (len(launcher_processes) != 1
+                or launcher_processes[0].child_rusage is None
+                or result.cpu_seconds != launcher_processes[0].child_rusage[0]
+                or result.max_rss_bytes != launcher_processes[0].child_rusage[1]):
+            raise RuntimeError("probe did not capture this launcher child's wait4 usage")
         return result
     finally:
         socket_handle.close()

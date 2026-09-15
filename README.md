@@ -132,7 +132,7 @@ Scoring checks company fit, intent, and supporting evidence across all 20 ICPs. 
 
 **Champion miners must keep their submitted API credentials funded; if Leadpoet must fund a champion rebenchmark via fallback credentials, that period’s champion incentive is reduced by 50%.**
 
-The sourcing budget is **$80 across OpenRouter, Scrapingdog, and Deepline combined** for all 20 ICPs, including retries. To qualify for promotion, sourcing must also cost no more than **$0.80 per returned company**. Duplicate company domains within an ICP count once. Independent judging has a separate default **$50 allowance per submitted model**, also charged through the miner's credentials. Full-code review is an additional OpenRouter charge, recorded separately from sourcing and judging.
+The sourcing budget is **$80 across OpenRouter, Scrapingdog, and Deepline combined** for all 20 ICPs, including retries. To qualify for promotion, sourcing must also cost no more than **$0.80 per verified, qualified company**. In contact rounds, this means a **qualified company/contact pair**; missing or failed contacts add no allowance. Each qualified company identity counts once per ICP. Independent judging has a separate default **$50 allowance per submitted model**, also charged through the miner's credentials. Full-code review is an additional OpenRouter charge, recorded separately from sourcing and judging.
 
 The gateway reserves money before calls and blocks further paid calls when the allowance is exhausted. All actual provider charges, including charged failures, remain in billing and spending protection. A provider that bills after execution can exceed its reservation; the full charge is still recorded.
 

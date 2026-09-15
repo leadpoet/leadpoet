@@ -43,6 +43,7 @@ DECLARE
   v_audit public.lab_arena_sep16_open_config_audit%ROWTYPE;
   v_new_config JSONB;
   v_concurrent_submissions BIGINT;
+  v_accepted_submissions BIGINT;
   v_slots INTEGER;
   v_attempts INTEGER;
   v_scoring_wave_seconds INTEGER;
@@ -110,7 +111,9 @@ BEGIN
                 WHERE round_id = v_round.round_id AND status = 'frozen') THEN
     RAISE EXCEPTION 'sep16 open-only state differs' USING ERRCODE = '55000';
   END IF;
-  SELECT pg_catalog.count(*) INTO v_concurrent_submissions
+  SELECT pg_catalog.count(*),
+         pg_catalog.count(*) FILTER (WHERE status = 'accepted')
+  INTO v_concurrent_submissions, v_accepted_submissions
   FROM public.lab_arena_submissions WHERE round_id = v_round.round_id;
   v_new_config := v_round.configuration_doc || pg_catalog.jsonb_build_object(
     'icp_wall_clock_seconds', 2700,
@@ -133,6 +136,18 @@ BEGIN
        - (v_new_config #>> '{schedule,submission_cutoff}')::TIMESTAMPTZ
      )) >= 86400 THEN
     RAISE EXCEPTION 'sep16 capacity schedule invalid' USING ERRCODE = '55000';
+  END IF;
+  -- Parallel execution completes all twenty positions before stage-one
+  -- scoring. Count the already-accepted miners plus the future baseline,
+  -- including their full retry reserve; rejected rows consume no slots.
+  IF EXTRACT(EPOCH FROM (
+       (v_new_config #>> '{schedule,stage_1_close}')::TIMESTAMPTZ
+       - (v_new_config #>> '{schedule,stage_1_start}')::TIMESTAMPTZ
+     )) < pg_catalog.ceil(
+       20.0 * (v_accepted_submissions + 1) * v_attempts / v_slots
+     ) * 2760 THEN
+    RAISE EXCEPTION 'sep16 accepted parallel workload exceeds stage1 window'
+      USING ERRCODE = '55000';
   END IF;
   v_supported := GREATEST(0, LEAST(
     (pg_catalog.floor(EXTRACT(EPOCH FROM (

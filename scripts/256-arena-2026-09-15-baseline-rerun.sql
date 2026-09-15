@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_sep15_baseline_rerun_audit (
   old_challenger_runs_hash TEXT NOT NULL,
   old_challenger_submissions_hash TEXT NOT NULL,
   old_challenger_ledger_hash TEXT NOT NULL,
+  old_challenger_ledger_max_entry_id BIGINT NOT NULL,
   bank_sha256 TEXT NOT NULL,
   new_source_ref TEXT NOT NULL,
   new_source_sha256 TEXT NOT NULL,
@@ -173,6 +174,7 @@ DECLARE
   v_challenger_runs_hash TEXT;
   v_challenger_submissions_hash TEXT;
   v_challenger_ledger_hash TEXT;
+  v_challenger_ledger_max_entry_id BIGINT;
   v_actual_microusd BIGINT;
   v_submission public.lab_arena_submissions%ROWTYPE;
   v_execute_cost JSONB;
@@ -263,6 +265,31 @@ BEGIN
           OR ranked ->> 'eligibility_reason'
                IS DISTINCT FROM 'cost_per_company_exceeded'
      )
+     OR v_round.configuration_doc ->> 'sourcing_cost_eligibility_policy'
+          IS DISTINCT FROM 'successful_calls_v1'
+     OR EXISTS (
+       SELECT 1 FROM pg_catalog.jsonb_array_elements(
+         COALESCE(v_round.publication_doc -> 'final_ranking', '[]'::JSONB)
+       ) AS ranked
+       WHERE ranked ->> 'is_baseline' = 'false'
+         AND (
+           ranked #>> '{cost_summary,sourcing_cost_eligibility_policy}'
+             IS DISTINCT FROM 'successful_calls_v1'
+           OR COALESCE(
+             (ranked #>> '{cost_summary,competition_sourcing_microusd}')::BIGINT,
+             0
+           ) <= COALESCE(
+             (ranked #>> '{cost_summary,eligibility_cap_microusd}')::BIGINT,
+             0
+           )
+           OR (public.lab_arena__successful_call_cost_state(
+             ranked ->> 'submission_id', 'execute', NULL
+           ) ->> 'successful_microusd')::BIGINT <= COALESCE(
+             (ranked #>> '{cost_summary,eligibility_cap_microusd}')::BIGINT,
+             0
+           )
+         )
+     )
      OR v_round.reward_basis_doc ->> 'king_outcome' <> 'no_king'
      OR v_round.reward_basis_hash <> v_old_basis_hash
      OR v_round.effective_reward_epoch <> 25183
@@ -313,13 +340,6 @@ BEGIN
      ) THEN
     RAISE EXCEPTION 'sep15 frozen publication preflight differs' USING ERRCODE = '55000';
   END IF;
-  IF EXISTS (
-       SELECT 1 FROM public.lab_arena_ledger
-       WHERE round_id = v_round_id AND entry_kind = 'uncertain'
-     ) THEN
-    RAISE EXCEPTION 'sep15 historical provider uncertainty remains'
-      USING ERRCODE = '55000';
-  END IF;
   FOR v_submission IN
     SELECT * FROM public.lab_arena_submissions
     WHERE round_id = v_round_id AND status = 'frozen'
@@ -332,10 +352,12 @@ BEGIN
     );
     IF (v_execute_cost ->> 'inflight_calls')::BIGINT <> 0
        OR (v_score_cost ->> 'inflight_calls')::BIGINT <> 0
-       OR (v_execute_cost ->> 'uncertain_calls')::BIGINT <> 0
-       OR (v_score_cost ->> 'uncertain_calls')::BIGINT <> 0
        OR (v_execute_cost ->> 'success_unresolved_calls')::BIGINT <> 0
-       OR (v_score_cost ->> 'success_unresolved_calls')::BIGINT <> 0 THEN
+       OR (v_score_cost ->> 'success_unresolved_calls')::BIGINT <> 0
+       OR (v_submission.submission_id = v_baseline_id AND (
+         (v_execute_cost ->> 'uncertain_calls')::BIGINT <> 0
+         OR (v_score_cost ->> 'uncertain_calls')::BIGINT <> 0
+       )) THEN
       RAISE EXCEPTION 'sep15 frozen submission has unresolved provider cost'
         USING ERRCODE = '55000';
     END IF;
@@ -442,6 +464,10 @@ BEGIN
   INTO v_challenger_ledger_hash
   FROM public.lab_arena_ledger AS entry
   WHERE entry.round_id = v_round_id AND entry.submission_id <> v_baseline_id;
+  SELECT COALESCE(pg_catalog.max(entry_id), 0)
+  INTO v_challenger_ledger_max_entry_id
+  FROM public.lab_arena_ledger
+  WHERE round_id = v_round_id AND submission_id <> v_baseline_id;
   SELECT COALESCE(pg_catalog.sum(amount_microusd), 0)
   INTO v_actual_microusd FROM public.lab_arena_ledger
   WHERE round_id = v_round_id AND submission_id = v_baseline_id
@@ -454,13 +480,15 @@ BEGIN
     round_id, archive_round_id, old_round_doc, old_baseline_submission_doc,
     old_baseline_runs_hash, old_baseline_ledger_hash,
     old_challenger_runs_hash, old_challenger_submissions_hash,
-    old_challenger_ledger_hash, bank_sha256, new_source_ref,
+    old_challenger_ledger_hash, old_challenger_ledger_max_entry_id,
+    bank_sha256, new_source_ref,
     new_source_sha256, new_source_commit, old_actual_microusd
   ) VALUES (
     v_round_id, v_archive_round_id, pg_catalog.to_jsonb(v_round),
     pg_catalog.to_jsonb(v_baseline), v_baseline_runs_hash,
     v_baseline_ledger_hash, v_challenger_runs_hash,
     v_challenger_submissions_hash, v_challenger_ledger_hash,
+    v_challenger_ledger_max_entry_id,
     p_bank_sha256, v_new_source_ref, p_source_sha256,
     p_source_commit, v_actual_microusd
   );
@@ -672,12 +700,35 @@ BEGIN
     ), 'hex'), '' ORDER BY entry_id), ''), 'sha256'), 'hex')
   INTO v_ledger_hash FROM public.lab_arena_ledger AS entry
   WHERE entry.round_id = 'arena-2026-09-15'
-    AND entry.submission_id <> 'baseline-2026-09-15';
+    AND entry.submission_id <> 'baseline-2026-09-15'
+    AND entry.entry_id <= v_audit.old_challenger_ledger_max_entry_id;
   RETURN v_runs_hash IS NOT DISTINCT FROM v_audit.old_challenger_runs_hash
      AND v_submissions_hash IS NOT DISTINCT FROM
          v_audit.old_challenger_submissions_hash
      AND v_ledger_hash IS NOT DISTINCT FROM
-         v_audit.old_challenger_ledger_hash;
+         v_audit.old_challenger_ledger_hash
+     AND NOT EXISTS (
+       SELECT 1 FROM public.lab_arena_ledger AS late
+       WHERE late.round_id = 'arena-2026-09-15'
+         AND late.submission_id <> 'baseline-2026-09-15'
+         AND late.entry_id > v_audit.old_challenger_ledger_max_entry_id
+         AND (
+           late.entry_kind <> 'settlement'
+           OR late.entry_doc ->> 'late_reconciliation' <> 'true'
+           OR NOT EXISTS (
+             SELECT 1 FROM public.lab_arena_ledger AS original
+             WHERE original.entry_id <= v_audit.old_challenger_ledger_max_entry_id
+               AND original.entry_kind = 'uncertain'
+               AND original.round_id = late.round_id
+               AND original.submission_id = late.submission_id
+               AND original.run_id = late.run_id
+               AND original.call_identity = late.call_identity
+               AND original.provider = late.provider
+               AND original.entry_id =
+                   (late.entry_doc ->> 'reconciled_uncertainty_entry_id')::BIGINT
+           )
+         )
+     );
 END;
 $sep15_challenger_seals_valid$;
 ALTER FUNCTION public.lab_arena_sep15_challenger_seals_valid_v1()
@@ -725,12 +776,7 @@ BEGIN
           <> 'atomic_checkpoint_45m_v1'
      OR v_round.configuration_doc ->> 'integrity_policy' <> 'arena_integrity_v1'
      OR NOT public.lab_arena_sep15_challenger_seals_valid_v1()
-     OR v_round.status IS DISTINCT FROM 'stage' || p_stage::TEXT || '_closed'
-     OR (p_stage = 1 AND v_audit.stage1_scoring_opened_at IS NOT NULL)
-     OR (p_stage = 2 AND (
-       v_audit.stage1_scoring_opened_at IS NULL
-       OR v_audit.stage2_scoring_opened_at IS NOT NULL
-     )) THEN
+     OR (p_stage = 2 AND v_audit.stage1_scoring_opened_at IS NULL) THEN
     RAISE EXCEPTION 'sep15 scoring state differs' USING ERRCODE = '55000';
   END IF;
   v_plan := CASE WHEN p_stage = 1 THEN v_round.stage1_scoring_plan_doc
@@ -775,6 +821,41 @@ BEGIN
      ) THEN
     RAISE EXCEPTION 'sep15 preserved challenger judgment differs'
       USING ERRCODE = '55000';
+  END IF;
+  IF (p_stage = 1 AND v_audit.stage1_scoring_opened_at IS NOT NULL)
+     OR (p_stage = 2 AND v_audit.stage2_scoring_opened_at IS NOT NULL) THEN
+    IF v_round.status NOT IN (
+         CASE WHEN p_stage = 1 THEN 'stage1_scoring' ELSE 'stage2_scoring' END,
+         CASE WHEN p_stage = 1 THEN 'stage1_judged' ELSE 'stage2_judged' END,
+         CASE WHEN p_stage = 1 THEN 'stage1_scored' ELSE 'scored' END,
+         'stage2', 'stage2_closed', 'stage2_scoring', 'stage2_judged',
+         'scored', 'published'
+       )
+       OR (SELECT pg_catalog.count(*) FROM public.lab_arena_runs
+           WHERE round_id = p_round_id AND submission_id = v_baseline_id
+             AND stage = p_stage AND kind = 'score'
+             AND assignment_id LIKE '%:score:rerun256') <> 10
+       OR EXISTS (
+         SELECT 1 FROM pg_catalog.jsonb_array_elements(v_baseline_items) AS item
+         WHERE NOT EXISTS (
+           SELECT 1 FROM public.lab_arena_runs AS score
+           WHERE score.round_id = p_round_id
+             AND score.submission_id = v_baseline_id
+             AND score.stage = p_stage AND score.kind = 'score'
+             AND score.scored_run_id = item ->> 'scored_run_id'
+             AND score.assignment_id LIKE '%:score:rerun256'
+         )
+       ) THEN
+      RAISE EXCEPTION 'sep15 baseline scorer replay differs'
+        USING ERRCODE = '55000';
+    END IF;
+    RETURN pg_catalog.jsonb_build_object(
+      'status', 'existing', 'round_status', v_round.status,
+      'assignments', 10
+    );
+  END IF;
+  IF v_round.status IS DISTINCT FROM 'stage' || p_stage::TEXT || '_closed' THEN
+    RAISE EXCEPTION 'sep15 scoring state differs' USING ERRCODE = '55000';
   END IF;
   v_result := public.lab_arena_open_scoring_sep15_baseline_only_v1(
     p_round_id, p_stage, v_baseline_items

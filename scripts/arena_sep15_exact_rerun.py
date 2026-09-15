@@ -241,6 +241,66 @@ def _open_scoring(service: Any, stage: int) -> dict[str, Any]:
     return dict(result)
 
 
+def _audit(service: Any) -> dict[str, Any]:
+    """Read only the exact public state needed after an uncertain RPC reply."""
+    row = service.store.get_round(SEP15_ROUND)
+    if row is None or row.get("reward_basis_hash") != SEP15_BASIS_HASH or (
+        row.get("reward_activated_at") is None or row.get("king_outcome") != "no_king"
+    ):
+        raise ExactRerunRefused("Sep15 activated reward basis differs")
+    original_runs = service.store.list_runs(SEP15_ROUND)
+    archived_runs = service.store.list_runs("arena-2026-09-15-archive")
+    archived_ledger = []
+    for offset in range(0, 100000, 500):
+        page = service.store._transport.select(
+            "lab_arena_ledger",
+            filters={"submission_id": "baseline-2026-09-15-archive"},
+            columns="entry_id,entry_kind,amount_microusd",
+            order="entry_id", limit=500, offset=offset,
+        )
+        archived_ledger.extend(page)
+        if len(page) < 500:
+            break
+    else:
+        raise ExactRerunRefused("archived ledger audit exceeds bounded read")
+    baseline = service.store.get_submission("baseline-2026-09-15")
+    new_source = bool(baseline and baseline.get("source_ref") == SEP15_SOURCE_REF)
+    result = {
+        "round_id": SEP15_ROUND,
+        "round_status": row["status"],
+        "old_activated_basis_hash": row["reward_basis_hash"],
+        "checkpoint_deadline_policy":
+            (row.get("configuration_doc") or {}).get("checkpoint_deadline_policy"),
+        "new_baseline_source_selected": new_source,
+        "archived_baseline_runs": sum(
+            run.get("submission_id") == "baseline-2026-09-15-archive"
+            for run in archived_runs
+        ),
+        "archived_actual_microusd": sum(
+            int(entry.get("amount_microusd") or 0) for entry in archived_ledger
+            if entry.get("entry_kind") in ("settlement", "uncertain")
+        ),
+        "preserved_challenger_runs": sum(
+            run.get("submission_id") != "baseline-2026-09-15"
+            for run in original_runs
+        ),
+    }
+    for stage in (1, 2):
+        result["stage%d_baseline_execute_assignments" % stage] = sum(
+            run.get("submission_id") == "baseline-2026-09-15"
+            and run.get("kind") == "execute" and int(run.get("stage") or 0) == stage
+            and str(run.get("assignment_id") or "").endswith(":rerun256")
+            for run in original_runs
+        )
+        result["stage%d_baseline_score_assignments" % stage] = sum(
+            run.get("submission_id") == "baseline-2026-09-15"
+            and run.get("kind") == "score" and int(run.get("stage") or 0) == stage
+            and str(run.get("assignment_id") or "").endswith(":score:rerun256")
+            for run in original_runs
+        )
+    return result
+
+
 def _adopt_sep16(service: Any, dry_run: bool) -> dict[str, Any]:
     from lab_arena import capacity, contracts
 
@@ -258,6 +318,22 @@ def _adopt_sep16(service: Any, dry_run: bool) -> dict[str, Any]:
         checkpoint_deadline_policy=contracts.CHECKPOINT_DEADLINE_POLICY,
     )
     contracts.validate_round_configuration(config)
+    accepted = len(service.store.list_submissions(
+        SEP16_ROUND, status="accepted", columns="submission_id"
+    ))
+    configured_slots = 20 * len(set(config["runner_hotkeys"]))
+    attempts = int(config["max_attempts_per_assignment"])
+    first_phase_waves = math.ceil(20 * (accepted + 1) * attempts / configured_slots)
+    stage1_start = datetime.fromisoformat(
+        config["schedule"]["stage_1_start"].replace("Z", "+00:00")
+    )
+    stage1_close = datetime.fromisoformat(
+        config["schedule"]["stage_1_close"].replace("Z", "+00:00")
+    )
+    if (stage1_close - stage1_start).total_seconds() < first_phase_waves * 2760:
+        raise ExactRerunRefused(
+            "Sep16 accepted parallel workload exceeds the frozen stage1 window"
+        )
     supported = capacity.daily_challenger_capacity(config)
     if supported < 1:
         raise ExactRerunRefused("Sep16 configured runner capacity is insufficient")
@@ -276,7 +352,10 @@ def _adopt_sep16(service: Any, dry_run: bool) -> dict[str, Any]:
     }
     if dry_run:
         return {"status": "preflight_ok", "round_id": SEP16_ROUND,
-                "configured_challenger_capacity": supported}
+                "configured_challenger_capacity": supported,
+                "already_accepted_challengers": accepted,
+                "first_phase_retry_reserved_waves_at_configured_ceiling":
+                    first_phase_waves}
     result = transport.rpc("lab_arena_adopt_sep16_open_config_v1", {
         "p_capacity_doc": proof,
     })
@@ -297,6 +376,7 @@ def build_parser() -> argparse.ArgumentParser:
         source_step.add_argument("--dry-run", action="store_true")
     scoring = commands.add_parser("open-scoring")
     scoring.add_argument("--stage", type=int, choices=(1, 2), required=True)
+    commands.add_parser("audit")
     sep16 = commands.add_parser("adopt-sep16")
     sep16.add_argument("--dry-run", action="store_true")
     return parser
@@ -318,6 +398,8 @@ def main(argv: list[str] | None = None) -> int:
             result = _prepare(service, args)
         elif args.command == "open-scoring":
             result = _open_scoring(service, args.stage)
+        elif args.command == "audit":
+            result = _audit(service)
         else:
             result = _adopt_sep16(service, args.dry_run)
         print(json.dumps(result, sort_keys=True, default=str))

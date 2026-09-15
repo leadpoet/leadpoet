@@ -16,6 +16,8 @@ from pathlib import Path
 RUNSC_CHECK_TIMEOUT_SECONDS = 5
 RUNSC_CHECK_CLEANUP_SECONDS = 2
 DEFAULT_RUNNER_SOCKET_ROOT = Path("/tmp")
+HOST_MEMORY_RESERVE_BYTES = 2 * 1024 ** 3
+PER_SLOT_MEMORY_RESERVE_BYTES = 128 * 1024 ** 2
 _REASONS = {
     "runtime_host_error": "the host cannot run the Arena sandbox",
     "runsc_path_invalid": "configure an absolute path to the installed runsc executable",
@@ -83,8 +85,13 @@ def require_linux_x86_64() -> None:
         raise RuntimeHostError(reason="unsupported_host")
 
 
-def require_parallel_memory(slots: int, sandbox_bytes: int, *, meminfo_path: Path = Path("/proc/meminfo"), cgroup_root: Path = Path("/sys/fs/cgroup"), membership_path: Path = Path("/proc/self/cgroup")) -> None:
-    """Refuse an overcommitted fleet before claiming work; weights stay independent."""
+def _available_parallel_memory(
+    *,
+    meminfo_path: Path,
+    cgroup_root: Path,
+    membership_path: Path,
+) -> int:
+    """Return memory available inside the tightest applicable host limit."""
     try:
         values = {parts[0].rstrip(":"): int(parts[1]) * 1024
                   for line in meminfo_path.read_text().splitlines()
@@ -115,12 +122,54 @@ def require_parallel_memory(slots: int, sandbox_bytes: int, *, meminfo_path: Pat
                 if directory == memory_root:
                     break
                 directory = directory.parent
-        if slots < 1 or sandbox_bytes < 1:
-            raise ValueError("invalid sandbox memory limits")
     except (OSError, ValueError, KeyError):
         raise RuntimeHostError(reason="parallel_memory_unavailable") from None
-    reserve = 2 * 1024 ** 3 + slots * 128 * 1024 ** 2
-    if slots * sandbox_bytes + reserve > available:
+    return available
+
+
+def parallel_memory_capacity(
+    slot_ceiling: int,
+    sandbox_bytes: int,
+    *,
+    meminfo_path: Path = Path("/proc/meminfo"),
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+    membership_path: Path = Path("/proc/self/cgroup"),
+) -> int:
+    """Return the safe slot count up to ``slot_ceiling``, or fail closed."""
+    available = _available_parallel_memory(
+        meminfo_path=meminfo_path,
+        cgroup_root=cgroup_root,
+        membership_path=membership_path,
+    )
+    try:
+        if slot_ceiling < 1 or sandbox_bytes < 1:
+            raise ValueError("invalid sandbox memory limits")
+        per_slot = sandbox_bytes + PER_SLOT_MEMORY_RESERVE_BYTES
+        supported = (available - HOST_MEMORY_RESERVE_BYTES) // per_slot
+    except (TypeError, ValueError, ZeroDivisionError):
+        raise RuntimeHostError(reason="parallel_memory_unavailable") from None
+    if supported < 1:
+        raise RuntimeHostError(reason="parallel_memory_insufficient")
+    return min(slot_ceiling, supported)
+
+
+def require_parallel_memory(
+    slots: int,
+    sandbox_bytes: int,
+    *,
+    meminfo_path: Path = Path("/proc/meminfo"),
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+    membership_path: Path = Path("/proc/self/cgroup"),
+) -> None:
+    """Refuse an overcommitted fleet before claiming work; weights stay independent."""
+    supported = parallel_memory_capacity(
+        slots,
+        sandbox_bytes,
+        meminfo_path=meminfo_path,
+        cgroup_root=cgroup_root,
+        membership_path=membership_path,
+    )
+    if supported < slots:
         raise RuntimeHostError(reason="parallel_memory_insufficient")
 
 

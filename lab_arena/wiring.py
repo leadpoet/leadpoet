@@ -35,7 +35,7 @@ from lab_arena.source_bundle import MAX_SOURCE_ARCHIVE_BYTES
 from lab_arena.store import ArenaStore, PostgrestTransport
 from lab_arena.submission_runtime import SubmissionProviderKeys
 from lab_arena.code_review_runtime import SubmissionCodeReviewer
-from lab_arena.runtime_host import prepare_scoring_host
+from lab_arena.runtime_host import parallel_memory_capacity, prepare_scoring_host
 
 
 _DIRECT_URLOPEN = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
@@ -512,9 +512,12 @@ def build_runner_from_environment(args, *, keypair=None):
     if str(proxy_environment.get(runner_module.MAX_PARALLEL_ENV) or "").strip():
         raise ServiceError("LAB_ARENA_MAX_PARALLEL_RUNS is retired; use indexed Webshare proxies", 500)
     verified_proxies = preflight_proxy_workers(proxy_workers_from_environment(proxy_environment))
-    parallelism = min(verified_proxies.total_process_capacity, contracts.RUNNER_SLOT_CEILING)
-    from lab_arena.runtime_host import require_parallel_memory
-    require_parallel_memory(parallelism, runtime.DEFAULT_MEMORY_LIMIT_BYTES)
+    proxy_parallelism = min(
+        verified_proxies.total_process_capacity, contracts.RUNNER_SLOT_CEILING
+    )
+    parallelism = parallel_memory_capacity(
+        proxy_parallelism, runtime.DEFAULT_MEMORY_LIMIT_BYTES
+    )
     proxy_pool = ProxyWorkerPool(verified_proxies)
     print("Arena proxy workers verified: proxies=%d; execution_slots=%d; native_coordinator=1" % (
         verified_proxies.webshare_worker_count, parallelism), flush=True)

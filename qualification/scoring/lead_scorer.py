@@ -480,11 +480,28 @@ def _series_stage_proof_patterns(label: str) -> tuple[re.Pattern, ...]:
             rf".{{0,60}}\b{label}\b",
             re.I,
         ),
+        _present_tense_raise_proof_pattern(label),
         re.compile(
             rf"\bwe(?:\s+are|['’]re)\s+(?:excited|thrilled)\s+to\s+"
             rf"announce\s+our\b.{{0,60}}\b{label}\b",
             re.I,
         ),
+    )
+
+
+def _present_tense_raise_proof_pattern(label: str) -> re.Pattern:
+    """Match affirmative funding headlines without treating every raise as funding."""
+
+    amount = r"(?:(?:US)?[$£€]\s*)?\d[\d,.]*\s*(?:[KMB]|million|billion)"
+    return re.compile(
+        rf"(?:^|[.!;:\n]\s*)"
+        rf"(?!(?:[^.!?;:\n]|\.(?=\d))*"
+        rf"\b(?:if|whether|conditional(?:ly)?|subject\s+to)\b)"
+        rf"(?!(?:[^.!;:\n]|\.(?=\d))*\?)"
+        rf"[^.!?;:\n]{{1,80}}\braises\s+"
+        rf"(?:(?:an?|its|the)\s+)?(?:{amount}\s+(?:in\s+)?)?"
+        rf"\b{label}\b(?:\s+(?:financing|funding|round))?",
+        re.I,
     )
 
 
@@ -516,6 +533,7 @@ _VENTURE_STAGE_PROOF_PATTERNS = {
             r"\b(?:pre[- ]seed|seed)\b",
             re.I,
         ),
+        _present_tense_raise_proof_pattern(r"(?:pre[- ]seed|seed)"),
     ),
     "series a": _series_stage_proof_patterns(r"series\s+a"),
     "series b": _series_stage_proof_patterns(r"series\s+b"),

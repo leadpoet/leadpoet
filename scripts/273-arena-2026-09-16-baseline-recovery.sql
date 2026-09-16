@@ -79,13 +79,13 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_sep16_baseline_recovery273_authority
     recovery_source_ref = 'arena/arena-2026-09-16/sources/baseline-2026-09-16-recovery273.tar.gz'
   ),
   recovery_source_size_bytes BIGINT NOT NULL CHECK (
-    recovery_source_size_bytes = 545026
+    recovery_source_size_bytes = 547308
   ),
   recovery_source_sha256 TEXT NOT NULL CHECK (
-    recovery_source_sha256 = '47fafc1653f36d08f8c925059af6a4d75c66a2d4bbe770fff2f74945df487177'
+    recovery_source_sha256 = '858ad5b2e68e3c6c354c0e4e358264186cec206b83220a68719a6e217273d057'
   ),
   recovery_source_commit TEXT NOT NULL CHECK (
-    recovery_source_commit = 'a7ed9b531de6a433d8d98df50237e006e0932465'
+    recovery_source_commit = 'ec4887f728b77002de570c4023415f8963995b79'
   ),
   bank_sha256 TEXT NOT NULL CHECK (
     bank_sha256 = '42b417604acf15e612570687e8fbccef82fe7b0808364a6491b4a2a4bcb07390'
@@ -157,7 +157,7 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_sep16_baseline_recovery273_authority
     old_schedule = $old_schedule${"benchmark_deadline":"2026-09-16T21:35:00Z","final_scoring_close":"2026-09-17T06:15:00Z","publication_deadline":"2026-09-17T06:45:00Z","stage_1_close":"2026-09-17T03:00:00Z","stage_1_scoring_close":"2026-09-17T04:30:00Z","stage_1_start":"2026-09-16T21:35:01Z","stage_2_close":"2026-09-17T04:45:00Z","stage_2_start":"2026-09-17T04:35:00Z","submission_cutoff":"2026-09-16T00:00:00Z","submission_open":"2026-09-15T00:00:00Z"}$old_schedule$::JSONB
   ),
   forward_schedule JSONB NOT NULL CHECK (
-    forward_schedule = $new_schedule${"benchmark_deadline":"2026-09-16T23:00:00Z","final_scoring_close":"2026-09-17T07:45:00Z","publication_deadline":"2026-09-17T08:15:00Z","stage_1_close":"2026-09-17T04:30:00Z","stage_1_scoring_close":"2026-09-17T06:00:00Z","stage_1_start":"2026-09-16T23:00:01Z","stage_2_close":"2026-09-17T06:15:00Z","stage_2_start":"2026-09-17T06:05:00Z","submission_cutoff":"2026-09-16T00:00:00Z","submission_open":"2026-09-15T00:00:00Z"}$new_schedule$::JSONB
+    forward_schedule = $new_schedule${"benchmark_deadline":"2026-09-16T23:15:00Z","final_scoring_close":"2026-09-17T08:00:00Z","publication_deadline":"2026-09-17T08:30:00Z","stage_1_close":"2026-09-17T04:45:00Z","stage_1_scoring_close":"2026-09-17T06:15:00Z","stage_1_start":"2026-09-16T23:15:01Z","stage_2_close":"2026-09-17T06:30:00Z","stage_2_start":"2026-09-17T06:20:00Z","submission_cutoff":"2026-09-16T00:00:00Z","submission_open":"2026-09-15T00:00:00Z"}$new_schedule$::JSONB
   ),
   authorized_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp()
 );
@@ -231,8 +231,8 @@ INSERT INTO public.lab_arena_sep16_baseline_recovery273_authority (
   533090, '72a008e2cacde52921c4be94951839edccc321d90de07741010a3100463eef32',
   '0a19bd28177628d01b5ce1f4fc54cc459d7d4f51',
   'arena/arena-2026-09-16/sources/baseline-2026-09-16-recovery273.tar.gz',
-  545026, '47fafc1653f36d08f8c925059af6a4d75c66a2d4bbe770fff2f74945df487177',
-  'a7ed9b531de6a433d8d98df50237e006e0932465',
+  547308, '858ad5b2e68e3c6c354c0e4e358264186cec206b83220a68719a6e217273d057',
+  'ec4887f728b77002de570c4023415f8963995b79',
   '42b417604acf15e612570687e8fbccef82fe7b0808364a6491b4a2a4bcb07390',
   'sha256:31ac47b38b4291396765b897df48e758741b8eb3bb9697be4d789e1d71597385',
   'sha256:7082fb9be08b5cf49056c783b1fd43832cc94d0062e73be3d38a95f96b64ae25',
@@ -256,7 +256,7 @@ INSERT INTO public.lab_arena_sep16_baseline_recovery273_authority (
   14,
   'operator',
   $old_schedule${"benchmark_deadline":"2026-09-16T21:35:00Z","final_scoring_close":"2026-09-17T06:15:00Z","publication_deadline":"2026-09-17T06:45:00Z","stage_1_close":"2026-09-17T03:00:00Z","stage_1_scoring_close":"2026-09-17T04:30:00Z","stage_1_start":"2026-09-16T21:35:01Z","stage_2_close":"2026-09-17T04:45:00Z","stage_2_start":"2026-09-17T04:35:00Z","submission_cutoff":"2026-09-16T00:00:00Z","submission_open":"2026-09-15T00:00:00Z"}$old_schedule$::JSONB,
-  $new_schedule${"benchmark_deadline":"2026-09-16T23:00:00Z","final_scoring_close":"2026-09-17T07:45:00Z","publication_deadline":"2026-09-17T08:15:00Z","stage_1_close":"2026-09-17T04:30:00Z","stage_1_scoring_close":"2026-09-17T06:00:00Z","stage_1_start":"2026-09-16T23:00:01Z","stage_2_close":"2026-09-17T06:15:00Z","stage_2_start":"2026-09-17T06:05:00Z","submission_cutoff":"2026-09-16T00:00:00Z","submission_open":"2026-09-15T00:00:00Z"}$new_schedule$::JSONB
+  $new_schedule${"benchmark_deadline":"2026-09-16T23:15:00Z","final_scoring_close":"2026-09-17T08:00:00Z","publication_deadline":"2026-09-17T08:30:00Z","stage_1_close":"2026-09-17T04:45:00Z","stage_1_scoring_close":"2026-09-17T06:15:00Z","stage_1_start":"2026-09-16T23:15:01Z","stage_2_close":"2026-09-17T06:30:00Z","stage_2_start":"2026-09-17T06:20:00Z","submission_cutoff":"2026-09-16T00:00:00Z","submission_open":"2026-09-15T00:00:00Z"}$new_schedule$::JSONB
 ) ON CONFLICT (round_id) DO NOTHING;
 
 DO $seal_terminal_sep16_rerun$

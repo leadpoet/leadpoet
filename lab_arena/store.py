@@ -729,6 +729,17 @@ class ArenaStore:
             or result.get("max_attempts") != 3
         ):
             raise ArenaStoreError("code review schema mismatch")
+        retry_policy = result.get("retry_policy")
+        if (
+            retry_policy != "bounded_transient_v1"
+            or result.get("max_transient_attempts") != 6
+            or result.get("transient_retry_backoff_seconds")
+                != [60, 120, 240, 480, 900]
+            or result.get("legacy_max_attempts") != 3
+            or result.get("retry_window")
+                != "replacement_freeze_to_benchmark_deadline"
+        ):
+            raise ArenaStoreError("code review schema mismatch")
         return result
 
     def validator_scoring_authority_schema(self) -> Dict[str, Any]:

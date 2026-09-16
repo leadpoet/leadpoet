@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+import time
 
 import pytest
 
@@ -15,6 +17,7 @@ from lab_arena.store import (
     new_lease_token,
 )
 from tests.lab_arena.lab_arena_pg_harness import (
+    CURRENT_SERVICE_MIGRATIONS,
     DEFAULT_MIGRATIONS,
     database_with_lab_arena_migration,
 )
@@ -95,13 +98,15 @@ def review_doc(verdict, *, file_count=3, source_bytes=1200):
 def test_capability_and_passing_review_gate_freeze_and_track_cost(
     store, superuser
 ):
-    assert store.code_review_schema() == {
+    assert store._transport.rpc("lab_arena_code_review_schema_v1", {}) == {
         "schema_version": "leadpoet.lab_arena.code_review.v1",
         "version": 207,
         "claim_ttl_seconds": 600,
         "retry_backoff_seconds": 60,
         "max_attempts": 3,
     }
+    with pytest.raises(ArenaStoreError, match="code review schema mismatch"):
+        store.code_review_schema()
     signatures = (
         "lab_arena_code_review_schema_v1()",
         "lab_arena_begin_submission_review(text,text,text,bigint,text,integer,bigint)",
@@ -551,3 +556,290 @@ def test_upgrade_preserves_existing_frozen_row_and_allows_review_recovery():
         if connection is not None:
             connection.close()
         generator.close()
+
+
+RECOVERY_MIGRATION = "263-lab-arena-code-review-recovery.sql"
+
+
+@pytest.fixture(scope="module")
+def recovery_database():
+    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+
+
+@pytest.fixture()
+def recovery_connect(recovery_database):
+    psycopg2, dsn = recovery_database
+    return lambda: psycopg2.connect(**dsn)
+
+
+@pytest.fixture()
+def recovery_store(recovery_connect):
+    transport = PsycopgTransport(recovery_connect)
+    yield ArenaStore(transport)
+    transport.close()
+
+
+@pytest.fixture()
+def recovery_superuser(recovery_connect):
+    connection = recovery_connect()
+    connection.autocommit = True
+    yield connection
+    connection.close()
+
+
+def accepted_recovery_submission(store, suffix, *, deadline_seconds=3600):
+    now = datetime.now(timezone.utc)
+    cutoff = now + timedelta(minutes=30)
+    round_id = "arena-2099-03-%02d" % (int(suffix[-2:], 16) % 27 + 1)
+    submission_id = suffix + "-recovery"
+    miner = hotkey("recovery-" + suffix)
+    config = round_config(round_id, [hotkey("recovery-runner-" + suffix)])
+    config["schedule"].update({
+        "submission_open": (now - timedelta(hours=2)).isoformat(),
+        "submission_cutoff": cutoff.isoformat(),
+        "benchmark_deadline": (now + timedelta(seconds=deadline_seconds)).isoformat(),
+    })
+    assert store.create_round(round_id, config)["status"] == "created"
+    source = source_submission_doc(round_id, submission_id)
+    assert store.register_submission(round_id, submission_id, miner, source)["status"] == "registered"
+    assert store.accept_submission_with_credentials(
+        round_id, submission_id, miner, encrypted_runtime_credentials(submission_id)
+    )["status"] == "ok"
+    return round_id, submission_id, miner
+
+
+def recovery_error_doc(*, retryable="missing", error_code="code_review_provider_unavailable"):
+    document = review_doc("error", file_count=2, source_bytes=1000)
+    document["error_code"] = error_code
+    if retryable != "missing":
+        document["retryable"] = retryable
+    return document
+
+
+def _age_review_error(superuser, submission_id, seconds=1000):
+    with superuser.cursor() as cursor:
+        cursor.execute(
+            "UPDATE public.lab_arena_submissions "
+            "SET code_review_started_at=clock_timestamp() - make_interval(secs => %s) "
+            "WHERE submission_id=%s",
+            (seconds, submission_id),
+        )
+
+
+def test_recovery_caps_permanent_legacy_and_final_expired_transient_claim(
+    recovery_store, recovery_superuser
+):
+    assert recovery_store.code_review_schema()["transient_retry_backoff_seconds"] == [
+        60, 120, 240, 480, 900,
+    ]
+    _round, permanent_id, permanent_miner = accepted_recovery_submission(
+        recovery_store, "a1"
+    )
+    token = new_lease_token()
+    assert recovery_store.begin_submission_review(
+        permanent_id, permanent_miner, token, 10, MODEL, 2, 1000
+    )["attempt"] == 1
+    recovery_store.finish_submission_review(
+        permanent_id, permanent_miner, token, "error",
+        recovery_error_doc(
+            retryable=False,
+            error_code="code_review_provider_authentication",
+        ),
+        0,
+    )
+    assert recovery_store.begin_submission_review(
+        permanent_id, permanent_miner, new_lease_token(), 10, MODEL, 2, 1000
+    )["status"] == "exhausted"
+
+    _round, legacy_id, legacy_miner = accepted_recovery_submission(
+        recovery_store, "a2"
+    )
+    for attempt in range(1, 4):
+        token = new_lease_token()
+        claimed = recovery_store.begin_submission_review(
+            legacy_id, legacy_miner, token, 10, MODEL, 2, 1000
+        )
+        assert claimed["attempt"] == attempt
+        recovery_store.finish_submission_review(
+            legacy_id, legacy_miner, token, "error", recovery_error_doc(), 0
+        )
+        _age_review_error(recovery_superuser, legacy_id)
+    assert recovery_store.begin_submission_review(
+        legacy_id, legacy_miner, new_lease_token(), 10, MODEL, 2, 1000
+    )["status"] == "exhausted"
+
+    _round, transient_id, transient_miner = accepted_recovery_submission(
+        recovery_store, "a3"
+    )
+    for attempt in range(1, 6):
+        token = new_lease_token()
+        claimed = recovery_store.begin_submission_review(
+            transient_id, transient_miner, token, 10, MODEL, 2, 1000
+        )
+        assert claimed["attempt"] == attempt
+        recovery_store.finish_submission_review(
+            transient_id, transient_miner, token, "error",
+            recovery_error_doc(retryable=True), None,
+        )
+        _age_review_error(recovery_superuser, transient_id)
+    final_token = new_lease_token()
+    assert recovery_store.begin_submission_review(
+        transient_id, transient_miner, final_token, 10, MODEL, 2, 1000
+    )["attempt"] == 6
+    with recovery_superuser.cursor() as cursor:
+        cursor.execute(
+            "UPDATE public.lab_arena_submissions "
+            "SET code_review_started_at=clock_timestamp() - interval '602 seconds', "
+            "code_review_expires_at=clock_timestamp() - interval '1 second' "
+            "WHERE submission_id=%s",
+            (transient_id,),
+        )
+    recovered = recovery_store.begin_submission_review(
+        transient_id, transient_miner, new_lease_token(), 10, MODEL, 2, 1000
+    )
+    assert recovered["status"] == "recovered"
+    assert recovered["attempt"] == 6
+    assert recovery_store.begin_submission_review(
+        transient_id, transient_miner, new_lease_token(), 10, MODEL, 2, 1000
+    )["status"] == "exhausted"
+    row = recovery_store.get_submission(transient_id)
+    assert row["code_review_doc"]["retryable"] is True
+    ledger = recovery_store.list_ledger(submission_id=transient_id)
+    assert len({entry["call_identity"] for entry in ledger}) == 6
+    assert ledger[-1]["entry_kind"] == "uncertain"
+
+
+def test_begin_lock_wait_rechecks_deadline_without_reserving(
+    recovery_connect, recovery_store
+):
+    round_id, submission_id, miner = accepted_recovery_submission(
+        recovery_store, "b1", deadline_seconds=1
+    )
+    blocker = recovery_connect()
+    blocker.autocommit = False
+    with blocker.cursor() as cursor:
+        cursor.execute(
+            "SELECT 1 FROM public.lab_arena_rounds WHERE round_id=%s FOR UPDATE",
+            (round_id,),
+        )
+
+    def begin():
+        contender = ArenaStore(PsycopgTransport(recovery_connect))
+        try:
+            return contender.begin_submission_review(
+                submission_id, miner, new_lease_token(), 10, MODEL, 2, 1000
+            )
+        finally:
+            contender.close()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(begin)
+        time.sleep(1.2)
+        blocker.commit()
+        result = pending.result(timeout=10)
+    blocker.close()
+    assert result["status"] == "deadline"
+    assert recovery_store.list_ledger(submission_id=submission_id) == []
+
+
+def test_late_finish_settles_known_cost_but_never_records_pass(
+    recovery_store, recovery_superuser
+):
+    _round_id, submission_id, miner = accepted_recovery_submission(
+        recovery_store, "b2"
+    )
+    token = new_lease_token()
+    assert recovery_store.begin_submission_review(
+        submission_id, miner, token, 100, MODEL, 2, 1000
+    )["status"] == "claimed"
+    with recovery_superuser.cursor() as cursor:
+        cursor.execute(
+            "ALTER TABLE public.lab_arena_rounds "
+            "DISABLE TRIGGER lab_arena_rounds_write_once"
+        )
+        cursor.execute(
+            "UPDATE public.lab_arena_rounds "
+            "SET configuration_doc=jsonb_set(configuration_doc, "
+            "'{schedule,benchmark_deadline}', to_jsonb(clock_timestamp() - interval '1 second')) "
+            "WHERE round_id=(SELECT round_id FROM public.lab_arena_submissions "
+            "WHERE submission_id=%s)",
+            (submission_id,),
+        )
+        cursor.execute(
+            "ALTER TABLE public.lab_arena_rounds "
+            "ENABLE TRIGGER lab_arena_rounds_write_once"
+        )
+    result = recovery_store.finish_submission_review(
+        submission_id, miner, token, "passed",
+        review_doc("pass", file_count=2, source_bytes=1000), 37,
+    )
+    assert result["status"] == "deadline"
+    assert result["ledger_status"] == "settled"
+    row = recovery_store.get_submission(submission_id)
+    assert row["code_review_status"] == "error"
+    assert row["code_review_doc"]["error_code"] == "code_review_deadline_exceeded"
+    ledger = recovery_store.list_ledger(submission_id=submission_id)
+    assert ledger[-1]["entry_kind"] == "settlement"
+    assert ledger[-1]["amount_microusd"] == 37
+
+
+def test_deadline_rejection_atomically_closes_review_and_late_finish_is_stale(
+    recovery_store
+):
+    round_id, submission_id, miner = accepted_recovery_submission(
+        recovery_store, "b4"
+    )
+    token = new_lease_token()
+    assert recovery_store.begin_submission_review(
+        submission_id, miner, token, 100, MODEL, 2, 1000
+    )["status"] == "claimed"
+    assert recovery_store.update_submission(
+        round_id, submission_id, "accepted", "rejected",
+        {"rejection_rule": "code_review_incomplete"},
+    )["status"] == "ok"
+    row = recovery_store.get_submission(submission_id)
+    assert row["status"] == "rejected"
+    assert row["code_review_status"] == "error"
+    assert row["code_review_doc"]["error_code"] == "code_review_deadline_exceeded"
+    assert row["code_review_doc"]["retryable"] is False
+    before = recovery_store.list_ledger(submission_id=submission_id)
+    assert [entry["entry_kind"] for entry in before] == [
+        "reservation", "dispatch", "uncertain",
+    ]
+    assert recovery_store.finish_submission_review(
+        submission_id, miner, token, "passed",
+        review_doc("pass", file_count=2, source_bytes=1000), 37,
+    )["status"] == "stale"
+    assert recovery_store.list_ledger(submission_id=submission_id) == before
+
+
+def test_recovery_migration_replay_preserves_rows_and_private_acl(
+    recovery_store, recovery_superuser
+):
+    _round, submission_id, miner = accepted_recovery_submission(
+        recovery_store, "b3"
+    )
+    token = new_lease_token()
+    recovery_store.begin_submission_review(
+        submission_id, miner, token, 10, MODEL, 2, 1000
+    )
+    recovery_store.finish_submission_review(
+        submission_id, miner, token, "error",
+        recovery_error_doc(retryable=True), None,
+    )
+    before = recovery_store.get_submission(submission_id)
+    migration = (SCRIPTS / RECOVERY_MIGRATION).read_text(encoding="utf-8")
+    with recovery_superuser.cursor() as cursor:
+        cursor.execute(migration)
+        cursor.execute(migration)
+        for signature in (
+            "lab_arena_begin_submission_review(text,text,text,bigint,text,integer,bigint)",
+            "lab_arena_finish_submission_review(text,text,text,text,jsonb,bigint)",
+        ):
+            cursor.execute(
+                "SELECT has_function_privilege('lab_arena_service', %s, 'EXECUTE'), "
+                "has_function_privilege('service_role', %s, 'EXECUTE')",
+                (signature, signature),
+            )
+            assert cursor.fetchone() == (True, False)
+    assert recovery_store.get_submission(submission_id) == before

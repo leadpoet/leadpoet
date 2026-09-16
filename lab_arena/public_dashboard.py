@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 import math
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-from lab_arena import contracts, icp_disclosure, source_disclosure, verify
+from lab_arena import code_review_policy, contracts, icp_disclosure, source_disclosure, verify
 
 
 PUBLIC_BASELINE_REPOSITORY = "https://github.com/leadpoet/pydantic-harness/tree/lab"
@@ -406,6 +406,49 @@ def _submitted_at(submission: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
+def code_review_summary(
+    row: Mapping[str, Any], *, round_row: Optional[Mapping[str, Any]] = None,
+    now: Optional[datetime] = None,
+) -> dict:
+    """Project review metadata, never source or provider-authored prose."""
+    document = row.get("code_review_doc") or {}
+    result = {
+        "status": row.get("code_review_status") or "pending",
+        "model": document.get("model"),
+        "file_count": document.get("file_count"),
+        "source_bytes": document.get("source_bytes"),
+        "cost_microusd": document.get("cost_microusd"),
+        "review_cost_microusd": document.get("review_cost_microusd"),
+        "cost_status": document.get("cost_status"),
+        "error_code": document.get("error_code"),
+        "categories": document.get("categories") or [],
+    }
+    if "code_review_attempts" in row:
+        result["attempts"] = row["code_review_attempts"]
+    if type(document.get("retryable")) is bool:
+        result["retryable"] = (
+            document["retryable"]
+            and row.get("status") != "rejected"
+            and code_review_policy.review_retry_available(row)
+        )
+        if round_row is not None:
+            deadline_text = _timestamp(
+                ((round_row.get("configuration_doc") or {}).get("schedule") or {}).get("benchmark_deadline")
+            )
+            deadline = datetime.fromisoformat(deadline_text.replace("Z", "+00:00")) if deadline_text else None
+            ready_at = code_review_policy.retry_ready_at(row)
+            result["retryable"] = bool(
+                result["retryable"] and round_row.get("status") == "open"
+                and deadline and now is not None
+                and now < deadline
+                and (ready_at is None or ready_at < deadline)
+            )
+    http_status = document.get("provider_http_status")
+    if type(http_status) is int and 100 <= http_status <= 599:
+        result["provider_http_status"] = http_status
+    return result
+
+
 def submissions_snapshot(service: Any, round_id: str) -> dict:
     row = service._round(round_id)
     round_status = str(row.get("status") or "")
@@ -420,19 +463,30 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
         round_id,
         columns=(
             "submission_id,round_id,miner_hotkey,status,is_king,updated_at,"
-            "accepted_at,frozen_at,source_ref,consent"
+            "accepted_at,frozen_at,source_ref,consent,rejection_rule,"
+            "replaced_by_submission_id,code_review_status,code_review_attempts,"
+            "code_review_started_at,code_review_doc"
         ),
     )
     submissions = []
     for submission in records:
         raw_status = str(submission.get("status") or "")
-        if raw_status not in ("accepted", "frozen"):
+        review_excluded = (
+            raw_status == "rejected"
+            and _timestamp(submission.get("accepted_at")) is not None
+            and submission.get("rejection_rule") in (
+                "code_review_incomplete", "code_review_rejected"
+            )
+            and not submission.get("replaced_by_submission_id")
+            and not submission.get("is_king")
+        )
+        if raw_status not in ("accepted", "frozen") and not review_excluded:
             continue
         submission_id = str(submission.get("submission_id") or "")
         participant = participants.get(submission_id)
-        # Open accepted intake is public by explicit dashboard policy.  After
-        # cutoff, only the immutable frozen participant set can be enumerated.
-        if round_status != "open" and participant is None:
+        # Preserve the outcome of previously public intake after a review
+        # exclusion. Never enumerate superseded or never-admitted uploads.
+        if round_status != "open" and participant is None and not review_excluded:
             continue
         is_baseline = bool(
             (participant or {}).get(
@@ -465,7 +519,16 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
                     submission, service.now(), round_row=row
                 ),
             }
-        if round_status == "published":
+        if submission.get("code_review_status") and not is_baseline:
+            projected["code_review"] = code_review_summary(submission, round_row=row, now=service.now())
+        if review_excluded:
+            projected.update({
+                "status": "review_rejected" if submission.get("rejection_rule") == "code_review_rejected" else "review_failed",
+                "stage1_score": None,
+                "final_score": None,
+                "is_champion": False,
+            })
+        if round_status == "published" and not review_excluded:
             configuration = row.get("configuration_doc")
             configuration = (
                 configuration if isinstance(configuration, Mapping) else {}

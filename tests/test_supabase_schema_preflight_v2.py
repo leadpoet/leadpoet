@@ -92,6 +92,11 @@ def _opener(
             "claim_ttl_seconds": 600,
             "retry_backoff_seconds": 60,
             "max_attempts": 3,
+            "retry_policy": "bounded_transient_v1",
+            "max_transient_attempts": 6,
+            "transient_retry_backoff_seconds": [60, 120, 240, 480, 900],
+            "legacy_max_attempts": 3,
+            "retry_window": "replacement_freeze_to_benchmark_deadline",
         },
         "lab_arena_schema_version_v1": {"schema_version": "leadpoet.lab_arena.schema_version.v1", "version": 197},
         "lab_arena_weight_state_schema_v1": {"schema_version": "leadpoet.lab_arena.weight_state_schema.v1", "version": 202},
@@ -170,6 +175,11 @@ def test_code_review_preflight_uses_only_the_scoped_arena_role():
         "claim_ttl_seconds": 600,
         "retry_backoff_seconds": 60,
         "max_attempts": 3,
+        "retry_policy": "bounded_transient_v1",
+        "max_transient_attempts": 6,
+        "transient_retry_backoff_seconds": [60, 120, 240, 480, 900],
+        "legacy_max_attempts": 3,
+        "retry_window": "replacement_freeze_to_benchmark_deadline",
     }
     assert any(
         table == "lab_arena_submissions"

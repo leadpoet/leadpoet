@@ -1,5 +1,20 @@
 # Agent Instructions
 
+## Scoped production authorization: review failure recovery and dashboard visibility
+
+On 2026-09-16 the user explicitly authorized surgical review-error diagnostics,
+bounded temporary-failure retries within the existing benchmark preparation
+window, and visible terminal review statuses for previously admitted submissions.
+Push the gateway and subnet_dashboard repositories to main and verify their
+production deployments through the canonical gateway and normal-validator
+restarts and the dashboard's existing deployment workflow. Authority includes
+protected production inspection, exact committed migrations, and isolated end-to-end
+verification through the overnight operational permissions. Preserve source
+freeze, replacement ownership/cutoff/allowance, scoring, costs, credentials,
+private data, published results, and concurrent work. Do not rescore historical
+rounds or restore a superseded submission. This scope ends when the verified
+release and miner-facing dashboard are live.
+
 ## Scoped production authorization: queued submission replacement and policy disclosure
 
 On 2026-09-15 the user explicitly authorized own-hotkey replacement of queued

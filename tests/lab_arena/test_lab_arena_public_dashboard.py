@@ -461,7 +461,106 @@ def test_submission_status_uses_full_round_scope_check():
         ),
         _round=lambda round_id: checked.append(round_id),
         _public_code_review=ArenaService._public_code_review,
+        now=_now,
     )
 
     assert ArenaService.submission_status(service, "sub-miner")["status"] == "accepted"
     assert checked == ["arena-testnet"]
+
+
+@pytest.mark.parametrize("round_status", ["open", "stage1", "published"])
+@pytest.mark.parametrize("rule,status", [
+    ("code_review_incomplete", "review_failed"),
+    ("code_review_rejected", "review_rejected"),
+])
+def test_previously_admitted_review_exclusion_remains_visible_without_scores(round_status, rule, status):
+    row = _published_round()
+    row["status"] = round_status
+    submission = {
+        "submission_id": "sub-3c67802803dcabc7844267cba4e84d76",
+        "round_id": row["round_id"], "miner_hotkey": MINER_HOTKEY,
+        "status": "rejected", "is_king": False,
+        "accepted_at": "2026-09-08T17:50:08Z",
+        "rejection_rule": rule, "replaced_by_submission_id": None,
+        "source_ref": "private-source-do-not-publish", "consent": {"public_rerun": True},
+        "code_review_status": "error" if status == "review_failed" else "rejected",
+        "code_review_attempts": 3,
+        "code_review_doc": {
+            "error_code": "code_review_provider_unavailable", "cost_status": "uncertain",
+            "review_cost_microusd": 4976874,
+            "findings": [{"evidence": "private-finding-do-not-publish"}],
+            "provider_response": "private-provider-do-not-publish",
+        },
+    }
+    service = SimpleNamespace(_round=lambda _: row, now=_now,
+        _store=SimpleNamespace(list_submissions=lambda *_a, **_k: [submission],
+                             list_runs=lambda *_a, **_k: []))
+    result = public_dashboard.submissions_snapshot(service, row["round_id"])
+    assert len(result["submissions"]) == 1
+    view = result["submissions"][0]
+    assert view["status"] == status
+    assert view["stage1_score"] is None and view["final_score"] is None
+    assert view["is_champion"] is False and view["code"]["available"] is False
+    assert "cost_summary" not in view and "eligible" not in view
+    assert view["code_review"]["cost_status"] == "uncertain"
+    assert view["code_review"]["attempts"] == 3
+    serialized = json.dumps(result)
+    for private in ["private-source-do-not-publish", "private-finding-do-not-publish", "private-provider-do-not-publish"]:
+        assert private not in serialized
+
+
+@pytest.mark.parametrize("change", [
+    {"accepted_at": None}, {"accepted_at": "invalid"},
+    {"rejection_rule": "source_replaced"}, {"rejection_rule": "source_upload_incomplete"},
+    {"replaced_by_submission_id": "sub-new"}, {"is_king": True},
+])
+def test_review_visibility_does_not_disclose_unadmitted_or_superseded_sources(change):
+    row = _published_round()
+    submission = {"submission_id": "private-id", "miner_hotkey": MINER_HOTKEY,
+        "status": "rejected", "rejection_rule": "code_review_incomplete",
+        "accepted_at": "2026-09-08T17:50:08Z", **change}
+    service = SimpleNamespace(_round=lambda _: row, now=_now,
+        _store=SimpleNamespace(list_submissions=lambda *_a, **_k: [submission],
+                             list_runs=lambda *_a, **_k: []))
+    assert public_dashboard.submissions_snapshot(service, row["round_id"])["submissions"] == []
+
+
+def test_public_review_diagnostics_project_only_typed_status_and_retry_flag():
+    value = public_dashboard.code_review_summary({"code_review_status": "error",
+        "code_review_attempts": 2, "code_review_doc": {"retryable": True,
+            "provider_http_status": 503, "exception": "private-secret", "body": "private-source"}})
+    assert value["retryable"] is True and value["provider_http_status"] == 503
+    assert value["attempts"] == 2
+    assert "private" not in json.dumps(value)
+    invalid = public_dashboard.code_review_summary({"code_review_doc": {
+        "retryable": "true", "provider_http_status": True}})
+    assert "retryable" not in invalid and "provider_http_status" not in invalid
+
+
+@pytest.mark.parametrize('attempts,round_status,offset,expected', [
+    (3, 'open', -1, True), (6, 'open', -1, False),
+    (3, 'open', 0, False), (3, 'open', 1, False),
+    (3, 'published', -1, False),
+])
+def test_public_review_retry_flag_stops_at_cap_and_deadline(attempts, round_status, offset, expected):
+    from datetime import timedelta
+    deadline = _now()
+    view = public_dashboard.code_review_summary({
+        'status': 'accepted', 'code_review_status': 'error',
+        'code_review_attempts': attempts,
+        'code_review_doc': {'error_code': 'code_review_provider_unavailable',
+                            'provider_http_status': 503, 'retryable': True},
+    }, round_row={'status': round_status, 'configuration_doc': {
+        'schedule': {'benchmark_deadline': deadline.isoformat()}}},
+        now=deadline + timedelta(seconds=offset))
+    assert view['retryable'] is expected
+
+
+def test_public_review_does_not_promise_retry_after_deadline():
+    view = public_dashboard.code_review_summary({
+        'status': 'accepted', 'code_review_status': 'error',
+        'code_review_attempts': 5, 'code_review_started_at': _now().isoformat(),
+        'code_review_doc': {'retryable': True},
+    }, round_row={'status': 'open', 'configuration_doc': {'schedule': {
+        'benchmark_deadline': '2026-09-11T02:01:00Z'}}}, now=_now())
+    assert view['retryable'] is False

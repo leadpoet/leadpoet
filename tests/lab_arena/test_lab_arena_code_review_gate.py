@@ -45,7 +45,7 @@ def test_worker_loads_full_round_identity_and_skips_baseline_and_completed_revie
     ))
     service._store = SimpleNamespace(list_submissions=lambda _, status: [baseline, passed, pending] if status == "accepted" else [])
     service.active_rounds = lambda: [{"round_id": "arena-test"}]
-    service._round = lambda _: {"round_id": "arena-test", "configuration_doc": {"baseline_hotkey": "host"}}
+    service._round = lambda _: {"round_id": "arena-test", "status": "stage1", "configuration_doc": {"baseline_hotkey": "host"}}
     assert service.review_pending_submissions() == {"reviewed": 1}
     assert calls == ["pending"]
 
@@ -94,3 +94,38 @@ def test_inflight_review_can_finish_after_cutoff_within_existing_benchmark_windo
     now += timedelta(minutes=30)
     assert len(service.freeze_participants("arena-test")) == 1
     assert any(call[1] == "miner" and call[4] == {"rejection_rule": "code_review_incomplete"} for call in updates)
+
+
+@pytest.mark.parametrize('attempts,retryable,pending', [
+    (3, True, True), (5, True, True), (6, True, False),
+    (1, False, False), (2, None, True), (3, None, False),
+])
+def test_freeze_waits_only_for_available_review_attempts(attempts, retryable, pending):
+    now = datetime(2026, 9, 11, tzinfo=timezone.utc)
+    baseline = {'submission_id': 'baseline-test', 'miner_hotkey': 'host', 'is_king': True,
+                'source_ref': 'baseline', 'source_size_bytes': 10, 'status': 'accepted'}
+    miner = {'submission_id': 'miner', 'miner_hotkey': 'miner-owner', 'is_king': False,
+             'code_review_status': 'error', 'code_review_attempts': attempts,
+             'code_review_doc': {} if retryable is None else {'retryable': retryable},
+             'source_ref': 'miner', 'source_size_bytes': 10, 'status': 'accepted'}
+    round_row = {'round_id': 'arena-test', 'champion_funding_frozen': True,
+                 'configuration_doc': {'baseline_hotkey': 'host',
+                 'schedule': {'benchmark_deadline': '2026-09-11T00:30:00Z'}}}
+    updates = []
+    service = object.__new__(ArenaService)
+    service._clock = lambda: now
+    service._round = lambda _: round_row
+    service._initial_baseline = lambda _: baseline
+    service._store = SimpleNamespace(
+        freeze_champion_funding=lambda _: {'status': 'existing'},
+        list_submissions=lambda _, status: [baseline, miner] if status == 'accepted' else [],
+        update_submission=lambda *args: updates.append(args) or {'status': 'ok'},
+    )
+    if pending:
+        with pytest.raises(ServiceError, match='code_review_pending'):
+            service.freeze_participants('arena-test')
+        assert not updates
+    else:
+        assert len(service.freeze_participants('arena-test')) == 1
+        assert any(call[1] == 'miner' and call[4] == {'rejection_rule': 'code_review_incomplete'}
+                   for call in updates)

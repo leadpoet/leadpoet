@@ -258,7 +258,7 @@ def test_preparation_failure_makes_no_api_or_credential_call():
     assert store.begin_calls[0][3] == 0
     assert store.finish_calls[0][4] == {
         "error_code": "review_source_not_text", "model": code_review.DEFAULT_REVIEW_MODEL,
-        "file_count": 0, "source_bytes": 0,
+        "file_count": 0, "source_bytes": 0, "retryable": False,
     }
 
 
@@ -278,6 +278,105 @@ def test_credential_failure_is_redacted_from_persisted_result():
     assert MINER_KEY not in repr(store.finish_calls)
     assert secret_detail not in repr(store.finish_calls)
     assert store.finish_calls[0][4]["error_code"] == "code_review_provider_unavailable"
+    assert "retryable" not in store.finish_calls[0][4]
+
+
+@pytest.mark.parametrize(
+    ("broker_code", "error_code", "retryable"),
+    (
+        ("broker_unavailable", "code_review_preparation_unavailable", True),
+        ("miner_credentials_unavailable", "code_review_provider_authentication", False),
+    ),
+)
+def test_typed_credential_failure_controls_retry_without_dispatch(
+    broker_code, error_code, retryable
+):
+    transport = ReviewTransport(lambda _parameters: pytest.fail("API must not be called"))
+
+    def fail(_submitted):
+        raise broker.BrokerError(broker_code)
+
+    reviewer, row, store, _objects = _reviewer(
+        _archive(_source()), transport, credential_for=fail
+    )
+    assert reviewer.review(row)["status"] == "error"
+    assert transport.sent == []
+    assert store.finish_calls[0][4]["error_code"] == error_code
+    assert store.finish_calls[0][4]["retryable"] is retryable
+    assert store.finish_calls[0][5] == 0
+
+
+@pytest.mark.parametrize(
+    ("http_status", "error_code", "retryable"),
+    (
+        (401, "code_review_provider_authentication", False),
+        (403, "code_review_provider_authentication", False),
+        (402, "code_review_provider_credit", False),
+        (400, "code_review_provider_request_rejected", False),
+        (408, "code_review_provider_timeout", True),
+        (429, "code_review_provider_rate_limited", True),
+        (503, "code_review_provider_unavailable", True),
+    ),
+)
+def test_http_failures_persist_only_bounded_classification(
+    http_status, error_code, retryable
+):
+    provider_prose = "private provider diagnostic that must not persist"
+    transport = ReviewTransport(lambda _parameters: {
+        "status": http_status,
+        "body": {"error": {"message": provider_prose}},
+    })
+    reviewer, row, store, _objects = _reviewer(_archive(_source()), transport)
+
+    assert reviewer.review(row)["status"] == "error"
+    document = store.finish_calls[0][4]
+    assert document["error_code"] == error_code
+    assert document["provider_http_status"] == http_status
+    assert document["retryable"] is retryable
+    assert provider_prose not in repr(store.finish_calls)
+    assert store.finish_calls[0][5] is None
+
+
+def test_non_json_provider_error_does_not_persist_body():
+    provider_prose = b"upstream secret prose"
+
+    class NonJsonTransport:
+        def send(self, **_request):
+            return broker.ProviderResponse(
+                503, {"content-type": "text/plain"}, provider_prose
+            )
+
+    reviewer, row, store, _objects = _reviewer(
+        _archive(_source()), NonJsonTransport()
+    )
+    assert reviewer.review(row)["status"] == "error"
+    assert store.finish_calls[0][4]["error_code"] == "code_review_provider_unavailable"
+    assert store.finish_calls[0][4]["retryable"] is True
+    assert provider_prose.decode() not in repr(store.finish_calls)
+
+
+def test_idempotent_claim_never_dispatches_or_finishes_again():
+    class IdempotentStore(ReviewStore):
+        def begin_submission_review(self, *args):
+            self.begin_calls.append(args)
+            return {
+                "status": "claimed",
+                "idempotent": True,
+                "code_review_status": "reviewing",
+                "attempt": 1,
+            }
+
+    transport = ReviewTransport(
+        lambda _parameters: pytest.fail("idempotent claim must not dispatch")
+    )
+    store = IdempotentStore()
+    reviewer, row, _store, _objects = _reviewer(
+        _archive(_source()), transport, store=store
+    )
+    result = reviewer.review(row)
+    assert result["idempotent"] is True
+    assert transport.sent == []
+    assert store.finish_calls == []
 
 
 def test_terminal_review_is_not_dispatched_or_charged_twice():

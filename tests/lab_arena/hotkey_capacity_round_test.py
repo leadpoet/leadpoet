@@ -73,8 +73,8 @@ def test_twenty_shared_owner_hotkeys_publish_with_intact_source_and_credentials(
     original_source = {submission: harness.objects.get(row["source_ref"]) for submission, row in original_rows.items()}
     assert {row["owner_coldkey"] for row in original_rows.values()} == {shared_owner}
 
-    # Accepted source is immutable, including when its owner has other hotkeys.
-    with pytest.raises(svc.ServiceError, match="submission_conflict"):
+    # The review freeze preserves accepted source, even for shared owners.
+    with pytest.raises(svc.ServiceError, match="submission_replacement_closed"):
         harness.submit("ChangedSourceWithADifferentSize", harness.round_id, miner_label=flavors[0])
     with pytest.raises(svc.ServiceError, match="submission_rejected:capacity.round_full"):
         harness.submit("TwentyFirst", harness.round_id)

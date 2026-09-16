@@ -1789,12 +1789,19 @@ def _query_value(value: Any) -> str:
     raise OperationRequestError("invalid_field")
 
 
-def build_outbound_request(operation_id: str, parameters: Any) -> OutboundRequest:
+def build_outbound_request(
+    operation_id: str,
+    parameters: Any,
+    *,
+    openrouter_provider_policy: Optional[Mapping[str, Any]] = None,
+) -> OutboundRequest:
     """Build the credential-free outbound request from validated parameters.
 
     Fixed params are merged last so nothing model-supplied can shadow them.
-    The broker places the credential per ``operation.credential`` and adds
-    nothing else from the model request.
+    The broker may narrow an OpenRouter call with one host-owned provider
+    policy derived from its source-controlled model route.  The broker places
+    the credential per ``operation.credential`` and adds nothing else from the
+    model request.
     """
 
     operation = _operation(operation_id)
@@ -1806,6 +1813,48 @@ def build_outbound_request(operation_id: str, parameters: Any) -> OutboundReques
     if operation.parameter_location == "body":
         document = {name: value for name, value in normalized.items() if name not in operation.path_fields}
         document.update(_deep_copy_json(operation.fixed_params))
+        if openrouter_provider_policy is not None:
+            if operation_id != "openrouter.responses" or not isinstance(
+                operation.fixed_params.get("provider"), Mapping
+            ):
+                raise OperationRequestError("invalid_request")
+            policy = _deep_copy_json(openrouter_provider_policy)
+            route_fields = ("order", "only")
+            price_fields = {"prompt", "completion", "request"}
+            if (
+                not isinstance(policy, dict)
+                or set(policy) != {
+                    "data_collection",
+                    "zdr",
+                    "allow_fallbacks",
+                    *route_fields,
+                    "max_price",
+                }
+                or policy.get("data_collection") != "deny"
+                or policy.get("zdr") is not True
+                or type(policy.get("allow_fallbacks")) is not bool
+                or any(
+                    not isinstance(policy.get(field), list)
+                    or not 1 <= len(policy[field]) <= 16
+                    or any(
+                        not isinstance(value, str) or not 1 <= len(value) <= 128
+                        for value in policy[field]
+                    )
+                    or len(set(policy[field])) != len(policy[field])
+                    for field in route_fields
+                )
+                or policy.get("order") != policy.get("only")
+                or not isinstance(policy.get("max_price"), dict)
+                or set(policy["max_price"]) != price_fields
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not 0 <= value <= 1_000_000
+                    for value in policy["max_price"].values()
+                )
+            ):
+                raise OperationRequestError("invalid_request")
+            document["provider"] = policy
         document = _wrap_body(operation, normalized, document)
         body = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
         return OutboundRequest(target, base_url, MappingProxyType({}), body, "application/json", operation.credential, operation.outbound_headers)

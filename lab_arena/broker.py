@@ -42,6 +42,22 @@ from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable
 PRICE_TABLE_SCHEMA_VERSION = "leadpoet.lab_arena.openrouter_price_table.v1"
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_GENERATION_URL = "https://openrouter.ai/api/v1/generation?id="
+OPENROUTER_LUNA_RESPONSES_MODEL = "openai/gpt-5.6-luna"
+OPENROUTER_LUNA_RESPONSES_ENDPOINTS = ("azure/eu", "azure/us")
+# Both exact regional endpoints are priced at 1.10x the model catalog row.
+# Luna prompt-cache writes are 1.25x its ordinary prompt price.  The regional
+# route reserves that larger input-token ceiling because Responses requests can
+# carry a prompt_cache_key and OpenRouter bills cache writes in usage.cost.
+OPENROUTER_LUNA_REGIONAL_PRICE_MULTIPLIER = Decimal("1.10")
+OPENROUTER_LUNA_CACHE_WRITE_PRICE_MULTIPLIER = Decimal("1.25")
+# The public Luna catalog applies these prices at 272k prompt tokens.  The
+# runtime catalog price table contains the base row, so keep this one model's
+# published tier beside its source-bound route until the catalog schema carries
+# tiers.
+OPENROUTER_LUNA_LONG_CONTEXT_MIN_PROMPT_TOKENS = 272_000
+OPENROUTER_LUNA_LONG_CONTEXT_PROMPT_PRICE = Decimal("0.0000004")
+OPENROUTER_LUNA_LONG_CONTEXT_COMPLETION_PRICE = Decimal("0.0000018")
+OPENROUTER_PRICE_PER_MILLION = Decimal("1000000")
 DEEPLINE_BILLING_LEDGER_URL = "https://code.deepline.com/api/v2/billing/ledger"
 DEEPLINE_BILLING_HISTORY_URL = (
     "https://code.deepline.com/api/v2/billing/usage?recent_limit=50"
@@ -574,6 +590,17 @@ def max_openrouter_cost_microusd(price_table: Mapping[str, Any], model: str, par
     pricing = price_table["models"].get(model)
     if pricing is None:
         raise BrokerError("model_not_allowed")
+    return _max_openrouter_cost_for_pricing(
+        pricing, parameters, max_output_tokens=max_output_tokens
+    )
+
+
+def _max_openrouter_cost_for_pricing(
+    pricing: Mapping[str, Any],
+    parameters: Mapping[str, Any],
+    *,
+    max_output_tokens: int,
+) -> int:
     input_tokens = bounded_input_tokens(parameters)
     output_tokens = int(max_output_tokens)
     usd = (
@@ -583,6 +610,83 @@ def max_openrouter_cost_microusd(price_table: Mapping[str, Any], model: str, par
         + Decimal(pricing["request"])
     )
     return _microusd_ceiling(usd)
+
+
+@dataclass(frozen=True)
+class OpenRouterHostRoute:
+    provider_policy: Mapping[str, Any]
+    reservation_pricing: Mapping[str, str]
+
+
+def _json_decimal_number(value: Decimal) -> Any:
+    """Return a plain JSON number without exponent notation."""
+
+    text = format(value.normalize(), "f")
+    return int(text) if "." not in text else float(text)
+
+
+def _openrouter_host_route(
+    *,
+    kind: str,
+    operation_id: str,
+    model: str,
+    pricing: Mapping[str, Any],
+    parameters: Mapping[str, Any],
+) -> Optional[OpenRouterHostRoute]:
+    """Return the one source-controlled execution route that differs by model."""
+
+    if (
+        kind != "execute"
+        or operation_id != "openrouter.responses"
+        or model != OPENROUTER_LUNA_RESPONSES_MODEL
+    ):
+        return None
+    regional = {
+        component: Decimal(str(pricing[component]))
+        * OPENROUTER_LUNA_REGIONAL_PRICE_MULTIPLIER
+        for component in PRICED_COMPONENTS
+    }
+    if (
+        bounded_input_tokens(parameters)
+        >= OPENROUTER_LUNA_LONG_CONTEXT_MIN_PROMPT_TOKENS
+    ):
+        regional["prompt"] = max(
+            regional["prompt"],
+            OPENROUTER_LUNA_LONG_CONTEXT_PROMPT_PRICE
+            * OPENROUTER_LUNA_REGIONAL_PRICE_MULTIPLIER,
+        )
+        regional["completion"] = max(
+            regional["completion"],
+            OPENROUTER_LUNA_LONG_CONTEXT_COMPLETION_PRICE
+            * OPENROUTER_LUNA_REGIONAL_PRICE_MULTIPLIER,
+        )
+    regional["prompt"] *= OPENROUTER_LUNA_CACHE_WRITE_PRICE_MULTIPLIER
+    max_completion_price = (
+        regional["completion"] + regional["internal_reasoning"]
+    )
+    provider_policy = {
+        "data_collection": "deny",
+        "zdr": True,
+        "allow_fallbacks": True,
+        "order": list(OPENROUTER_LUNA_RESPONSES_ENDPOINTS),
+        "only": list(OPENROUTER_LUNA_RESPONSES_ENDPOINTS),
+        "max_price": {
+            "prompt": _json_decimal_number(
+                regional["prompt"] * OPENROUTER_PRICE_PER_MILLION
+            ),
+            "completion": _json_decimal_number(
+                max_completion_price * OPENROUTER_PRICE_PER_MILLION
+            ),
+            "request": _json_decimal_number(regional["request"]),
+        },
+    }
+    return OpenRouterHostRoute(
+        provider_policy=provider_policy,
+        reservation_pricing={
+            component: format(value.normalize(), "f")
+            for component, value in regional.items()
+        },
+    )
 
 
 def actual_openrouter_cost_microusd(price_table: Mapping[str, Any], model: str, response_json: Any) -> Optional[int]:
@@ -2382,12 +2486,29 @@ class Broker:
         max_output_tokens = 0
         reservation_cost: Optional[provider_costs.ProviderCost] = None
         reserve_remaining_budget = False
+        openrouter_host_route: Optional[OpenRouterHostRoute] = None
         try:
             if effective_operation.provider == "openrouter":
                 # Reserve the maximum cost allowed by the request and output cap.
                 effective_normalized, max_output_tokens = self._openrouter_parameters(effective_normalized, kind=getattr(context, "kind", "execute"))
                 normalized = effective_normalized
-                amount = max_openrouter_cost_microusd(self._price_table, normalized["model"], normalized, max_output_tokens=max_output_tokens)
+                pricing = self._price_table["models"][normalized["model"]]
+                openrouter_host_route = _openrouter_host_route(
+                    kind=getattr(context, "kind", "execute"),
+                    operation_id=effective_operation_id,
+                    model=normalized["model"],
+                    pricing=pricing,
+                    parameters=normalized,
+                )
+                amount = _max_openrouter_cost_for_pricing(
+                    (
+                        openrouter_host_route.reservation_pricing
+                        if openrouter_host_route is not None
+                        else pricing
+                    ),
+                    normalized,
+                    max_output_tokens=max_output_tokens,
+                )
             elif effective_operation.provider == "scrapingdog":
                 reservation_cost = provider_costs.scrapingdog_cost(
                     effective_operation_id, effective_normalized
@@ -2576,14 +2697,18 @@ class Broker:
             time.sleep(min(0.2, max(0.0, reserve_deadline - time.monotonic())))
         status = reserved.get("status")
         # Terminal admission replies such as stale and refused do not create a
-        # reservation. Preserve their normal classification. States backed by
-        # a durable reservation must match the exact replayed call before the
-        # broker can reuse them or send a paid provider request.
+        # reservation. Preserve their normal classification. A response-loss
+        # state, and an idempotent reservation that could still dispatch, must
+        # match the exact replayed call. Completed states keep replaying their
+        # saved terminal response without a new provider request.
         if (
-            reserve_readback_used
-            and status in {
-                "reserved", "dispatched", "settled", "uncertain", "recovered",
-            }
+            (
+                reserve_readback_used
+                and status in {
+                    "reserved", "dispatched", "settled", "uncertain", "recovered",
+                }
+                or reserved.get("idempotent") is True and status == "reserved"
+            )
             and not _reservation_readback_matches(
                 self._store, reservation_arguments, reserved
             )
@@ -2768,7 +2893,13 @@ class Broker:
             return _error_result("call_uncertain", summary)
         # Build the outbound request from the constant table and inject the credential.
         outbound = operations.build_outbound_request(
-            effective_operation_id, effective_normalized
+            effective_operation_id,
+            effective_normalized,
+            openrouter_provider_policy=(
+                openrouter_host_route.provider_policy
+                if openrouter_host_route is not None
+                else None
+            ),
         )
         raw_document: Any = None
         deepline_readback_cost: Optional[provider_costs.ProviderCost] = None

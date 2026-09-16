@@ -161,7 +161,20 @@ def test_recorded_native_wire_crosses_bridge_worker_broker_and_bills(monkeypatch
     if style == "lite":
         assert all(body["reasoning"]["context"] == "all_turns" for body in outbound)
     assert all(body["max_output_tokens"] == 16384 for body in outbound)
-    assert all(body["provider"] == dict(ops.OPENROUTER_STRICT_PROVIDER_POLICY) for body in outbound)
+    if model == br.OPENROUTER_LUNA_RESPONSES_MODEL:
+        assert all(
+            body["provider"]["order"] == ["azure/eu", "azure/us"]
+            and body["provider"]["only"] == ["azure/eu", "azure/us"]
+            and body["provider"]["allow_fallbacks"] is True
+            and body["provider"]["data_collection"] == "deny"
+            and body["provider"]["zdr"] is True
+            for body in outbound
+        )
+    else:
+        assert all(
+            body["provider"] == dict(ops.OPENROUTER_STRICT_PROVIDER_POLICY)
+            for body in outbound
+        )
     assert "client_metadata" not in outbound[0]
     if style == "lite":
         assert outbound[0]["input"][0]["type"] == "additional_tools"

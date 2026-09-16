@@ -40,6 +40,19 @@ def price_table():
     })
 
 
+def luna_price_table():
+    table = price_table()
+    table["models"][br.OPENROUTER_LUNA_RESPONSES_MODEL] = {
+        "prompt": "0.0000002",
+        "completion": "0.0000012",
+        "request": "0",
+        "image": "0",
+        "web_search": "0",
+        "internal_reasoning": "0",
+    }
+    return br.validate_price_table(table)
+
+
 class FakeLedgerStore:
     """In-memory model of the section 7.5 ledger functions and their statuses."""
 
@@ -1393,6 +1406,13 @@ def test_stream_timeout_generation_header_credential_echo_is_not_persisted(
 
 CONTEXT = br.RunContext(run_id="r1", assignment_id="arena-2026-09-02:s1:1:0", icp_position=0, lease_token_hash=contracts.document_hash("lease"), miner_hotkey="5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY", submission_id="s1", stage=1)
 CHAT = {"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "find fintech companies"}], "max_tokens": 200}
+LUNA_RESPONSES = {
+    "model": br.OPENROUTER_LUNA_RESPONSES_MODEL,
+    "input": "research regional capacity",
+    "reasoning": {"effort": "xhigh"},
+    "max_output_tokens": 256,
+    "prompt_cache_key": "arena-luna-route-test",
+}
 
 
 def test_persistent_reservation_store_unavailable_propagates_after_one_readback():
@@ -1739,6 +1759,187 @@ def test_openrouter_reserves_maximum_cost_and_settles_reported_actual():
     body = json.loads(sent["body"])
     assert body["provider"] == {"allow_fallbacks": False, "data_collection": "deny", "zdr": True} and body["stream"] is False
     assert store.openrouter_capacity == 10_000_000 - expected_actual
+
+
+def test_luna_responses_uses_exact_regional_fallback_and_reserves_its_price_ceiling():
+    payload = {
+        "id": "gen-luna-regional",
+        "model": br.OPENROUTER_LUNA_RESPONSES_MODEL,
+        "output": [],
+        "usage": {"cost": "0.00025"},
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, payload)])
+    )
+    broker._price_table = luna_price_table()
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.responses",
+        parameters=LUNA_RESPONSES,
+        action_sequence=0,
+        timeout_ms=300_000,
+    )
+
+    assert result.status == 200
+    assert result.call["actual_microusd"] == 250
+    body = json.loads(transport.sent[0]["body"])
+    assert body["provider"] == {
+        "allow_fallbacks": True,
+        "data_collection": "deny",
+        "zdr": True,
+        "order": ["azure/eu", "azure/us"],
+        "only": ["azure/eu", "azure/us"],
+        "max_price": {"prompt": 0.275, "completion": 1.32, "request": 0},
+    }
+    assert body["store"] is False and body["stream"] is False
+    base_reserve = br.max_openrouter_cost_microusd(
+        luna_price_table(),
+        br.OPENROUTER_LUNA_RESPONSES_MODEL,
+        LUNA_RESPONSES,
+        max_output_tokens=256,
+    )
+    assert result.call["reserved_microusd"] > base_reserve
+    assert result.call["reserved_microusd"] > result.call["actual_microusd"]
+    assert store.calls[result.call["call_identity"]]["actual"] == 250
+
+
+@pytest.mark.parametrize(
+    "kind,operation_id,model",
+    [
+        ("score", "openrouter.responses", br.OPENROUTER_LUNA_RESPONSES_MODEL),
+        ("execute", "openrouter.chat", br.OPENROUTER_LUNA_RESPONSES_MODEL),
+        ("execute", "openrouter.responses", "openai/gpt-4o-mini"),
+    ],
+)
+def test_luna_regional_route_does_not_change_scorers_chat_or_other_models(
+    kind, operation_id, model
+):
+    assert br._openrouter_host_route(
+        kind=kind,
+        operation_id=operation_id,
+        model=model,
+        pricing=luna_price_table()["models"][br.OPENROUTER_LUNA_RESPONSES_MODEL],
+        parameters=LUNA_RESPONSES,
+    ) is None
+
+
+@pytest.mark.parametrize("case", ("score", "chat", "other_model"))
+def test_nonmatching_public_broker_paths_keep_strict_provider_policy(case):
+    operation_id = "openrouter.responses"
+    parameters = dict(LUNA_RESPONSES)
+    context = CONTEXT
+    if case == "score":
+        context = br.RunContext(**{**CONTEXT.__dict__, "kind": "score"})
+    elif case == "chat":
+        operation_id = "openrouter.chat"
+        parameters = {**CHAT, "model": br.OPENROUTER_LUNA_RESPONSES_MODEL}
+    else:
+        parameters = {
+            **LUNA_RESPONSES,
+            "model": "openai/gpt-4o-mini",
+        }
+    response = {
+        "id": "gen-strict-policy",
+        "object": "response",
+        "created_at": 1789488000,
+        "status": "completed",
+        "model": parameters["model"],
+        "error": None,
+        "output": [],
+        "usage": {"cost": "0.0001"},
+    }
+    store = FakeLedgerStore()
+    transport = FakeTransport([(200, response)])
+    broker = br.Broker(
+        store=store,
+        key_for=lambda provider: HOST_KEYS[provider],
+        price_table=luna_price_table(),
+        transport=transport,
+        clock=lambda: datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc),
+        judge_models=(br.OPENROUTER_LUNA_RESPONSES_MODEL,),
+    )
+
+    result = broker.execute(
+        context,
+        operation_id=operation_id,
+        parameters=parameters,
+        action_sequence=0,
+        timeout_ms=300_000,
+    )
+
+    assert result.status == 200
+    assert json.loads(transport.sent[0]["body"])["provider"] == dict(
+        operations.OPENROUTER_STRICT_PROVIDER_POLICY
+    )
+
+
+def test_luna_regional_route_reserves_published_long_context_tier():
+    parameters = {
+        **LUNA_RESPONSES,
+        "input": [
+            {"role": "user", "content": "x" * 31_000} for _ in range(9)
+        ],
+    }
+    assert br.bounded_input_tokens(parameters) >= 272_000
+    route = br._openrouter_host_route(
+        kind="execute",
+        operation_id="openrouter.responses",
+        model=br.OPENROUTER_LUNA_RESPONSES_MODEL,
+        pricing=luna_price_table()["models"][br.OPENROUTER_LUNA_RESPONSES_MODEL],
+        parameters=parameters,
+    )
+    assert route is not None
+    assert route.provider_policy["max_price"] == {
+        "prompt": 0.55,
+        "completion": 1.98,
+        "request": 0,
+    }
+    assert route.reservation_pricing["prompt"] == "0.00000055"
+    assert route.reservation_pricing["completion"] == "0.00000198"
+
+
+@pytest.mark.parametrize(
+    "bounded_tokens,expected_max_price",
+    [
+        (271_999, {"prompt": 0.275, "completion": 1.32, "request": 0}),
+        (272_000, {"prompt": 0.55, "completion": 1.98, "request": 0}),
+    ],
+)
+def test_luna_regional_long_context_tier_boundary(
+    monkeypatch, bounded_tokens, expected_max_price
+):
+    monkeypatch.setattr(br, "bounded_input_tokens", lambda _parameters: bounded_tokens)
+    route = br._openrouter_host_route(
+        kind="execute",
+        operation_id="openrouter.responses",
+        model=br.OPENROUTER_LUNA_RESPONSES_MODEL,
+        pricing=luna_price_table()["models"][br.OPENROUTER_LUNA_RESPONSES_MODEL],
+        parameters=LUNA_RESPONSES,
+    )
+    assert route is not None
+    assert route.provider_policy["max_price"] == expected_max_price
+
+
+def test_luna_regional_unproved_provider_failure_keeps_full_reservation():
+    broker, store, _transport = make_broker(
+        transport=FakeTransport(
+            [(502, {"error": {"code": 502, "message": "provider failed"}})]
+        )
+    )
+    broker._price_table = luna_price_table()
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.responses",
+        parameters=LUNA_RESPONSES,
+        action_sequence=0,
+        timeout_ms=300_000,
+    )
+
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+    assert store.log == ["reserve", "dispatch", "uncertain"]
 
 
 def test_openrouter_reported_model_alias_does_not_erase_actual_billing():
@@ -2330,6 +2531,73 @@ def test_delayed_exact_generation_settles_after_restart_without_second_post(
             generation_id=generation_id,
         ).microusd
     )
+
+
+def test_luna_regional_failure_reconciles_exact_cost_after_restart_without_second_post(
+    monkeypatch,
+):
+    generation_id = "gen-luna-regional-delayed"
+    monkeypatch.setattr(br, "_openrouter_generation_readback", lambda **_kwargs: None)
+    first_broker, store, first_transport = make_broker(
+        transport=FakeTransport(
+            [
+                (
+                    502,
+                    {"error": {"code": 502, "message": "provider failed"}},
+                    {"X-Generation-Id": generation_id},
+                )
+            ]
+        )
+    )
+    first_broker._price_table = luna_price_table()
+    parameters = {
+        **LUNA_RESPONSES,
+        "input": "x" * 30_000,
+        "max_output_tokens": 10_000,
+    }
+
+    first = first_broker.execute(
+        CONTEXT,
+        operation_id="openrouter.responses",
+        parameters=parameters,
+        action_sequence=0,
+        timeout_ms=300_000,
+    )
+    diagnostic = store.calls[first.call["call_identity"]]["uncertain_doc"]
+    candidate = {
+        "uncertain_entry_id": 1,
+        "round_id": "arena-2026-09-02",
+        "run_id": CONTEXT.run_id,
+        "submission_id": CONTEXT.submission_id,
+        "miner_hotkey": CONTEXT.miner_hotkey,
+        "assignment_id": CONTEXT.assignment_id,
+        "stage": CONTEXT.stage,
+        "icp_position": CONTEXT.icp_position,
+        "attempt": CONTEXT.attempt,
+        "kind": CONTEXT.kind,
+        "call_identity": first.call["call_identity"],
+        "generation_id": diagnostic["openrouter_generation_id"],
+        "credential_fingerprint": diagnostic["credential_fingerprint"],
+        "funding_source": "host",
+        "run_status": "leased",
+        "lease_expires_at": "2026-09-02T01:20:00Z",
+    }
+    second_transport = FakeTransport(
+        [(200, {"data": {"id": generation_id, "total_cost": "0.0116"}})]
+    )
+    restarted_broker, _same_store, _ = make_broker(
+        store=store, transport=second_transport
+    )
+    restarted_broker._price_table = luna_price_table()
+
+    reconciled = restarted_broker.reconcile_openrouter_cost(candidate)
+
+    assert first.call["outcome"] == "uncertain"
+    assert first.call["reserved_microusd"] > 11_600
+    assert [request["method"] for request in first_transport.sent] == ["POST"]
+    assert [request["method"] for request in second_transport.sent] == ["GET"]
+    assert reconciled["status"] == "settled"
+    assert store.calls[first.call["call_identity"]]["actual"] == 11_600
 
 
 def test_stream_timeout_generation_settles_exact_cost_without_second_post(caplog):
@@ -4279,11 +4547,26 @@ def test_dynamic_deepline_admission_wait_does_not_consume_operation_window(monke
 
 def test_fault_injection_points_produce_single_accounting_results():
     # After reservation (crash before dispatch): resuming the identity dispatches exactly once.
-    broker, store, transport = make_broker(transport=FakeTransport([(200, {"results": []})]))
+    class CrashBeforeFirstDispatch(FakeLedgerStore):
+        def __init__(self):
+            super().__init__()
+            self.crash = True
+
+        def mark_dispatched(self, **kwargs):
+            if self.crash:
+                self.crash = False
+                raise ArenaStoreUnavailable("synthetic crash before dispatch")
+            return super().mark_dispatched(**kwargs)
+
+    broker, store, transport = make_broker(
+        store=CrashBeforeFirstDispatch(),
+        transport=FakeTransport([(200, {"results": []})]),
+    )
     identity_args = dict(operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "crash"}}, action_sequence=5, timeout_ms=1000)
     request_hash = contracts.document_hash(operations.validate_operation_request("deepline.execute", {"tool": "exa_search", "payload": {"query": "crash"}}))
     identity = contracts.provider_call_identity(attempt=1, assignment_id=CONTEXT.assignment_id, icp_position=0, action_sequence=5, operation_id="deepline.execute", request_hash=request_hash)
-    store.reserve_call(run_id="r1", lease_token_hash=CONTEXT.lease_token_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="host", amount_microusd=0, call_doc={}, lease_ttl_seconds=420)
+    with pytest.raises(ArenaStoreUnavailable):
+        broker.execute(CONTEXT, **identity_args)
     result = broker.execute(CONTEXT, **identity_args)
     assert result.status == 200
     assert [sent["method"] for sent in transport.sent].count("POST") == 1
@@ -4479,6 +4762,151 @@ def test_ambiguous_reservation_readback_rejects_binding_mismatch(
     assert result.status == 503
     assert json.loads(result.body) == {"error": {"code": "broker_unavailable"}}
     assert transport.sent == [] and store.log.count("dispatch") == 0
+
+
+def test_luna_regional_replay_rejects_old_lower_reservation_before_dispatch(
+    monkeypatch,
+):
+    class CrashBeforeDispatchStore(FakeLedgerStore):
+        crash = True
+
+        def mark_dispatched(self, **kwargs):
+            if self.crash:
+                self.log.append("dispatch")
+                raise ArenaStoreUnavailable("synthetic crash before dispatch")
+            return super().mark_dispatched(**kwargs)
+
+    store = CrashBeforeDispatchStore()
+    old_broker, _store, old_transport = make_broker(store=store)
+    old_broker._price_table = luna_price_table()
+    regional_route = br._openrouter_host_route
+    monkeypatch.setattr(br, "_openrouter_host_route", lambda **_kwargs: None)
+    with pytest.raises(ArenaStoreUnavailable):
+        old_broker.execute(
+            CONTEXT,
+            operation_id="openrouter.responses",
+            parameters=LUNA_RESPONSES,
+            action_sequence=0,
+            timeout_ms=300_000,
+        )
+    old_reservation = next(iter(store.calls.values()))["amount"]
+    assert old_transport.sent == []
+
+    monkeypatch.setattr(br, "_openrouter_host_route", regional_route)
+    store.crash = False
+    new_broker, _store, new_transport = make_broker(store=store)
+    new_broker._price_table = luna_price_table()
+    result = new_broker.execute(
+        CONTEXT,
+        operation_id="openrouter.responses",
+        parameters=LUNA_RESPONSES,
+        action_sequence=0,
+        timeout_ms=300_000,
+    )
+
+    assert result.status == 503
+    assert json.loads(result.body) == {"error": {"code": "broker_unavailable"}}
+    assert result.call["reserved_microusd"] > old_reservation
+    assert new_transport.sent == []
+    assert store.log.count("dispatch") == 1
+
+
+def test_luna_regional_replay_resumes_matching_reservation_once():
+    class CrashBeforeDispatchStore(FakeLedgerStore):
+        crash = True
+
+        def mark_dispatched(self, **kwargs):
+            if self.crash:
+                self.log.append("dispatch")
+                raise ArenaStoreUnavailable("synthetic crash before dispatch")
+            return super().mark_dispatched(**kwargs)
+
+    response = {
+        "id": "gen-luna-replay",
+        "object": "response",
+        "created_at": 1789488000,
+        "status": "completed",
+        "model": br.OPENROUTER_LUNA_RESPONSES_MODEL,
+        "error": None,
+        "output": [],
+        "usage": {"cost": "0.00025"},
+    }
+    store = CrashBeforeDispatchStore()
+    first_broker, _store, first_transport = make_broker(store=store)
+    first_broker._price_table = luna_price_table()
+    with pytest.raises(ArenaStoreUnavailable):
+        first_broker.execute(
+            CONTEXT,
+            operation_id="openrouter.responses",
+            parameters=LUNA_RESPONSES,
+            action_sequence=0,
+            timeout_ms=300_000,
+        )
+    assert first_transport.sent == []
+
+    store.crash = False
+    second_broker, _store, second_transport = make_broker(
+        store=store, transport=FakeTransport([(200, response)])
+    )
+    second_broker._price_table = luna_price_table()
+    result = second_broker.execute(
+        CONTEXT,
+        operation_id="openrouter.responses",
+        parameters=LUNA_RESPONSES,
+        action_sequence=0,
+        timeout_ms=300_000,
+    )
+
+    assert result.status == 200 and result.call["actual_microusd"] == 250
+    assert len(second_transport.sent) == 1
+    assert store.log.count("dispatch") == 2
+
+
+def test_luna_regional_rollout_replays_old_settlement_without_second_post(
+    monkeypatch,
+):
+    response = {
+        "id": "gen-luna-old-route-settled",
+        "object": "response",
+        "created_at": 1789488000,
+        "status": "completed",
+        "model": br.OPENROUTER_LUNA_RESPONSES_MODEL,
+        "error": None,
+        "output": [],
+        "usage": {"cost": "0.0001"},
+    }
+    store = FakeLedgerStore()
+    old_broker, _store, old_transport = make_broker(
+        store=store, transport=FakeTransport([(200, response)])
+    )
+    old_broker._price_table = luna_price_table()
+    regional_route = br._openrouter_host_route
+    monkeypatch.setattr(br, "_openrouter_host_route", lambda **_kwargs: None)
+    first = old_broker.execute(
+        CONTEXT,
+        operation_id="openrouter.responses",
+        parameters=LUNA_RESPONSES,
+        action_sequence=0,
+        timeout_ms=300_000,
+    )
+    assert first.status == 200 and len(old_transport.sent) == 1
+
+    monkeypatch.setattr(br, "_openrouter_host_route", regional_route)
+    new_broker, _store, new_transport = make_broker(store=store)
+    new_broker._price_table = luna_price_table()
+    replay = new_broker.execute(
+        CONTEXT,
+        operation_id="openrouter.responses",
+        parameters=LUNA_RESPONSES,
+        action_sequence=0,
+        timeout_ms=300_000,
+    )
+
+    assert replay.status == 200
+    assert replay.call["outcome"] == "settled"
+    assert replay.call["idempotent"] is True
+    assert replay.body == first.body
+    assert new_transport.sent == []
 
 
 @pytest.mark.parametrize("corruption", ["non_mapping", "wrong_second_identity", "unordered"])

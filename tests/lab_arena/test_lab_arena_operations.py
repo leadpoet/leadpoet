@@ -193,6 +193,49 @@ def test_deepline_path_field_is_closed_and_rendered_into_the_outbound_path():
     assert excinfo.value.code == "invalid_body"  # the body may not restate the path field
 
 
+def test_host_openrouter_route_override_must_retain_fixed_privacy_policy():
+    route = {
+        "data_collection": "deny",
+        "zdr": True,
+        "allow_fallbacks": True,
+        "order": ["azure/eu", "azure/us"],
+        "only": ["azure/eu", "azure/us"],
+        "max_price": {"prompt": 0.275, "completion": 1.32, "request": 0},
+    }
+    outbound = ops.build_outbound_request(
+        "openrouter.responses",
+        VALID["openrouter.responses"],
+        openrouter_provider_policy=route,
+    )
+    assert json.loads(outbound.body)["provider"] == route
+
+    for unsafe in (
+        {**route, "zdr": False},
+        {**route, "data_collection": "allow"},
+        {**route, "allow_fallbacks": "true"},
+        {key: value for key, value in route.items() if key != "only"},
+        {**route, "extra": True},
+        {**route, "order": "azure/eu"},
+        {**route, "only": ["azure/us", "azure/eu"]},
+        {**route, "max_price": {"prompt": -1, "completion": 1.32, "request": 0}},
+    ):
+        with pytest.raises(ops.OperationRequestError) as excinfo:
+            ops.build_outbound_request(
+                "openrouter.responses",
+                VALID["openrouter.responses"],
+                openrouter_provider_policy=unsafe,
+            )
+        assert excinfo.value.code == "invalid_request"
+
+    with pytest.raises(ops.OperationRequestError) as excinfo:
+        ops.build_outbound_request(
+            "openrouter.chat",
+            VALID["openrouter.chat"],
+            openrouter_provider_policy=route,
+        )
+    assert excinfo.value.code == "invalid_request"
+
+
 @pytest.mark.parametrize("payload", [
     {"url": "https://www.linkedin.com/company/example/"},
     {"universalName": "example"},

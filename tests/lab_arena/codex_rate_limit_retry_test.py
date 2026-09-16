@@ -12,7 +12,13 @@ import pytest
 
 from lab_arena import broker as br
 from lab_arena import runner as rn
-from tests.lab_arena.test_lab_arena_broker import CONTEXT, FakeTransport, make_broker
+from tests.lab_arena.test_lab_arena_broker import (
+    CONTEXT,
+    LUNA_RESPONSES,
+    FakeTransport,
+    luna_price_table,
+    make_broker,
+)
 from tests.lab_arena.test_lab_arena_runner import lease
 
 PARAMETERS = {"model": "openai/gpt-4o-mini", "input": "research"}
@@ -240,6 +246,83 @@ def test_broker_exposes_only_internal_bounded_retry_delay_after_zero_cost_settle
         action_sequence=0, timeout_ms=120_000,
     )
     assert "retry_after_seconds" not in absent.call
+
+
+def test_worker_retries_luna_throttle_through_broker_with_same_regional_route(
+    monkeypatch, tmp_path
+):
+    success = {
+        "id": "gen-luna-after-throttle",
+        "object": "response",
+        "created_at": 1789488000,
+        "status": "completed",
+        "model": br.OPENROUTER_LUNA_RESPONSES_MODEL,
+        "error": None,
+        "output": [
+            {
+                "id": "msg-1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "ok",
+                        "annotations": [],
+                    }
+                ],
+            }
+        ],
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 10,
+            "total_tokens": 20,
+            "cost": "0.00025",
+        },
+    }
+    throttle = {"error": {"code": "rate_limit_exceeded", "message": "limited"}}
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, throttle), (200, success)])
+    )
+    broker._price_table = luna_price_table()
+
+    class BrokerApi:
+        def __init__(self):
+            self.frames = []
+
+        def provider(self, _run_id, _lease_token, frame):
+            self.frames.append(dict(frame))
+            return broker.execute(CONTEXT, **frame).to_document()
+
+    api = BrokerApi()
+    worker = server(tmp_path, api)
+    event = install_clock(monkeypatch, worker)
+
+    error, result = worker._dispatch(
+        "openrouter.responses", LUNA_RESPONSES, 300_000
+    )
+
+    assert error is None and result["status"] == 200
+    assert [frame["action_sequence"] for frame in api.frames] == [0, 1]
+    assert event.waits == [20.001]
+    assert len(store.calls) == 2
+    assert [call["kind"] for call in store.calls.values()] == [
+        "settlement",
+        "settlement",
+    ]
+    assert [call["actual"] for call in store.calls.values()] == [0, 250]
+    assert len(transport.sent) == 2
+    for request in transport.sent:
+        body = json.loads(request["body"])
+        assert body["provider"]["order"] == ["azure/eu", "azure/us"]
+        assert body["provider"]["only"] == ["azure/eu", "azure/us"]
+        assert body["provider"]["max_price"] == {
+            "prompt": 0.275,
+            "completion": 1.32,
+            "request": 0,
+        }
+        assert body["provider"]["zdr"] is True
+        assert body["provider"]["data_collection"] == "deny"
 
 
 def test_miner_funded_proved_free_throttle_uses_the_same_retry_policy(monkeypatch, tmp_path):

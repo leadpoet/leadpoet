@@ -10,14 +10,27 @@ from pathlib import Path
 import pytest
 from bittensor_wallet import Keypair
 
-from lab_arena import contact_policy, contracts, rewards, scoring
+from lab_arena import (
+    contact_policy,
+    contracts,
+    intent_details_policy,
+    output,
+    rewards,
+    scoring,
+    verify,
+)
+from qualification.scoring.arena_integrity import canonical_company_identity
+from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration,
 )
+from tests.lab_arena.test_lab_arena_service_round import Harness
 
-MIGRATIONS = CURRENT_SERVICE_MIGRATIONS + (
+PRE267_MIGRATIONS = CURRENT_SERVICE_MIGRATIONS + (
     "264-lab-arena-codex-cost-reconciliation.sql",
     "265-arena-2026-09-16-native-baseline-rerun.sql",
+)
+MIGRATIONS = PRE267_MIGRATIONS + (
     "267-arena-2026-09-16-failed-cost-publication.sql",
 )
 ROUND = "arena-2026-09-16"
@@ -55,6 +68,169 @@ def _schedule():
         "stage_2_close": future(hours=4),
         "final_scoring_close": future(hours=5),
         "publication_deadline": future(hours=5, minutes=1),
+    }
+
+
+def _proof_company(icp, index, position):
+    name = "Proof %d %d" % (index, position)
+    domain = "proof-%d-%d.example.com" % (index, position)
+    return {
+        "company_name": name,
+        "company_website": "https://" + domain,
+        "company_linkedin": "https://www.linkedin.com/company/proof-%d-%d"
+        % (index, position),
+        "industry": icp["industry"],
+        "employee_count": icp["employee_count"][0],
+        "company_stage": str(icp.get("company_stage") or ""),
+        "country": icp.get("country") or "United States",
+        "state": "California",
+        "intent_details": (
+            "%s announced a relevant operating milestone in August 2026. "
+            "That activity indicates current demand aligned with this ICP."
+        ) % name,
+        "intent_signals": [{
+            "description": "Announced a relevant operating milestone",
+            "url": "https://" + domain + "/news",
+            "date": "2026-08-01",
+            "matched_icp_signal": 0,
+        }],
+        "contact": {
+            "full_name": "Alex Proof",
+            "job_title": "VP Engineering",
+            "email": "alex@" + domain,
+        },
+    }
+
+
+def _proof_breakdown(company, score):
+    identity = canonical_company_identity(company).key
+    qualified = float(score) > 0
+    checks = {key: {"status": "pass"} for key in (
+        "claim", "identity", "source", "company", "role", "location",
+        "email_attribution", "email_verification",
+    )}
+    return {
+        "final_score": float(score),
+        "company_index": 0,
+        "company_identity_key": identity,
+        "company_identity_alias_keys": [identity],
+        "company_qualified": qualified,
+        "duplicate_company": False,
+        "contact_identity_key": "contact:" + identity,
+        "contact_qualified": qualified,
+        "email_status": "valid" if qualified else "invalid",
+        "contact_verification": {
+            "decision": "verified" if qualified else "mismatch",
+            "subchecks": checks,
+        },
+        "verifier_gate_receipts": [
+            {"gate": "company_fit", "decision": "match"},
+            {"gate": "intent_details", "decision": "match"},
+        ],
+        "intent_signals_detail": [{
+            "matched_icp_signal": 0,
+            "after_decay": 50.0,
+            "judge_verdict": {
+                "decision": "verified",
+                "verification_trace": {
+                    "intent_verdict": {
+                        "signal_evaluations": [{"signal_status": "supported"}]
+                    }
+                },
+            },
+        }],
+        "failure_reason": "",
+    }
+
+
+def _proof_execution(objects, icp, index, position, execute_id, score_id=None):
+    company = _proof_company(icp, index, position)
+    document = output.output_document_from_bytes(
+        json.dumps({
+            "schema_version": intent_details_policy.OUTPUT_SCHEMA,
+            "companies": [company],
+        }).encode(),
+        expected_schema_version=intent_details_policy.OUTPUT_SCHEMA,
+    )
+    objects.put("arena/output/%s.json" % execute_id, json.dumps(document).encode())
+    breakdown = _proof_breakdown(company, 40 if index == 0 else 0)
+    if score_id is not None:
+        objects.put(
+            "arena/score/%s.json" % score_id,
+            json.dumps(scoring.build_scoring_output(execute_id, [breakdown])).encode(),
+        )
+    row = verify.scored_row(
+        "proof", position, execute_id, icp, document["companies"], [breakdown],
+        scoring.build_scorer_policy(
+            scoring_adapter_version=contact_policy.SCORING_ADAPTER,
+            intent_details=True,
+        ),
+    )
+    receipt = {"companies": [{
+        "company_index": 0,
+        "company_identity_key": identity,
+        "company_qualified": breakdown["company_qualified"],
+        "duplicate_company": False,
+        "contact_qualified": breakdown["contact_qualified"],
+    } for identity in [canonical_company_identity(company).key]]}
+    return row["per_icp_score"], receipt
+
+
+def _proof_challenger_publication_row(submission_id, index):
+    uncertain = index == 2
+    settled = 20_000_000
+    unresolved = 500_000 if uncertain else 0
+    calls = 2 if uncertain else 1
+    provider = {
+        "provider": "deepline",
+        "settled_microusd": settled,
+        "reserved_or_uncertain_microusd": unresolved,
+        "conservative_microusd": settled + unresolved,
+        "inflight_calls": 0,
+        "uncertain_calls": int(uncertain),
+        "refused_calls": 0,
+        "call_count": calls,
+        "successful_microusd": settled,
+        "successful_calls": 1,
+        "success_unresolved_microusd": 0,
+        "success_unresolved_calls": 0,
+    }
+    execution = dict(provider)
+    execution.pop("provider")
+    execution["providers"] = [provider]
+    judge = {
+        "settled_microusd": 0,
+        "reserved_or_uncertain_microusd": 0,
+        "conservative_microusd": 0,
+        "inflight_calls": 0,
+        "uncertain_calls": 0,
+        "refused_calls": 0,
+        "call_count": 0,
+        "successful_microusd": 0,
+        "successful_calls": 0,
+        "success_unresolved_microusd": 0,
+        "success_unresolved_calls": 0,
+        "providers": [],
+    }
+    return {
+        "rank": index + 1,
+        "submission_id": submission_id,
+        "final_score": 0.0,
+        "is_baseline": False,
+        "cost_summary": {
+            "execution": execution,
+            "judge": judge,
+            "execution_cap_microusd": 80_000_000,
+            "cost_per_company_cap_microusd": 800_000,
+            "qualified_company_count": 0,
+            "returned_company_count": 18 if index in (1, 3) else 20,
+            "competition_sourcing_microusd": settled,
+            "eligibility_cap_microusd": 0,
+            "sourcing_cost_eligibility_policy":
+                contracts.SUCCESSFUL_CALLS_COST_POLICY,
+        },
+        "eligible": False,
+        "eligibility_reason": "cost_per_company_exceeded",
     }
 
 
@@ -127,6 +303,11 @@ def _seed_observed_sep16(connection, objects=None):
             for index, submission_id in enumerate(ids)
         ],
     }
+    if objects is not None:
+        publication["final_ranking"][1:] = [
+            _proof_challenger_publication_row(submission_id, index)
+            for index, submission_id in enumerate(ids[1:], start=1)
+        ]
     with connection.cursor() as cursor:
         for table in ("lab_arena_rounds", "lab_arena_submissions",
                       "lab_arena_runs", "lab_arena_ledger"):
@@ -179,7 +360,12 @@ def _seed_observed_sep16(connection, objects=None):
             for position in range(20):
                 stage = 1 if position < 10 else 2
                 execute_id = "old-execute-%d-%d" % (index, position)
-                failed = False
+                failed = (
+                    objects is not None
+                    and index in (1, 3)
+                    and position in (13, 16)
+                )
+                recovered = objects is not None and index == 3 and position == 17
                 cursor.execute(
                     "INSERT INTO public.lab_arena_runs (run_id,assignment_id,round_id,"
                     "submission_id,miner_hotkey,stage,icp_position,attempt,kind,status,"
@@ -189,8 +375,21 @@ def _seed_observed_sep16(connection, objects=None):
                      hotkeys[index], stage, position,
                      "failed" if failed else "accepted",
                      None if failed else "arena/output/%s.json" % execute_id,
-                     "model_error" if failed else "accepted"),
+                     "credential_error" if failed else "accepted"),
                 )
+                if recovered:
+                    cursor.execute(
+                        "UPDATE public.lab_arena_runs SET attempt=2 WHERE run_id=%s",
+                        (execute_id,),
+                    )
+                    cursor.execute(
+                        "INSERT INTO public.lab_arena_runs (run_id,assignment_id,"
+                        "round_id,submission_id,miner_hotkey,stage,icp_position,"
+                        "attempt,kind,status,terminal_cause) VALUES "
+                        "(%s,%s,%s,%s,%s,%s,%s,1,'execute','failed','provider_error')",
+                        (execute_id + "-failed", execute_id, ROUND, submission_id,
+                         hotkeys[index], stage, position),
+                    )
                 if failed:
                     if objects is not None:
                         cursor.execute(
@@ -209,9 +408,10 @@ def _seed_observed_sep16(connection, objects=None):
                 score_id = (
                     score_assignment if index == 0 else score_assignment + ":1"
                 )
-                # The protected original has ten stage-two miner-account
-                # failures and no accepted replacement for those executions.
-                score_failed = index == 1 and stage == 2
+                # The compact direct-seam fixture keeps its older scoring-
+                # failure case.  The objects-backed service fixture above
+                # instead mirrors the live round's five execute failures.
+                score_failed = index == 1 and stage == 2 and objects is None
                 value = qualification = None
                 if objects is not None:
                     value, qualification = _proof_execution(
@@ -230,7 +430,7 @@ def _seed_observed_sep16(connection, objects=None):
                      "arena/score/%s.json" % score_id, hotkeys[5],
                      "old-score-0-0" if 0 < len(accepted_challenger) <= 79 else None),
                 )
-                if objects is not None and not score_failed:
+                if objects is not None:
                     cursor.execute(
                         "UPDATE public.lab_arena_runs SET per_icp_score=%s, "
                         "qualification_doc=%s::jsonb WHERE run_id=%s",
@@ -260,7 +460,7 @@ def _seed_observed_sep16(connection, objects=None):
                          json.dumps({"reason": "worker_reported",
                                      "call": {"call_succeeded": False}})),
                     )
-        assert len(accepted_challenger) == 80
+        assert len(accepted_challenger) == (76 if objects is not None else 80)
         cursor.execute(
             "INSERT INTO public.lab_arena_ledger (entry_kind,miner_hotkey,round_id,"
             "submission_id,run_id,amount_microusd) VALUES ('settlement',%s,%s,%s,%s,4463935)",
@@ -576,8 +776,74 @@ def _ready_for_publication(connection, hotkeys, baseline_score, *, failed_positi
     return publication
 
 
+def _service_scoring_items(connection, stage, hotkeys):
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT stage%d_scoring_plan_doc FROM public.lab_arena_rounds "
+            "WHERE round_id=%%s" % stage,
+            (ROUND,),
+        )
+        plan = cursor.fetchone()[0]
+    items = []
+    for index, planned in enumerate(plan["work_items"]):
+        item = dict(planned)
+        if item["submission_id"] == BASELINE:
+            cache_key = "sha256:" + ("%064x" % (stage * 1000 + index + 100))
+            input_hash = "sha256:" + ("%064x" % (stage * 1000 + index + 200))
+            item.update(
+                judgment_cache_key=cache_key,
+                judgment_input_hash=input_hash,
+                judgment_scope_doc={
+                    "cache_key": cache_key,
+                    "scoring_input_hash": input_hash,
+                    "round_id": ROUND,
+                    "network_name": "finney",
+                    "netuid": 71,
+                    "integrity_policy": "arena_integrity_v1",
+                    "evaluation_date": "2026-09-16",
+                    "scorer_image_digest": NEW_IMAGE,
+                    "scorer_image_reference": "registry.example/native@" + NEW_IMAGE,
+                },
+                judgment_group_leader=True,
+                judgment_group_miner_hotkeys=[hotkeys[0]],
+            )
+        items.append(item)
+    return items
+
+
+def _accept_service_baseline_scores(connection, objects, stage, icps):
+    with connection.cursor() as cursor:
+        cursor.execute("ALTER TABLE public.lab_arena_runs DISABLE TRIGGER USER")
+        cursor.execute(
+            "SELECT run_id,scored_run_id,icp_position "
+            "FROM public.lab_arena_runs WHERE round_id=%s AND submission_id=%s "
+            "AND kind='score' AND stage=%s "
+            "AND assignment_id LIKE '%%:score:rerun265' ORDER BY icp_position",
+            (ROUND, BASELINE, stage),
+        )
+        rows = cursor.fetchall()
+        assert len(rows) == 10
+        for run_id, scored_run_id, position in rows:
+            company = _proof_company(icps[position], 0, position)
+            breakdown = _proof_breakdown(company, 40)
+            ref = "arena/score/%s.json" % run_id
+            objects.put(
+                ref,
+                json.dumps(scoring.build_scoring_output(
+                    scored_run_id, [breakdown]
+                )).encode(),
+            )
+            cursor.execute(
+                "UPDATE public.lab_arena_runs SET status='accepted',"
+                "terminal_cause='accepted',output_ref=%s WHERE run_id=%s",
+                (ref, run_id),
+            )
+        cursor.execute("ALTER TABLE public.lab_arena_runs ENABLE TRIGGER USER")
+
+
 def _insert_baseline_cost_head(
-    connection, *, kind, entry_kind, identity_number, call_succeeded=None
+    connection, *, kind, entry_kind, identity_number, call_succeeded=None,
+    amount_microusd=1000,
 ):
     with connection.cursor() as cursor:
         cursor.execute(
@@ -598,7 +864,7 @@ def _insert_baseline_cost_head(
             "round_id,submission_id,run_id,stage,call_identity,provider,"
             "operation_id,amount_microusd,entry_doc) VALUES "
             "(%s,%s,%s,%s,%s,%s,%s,'openrouter','openrouter.responses',"
-            "1000,%s::jsonb)",
+            "%s,%s::jsonb)",
             (
                 entry_kind,
                 miner_hotkey,
@@ -607,6 +873,7 @@ def _insert_baseline_cost_head(
                 run_id,
                 stage,
                 "sha256:" + ("%064x" % identity_number),
+                amount_microusd,
                 json.dumps(entry_doc),
             ),
         )
@@ -644,6 +911,59 @@ def _baseline_ledger_state(connection):
             (BASELINE,),
         )
         return cursor.fetchone()[0]
+
+
+def test_migration_changes_only_two_cost_fragments_and_preserves_identity():
+    generator = database_with_lab_arena_migration(PRE267_MIGRATIONS)
+    psycopg2, dsn = next(generator)
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    migration = (
+        Path(__file__).parents[2]
+        / "scripts/267-arena-2026-09-16-failed-cost-publication.sql"
+    ).read_text(encoding="utf-8")
+    fragments = (
+        "OR (v_execute_cost ->> 'uncertain_calls')::BIGINT <> 0",
+        "OR (v_score_cost ->> 'uncertain_calls')::BIGINT <> 0",
+    )
+
+    def state(cursor):
+        cursor.execute(
+            "SELECT pg_get_functiondef(p.oid),p.oid,pg_get_userbyid(p.proowner),"
+            "p.proacl,p.prosecdef,p.proconfig,p.provolatile "
+            "FROM pg_proc p WHERE p.oid=to_regprocedure("
+            "'public.lab_arena_sep16_rerun_publication_guard_v1()')"
+        )
+        function = cursor.fetchone()
+        cursor.execute(
+            "SELECT oid,tgfoid,tgenabled,tgtype,tgconstraint,tgrelid "
+            "FROM pg_trigger WHERE tgname="
+            "'lab_arena_sep16_rerun_publication_guard' AND NOT tgisinternal"
+        )
+        return function, cursor.fetchone()
+
+    try:
+        with connection.cursor() as cursor:
+            before_function, before_trigger = state(cursor)
+            before_definition = before_function[0]
+            assert all(before_definition.count(fragment) == 1 for fragment in fragments)
+            expected_definition = before_definition
+            for fragment in fragments:
+                expected_definition = expected_definition.replace(fragment, "")
+
+            cursor.execute(migration)
+            after_function, after_trigger = state(cursor)
+            assert after_function[0] == expected_definition
+            assert after_function[1:] == before_function[1:]
+            assert after_trigger == before_trigger
+
+            cursor.execute(migration)
+            replay_function, replay_trigger = state(cursor)
+            assert replay_function == after_function
+            assert replay_trigger == after_trigger
+    finally:
+        connection.close()
+        generator.close()
 
 
 def test_prepare_is_sealed_and_preserves_miners_rewards_and_history(connect):
@@ -1312,18 +1632,26 @@ def test_failed_cost_uncertainty_preserves_full_positive_publication(connect):
             )
         connection.commit()
 
-        for index, (kind, entry_kind, succeeded) in enumerate((
-            ("execute", "uncertain", True),
-            ("score", "uncertain", True),
-            ("execute", "reservation", None),
-            ("score", "reservation", None),
-        )):
+        blocking_heads = tuple(
+            (kind, entry_kind, succeeded, amount)
+            for kind in ("execute", "score")
+            for entry_kind, succeeded, amount in (
+                ("uncertain", True, 1000),
+                ("uncertain", None, 0),
+                ("reservation", None, 1000),
+                ("reservation", None, 0),
+            )
+        )
+        for index, (kind, entry_kind, succeeded, amount) in enumerate(
+            blocking_heads
+        ):
             _insert_baseline_cost_head(
                 connection,
                 kind=kind,
                 entry_kind=entry_kind,
                 identity_number=91000 + index,
                 call_succeeded=succeeded,
+                amount_microusd=amount,
             )
             with connection.cursor() as cursor:
                 with pytest.raises(Exception, match="conflicts with sealed"):
@@ -1382,6 +1710,176 @@ def test_failed_cost_uncertainty_preserves_full_positive_publication(connect):
                 "lab_arena_integrity_publication_guard"
             )
         connection.commit()
+        assert _baseline_ledger_state(connection) == ledger_before
+        assert _publication_preservation_state(connection) == protected_before
+    finally:
+        connection.close()
+
+
+def test_service_transition_publishes_with_all_guards_and_failed_liabilities(
+    connect, tmp_path, monkeypatch
+):
+    connection = connect()
+    harness = Harness(connect, tmp_path, challengers=[], runners=["sep16-proof"])
+    objects = harness.objects
+    service = harness.service
+    icps = daily_icps()
+    try:
+        schedule, hotkeys, ids = _seed_observed_sep16(connection, objects)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT kind,status,count(*) FROM public.lab_arena_runs "
+                "WHERE round_id=%s GROUP BY kind,status ORDER BY kind,status",
+                (ROUND,),
+            )
+            assert cursor.fetchall() == [
+                ("execute", "accepted", 96),
+                ("execute", "failed", 5),
+                ("score", "accepted", 96),
+            ]
+            cursor.execute(
+                "SELECT submission_id,icp_position,terminal_cause,"
+                "per_icp_score::text,EXISTS(SELECT 1 FROM public.lab_arena_runs ok "
+                "WHERE ok.assignment_id=failed.assignment_id "
+                "AND ok.kind='execute' AND ok.status='accepted') "
+                "FROM public.lab_arena_runs failed WHERE failed.round_id=%s "
+                "AND failed.kind='execute' AND failed.status='failed' "
+                "ORDER BY submission_id,icp_position",
+                (ROUND,),
+            )
+            assert cursor.fetchall() == [
+                (ids[1], 13, "credential_error", "0.000000", False),
+                (ids[1], 16, "credential_error", "0.000000", False),
+                (ids[3], 13, "credential_error", "0.000000", False),
+                (ids[3], 16, "credential_error", "0.000000", False),
+                (ids[3], 17, "provider_error", None, True),
+            ]
+        protected_reward = service.store.get_round(ROUND)
+        assert _prepare(connection, schedule)["status"] == "prepared"
+
+        with connection.cursor() as cursor:
+            cursor.execute("ALTER TABLE public.lab_arena_runs DISABLE TRIGGER USER")
+            cursor.execute(
+                "SELECT run_id,icp_position FROM public.lab_arena_runs "
+                "WHERE round_id=%s AND submission_id=%s AND kind='execute' "
+                "ORDER BY icp_position",
+                (ROUND, BASELINE),
+            )
+            fresh_executions = cursor.fetchall()
+            assert len(fresh_executions) == 20
+            for run_id, position in fresh_executions:
+                _proof_execution(objects, icps[position], 0, position, run_id)
+                cursor.execute(
+                    "UPDATE public.lab_arena_runs SET status='accepted',"
+                    "terminal_cause='accepted',output_ref=%s WHERE run_id=%s",
+                    ("arena/output/%s.json" % run_id, run_id),
+                )
+            cursor.execute("ALTER TABLE public.lab_arena_runs ENABLE TRIGGER USER")
+        connection.commit()
+
+        original_verified = service._verified_breakdowns
+
+        def verified_fixture(run, *, icp, companies, policy):
+            if run["submission_id"] != BASELINE:
+                return original_verified(
+                    run, icp=icp, companies=companies, policy=policy
+                )
+            document = json.loads(objects.get(run["output_ref"]).decode())
+            validated = scoring.validate_scoring_output_document(document)
+            assert validated["scored_run_id"] == run["scored_run_id"]
+            return scoring.validate_breakdowns_for_item(
+                validated["breakdowns"],
+                icp=icp,
+                companies=companies,
+                max_scored_companies=int(policy["max_scored_companies"]),
+                integrity_policy=True,
+                contacts_required=True,
+            )
+
+        monkeypatch.setattr(service, "_verified_breakdowns", verified_fixture)
+        assert service.close_stage(ROUND, 1)["status"] == "ok"
+        for stage in (1, 2):
+            items = _service_scoring_items(connection, stage, hotkeys)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT public.lab_arena_open_sep16_baseline_scoring_v1("
+                    "%s,%s::smallint,%s::jsonb)",
+                    (ROUND, stage, json.dumps(items)),
+                )
+                opened = cursor.fetchone()[0]
+                assert opened["status"] == "ok"
+                assert opened["assignments"] == 10
+            connection.commit()
+            _accept_service_baseline_scores(connection, objects, stage, icps)
+            connection.commit()
+            assert service.close_scoring(ROUND, stage)["status"] == "closed"
+            outcome = service.score_stage(ROUND, stage)
+            assert outcome["status"] == "ok", outcome
+            if stage == 1:
+                assert service.open_stage(ROUND, 2)["status"] == "ok"
+                assert service.close_stage(ROUND, 2)["status"] == "ok"
+
+        scored = service.store.get_round(ROUND)
+        assert scored["status"] == "scored"
+        _insert_baseline_cost_head(
+            connection,
+            kind="execute",
+            entry_kind="uncertain",
+            identity_number=93001,
+            call_succeeded=False,
+            amount_microusd=31949,
+        )
+        _insert_baseline_cost_head(
+            connection,
+            kind="score",
+            entry_kind="uncertain",
+            identity_number=93002,
+            call_succeeded=False,
+            amount_microusd=7000,
+        )
+        connection.commit()
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT tgname,tgenabled FROM pg_trigger "
+                "WHERE tgrelid='public.lab_arena_rounds'::regclass "
+                "AND tgname IN ('lab_arena_integrity_publication_guard',"
+                "'lab_arena_sep16_rerun_publication_guard') ORDER BY tgname"
+            )
+            assert cursor.fetchall() == [
+                ("lab_arena_integrity_publication_guard", "O"),
+                ("lab_arena_sep16_rerun_publication_guard", "O"),
+            ]
+            for kind in ("execute", "score"):
+                cursor.execute(
+                    "SELECT public.lab_arena__successful_call_cost_state(%s,%s,NULL)",
+                    (BASELINE, kind),
+                )
+                state = cursor.fetchone()[0]
+                assert state["uncertain_calls"] == 1
+                assert state["success_unresolved_calls"] == 0
+                assert state["inflight_calls"] == 0
+
+        ledger_before = _baseline_ledger_state(connection)
+        protected_before = _publication_preservation_state(connection)
+        published_result = service.publish(ROUND)
+        assert published_result["status"] == "ok", published_result
+        published = service.store.get_round(ROUND)
+        baseline = next(
+            row for row in published["publication_doc"]["final_ranking"]
+            if row["submission_id"] == BASELINE
+        )
+        assert baseline["final_score"] > 0
+        assert baseline["eligible"] is True
+        assert published["reward_basis_hash"] == BASIS_HASH
+        assert published["reward_basis_doc"] == protected_reward["reward_basis_doc"]
+        assert published["signing_key_doc"] == protected_reward["signing_key_doc"]
+        assert published["reward_activated_at"] == protected_reward[
+            "reward_activated_at"
+        ]
+        assert published["effective_reward_epoch"] == protected_reward[
+            "effective_reward_epoch"
+        ]
         assert _baseline_ledger_state(connection) == ledger_before
         assert _publication_preservation_state(connection) == protected_before
     finally:

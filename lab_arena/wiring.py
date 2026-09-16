@@ -312,6 +312,23 @@ def _max_image_bytes_from_environment() -> int:
     return value
 
 
+def _openrouter_shared_concurrency_from_environment() -> int:
+    raw = os.environ.get("LAB_ARENA_OPENROUTER_MAX_CONCURRENCY", "").strip()
+    if not raw:
+        return broker_module.OPENROUTER_SHARED_GATE_DEFAULT_MAX
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ServiceError(
+            "LAB_ARENA_OPENROUTER_MAX_CONCURRENCY must be an integer", 500
+        ) from None
+    if not 1 <= value <= broker_module.OPENROUTER_SHARED_GATE_MAX:
+        raise ServiceError(
+            "LAB_ARENA_OPENROUTER_MAX_CONCURRENCY must be from 1 to 10", 500
+        )
+    return value
+
+
 def registry_client_from_environment() -> images.RegistryClient:
     """Create the read-only client for the organizer's trusted scorer image."""
 
@@ -439,6 +456,9 @@ def build_service_from_environment(mode: str):
     # The catalog is organizer-held runtime state. It is not published in a
     # round and the baseline model never becomes an allowlist for miners.
     price_table = broker_module.fetch_openrouter_price_table()
+    openrouter_shared_gate = broker_module.OpenRouterSharedGate(
+        _openrouter_shared_concurrency_from_environment()
+    )
 
     def key_for(provider: str) -> str:
         """Return one organizer-supplied key by provider name."""
@@ -466,6 +486,7 @@ def build_service_from_environment(mode: str):
             provider_restart_required_for=(
                 submission_keys.provider_restart_required_for
             ),
+            openrouter_shared_gate=openrouter_shared_gate,
         )
 
     def daily_icp_source(*, set_id: int, active_at: datetime) -> Mapping[str, Any]:

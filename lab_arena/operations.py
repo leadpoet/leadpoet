@@ -45,6 +45,7 @@ BUDGET_ADMISSION_MAX_SECONDS = 20.0
 # window for exact post-response billing reconciliation; never resend the paid
 # request during this allowance.
 PROVIDER_BILLING_RECONCILIATION_SECONDS = 30.0
+PROVIDER_API_TIMEOUT_GRACE_SECONDS = 15.0
 
 # A public SDK-compatible handle, not a provider credential. The worker drops
 # this exact value before the gateway resolves the submission-owned key.
@@ -1936,6 +1937,7 @@ def sanitize_response(
 __all__ = [
     "ALLOWED_REQUEST_HEADERS",
     "BUDGET_ADMISSION_MAX_SECONDS",
+    "PROVIDER_API_TIMEOUT_GRACE_SECONDS",
     "PROVIDER_BILLING_RECONCILIATION_SECONDS",
     "CREDENTIAL_HEADERS",
     "HOST_ACCOUNT_STATUSES",

@@ -104,8 +104,12 @@ class StubService:
         self.calls["claim"] = envelope
         return {"status": "no_pending"}
 
-    def handle_provider(self, run_id, lease_token, frame):
+    def handle_provider(self, run_id, lease_token, frame, cancel_requested=None):
         self.calls["provider"] = (run_id, lease_token, frame)
+        self.calls["provider_cancel_requested"] = cancel_requested
+        self.calls["provider_cancelled"] = (
+            cancel_requested() if cancel_requested is not None else None
+        )
         try:
             asyncio.get_running_loop()
             self.calls["provider_has_event_loop"] = True
@@ -159,7 +163,9 @@ def test_provider_rpc_transport_timeout_is_sanitized_and_next_request_is_healthy
         store = ArenaStore(transport)
 
         class RpcService(StubService):
-            def handle_provider(self, run_id, lease_token, frame):
+            def handle_provider(
+                self, run_id, lease_token, frame, cancel_requested=None
+            ):
                 self.calls["provider"] = (run_id, lease_token, frame)
                 return store.reserve_call(
                     run_id=run_id, lease_token_hash="sha256:" + "a" * 64,
@@ -295,6 +301,8 @@ def test_runner_routes_require_lease_header_and_bounded_bodies(client):
     token = "a" * 64
     ok = http.post("/arena/v1/runs/r1/provider", content=json.dumps(frame), headers={"x-lab-arena-lease": token})
     assert ok.status_code == 200 and service.calls["provider"] == ("r1", token, frame)
+    assert callable(service.calls["provider_cancel_requested"])
+    assert service.calls["provider_cancelled"] is False
     assert service.calls["provider_has_event_loop"] is False
     assert http.get("/arena/v1/runs/r1/source").status_code == 401
     source = http.get(

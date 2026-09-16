@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections import deque
 import contextvars
 import hashlib
 import hmac
@@ -21,12 +22,13 @@ import json
 import logging
 import math
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING
 from email.utils import parsedate_to_datetime
-from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Sequence, Tuple
+from typing import Any, Callable, Deque, Dict, Mapping, Optional, Protocol, Sequence, Tuple
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, unquote_to_bytes, urlsplit
@@ -112,6 +114,252 @@ _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES = 16 * 1024 * 1024
 _OPENROUTER_GENERATION_HEADER = "x-generation-id"
 _RETRY_AFTER_ABSENT = object()
 _MAX_RETRY_AFTER_SECONDS = 3600
+OPENROUTER_SHARED_GATE_DEFAULT_MAX = 2
+OPENROUTER_SHARED_GATE_MAX = 10
+OPENROUTER_SHARED_GATE_MIN_PROVIDER_SECONDS = 30.0
+OPENROUTER_SHARED_GATE_IDLE_SECONDS = 300.0
+OPENROUTER_SHARED_GATE_MAX_IDLE_STATES = 256
+OPENROUTER_SHARED_GATE_MAX_STATES = 1024
+_OPENROUTER_SHARED_GATE_FALLBACK_SECONDS = (20.0, 40.0)
+
+
+@dataclass
+class _OpenRouterGateState:
+    active: int = 0
+    waiters: Deque[int] = field(default_factory=deque)
+    cooldown_until: float = 0.0
+    cooldown_generation: int = 0
+    throttle_count: int = 0
+    last_used: float = 0.0
+
+
+class OpenRouterGateLease:
+    """One admitted request. Release is idempotent for fail-closed paths."""
+
+    def __init__(
+        self,
+        gate: "OpenRouterSharedGate",
+        credential_fingerprint: str,
+        ticket: int,
+        cooldown_generation: int,
+    ) -> None:
+        self._gate = gate
+        self.credential_fingerprint = credential_fingerprint
+        self.ticket = ticket
+        self.cooldown_generation = cooldown_generation
+        self._released = False
+
+    def release(self) -> None:
+        if not self._released:
+            self._released = True
+            self._gate._release(self)
+
+
+class OpenRouterGateCancelled(RuntimeError):
+    """The queued caller disconnected or its cancellation probe failed."""
+
+
+class OpenRouterSharedGate:
+    """Process-shared FIFO admission and cooldown per credential fingerprint."""
+
+    def __init__(
+        self,
+        max_concurrency: int = OPENROUTER_SHARED_GATE_DEFAULT_MAX,
+        *,
+        idle_seconds: float = OPENROUTER_SHARED_GATE_IDLE_SECONDS,
+        max_idle_states: int = OPENROUTER_SHARED_GATE_MAX_IDLE_STATES,
+        max_states: int = OPENROUTER_SHARED_GATE_MAX_STATES,
+        fallback_seconds: Sequence[float] = _OPENROUTER_SHARED_GATE_FALLBACK_SECONDS,
+    ) -> None:
+        if (
+            isinstance(max_concurrency, bool)
+            or not isinstance(max_concurrency, int)
+            or not 1 <= max_concurrency <= OPENROUTER_SHARED_GATE_MAX
+        ):
+            raise ValueError("OpenRouter shared concurrency must be an integer from 1 to 10")
+        if (
+            idle_seconds < 0
+            or max_idle_states < 1
+            or max_states < max_idle_states
+        ):
+            raise ValueError("OpenRouter shared gate cleanup bounds are invalid")
+        if len(fallback_seconds) != 2 or any(float(value) < 0 for value in fallback_seconds):
+            raise ValueError("OpenRouter shared gate fallback is invalid")
+        self.max_concurrency = max_concurrency
+        self._idle_seconds = float(idle_seconds)
+        self._max_idle_states = int(max_idle_states)
+        self._max_states = int(max_states)
+        self._fallback_seconds = tuple(float(value) for value in fallback_seconds)
+        self._condition = threading.Condition()
+        self._states: Dict[str, _OpenRouterGateState] = {}
+        self._next_ticket = 0
+
+    @staticmethod
+    def _cancelled(cancel_requested: Optional[Callable[[], bool]]) -> bool:
+        if cancel_requested is None:
+            return False
+        try:
+            return bool(cancel_requested())
+        except Exception:
+            # A broken disconnect probe must fail closed before reservation.
+            return True
+
+    def _cleanup_locked(self, now: float) -> None:
+        idle = [
+            (fingerprint, state)
+            for fingerprint, state in self._states.items()
+            if state.active == 0
+            and not state.waiters
+            and state.cooldown_until <= now
+        ]
+        for fingerprint, state in idle:
+            if now - state.last_used >= self._idle_seconds:
+                self._states.pop(fingerprint, None)
+        idle = sorted(
+            (
+                (state.last_used, fingerprint)
+                for fingerprint, state in self._states.items()
+                if state.active == 0
+                and not state.waiters
+                and state.cooldown_until <= now
+            )
+        )
+        excess = max(0, len(idle) - self._max_idle_states)
+        for _, fingerprint in idle[:excess]:
+            self._states.pop(fingerprint, None)
+
+    def acquire(
+        self,
+        credential_fingerprint: str,
+        *,
+        deadline: float,
+        cancel_requested: Optional[Callable[[], bool]] = None,
+    ) -> Optional[OpenRouterGateLease]:
+        if _CREDENTIAL_FINGERPRINT_RE.fullmatch(credential_fingerprint) is None:
+            raise ValueError("OpenRouter credential fingerprint is invalid")
+        with self._condition:
+            now = time.monotonic()
+            self._cleanup_locked(now)
+            state = self._states.get(credential_fingerprint)
+            if state is None:
+                if len(self._states) >= self._max_states:
+                    return None
+                state = _OpenRouterGateState(last_used=now)
+                self._states[credential_fingerprint] = state
+            self._next_ticket += 1
+            ticket = self._next_ticket
+            state.waiters.append(ticket)
+        first_check = True
+        while True:
+            # The disconnect probe can cross the async/thread boundary. Never
+            # run it while holding the process-wide condition shared by other
+            # credentials.
+            cancelled = self._cancelled(cancel_requested)
+            with self._condition:
+                now = time.monotonic()
+                can_admit = (
+                    state.waiters
+                    and state.waiters[0] == ticket
+                    and state.active < self.max_concurrency
+                    and now >= state.cooldown_until
+                )
+                if cancelled:
+                    try:
+                        state.waiters.remove(ticket)
+                    except ValueError:
+                        pass
+                    state.last_used = now
+                    self._condition.notify_all()
+                    self._cleanup_locked(now)
+                    raise OpenRouterGateCancelled
+                # A short caller timeout is valid when the gate is idle. Its
+                # queue deadline can equal entry time, so allow this first
+                # uncontended admission before applying the queue bound.
+                if can_admit and (first_check or now < deadline):
+                    state.waiters.popleft()
+                    state.active += 1
+                    state.last_used = now
+                    lease = OpenRouterGateLease(
+                        self,
+                        credential_fingerprint,
+                        ticket,
+                        state.cooldown_generation,
+                    )
+                    self._condition.notify_all()
+                    return lease
+                if now >= deadline:
+                    try:
+                        state.waiters.remove(ticket)
+                    except ValueError:
+                        pass
+                    state.last_used = now
+                    self._condition.notify_all()
+                    self._cleanup_locked(now)
+                    return None
+                wake_at = deadline
+                if (
+                    state.waiters
+                    and state.waiters[0] == ticket
+                    and state.active < self.max_concurrency
+                    and state.cooldown_until > now
+                ):
+                    wake_at = min(wake_at, state.cooldown_until)
+                # Poll a real disconnect callback while queued.
+                if cancel_requested is not None:
+                    wake_at = min(wake_at, now + 0.1)
+                first_check = False
+                self._condition.wait(max(0.001, wake_at - now))
+
+    def observe_throttle(
+        self,
+        lease: OpenRouterGateLease,
+        retry_after_seconds: object = _RETRY_AFTER_ABSENT,
+    ) -> bool:
+        if retry_after_seconds is _RETRY_AFTER_ABSENT:
+            use_fallback = True
+        elif (
+            type(retry_after_seconds) is int
+            and 0 <= retry_after_seconds <= _MAX_RETRY_AFTER_SECONDS
+        ):
+            use_fallback = False
+        else:
+            return False
+        with self._condition:
+            state = self._states.get(lease.credential_fingerprint)
+            if state is None:
+                return False
+            if use_fallback:
+                index = min(state.throttle_count, len(self._fallback_seconds) - 1)
+                delay = self._fallback_seconds[index]
+            else:
+                delay = float(retry_after_seconds)
+            state.throttle_count = min(state.throttle_count + 1, 2)
+            state.cooldown_generation += 1
+            now = time.monotonic()
+            state.cooldown_until = max(state.cooldown_until, now + delay)
+            state.last_used = now
+            self._condition.notify_all()
+            return True
+
+    def observe_success(self, lease: OpenRouterGateLease) -> None:
+        with self._condition:
+            state = self._states.get(lease.credential_fingerprint)
+            if state is None:
+                return
+            # A request admitted before a newer throttle is stale evidence. It
+            # must not reset that newer cooldown or its fallback progression.
+            if lease.cooldown_generation == state.cooldown_generation:
+                state.throttle_count = 0
+            state.last_used = time.monotonic()
+
+    def _release(self, lease: OpenRouterGateLease) -> None:
+        with self._condition:
+            state = self._states.get(lease.credential_fingerprint)
+            if state is None or state.active < 1:
+                raise RuntimeError("OpenRouter shared gate lease is inconsistent")
+            state.active -= 1
+            state.last_used = time.monotonic()
+            self._condition.notify_all()
 
 
 def _retry_after_seconds(headers: Mapping[str, str]) -> object:
@@ -1451,6 +1699,7 @@ class Broker:
         provider_restart_required_for: Optional[
             Callable[[RunContext, str], bool]
         ] = None,
+        openrouter_shared_gate: Optional[OpenRouterSharedGate] = None,
     ) -> None:
         self._store = store
         # Host-only callers retain key_for. Production supplies the scoped
@@ -1463,6 +1712,7 @@ class Broker:
         self._retry_miner_credential_for = retry_miner_credential_for
         self._mark_provider_fallback = mark_provider_fallback
         self._provider_restart_required_for = provider_restart_required_for
+        self._openrouter_shared_gate = openrouter_shared_gate
         self._price_table = validate_price_table(price_table)
         # Judge models are what scoring runs may call; they are pinned by the
         # scorer policy and priced from the same table.
@@ -1726,6 +1976,7 @@ class Broker:
         parameters: Mapping[str, Any],
         action_sequence: int,
         timeout_ms: int,
+        cancel_requested: Optional[Callable[[], bool]] = None,
     ) -> BrokerResult:
         """Execute one model action with bounded champion credential retries.
 
@@ -1735,6 +1986,7 @@ class Broker:
         request and action sequence but receives a distinct ledger identity.
         """
 
+        api_started_at = time.monotonic()
         try:
             retry_miner_credential = bool(
                 self._retry_miner_credential_for(context)
@@ -1755,6 +2007,8 @@ class Broker:
                 timeout_ms=timeout_ms,
                 provider_attempt=provider_attempt,
                 champion_credential_retry=retry_miner_credential,
+                api_started_at=api_started_at,
+                cancel_requested=cancel_requested,
             )
             last_result = result
             if result.call.get("provider_fallback_required") is True:
@@ -1844,6 +2098,42 @@ class Broker:
         timeout_ms: int,
         provider_attempt: int,
         champion_credential_retry: bool,
+        api_started_at: Optional[float] = None,
+        cancel_requested: Optional[Callable[[], bool]] = None,
+    ) -> BrokerResult:
+        if api_started_at is None:
+            api_started_at = time.monotonic()
+        gate_holder: list[OpenRouterGateLease] = []
+        try:
+            return self._execute_once_impl(
+                context,
+                operation_id=operation_id,
+                parameters=parameters,
+                action_sequence=action_sequence,
+                timeout_ms=timeout_ms,
+                provider_attempt=provider_attempt,
+                champion_credential_retry=champion_credential_retry,
+                api_started_at=api_started_at,
+                cancel_requested=cancel_requested,
+                gate_holder=gate_holder,
+            )
+        finally:
+            if gate_holder:
+                gate_holder[0].release()
+
+    def _execute_once_impl(
+        self,
+        context: RunContext,
+        *,
+        operation_id: str,
+        parameters: Mapping[str, Any],
+        action_sequence: int,
+        timeout_ms: int,
+        provider_attempt: int,
+        champion_credential_retry: bool,
+        api_started_at: float,
+        cancel_requested: Optional[Callable[[], bool]],
+        gate_holder: list[OpenRouterGateLease],
     ) -> BrokerResult:
         operation = operations.OPERATIONS.get(operation_id)
         if operation is None:
@@ -2035,13 +2325,89 @@ class Broker:
             call_doc={"request_hash": request_hash, "base_call_identity": base_call_identity, "provider_attempt": provider_attempt, "action_sequence": action_sequence, "max_output_tokens": max_output_tokens, **request_accounting, **({"reserve_remaining_budget": True} if reserve_remaining_budget else {}), **(route.summary() if route else {})},
             lease_ttl_seconds=self._lease_ttl_seconds,
         )
-        # Another call can hold money without having spent it. Wait briefly for
-        # settlement, using the same identity; do not dispatch or charge twice.
         operation_timeout_seconds = min(
             max(1, int(timeout_ms)) / 1000.0,
             float(effective_operation.timeout_seconds),
         )
+        gate_lease: Optional[OpenRouterGateLease] = None
+        if (
+            effective_operation_id == "openrouter.responses"
+            and self._openrouter_shared_gate is not None
+            and openrouter_credential_fingerprint is not None
+        ):
+            api_deadline = (
+                api_started_at
+                + operations.BUDGET_ADMISSION_MAX_SECONDS
+                + operation_timeout_seconds
+                + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+                + operations.PROVIDER_API_TIMEOUT_GRACE_SECONDS
+            )
+            if time.monotonic() >= api_deadline - (
+                operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+                + operations.PROVIDER_API_TIMEOUT_GRACE_SECONDS
+            ):
+                summary.update(
+                    {
+                        "outcome": "not_dispatched",
+                        "reason": "provider_admission_deadline",
+                    }
+                )
+                return _error_result("provider_unavailable", summary)
+            required_provider_seconds = min(
+                OPENROUTER_SHARED_GATE_MIN_PROVIDER_SECONDS,
+                operation_timeout_seconds,
+            )
+            gate_deadline = api_deadline - (
+                operations.BUDGET_ADMISSION_MAX_SECONDS
+                + required_provider_seconds
+                + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+                + operations.PROVIDER_API_TIMEOUT_GRACE_SECONDS
+            )
+            try:
+                gate_lease = self._openrouter_shared_gate.acquire(
+                    openrouter_credential_fingerprint,
+                    deadline=gate_deadline,
+                    cancel_requested=cancel_requested,
+                )
+            except OpenRouterGateCancelled:
+                summary.update(
+                    {
+                        "outcome": "not_dispatched",
+                        "reason": "provider_admission_cancelled",
+                    }
+                )
+                return _error_result("provider_unavailable", summary)
+            if gate_lease is None:
+                summary.update(
+                    {
+                        "outcome": "not_dispatched",
+                        "reason": "provider_admission_deadline",
+                    }
+                )
+                return _error_result("provider_unavailable", summary)
+            gate_holder.append(gate_lease)
+
+        cancelled_before_reserve = (
+            gate_lease is not None
+            and OpenRouterSharedGate._cancelled(cancel_requested)
+        )
+        if cancelled_before_reserve:
+            summary.update(
+                {"outcome": "not_dispatched", "reason": "provider_admission_cancelled"}
+            )
+            return _error_result("provider_unavailable", summary)
+
+        # Another call can hold money without having spent it. Wait briefly for
+        # settlement, using the same identity; do not dispatch or charge twice.
         reserve_deadline = time.monotonic() + operations.BUDGET_ADMISSION_MAX_SECONDS
+        if gate_lease is not None:
+            reserve_deadline = min(
+                reserve_deadline,
+                api_deadline
+                - required_provider_seconds
+                - operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+                - operations.PROVIDER_API_TIMEOUT_GRACE_SECONDS,
+            )
         reserve_readback_used = False
         while True:
             try:
@@ -2214,12 +2580,26 @@ class Broker:
         if reserve_remaining_budget:
             summary["reservation_basis"] = "remaining_budget_dynamic_deepline"
 
-        # Budget admission has its own bounded wait. Once admitted, the paid
-        # provider request receives the full caller-requested window, capped by
-        # the operation table. Exact billing reconciliation gets its own fixed
-        # post-response allowance and never resends the paid request.
+        # Only gated Responses calls share the worker API's absolute deadline.
+        # Other providers retain their full post-admission request and billing
+        # windows. Once reserve commits, preserve the existing accounting
+        # sequence because no call-level pre-dispatch release transition exists.
+        billing_deadline: Optional[float] = None
         request_deadline = time.monotonic() + operation_timeout_seconds
-        dispatched = self._store.mark_dispatched(run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity)
+        if gate_lease is not None:
+            billing_deadline = (
+                api_deadline - operations.PROVIDER_API_TIMEOUT_GRACE_SECONDS
+            )
+            request_deadline = min(
+                request_deadline,
+                billing_deadline
+                - operations.PROVIDER_BILLING_RECONCILIATION_SECONDS,
+            )
+        dispatched = self._store.mark_dispatched(
+            run_id=context.run_id,
+            lease_token_hash=context.lease_token_hash,
+            call_identity=call_identity,
+        )
         if dispatched.get("status") == "stale":
             # The marker did not commit (stage closed or lease lost): the request is not sent.
             return _error_result("lease_stale", summary)
@@ -2230,7 +2610,9 @@ class Broker:
             summary["outcome"] = "uncertain"
             return _error_result("call_uncertain", summary)
         # Build the outbound request from the constant table and inject the credential.
-        outbound = operations.build_outbound_request(effective_operation_id, effective_normalized)
+        outbound = operations.build_outbound_request(
+            effective_operation_id, effective_normalized
+        )
         raw_document: Any = None
         deepline_readback_cost: Optional[provider_costs.ProviderCost] = None
         deepline_known_free_cost: Optional[provider_costs.ProviderCost] = None
@@ -2315,7 +2697,13 @@ class Broker:
                             secret=secret,
                             generation_id=openrouter_generation_id,
                             reconciliation_deadline=(
-                                time.monotonic()
+                                min(
+                                    time.monotonic()
+                                    + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS,
+                                    billing_deadline,
+                                )
+                                if billing_deadline is not None
+                                else time.monotonic()
                                 + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
                             ),
                         )
@@ -2394,7 +2782,13 @@ class Broker:
                             request_id=request_id,
                             operation=deepline_operation,
                             reconciliation_deadline=(
-                                time.monotonic()
+                                min(
+                                    time.monotonic()
+                                    + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS,
+                                    billing_deadline,
+                                )
+                                if billing_deadline is not None
+                                else time.monotonic()
                                 + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
                             ),
                         )
@@ -2811,14 +3205,20 @@ class Broker:
                 and provider_status_for_summary == 429
                 and type(actual) is int
                 and actual == 0
-                and openrouter_retry_after_seconds is not _RETRY_AFTER_ABSENT
             ):
+                if gate_lease is not None:
+                    self._openrouter_shared_gate.observe_throttle(
+                        gate_lease, openrouter_retry_after_seconds
+                    )
                 # Internal worker control data only. The model still receives
                 # the same generic provider-unavailable response.
-                summary["retry_after_seconds"] = openrouter_retry_after_seconds
+                if openrouter_retry_after_seconds is not _RETRY_AFTER_ABSENT:
+                    summary["retry_after_seconds"] = openrouter_retry_after_seconds
             return _error_result("provider_unavailable", summary)
         if settle_status == "settled":
             summary.update({"outcome": "settled", "actual_microusd": actual, "status": sanitized_status, "provider_status": provider_status_for_summary, "response_hash": payload["response_hash"]})
+            if gate_lease is not None and call_succeeded:
+                self._openrouter_shared_gate.observe_success(gate_lease)
             return BrokerResult(sanitized_status, sanitized_headers, sanitized_body, summary)
         if settle_status == "stale":
             # The lease or stage ended while the request was in flight: the

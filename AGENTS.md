@@ -1,5 +1,24 @@
 # Agent Instructions
 
+## Scoped production authorization: native Tyche September 16 runtime
+
+On 2026-09-16 the user superseded the September 15 rerun scope and explicitly
+retargeted the latest Tyche baseline to the exact twenty September 16 ICPs and
+the current output fields and scoring contract. Preserve the latest Tyche
+Codex and Luna research and lead-finding logic unchanged; adapt only its Arena
+interface and runtime configuration. The necessary generic sandboxed Codex
+CLI, Responses broker, runner, image installer, and bounded cost-recovery
+support from PR198 are authorized. Preserve the 45-minute per-ICP deadline,
+current review-recovery behavior, scoring, provider costs, rewards, weights,
+sandbox and credential isolation, and latest-lab source selection. The existing
+authority covers protected production inspection, necessary exact committed
+migrations, runtime image publication, tested code pushes, canonical restarts,
+paid validation and publication of the tested model to pydantic-harness main
+and lab. After validation, override and rerun the September 16 baseline on its
+same twenty ICPs, retaining prior results, actual costs, miner submissions and
+audit history. This target replaces the earlier September 15 rerun. Continue
+through genuine positive score publication and downstream verification.
+
 ## Scoped production authorization: review failure recovery and dashboard visibility
 
 On 2026-09-16 the user explicitly authorized surgical review-error diagnostics,

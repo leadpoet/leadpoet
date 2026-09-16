@@ -1,0 +1,487 @@
+"""Real HTTP/Unix broker boundary and optional native Codex tool-loop proof."""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path
+
+import httpx
+import pytest
+
+from lab_arena import broker as br, operations as ops, runner, runtime
+from lab_arena import lab_arena_codex as codex
+from tests.lab_arena.test_lab_arena_broker import CONTEXT, FakeTransport, FakeLedgerStore, make_broker, price_table
+from tests.lab_arena.test_lab_arena_runner import lease
+
+
+NATIVE_MODELS = (
+    "openai/gpt-6-astra", "openai/gpt-5.6-sol", "openai/gpt-5.6-terra",
+    "openai/gpt-5.6-luna", "openai/gpt-5.5",
+)
+
+
+def response(output=None, **changes):
+    return dict({
+        "id": "gen-codex-1", "object": "response", "created_at": 1789488000,
+        "status": "completed", "model": "openai/gpt-4o-mini", "error": None,
+        "output": output or [{"id": "msg-1", "type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "ARENA_CODEX_OK", "annotations": []}]}],
+        "usage": {"input_tokens": 10, "output_tokens": 10, "total_tokens": 20, "cost": 0.000012},
+    }, **changes)
+
+
+@contextmanager
+def broker_socket(monkeypatch, transport=None, store=None, *, priced_models=()):
+    broker, store, transport = make_broker(transport=transport, store=store)
+    if priced_models:
+        # Synthetic test prices admit model selection. Production still uses
+        # the fetched, validated OpenRouter price allowlist.
+        table = price_table()
+        for model in priced_models:
+            table["models"][model] = dict(table["models"]["openai/gpt-4o-mini"])
+        broker._price_table = br.validate_price_table(table)
+
+    class Api:
+        def provider(self, run_id, lease_token, frame):
+            return broker.execute(CONTEXT, **frame).to_document()
+
+    with tempfile.TemporaryDirectory(prefix="codex-test-", dir="/tmp") as directory:
+        path = Path(directory) / "worker.sock"
+        state = runner.RunState(lease=lease("r1"), lease_token="tok-r1")
+        server = runner.WorkerSocketServer(path, Api(), state)
+        server.start()
+        monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(path))
+        monkeypatch.setenv("LAB_ARENA_WEB_EGRESS_SOCKET", str(Path(directory) / "web.sock"))
+        try:
+            yield store, transport, path
+        finally:
+            server.stop()
+
+
+@pytest.mark.parametrize("extra", [
+    {"stream": True}, {"store": True}, {"previous_response_id": "resp-other"},
+    {"provider": {"allow_fallbacks": True}}, {"background": True},
+    {"tools": [{"type": "web_search"}]}, {"tools": [{"type": "mcp", "server_url": "https://example.com"}]},
+    {"input": [{"type": "item_reference", "id": "remote-item"}]},
+    {"input": [{"role": "user", "content": [{"type": "input_image", "image_url": "https://example.com/a.png"}]}]},
+    {"max_output_tokens": 32769}, {"input": True}, {"tools": {}},
+])
+def test_closed_responses_operation_rejects_unpriced_or_remote_work(extra):
+    with pytest.raises(ops.OperationRequestError):
+        ops.validate_operation_request("openrouter.responses", {"model": "openai/gpt-4o-mini", "input": "hi", **extra})
+
+
+def test_responses_native_tool_history_and_caps():
+    params = ops.validate_operation_request("openrouter.responses", {
+        "model": "openai/gpt-4o-mini",
+        "input": [
+            {"role": "user", "content": [{"type": "input_text", "text": "research"}]},
+            {"type": "function_call", "id": "fc-1", "call_id": "call-1", "name": "shell", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call-1", "output": "tool evidence"},
+            {"type": "reasoning", "id": "rs-1", "summary": [], "encrypted_content": "opaque"},
+        ],
+        "tools": [{"type": "function", "name": "shell", "parameters": {"type": "object", "properties": {"url": {"type": "string"}}}}],
+    })
+    normalized = br.normalized_request("openrouter.responses", params)
+    assert normalized["max_output_tokens"] == 4096
+    assert "max_tokens" not in normalized
+    outbound = ops.build_outbound_request("openrouter.responses", normalized)
+    assert outbound.url == "https://openrouter.ai/api/v1/responses"
+    body = json.loads(outbound.body)
+    assert body["stream"] is False and body["store"] is False
+    assert body["provider"] == dict(ops.OPENROUTER_STRICT_PROVIDER_POLICY)
+
+
+def native_wire_request(model, style, *, continued=False):
+    """Small, path-free forms taken from Codex 0.154.0's recorded wire shapes."""
+    function = {"type": "function", "name": "arena_inspect", "description": "Inspect local fixture", "strict": True,
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}
+    custom = {"type": "custom", "name": "exec", "description": "Call a local MCP tool", "format": {"type": "text"}}
+    namespace = {"type": "namespace", "name": "functions", "description": "Local code mode", "tools": [custom]}
+    items = [{"role": "user", "content": [{"type": "input_text", "text": "Inspect the local fixture."}]}]
+    tools = [function] if style == "flat" else []
+    if style == "lite":
+        items.insert(0, {"type": "additional_tools", "id": "at-local", "role": "developer", "tools": [namespace]})
+    if continued:
+        if style == "flat":
+            items.extend([
+                {"type": "function_call", "call_id": "call-1", "name": "arena_inspect",
+                 "arguments": "{}", "status": "completed"},
+                {"type": "function_call_output", "call_id": "call-1", "output": "ARENA_MCP_FIRST_OK"},
+            ])
+        else:
+            items.extend([
+                {"type": "custom_tool_call", "call_id": "call-1", "name": "exec", "namespace": "functions",
+                 "input": "text(await tools.mcp__fixture__arena_inspect({}));", "status": "completed"},
+                {"type": "custom_tool_call_output", "call_id": "call-1",
+                 "output": [{"type": "input_text", "text": "ARENA_MCP_FIRST_OK"}]},
+            ])
+        items.extend([
+            {"role": "user", "content": [{"type": "input_text", "text": "Compacted summary: first local MCP result was ARENA_MCP_FIRST_OK; inspect again."}]},
+        ])
+    reasoning = {"effort": "high", "context": "all_turns"} if style == "lite" else {"effort": "high"}
+    return {"model": model, "input": items, "tools": tools, "reasoning": reasoning,
+            "include": ["reasoning.encrypted_content"], "parallel_tool_calls": False,
+            "prompt_cache_key": "local-fixture", "text": {"verbosity": "low"}, "tool_choice": "auto",
+            "client_metadata": {"source": "codex-cli-0.154.0"}, "stream": True, "store": False}
+
+
+@pytest.mark.parametrize("model,style", [
+    ("openai/gpt-5.5", "flat"), ("openai/gpt-5.6-luna", "lite"),
+])
+def test_recorded_native_wire_crosses_bridge_worker_broker_and_bills(monkeypatch, model, style):
+    """The bridge, worker frame, operation and ledger all see native fields."""
+    first_output = ({"type": "function_call", "id": "fc-1", "call_id": "call-1", "name": "arena_inspect",
+                     "arguments": "{}", "status": "completed"} if style == "flat" else
+                    {"type": "custom_tool_call", "id": "ct-1", "call_id": "call-1", "name": "exec",
+                     "namespace": "functions", "input": "text(await tools.mcp__fixture__arena_inspect({}));", "status": "completed"})
+    outputs = [[first_output],
+               [{"id": "msg-2", "type": "message", "role": "assistant", "status": "completed",
+                 "content": [{"type": "output_text", "text": "ARENA_NATIVE_WIRE_OK", "annotations": []}]}]]
+    transport = FakeTransport([(200, response(model=model, output=output, id="resp-%d" % index))
+                               for index, output in enumerate(outputs, 1)])
+    with broker_socket(monkeypatch, transport, priced_models=(model,)) as (store, transport, path), codex.ResponsesBridge(str(path)) as bridge:
+        with httpx.Client(trust_env=False) as client:
+            replies = [client.post(bridge.base_url + "/responses",
+                                   headers={"Authorization": "Bearer " + bridge.token},
+                                   json=native_wire_request(model, style, continued=index == 1))
+                       for index in range(2)]
+    assert [reply.status_code for reply in replies] == [200, 200], [reply.text for reply in replies]
+    assert "event: response.completed" in replies[0].text
+    assert "ARENA_NATIVE_WIRE_OK" in replies[1].text
+    assert len(transport.sent) == 2
+    outbound = [json.loads(sent["body"]) for sent in transport.sent]
+    assert all(sent["url"] == "https://openrouter.ai/api/v1/responses" for sent in transport.sent)
+    assert all(body["model"] == model for body in outbound)
+    if style == "lite":
+        assert all(body["reasoning"]["context"] == "all_turns" for body in outbound)
+    assert all(body["max_output_tokens"] == 16384 for body in outbound)
+    assert all(body["provider"] == dict(ops.OPENROUTER_STRICT_PROVIDER_POLICY) for body in outbound)
+    assert "client_metadata" not in outbound[0]
+    if style == "lite":
+        assert outbound[0]["input"][0]["type"] == "additional_tools"
+        assert outbound[1]["input"][-2]["output"] == [{"type": "input_text", "text": "ARENA_MCP_FIRST_OK"}]
+    else:
+        assert outbound[0]["tools"][0]["type"] == "function"
+        assert outbound[1]["input"][-2]["output"] == "ARENA_MCP_FIRST_OK"
+    assert "Compacted summary" in outbound[1]["input"][-1]["content"][0]["text"]
+    assert len(store.calls) == 2
+    assert all(call["kind"] == "settlement" and call["terminal"]["call_succeeded"] is True
+               for call in store.calls.values())
+    assert sum(call["actual"] for call in store.calls.values()) == 24
+
+
+def test_bridge_bills_real_worker_and_replays_sse(monkeypatch):
+    with broker_socket(monkeypatch, FakeTransport([(200, response())])) as (store, transport, path), codex.ResponsesBridge(str(path)) as bridge:
+        with httpx.Client(trust_env=False) as client:
+            reply = client.post(bridge.base_url + "/responses", headers={"Authorization": "Bearer " + bridge.token}, json={"model": "openai/gpt-4o-mini", "input": "hi", "stream": True, "store": False})
+        assert reply.status_code == 200, reply.text
+        assert "event: response.completed" in reply.text
+        assert "ARENA_CODEX_OK" in reply.text
+        assert len(transport.sent) == 1
+        assert next(iter(store.calls.values()))["actual"] == 12
+        assert next(iter(store.calls.values()))["terminal"]["call_succeeded"] is True
+
+
+def test_bridge_auth_and_stateful_requests_never_dispatch(monkeypatch):
+    with broker_socket(monkeypatch) as (store, transport, path), codex.ResponsesBridge(str(path)) as bridge:
+        with httpx.Client(trust_env=False) as client:
+            assert client.post(bridge.base_url + "/responses", json={}).status_code == 401
+            assert client.post(bridge.base_url + "/responses", headers={"Authorization": "Bearer " + bridge.token}, json={"store": True}).status_code == 400
+            assert client.post(bridge.base_url + "/chat/completions", json={}).status_code == 404
+        assert not store.calls and not transport.sent
+
+
+def test_responses_budget_refusal_and_incomplete_billing(monkeypatch):
+    with broker_socket(monkeypatch, store=FakeLedgerStore(openrouter_capacity=0)) as (store, transport, path):
+        status, _ = codex._dispatch(str(path), {"model": "openai/gpt-4o-mini", "input": "hi"})
+        assert status >= 400
+        assert not transport.sent
+    broker, store, _ = make_broker(transport=FakeTransport([(200, response(status="incomplete"))]))
+    result = broker.execute(CONTEXT, operation_id="openrouter.responses", parameters={"model": "openai/gpt-4o-mini", "input": "hi"}, action_sequence=1, timeout_ms=120000)
+    assert next(iter(store.calls.values()))["terminal"]["call_succeeded"] is False
+    assert next(iter(store.calls.values()))["actual"] == 12
+
+
+@pytest.mark.parametrize("scrapingdog_value", ["lab-arena-brokered-scrapingdog", "test-secret"])
+def test_session_isolates_login_and_provider_keys(monkeypatch, scrapingdog_value):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-secret")
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", scrapingdog_value)
+    monkeypatch.setenv("CODEX_HOME", "/personal/config")
+    with broker_socket(monkeypatch), codex.session(model="openai/gpt-4o-mini") as env:
+        assert "OPENROUTER_API_KEY" not in env and "OPENAI_API_KEY" not in env
+        if scrapingdog_value == "lab-arena-brokered-scrapingdog":
+            assert env["SCRAPINGDOG_API_KEY"] == scrapingdog_value
+        else:
+            assert "SCRAPINGDOG_API_KEY" not in env
+        assert env["CODEX_HOME"] != "/personal/config"
+        home = Path(env["CODEX_HOME"])
+        assert not (home / "auth.json").exists()
+        assert 'request_max_retries = 0' in (home / "config.toml").read_text()
+    assert not home.exists()
+
+
+@pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="set ARENA_TEST_CODEX_BINARY for the real CLI protocol proof")
+def test_real_codex_tool_call_and_continuation(monkeypatch, tmp_path):
+    request_errors = []
+    original_dispatch = codex._dispatch
+
+    def checked_dispatch(socket_path, document):
+        try:
+            ops.validate_operation_request("openrouter.responses", document)
+        except ops.OperationRequestError as exc:
+            request_errors.append((str(exc), list(document), document.get("tools")))
+        return original_dispatch(socket_path, document)
+
+    monkeypatch.setattr(codex, "_dispatch", checked_dispatch)
+    class ToolTransport(FakeTransport):
+        def send(self, **kwargs):
+            document = json.loads(kwargs["body"])
+            if not self.sent:
+                names = [tool["name"] for tool in document["tools"]]
+                name = "exec_command" if "exec_command" in names else "shell_command"
+                assert name in names, names
+                command = "python3 -c 'import lab_arena_codex; from pathlib import Path; Path(\"codex-tool-proof.txt\").write_text(lab_arena_codex.CODEX_VERSION); print(\"ARENA_TOOL_OK\")'"
+                arguments = {"cmd": command, "max_output_tokens": 100} if name == "exec_command" else {"command": command}
+                self.responses.append((200, response(output=[{"type": "function_call", "id": "fc-1", "call_id": "call-1", "name": name, "arguments": json.dumps(arguments), "status": "completed"}])))
+            else:
+                assert any(item.get("type") == "function_call_output" and "ARENA_TOOL_OK" in item["output"] for item in document["input"])
+                self.responses.append((200, response(id="gen-codex-2")))
+            return super().send(**kwargs)
+
+    monkeypatch.setattr(codex, "CODEX_BINARY", os.environ["ARENA_TEST_CODEX_BINARY"])
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        monkeypatch.setenv(name, "http://127.0.0.1:9")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+    with broker_socket(monkeypatch, ToolTransport()) as (store, transport, path):
+        try:
+            text = codex.run("Run the shell command provided by the model, then report success.", model="openai/gpt-4o-mini", cwd=tmp_path, timeout_seconds=60)
+        except codex.CodexRuntimeError as exc:
+            pytest.fail(exc.diagnostics[-8000:] + "\n" + repr(request_errors))
+        assert "ARENA_CODEX_OK" in text
+        assert (tmp_path / "codex-tool-proof.txt").read_text() == codex.CODEX_VERSION
+        assert len(transport.sent) == 2
+        assert sum(call["actual"] for call in store.calls.values()) == 24
+
+
+@pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="set ARENA_TEST_CODEX_BINARY to the complete Codex 0.154.0 package")
+@pytest.mark.parametrize("model", NATIVE_MODELS)
+def test_pinned_codex_selects_each_priced_model_without_runtime_rewrites(monkeypatch, tmp_path, model):
+    binary = os.environ["ARENA_TEST_CODEX_BINARY"]
+    assert subprocess.check_output([binary, "--version"], text=True).strip() == "codex-cli 0.154.0"
+    monkeypatch.setattr(codex, "CODEX_BINARY", binary)
+
+    class FinalTransport(FakeTransport):
+        def send(self, **kwargs):
+            body = json.loads(kwargs["body"])
+            assert body["model"] == model
+            self.responses.append((200, response(model=model)))
+            return super().send(**kwargs)
+
+    with broker_socket(monkeypatch, FinalTransport(), priced_models=(model,)) as (store, transport, path):
+        result = codex.run("Reply exactly ARENA_CODEX_OK.", model=model, cwd=tmp_path, timeout_seconds=60)
+    assert "ARENA_CODEX_OK" in result
+    assert transport.sent
+    assert all(json.loads(sent["body"])["model"] == model for sent in transport.sent)
+    assert all(call["kind"] == "settlement" for call in store.calls.values())
+
+
+def write_local_mcp_fixture(tmp_path):
+    """A stdio MCP fixture with two local calls and no provider access."""
+    fixture = tmp_path / "arena_fixture_mcp.py"
+    fixture.write_text("\n".join([
+        "import json, sys",
+        "from pathlib import Path",
+        "log = Path(sys.argv[1])",
+        "tools = [{'name': name, 'description': 'Return a local fixture marker',",
+        "          'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}}",
+        "         for name in ('arena_inspect', 'arena_review')]",
+        "for line in sys.stdin:",
+        "    request = json.loads(line)",
+        "    if 'id' not in request: continue",
+        "    method = request.get('method')",
+        "    if method == 'initialize':",
+        "        result = {'protocolVersion': request['params']['protocolVersion'],",
+        "                  'capabilities': {'tools': {}}, 'serverInfo': {'name': 'arena-fixture', 'version': '1'}}",
+        "    elif method == 'tools/list': result = {'tools': tools}",
+        "    elif method == 'tools/call':",
+        "        name = request['params']['name']",
+        "        assert name in ('arena_inspect', 'arena_review')",
+        "        assert request['params'].get('arguments', {}) == {}",
+        "        with log.open('a') as output: output.write(name + '\\n')",
+        "        result = {'content': [{'type': 'text', 'text': 'ARENA_MCP_' + name.upper() + '_OK'}]}",
+        "    else: result = {}",
+        "    print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)",
+    ]) + "\n", encoding="utf-8")
+    return fixture
+
+
+@pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="set ARENA_TEST_CODEX_BINARY to the complete Codex 0.154.0 package")
+def test_pinned_luna_code_mode_uses_two_local_mcp_calls_and_compacts(monkeypatch, tmp_path):
+    binary = os.environ["ARENA_TEST_CODEX_BINARY"]
+    assert subprocess.check_output([binary, "--version"], text=True).strip() == "codex-cli 0.154.0"
+    assert Path(binary).resolve().with_name("codex-code-mode-host").is_file()
+    monkeypatch.setattr(codex, "CODEX_BINARY", binary)
+    fixture = write_local_mcp_fixture(tmp_path)
+    mcp_log = tmp_path / "mcp-calls.txt"
+    original_session = codex.session
+
+    @contextmanager
+    def local_mcp_session(**kwargs):
+        with original_session(**kwargs) as environment:
+            config = Path(environment["CODEX_HOME"]) / "config.toml"
+            # The compaction setting belongs to the top-level TOML table;
+            # append only the MCP table after the helper's provider table.
+            current = config.read_text(encoding="utf-8")
+            if "model_auto_compact_token_limit" not in current:
+                current = "model_auto_compact_token_limit = 16000\n" + current
+            config.write_text(
+                current
+                + "\n[mcp_servers.fixture]\ncommand = " + json.dumps(sys.executable) + "\n"
+                + "args = " + json.dumps([str(fixture), str(mcp_log)]) + "\n"
+                + 'required = true\ndefault_tools_approval_mode = "approve"\n',
+                encoding="utf-8",
+            )
+            yield environment
+
+    monkeypatch.setattr(codex, "session", local_mcp_session)
+
+    class NativeTransport(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.requests = []
+            self.compaction_requests = 0
+            self.tool_calls = 0
+
+        def send(self, **kwargs):
+            body = json.loads(kwargs["body"])
+            assert body["model"] == "openai/gpt-5.6-luna"
+            self.requests.append(body)
+            added_tools = any(item.get("type") == "additional_tools" and item.get("tools")
+                              for item in body["input"])
+            if not self.sent:
+                code = "const t = ALL_TOOLS.find(t => t.name.endsWith('arena_inspect')); if (!t) throw new Error('inspect missing'); text(await tools[t.name]({}));"
+                self.tool_calls += 1
+                output = [{"type": "custom_tool_call", "id": "ct-1", "call_id": "call-1", "name": "exec",
+                           "namespace": "functions", "input": code, "status": "completed"}]
+            elif not added_tools:
+                # Codex's continuation after code-mode output can omit the
+                # large additional_tools declaration. Reply with compactable
+                # prose; the following request must carry the summary.
+                self.compaction_requests += 1
+                output = [{"type": "message", "id": "summary-msg", "role": "assistant", "status": "completed",
+                           "content": [{"type": "output_text", "text": "The first local MCP check succeeded. Continue with arena_review.", "annotations": []}]}]
+            elif self.tool_calls < 2:
+                assert "Another language model started to solve this problem" in json.dumps(body)
+                code = "const t = ALL_TOOLS.find(t => t.name.endsWith('arena_review')); if (!t) throw new Error('review missing'); text(await tools[t.name]({}));"
+                self.tool_calls += 1
+                output = [{"type": "custom_tool_call", "id": "ct-2", "call_id": "call-2", "name": "exec",
+                           "namespace": "functions", "input": code, "status": "completed"}]
+            else:
+                output = [{"type": "message", "id": "final-msg", "role": "assistant", "status": "completed",
+                           "content": [{"type": "output_text", "text": "ARENA_NATIVE_MCP_OK", "annotations": []}]}]
+            count = len(self.sent) + 1
+            usage = {"input_tokens": 17000 if count == 1 else 100, "output_tokens": 20,
+                     "total_tokens": 17020 if count == 1 else 120, "cost": 0.000012}
+            self.responses.append((200, response(model=body["model"], id="native-%d" % count,
+                                                 output=output, usage=usage)))
+            return super().send(**kwargs)
+
+    with broker_socket(monkeypatch, NativeTransport(), priced_models=("openai/gpt-5.6-luna",)) as (store, transport, path):
+        try:
+            result = codex.run("Use both local fixture MCP tools, then reply ARENA_NATIVE_MCP_OK.",
+                               model="openai/gpt-5.6-luna", reasoning_effort="high", cwd=tmp_path,
+                               timeout_seconds=90)
+        except codex.CodexRuntimeError as exc:
+            pytest.fail(exc.diagnostics[-8000:])
+    assert "ARENA_NATIVE_MCP_OK" in result
+    assert mcp_log.read_text().splitlines() == ["arena_inspect", "arena_review"]
+    assert transport.compaction_requests >= 1, "The forced 17000-token usage did not produce a compacted continuation"
+    assert any("Another language model started to solve this problem" in json.dumps(body)
+               for body in transport.requests[2:])
+    assert any(item.get("type") == "custom_tool_call_output" and "input_text" in json.dumps(item.get("output"))
+               for body in transport.requests[1:] for item in body["input"])
+    assert len(store.calls) == len(transport.sent)
+    assert all(call["kind"] == "settlement" for call in store.calls.values())
+
+
+def test_malformed_reply_fails_closed():
+    document = response(output=[{"type": "message", "content": ["bad"]}])
+    with pytest.raises(codex.CodexRuntimeError, match="invalid Responses content"):
+        list(codex.response_events(document))
+
+
+def test_noisy_cli_failure_keeps_only_a_bounded_tail(monkeypatch, tmp_path):
+    executable = tmp_path / "fake-codex"
+    executable.write_text("#!" + sys.executable + "\nimport sys\nsys.stdout.write('x' * 300000)\nsys.exit(7)\n")
+    executable.chmod(0o755)
+    monkeypatch.setattr(codex, "CODEX_BINARY", str(executable))
+    with broker_socket(monkeypatch), pytest.raises(codex.CodexRuntimeError, match="status 7") as error:
+        codex.run("test", model="openai/gpt-4o-mini", cwd=tmp_path, timeout_seconds=5)
+    assert error.value.diagnostics == "x" * codex.MAX_LOG_BYTES
+
+
+def test_cli_timeout_stops_the_process(monkeypatch, tmp_path):
+    executable = tmp_path / "fake-codex"
+    executable.write_text("#!" + sys.executable + "\nimport time\ntime.sleep(60)\n")
+    executable.chmod(0o755)
+    monkeypatch.setattr(codex, "CODEX_BINARY", str(executable))
+    with broker_socket(monkeypatch), pytest.raises(subprocess.TimeoutExpired):
+        codex.run("test", model="openai/gpt-4o-mini", cwd=tmp_path, timeout_seconds=0.1)
+
+
+@pytest.mark.skipif(sys.platform != "linux" or not os.environ.get("ARENA_TEST_CODEX_ROOTFS"), reason="requires Linux root, runsc and the built Arena rootfs")
+def test_codex_in_real_gvisor(monkeypatch):
+    """Execute the shipped entrypoint/helper/CLI in the actual Arena sandbox."""
+    root = Path(__file__).resolve().parents[2]
+    tool = {"id": "fc-1", "type": "function_call", "call_id": "call-1", "name": "exec_command", "arguments": json.dumps({"cmd": "python3 -c 'import lab_arena_codex; print(\"ARENA_TOOL_OK\")'", "max_output_tokens": 100}), "status": "completed"}
+
+    class ToolTransport(FakeTransport):
+        def send(self, **kwargs):
+            if not self.sent:
+                self.responses.append((200, response(output=[tool])))
+            else:
+                body = json.loads(kwargs["body"])
+                assert any(item.get("type") == "function_call_output" and "ARENA_TOOL_OK" in item["output"] for item in body["input"])
+                self.responses.append((200, response(id="gen-codex-2")))
+            return super().send(**kwargs)
+
+    with broker_socket(monkeypatch, ToolTransport()) as (store, transport, socket_path), tempfile.TemporaryDirectory(prefix="arena-codex-gvisor-", dir="/tmp") as directory:
+        work = Path(directory)
+        work.chmod(0o755)
+        for name in ("source", "deps", "input", "output", "runtime"):
+            (work / name).mkdir(mode=0o755)
+        (work / "input/icp.json").write_text('{"icp":{},"company_limit":5}')
+        (work / "source/harness.py").write_text(
+            "import lab_arena_codex\n"
+            "def run_icp(icp):\n"
+            "    result = lab_arena_codex.run('Run the requested tool, then finish.', model='openai/gpt-4o-mini', cwd='/tmp', timeout_seconds=60)\n"
+            "    assert 'ARENA_CODEX_OK' in result\n"
+            "    return []\n"
+        )
+        for name in ("agent_entrypoint.py", "lab_arena_checkpoint.py", "lab_arena_codex.py", "web_egress_bridge.py"):
+            shutil.copyfile(root / "lab_arena" / name, work / name)
+            (work / name).chmod(0o444)
+        spec = runtime.SandboxSpec(
+            sandbox_id="arena-codex-probe", rootfs_path=Path(os.environ["ARENA_TEST_CODEX_ROOTFS"]),
+            input_dir=work / "input", output_dir=work / "output", socket_path=socket_path,
+            source_dir=work / "source", dependency_dir=work / "deps",
+            agent_entrypoint_path=work / "agent_entrypoint.py", checkpoint_module_path=work / "lab_arena_checkpoint.py",
+            codex_module_path=work / "lab_arena_codex.py", web_bridge_path=work / "web_egress_bridge.py",
+            entry_command=runtime.AGENT_ENTRY_COMMAND, working_dir=runtime.AGENT_WORKING_DIR,
+            evaluation_date="2026-09-15", random_seed=1, wall_clock_seconds=90,
+        )
+        result = runtime.RunscRuntime(runtime.RuntimeConfig(
+            runsc_path=Path(os.environ.get("ARENA_TEST_RUNSC", "/usr/local/bin/runsc")), work_dir=work / "runtime",
+        )).run_icp(spec)
+        assert result.exit_code == 0 and not result.timed_out, result.stderr.decode(errors="replace")
+        assert result.output_bytes == b'{"companies":[]}'
+        assert len(transport.sent) == 2
+        assert sum(call["actual"] for call in store.calls.values()) == 24

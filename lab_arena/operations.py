@@ -62,6 +62,7 @@ FIELD_KINDS = ("str", "int", "float", "bool", "list[str]", "list[object]", "obje
 FIELD_FORMATS = ("https_url", "iso_date", "domain", "model_id")
 
 OPENROUTER_MAX_OUTPUT_TOKENS = 4096
+OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS = 32_768
 OPENROUTER_MAX_MESSAGES = 128
 OPENROUTER_MAX_CONTENT_CHARS = 32_000
 # Copied from gateway/research_lab/key_vault.py (section 3.1): the broker
@@ -92,6 +93,8 @@ OPERATION_LIMITS = contracts.StrictLimits(
 # The structural pass never applies the total-size check itself: size is the
 # per-operation cap below and reports ``request_too_large``.
 _STRUCTURE_LIMITS = dataclasses.replace(OPERATION_LIMITS, max_total_bytes=2 ** 31)
+RESPONSES_OPERATION_LIMITS = dataclasses.replace(OPERATION_LIMITS, max_depth=24)
+_RESPONSES_STRUCTURE_LIMITS = dataclasses.replace(RESPONSES_OPERATION_LIMITS, max_total_bytes=2 ** 31)
 
 ERROR_CODES = frozenset(
     {
@@ -1066,6 +1069,50 @@ _OPERATION_LIST = (
         credential=_OPENROUTER_CREDENTIAL,
         outbound_headers=OPENROUTER_OUTBOUND_HEADERS,
     ),
+    Operation(
+        operation_id="openrouter.responses",
+        provider="openrouter",
+        method="POST",
+        host="openrouter.ai",
+        path="/api/v1/responses",
+        parameter_location="body",
+        request_fields={
+            "model": FieldSpec("str", required=True, min_length=3, max_length=128, format="model_id"),
+            # Union members are checked below; only local tools and text are allowed.
+            "input": FieldSpec("any", required=True),
+            "instructions": FieldSpec("str", max_length=OPENROUTER_MAX_CONTENT_CHARS),
+            "tools": FieldSpec("any"),
+            "tool_choice": FieldSpec("str", choices=("auto", "none", "required")),
+            "parallel_tool_calls": FieldSpec("bool"),
+            "reasoning": FieldSpec("object", fields={
+                "effort": FieldSpec("str", choices=("none", "minimal", "low", "medium", "high", "xhigh", "max")),
+                "summary": FieldSpec("str", choices=("auto", "concise", "detailed")),
+                "context": FieldSpec("str", choices=("auto", "all_turns", "current_turn")),
+            }),
+            "text": FieldSpec("object", fields={
+                "verbosity": FieldSpec("str", choices=("low", "medium", "high")),
+                "format": FieldSpec("object", fields={
+                    "type": FieldSpec("str", required=True, choices=("text", "json_schema")),
+                    "name": FieldSpec("str", max_length=128),
+                    "schema": FieldSpec("object"),
+                    "strict": FieldSpec("bool"),
+                }),
+            }),
+            "include": FieldSpec("list[str]", max_length=1, item=FieldSpec("str", choices=("reasoning.encrypted_content",))),
+            "max_output_tokens": FieldSpec("int", minimum=1, maximum=OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS),
+            "prompt_cache_key": FieldSpec("str", max_length=256),
+        },
+        fixed_params={"stream": False, "store": False, "provider": dict(OPENROUTER_STRICT_PROVIDER_POLICY)},
+        defaults={"max_output_tokens": OPENROUTER_MAX_OUTPUT_TOKENS},
+        timeout_seconds=120,
+        max_request_bytes=1_000_000,
+        max_response_bytes=1_048_576,
+        cost_rule={"kind": "openrouter_price_table", "max_output_tokens": OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS},
+        response_sanitizer="json",
+        funding_source="host",
+        credential=_OPENROUTER_CREDENTIAL,
+        outbound_headers=OPENROUTER_OUTBOUND_HEADERS,
+    ),
 )
 
 OPERATIONS: Mapping[str, Operation] = MappingProxyType(
@@ -1162,6 +1209,9 @@ def operation_table_document() -> Dict[str, Any]:
             "max_string_bytes": OPERATION_LIMITS.max_string_bytes,
             "max_total_bytes": OPERATION_LIMITS.max_total_bytes,
         },
+        "operation_limit_overrides": {
+            "openrouter.responses": {"max_depth": RESPONSES_OPERATION_LIMITS.max_depth},
+        },
         "allowed_request_headers": sorted(ALLOWED_REQUEST_HEADERS),
         "credential_headers": sorted(CREDENTIAL_HEADERS),
         "forbidden_field_names": sorted(FORBIDDEN_FIELD_NAMES),
@@ -1241,7 +1291,7 @@ def _check_format(spec: FieldSpec, value: str, path: str) -> str:
     return value
 
 
-def _validate_field(spec: FieldSpec, value: Any, path: str) -> Any:
+def _validate_field(spec: FieldSpec, value: Any, path: str, *, limits: contracts.StrictLimits = _STRUCTURE_LIMITS) -> Any:
     kind = spec.kind
     if kind == "bool":
         if not isinstance(value, bool):
@@ -1277,25 +1327,25 @@ def _validate_field(spec: FieldSpec, value: Any, path: str) -> Any:
             raise OperationRequestError("invalid_field", path)
         if kind == "list[str]":
             assert spec.item is not None
-            return [_validate_field(spec.item, item, "%s[%d]" % (path, index)) for index, item in enumerate(value)]
+            return [_validate_field(spec.item, item, "%s[%d]" % (path, index), limits=limits) for index, item in enumerate(value)]
         assert spec.fields is not None
-        return [_validate_object(spec.fields, item, "%s[%d]" % (path, index)) for index, item in enumerate(value)]
+        return [_validate_object(spec.fields, item, "%s[%d]" % (path, index), limits=limits) for index, item in enumerate(value)]
     if kind == "object":
         if spec.fields is None:
-            return _validate_opaque_object(value, path)
-        return _validate_object(spec.fields, value, path)
+            return _validate_opaque_object(value, path, limits=limits)
+        return _validate_object(spec.fields, value, path, limits=limits)
     if kind == "any":
-        return _validate_opaque_object({"value": value}, path)["value"]
+        return _validate_opaque_object({"value": value}, path, limits=limits)["value"]
     raise OperationRequestError("invalid_field", path)
 
 
-def _validate_opaque_object(value: Any, path: str) -> Dict[str, Any]:
+def _validate_opaque_object(value: Any, path: str, *, limits: contracts.StrictLimits = _STRUCTURE_LIMITS) -> Dict[str, Any]:
     """A provider-owned document: bounded, JSON-plain, and free of credential-shaped names at any depth."""
 
     if not isinstance(value, Mapping):
         raise OperationRequestError("invalid_field", path)
     try:
-        contracts.check_strict_document(value, _STRUCTURE_LIMITS)
+        contracts.check_strict_document(value, limits)
     except contracts.ArenaContractError:
         raise OperationRequestError("invalid_field", path) from None
 
@@ -1328,6 +1378,7 @@ def _validate_object(
     path: str,
     *,
     forbidden: frozenset = frozenset(),
+    limits: contracts.StrictLimits = _STRUCTURE_LIMITS,
 ) -> Dict[str, Any]:
     if not isinstance(value, Mapping):
         raise OperationRequestError("invalid_field", path)
@@ -1344,7 +1395,7 @@ def _validate_object(
             if spec.required:
                 raise OperationRequestError("missing_field", "%s.%s" % (path, name))
             continue
-        out[name] = _validate_field(spec, value[name], "%s.%s" % (path, name))
+        out[name] = _validate_field(spec, value[name], "%s.%s" % (path, name), limits=limits)
     return out
 
 
@@ -1379,16 +1430,19 @@ def validate_operation_request(operation_id: str, parameters: Any) -> Dict[str, 
     if not isinstance(parameters, Mapping):
         raise OperationRequestError("invalid_request")
     try:
-        contracts.check_strict_document(parameters, _STRUCTURE_LIMITS)
+        limits = _RESPONSES_STRUCTURE_LIMITS if operation_id == "openrouter.responses" else _STRUCTURE_LIMITS
+        contracts.check_strict_document(parameters, limits)
     except contracts.ArenaContractError as exc:
         raise OperationRequestError("invalid_request") from exc
     if len(contracts.canonical_json(parameters).encode("utf-8")) > operation.max_request_bytes:
         raise OperationRequestError("request_too_large")
     parameters = _drop_superseded_fields(operation, parameters)
-    normalized = _validate_object(operation.request_fields, parameters, "$", forbidden=operation.forbidden_names)
+    normalized = _validate_object(operation.request_fields, parameters, "$", forbidden=operation.forbidden_names, limits=limits)
     for name, default in operation.defaults.items():
         if name not in normalized:
             normalized[name] = _deep_copy_json(default)
+    if operation_id == "openrouter.responses":
+        _validate_responses(normalized)
     if operation_id == "deepline.execute":
         tool = normalized.get("tool")
         payload = normalized.get("payload")
@@ -1419,6 +1473,117 @@ def validate_operation_request(operation_id: str, parameters: Any) -> Dict[str, 
     if len(encoded) > operation.max_request_bytes:
         raise OperationRequestError("request_too_large")
     return normalized
+
+
+def _validate_responses(parameters: Mapping[str, Any]) -> None:
+    """Stateless text and local tool history; no hosted tools or remote inputs."""
+
+    text = FieldSpec("str", max_length=OPENROUTER_MAX_CONTENT_CHARS)
+    identifier = FieldSpec("str", required=True, min_length=1, max_length=256)
+    status = FieldSpec("str", choices=("in_progress", "completed", "incomplete"))
+    item_fields = {
+        "message": {"role": FieldSpec("str", required=True, choices=("system", "developer", "user", "assistant")), "content": FieldSpec("any", required=True), "status": status, "phase": FieldSpec("str", choices=("commentary", "final_answer"))},
+        "function_call": {"call_id": identifier, "name": identifier, "namespace": dataclasses.replace(identifier, required=False), "arguments": dataclasses.replace(text, required=True), "status": status},
+        "function_call_output": {"call_id": identifier, "output": FieldSpec("any", required=True), "status": status},
+        "custom_tool_call": {"call_id": identifier, "name": identifier, "namespace": dataclasses.replace(identifier, required=False), "input": dataclasses.replace(text, required=True), "status": status},
+        "custom_tool_call_output": {"call_id": identifier, "output": FieldSpec("any", required=True)},
+        "additional_tools": {"role": FieldSpec("str", required=True, choices=("developer",)), "tools": FieldSpec("any", required=True)},
+        "reasoning": {"summary": FieldSpec("any"), "encrypted_content": FieldSpec("str", max_length=128_000), "content": FieldSpec("any"), "status": status},
+    }
+
+    local_tool_fields = {"type": FieldSpec("str", required=True, choices=("function", "custom")), "name": identifier, "description": text}
+
+    def validate_local_tools(tools: Any, path: str, *, namespaces_allowed: bool) -> int:
+        if not isinstance(tools, list) or len(tools) > 64:
+            raise OperationRequestError("invalid_field", path)
+        total = 0
+        for tool in tools:
+            kind = tool.get("type") if isinstance(tool, dict) else None
+            if kind == "namespace" and namespaces_allowed:
+                _validate_object({
+                    "type": FieldSpec("str", required=True, choices=("namespace",)),
+                    "name": identifier,
+                    "description": dataclasses.replace(text, required=True),
+                    "tools": FieldSpec("any", required=True),
+                }, tool, path, limits=_RESPONSES_STRUCTURE_LIMITS)
+                total += 1
+                total += validate_local_tools(tool["tools"], path + ".tools", namespaces_allowed=False)
+                continue
+            fields = dict(local_tool_fields)
+            if kind == "function":
+                fields.update(
+                    parameters=FieldSpec("object"), strict=FieldSpec("bool"),
+                    output_schema=FieldSpec("object"), async_=FieldSpec("bool"),
+                    defer_loading=FieldSpec("bool"),
+                    allowed_callers=FieldSpec("list[str]", max_length=2, item=FieldSpec("str", choices=("direct", "programmatic"))),
+                )
+                # ``async`` is a schema field, while ``async_`` is a Python identifier.
+                fields["async"] = fields.pop("async_")
+            elif kind == "custom":
+                fields["format"] = FieldSpec("object", fields={
+                    "type": FieldSpec("str", required=True, choices=("text", "grammar")),
+                    "syntax": FieldSpec("str", choices=("lark", "regex")),
+                    "definition": text,
+                })
+            else:
+                raise OperationRequestError("invalid_field", path + ".type")
+            _validate_object(fields, tool, path, limits=_RESPONSES_STRUCTURE_LIMITS)
+            total += 1
+        return total
+
+    def content_parts(value: Any, *, reasoning: bool = False) -> None:
+        if isinstance(value, str) and not reasoning:
+            _validate_field(text, value, "$.input.content")
+            return
+        if not isinstance(value, list) or len(value) > OPENROUTER_MAX_MESSAGES:
+            raise OperationRequestError("invalid_field", "$.input.content")
+        for part in value:
+            _validate_object({
+                "type": FieldSpec("str", required=True, choices=(("summary_text", "reasoning_text") if reasoning else ("input_text", "output_text"))),
+                "text": dataclasses.replace(text, required=True),
+                "annotations": FieldSpec("list[object]", max_length=0, fields={}),
+            }, part, "$.input.content")
+
+    def tool_output(value: Any) -> None:
+        if isinstance(value, str):
+            _validate_field(text, value, "$.input.output")
+        elif isinstance(value, list) and 1 <= len(value) <= OPENROUTER_MAX_MESSAGES:
+            for part in value:
+                _validate_object({
+                    "type": FieldSpec("str", required=True, choices=("input_text",)),
+                    "text": dataclasses.replace(text, required=True),
+                }, part, "$.input.output")
+        else:
+            raise OperationRequestError("invalid_field", "$.input.output")
+
+    value = parameters["input"]
+    additional_tool_count = 0
+    if isinstance(value, str):
+        _validate_field(text, value, "$.input")
+    elif isinstance(value, list) and 1 <= len(value) <= OPENROUTER_MAX_MESSAGES:
+        for item in value:
+            kind = item.get("type", "message") if isinstance(item, dict) else None
+            if kind not in item_fields:
+                raise OperationRequestError("invalid_field", "$.input.type")
+            _validate_object(dict(item_fields[kind], type=FieldSpec("str", choices=(kind,)), id=dataclasses.replace(identifier, required=False)), item, "$.input", limits=_RESPONSES_STRUCTURE_LIMITS)
+            if kind == "message":
+                content_parts(item["content"])
+                if "phase" in item and item["role"] != "assistant":
+                    raise OperationRequestError("invalid_field", "$.input.phase")
+            elif kind == "additional_tools":
+                additional_tool_count += validate_local_tools(item["tools"], "$.input.tools", namespaces_allowed=True)
+                if additional_tool_count > 64:
+                    raise OperationRequestError("invalid_field", "$.input.tools")
+            elif kind in ("function_call_output", "custom_tool_call_output"):
+                tool_output(item["output"])
+            elif kind == "reasoning":
+                for name in ("summary", "content"):
+                    if item.get(name) is not None:
+                        content_parts(item[name], reasoning=True)
+    else:
+        raise OperationRequestError("invalid_field", "$.input")
+    if additional_tool_count + validate_local_tools(parameters.get("tools", []), "$.tools", namespaces_allowed=True) > 64:
+        raise OperationRequestError("invalid_field", "$.tools")
 
 
 # ---------------------------------------------------------------------------
@@ -1773,10 +1938,12 @@ __all__ = [
     "FORBIDDEN_FIELD_NAMES",
     "FieldSpec",
     "OPENROUTER_MAX_OUTPUT_TOKENS",
+    "OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS",
     "OPENROUTER_STRICT_PROVIDER_POLICY",
     "OPENROUTER_OUTBOUND_HEADERS",
     "OPERATIONS",
     "OPERATION_LIMITS",
+    "RESPONSES_OPERATION_LIMITS",
     "DEEPLINE_TOOLS",
     "DEEPLINE_TOOL_PROVIDERS",
     "DEEPLINE_EXECUTE_HEADERS",

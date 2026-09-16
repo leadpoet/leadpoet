@@ -116,7 +116,10 @@ def round_config(
         "rewards_enabled": rewards_enabled,
         "schedule": {
             "submission_open": "2000-01-01T00:00:00Z",
-            "submission_cutoff": "2100-01-01T00:00:00Z",
+            # Admit fixture submissions while the replacement freeze has begun.
+            "submission_cutoff": (
+                datetime.now(timezone.utc) + timedelta(minutes=30)
+            ).isoformat().replace("+00:00", "Z"),
         },
         "runner_hotkeys": runners,
         "call_quotas": dict(quotas or contracts.CALL_QUOTAS_PER_ICP),
@@ -190,6 +193,7 @@ def pass_code_review(store: ArenaStore, submission_id: str, miner: str) -> None:
             "reviewed_file_bytes": 4096,
             "file_count": 1,
             "source_bytes": 4096,
+            "categories": [],
             "findings": [],
         },
         750,

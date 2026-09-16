@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -180,6 +181,17 @@ def _prepare_terminal_recovery272(connection, objects=None):
     migration272 = _render_prior_recovery272(connection, schedule272)
     _install_prior_recovery272(connection, migration272, schedule272)
     _fail_recovery269_and_cancel(connection)
+    # Production recovery272 was cancelled by the canonical operator RPC.
+    # This fixture creates the same terminal 40-run shape directly, so bind
+    # its cancellation reason to that sealed production contract.
+    with connection.cursor() as cursor:
+        cursor.execute("ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER USER")
+        cursor.execute(
+            "UPDATE public.lab_arena_rounds SET status='cancelled',cancel_reason='operator' "
+            "WHERE round_id=%s", (ROUND,),
+        )
+        cursor.execute("ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER USER")
+    connection.commit()
     return schedule272, hotkeys, ids
 
 
@@ -207,6 +219,8 @@ def _render_recovery273(connection, new_schedule):
             (ROUND, BASELINE),
         )
         run_count = cursor.fetchone()[0]
+    if seal["baseline_ledger"] is None:
+        seal["baseline_ledger"] = "sha256:" + hashlib.sha256(b"").hexdigest()
     values = {
         "__SEALED_RECOVERY_SOURCE_SIZE_BYTES__": str(RECOVERY_SOURCE_SIZE),
         "__SEALED_RECOVERY_SOURCE_SHA256__": RECOVERY_SOURCE_SHA,
@@ -249,6 +263,7 @@ def _render_recovery273(connection, new_schedule):
     rendered = TEMPLATE.read_text(encoding="utf-8")
     for marker, value in values.items():
         assert rendered.count(marker) >= 1
+        assert isinstance(value, str), marker
         rendered = rendered.replace(marker, value)
     assert "__SEALED_" not in rendered
     assert TERMINAL_SOURCE_REF in rendered

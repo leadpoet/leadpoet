@@ -306,6 +306,50 @@ def round_summary(row: Mapping[str, Any]) -> dict:
     }
 
 
+def _is_administrative_archive(row: Mapping[str, Any]) -> bool:
+    """Identify immutable evidence copies that are not competition rounds."""
+    reason = row.get("cancel_reason")
+    return bool(
+        row.get("status") == "cancelled"
+        and isinstance(reason, str)
+        and reason.startswith("authorized_")
+        and reason.endswith("_archive")
+    )
+
+
+def _recent_competition_rounds(
+    service: Any, *, network_name: str, netuid: int, limit: int
+) -> list[Mapping[str, Any]]:
+    rows: list[Mapping[str, Any]] = []
+    seen_round_ids: set[str] = set()
+    offset = 0
+    while len(rows) < limit:
+        page = service._store.list_rounds(
+            mode=service._config.mode,
+            network_name=network_name,
+            netuid=netuid,
+            limit=limit,
+            offset=offset,
+            columns=_ROUND_COLUMNS,
+        )
+        if not page:
+            break
+        unseen = []
+        for row in page:
+            round_id = str(row.get("round_id") or "")
+            if round_id in seen_round_ids:
+                continue
+            seen_round_ids.add(round_id)
+            unseen.append(row)
+        if not unseen:
+            break
+        rows.extend(row for row in unseen if not _is_administrative_archive(row))
+        offset += len(page)
+        if len(page) < limit:
+            break
+    return rows[:limit]
+
+
 def competition_snapshot(service: Any, *, limit: int = DEFAULT_RECENT_ROUND_LIMIT) -> dict:
     bounded_limit = max(1, min(int(limit), MAX_RECENT_ROUND_LIMIT))
     network_name, netuid = service._chain_scope()
@@ -313,12 +357,11 @@ def competition_snapshot(service: Any, *, limit: int = DEFAULT_RECENT_ROUND_LIMI
     if pinned_round_id is not None:
         rows = [service._round(str(pinned_round_id))]
     else:
-        rows = service._store.list_rounds(
-            mode=service._config.mode,
+        rows = _recent_competition_rounds(
+            service,
             network_name=network_name,
             netuid=netuid,
             limit=bounded_limit,
-            columns=_ROUND_COLUMNS,
         )
     summaries = [round_summary(row) for row in rows]
     open_round = next((row for row in summaries if row["status"] == "open"), None)

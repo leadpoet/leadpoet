@@ -241,6 +241,159 @@ def test_competition_snapshot_fetches_the_latest_published_outside_recent_window
     assert store.queries[1]["netuid"] == 71
 
 
+def test_competition_snapshot_pages_past_server_authored_archives_with_scope():
+    # These exact reasons are authored by SQL256/265 and SQL269 respectively.
+    prior_archive = {
+        "round_id": "arena-2026-09-15-archive",
+        "status": "cancelled",
+        "created_at": "2026-09-16T02:00:00Z",
+        "cancel_reason": "authorized_sep15_baseline_evidence_archive",
+        "configuration_doc": _configuration(mode="shadow"),
+        "participants": [],
+    }
+    recovery_archive = {
+        "round_id": "arena-2026-09-16-rerun265archive",
+        "status": "cancelled",
+        "created_at": "2026-09-16T03:00:00Z",
+        "cancel_reason": "authorized_sep16_failed_native_rerun_archive",
+        "configuration_doc": _configuration(),
+        "participants": [],
+    }
+    running = {
+        "round_id": "arena-2026-09-16",
+        "status": "stage1",
+        "created_at": "2026-09-15T00:00:00Z",
+        "configuration_doc": _configuration(),
+        "participants": [],
+    }
+    published = _published_round()
+
+    class Store:
+        def __init__(self):
+            self.queries = []
+
+        def list_rounds(self, **kwargs):
+            self.queries.append(kwargs)
+            assert kwargs["mode"] == "live"
+            assert kwargs["network_name"] == "finney"
+            assert kwargs["netuid"] == 71
+            assert "source_ref" not in kwargs["columns"]
+            pages = {
+                0: [recovery_archive, prior_archive],
+                2: [running, published],
+            }
+            return pages.get(kwargs.get("offset", 0), [])
+
+    store = Store()
+    service = SimpleNamespace(
+        _config=SimpleNamespace(mode="live"),
+        _store=store,
+        _chain_scope=lambda: ("finney", 71),
+    )
+
+    result = public_dashboard.competition_snapshot(service, limit=2)
+
+    assert [query["offset"] for query in store.queries] == [0, 2]
+    assert [row["round_id"] for row in result["rounds"]] == [
+        running["round_id"],
+        published["round_id"],
+    ]
+    assert result["latest_round"]["round_id"] == running["round_id"]
+    assert result["latest_completed_round"]["round_id"] == published["round_id"]
+
+
+def test_competition_snapshot_keeps_a_real_cancelled_round():
+    cancelled = {
+        "round_id": "arena-2026-09-17",
+        "status": "cancelled",
+        "created_at": "2026-09-17T00:00:00Z",
+        "cancel_reason": "capacity:stage1:20",
+        "configuration_doc": _configuration(),
+        "participants": [],
+    }
+    published = _published_round()
+
+    class Store:
+        @staticmethod
+        def list_rounds(**_kwargs):
+            return [cancelled, published]
+
+    service = SimpleNamespace(
+        _config=SimpleNamespace(mode="live"),
+        _store=Store(),
+        _chain_scope=lambda: ("finney", 71),
+    )
+
+    result = public_dashboard.competition_snapshot(service, limit=2)
+
+    assert result["latest_round"]["round_id"] == cancelled["round_id"]
+    assert [row["round_id"] for row in result["rounds"]] == [
+        cancelled["round_id"],
+        published["round_id"],
+    ]
+
+
+def test_competition_snapshot_honors_an_explicitly_pinned_archive():
+    archive = {
+        "round_id": "arena-2026-09-16-rerun265archive",
+        "status": "cancelled",
+        "created_at": "2026-09-16T03:00:00Z",
+        "cancel_reason": "authorized_sep16_failed_native_rerun_archive",
+        "configuration_doc": _configuration(),
+        "participants": [],
+    }
+
+    class Store:
+        @staticmethod
+        def list_rounds(**_kwargs):
+            raise AssertionError("pinned public reads must not enumerate rounds")
+
+    service = SimpleNamespace(
+        _config=SimpleNamespace(
+            mode="live", pinned_round_id=archive["round_id"]
+        ),
+        _store=Store(),
+        _chain_scope=lambda: ("finney", 71),
+        _round=lambda round_id: archive if round_id == archive["round_id"] else None,
+    )
+
+    result = public_dashboard.competition_snapshot(service)
+
+    assert result["latest_round"]["round_id"] == archive["round_id"]
+    assert result["rounds"] == [public_dashboard.round_summary(archive)]
+
+
+def test_competition_snapshot_stops_on_a_repeated_archive_page():
+    archive = {
+        "round_id": "arena-archive",
+        "status": "cancelled",
+        "cancel_reason": "authorized_test_evidence_archive",
+        "configuration_doc": _configuration(),
+        "participants": [],
+    }
+
+    class Store:
+        def __init__(self):
+            self.calls = 0
+
+        def list_rounds(self, **kwargs):
+            self.calls += 1
+            return [] if kwargs.get("status") == "published" else [archive]
+
+    store = Store()
+    service = SimpleNamespace(
+        _config=SimpleNamespace(mode="live"),
+        _store=store,
+        _chain_scope=lambda: ("finney", 71),
+    )
+
+    result = public_dashboard.competition_snapshot(service, limit=1)
+
+    assert result["rounds"] == []
+    assert result["latest_round"] is None
+    assert store.calls == 3
+
+
 def test_open_submissions_disclose_only_accepted_intake_as_queued():
     round_row = {
         "round_id": "arena-2026-09-11",

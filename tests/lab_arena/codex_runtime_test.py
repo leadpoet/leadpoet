@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import httpx
@@ -260,7 +263,9 @@ def test_session_isolates_login_and_provider_keys(monkeypatch, scrapingdog_value
         assert env["CODEX_HOME"] != "/personal/config"
         home = Path(env["CODEX_HOME"])
         assert not (home / "auth.json").exists()
-        assert 'request_max_retries = 0' in (home / "config.toml").read_text()
+        config = (home / "config.toml").read_text()
+        assert 'request_max_retries = 1' in config
+        assert 'stream_max_retries = 0' in config
     assert not home.exists()
 
 
@@ -310,6 +315,8 @@ def test_codex_timeout_layers_cover_the_derived_provider_window(monkeypatch):
     assert runner.MAX_PROVIDER_API_TIMEOUT_SECONDS == 365
     assert codex.SOCKET_TIMEOUT_SECONDS == 380
 
+    assert "request_max_retries = 1" in config
+    assert "stream_max_retries = 0" in config
     assert "stream_idle_timeout_ms = 400000" in config
     assert 400 > codex.SOCKET_TIMEOUT_SECONDS > runner.MAX_PROVIDER_API_TIMEOUT_SECONDS
 
@@ -356,6 +363,203 @@ def test_real_codex_tool_call_and_continuation(monkeypatch, tmp_path):
         assert (tmp_path / "codex-tool-proof.txt").read_text() == codex.CODEX_VERSION
         assert len(transport.sent) == 2
         assert sum(call["actual"] for call in store.calls.values()) == 24
+
+
+def _pin_real_codex(monkeypatch):
+    binary = os.environ["ARENA_TEST_CODEX_BINARY"]
+    assert subprocess.check_output([binary, "--version"], text=True).strip() == "codex-cli 0.154.0"
+    monkeypatch.setattr(codex, "CODEX_BINARY", binary)
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", "/unused-worker.sock")
+    monkeypatch.setenv("LAB_ARENA_WEB_EGRESS_SOCKET", "/unused-egress.sock")
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        monkeypatch.setenv(name, "http://127.0.0.1:9")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+
+
+@pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="set ARENA_TEST_CODEX_BINARY to the complete Codex 0.154.0 package")
+@pytest.mark.parametrize(
+    "statuses,succeeds,expected_posts",
+    [
+        ((200,), True, 1),
+        ((400,), False, 1),
+        ((429,), False, 1),
+        ((502, 200), True, 2),
+        ((502, 502, 200), False, 2),
+    ],
+    ids=("success", "client-error", "rate-limit", "server-error-recovery", "server-error-cap"),
+)
+def test_pinned_codex_request_retry_is_one_and_only_for_5xx(
+    monkeypatch, tmp_path, statuses, succeeds, expected_posts
+):
+    _pin_real_codex(monkeypatch)
+    remaining = list(statuses)
+    posts = []
+
+    def dispatch(_socket_path, document):
+        posts.append(document)
+        status = remaining.pop(0)
+        payload = (
+            response()
+            if status == 200
+            else {"error": {"code": "fixture_error", "message": "bounded fixture failure"}}
+        )
+        return status, json.dumps(payload, separators=(",", ":")).encode()
+
+    monkeypatch.setattr(codex, "_dispatch", dispatch)
+    if succeeds:
+        assert "ARENA_CODEX_OK" in codex.run(
+            "Reply exactly ARENA_CODEX_OK.",
+            model="openai/gpt-4o-mini",
+            cwd=tmp_path,
+            timeout_seconds=30,
+        )
+    else:
+        with pytest.raises(codex.CodexRuntimeError):
+            codex.run(
+                "Reply exactly ARENA_CODEX_OK.",
+                model="openai/gpt-4o-mini",
+                cwd=tmp_path,
+                timeout_seconds=30,
+            )
+    assert len(posts) == expected_posts
+    assert len(statuses) - len(remaining) == expected_posts
+
+
+@pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="set ARENA_TEST_CODEX_BINARY to the complete Codex 0.154.0 package")
+def test_pinned_codex_retries_one_dropped_http_connection(monkeypatch, tmp_path):
+    _pin_real_codex(monkeypatch)
+
+    class DropOnceBridge:
+        def __init__(self):
+            owner = self
+            self.posts = 0
+            self.token = "drop-once-token"
+
+            class Handler(BaseHTTPRequestHandler):
+                def log_message(self, *_args):
+                    return
+
+                def do_POST(self):
+                    size = int(self.headers.get("Content-Length", "0"))
+                    self.rfile.read(size)
+                    owner.posts += 1
+                    if owner.posts == 1:
+                        try:
+                            self.connection.shutdown(socket.SHUT_RDWR)
+                        except OSError:
+                            pass
+                        self.connection.close()
+                        self.close_connection = True
+                        return
+                    payload = b"".join(codex.response_events(response()))
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(payload)
+
+            self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+            self.base_url = "http://127.0.0.1:%d/v1" % self.server.server_address[1]
+
+        def __enter__(self):
+            self.thread.start()
+            return self
+
+        def __exit__(self, *_args):
+            self.server.shutdown()
+            self.server.server_close()
+            self.thread.join(timeout=5)
+
+    bridge = DropOnceBridge()
+    monkeypatch.setattr(codex, "ResponsesBridge", lambda *_args, **_kwargs: bridge)
+    assert "ARENA_CODEX_OK" in codex.run(
+        "Reply exactly ARENA_CODEX_OK.",
+        model="openai/gpt-4o-mini",
+        cwd=tmp_path,
+        timeout_seconds=30,
+    )
+    assert bridge.posts == 2
+
+
+@pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="set ARENA_TEST_CODEX_BINARY to the complete Codex 0.154.0 package")
+def test_pinned_codex_retry_uses_distinct_accounted_calls(monkeypatch, tmp_path):
+    _pin_real_codex(monkeypatch)
+    unknown = {
+        "error": {"code": "server_error", "message": "bounded fixture failure"}
+    }
+    transport = FakeTransport([(520, unknown), (200, response(id="gen-retry-success"))])
+
+    with broker_socket(monkeypatch, transport) as (store, transport, _path):
+        assert "ARENA_CODEX_OK" in codex.run(
+            "Reply exactly ARENA_CODEX_OK.",
+            model="openai/gpt-4o-mini",
+            cwd=tmp_path,
+            timeout_seconds=30,
+        )
+
+    assert len(transport.sent) == 2
+    assert len(store.calls) == 2
+    calls = sorted(store.calls.values(), key=lambda call: call["call_doc"]["action_sequence"])
+    assert [call["call_doc"]["action_sequence"] for call in calls] == [0, 1]
+    assert calls[0]["kind"] == "uncertain"
+    assert calls[0]["uncertain_doc"]["reason"] == "missing_provider_cost"
+    assert calls[0]["uncertain_doc"]["call_succeeded"] is False
+    assert calls[0]["amount"] > 0
+    assert calls[1]["kind"] == "settlement"
+    assert calls[1]["terminal"]["call_succeeded"] is True
+    assert calls[1]["actual"] == 12
+    assert calls[0]["identity"] != calls[1]["identity"]
+
+
+@pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="set ARENA_TEST_CODEX_BINARY to the complete Codex 0.154.0 package")
+@pytest.mark.parametrize(
+    "limit,expected_reason",
+    (("cost", "provider_cost_cap"), ("quota", "per_icp_quota")),
+)
+def test_pinned_codex_retry_cannot_bypass_cost_or_call_quota(
+    monkeypatch, tmp_path, limit, expected_reason
+):
+    _pin_real_codex(monkeypatch)
+
+    class OneCallStore(FakeLedgerStore):
+        def __init__(self):
+            super().__init__()
+            self.action_sequences = []
+
+        def reserve_call(self, **kwargs):
+            self.action_sequences.append(kwargs["call_doc"]["action_sequence"])
+            if not self.calls:
+                if limit == "cost":
+                    self.openrouter_capacity = kwargs["amount_microusd"]
+                else:
+                    self.per_icp_quota = 1
+            return super().reserve_call(**kwargs)
+
+    unknown = {
+        "error": {"code": "server_error", "message": "bounded fixture failure"}
+    }
+    store = OneCallStore()
+    transport = FakeTransport([(520, unknown), (200, response(id="must-not-dispatch"))])
+
+    with broker_socket(monkeypatch, transport, store=store):
+        with pytest.raises(codex.CodexRuntimeError):
+            codex.run(
+                "Reply exactly ARENA_CODEX_OK.",
+                model="openai/gpt-4o-mini",
+                cwd=tmp_path,
+                timeout_seconds=30,
+            )
+
+    assert len(transport.sent) == 1
+    assert len(store.calls) == 2
+    assert store.action_sequences == [0, 1]
+    calls = list(store.calls.values())
+    assert calls[0]["kind"] == "uncertain" and calls[0]["amount"] > 0
+    assert calls[1]["kind"] == "refusal"
+    assert calls[1]["reason"] == expected_reason
 
 
 @pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="set ARENA_TEST_CODEX_BINARY to the complete Codex 0.154.0 package")

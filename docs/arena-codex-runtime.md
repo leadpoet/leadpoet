@@ -96,14 +96,18 @@ Hosted tools, remote images/files, server-side conversation IDs, background
 work and caller-selected routing are rejected. Research-provider calls still
 use the harness's Arena broker adapter. Codex's built-in hosted web search is
 disabled.
-Codex transport retries are disabled; the existing broker owns cost recovery.
-The runner may retry a Responses request at most twice only after the broker
-proves the preceding attempt settled at zero cost with provider status 429.
-Each retry uses a new normal action sequence, consumes the existing call quota,
-honors a valid bounded `Retry-After`, and stays inside the worker request
-deadline. Uncertain, billed, idempotent, malformed and other failures are never
-retried. Stopping the worker cancels a pending backoff. Incomplete model
-responses retain actual billing and do not become successful sourcing calls.
+Codex may retry each Responses HTTP request once after a transport failure or
+HTTP 5xx response. Streaming retries remain disabled. The retry re-enters the
+Arena bridge with a new normal action sequence and therefore passes the same
+call quota, cost reservation, shared gate and signed run deadline as every other
+request. Any uncertain or billed first request remains in its own ledger entry.
+Separately, the runner may retry a Responses request at most twice only after
+the broker proves the preceding attempt settled at zero cost with provider
+status 429. Each runner retry also uses a new normal action sequence, consumes
+the existing call quota, honors a valid bounded `Retry-After`, and stays inside
+the worker request deadline. Stopping the worker cancels a pending backoff.
+Incomplete model responses retain actual billing and do not become successful
+sourcing calls.
 
 The gateway shares a conservative Responses reliability gate across rounds by
 OpenRouter credential. It admits two concurrent requests per credential by

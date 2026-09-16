@@ -298,7 +298,7 @@ def session(*, model: str, reasoning_effort: str = "medium", max_output_tokens: 
             'wire_api = "responses"',
             'requires_openai_auth = false',
             'supports_websockets = false',
-            'request_max_retries = 0',
+            'request_max_retries = 1',
             'stream_max_retries = 0',
             'stream_idle_timeout_ms = 400000',
             '',

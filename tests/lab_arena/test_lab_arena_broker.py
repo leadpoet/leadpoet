@@ -3457,6 +3457,33 @@ def test_real_deepline_hunter_discover_without_billing_settles_verified_zero():
     assert len(transport.sent) == 1
 
 
+def test_real_deepline_generic_http_without_billing_settles_verified_zero():
+    envelope = {
+        "job_id": "iad1::generic-http",
+        "result": {"status": 200, "body": "example"},
+        "status": "completed",
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, json.dumps(envelope).encode("utf-8"))])
+    )
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={
+            "tool": "generic_http_request",
+            "payload": {"url": "https://example.com/", "method": "GET"},
+        },
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+    assert result.status == 200 and json.loads(result.body) == envelope
+    assert result.call["outcome"] == "settled"
+    assert result.call["reserved_microusd"] == result.call["actual_microusd"] == 0
+    assert result.call["cost_basis"] == "deepline_generic_http_request_completed_zero"
+    assert store.log == ["reserve", "dispatch", "settle"]
+    assert len(transport.sent) == 1
+
+
 def test_real_deepline_free_company_search_keeps_reported_billing():
     envelope = {
         "job_id": "iad1::free-company-search",

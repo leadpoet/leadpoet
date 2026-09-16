@@ -36,9 +36,12 @@ _DEEPLINE_CREDIT_FIELDS = (
 _DEEPLINE_MAX_REQUEST_ID_LENGTH = 512
 _DEEPLINE_BILLING_LEDGER_MAX_ENTRIES = 5_000
 _DEEPLINE_BILLING_CURSOR_MAX_LENGTH = 4_096
-# Deepline's live tool descriptions reported billingMode=no_bill on 2026-09-10.
+# Deepline's authenticated live catalog reported generic_http_request as Free,
+# per call, at zero credits and zero USD on 2026-09-16.  Earlier descriptions
+# reported billingMode=no_bill for the other entries below.
 _DEEPLINE_COMPLETED_NO_BILL_BASIS = {
     "free_simple_company_search": "deepline_free_simple_company_search_completed_zero",
+    "generic_http_request": "deepline_generic_http_request_completed_zero",
     "hunter_discover": "deepline_hunter_discover_completed_zero",
 }
 # The authenticated live contract for hunter_discover was checked on

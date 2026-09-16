@@ -226,15 +226,17 @@ def test_unresolved_dynamic_firecrawl_cost_retains_full_reservation():
 
 
 class ReconciliationStore:
-    def __init__(self):
+    def __init__(self, *, actual_microusd=3_000, cost_units="0.03"):
         self.calls = []
+        self.actual_microusd = actual_microusd
+        self.cost_units = cost_units
 
     def reconcile_deepline_cost(self, **kwargs):
         self.calls.append(kwargs)
         # The authenticated provider amount may exceed the reservation. The
         # broker must pass the exact amount to the append-only database RPC.
-        assert kwargs["actual_microusd"] == 3_000
-        assert kwargs["cost_units"] == "0.03"
+        assert kwargs["actual_microusd"] == self.actual_microusd
+        assert kwargs["cost_units"] == self.cost_units
         return {
             "status": "settled",
             "idempotent": False,
@@ -245,8 +247,9 @@ class ReconciliationStore:
 
 
 class LedgerTransport:
-    def __init__(self):
+    def __init__(self, entry=None):
         self.sent = []
+        self.entry = entry or _ledger_entry()
 
     def send(self, **kwargs):
         self.sent.append(kwargs)
@@ -265,7 +268,7 @@ class LedgerTransport:
             200,
             {"content-type": "application/json"},
             json.dumps(
-                {"entries": [_ledger_entry()], "has_more": False}
+                {"entries": [self.entry], "has_more": False}
             ).encode("utf-8"),
         )
 
@@ -313,6 +316,53 @@ def test_delayed_exact_ledger_get_settles_above_reservation_without_paid_post():
             "cost_units": "0.03",
         }
     ]
+
+
+def test_delayed_generic_http_settles_only_from_exact_free_ledger_row():
+    entry = _ledger_entry(credits=0)
+    entry.update(
+        delta=0,
+        reason="no_bill",
+        provider="generic_http",
+        operation="generic_http_request",
+        billing_stage="free",
+        charge_state="free",
+        billing_mode="no_bill",
+        pricing_model="fixed",
+        pricing_basis="call",
+        charge_credits=0,
+    )
+    entry["metadata"].update(
+        operation="generic_http_request",
+        provider="generic_http",
+        billingStage="free",
+        billingMode="no_bill",
+        pricingModel="fixed",
+        postedCredits=0,
+    )
+    entry["billing_audit"].update(
+        operation="generic_http_request",
+        provider="generic_http",
+        billing_stage="free",
+        charge_state="free",
+        billing_mode="no_bill",
+        pricing_model="fixed",
+        pricing_basis="call",
+        charge_credits=0,
+    )
+    store = ReconciliationStore(actual_microusd=0, cost_units="0")
+    transport = LedgerTransport(entry)
+    broker = _broker(store, transport)
+
+    result = broker.reconcile_deepline_cost(
+        _candidate(operation="generic_http_request")
+    )
+
+    assert result["status"] == "settled"
+    assert [request["method"] for request in transport.sent] == ["GET"]
+    assert store.calls[0]["operation"] == "generic_http_request"
+    assert store.calls[0]["actual_microusd"] == 0
+    assert store.calls[0]["cost_units"] == "0"
 
 
 @pytest.mark.parametrize(

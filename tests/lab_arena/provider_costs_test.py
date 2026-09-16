@@ -450,6 +450,10 @@ def test_deepline_history_direct_singleton_group_counts_once():
             "free_simple_company_search",
             "deepline_free_simple_company_search_completed_zero",
         ),
+        (
+            "generic_http_request",
+            "deepline_generic_http_request_completed_zero",
+        ),
         ("hunter_discover", "deepline_hunter_discover_completed_zero"),
     ],
 )
@@ -478,6 +482,7 @@ def test_deepline_hunter_no_bill_structured_error_settles_zero_without_job_id():
     ("tool", "response"),
     [
         ("exa_search", {"error": {"code": "upstream_error"}}),
+        ("generic_http_request", {"error": {"code": "upstream_error"}}),
         ("hunter_discover", {"error": {"code": "upstream_error"}, "billing": None}),
         (
             "hunter_discover",
@@ -511,6 +516,23 @@ def test_deepline_hunter_zero_proof_fails_closed(response_status, response):
     assert (
         deepline_free_completed_cost(
             {"tool": "hunter_discover"}, response_status, response
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("billing", [None, {"credits_charged": "invalid"}])
+def test_deepline_generic_http_completed_zero_rejects_present_billing(billing):
+    assert (
+        deepline_free_completed_cost(
+            {"tool": "generic_http_request"},
+            200,
+            {
+                "job_id": "wrapper-job",
+                "status": "completed",
+                "result": {},
+                "billing": billing,
+            },
         )
         is None
     )

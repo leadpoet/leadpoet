@@ -81,8 +81,11 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_sep16_baseline_recovery_authority (
   terminal_baseline_ledger_max_entry_id BIGINT NOT NULL CHECK (
     terminal_baseline_ledger_max_entry_id = __SEALED_TERMINAL_BASELINE_LEDGER_MAX_ENTRY_ID__
   ),
-  terminal_baseline_actual_microusd BIGINT NOT NULL CHECK (
-    terminal_baseline_actual_microusd = __SEALED_TERMINAL_BASELINE_ACTUAL_MICROUSD__
+  terminal_baseline_settled_microusd BIGINT NOT NULL CHECK (
+    terminal_baseline_settled_microusd = __SEALED_TERMINAL_BASELINE_SETTLED_MICROUSD__
+  ),
+  terminal_baseline_uncertain_microusd BIGINT NOT NULL CHECK (
+    terminal_baseline_uncertain_microusd = __SEALED_TERMINAL_BASELINE_UNCERTAIN_MICROUSD__
   ),
   challenger_runs_hash TEXT NOT NULL CHECK (
     challenger_runs_hash = '__SEALED_CHALLENGER_RUNS_HASH__'
@@ -138,7 +141,8 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_sep16_baseline_recovery_audit (
   terminal_baseline_run_count BIGINT NOT NULL,
   terminal_baseline_ledger_count BIGINT NOT NULL,
   terminal_baseline_ledger_max_entry_id BIGINT NOT NULL,
-  terminal_baseline_actual_microusd BIGINT NOT NULL,
+  terminal_baseline_settled_microusd BIGINT NOT NULL,
+  terminal_baseline_uncertain_microusd BIGINT NOT NULL,
   challenger_runs_hash TEXT NOT NULL,
   challenger_submissions_hash TEXT NOT NULL,
   challenger_ledger_hash TEXT NOT NULL,
@@ -164,7 +168,8 @@ INSERT INTO public.lab_arena_sep16_baseline_recovery_authority (
   terminal_baseline_submission_hash, terminal_baseline_runs_hash,
   terminal_baseline_ledger_hash, terminal_baseline_run_count,
   terminal_baseline_ledger_count, terminal_baseline_ledger_max_entry_id,
-  terminal_baseline_actual_microusd, challenger_runs_hash,
+  terminal_baseline_settled_microusd, terminal_baseline_uncertain_microusd,
+  challenger_runs_hash,
   challenger_submissions_hash, challenger_ledger_hash,
   challenger_ledger_max_entry_id, prior_rerun_audit_hash,
   release_authority_hash, terminal_status_generation,
@@ -185,7 +190,8 @@ INSERT INTO public.lab_arena_sep16_baseline_recovery_authority (
   __SEALED_TERMINAL_BASELINE_RUN_COUNT__,
   __SEALED_TERMINAL_BASELINE_LEDGER_COUNT__,
   __SEALED_TERMINAL_BASELINE_LEDGER_MAX_ENTRY_ID__,
-  __SEALED_TERMINAL_BASELINE_ACTUAL_MICROUSD__,
+  __SEALED_TERMINAL_BASELINE_SETTLED_MICROUSD__,
+  __SEALED_TERMINAL_BASELINE_UNCERTAIN_MICROUSD__,
   '__SEALED_CHALLENGER_RUNS_HASH__',
   '__SEALED_CHALLENGER_SUBMISSIONS_HASH__',
   '__SEALED_CHALLENGER_LEDGER_HASH__',
@@ -216,7 +222,8 @@ DECLARE
   v_count BIGINT;
   v_ledger_count BIGINT;
   v_ledger_max BIGINT;
-  v_actual BIGINT;
+  v_settled BIGINT;
+  v_uncertain BIGINT;
   v_challenger_ledger_max BIGINT;
 BEGIN
   SELECT * INTO STRICT v_authority
@@ -250,8 +257,10 @@ BEGIN
       'sha256'), 'hex'), '' ORDER BY entry_id), ''), 'sha256'), 'hex'),
     pg_catalog.count(*), COALESCE(pg_catalog.max(entry_id), 0),
     COALESCE(pg_catalog.sum(amount_microusd)
-      FILTER (WHERE entry_kind IN ('settlement', 'uncertain')), 0)
-  INTO v_ledger_hash, v_ledger_count, v_ledger_max, v_actual
+      FILTER (WHERE entry_kind = 'settlement'), 0),
+    COALESCE(pg_catalog.sum(amount_microusd)
+      FILTER (WHERE entry_kind = 'uncertain'), 0)
+  INTO v_ledger_hash, v_ledger_count, v_ledger_max, v_settled, v_uncertain
   FROM public.lab_arena_ledger AS row_value
   WHERE round_id = v_authority.round_id
     AND submission_id = 'baseline-2026-09-16';
@@ -299,7 +308,10 @@ BEGIN
           v_authority.terminal_baseline_ledger_count
      OR v_ledger_max IS DISTINCT FROM
           v_authority.terminal_baseline_ledger_max_entry_id
-     OR v_actual IS DISTINCT FROM v_authority.terminal_baseline_actual_microusd
+     OR v_settled IS DISTINCT FROM
+          v_authority.terminal_baseline_settled_microusd
+     OR v_uncertain IS DISTINCT FROM
+          v_authority.terminal_baseline_uncertain_microusd
      OR v_challenger_runs_hash IS DISTINCT FROM v_authority.challenger_runs_hash
      OR v_challenger_submissions_hash IS DISTINCT FROM
           v_authority.challenger_submissions_hash
@@ -496,7 +508,8 @@ DECLARE
   v_release_hash TEXT;
   v_ledger_count BIGINT;
   v_ledger_max BIGINT;
-  v_actual BIGINT;
+  v_settled BIGINT;
+  v_uncertain BIGINT;
   v_challenger_ledger_max BIGINT;
 BEGIN
   PERFORM pg_catalog.set_config('lock_timeout', '5s', TRUE);
@@ -571,8 +584,10 @@ BEGIN
       'sha256'), 'hex'), '' ORDER BY entry_id), ''), 'sha256'), 'hex'),
     pg_catalog.count(*), COALESCE(pg_catalog.max(entry_id), 0),
     COALESCE(pg_catalog.sum(amount_microusd)
-      FILTER (WHERE entry_kind IN ('settlement', 'uncertain')), 0)
-  INTO v_ledger_hash, v_ledger_count, v_ledger_max, v_actual
+      FILTER (WHERE entry_kind = 'settlement'), 0),
+    COALESCE(pg_catalog.sum(amount_microusd)
+      FILTER (WHERE entry_kind = 'uncertain'), 0)
+  INTO v_ledger_hash, v_ledger_count, v_ledger_max, v_settled, v_uncertain
   FROM public.lab_arena_ledger AS row_value
   WHERE round_id = v_round_id AND submission_id = v_baseline_id;
   SELECT 'sha256:' || pg_catalog.encode(extensions.digest(
@@ -619,7 +634,8 @@ BEGIN
      OR v_count <> v_authority.terminal_baseline_run_count
      OR v_ledger_count <> v_authority.terminal_baseline_ledger_count
      OR v_ledger_max <> v_authority.terminal_baseline_ledger_max_entry_id
-     OR v_actual <> v_authority.terminal_baseline_actual_microusd
+     OR v_settled <> v_authority.terminal_baseline_settled_microusd
+     OR v_uncertain <> v_authority.terminal_baseline_uncertain_microusd
      OR v_challenger_runs_hash <> v_authority.challenger_runs_hash
      OR v_challenger_submissions_hash <> v_authority.challenger_submissions_hash
      OR v_challenger_ledger_hash <> v_authority.challenger_ledger_hash
@@ -648,7 +664,9 @@ BEGIN
     terminal_round_doc, terminal_baseline_submission_doc,
     terminal_baseline_runs_hash, terminal_baseline_ledger_hash,
     terminal_baseline_run_count, terminal_baseline_ledger_count,
-    terminal_baseline_ledger_max_entry_id, terminal_baseline_actual_microusd,
+    terminal_baseline_ledger_max_entry_id,
+    terminal_baseline_settled_microusd,
+    terminal_baseline_uncertain_microusd,
     challenger_runs_hash, challenger_submissions_hash, challenger_ledger_hash,
     challenger_ledger_max_entry_id, prior_rerun_audit_hash,
     release_authority_hash, bank_sha256, source_ref, source_sha256, source_commit
@@ -656,7 +674,8 @@ BEGIN
     v_round_id, v_authority.archive_round_id, v_authority.archive_submission_id,
     v_authority.execute_namespace, pg_catalog.to_jsonb(v_round),
     pg_catalog.to_jsonb(v_baseline), v_runs_hash, v_ledger_hash, v_count,
-    v_ledger_count, v_ledger_max, v_actual, v_challenger_runs_hash,
+    v_ledger_count, v_ledger_max, v_settled, v_uncertain,
+    v_challenger_runs_hash,
     v_challenger_submissions_hash, v_challenger_ledger_hash,
     v_challenger_ledger_max, v_prior_audit_hash, v_release_hash,
     v_authority.bank_sha256, v_authority.source_ref, v_authority.source_sha256,

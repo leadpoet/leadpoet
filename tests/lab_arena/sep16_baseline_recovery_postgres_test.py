@@ -206,11 +206,14 @@ def _render_recovery(connection, new_schedule):
         )
         status_generation, stage_generation, reason, old_schedule = cursor.fetchone()
         cursor.execute(
-            "SELECT count(*),coalesce(max(entry_id),0) FROM public.lab_arena_ledger "
+            "SELECT count(*),coalesce(max(entry_id),0),"
+            "coalesce(sum(amount_microusd) FILTER (WHERE entry_kind='settlement'),0),"
+            "coalesce(sum(amount_microusd) FILTER (WHERE entry_kind='uncertain'),0) "
+            "FROM public.lab_arena_ledger "
             "WHERE round_id=%s AND submission_id=%s",
             (ROUND, BASELINE),
         )
-        ledger_count, ledger_max = cursor.fetchone()
+        ledger_count, ledger_max, settled, uncertain = cursor.fetchone()
         cursor.execute(
             "SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s "
             "AND submission_id=%s",
@@ -227,9 +230,8 @@ def _render_recovery(connection, new_schedule):
         "__SEALED_TERMINAL_BASELINE_RUN_COUNT__": str(run_count),
         "__SEALED_TERMINAL_BASELINE_LEDGER_COUNT__": str(ledger_count),
         "__SEALED_TERMINAL_BASELINE_LEDGER_MAX_ENTRY_ID__": str(ledger_max),
-        "__SEALED_TERMINAL_BASELINE_ACTUAL_MICROUSD__": str(
-            seal["baseline_actual"]
-        ),
+        "__SEALED_TERMINAL_BASELINE_SETTLED_MICROUSD__": str(settled),
+        "__SEALED_TERMINAL_BASELINE_UNCERTAIN_MICROUSD__": str(uncertain),
         "__SEALED_CHALLENGER_RUNS_HASH__": seal["challenger_runs"],
         "__SEALED_CHALLENGER_SUBMISSIONS_HASH__": seal[
             "challenger_submissions"

@@ -433,6 +433,7 @@ def test_responses_canonical_error_type_restores_precise_status(
         lambda document: document["error"].update(
             metadata={"error_type": "server"}
         ),
+        lambda document: document["error"].pop("message"),
         lambda document: document["error"].update(message=""),
         lambda document: document.update(
             choices=[
@@ -449,6 +450,7 @@ def test_responses_canonical_error_type_restores_precise_status(
         "nonfailed-status",
         "metadata-type-conflict",
         "missing-message",
+        "empty-message",
         "multiple-error-locations",
     ),
 )

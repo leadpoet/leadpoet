@@ -486,7 +486,10 @@ def test_champion_openrouter_upstream_429_does_not_fallback_account():
                 "object": "response",
                 "status": "failed",
                 "error_type": "content_policy_violation",
-                "error": {"code": "image_content_policy_violation"},
+                "error": {
+                    "code": "image_content_policy_violation",
+                    "message": "content policy violation",
+                },
             },
         ),
         (
@@ -495,7 +498,10 @@ def test_champion_openrouter_upstream_429_does_not_fallback_account():
                 "object": "response",
                 "status": "failed",
                 "error_type": "refusal",
-                "error": {"code": "invalid_prompt"},
+                "error": {
+                    "code": "invalid_prompt",
+                    "message": "request refused",
+                },
             },
         ),
         (
@@ -5181,10 +5187,15 @@ def test_a_reply_the_sanitizer_refuses_after_dispatch_settles_as_uncertain_not_d
     assert result.call["outcome"] == "uncertain" and result.call["error_code"] == "provider_unavailable"
     assert store.log[-1] == "uncertain" and "settle" not in store.log[-1:]  # the reservation is consumed, the head is terminal
     assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
-        "reason": "settle_failure",
+        "reason": "missing_provider_cost",
         "call_succeeded": False,
         "failure_stage": "response_adaptation",
         "error_class": "OperationResponseError",
+        "provider_status": 200,
+        "body_is_mapping": False,
+        "billing_present": False,
+        "usage_present": False,
+        "body_bytes": 29,
     }
     assert b"Cloudflare" not in result.body
 

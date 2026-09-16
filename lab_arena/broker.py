@@ -3457,7 +3457,10 @@ class Broker:
                         "provider_status": int(response.status),
                     }
                 )
-                if request_refused:
+                if (
+                    request_refused
+                    and effective_operation.provider == "openrouter"
+                ):
                     return _error_result("provider_request_refused", summary)
                 if miner_credential_failure:
                     return _error_result("miner_credentials_unavailable", summary)

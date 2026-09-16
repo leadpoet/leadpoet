@@ -407,6 +407,71 @@ def test_recover_proves_staged_source_and_calls_exact_rpc(monkeypatch, tmp_path)
     )
 
 
+def test_recover272_proves_prior_source_and_calls_exact_rpc(monkeypatch, tmp_path):
+    from lab_arena import source_bundle
+
+    terminal_payload = b"recovery269-champion-source"
+    recovery_payload = b"new-recovery272-champion-source"
+    service = _recovery_service(terminal_payload, recovery_payload)
+    terminal_hash = rerun._sha256(terminal_payload)
+    service.config.object_store.values = {
+        rerun.RECOVERY_SOURCE_REF: terminal_payload,
+    }
+    submission = {
+        "source_ref": rerun.RECOVERY_SOURCE_REF,
+        "source_size_bytes": len(terminal_payload),
+        "submission_doc": {
+            "source_ref": rerun.RECOVERY_SOURCE_REF,
+            "source_sha256": terminal_hash,
+            "source_commit": "8" * 40,
+        },
+    }
+    service.store.get_submission = lambda _submission_id: submission
+    schedule = {"sealed": "recovery272-forward"}
+    monkeypatch.setattr(rerun, "_bank_proof", lambda *_args: rerun.BANK_HASH)
+    monkeypatch.setattr(rerun, "_schedule_proof", lambda *_args: schedule)
+    monkeypatch.setattr(source_bundle, "validate_source_archive", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        source_bundle,
+        "source_archive_commit",
+        lambda payload: "8" * 40 if payload == terminal_payload else "9" * 40,
+    )
+    args = SimpleNamespace(
+        expected_lab_commit="9" * 40,
+        forward_schedule_file=tmp_path / "schedule.json",
+        dry_run=True,
+    )
+
+    preflight = rerun._recover272(service, args)
+    assert preflight["status"] == "recovery272_preflight_ok"
+    assert preflight["source_ref"] == rerun.RECOVERY272_SOURCE_REF
+    assert preflight["terminal_source_commit"] == "8" * 40
+    assert preflight["execute_namespace"] == "rerun272"
+    assert service.store._transport.calls == []
+    assert service.config.object_store.puts == []
+
+    service.store._transport.rpc = lambda name, arguments: (
+        service.store._transport.calls.append((name, arguments))
+        or {"status": "prepared", "baseline_execute_assignments": 20}
+    )
+    args.dry_run = False
+    assert rerun._recover272(service, args)["status"] == "prepared"
+    assert service.store._transport.calls == [
+        (
+            "lab_arena_prepare_sep16_baseline_recovery272_v1",
+            {
+                "p_source_size_bytes": len(recovery_payload),
+                "p_source_sha256": rerun._sha256(recovery_payload),
+                "p_source_commit": "9" * 40,
+                "p_forward_schedule": schedule,
+            },
+        )
+    ]
+    assert service.config.object_store.puts == [
+        (rerun.RECOVERY272_SOURCE_REF, recovery_payload)
+    ]
+
+
 @pytest.mark.parametrize("drift", ["ref", "size", "hash", "commit"])
 def test_recover_refuses_unsealed_source(drift):
     payload = b"latest-tested-champion-source"

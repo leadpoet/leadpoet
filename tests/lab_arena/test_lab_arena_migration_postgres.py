@@ -116,7 +116,11 @@ def round_config(
         "rewards_enabled": rewards_enabled,
         "schedule": {
             "submission_open": "2000-01-01T00:00:00Z",
-            "submission_cutoff": "2100-01-01T00:00:00Z",
+            # Admit fixture submissions while the one-hour replacement freeze
+            # has already begun, so the real review RPC can claim them.
+            "submission_cutoff": (
+                datetime.now(timezone.utc) + timedelta(minutes=30)
+            ).isoformat().replace("+00:00", "Z"),
         },
         "runner_hotkeys": runners,
         "call_quotas": dict(quotas or contracts.CALL_QUOTAS_PER_ICP),

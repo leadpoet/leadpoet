@@ -222,7 +222,7 @@ def test_quality_round_publishes_coverage_winner_after_restart(
     harness.sandbox.run_icp = run_icp
     harness.clock.now = datetime.now(timezone.utc)
     round_id = "arena-2026-12-02-qualitycomplete"
-    harness.service.create_round(harness.clock.now + timedelta(hours=12), round_id=round_id)
+    harness.service.create_round(harness.clock.now + timedelta(minutes=30), round_id=round_id)
     harness.round_id = round_id
     broad = harness.submit("Broad", round_id)
     sparse = harness.submit("Sparse", round_id)

@@ -62,7 +62,7 @@ def _start_parallel_round(
         parallel_twenty_icp_execution=True,
     )
     harness.chain.epoch += int(round_id[-2:], 16)
-    cutoff = datetime.now(timezone.utc) + timedelta(hours=12)
+    cutoff = datetime.now(timezone.utc) + timedelta(minutes=30)
     configuration = harness.service.create_round(cutoff, round_id=round_id)
     assert configuration["runner_slot_ceiling"] == slot_ceiling
     assert configuration["parallel_twenty_icp_execution"] is True

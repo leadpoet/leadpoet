@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import dataclasses
 import json
 import math
 import re
@@ -259,6 +260,9 @@ PROVIDER_FRAME_LIMITS = StrictLimits(
     max_string_bytes=131_072,
     max_total_bytes=1_100_000,
 )
+# Codex Responses frames can include a local namespace's JSON tool schemas.
+# The additional envelope levels are accepted only for that operation.
+RESPONSES_PROVIDER_FRAME_LIMITS = dataclasses.replace(PROVIDER_FRAME_LIMITS, max_depth=26)
 OUTPUT_LIMITS = StrictLimits(
     max_depth=8,
     max_list_items=200,

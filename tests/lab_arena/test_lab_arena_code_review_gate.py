@@ -35,6 +35,7 @@ def test_baseline_exemption_requires_all_three_identity_fields():
 
 
 def test_worker_loads_full_round_identity_and_skips_baseline_and_completed_reviews():
+    now = datetime(2026, 9, 15, 18, tzinfo=timezone.utc)
     baseline = {"submission_id": "baseline-test", "miner_hotkey": "host", "is_king": True}
     passed = {"submission_id": "passed", "code_review_status": "passed"}
     pending = {"submission_id": "pending", "code_review_status": "pending"}
@@ -45,7 +46,16 @@ def test_worker_loads_full_round_identity_and_skips_baseline_and_completed_revie
     ))
     service._store = SimpleNamespace(list_submissions=lambda _, status: [baseline, passed, pending] if status == "accepted" else [])
     service.active_rounds = lambda: [{"round_id": "arena-test"}]
-    service._round = lambda _: {"round_id": "arena-test", "configuration_doc": {"baseline_hotkey": "host"}}
+    service._round = lambda _: {
+        "round_id": "arena-test", "status": "open",
+        "configuration_doc": {
+            "baseline_hotkey": "host",
+            "schedule": {"submission_cutoff": (
+                now + timedelta(minutes=30)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")},
+        },
+    }
+    service._clock = lambda: now
     assert service.review_pending_submissions() == {"reviewed": 1}
     assert calls == ["pending"]
 

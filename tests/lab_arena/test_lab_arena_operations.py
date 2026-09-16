@@ -13,6 +13,7 @@ from lab_arena import operations as ops
 D_EXECUTE = "https://code.deepline.com/api/v2/integrations/exa_search/execute"
 
 VALID = {
+    "openrouter.responses": {"model": "openai/gpt-4o-mini", "input": "hi", "max_output_tokens": 256},
     "deepline.execute": {
         "tool": "exa_search",
         "payload": {"query": "fintech startups in berlin", "type": "fast", "numResults": 5, "includeDomains": ["Example.com"]},
@@ -128,6 +129,7 @@ def test_table_is_closed_and_every_operation_uses_host_credentials():
         "scrapingdog.google_news",
         "scrapingdog.google_jobs",
         "openrouter.chat",
+        "openrouter.responses",
     } | judge_scrapingdog
     assert ops.PROVIDERS == contracts.PROVIDERS == ("scrapingdog", "deepline", "openrouter")
     assert ops.FUNDING_SOURCES == ("host",)
@@ -143,7 +145,10 @@ def test_table_is_closed_and_every_operation_uses_host_credentials():
         assert not set(operation.fixed_params) & set(operation.request_fields)
         if operation.provider == "openrouter":
             assert operation.cost_rule["kind"] == "openrouter_price_table"
-            assert operation.cost_rule["max_output_tokens"] == ops.OPENROUTER_MAX_OUTPUT_TOKENS
+            expected_cap = (ops.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS
+                            if operation_id == "openrouter.responses"
+                            else ops.OPENROUTER_MAX_OUTPUT_TOKENS)
+            assert operation.cost_rule["max_output_tokens"] == expected_cap
         else:
             assert operation.cost_rule == {"kind": "call_quota"}
     deepline = ops.OPERATIONS["deepline.execute"]

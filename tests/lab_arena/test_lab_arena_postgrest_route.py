@@ -120,7 +120,13 @@ def stack():
                   FROM PUBLIC, anon, authenticated;
                 """
             )
-            for migration in CURRENT_SERVICE_MIGRATIONS:
+            # FUNCTION_SIGNATURES also probes these guarded operator RPCs.
+            # Installing them does not perform a rerun or mutate a round.
+            for migration in CURRENT_SERVICE_MIGRATIONS + (
+                "256-arena-2026-09-15-baseline-rerun.sql",
+                "257-arena-2026-09-16-open-round-45m-adoption.sql",
+                "259-arena-2026-09-16-measured-open-round-adoption.sql",
+            ):
                 cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
             cursor.execute("SELECT granted.rolname FROM pg_auth_members m JOIN pg_roles granted ON granted.oid = m.roleid JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = 'authenticator' ORDER BY 1")
             memberships = [row[0] for row in cursor.fetchall()]

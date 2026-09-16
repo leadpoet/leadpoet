@@ -139,7 +139,7 @@ def test_contact_generation_does_not_activate_an_existing_company_round(
     harness.clock.now = datetime.now(timezone.utc)
     round_id = "arena-2026-12-01-companyonly"
     configuration = harness.service.create_round(
-        harness.clock.now + timedelta(hours=12), round_id=round_id,
+        harness.clock.now + timedelta(minutes=30), round_id=round_id,
     )
     assert "contact_policy" not in configuration
     harness.round_id = round_id
@@ -382,7 +382,7 @@ def test_v5_full_contact_round_persists_and_publishes_multi_signal_narrative(
     harness.clock.now = datetime.now(timezone.utc)
     round_id = "arena-2026-12-01-intentdetails"
     configuration = harness.service.create_round(
-        harness.clock.now + timedelta(hours=12), round_id=round_id
+        harness.clock.now + timedelta(minutes=30), round_id=round_id
     )
     harness.round_id = round_id
     submission_id = harness.submit("IntentWinner", round_id)
@@ -459,7 +459,7 @@ def test_contact_round_saves_scores_budget_counts_and_public_receipts(
         if delayed_disclosure else "arena-2026-12-01-contacts"
     )
     configuration = harness.service.create_round(
-        harness.clock.now + timedelta(hours=12), round_id=round_id
+        harness.clock.now + timedelta(minutes=30), round_id=round_id
     )
     harness.round_id = round_id
     assert configuration["contact_policy"] == "contacts_v1"

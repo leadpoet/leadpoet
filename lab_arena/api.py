@@ -222,7 +222,9 @@ def create_app(service: ArenaService) -> FastAPI:
     @app.post("/arena/v1/runs/{run_id}/provider")
     async def provider(run_id: str, request: Request, x_lab_arena_lease: Optional[str] = Header(default=None)) -> Any:
         lease_token = _lease_header(x_lab_arena_lease)
-        frame = await _read_json(request)
+        # Decode within the largest admitted provider frame. The service then
+        # applies the operation-specific bound before context lookup or spend.
+        frame = await _read_json(request, limits=contracts.RESPONSES_PROVIDER_FRAME_LIMITS)
         return await run_in_threadpool(service.handle_provider, run_id, lease_token, frame)
 
     @app.get("/arena/v1/runs/{run_id}/source")

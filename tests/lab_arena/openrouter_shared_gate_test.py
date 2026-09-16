@@ -373,6 +373,173 @@ def test_strict_openrouter_429_cools_other_round_but_invalid_hint_does_not():
         assert invalid_gate._states[fingerprint()].cooldown_generation == 0
 
 
+def test_retained_responses_429_pauses_gate_before_billing_readback(
+    monkeypatch,
+):
+    retained_failure = {
+        "id": "resp-retained-rate-limit",
+        "object": "response",
+        "status": "failed",
+        "error": {
+            "code": "rate_limit_exceeded",
+            "message": "sanitized upstream throttle",
+        },
+        "output": [],
+        "usage": None,
+    }
+    gate = br.OpenRouterSharedGate(
+        max_concurrency=2, fallback_seconds=(1.0, 1.0)
+    )
+    held = gate.acquire(fingerprint(), deadline=time.monotonic() + 2)
+    assert held is not None
+    readback_entered = threading.Event()
+    release_readback = threading.Event()
+
+    def blocked_readback(**_kwargs):
+        readback_entered.set()
+        assert release_readback.wait(2)
+        return None
+
+    monkeypatch.setattr(br, "_openrouter_generation_readback", blocked_readback)
+    limited, limited_store, limited_transport = make_broker(
+        store=FakeLedgerStore(),
+        transport=FakeTransport([(200, retained_failure)]),
+        openrouter_shared_gate=gate,
+    )
+    following, following_store, following_transport = make_broker(
+        store=FakeLedgerStore(),
+        transport=FakeTransport([(200, response(id="gen-after-readback"))]),
+        openrouter_shared_gate=gate,
+    )
+    results = {}
+    limited_thread = threading.Thread(
+        target=lambda: results.setdefault(
+            "limited",
+            limited.execute(
+                context(41), operation_id="openrouter.responses",
+                parameters=PARAMETERS, action_sequence=1, timeout_ms=120_000,
+            ),
+        )
+    )
+    limited_thread.start()
+    assert readback_entered.wait(2)
+    with gate._condition:
+        state = gate._states[fingerprint()]
+        assert state.cooldown_generation == 1
+        assert state.throttle_count == 1
+
+    cancelled = threading.Event()
+    following_thread = threading.Thread(
+        target=lambda: results.setdefault(
+            "following",
+            following.execute(
+                context(42), operation_id="openrouter.responses",
+                parameters=PARAMETERS, action_sequence=1, timeout_ms=120_000,
+                cancel_requested=cancelled.is_set,
+            ),
+        )
+    )
+    following_thread.start()
+    wait_for(lambda: queued(gate, fingerprint()) == 1)
+    held.release()
+    time.sleep(0.02)
+    assert queued(gate, fingerprint()) == 1
+    assert following_store.log == [] and following_transport.sent == []
+
+    cancelled.set()
+    following_thread.join(2)
+    release_readback.set()
+    limited_thread.join(2)
+
+    assert not limited_thread.is_alive() and not following_thread.is_alive()
+    assert results["following"].call["outcome"] == "not_dispatched"
+    assert results["following"].call["reason"] == "provider_admission_cancelled"
+    assert results["limited"].status == 502
+    assert results["limited"].call["provider_status"] == 429
+    assert results["limited"].call["outcome"] == "settled"
+    assert results["limited"].call["actual_microusd"] == 0
+    assert limited_store.log == ["reserve", "dispatch", "settle"]
+    assert len(limited_transport.sent) == 1
+    with gate._condition:
+        state = gate._states[fingerprint()]
+        assert state.cooldown_generation == 1
+        assert state.throttle_count == 1
+
+
+def test_early_429_pause_does_not_authorize_billed_worker_retry():
+    billed_failure = {
+        "object": "response",
+        "status": "failed",
+        "error": {"code": "rate_limit_exceeded", "message": "limited"},
+        "output": [],
+        "usage": {"cost": "0.000001"},
+    }
+    gate = br.OpenRouterSharedGate(
+        max_concurrency=2, fallback_seconds=(0.01, 0.02)
+    )
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, billed_failure)]),
+        openrouter_shared_gate=gate,
+    )
+
+    result = broker.execute(
+        context(43), operation_id="openrouter.responses",
+        parameters=PARAMETERS, action_sequence=1, timeout_ms=120_000,
+    )
+
+    assert result.call["provider_status"] == 429
+    assert result.call["outcome"] == "settled"
+    assert result.call["actual_microusd"] == 1
+    assert rn.WorkerSocketServer._responses_rate_limit_delay(result.call, 0) is None
+    assert store.log == ["reserve", "dispatch", "settle"]
+    assert len(transport.sent) == 1
+    with gate._condition:
+        state = gate._states[fingerprint()]
+        assert state.cooldown_generation == 1
+        assert state.throttle_count == 1
+
+
+def test_early_429_pause_does_not_authorize_uncertain_worker_retry():
+    free_failure = {
+        "object": "response",
+        "status": "failed",
+        "error": {"code": "rate_limit_exceeded", "message": "limited"},
+        "output": [],
+        "usage": None,
+    }
+    gate = br.OpenRouterSharedGate(
+        max_concurrency=2, fallback_seconds=(0.01, 0.02)
+    )
+    store = FakeLedgerStore()
+
+    def fail_settlement(**_kwargs):
+        store.log.append("settle")
+        raise br.ArenaStoreError("synthetic settlement failure")
+
+    store.settle_call = fail_settlement
+    broker, _, transport = make_broker(
+        store=store,
+        transport=FakeTransport([(200, free_failure)]),
+        openrouter_shared_gate=gate,
+    )
+
+    result = broker.execute(
+        context(44), operation_id="openrouter.responses",
+        parameters=PARAMETERS, action_sequence=1, timeout_ms=120_000,
+    )
+
+    assert result.call["outcome"] == "uncertain"
+    assert rn.WorkerSocketServer._responses_rate_limit_delay(result.call, 0) is None
+    assert store.log[:2] == ["reserve", "dispatch"]
+    assert store.log[-1] == "uncertain"
+    assert len(transport.sent) == 1
+    assert next(iter(store.calls.values()))["kind"] == "uncertain"
+    with gate._condition:
+        state = gate._states[fingerprint()]
+        assert state.cooldown_generation == 1
+        assert state.throttle_count == 1
+
+
 def test_reservation_boundary_oversleep_keeps_dispatch_and_settlement(monkeypatch):
     class SlowStore(FakeLedgerStore):
         def reserve_call(self, **kwargs):

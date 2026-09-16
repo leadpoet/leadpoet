@@ -2836,6 +2836,19 @@ class Broker:
                     openrouter_retry_after_seconds = _retry_after_seconds(
                         response.headers
                     )
+                    if (
+                        effective_operation_id == "openrouter.responses"
+                        and gate_lease is not None
+                        and openrouter_effective_response is not None
+                        and openrouter_effective_response.status == 429
+                    ):
+                        # Stop new work for this credential as soon as the
+                        # trusted provider response proves a throttle. Billing
+                        # readback and settlement still decide whether the
+                        # worker may retry the call.
+                        self._openrouter_shared_gate.observe_throttle(
+                            gate_lease, openrouter_retry_after_seconds
+                        )
                     openrouter_native_cost = provider_costs.openrouter_cost(
                         raw_document
                     )
@@ -3386,10 +3399,6 @@ class Broker:
                 and type(actual) is int
                 and actual == 0
             ):
-                if gate_lease is not None:
-                    self._openrouter_shared_gate.observe_throttle(
-                        gate_lease, openrouter_retry_after_seconds
-                    )
                 # Internal worker control data only. The model still receives
                 # the same generic provider-unavailable response.
                 if openrouter_retry_after_seconds is not _RETRY_AFTER_ABSENT:

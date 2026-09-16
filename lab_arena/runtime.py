@@ -579,6 +579,8 @@ class SandboxResult:
     output_bytes: Optional[bytes]
     output_path: str
     output_error: Optional[str] = None
+    # Trusted host observation only; no submitted output or exception detail.
+    checkpoint_output_invalid: bool = False
 
 
 def read_output(spec: SandboxSpec, *, max_bytes: int = MAX_OUTPUT_BYTES) -> Optional[bytes]:
@@ -917,19 +919,24 @@ def run_sandbox(
         last_pid_absence_at: Optional[float] = None
         checkpoint_bytes: Optional[bytes] = None
         observed_bytes: Optional[bytes] = None
+        latest_checkpoint_invalid = False
 
         def observe_checkpoint(deadline: float) -> None:
-            nonlocal checkpoint_bytes, observed_bytes
+            nonlocal checkpoint_bytes, observed_bytes, latest_checkpoint_invalid
             if clock() >= deadline:
                 return
             try:
                 candidate = read_output(spec)
             except SandboxOutputError:
+                if clock() < deadline:
+                    latest_checkpoint_invalid = True
                 return
             # Both the open and full read must finish before the hard cutoff.
             if candidate is None or clock() >= deadline:
                 return
             if candidate == observed_bytes:
+                if candidate == checkpoint_bytes:
+                    latest_checkpoint_invalid = False
                 return
             observed_bytes = candidate
             try:
@@ -937,9 +944,13 @@ def run_sandbox(
             except Exception:
                 # An adversarial malformed document must not erase an earlier
                 # complete checkpoint or fail the worker before its cutoff.
+                latest_checkpoint_invalid = True
                 return
             if valid:
                 checkpoint_bytes = candidate
+                latest_checkpoint_invalid = False
+            else:
+                latest_checkpoint_invalid = True
 
         launcher_runner = (
             _RusagePopen if process_runner is subprocess.Popen else process_runner
@@ -1071,6 +1082,7 @@ def run_sandbox(
             output_bytes=output_bytes,
             output_path=str(spec.output_path),
             output_error=output_error,
+            checkpoint_output_invalid=latest_checkpoint_invalid,
         )
     finally:
         if process is not None and process.poll() is None:
@@ -1175,6 +1187,7 @@ def fake_result(
     stdout: bytes = b"",
     stderr: bytes = b"",
     output_error: Optional[str] = None,
+    checkpoint_output_invalid: bool = False,
 ) -> SandboxResult:
     """Convenience constructor for ``FakeRuntime`` results."""
 
@@ -1191,6 +1204,7 @@ def fake_result(
         output_bytes=output_bytes,
         output_path=SANDBOX_OUTPUT_PATH,
         output_error=output_error,
+        checkpoint_output_invalid=checkpoint_output_invalid,
     )
 
 

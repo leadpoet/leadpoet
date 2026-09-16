@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: Arena input and output diagnostics
+
+On 2026-09-16 the user authorized careful, narrow fixes for the reported miner
+schema and output failures, followed by a push to main and redeployment. Carry
+the pinned output schema into the actual harness input and preserve safe output
+failure and checkpoint-fallback diagnostics through the existing result path.
+Authority includes protected read-only inspection, focused regression tests,
+pushes to main, and canonical gateway/normal-validator restarts with live
+verification. Preserve frozen miner source, accepted historical results,
+last-valid checkpoint selection, scoring, retries, costs, credentials, weights,
+and concurrent baseline work. Do not rescore historical submissions. This scope
+ends after the verified release is deployed.
+
 ## Scoped production authorization: champion model repository rename
 
 On 2026-09-16 the user explicitly authorized renaming the public baseline

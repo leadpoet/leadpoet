@@ -31,6 +31,17 @@ class OutputInvalid(ArenaContractError):
     """The model output violates the contract; the ICP scores zero."""
 
 
+def output_invalid_reason(error: OutputInvalid) -> str:
+    """Map detailed validation errors to safe public diagnostic codes."""
+
+    message = str(error)
+    if message == "output is not valid JSON":
+        return "invalid_json"
+    if message == "unsupported output schema version":
+        return "output_schema_mismatch"
+    return "output_contract_violation"
+
+
 def _reject_constant(value: str) -> Any:
     raise ValueError("non-finite JSON constant %s" % value)
 

@@ -41,7 +41,11 @@ import httpx
 from lab_arena import integrity, contact_policy, intent_details_policy, quality_policy
 from lab_arena import contracts, images, leased_images, operations, runtime, scoring, shim, source_bundle
 from lab_arena.contracts import ArenaContractError
-from lab_arena.output import OutputInvalid, output_document_from_bytes
+from lab_arena.output import (
+    OutputInvalid,
+    output_document_from_bytes,
+    output_invalid_reason,
+)
 from lab_arena.runtime_host import DEFAULT_RUNNER_SOCKET_ROOT, RuntimeHostError, runtime_host_diagnostic
 
 DEFAULT_MAX_PARALLEL_RUNS = 8  # compatibility for direct test/embedded configurations
@@ -1700,6 +1704,7 @@ class AssignmentExecutor:
             return True
         terminal = "judge_error" if scoring_run else "model_error"
         failure_diagnostic: Optional[Dict[str, str]] = None
+        execution_output_diagnostic: Optional[Dict[str, str]] = None
         failure_detail: Any = ""
         output_document: Optional[Dict[str, Any]] = None
         result: Optional[runtime.SandboxResult] = None
@@ -1725,13 +1730,18 @@ class AssignmentExecutor:
                         if lease.get("integrity_policy") == "arena_integrity_v1" else dict(icp)
                     ),
                     "evaluation_date": evaluation_date,
+                    "output_schema_version": contact_policy.output_schema(lease),
                     "company_limit": int(icp.get("max_companies") or 5),
                     "provider_operations": sorted(operations.OPERATIONS),
                 }
+                # harness.run_icp receives only this nested object. Announce
+                # the same pinned schema that validates its returned companies.
+                input_document["icp"]["output_schema_version"] = (
+                    input_document["output_schema_version"]
+                )
                 extra_environment = {}
                 if quality_policy.enabled(lease):
                     input_document["company_quality_policy"] = quality_policy.POLICY
-                    input_document["output_schema_version"] = contact_policy.output_schema(lease)
                     input_document["company_requirements"] = {
                         "company_linkedin": "matching LinkedIn company page required",
                         "state": "headquarters state required for United States companies; full name or abbreviation, including DC",
@@ -1745,9 +1755,6 @@ class AssignmentExecutor:
                 if intent_details_policy.enabled(lease):
                     input_document["intent_details_policy"] = (
                         intent_details_policy.POLICY
-                    )
-                    input_document["output_schema_version"] = (
-                        intent_details_policy.OUTPUT_SCHEMA
                     )
                     input_document["icp"]["intent_details_policy"] = (
                         intent_details_policy.POLICY
@@ -1872,6 +1879,11 @@ class AssignmentExecutor:
                             ),
                         }
                         failure_detail = result.output_error or ""
+                    elif result.output_error:
+                        execution_output_diagnostic = {
+                            "stage": "sandbox_output",
+                            "error_class": "sandbox_output_error",
+                        }
                 elif scoring_run:
                     try:
                         output_document = scoring.scoring_output_from_bytes(result.output_bytes)
@@ -1911,6 +1923,11 @@ class AssignmentExecutor:
                         )
                     except OutputInvalid as exc:
                         terminal = "invalid_output"
+                        execution_output_diagnostic = {
+                            "stage": "sandbox_output",
+                            "error_class": "execution_output_invalid",
+                            "reason": output_invalid_reason(exc),
+                        }
                     else:
                         terminal = "accepted"
             # A shared host key or account failure is infrastructure when it
@@ -1951,6 +1968,32 @@ class AssignmentExecutor:
                         "reason": "provider_error",
                     }
                     failure_detail = ""
+            if not scoring_run:
+                if (
+                    terminal == "accepted"
+                    and result is not None
+                    and result.checkpoint_output_invalid
+                ):
+                    failure_diagnostic = {
+                        "stage": "sandbox_output",
+                        "error_class": "execution_output_invalid",
+                        "reason": "invalid_final_checkpoint",
+                    }
+                elif (
+                    terminal in ("model_error", "model_timeout")
+                    and result is not None
+                    and result.checkpoint_output_invalid
+                ):
+                    failure_diagnostic = {
+                        "stage": "sandbox_output",
+                        "error_class": "execution_output_invalid",
+                        "reason": "no_valid_checkpoint",
+                    }
+                elif terminal == "invalid_output":
+                    failure_diagnostic = execution_output_diagnostic
+                else:
+                    # Provider and credential overrides own the final failure.
+                    failure_diagnostic = None
         except AgentDependencyError:
             if scoring_run:  # the trusted scorer has no submitted dependency tree
                 raise
@@ -2006,6 +2049,8 @@ class AssignmentExecutor:
                 error_class=failure_diagnostic["error_class"],
                 detail=failure_detail,
             )
+        elif not scoring_run and failure_diagnostic is not None:
+            run_result["failure_diagnostic"] = failure_diagnostic
         body = {"run_id": lease["run_id"], "result": run_result, "output": output_document, "lease_token": lease_token}
         return contracts.build_signed_request(
             scope=contracts.SCOPE_COMPLETE,

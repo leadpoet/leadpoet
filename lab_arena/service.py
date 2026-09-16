@@ -3661,7 +3661,13 @@ class ArenaService:
             "lease_expires_at": str(candidate.get("lease_expires_at") or ""),
         }
 
-    def handle_provider(self, run_id: str, lease_token: str, frame: Any) -> Dict[str, Any]:
+    def handle_provider(
+        self,
+        run_id: str,
+        lease_token: str,
+        frame: Any,
+        cancel_requested: Optional[Callable[[], bool]] = None,
+    ) -> Dict[str, Any]:
         if not isinstance(frame, Mapping) or set(frame) != {"operation_id", "parameters", "timeout_ms", "action_sequence"}:
             raise ServiceError("frame_invalid", 400)
         limits = (contracts.RESPONSES_PROVIDER_FRAME_LIMITS
@@ -3669,7 +3675,14 @@ class ArenaService:
         contracts.check_strict_document(frame, limits)
         run, context = self._run_context(run_id, lease_token)
         broker = self._broker_for(run["round_id"])
-        result = broker.execute(context, operation_id=str(frame["operation_id"]), parameters=frame["parameters"], action_sequence=frame["action_sequence"], timeout_ms=int(frame["timeout_ms"]))
+        result = broker.execute(
+            context,
+            operation_id=str(frame["operation_id"]),
+            parameters=frame["parameters"],
+            action_sequence=frame["action_sequence"],
+            timeout_ms=int(frame["timeout_ms"]),
+            cancel_requested=cancel_requested,
+        )
         return result.to_document()
 
     def handle_complete(self, envelope: Any) -> Dict[str, Any]:

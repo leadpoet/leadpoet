@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
+import anyio
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
@@ -225,7 +226,17 @@ def create_app(service: ArenaService) -> FastAPI:
         # Decode within the largest admitted provider frame. The service then
         # applies the operation-specific bound before context lookup or spend.
         frame = await _read_json(request, limits=contracts.RESPONSES_PROVIDER_FRAME_LIMITS)
-        return await run_in_threadpool(service.handle_provider, run_id, lease_token, frame)
+
+        def disconnected() -> bool:
+            return bool(anyio.from_thread.run(request.is_disconnected))
+
+        return await run_in_threadpool(
+            service.handle_provider,
+            run_id,
+            lease_token,
+            frame,
+            disconnected,
+        )
 
     @app.get("/arena/v1/runs/{run_id}/source")
     async def source(run_id: str, x_lab_arena_lease: Optional[str] = Header(default=None)) -> Any:

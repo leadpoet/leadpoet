@@ -105,6 +105,20 @@ deadline. Uncertain, billed, idempotent, malformed and other failures are never
 retried. Stopping the worker cancels a pending backoff. Incomplete model
 responses retain actual billing and do not become successful sourcing calls.
 
+The gateway shares a conservative Responses reliability gate across rounds by
+OpenRouter credential. It admits two concurrent requests per credential by
+default; this is a local protection, not a claimed upstream account limit. A
+gateway service can set `LAB_ARENA_OPENROUTER_MAX_CONCURRENCY` to an integer
+from 1 through 10. The default needs no secret or environment update. Other
+provider operations and different OpenRouter credentials remain independent.
+For a 120-second provider operation, queueing can use about 90 seconds while
+retaining 20 seconds for database admission, at least 30 seconds for provider
+work, 30 seconds for billing, and 15 seconds of API grace. A disconnect cancels
+the queue wait and is checked once more before reservation. After reservation
+commits, the existing dispatch, transport, and settlement sequence completes so
+the ledger cannot retain an abandoned reservation. The setting does not change
+model, round, quota, cost, or schema policy.
+
 Codex disables its inner OS sandbox because the process is already inside
 gVisor, with a read-only image/source, an unprivileged UID, bounded writable
 directories and no external network interface. This helper is not a general

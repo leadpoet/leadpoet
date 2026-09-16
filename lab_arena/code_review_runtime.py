@@ -7,7 +7,7 @@ import secrets
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
-from lab_arena import broker, code_review, code_review_policy, contracts, source_bundle
+from lab_arena import broker, code_review, code_review_policy, contracts, operations, source_bundle
 
 
 class SubmissionCodeReviewer:
@@ -137,6 +137,12 @@ class SubmissionCodeReviewer:
                         actual = broker.actual_openrouter_cost_microusd(
                             self._prices, prepared.parameters["model"], parsed,
                         )
+                    try:
+                        response = broker._openrouter_effective_response(response)
+                    except operations.OperationResponseError as exc:
+                        raise code_review.CodeReviewError(
+                            "review_response_invalid", response_reason="envelope"
+                        ) from exc
                     if response.status == 200:
                         if not isinstance(parsed, Mapping):
                             raise code_review.CodeReviewError(
@@ -151,6 +157,15 @@ class SubmissionCodeReviewer:
                             "categories": sorted({item["category"] for item in result.findings}),
                         }
                         status = "passed" if result.passed else "rejected"
+                    elif (
+                        response.status == 403
+                        and broker._openrouter_request_policy_refusal(response)
+                    ):
+                        document = code_review_policy.diagnostic(
+                            "code_review_provider_request_rejected",
+                            provider_http_status=403,
+                            retryable=False,
+                        )
                     else:
                         document = code_review_policy.provider_http_diagnostic(
                             response.status

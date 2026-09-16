@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: September 16 miner root-cause repair
+
+On 2026-09-16 the user renewed investigation and repair of the reported miner
+failures, with tested narrow fixes pushed to main and canonically redeployed.
+This scope includes protected read-only source, provider and production-state
+inspection, deterministic reproductions, and canonical gateway/normal-validator
+restarts with live verification. Correct confirmed provider-error classification
+defects without adding new competition mechanisms. Preserve frozen miner source,
+historical results, actual provider costs, spending limits, credential isolation,
+scoring policy, replacement rules, weights and concurrent baseline work. Do not
+rescore historical miner submissions or infer missing historical error details.
+This authority ends after confirmed host fixes are deployed and verified.
+
 ## Scoped production authorization: Arena input and output diagnostics
 
 On 2026-09-16 the user authorized careful, narrow fixes for the reported miner

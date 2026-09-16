@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 from pathlib import Path
@@ -342,6 +343,95 @@ def test_infrastructure_override_does_not_keep_output_diagnostic(
     result = contracts.validate_run_result(api.completions[0]["body"]["result"])
     assert result["terminal_status"] == expected_terminal
     assert "failure_diagnostic" not in result
+
+
+@pytest.mark.parametrize("funding_source", ["host", "miner_key"])
+@pytest.mark.parametrize(
+    "mode, expected_terminal",
+    [
+        ("accepted", "accepted"),
+        ("invalid", "invalid_output"),
+        ("model_error", "model_error"),
+    ],
+)
+def test_provider_request_refusal_keeps_the_models_own_terminal_result(
+    tmp_path, funding_source, mode, expected_terminal
+):
+    """An ordinary provider rejection must not become infrastructure failure."""
+
+    class RequestRefusedApi(FakeApi):
+        def provider(self, run_id, lease_token, frame):
+            self.provider_frames.append(dict(frame))
+            body = b'{"error":{"code":"provider_request_refused"}}'
+            return {
+                "status": 403,
+                "headers": {
+                    "content-type": "application/json",
+                    "content-length": str(len(body)),
+                },
+                "body_b64": base64.b64encode(body).decode(),
+                "call": {
+                    "call_identity": contracts.document_hash(
+                        ["request-refused", frame["action_sequence"]]
+                    ),
+                    "operation_id": frame["operation_id"],
+                    "provider": "deepline",
+                    "funding_source": funding_source,
+                    "reserved_microusd": 0,
+                    "actual_microusd": 0,
+                    "outcome": "settled",
+                    "status": 403,
+                    "provider_status": 403,
+                    "error_code": "provider_request_refused",
+                },
+            }
+
+    class RequestRefusedRuntime:
+        @staticmethod
+        def run_icp(spec, **_kwargs):
+            os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
+            try:
+                status, _headers, _body = shim.dispatch(
+                    "deepline.execute",
+                    {
+                        "tool": "generic_http_request",
+                        "payload": {
+                            "url": "https://public.example/status/403",
+                            "method": "GET",
+                        },
+                    },
+                    5000,
+                )
+            finally:
+                os.environ.pop(shim.WORKER_SOCKET_ENV, None)
+            assert status == 403
+            if mode == "accepted":
+                return runtime.fake_result(output_bytes=VALID_EMPTY)
+            if mode == "invalid":
+                return runtime.fake_result(output_bytes=b"{not-json")
+            return runtime.fake_result(exit_code=1)
+
+        @staticmethod
+        def read_output(spec):
+            return runtime.read_output(spec)
+
+    api = RequestRefusedApi([lease()])
+    (tmp_path / "work").mkdir()
+
+    runner.Runner(make_config(tmp_path, api, RequestRefusedRuntime())).run_once()
+
+    completion = api.completions[0]["body"]
+    result = contracts.validate_run_result(completion["result"])
+    assert result["terminal_status"] == expected_terminal
+    assert len(api.provider_frames) == 1
+    if mode == "invalid":
+        assert result["failure_diagnostic"] == {
+            "stage": "sandbox_output",
+            "error_class": "execution_output_invalid",
+            "reason": "invalid_json",
+        }
+    else:
+        assert "failure_diagnostic" not in result
 
 
 def test_safe_diagnostic_is_private_until_existing_public_results_release():

@@ -299,6 +299,143 @@ def test_miner_key_refusal_is_not_an_organizer_outage(status):
     assert len(transport.sent) == 1
 
 
+def test_openrouter_legacy_moderation_403_is_not_a_miner_credential_failure():
+    flagged_input = "private prompt that must not be persisted"
+    payload = {
+        "choices": [
+            {
+                "finish_reason": "error",
+                "error": {
+                    "code": 403,
+                    "message": "request rejected by moderation",
+                    "metadata": {
+                        "reasons": ["policy"],
+                        "flagged_input": flagged_input,
+                        "provider_name": "Upstream Provider",
+                        "model_slug": "provider/model",
+                    },
+                },
+            }
+        ]
+    }
+    broker, ledger, transport = make_broker(
+        transport=FakeTransport([(200, payload)]),
+        credential_for=lambda _context, _provider: "miner-runtime-key",
+        funding_source_for=lambda _context: "miner_key",
+    )
+    arguments = dict(
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=0,
+        timeout_ms=5000,
+    )
+
+    result = broker.execute(CONTEXT, **arguments)
+    replay = broker.execute(CONTEXT, **arguments)
+
+    assert result.status == 403
+    assert json.loads(result.body) == {
+        "error": {"code": "provider_request_refused"}
+    }
+    assert result.call["error_code"] == "provider_request_refused"
+    assert result.call["provider_status"] == 403
+    assert replay.call["idempotent"] is True
+    assert replay.call["error_code"] == "provider_request_refused"
+    assert replay.call["provider_status"] == 403
+    assert replay.body == result.body and replay.status == result.status
+    assert len(transport.sent) == 1
+    assert flagged_input not in repr(result.to_document())
+    assert flagged_input not in repr(ledger.calls)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "error": {
+                "code": 403,
+                "metadata": {"provider_name": "Upstream Provider"},
+            }
+        },
+        {
+            "error": {
+                "code": 403,
+                "metadata": {"error_type": "refusal"},
+            },
+            "choices": [
+                {
+                    "finish_reason": "error",
+                    "error": {"code": 403, "message": "account forbidden"},
+                }
+            ],
+        },
+        {
+            "error": {
+                "code": 403,
+                "metadata": {
+                    "error_type": "authentication",
+                    "reasons": ["policy"],
+                    "flagged_input": "input",
+                    "provider_name": "Upstream Provider",
+                    "model_slug": "provider/model",
+                },
+            }
+        },
+        {
+            "error_type": "permission_denied",
+            "error": {
+                "code": 403,
+                "metadata": {"patterns": ["blocked-pattern"]},
+            },
+        },
+        {
+            "error_type": "content_policy_violation",
+            "error": {"code": "invalid_prompt"},
+        },
+        {
+            "error": {
+                "code": 403,
+                "metadata": {"patterns": []},
+            }
+        },
+        {
+            "error_type": {"unexpected": "mapping"},
+            "error": {"code": 403},
+        },
+    ],
+    ids=(
+        "provider_name_alone",
+        "mixed_policy_and_account_errors",
+        "typed_authentication_overrides_legacy_shape",
+        "top_level_permission_overrides_patterns",
+        "incoherent_responses_type_and_code",
+        "empty_guardrail_patterns",
+        "non_string_top_level_error_type",
+    ),
+)
+def test_openrouter_ambiguous_403_errors_remain_miner_credential_failures(
+    payload,
+):
+    broker, ledger, transport = make_broker(
+        transport=FakeTransport([(403, payload)]),
+        credential_for=lambda _context, _provider: "miner-runtime-key",
+        funding_source_for=lambda _context: "miner_key",
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=0,
+        timeout_ms=5000,
+    )
+
+    assert result.status == 402
+    assert result.call["error_code"] == "miner_credentials_unavailable"
+    assert ledger.log == ["reserve", "dispatch", "settle"]
+    assert len(transport.sent) == 1
+
+
 def test_provider_cannot_echo_runtime_key_into_output_or_storage():
     secret = "miner-runtime-key-never-publish"
     broker, ledger, transport = make_broker(

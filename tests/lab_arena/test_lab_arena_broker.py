@@ -432,6 +432,120 @@ def test_champion_openrouter_upstream_429_does_not_fallback_account():
     assert marked == []
 
 
+@pytest.mark.parametrize(
+    ("provider_status", "payload"),
+    [
+        (
+            403,
+            {
+                "error": {
+                    "code": 403,
+                    "metadata": {"error_type": "content_policy_violation"},
+                }
+            },
+        ),
+        (
+            403,
+            {
+                "error": {
+                    "code": 403,
+                    "metadata": {"error_type": "refusal"},
+                }
+            },
+        ),
+        (
+            403,
+            {
+                "error_type": "content_policy_violation",
+                "error": {"code": "image_content_policy_violation"},
+            },
+        ),
+        (
+            403,
+            {
+                "error_type": "refusal",
+                "error": {"code": "invalid_prompt"},
+            },
+        ),
+        (
+            200,
+            {
+                "object": "response",
+                "status": "failed",
+                "error_type": "content_policy_violation",
+                "error": {"code": "image_content_policy_violation"},
+            },
+        ),
+        (
+            200,
+            {
+                "object": "response",
+                "status": "failed",
+                "error_type": "refusal",
+                "error": {"code": "invalid_prompt"},
+            },
+        ),
+        (
+            403,
+            {
+                "error": {
+                    "code": 403,
+                    "metadata": {"patterns": ["blocked-pattern"]},
+                }
+            },
+        ),
+    ],
+    ids=(
+        "chat_content_policy",
+        "chat_refusal",
+        "responses_content_policy",
+        "responses_refusal",
+        "embedded_responses_content_policy",
+        "embedded_responses_refusal",
+        "guardrail_patterns",
+    ),
+)
+def test_champion_openrouter_policy_403_does_not_retry_or_fallback_account(
+    provider_status, payload,
+):
+    marked = []
+    flagged_input = "private prompt that must not be persisted"
+    payload["private_detail"] = flagged_input
+    broker, store, transport = make_broker(
+        transport=FakeTransport(
+            [(provider_status, payload) for _ in range(4)]
+        ),
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        provider_funding_source_for=lambda _context, _provider: "miner_key",
+        retry_miner_credential_for=lambda _context: True,
+        mark_provider_fallback=lambda context, provider, evidence: (
+            marked.append((context, provider, evidence))
+            or {"status": "marked"}
+        ),
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.chat",
+        parameters=CHAT,
+        action_sequence=7,
+        timeout_ms=5000,
+    )
+
+    assert result.status == 403
+    assert json.loads(result.body) == {
+        "error": {"code": "provider_request_refused"}
+    }
+    assert result.call["error_code"] == "provider_request_refused"
+    assert result.call["provider_status"] == 403
+    assert "champion_credential_attempts" not in result.call
+    assert "provider_fallback_required" not in result.call
+    assert len(transport.sent) == len(store.calls) == 1
+    assert marked == []
+    assert flagged_input not in repr(result.to_document())
+    assert flagged_input not in repr(store.calls)
+
+
 @pytest.mark.parametrize("provider_status", [401, 402, 429])
 def test_champion_openrouter_zero_cost_account_failure_latches(
     provider_status,
@@ -736,6 +850,188 @@ def deepline_history(*entries, has_more=False, next_offset=None):
             "next_offset": next_offset,
         }
     }
+
+
+def deepline_generic_http_denial(request_id="iad1::generic-http-denied"):
+    return {
+        "code": "PROVIDER_AUTHORIZATION_FAILED",
+        "credential_owner": "workspace",
+        "credential_source": "managed",
+        "error": "private upstream error",
+        "error_category": "authorization",
+        "failure_description": "private failure detail",
+        "failure_origin": "provider",
+        "message": "private provider message",
+        "operation": "generic_http_request",
+        "operator_hint": "private operator hint",
+        "provider": "generic_http",
+        "requestId": request_id,
+        "request_id": request_id,
+        "tool_error": {
+            "category": "authorization",
+            "code": "PROVIDER_AUTHORIZATION_FAILED",
+            "networkKind": None,
+            "networkScope": None,
+            "operation": "generic_http_request",
+            "origin": "provider",
+            "provider": "generic_http",
+            "requestId": request_id,
+            "retryAfterMs": None,
+            "retryable": False,
+            "schemaVersion": 1,
+            "statusCode": 403,
+            "toolId": "generic-http",
+        },
+        "upstream_status": 403,
+    }
+
+
+def test_deepline_generic_http_403_is_a_replayable_request_refusal():
+    request_id = "iad1::generic-http-denied"
+    denial = deepline_generic_http_denial(request_id)
+    history_entry = deepline_history_entry(
+        request_id,
+        "generic_http_request",
+        0,
+        charge_state="failed",
+        provider="generic_http",
+    )
+    history_entry.update({"status": "error", "delta": 0})
+    marked = []
+    broker, store, transport = make_broker(
+        transport=FakeTransport(
+            [(403, denial), (200, deepline_history(history_entry))]
+        ),
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        provider_funding_source_for=lambda _context, _provider: "miner_key",
+        retry_miner_credential_for=lambda _context: True,
+        mark_provider_fallback=lambda context, provider, evidence: (
+            marked.append((context, provider, evidence))
+            or {"status": "marked"}
+        ),
+    )
+    arguments = dict(
+        operation_id="deepline.execute",
+        parameters={
+            "tool": "generic_http_request",
+            "payload": {"url": "https://httpbin.org/status/403"},
+        },
+        action_sequence=0,
+        timeout_ms=5000,
+    )
+
+    result = broker.execute(CONTEXT, **arguments)
+    replay = broker.execute(CONTEXT, **arguments)
+
+    assert result.status == 403
+    assert json.loads(result.body) == {
+        "error": {"code": "provider_request_refused"}
+    }
+    assert result.call["error_code"] == "provider_request_refused"
+    assert result.call["provider_status"] == 403
+    assert result.call["actual_microusd"] == 0
+    assert result.call["cost_basis"] == "deepline_billing_history_failed_zero"
+    assert "champion_credential_attempts" not in result.call
+    assert "provider_fallback_required" not in result.call
+    assert marked == []
+    assert replay.call["idempotent"] is True
+    assert replay.call["error_code"] == "provider_request_refused"
+    assert replay.call["provider_status"] == 403
+    assert replay.body == result.body and replay.status == result.status
+    assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
+    terminal = store.calls[result.call["call_identity"]]["terminal"]
+    assert "account_failure_evidence" not in terminal
+    for private_text in (
+        denial["error"],
+        denial["failure_description"],
+        denial["message"],
+        denial["operator_hint"],
+    ):
+        assert private_text not in repr(result.to_document())
+        assert private_text not in repr(store.calls)
+
+
+def test_deepline_generic_http_403_without_exact_cost_stays_uncertain():
+    request_id = "iad1::generic-http-cost-pending"
+    broker, store, transport = make_broker(
+        transport=FakeTransport(
+            [(403, deepline_generic_http_denial(request_id)), (200, deepline_history())]
+        )
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={
+            "tool": "generic_http_request",
+            "payload": {"url": "https://httpbin.org/status/403"},
+        },
+        action_sequence=0,
+        timeout_ms=5000,
+    )
+
+    assert result.status == 502
+    assert json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
+    assert result.call["error_code"] == "provider_unavailable"
+    assert result.call["outcome"] == "uncertain"
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+    assert transport.sent[0]["method"] == "POST"
+    assert all(sent["method"] == "GET" for sent in transport.sent[1:])
+
+
+@pytest.mark.parametrize(
+    ("parameters", "payload"),
+    [
+        (
+            {"tool": "exa_search"},
+            deepline_generic_http_denial(),
+        ),
+        (
+            {"tool": "generic_http_request"},
+            {**deepline_generic_http_denial(), "code": "ACCOUNT_FORBIDDEN"},
+        ),
+        (
+            {"tool": "generic_http_request"},
+            {**deepline_generic_http_denial(), "provider": "other"},
+        ),
+        (
+            {"tool": "generic_http_request"},
+            {**deepline_generic_http_denial(), "operation": "other"},
+        ),
+        (
+            {"tool": "generic_http_request"},
+            {**deepline_generic_http_denial(), "upstream_status": 401},
+        ),
+        (
+            {"tool": "generic_http_request"},
+            {
+                **deepline_generic_http_denial(),
+                "tool_error": {
+                    **deepline_generic_http_denial()["tool_error"],
+                    "statusCode": 401,
+                },
+            },
+        ),
+    ],
+    ids=(
+        "other_tool",
+        "other_top_level_code",
+        "other_top_level_provider",
+        "other_top_level_operation",
+        "other_upstream_status",
+        "other_tool_error_status",
+    ),
+)
+def test_deepline_request_refusal_requires_the_exact_denial_shape(
+    parameters, payload
+):
+    response = br.ProviderResponse(
+        403,
+        {"content-type": "application/json"},
+        json.dumps(payload).encode("utf-8"),
+    )
+
+    assert br._deepline_generic_http_request_refusal(parameters, response) is False
 
 
 def test_default_http_transport_does_not_inherit_proxy_environment():
@@ -2246,6 +2542,7 @@ def test_openrouter_http_200_top_level_error_applies_to_error_finished_choice_wi
 @pytest.mark.parametrize("payload", [
     {"error": {"message": "missing status"}},
     {"error": {"code": "429", "message": "string status"}},
+    {"error_type": [], "error": {"code": "invalid_prompt"}},
     {"error": {"code": 399, "message": "non-error status"}},
     {"choices": [{"finish_reason": "error", "error": {"code": 600}}]},
     {"error": {"code": 429}, "choices": [{"finish_reason": "error", "error": {"code": 502}}]},

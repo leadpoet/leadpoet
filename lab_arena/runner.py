@@ -1947,6 +1947,7 @@ class AssignmentExecutor:
                 call.get("error_code") in ("broker_unavailable", "provider_unavailable")
                 or (
                     operations.provider_status_is_infrastructure(call.get("provider_status"))
+                    and call.get("error_code") != "provider_request_refused"
                     and not (call.get("funding_source") == "miner_key" and call.get("provider_status") in (401, 402, 403))
                 )
                 for call in state.calls

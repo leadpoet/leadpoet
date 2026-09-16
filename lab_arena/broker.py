@@ -61,6 +61,7 @@ GENERIC_ERRORS = {
     "call_uncertain": 409,
     "call_refused": 402,
     "provider_unavailable": 502,
+    "provider_request_refused": 403,
     "broker_unavailable": 503,
     "miner_credentials_unavailable": 402,
     "miner_provider_not_configured": 400,
@@ -89,6 +90,10 @@ _DEEPLINE_BILLING_MAX_ATTEMPTS = 24
 _DEEPLINE_BILLING_POLL_SECONDS = 2.0
 _OPENROUTER_BILLING_MAX_ATTEMPTS = 6
 _OPENROUTER_BILLING_POLL_SECONDS = 2.0
+_OPENROUTER_RESPONSE_POLICY_ERROR_CODES = {
+    "content_policy_violation": "image_content_policy_violation",
+    "refusal": "invalid_prompt",
+}
 OPENROUTER_DELAYED_RECONCILIATION_TIMEOUT_SECONDS = 5.0
 _SETTLEMENT_STORE_MAX_ATTEMPTS = 3
 DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS = 5.0
@@ -1319,6 +1324,15 @@ def _openrouter_effective_response(response: ProviderResponse) -> ProviderRespon
     statuses = []
     for error in errors:
         code = error.get("code") if isinstance(error, Mapping) else None
+        if (
+            error is top_level_error
+            and isinstance(document.get("error_type"), str)
+            and document["error_type"] in _OPENROUTER_RESPONSE_POLICY_ERROR_CODES
+            and _OPENROUTER_RESPONSE_POLICY_ERROR_CODES[
+                document["error_type"]
+            ] == code
+        ):
+            code = 403
         if code == "rate_limit_exceeded":
             code = 429
         if isinstance(code, bool) or not isinstance(code, int) or not 400 <= code <= 599:
@@ -1369,6 +1383,133 @@ def _provider_call_succeeded(
     return True
 
 
+def _openrouter_request_policy_refusal(response: ProviderResponse) -> bool:
+    """Identify only documented request-specific OpenRouter policy refusals."""
+
+    if response.status != 403:
+        return False
+    try:
+        document = json.loads(response.body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(document, Mapping):
+        return False
+    document_error_type_present = "error_type" in document
+    document_error_type = document.get("error_type")
+    if (
+        document_error_type_present
+        and (
+            not isinstance(document_error_type, str)
+            or document_error_type not in _OPENROUTER_RESPONSE_POLICY_ERROR_CODES
+        )
+    ):
+        return False
+    errors: List[Any] = []
+    top_level_error = document.get("error")
+    if top_level_error is not None:
+        errors.append(top_level_error)
+    choices = document.get("choices")
+    if isinstance(choices, list):
+        errors.extend(
+            choice.get("error")
+            for choice in choices
+            if isinstance(choice, Mapping) and choice.get("error") is not None
+        )
+    if not errors:
+        return False
+    if document_error_type_present and (
+        len(errors) != 1 or errors[0] is not top_level_error
+    ):
+        return False
+    for error in errors:
+        if not isinstance(error, Mapping):
+            return False
+        error_code = error.get("code")
+        metadata = error.get("metadata")
+        if document_error_type_present:
+            if isinstance(metadata, Mapping) and "error_type" in metadata and (
+                metadata.get("error_type") != document_error_type
+            ):
+                return False
+            return error_code in (
+                403,
+                _OPENROUTER_RESPONSE_POLICY_ERROR_CODES[document_error_type],
+            )
+        if error_code is not None and error_code != 403:
+            return False
+        if not isinstance(metadata, Mapping):
+            return False
+        if "error_type" in metadata:
+            if metadata.get("error_type") in (
+                "content_policy_violation",
+                "refusal",
+            ):
+                continue
+            return False
+        patterns = metadata.get("patterns")
+        if (
+            error_code == 403
+            and isinstance(patterns, list)
+            and patterns
+            and all(
+                isinstance(pattern, str) and pattern.strip()
+                for pattern in patterns
+            )
+        ):
+            continue
+        reasons = metadata.get("reasons")
+        if not (
+            isinstance(reasons, list)
+            and all(isinstance(reason, str) for reason in reasons)
+            and isinstance(metadata.get("flagged_input"), str)
+            and isinstance(metadata.get("provider_name"), str)
+            and metadata["provider_name"].strip()
+            and isinstance(metadata.get("model_slug"), str)
+            and metadata["model_slug"].strip()
+        ):
+            return False
+    return True
+
+
+def _deepline_generic_http_request_refusal(
+    parameters: Mapping[str, Any], response: ProviderResponse
+) -> bool:
+    """Identify the observed per-request Deepline generic HTTP denial."""
+
+    if response.status != 403 or parameters.get("tool") != "generic_http_request":
+        return False
+    try:
+        document = json.loads(response.body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(document, Mapping):
+        return False
+    tool_error = document.get("tool_error")
+    return (
+        document.get("code") == "PROVIDER_AUTHORIZATION_FAILED"
+        and document.get("provider") == "generic_http"
+        and document.get("operation") == "generic_http_request"
+        and document.get("upstream_status") == 403
+        and isinstance(tool_error, Mapping)
+        and tool_error.get("code") == "PROVIDER_AUTHORIZATION_FAILED"
+        and tool_error.get("statusCode") == 403
+        and tool_error.get("provider") == "generic_http"
+        and tool_error.get("operation") == "generic_http_request"
+    )
+
+
+def _provider_request_refused(
+    provider: str,
+    parameters: Mapping[str, Any],
+    response: ProviderResponse,
+) -> bool:
+    if provider == "openrouter":
+        return _openrouter_request_policy_refusal(response)
+    if provider == "deepline":
+        return _deepline_generic_http_request_refusal(parameters, response)
+    return False
+
+
 def _miner_credential_failure(
     provider: str,
     response: ProviderResponse,
@@ -1377,14 +1518,19 @@ def _miner_credential_failure(
 ) -> bool:
     """Return true only for a failure tied to the submitted account.
 
-    OpenRouter can relay an upstream provider 429 through the submitted
-    OpenRouter account. Its documented metadata identifies that provider, so
-    Arena treats that response as infrastructure instead of miner account
-    exhaustion. An unqualified OpenRouter 429 remains an account rate limit.
+    OpenRouter can relay an upstream provider 429 or reject one request under
+    content policy through the submitted account. Its documented metadata
+    distinguishes those responses from miner account failures. Unqualified
+    403 and 429 responses remain account failures.
     """
 
-    if response.status in (401, 402, 403):
+    if response.status in (401, 402):
         return True
+    if response.status == 403:
+        return not (
+            provider == "openrouter"
+            and _openrouter_request_policy_refusal(response)
+        )
     if response.status != 429 or not champion_credential_retry:
         return False
     if provider != "openrouter":
@@ -2150,6 +2296,17 @@ class Broker:
             ):
                 return _error_result("broker_unavailable", summary)
             summary.update({"outcome": "settled", "idempotent": True, "actual_microusd": reserved.get("amount_microusd")})
+            if terminal_status == 403:
+                try:
+                    terminal_error = json.loads(terminal_body).get("error")
+                except (ValueError, AttributeError):
+                    terminal_error = None
+                if (
+                    isinstance(terminal_error, dict)
+                    and terminal_error.get("code") == "provider_request_refused"
+                ):
+                    summary["error_code"] = "provider_request_refused"
+                    summary["provider_status"] = 403
             if funding_source == "miner_key" and terminal_status == 402:
                 try:
                     error = json.loads(terminal_body).get("error")
@@ -2579,8 +2736,14 @@ class Broker:
                 response,
                 raw_document,
             )
+            request_refused = _provider_request_refused(
+                effective_operation.provider,
+                effective_normalized,
+                response,
+            )
             miner_credential_failure = (
                 funding_source == "miner_key"
+                and not request_refused
                 and _miner_credential_failure(
                     effective_operation.provider,
                     response,
@@ -2605,7 +2768,15 @@ class Broker:
                 and response.status not in (400, 401, 402, 403, 404, 422, 429)
                 and raw_actual is None
             )
-            if miner_credential_failure:
+            if request_refused:
+                failure_stage = "response_sanitization"
+                refused = _error_result("provider_request_refused", summary)
+                sanitized_status, sanitized_headers, sanitized_body = (
+                    refused.status,
+                    refused.headers,
+                    refused.body,
+                )
+            elif miner_credential_failure:
                 failure_stage = "response_sanitization"
                 refused = _error_result("miner_credentials_unavailable", summary)
                 sanitized_status, sanitized_headers, sanitized_body = refused.status, refused.headers, refused.body
@@ -2800,6 +2971,15 @@ class Broker:
                 summary.update({"outcome": "uncertain", "actual_microusd": amount})
             return _error_result("provider_unavailable", summary)
         settle_status = settled.get("status")
+        if settle_status == "settled" and request_refused:
+            summary.update(
+                {
+                    "outcome": "settled",
+                    "actual_microusd": actual,
+                    "provider_status": provider_status_for_summary,
+                }
+            )
+            return _error_result("provider_request_refused", summary)
         if settle_status == "settled" and miner_credential_failure:
             summary.update({"outcome": "settled", "actual_microusd": actual, "provider_status": provider_status_for_summary})
             return _error_result("miner_credentials_unavailable", summary)

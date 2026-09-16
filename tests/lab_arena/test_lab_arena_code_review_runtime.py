@@ -337,6 +337,49 @@ def test_http_failures_persist_only_bounded_classification(
     assert store.finish_calls[0][5] is None
 
 
+@pytest.mark.parametrize("http_status", [200, 403])
+@pytest.mark.parametrize("error_type", ["content_policy_violation", "refusal"])
+def test_review_content_refusal_is_not_a_credential_failure(error_type, http_status):
+    private_text = "private flagged content"
+    transport = ReviewTransport(lambda _parameters: {
+        "status": http_status,
+        "body": {"error": {
+            "code": 403,
+            "message": private_text,
+            "metadata": {"error_type": error_type, "flagged_input": private_text},
+        }},
+    })
+    reviewer, row, store, _objects = _reviewer(_archive(_source()), transport)
+
+    assert reviewer.review(row)["status"] == "error"
+    document = store.finish_calls[0][4]
+    assert document["error_code"] == "code_review_provider_request_rejected"
+    assert document["provider_http_status"] == 403
+    assert document["retryable"] is False
+    assert private_text not in repr(store.finish_calls)
+    assert store.finish_calls[0][5] is None  # Preserve uncertain accounting.
+    assert len(transport.sent) == 1
+
+
+@pytest.mark.parametrize("error_status", [401, 402, 403, 429, 503])
+def test_review_embedded_provider_error_uses_same_typed_diagnostic(error_status):
+    from lab_arena import code_review_policy
+
+    transport = ReviewTransport(lambda _parameters: {
+        "status": 200,
+        "body": {"error": {"code": error_status, "message": "private error"}},
+    })
+    reviewer, row, store, _objects = _reviewer(_archive(_source()), transport)
+
+    assert reviewer.review(row)["status"] == "error"
+    document = store.finish_calls[0][4]
+    expected = code_review_policy.provider_http_diagnostic(error_status)
+    assert {key: document[key] for key in expected} == expected
+    assert "private error" not in repr(store.finish_calls)
+    assert store.finish_calls[0][5] is None
+    assert len(transport.sent) == 1
+
+
 def test_non_json_provider_error_does_not_persist_body():
     provider_prose = b"upstream secret prose"
 

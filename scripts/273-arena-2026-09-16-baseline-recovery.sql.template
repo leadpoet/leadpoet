@@ -431,8 +431,8 @@ BEGIN
      OR (v_score_cost ->> 'success_unresolved_calls')::BIGINT <> 0
      OR (SELECT pg_catalog.count(*)
          FROM public.lab_arena_ledger
-         WHERE round_id = v_authority.round_id
-           AND submission_id = 'baseline-2026-09-16'
+         WHERE round_id = 'arena-2026-09-16-rerun269archive'
+           AND submission_id = 'baseline-2026-09-16-native-rerun269-archive'
            AND entry_kind = 'settlement'
            AND entry_doc ->>
                  'sep16_generic_http_catalog_reconciliation' = 'true') <> 2
@@ -807,7 +807,8 @@ BEGIN
      OR NOT public.lab_arena_sep16_recovery272_archive_valid_v1()
      OR (SELECT pg_catalog.count(*)
          FROM public.lab_arena_ledger
-         WHERE round_id = v_round_id AND submission_id = v_baseline_id
+         WHERE round_id = 'arena-2026-09-16-rerun269archive'
+           AND submission_id = 'baseline-2026-09-16-native-rerun269-archive'
            AND entry_kind = 'settlement'
            AND entry_doc ->>
                  'sep16_generic_http_catalog_reconciliation' = 'true') <> 2
@@ -952,8 +953,8 @@ BEGIN
      OR NOT public.lab_arena_sep16_challenger_seals_valid_v1()
      OR (SELECT pg_catalog.count(*)
          FROM public.lab_arena_ledger
-         WHERE round_id = v_authority.archive_round_id
-           AND submission_id = v_authority.archive_submission_id
+         WHERE round_id = 'arena-2026-09-16-rerun269archive'
+           AND submission_id = 'baseline-2026-09-16-native-rerun269-archive'
            AND entry_kind = 'settlement'
            AND entry_doc ->>
                  'sep16_generic_http_catalog_reconciliation' = 'true') <> 2

@@ -23,6 +23,7 @@ from tests.lab_arena.sep16_baseline_recovery_postgres_test import (
 )
 from tests.lab_arena.sep16_baseline_recovery272_postgres_test import (
     ARCHIVE_ROUND as RERUN269_ARCHIVE,
+    ARCHIVE_SUBMISSION as RERUN269_ARCHIVE_SUBMISSION,
     RECOVERY_SOURCE_COMMIT as TERMINAL_SOURCE_COMMIT,
     RECOVERY_SOURCE_REF as TERMINAL_SOURCE_REF,
     RECOVERY_SOURCE_SHA as TERMINAL_SOURCE_SHA,
@@ -179,7 +180,6 @@ def _prepare_terminal_recovery272(connection, objects=None):
     migration272 = _render_prior_recovery272(connection, schedule272)
     _install_prior_recovery272(connection, migration272, schedule272)
     _fail_recovery269_and_cancel(connection)
-    _append_catalog_settlements(connection)
     return schedule272, hotkeys, ids
 
 
@@ -441,7 +441,7 @@ def test_recovery273_preserves_history_and_publishes_positive(connect, tmp_path,
                 "SELECT count(*) FROM public.lab_arena_ledger WHERE round_id=%s "
                 "AND submission_id=%s AND entry_doc->>"
                 "'sep16_generic_http_catalog_reconciliation'='true'",
-                (ARCHIVE_ROUND, ARCHIVE_SUBMISSION),
+                (RERUN269_ARCHIVE, RERUN269_ARCHIVE_SUBMISSION),
             )
             assert cursor.fetchone() == (2,)
             cursor.execute(

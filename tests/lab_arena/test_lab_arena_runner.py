@@ -630,6 +630,157 @@ def test_run_once_refills_a_slot_before_a_slow_lease_finishes(tmp_path):
         runner_.close()
 
 
+def test_run_once_claims_retry_created_after_an_idle_response(tmp_path):
+    class RetryApi(FakeApi):
+        def __init__(self):
+            super().__init__([lease("slow", 0), lease("long", 1)])
+            self.idle_seen = threading.Event()
+
+        def claim(self, envelope):
+            with self.lock:
+                response = super().claim(envelope)
+            if response.get("status") == "no_pending":
+                self.idle_seen.set()
+            return response
+
+    api = RetryApi()
+    (tmp_path / "work").mkdir()
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0), parallel=3)
+    config.claim_poll_seconds = 0.1
+    runner_ = rn.Runner(config)
+    existing_release = threading.Event()
+    retry_started = threading.Event()
+
+    def run_lease(run_lease):
+        try:
+            if run_lease["run_id"] in ("slow", "long"):
+                assert existing_release.wait(timeout=3)
+            elif run_lease["run_id"] == "retry":
+                retry_started.set()
+        finally:
+            runner_._slots.release()
+
+    runner_._run_lease = run_lease
+    caller = ThreadPoolExecutor(max_workers=1)
+    try:
+        result = caller.submit(runner_.run_once, max_claims=3)
+        assert api.idle_seen.wait(timeout=2)
+        time.sleep(0.05)
+        assert len(api.claims) == 3  # two leases and one bounded idle check
+        with api.lock:
+            api.leases.append(lease("retry", 0))
+        assert retry_started.wait(timeout=2)
+        assert not existing_release.is_set()
+        existing_release.set()
+        assert result.result(timeout=2) == 3
+        assert [item["run_id"] for item in api.leases] == []
+    finally:
+        existing_release.set()
+        caller.shutdown(wait=True)
+        runner_.close()
+
+
+def test_run_once_checks_later_round_before_waiting_to_rescan(tmp_path):
+    class RoundApi(FakeApi):
+        def __init__(self):
+            super().__init__([])
+            self.available = {
+                "old-round": [lease("old", 0)],
+                "new-round": [lease("new", 1)],
+            }
+
+        def claim(self, envelope):
+            self.claims.append(envelope)
+            leases = self.available[envelope["round_id"]]
+            return leases.pop(0) if leases else {"status": "no_pending"}
+
+    api = RoundApi()
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(
+        make_config(tmp_path, api, BridgingRuntime(calls=0), parallel=2)
+    )
+    runner_._round_ids = ["old-round", "new-round"]
+    old_release = threading.Event()
+    new_started = threading.Event()
+
+    def run_lease(run_lease):
+        try:
+            if run_lease["run_id"] == "old":
+                assert old_release.wait(timeout=3)
+            else:
+                new_started.set()
+        finally:
+            runner_._slots.release()
+
+    runner_._run_lease = run_lease
+    caller = ThreadPoolExecutor(max_workers=1)
+    try:
+        result = caller.submit(runner_.run_once, max_claims=2)
+        assert new_started.wait(timeout=2)
+        assert not result.done()
+        old_release.set()
+        assert result.result(timeout=2) == 2
+        assert [claim["round_id"] for claim in api.claims] == [
+            "old-round",
+            "old-round",
+            "new-round",
+        ]
+    finally:
+        old_release.set()
+        caller.shutdown(wait=True)
+        runner_.close()
+
+
+def test_run_once_stop_prevents_refill_after_idle(tmp_path):
+    class RetryApi(FakeApi):
+        def __init__(self):
+            super().__init__([lease("slow", 0), lease("long", 1)])
+            self.idle_seen = threading.Event()
+
+        def claim(self, envelope):
+            with self.lock:
+                response = super().claim(envelope)
+            if response.get("status") == "no_pending":
+                self.idle_seen.set()
+            return response
+
+    api = RetryApi()
+    (tmp_path / "work").mkdir()
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0), parallel=3)
+    config.claim_poll_seconds = 0.1
+    runner_ = rn.Runner(config)
+    existing_release = threading.Event()
+    retry_started = threading.Event()
+
+    def run_lease(run_lease):
+        try:
+            if run_lease["run_id"] in ("slow", "long"):
+                assert existing_release.wait(timeout=3)
+            elif run_lease["run_id"] == "retry":
+                retry_started.set()
+        finally:
+            runner_._slots.release()
+
+    runner_._run_lease = run_lease
+    stop = threading.Event()
+    caller = ThreadPoolExecutor(max_workers=1)
+    try:
+        result = caller.submit(runner_.run_once, max_claims=3, stop_event=stop)
+        assert api.idle_seen.wait(timeout=2)
+        stop.set()
+        with api.lock:
+            api.leases.append(lease("retry", 0))
+        existing_release.set()
+        assert result.result(timeout=2) == 2
+        assert not retry_started.is_set()
+        assert [item["run_id"] for item in api.leases] == ["retry"]
+    finally:
+        stop.set()
+        existing_release.set()
+        caller.shutdown(wait=True)
+        runner_.close()
+
+
 def test_run_once_returns_when_its_only_slot_is_already_occupied(tmp_path):
     api = FakeApi([])
     (tmp_path / "work").mkdir()

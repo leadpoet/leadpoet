@@ -39,6 +39,21 @@ def _native_input(*, tools=True, call=False):
     return items
 
 
+def _sixty_turn_native_history():
+    items = _native_input(tools=False)
+    for index in range(60):
+        call_id = "call-%d" % index
+        items.extend([
+            {"type": "reasoning", "id": "reasoning-%d" % index,
+             "summary": [], "encrypted_content": "opaque-%d" % index},
+            {"type": "custom_tool_call", "status": "completed", "call_id": call_id,
+             "name": "exec", "namespace": "functions", "input": "run"},
+            {"type": "custom_tool_call_output", "call_id": call_id,
+             "output": [{"type": "input_text", "text": "completed"}]},
+        ])
+    return items
+
+
 @pytest.mark.parametrize("tools,call", [(True, False), (True, True), (False, True)])
 def test_native_standard_namespaced_and_compaction_shapes_preserve_input(tools, call):
     params = {
@@ -120,9 +135,60 @@ def test_responses_frame_allowance_is_scoped_and_shared_caps_remain():
         contracts.check_strict_document(frame, contracts.PROVIDER_FRAME_LIMITS)
     assert operations.OPERATION_LIMITS.max_depth == 12
     assert operations.RESPONSES_OPERATION_LIMITS.max_depth == 24
+    assert operations.OPERATION_LIMITS.max_list_items == 128
+    assert operations.RESPONSES_OPERATION_LIMITS.max_list_items == 256
+    assert operations.OPERATION_LIMITS.max_total_bytes == 1_000_000
+    assert operations.RESPONSES_OPERATION_LIMITS.max_total_bytes == 1_000_000
+    assert operations.OPERATIONS["openrouter.chat"].max_request_bytes == 1_000_000
+    assert operations.OPERATIONS["openrouter.responses"].max_request_bytes == 1_000_000
+    assert contracts.RESPONSES_PROVIDER_FRAME_LIMITS.max_total_bytes == 1_100_000
+    assert contracts.CALL_QUOTAS_PER_ICP["openrouter"] == 60
     assert operations.OPERATIONS["openrouter.chat"].cost_rule["max_output_tokens"] == 4096
     assert operations.OPERATIONS["openrouter.responses"].cost_rule["max_output_tokens"] == 32_768
-    assert operations.operation_table_document()["operation_limit_overrides"]["openrouter.responses"]["max_depth"] == 24
+    assert operations.operation_table_document()["operation_limit_overrides"]["openrouter.responses"] == {
+        "max_depth": 24,
+        "max_list_items": 256,
+    }
+
+
+def test_responses_accepts_real_shaped_sixty_turn_history():
+    items = _sixty_turn_native_history()
+    assert 128 < len(items) <= operations.OPENROUTER_RESPONSES_MAX_INPUT_ITEMS
+    params = {"model": "openai/gpt-5.4", "input": items}
+    frame = {"operation_id": "openrouter.responses", "parameters": params}
+    contracts.check_strict_document(frame, contracts.RESPONSES_PROVIDER_FRAME_LIMITS)
+    assert operations.validate_operation_request("openrouter.responses", params)["input"] == items
+
+
+def test_responses_top_level_input_accepts_256_and_rejects_257_items():
+    item = {"type": "message", "role": "user", "content": "continue"}
+    params = {"model": "openai/gpt-5.4", "input": [dict(item) for _ in range(256)]}
+    assert len(operations.validate_operation_request("openrouter.responses", params)["input"]) == 256
+    params["input"].append(dict(item))
+    with pytest.raises(operations.OperationRequestError):
+        operations.validate_operation_request("openrouter.responses", params)
+
+
+@pytest.mark.parametrize("item", [
+    {"type": "message", "role": "user", "content": [
+        {"type": "input_text", "text": "x"} for _ in range(129)
+    ]},
+    {"type": "custom_tool_call_output", "call_id": "call-1", "output": [
+        {"type": "input_text", "text": "x"} for _ in range(129)
+    ]},
+])
+def test_responses_nested_129_item_lists_remain_rejected(item):
+    params = {"model": "openai/gpt-5.4", "input": [item]}
+    with pytest.raises(operations.OperationRequestError):
+        operations.validate_operation_request("openrouter.responses", params)
+
+
+def test_chat_129_messages_remain_rejected():
+    params = {"model": "openai/gpt-5.4", "messages": [
+        {"role": "user", "content": "continue"} for _ in range(129)
+    ]}
+    with pytest.raises(operations.OperationRequestError):
+        operations.validate_operation_request("openrouter.chat", params)
 
 
 def test_oversized_response_cap_is_rejected_before_provider_call():

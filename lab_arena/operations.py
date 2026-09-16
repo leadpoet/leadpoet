@@ -64,6 +64,7 @@ FIELD_FORMATS = ("https_url", "iso_date", "domain", "model_id")
 OPENROUTER_MAX_OUTPUT_TOKENS = 4096
 OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS = 32_768
 OPENROUTER_MAX_MESSAGES = 128
+OPENROUTER_RESPONSES_MAX_INPUT_ITEMS = 256
 OPENROUTER_MAX_CONTENT_CHARS = 32_000
 # Copied from gateway/research_lab/key_vault.py (section 3.1): the broker
 # injects this policy into every chat body; it is table data so its hash is
@@ -93,7 +94,11 @@ OPERATION_LIMITS = contracts.StrictLimits(
 # The structural pass never applies the total-size check itself: size is the
 # per-operation cap below and reports ``request_too_large``.
 _STRUCTURE_LIMITS = dataclasses.replace(OPERATION_LIMITS, max_total_bytes=2 ** 31)
-RESPONSES_OPERATION_LIMITS = dataclasses.replace(OPERATION_LIMITS, max_depth=24)
+RESPONSES_OPERATION_LIMITS = dataclasses.replace(
+    OPERATION_LIMITS,
+    max_depth=24,
+    max_list_items=OPENROUTER_RESPONSES_MAX_INPUT_ITEMS,
+)
 _RESPONSES_STRUCTURE_LIMITS = dataclasses.replace(RESPONSES_OPERATION_LIMITS, max_total_bytes=2 ** 31)
 
 ERROR_CODES = frozenset(
@@ -1210,7 +1215,10 @@ def operation_table_document() -> Dict[str, Any]:
             "max_total_bytes": OPERATION_LIMITS.max_total_bytes,
         },
         "operation_limit_overrides": {
-            "openrouter.responses": {"max_depth": RESPONSES_OPERATION_LIMITS.max_depth},
+            "openrouter.responses": {
+                "max_depth": RESPONSES_OPERATION_LIMITS.max_depth,
+                "max_list_items": RESPONSES_OPERATION_LIMITS.max_list_items,
+            },
         },
         "allowed_request_headers": sorted(ALLOWED_REQUEST_HEADERS),
         "credential_headers": sorted(CREDENTIAL_HEADERS),
@@ -1560,7 +1568,7 @@ def _validate_responses(parameters: Mapping[str, Any]) -> None:
     additional_tool_count = 0
     if isinstance(value, str):
         _validate_field(text, value, "$.input")
-    elif isinstance(value, list) and 1 <= len(value) <= OPENROUTER_MAX_MESSAGES:
+    elif isinstance(value, list) and 1 <= len(value) <= OPENROUTER_RESPONSES_MAX_INPUT_ITEMS:
         for item in value:
             kind = item.get("type", "message") if isinstance(item, dict) else None
             if kind not in item_fields:
@@ -1938,6 +1946,7 @@ __all__ = [
     "FORBIDDEN_FIELD_NAMES",
     "FieldSpec",
     "OPENROUTER_MAX_OUTPUT_TOKENS",
+    "OPENROUTER_RESPONSES_MAX_INPUT_ITEMS",
     "OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS",
     "OPENROUTER_STRICT_PROVIDER_POLICY",
     "OPENROUTER_OUTBOUND_HEADERS",

@@ -112,6 +112,35 @@ _OPENROUTER_RESPONSE_POLICY_ERROR_CODES = {
     "content_policy_violation": "image_content_policy_violation",
     "refusal": "invalid_prompt",
 }
+_OPENROUTER_RESPONSE_ERROR_TYPE_STATUSES = {
+    "context_length_exceeded": 400,
+    "max_tokens_exceeded": 400,
+    "token_limit_exceeded": 400,
+    "string_too_long": 400,
+    "authentication": 401,
+    "permission_denied": 403,
+    "payment_required": 402,
+    "rate_limit_exceeded": 429,
+    "provider_overloaded": 503,
+    "provider_unavailable": 502,
+    "invalid_request": 400,
+    "invalid_prompt": 400,
+    "not_found": 404,
+    "precondition_failed": 412,
+    "payload_too_large": 413,
+    "unprocessable": 422,
+    "content_policy_violation": 403,
+    "refusal": 403,
+    "invalid_image": 400,
+    "image_too_large": 400,
+    "image_too_small": 400,
+    "unsupported_image_format": 400,
+    "image_not_found": 404,
+    "image_download_failed": 400,
+    "server": 500,
+    "timeout": 504,
+    "unmapped": 500,
+}
 OPENROUTER_DELAYED_RECONCILIATION_TIMEOUT_SECONDS = 5.0
 _SETTLEMENT_STORE_MAX_ATTEMPTS = 3
 DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS = 5.0
@@ -1637,6 +1666,43 @@ def _error_result(code: str, call: Mapping[str, Any]) -> BrokerResult:
     return BrokerResult(GENERIC_ERRORS[code], {"content-type": "application/json", "content-length": str(len(body))}, body, dict(call, error_code=code))
 
 
+def _openrouter_responses_native_error_code(error_type: str) -> str:
+    if error_type == "rate_limit_exceeded":
+        return "rate_limit_exceeded"
+    if error_type in ("context_length_exceeded", "invalid_request", "refusal"):
+        return "invalid_prompt"
+    if error_type == "content_policy_violation":
+        return "image_content_policy_violation"
+    return "server_error"
+
+
+def _openrouter_responses_error_status(
+    document: Mapping[str, Any], error: Any
+) -> int:
+    """Validate one documented Responses failure and return its precise status."""
+
+    error_type = document.get("error_type")
+    if (
+        not isinstance(error_type, str)
+        or error_type not in _OPENROUTER_RESPONSE_ERROR_TYPE_STATUSES
+        or document.get("status") != "failed"
+        or error is not document.get("error")
+        or not isinstance(error, Mapping)
+        or error.get("code") != _openrouter_responses_native_error_code(error_type)
+        or not isinstance(error.get("message"), str)
+        or not error["message"].strip()
+    ):
+        raise operations.OperationResponseError("invalid_response")
+    metadata = error.get("metadata")
+    if metadata is not None and not isinstance(metadata, Mapping):
+        raise operations.OperationResponseError("invalid_response")
+    if isinstance(metadata, Mapping) and "error_type" in metadata and (
+        metadata.get("error_type") != error_type
+    ):
+        raise operations.OperationResponseError("invalid_response")
+    return _OPENROUTER_RESPONSE_ERROR_TYPE_STATUSES[error_type]
+
+
 def _openrouter_effective_response(response: ProviderResponse) -> ProviderResponse:
     """Expose errors which OpenRouter reports inside an HTTP 2xx body.
 
@@ -1673,18 +1739,17 @@ def _openrouter_effective_response(response: ProviderResponse) -> ProviderRespon
     if not errors:
         return response
 
+    canonical_error_type_present = "error_type" in document
+    if canonical_error_type_present and (
+        len(errors) != 1 or errors[0] is not top_level_error
+    ):
+        raise operations.OperationResponseError("invalid_response")
     statuses = []
     for error in errors:
+        if canonical_error_type_present:
+            statuses.append(_openrouter_responses_error_status(document, error))
+            continue
         code = error.get("code") if isinstance(error, Mapping) else None
-        if (
-            error is top_level_error
-            and isinstance(document.get("error_type"), str)
-            and document["error_type"] in _OPENROUTER_RESPONSE_POLICY_ERROR_CODES
-            and _OPENROUTER_RESPONSE_POLICY_ERROR_CODES[
-                document["error_type"]
-            ] == code
-        ):
-            code = 403
         if code == "rate_limit_exceeded":
             code = 429
         if isinstance(code, bool) or not isinstance(code, int) or not 400 <= code <= 599:
@@ -2915,6 +2980,7 @@ class Broker:
         openrouter_effective_response: Optional[ProviderResponse] = None
         openrouter_generation_present = False
         openrouter_generation_id: Optional[str] = None
+        openrouter_canonical_response_error = False
         openrouter_retry_after_seconds: object = _RETRY_AFTER_ABSENT
         scrapingdog_observed_success_status: Optional[int] = None
         try:
@@ -2964,6 +3030,13 @@ class Broker:
                         raw_document = json.loads(response.body.decode("utf-8"))
                     except (UnicodeDecodeError, ValueError):
                         raw_document = None
+                    openrouter_canonical_response_error = bool(
+                        openrouter_effective_response is not None
+                        and 200 <= response.status < 300
+                        and not 200 <= openrouter_effective_response.status < 300
+                        and isinstance(raw_document, Mapping)
+                        and "error_type" in raw_document
+                    )
                     openrouter_retry_after_seconds = _retry_after_seconds(
                         response.headers
                     )
@@ -3303,7 +3376,11 @@ class Broker:
             )
             missing_openrouter_cost = (
                 effective_operation.provider == "openrouter"
-                and response.status not in (400, 401, 402, 403, 404, 422, 429)
+                and (
+                    openrouter_canonical_response_error
+                    or response.status
+                    not in (400, 401, 402, 403, 404, 422, 429)
+                )
                 and raw_actual is None
             )
             if request_refused:
@@ -3380,6 +3457,8 @@ class Broker:
                         "provider_status": int(response.status),
                     }
                 )
+                if request_refused:
+                    return _error_result("provider_request_refused", summary)
                 if miner_credential_failure:
                     return _error_result("miner_credentials_unavailable", summary)
                 return _error_result("provider_unavailable", summary)
@@ -3476,7 +3555,10 @@ class Broker:
                 "failure_stage": failure_stage,
                 "error_class": _safe_exception_class(exc),
             }
-            if failure_stage == "settlement":
+            if failure_stage == "settlement" or (
+                effective_operation.provider == "openrouter"
+                and failure_stage == "response_adaptation"
+            ):
                 uncertain_doc = _missing_provider_cost_call_doc(
                     response, raw_document, call_succeeded=call_succeeded,
                     deepline_request_id=deepline_request_id,
@@ -3486,9 +3568,11 @@ class Broker:
                     credential_fingerprint=provider_credential_fingerprint,
                 )
                 uncertain_doc.update({
-                    "reason": "settle_failure", "failure_stage": failure_stage,
+                    "failure_stage": failure_stage,
                     "error_class": _safe_exception_class(exc),
                 })
+                if failure_stage == "settlement":
+                    uncertain_doc["reason"] = "settle_failure"
                 if raw_actual is not None:
                     uncertain_doc["known_actual_microusd"] = raw_actual
                 if cost_record is not None:

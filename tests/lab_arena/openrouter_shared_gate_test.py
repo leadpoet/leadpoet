@@ -373,6 +373,292 @@ def test_strict_openrouter_429_cools_other_round_but_invalid_hint_does_not():
         assert invalid_gate._states[fingerprint()].cooldown_generation == 0
 
 
+@pytest.mark.parametrize(
+    "error_type,native_code,effective_status",
+    [
+        ("context_length_exceeded", "invalid_prompt", 400),
+        ("max_tokens_exceeded", "server_error", 400),
+        ("token_limit_exceeded", "server_error", 400),
+        ("string_too_long", "server_error", 400),
+        ("invalid_request", "invalid_prompt", 400),
+        ("invalid_prompt", "server_error", 400),
+        ("authentication", "server_error", 401),
+        ("permission_denied", "server_error", 403),
+        ("payment_required", "server_error", 402),
+        ("rate_limit_exceeded", "rate_limit_exceeded", 429),
+        ("refusal", "invalid_prompt", 403),
+        ("content_policy_violation", "image_content_policy_violation", 403),
+        ("provider_unavailable", "server_error", 502),
+        ("provider_overloaded", "server_error", 503),
+        ("not_found", "server_error", 404),
+        ("precondition_failed", "server_error", 412),
+        ("payload_too_large", "server_error", 413),
+        ("unprocessable", "server_error", 422),
+        ("invalid_image", "server_error", 400),
+        ("image_too_large", "server_error", 400),
+        ("image_too_small", "server_error", 400),
+        ("unsupported_image_format", "server_error", 400),
+        ("image_not_found", "server_error", 404),
+        ("image_download_failed", "server_error", 400),
+        ("timeout", "server_error", 504),
+        ("server", "server_error", 500),
+        ("unmapped", "server_error", 500),
+    ],
+)
+def test_responses_canonical_error_type_restores_precise_status(
+    error_type, native_code, effective_status
+):
+    document = {
+        "id": "resp-documented-error",
+        "status": "failed",
+        "error": {"code": native_code, "message": "documented provider error"},
+        "error_type": error_type,
+    }
+    response = br.ProviderResponse(
+        200, {"content-type": "application/json"}, json.dumps(document).encode()
+    )
+
+    effective = br._openrouter_effective_response(response)
+
+    assert effective.status == effective_status
+    assert effective.body == response.body
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda document: document.update(error_type="future_error"),
+        lambda document: document["error"].update(code="invalid_prompt"),
+        lambda document: document.update(status="completed"),
+        lambda document: document["error"].update(
+            metadata={"error_type": "server"}
+        ),
+        lambda document: document["error"].update(message=""),
+        lambda document: document.update(
+            choices=[
+                {
+                    "finish_reason": "error",
+                    "error": {"code": 502, "message": "conflict"},
+                }
+            ]
+        ),
+    ],
+    ids=(
+        "unknown-canonical-type",
+        "native-code-conflict",
+        "nonfailed-status",
+        "metadata-type-conflict",
+        "missing-message",
+        "multiple-error-locations",
+    ),
+)
+def test_responses_canonical_error_envelope_fails_closed(mutate):
+    document = {
+        "id": "resp-malformed-error",
+        "status": "failed",
+        "error": {"code": "server_error", "message": "provider unavailable"},
+        "error_type": "provider_unavailable",
+    }
+    mutate(document)
+    response = br.ProviderResponse(
+        200, {"content-type": "application/json"}, json.dumps(document).encode()
+    )
+
+    with pytest.raises(operations.OperationResponseError, match="invalid_response"):
+        br._openrouter_effective_response(response)
+
+
+@pytest.mark.parametrize(
+    "error_type,native_code,effective_status",
+    [
+        ("invalid_request", "invalid_prompt", 400),
+        ("provider_unavailable", "server_error", 502),
+    ],
+)
+def test_unknown_canonical_failure_cost_stays_uncertain_and_reconcilable(
+    monkeypatch, error_type, native_code, effective_status
+):
+    generation_id = "resp-unknown-cost-" + error_type
+    document = {
+        "id": generation_id,
+        "status": "failed",
+        "error": {"code": native_code, "message": "bounded failure"},
+        "error_type": error_type,
+    }
+    monkeypatch.setattr(br, "_openrouter_generation_readback", lambda **_kwargs: None)
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, document)])
+    )
+
+    result = broker.execute(
+        context(45), operation_id="openrouter.responses", parameters=PARAMETERS,
+        action_sequence=1, timeout_ms=120_000,
+    )
+
+    call = next(iter(store.calls.values()))
+    assert result.call["outcome"] == "uncertain"
+    assert result.call["provider_status"] == effective_status
+    assert call["kind"] == "uncertain"
+    assert call["uncertain_doc"]["reason"] == "missing_provider_cost"
+    assert call["uncertain_doc"]["call_succeeded"] is False
+    assert call["uncertain_doc"]["openrouter_generation_id"] == generation_id
+    assert call["uncertain_doc"]["credential_fingerprint"] == fingerprint()
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+    assert len(transport.sent) == 1
+
+
+def test_known_canonical_failure_charge_is_settled_without_resend():
+    document = {
+        "id": "resp-known-cost-error",
+        "status": "failed",
+        "error": {"code": "server_error", "message": "provider unavailable"},
+        "error_type": "provider_unavailable",
+        "usage": {"cost": "0.000123"},
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, document)])
+    )
+
+    result = broker.execute(
+        context(46), operation_id="openrouter.responses", parameters=PARAMETERS,
+        action_sequence=1, timeout_ms=120_000,
+    )
+
+    call = next(iter(store.calls.values()))
+    assert result.call["outcome"] == "settled"
+    assert result.call["provider_status"] == 502
+    assert result.call["actual_microusd"] == 123
+    assert call["kind"] == "settlement"
+    assert call["terminal"]["call_succeeded"] is False
+    assert store.log == ["reserve", "dispatch", "settle"]
+    assert len(transport.sent) == 1
+
+
+def test_canonical_refusal_keeps_policy_classification_with_unknown_cost(
+    monkeypatch,
+):
+    document = {
+        "id": "resp-policy-refusal",
+        "status": "failed",
+        "error": {"code": "invalid_prompt", "message": "request refused"},
+        "error_type": "refusal",
+    }
+    monkeypatch.setattr(br, "_openrouter_generation_readback", lambda **_kwargs: None)
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, document)])
+    )
+
+    result = broker.execute(
+        context(49), operation_id="openrouter.responses", parameters=PARAMETERS,
+        action_sequence=1, timeout_ms=120_000,
+    )
+
+    call = next(iter(store.calls.values()))
+    assert result.status == 403
+    assert result.call["error_code"] == "provider_request_refused"
+    assert result.call["provider_status"] == 403
+    assert call["kind"] == "uncertain"
+    assert call["uncertain_doc"]["call_succeeded"] is False
+    assert len(transport.sent) == 1
+
+
+def test_canonical_authentication_keeps_miner_credential_classification(
+    monkeypatch,
+):
+    miner_key = "sk-or-v1-" + "m" * 40
+    document = {
+        "id": "resp-miner-authentication",
+        "status": "failed",
+        "error": {"code": "server_error", "message": "invalid credentials"},
+        "error_type": "authentication",
+    }
+    monkeypatch.setattr(br, "_openrouter_generation_readback", lambda **_kwargs: None)
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, document)]),
+        credential_for=lambda _context, _provider: miner_key,
+        provider_funding_source_for=lambda _context, _provider: "miner_key",
+    )
+
+    result = broker.execute(
+        context(50), operation_id="openrouter.responses", parameters=PARAMETERS,
+        action_sequence=1, timeout_ms=120_000,
+    )
+
+    call = next(iter(store.calls.values()))
+    assert result.status == 402
+    assert result.call["error_code"] == "miner_credentials_unavailable"
+    assert result.call["provider_status"] == 401
+    assert call["kind"] == "uncertain"
+    assert call["uncertain_doc"]["call_succeeded"] is False
+    assert call["uncertain_doc"]["credential_fingerprint"] == fingerprint(miner_key)
+    assert miner_key not in json.dumps(call, sort_keys=True)
+    assert len(transport.sent) == 1
+
+
+def test_malformed_response_adaptation_keeps_safe_reconciliation_identity(
+    monkeypatch,
+):
+    generation_id = "resp-malformed-reconcilable"
+    document = {
+        "id": generation_id,
+        "status": "failed",
+        "error": {"code": "server_error", "message": "unrecognized failure"},
+        "error_type": "future_error",
+    }
+    monkeypatch.setattr(br, "_openrouter_generation_readback", lambda **_kwargs: None)
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, document)])
+    )
+
+    result = broker.execute(
+        context(47), operation_id="openrouter.responses", parameters=PARAMETERS,
+        action_sequence=1, timeout_ms=120_000,
+    )
+
+    call = next(iter(store.calls.values()))
+    diagnostics = call["uncertain_doc"]
+    assert result.call["outcome"] == "uncertain"
+    assert call["kind"] == "uncertain"
+    assert diagnostics["reason"] == "missing_provider_cost"
+    assert diagnostics["failure_stage"] == "response_adaptation"
+    assert diagnostics["error_class"] == "OperationResponseError"
+    assert diagnostics["provider_status"] == 200
+    assert diagnostics["call_succeeded"] is False
+    assert diagnostics["openrouter_generation_id"] == generation_id
+    assert diagnostics["credential_fingerprint"] == fingerprint()
+    assert HOST_KEYS["openrouter"] not in json.dumps(diagnostics, sort_keys=True)
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+    assert len(transport.sent) == 1
+
+
+def test_provider_credential_echo_never_enters_error_diagnostics(monkeypatch):
+    document = {
+        "id": "resp-credential-echo",
+        "status": "failed",
+        "error": {
+            "code": "server_error",
+            "message": "echo " + HOST_KEYS["openrouter"],
+        },
+        "error_type": "server",
+    }
+    monkeypatch.setattr(br, "_openrouter_generation_readback", lambda **_kwargs: None)
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, document)])
+    )
+
+    result = broker.execute(
+        context(48), operation_id="openrouter.responses", parameters=PARAMETERS,
+        action_sequence=1, timeout_ms=120_000,
+    )
+
+    call = next(iter(store.calls.values()))
+    assert result.call["outcome"] == "uncertain"
+    assert call["kind"] == "uncertain"
+    assert call["uncertain_doc"]["response_provenance"] == "credential_echo"
+    assert HOST_KEYS["openrouter"] not in json.dumps(call, sort_keys=True)
+    assert len(transport.sent) == 1
+
+
 def test_retained_responses_429_pauses_gate_before_billing_readback(
     monkeypatch,
 ):

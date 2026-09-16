@@ -65,7 +65,7 @@ def baseline_promoter_from_environment():
     from lab_arena.promotion import GitPromoter
 
     environment = {}
-    repository = "https://github.com/leadpoet/pydantic-harness.git"
+    repository = "https://github.com/leadpoet/champion_model.git"
     key_path = os.environ.get("LAB_ARENA_GIT_SSH_KEY_PATH", "").strip()
     token = os.environ.get("LAB_ARENA_GITHUB_TOKEN", "").strip()
     if key_path and token:
@@ -76,7 +76,7 @@ def baseline_promoter_from_environment():
             raise ServiceError("promotion_ssh_key_invalid", 500)
         if key.stat().st_mode & 0o077:
             raise ServiceError("promotion_ssh_key_permissions_invalid", 500)
-        repository = "git@github.com:leadpoet/pydantic-harness.git"
+        repository = "git@github.com:leadpoet/champion_model.git"
         environment["GIT_SSH_COMMAND"] = (
             "ssh -i %s -o IdentitiesOnly=yes -o BatchMode=yes "
             "-o StrictHostKeyChecking=yes -o ConnectTimeout=15"

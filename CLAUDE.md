@@ -1,5 +1,27 @@
 # Agent Instructions
 
+## Scoped production authorization: champion model repository rename
+
+On 2026-09-16 the user explicitly authorized renaming the public baseline
+repository from `leadpoet/pydantic-harness` to `leadpoet/champion_model`.
+Update the active Arena baseline download, HTTPS and SSH promotion remotes,
+public dashboard link, live documentation, and direct tests. Preserve the
+existing `main` and promoted `lab` branch behavior, source archives, promotion
+state, scoring, rewards, weights, and historical migrations, data, fixtures,
+and audit evidence that record the former repository name. Repository rename,
+production environment updates, deployment, and live validation are separate
+release actions owned by the active parent task.
+
+The same current instruction explicitly authorizes stopping only exact
+competing model test processes and sandboxes on the primary validator while
+preserving their artifacts and provider costs. It also authorizes ten execution
+slots derived through the existing configuration from nine verified proxy
+profiles plus the validator's native route. The observed standalone
+`native_probe_stable_sol_high_quote_unlimited_shared_budget_loader_adfee4333481.py`
+launcher is external-SSH test work, not the normal validator or a real Arena
+round. This repository-reference change does not itself stop processes or
+change production capacity.
+
 ## Scoped production authorization: native Tyche September 16 runtime
 
 On 2026-09-16 the user superseded the September 15 rerun scope and explicitly

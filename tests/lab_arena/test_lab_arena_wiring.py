@@ -93,12 +93,15 @@ def test_public_baseline_download_is_https_and_byte_bounded(monkeypatch):
 
 def test_daily_baseline_environment_allows_only_promoted_lab(monkeypatch):
     monkeypatch.delenv("LAB_ARENA_BASELINE_SOURCE_URL", raising=False)
+    assert wiring.DEFAULT_BASELINE_SOURCE_URL == (
+        "https://github.com/leadpoet/champion_model/archive/refs/heads/lab.tar.gz"
+    )
     assert wiring._baseline_source_url_from_environment("live") == wiring.DEFAULT_BASELINE_SOURCE_URL
     monkeypatch.setenv("LAB_ARENA_BASELINE_SOURCE_URL", wiring.DEFAULT_BASELINE_SOURCE_URL)
     assert wiring._baseline_source_url_from_environment("live") == wiring.DEFAULT_BASELINE_SOURCE_URL
     monkeypatch.setenv(
         "LAB_ARENA_BASELINE_SOURCE_URL",
-        "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz",
+        "https://github.com/leadpoet/champion_model/archive/refs/heads/main.tar.gz",
     )
     with pytest.raises(ServiceError, match="not the promoted lab source"):
         wiring._baseline_source_url_from_environment("live")
@@ -285,7 +288,7 @@ def test_promoter_keeps_github_token_out_of_repository_and_command(monkeypatch, 
     monkeypatch.setenv("LAB_ARENA_GITHUB_TOKEN", "unit-test-placeholder")
     monkeypatch.setenv("LAB_ARENA_PROMOTION_WORK_DIR", str(tmp_path / "cache"))
     promoter = wiring.baseline_promoter_from_environment()
-    assert promoter.repo_url == "https://github.com/leadpoet/pydantic-harness.git"
+    assert promoter.repo_url == "https://github.com/leadpoet/champion_model.git"
     assert promoter.work_dir == tmp_path / "cache"
     assert "unit-test-placeholder" not in promoter.repo_url
     assert promoter._environment["GIT_CONFIG_KEY_0"] == "http.https://github.com/.extraheader"
@@ -305,7 +308,7 @@ def test_promoter_ssh_credentials_are_repo_scoped_and_require_private_permission
         wiring.baseline_promoter_from_environment()
     path.chmod(0o600)
     promoter = wiring.baseline_promoter_from_environment()
-    assert promoter.repo_url == "git@github.com:leadpoet/pydantic-harness.git"
+    assert promoter.repo_url == "git@github.com:leadpoet/champion_model.git"
     command = shlex.split(promoter._environment["GIT_SSH_COMMAND"])
     assert command[:3] == ["ssh", "-i", str(path)]
     assert "StrictHostKeyChecking=yes" in command

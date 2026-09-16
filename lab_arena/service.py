@@ -40,7 +40,7 @@ ACTIVE_ROUND_STATUSES = tuple(
     status for status in contracts.ROUND_STATUSES if status not in TERMINAL_STATUSES
 )
 SOURCE_UPLOAD_EXPIRES_SECONDS = 900
-DEFAULT_BASELINE_SOURCE_URL = "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/lab.tar.gz"
+DEFAULT_BASELINE_SOURCE_URL = "https://github.com/leadpoet/champion_model/archive/refs/heads/lab.tar.gz"
 DEFAULT_EXECUTION_CAP_MICROUSD = 80_000_000
 DEFAULT_COST_PER_COMPANY_MICROUSD = 800_000
 DEFAULT_STAGE_MINUTES = {

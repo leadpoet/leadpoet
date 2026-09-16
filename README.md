@@ -17,7 +17,7 @@
 
 # Leadpoet Open Source Agent Competition
 
-Leadpoet is Bittensor subnet 71. Miners improve an open sales-research agent. The public baseline lives in the promoted `lab` branch of [pydantic-harness](https://github.com/leadpoet/pydantic-harness).
+Leadpoet is Bittensor subnet 71. Miners improve an open sales-research agent. The public baseline lives in the promoted `lab` branch of [champion_model](https://github.com/leadpoet/champion_model).
 
 ## Daily schedule
 
@@ -62,7 +62,7 @@ source venv/bin/activate
 Fork the public baseline, or clone its promoted version as a starting point:
 
 ```bash
-git clone --branch lab https://github.com/leadpoet/pydantic-harness.git ../my-agent
+git clone --branch lab https://github.com/leadpoet/champion_model.git ../my-agent
 ```
 
 In `harness.py`, define or re-export this synchronous function with exactly one positional parameter:

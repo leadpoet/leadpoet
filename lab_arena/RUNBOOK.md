@@ -91,7 +91,7 @@ synchronous and have exactly one positional parameter. It cannot have
 keyword-only parameters, `*args`, or `**kwargs`. It returns at most five
 company objects. The public baseline README gives the full input and output
 example:
-[`leadpoet/pydantic-harness`](https://github.com/leadpoet/pydantic-harness).
+[`leadpoet/champion_model`](https://github.com/leadpoet/champion_model).
 
 ## Execution checkpoint deadline
 
@@ -285,7 +285,7 @@ Set these values on the Arena service host:
 - `LAB_ARENA_BASELINE_HOTKEY`: the registered hotkey that owns each daily
   public baseline entry
 - `LAB_ARENA_BASELINE_SOURCE_URL`: optional in live mode. The only live daily
-  baseline source is the promoted `leadpoet/pydantic-harness` `lab` branch.
+  baseline source is the promoted `leadpoet/champion_model` `lab` branch.
   Remove an old `main` override before service startup. Shadow mode can set a
   different public HTTPS candidate archive.
 

@@ -115,13 +115,20 @@ def test_source_proof_uses_explicit_champion_model_lab_url(monkeypatch):
 
     expected_commit = "a" * 40
     observed = []
+    validations = []
     payload = b"sealed-native-source"
 
     def fetch(url, limit):
         observed.append((url, limit))
         return payload
 
-    monkeypatch.setattr(source_bundle, "validate_source_archive", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        source_bundle,
+        "validate_source_archive",
+        lambda archive, *, require_license: validations.append(
+            (archive, require_license)
+        ),
+    )
     monkeypatch.setattr(source_bundle, "source_archive_commit", lambda _payload: expected_commit)
     service = SimpleNamespace(
         config=SimpleNamespace(baseline_source_fetcher=fetch)
@@ -133,6 +140,43 @@ def test_source_proof_uses_explicit_champion_model_lab_url(monkeypatch):
     assert digest == rerun._sha256(payload)
     assert commit == expected_commit
     assert observed == [(rerun.SOURCE_URL, source_bundle.MAX_SOURCE_ARCHIVE_BYTES)]
+    assert validations == [(payload, True)]
+
+
+def test_source_proof_refuses_latest_archive_commit_mismatch(monkeypatch):
+    from lab_arena import source_bundle
+
+    payload = b"latest-source"
+    service = SimpleNamespace(
+        config=SimpleNamespace(
+            baseline_source_fetcher=lambda _url, _limit: payload
+        )
+    )
+    monkeypatch.setattr(source_bundle, "validate_source_archive", lambda *_a, **_k: None)
+    monkeypatch.setattr(source_bundle, "source_archive_commit", lambda _payload: "b" * 40)
+
+    with pytest.raises(rerun.ExactRerunRefused, match="archive commit differs"):
+        rerun._source_proof(service, "a" * 40)
+
+
+def test_source_proof_refuses_latest_archive_without_license(monkeypatch):
+    from lab_arena import source_bundle
+
+    payload = b"latest-source"
+    service = SimpleNamespace(
+        config=SimpleNamespace(
+            baseline_source_fetcher=lambda _url, _limit: payload
+        )
+    )
+
+    def reject_license(_payload, *, require_license):
+        assert require_license is True
+        raise ValueError("license missing")
+
+    monkeypatch.setattr(source_bundle, "validate_source_archive", reject_license)
+
+    with pytest.raises(ValueError, match="license missing"):
+        rerun._source_proof(service, "a" * 40)
 
 
 def test_bank_proof_hashes_authoritative_icp_array(monkeypatch):
@@ -259,3 +303,250 @@ def test_open_scoring_rejects_non_integrity_mode():
     service.open_scoring = wrong_mode
     with pytest.raises(rerun.ExactRerunRefused, match="integrity mode"):
         rerun._open_scoring(service, 1)
+
+
+def _recovery_service(terminal_payload: bytes, recovery_payload: bytes | None = None):
+    terminal_hash = rerun._sha256(terminal_payload)
+    recovery_payload = recovery_payload or b"new-latest-champion-source"
+
+    class RecoveryStore:
+        def __init__(self):
+            self._transport = _Transport()
+
+        def get_round(self, round_id):
+            return {
+                "round_id": round_id,
+                "status": "cancelled",
+                "reward_basis_hash": rerun.BASIS_HASH,
+            }
+
+        def get_submission(self, submission_id):
+            assert submission_id == rerun.BASELINE
+            return {
+                "source_ref": rerun.SOURCE_REF,
+                "source_size_bytes": len(terminal_payload),
+                "submission_doc": {
+                    "source_ref": rerun.SOURCE_REF,
+                    "source_sha256": terminal_hash,
+                    "source_commit": "3" * 40,
+                },
+            }
+
+    objects = _Objects({rerun.SOURCE_REF: terminal_payload})
+    return SimpleNamespace(
+        store=RecoveryStore(),
+        config=SimpleNamespace(
+            object_store=objects,
+            baseline_source_fetcher=lambda _url, _limit: recovery_payload,
+        ),
+    )
+
+
+def test_recover_proves_staged_source_and_calls_exact_rpc(monkeypatch, tmp_path):
+    from lab_arena import source_bundle
+
+    terminal_payload = b"failed-run-champion-source"
+    recovery_payload = b"new-latest-champion-source"
+    service = _recovery_service(terminal_payload, recovery_payload)
+    schedule = {"sealed": "forward"}
+    monkeypatch.setattr(rerun, "_bank_proof", lambda *_args: rerun.BANK_HASH)
+    monkeypatch.setattr(rerun, "_schedule_proof", lambda *_args: schedule)
+    monkeypatch.setattr(source_bundle, "validate_source_archive", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        source_bundle,
+        "source_archive_commit",
+        lambda payload: "3" * 40 if payload == terminal_payload else "4" * 40,
+    )
+    args = SimpleNamespace(
+        expected_lab_commit="4" * 40,
+        forward_schedule_file=tmp_path / "schedule.json",
+        dry_run=True,
+    )
+
+    preflight = rerun._recover(service, args)
+
+    assert preflight == {
+        "status": "recovery_preflight_ok",
+        "round_id": rerun.ROUND,
+        "bank_sha256": rerun.BANK_HASH,
+        "source_sha256": rerun._sha256(recovery_payload),
+        "source_commit": "4" * 40,
+        "source_size_bytes": len(recovery_payload),
+        "source_ref": rerun.RECOVERY_SOURCE_REF,
+        "terminal_source_sha256": rerun._sha256(terminal_payload),
+        "terminal_source_commit": "3" * 40,
+        "terminal_source_size_bytes": len(terminal_payload),
+        "execute_namespace": "rerun269",
+        "verified_parallel_runner_slots": rerun.VERIFIED_RUNNER_SLOTS,
+    }
+    assert service.store._transport.calls == []
+    assert service.config.object_store.puts == []
+
+    service.store._transport.rpc = lambda name, arguments: (
+        service.store._transport.calls.append((name, arguments))
+        or {"status": "prepared", "baseline_execute_assignments": 20}
+    )
+    args.dry_run = False
+    assert rerun._recover(service, args)["status"] == "prepared"
+    assert service.store._transport.calls == [
+        (
+            "lab_arena_prepare_sep16_baseline_recovery_v1",
+            {
+                "p_source_size_bytes": len(recovery_payload),
+                "p_source_sha256": rerun._sha256(recovery_payload),
+                "p_source_commit": "4" * 40,
+                "p_forward_schedule": schedule,
+            },
+        )
+    ]
+    assert service.config.object_store.puts == [
+        (rerun.RECOVERY_SOURCE_REF, recovery_payload)
+    ]
+    assert service.config.object_store.values[rerun.RECOVERY_SOURCE_REF] == (
+        recovery_payload
+    )
+
+
+@pytest.mark.parametrize("drift", ["ref", "size", "hash", "commit"])
+def test_recover_refuses_unsealed_source(drift):
+    payload = b"latest-tested-champion-source"
+    service = _recovery_service(payload)
+    submission = service.store.get_submission(rerun.BASELINE)
+    if drift == "ref":
+        submission["source_ref"] += ".changed"
+    elif drift == "size":
+        submission["source_size_bytes"] += 1
+    elif drift == "hash":
+        submission["submission_doc"]["source_sha256"] = "0" * 64
+    else:
+        submission["submission_doc"]["source_commit"] = "short"
+    service.store.get_submission = lambda _submission_id: submission
+
+    with pytest.raises(rerun.ExactRerunRefused, match="source"):
+        rerun._terminal_recovery_source_proof(service)
+
+
+def test_recover_refuses_an_active_round(monkeypatch, tmp_path):
+    service = _recovery_service(b"latest-tested-champion-source")
+    row = service.store.get_round(rerun.ROUND)
+    row["status"] = "stage1"
+    service.store.get_round = lambda _round_id: row
+    monkeypatch.setattr(
+        rerun, "_bank_proof", lambda *_args: pytest.fail("bank proof must not run")
+    )
+
+    with pytest.raises(rerun.ExactRerunRefused, match="status"):
+        rerun._recover(
+            service,
+            SimpleNamespace(
+                expected_lab_commit="4" * 40,
+                forward_schedule_file=tmp_path / "schedule.json",
+                dry_run=True,
+            ),
+        )
+
+
+def test_recover_refuses_existing_different_recovery_source(monkeypatch, tmp_path):
+    from lab_arena import source_bundle
+
+    terminal = b"failed-run-champion-source"
+    latest = b"new-latest-champion-source"
+    service = _recovery_service(terminal, latest)
+    service.config.object_store.values[rerun.RECOVERY_SOURCE_REF] = b"different"
+    monkeypatch.setattr(rerun, "_bank_proof", lambda *_args: rerun.BANK_HASH)
+    monkeypatch.setattr(rerun, "_schedule_proof", lambda *_args: {"sealed": True})
+    monkeypatch.setattr(source_bundle, "validate_source_archive", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        source_bundle,
+        "source_archive_commit",
+        lambda payload: "3" * 40 if payload == terminal else "4" * 40,
+    )
+
+    with pytest.raises(rerun.ExactRerunRefused, match="different bytes"):
+        rerun._recover(
+            service,
+            SimpleNamespace(
+                expected_lab_commit="4" * 40,
+                forward_schedule_file=tmp_path / "schedule.json",
+                dry_run=False,
+            ),
+        )
+    assert service.store._transport.calls == []
+
+
+def test_recovery_source_proof_revalidates_archive_and_commit(monkeypatch):
+    from lab_arena import source_bundle
+
+    payload = b"latest-tested-champion-source"
+    service = _recovery_service(payload)
+    validations = []
+    monkeypatch.setattr(
+        source_bundle,
+        "validate_source_archive",
+        lambda observed, *, require_license: validations.append(
+            (observed, require_license)
+        ),
+    )
+    monkeypatch.setattr(
+        source_bundle, "source_archive_commit", lambda _payload: "4" * 40
+    )
+
+    with pytest.raises(rerun.ExactRerunRefused, match="commit differs"):
+        rerun._terminal_recovery_source_proof(service)
+    assert validations == [(payload, True)]
+
+
+@pytest.mark.parametrize("namespace", ["rerun265", "rerun269"])
+def test_audit_counts_scores_for_the_active_rerun_namespace(namespace):
+    runs = [
+        {
+            "assignment_id": f"assignment-{position}:{namespace}",
+            "submission_id": rerun.BASELINE,
+            "kind": "execute",
+        }
+        for position in range(2)
+    ] + [
+        {
+            "assignment_id": f"assignment-{position}:score:{namespace}",
+            "submission_id": rerun.BASELINE,
+            "kind": "score",
+        }
+        for position in range(2)
+    ] + [
+        {
+            "assignment_id": "unrelated:score:" + (
+                "rerun269" if namespace == "rerun265" else "rerun265"
+            ),
+            "submission_id": rerun.BASELINE,
+            "kind": "score",
+        }
+    ]
+
+    class AuditStore:
+        def get_round(self, round_id):
+            assert round_id == rerun.ROUND
+            return {
+                "round_id": round_id,
+                "status": "cancelled",
+                "reward_basis_hash": rerun.BASIS_HASH,
+            }
+
+        def get_submission(self, submission_id):
+            assert submission_id == rerun.BASELINE
+            return {
+                "source_ref": (
+                    rerun.RECOVERY_SOURCE_REF
+                    if namespace == "rerun269"
+                    else rerun.SOURCE_REF
+                )
+            }
+
+        def list_runs(self, round_id):
+            return runs if round_id == rerun.ROUND else []
+
+    result = rerun._audit(SimpleNamespace(store=AuditStore()))
+
+    assert result["active_rerun_namespace"] == namespace
+    assert result["new_baseline_source_selected"] is True
+    assert result["rerun_execute_assignments"] == 2
+    assert result["rerun_score_assignments"] == 2

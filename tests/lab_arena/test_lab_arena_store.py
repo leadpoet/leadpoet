@@ -13,6 +13,13 @@ from lab_arena.store import ArenaStoreUnavailable
 
 SEP16_ADMIN_RPCS = (
     (
+        "lab_arena_prepare_sep16_baseline_recovery_v1",
+        {
+            "p_forward_schedule": {"stage_1_close": "2026-09-17T04:00:00Z"},
+        },
+        ("p_forward_schedule => %s::jsonb",),
+    ),
+    (
         "lab_arena_prepare_sep16_baseline_rerun_v1",
         {
             "p_source_size_bytes": 524266,

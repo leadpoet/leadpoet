@@ -52,14 +52,17 @@ def _bank_proof(service: Any, row: Mapping[str, Any]) -> str:
         document = json.loads(payload)
     except (UnicodeDecodeError, ValueError) as exc:
         raise ExactRerunRefused("Sep16 benchmark bytes are invalid") from exc
-    if set(document) != {"schema_version", "round_id", "icps"} or (
+    if not isinstance(document, dict) or set(document) != {
+        "schema_version", "round_id", "icps"
+    } or (
         document["schema_version"] != "leadpoet.lab_arena.benchmark.v1"
         or document["round_id"] != ROUND
+        or not isinstance(document["icps"], list)
         or len(document["icps"]) != 20
         or len({contracts.document_hash(icp) for icp in document["icps"]}) != 20
     ):
         raise ExactRerunRefused("Sep16 benchmark document differs")
-    digest = _sha256(contracts.canonical_json(document).encode("utf-8"))
+    digest = _sha256(contracts.canonical_json(document["icps"]).encode("utf-8"))
     if digest != BANK_HASH:
         raise ExactRerunRefused("Sep16 benchmark hash differs")
     return digest

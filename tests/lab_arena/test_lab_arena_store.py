@@ -2,11 +2,115 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
 from lab_arena.store import ArenaStore, ArenaStoreError, FUNCTION_SIGNATURES, PostgrestTransport, PsycopgTransport, SCORE_BATCH_SIZE, TABLES, create_http1_client
 from lab_arena.store import ArenaStoreUnavailable
+
+
+SEP16_ADMIN_RPCS = (
+    (
+        "lab_arena_prepare_sep16_baseline_rerun_v1",
+        {
+            "p_source_size_bytes": 524266,
+            "p_source_sha256": "a" * 64,
+            "p_source_commit": "b" * 40,
+            "p_bank_sha256": "c" * 64,
+            "p_forward_schedule": {"stage_1_close": "2026-09-16T23:00:00Z"},
+        },
+        (
+            "p_source_size_bytes => %s::bigint",
+            "p_source_sha256 => %s::text",
+            "p_source_commit => %s::text",
+            "p_bank_sha256 => %s::text",
+            "p_forward_schedule => %s::jsonb",
+        ),
+    ),
+    (
+        "lab_arena_open_sep16_baseline_scoring_v1",
+        {
+            "p_round_id": "arena-2026-09-16",
+            "p_stage": 1,
+            "p_work_items": [{"scored_run_id": "run-1"}],
+        },
+        (
+            "p_round_id => %s::text",
+            "p_stage => %s::smallint",
+            "p_work_items => %s::jsonb",
+        ),
+    ),
+)
+
+
+@pytest.mark.parametrize("function,params,_casts", SEP16_ADMIN_RPCS)
+def test_sep16_admin_rpc_is_allowed_through_postgrest(function, params, _casts):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"status": "ok"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        transport = PostgrestTransport(
+            "https://project.example",
+            anon_key="anon",
+            service_jwt="a.b.c",
+            http_client=client,
+        )
+        assert transport.rpc(function, params) == {"status": "ok"}
+    assert len(requests) == 1
+    assert requests[0].method == "POST"
+    assert requests[0].url.path == "/rest/v1/rpc/" + function
+    assert requests[0].read() == json.dumps(
+        params, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
+@pytest.mark.parametrize("function,params,casts", SEP16_ADMIN_RPCS)
+def test_sep16_admin_rpc_has_exact_psycopg_signature(function, params, casts):
+    calls = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, values):
+            calls.append((sql, values))
+
+        @staticmethod
+        def fetchone():
+            return ({"status": "ok"},)
+
+    class Connection:
+        closed = 0
+        autocommit = False
+
+        @staticmethod
+        def cursor():
+            return Cursor()
+
+        @staticmethod
+        def close():
+            return None
+
+    transport = PsycopgTransport(lambda: Connection(), role=None)
+    assert transport.rpc(function, params) == {"status": "ok"}
+    sql, values = calls[0]
+    assert sql == "SELECT public.%s(%s)" % (function, ", ".join(casts))
+    expected_values = []
+    for name, sql_type in FUNCTION_SIGNATURES[function]:
+        value = params[name]
+        expected_values.append(
+            json.dumps(value, sort_keys=True) if sql_type == "jsonb" else value
+        )
+    assert values == expected_values
+    transport.close()
 
 
 @pytest.mark.parametrize('limit', [None, 0, 2, True, '1', 1])

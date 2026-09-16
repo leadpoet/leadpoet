@@ -62,6 +62,15 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_round_id", "text"), ("p_stage", "smallint"),
         ("p_work_items", "jsonb"),
     ),
+    "lab_arena_prepare_sep16_baseline_rerun_v1": (
+        ("p_source_size_bytes", "bigint"), ("p_source_sha256", "text"),
+        ("p_source_commit", "text"), ("p_bank_sha256", "text"),
+        ("p_forward_schedule", "jsonb"),
+    ),
+    "lab_arena_open_sep16_baseline_scoring_v1": (
+        ("p_round_id", "text"), ("p_stage", "smallint"),
+        ("p_work_items", "jsonb"),
+    ),
     "lab_arena_adopt_sep16_open_config_v1": (("p_capacity_doc", "jsonb"),),
     "lab_arena_next_closed_deepline_reconciliation_v1": (
         ("p_mode", "text"), ("p_network_name", "text"),

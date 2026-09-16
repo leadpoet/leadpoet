@@ -572,6 +572,7 @@ def build_runner_from_environment(args, *, keypair=None):
     runner_config = runner_module.RunnerConfig(
         round_id=round_id, identity=identity, api=api, sandbox_runtime=sandbox_runtime, image_cache=cache, source_cache=source_cache,
         work_dir=runs_work, max_parallel_runs=parallelism, proxy_worker_pool=proxy_pool,
+        claim_poll_seconds=max(5, int(getattr(args, "poll_seconds", 30))),
     )
     if round_id is not None:
         api.round(round_id)

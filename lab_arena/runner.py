@@ -1596,6 +1596,9 @@ class RunnerConfig:
     # Waits between retries of the same signed claim after a transport or
     # server failure. The service replays a committed claim by request ID.
     claim_retry_seconds: Tuple[float, ...] = (2.0, 5.0)
+    # Reuse the process's normal idle claim cadence while active leases leave
+    # spare capacity. A retry may become eligible without a local future ending.
+    claim_poll_seconds: float = 30.0
 
     def __post_init__(self) -> None:
         if (
@@ -2277,7 +2280,31 @@ class Runner:
                 return 0  # the Arena or the round is unavailable: poll again later
         taken = 0
         futures = set()
-        for round_id in list(self._round_ids):
+
+        def wait_for_completion(*, rescan_on_timeout: bool = False) -> bool:
+            while futures:
+                done, pending = wait(
+                    futures,
+                    timeout=self._config.claim_poll_seconds,
+                    return_when=FIRST_COMPLETED,
+                )
+                if done:
+                    futures.clear()
+                    futures.update(pending)
+                    for future in done:
+                        future.result()
+                    return True
+                if stop_event is not None and stop_event.is_set():
+                    return False
+                if rescan_on_timeout:
+                    return True
+            return False
+
+        round_ids = list(self._round_ids)
+        round_index = 0
+        rescan_while_active = False
+        while round_index < len(round_ids):
+            round_id = round_ids[round_index]
             # Oldest round first: its deadline is nearer. Each round is claimed
             # until it has nothing to lease or this call reaches its claim cap.
             while taken < max_claims:
@@ -2291,23 +2318,13 @@ class Runner:
                 if usable_parallelism < 1:
                     break
                 if not self._slots.acquire(blocking=False):
-                    if not futures:
+                    if not wait_for_completion():
                         break
-                    done, futures = wait(
-                        futures,
-                        return_when=FIRST_COMPLETED,
-                    )
-                    for future in done:
-                        future.result()
                     continue
                 if len(futures) >= usable_parallelism:
                     self._slots.release()
-                    done, futures = wait(
-                        futures,
-                        return_when=FIRST_COMPLETED,
-                    )
-                    for future in done:
-                        future.result()
+                    if not wait_for_completion():
+                        break
                     continue
                 try:
                     response = self.claim_one(round_id)
@@ -2323,19 +2340,36 @@ class Runner:
                 if response.get("status") != "leased":
                     self._slots.release()
                     response_status = response.get("status")
-                    if not (
+                    idle = (
                         isinstance(response_status, str)
                         and response_status in _IDLE_CLAIM_STATUSES
-                    ):
+                    )
+                    if not idle:
                         _log_pickup_failure(
                             phase="claim",
                             reason="claim_denied",
                             http_status=getattr(response, "http_status", None),
                             denial_code=response.get("code"),
                         )
+                    rescan_while_active = rescan_while_active or (
+                        response_status == "no_pending" and bool(futures)
+                    )
                     break
                 taken += 1
                 futures.add(self._pool.submit(self._run_lease, response))
+            round_index += 1
+            if (
+                round_index == len(round_ids)
+                and rescan_while_active
+                and taken < max_claims
+                and futures
+                and not (stop_event is not None and stop_event.is_set())
+                and wait_for_completion(rescan_on_timeout=True)
+            ):
+                round_index = 0
+                rescan_while_active = False
+            elif round_index == len(round_ids):
+                break
         for future in futures:
             future.result()
         return taken

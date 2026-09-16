@@ -47,11 +47,20 @@ model catalog override or replacement agent framework in this runtime.
 
 For an existing CLI or SDK launcher,
 `session(model=..., reasoning_effort=..., max_output_tokens=...)`
-is a context manager yielding the child environment. Use it only while the
-context is open. It supplies an isolated `CODEX_HOME`, local provider config
-and an attempt-local bridge token. It does not inherit a personal Codex login
-or provider key. Use `/usr/local/bin/codex`; the pinned native package is
+is a context manager yielding a dict-compatible child environment. Use it only
+while the context is open. It supplies an isolated `CODEX_HOME`, local provider
+config and an attempt-local bridge token. It does not inherit a personal Codex
+login or provider key. Use `/usr/local/bin/codex`; the pinned native package is
 `0.154.0`. The CLI path avoids an additional Node/SDK dependency.
+
+The yielded environment also provides `wait_idle(timeout_seconds)`. A model
+supervisor can call it before starting another Codex process when an interrupted
+process may have left its last Responses request in progress. The call only
+waits on the attempt-local bridge semaphore. It returns `True` after the prior
+request settles and `False` at the timeout; it does not send, queue, replay or
+cancel a provider request. The finite timeout must be from 0 through 2,700
+seconds. The model still decides when to start finalization or write a
+checkpoint, and the capability becomes invalid when the session closes.
 
 ## Request Path
 

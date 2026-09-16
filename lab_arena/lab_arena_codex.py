@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hmac
 import json
+import math
 import os
 import secrets
 import signal
@@ -29,6 +30,7 @@ MAX_REQUEST_BYTES = 1_000_000
 MAX_RESPONSE_BYTES = 4 * 1_048_576
 MAX_LOG_BYTES = 64 * 1024
 SOCKET_TIMEOUT_SECONDS = 380
+MAX_IDLE_WAIT_SECONDS = 2700
 DEFAULT_MAX_OUTPUT_TOKENS = 16_384
 MAX_OUTPUT_TOKENS = 32_768
 # The broker operation accepts tool output as ordered ``input_text`` parts of
@@ -43,6 +45,44 @@ class CodexRuntimeError(RuntimeError):
     def __init__(self, message: str, *, diagnostics: str = "") -> None:
         super().__init__(message)
         self.diagnostics = diagnostics
+
+
+class _IdleWaitCapability:
+    """Session-scoped callable that does not expose the bridge or its token."""
+
+    __slots__ = ("_wait",)
+
+    def __init__(self, wait: Any) -> None:
+        self._wait = wait
+
+    def __call__(self, timeout_seconds: float) -> bool:
+        wait = self._wait
+        if wait is None:
+            raise CodexRuntimeError("Codex session is closed")
+        return wait(timeout_seconds)
+
+    def close(self) -> None:
+        self._wait = None
+
+    def __repr__(self) -> str:
+        return "<Codex idle-wait capability>"
+
+
+class CodexSessionEnvironment(dict[str, str]):
+    """A subprocess environment with a session-scoped passive idle wait."""
+
+    __slots__ = ("_idle_wait",)
+
+    def __init__(self, values: dict[str, str], wait: Any) -> None:
+        super().__init__(values)
+        self._idle_wait = _IdleWaitCapability(wait)
+
+    @property
+    def wait_idle(self) -> _IdleWaitCapability:
+        return self._idle_wait
+
+    def _close(self) -> None:
+        self._idle_wait.close()
 
 
 def _receive(connection: socket.socket, size: int) -> bytes:
@@ -248,6 +288,18 @@ class ResponsesBridge:
     def base_url(self) -> str:
         return "http://127.0.0.1:%d/v1" % self.server.server_port
 
+    def wait_idle(self, timeout_seconds: float) -> bool:
+        """Wait passively for the current Responses dispatch to release."""
+
+        if (type(timeout_seconds) not in (int, float)
+                or not 0 <= timeout_seconds <= MAX_IDLE_WAIT_SECONDS
+                or not math.isfinite(timeout_seconds)):
+            raise CodexRuntimeError("invalid Codex idle timeout")
+        acquired = self._active.acquire(timeout=float(timeout_seconds))
+        if acquired:
+            self._active.release()
+        return acquired
+
     def __enter__(self) -> "ResponsesBridge":
         self.thread.start()
         return self
@@ -259,7 +311,7 @@ class ResponsesBridge:
 
 
 @contextmanager
-def session(*, model: str, reasoning_effort: str = "medium", max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS) -> Iterator[dict[str, str]]:
+def session(*, model: str, reasoning_effort: str = "medium", max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS) -> Iterator[CodexSessionEnvironment]:
     """Yield an isolated child environment for a Codex CLI or SDK launcher.
 
     Call only inside an Arena execute sandbox with private loopback enabled.
@@ -321,7 +373,11 @@ def session(*, model: str, reasoning_effort: str = "medium", max_output_tokens: 
         )
         for name in ("NO_PROXY", "no_proxy"):
             environment[name] = ",".join(filter(None, [environment.get(name, ""), "127.0.0.1", "localhost"]))
-        yield environment
+        session_environment = CodexSessionEnvironment(environment, bridge.wait_idle)
+        try:
+            yield session_environment
+        finally:
+            session_environment._close()
 
 
 def run(prompt: str, *, model: str, cwd: str | Path, reasoning_effort: str = "medium", max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS, timeout_seconds: float = 2700) -> str:

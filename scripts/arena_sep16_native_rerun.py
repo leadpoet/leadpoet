@@ -31,6 +31,9 @@ BASIS_HASH = "sha256:b19a147f1c8cc8365e3cf7dcc96b827ffffdd6c1e8fad65ad9fc25c8895
 BANK_HASH = "42b417604acf15e612570687e8fbccef82fe7b0808364a6491b4a2a4bcb07390"
 SOURCE_URL = "https://github.com/leadpoet/champion_model/archive/refs/heads/lab.tar.gz"
 SOURCE_REF = "arena/arena-2026-09-16/sources/baseline-2026-09-16-native-rerun268.tar.gz"
+RECOVERY_SOURCE_REF = (
+    "arena/arena-2026-09-16/sources/baseline-2026-09-16-recovery269.tar.gz"
+)
 VERIFIED_RUNNER_SLOTS = 10
 RECOVERY_SUFFIX = ":rerun269"
 
@@ -195,31 +198,31 @@ def _prepare(service: Any, args: argparse.Namespace) -> dict[str, Any]:
     return dict(result)
 
 
-def _recovery_source_proof(service: Any) -> tuple[int, str, str]:
+def _terminal_recovery_source_proof(service: Any) -> tuple[int, str, str]:
     from lab_arena import source_bundle
 
     submission = service.store.get_submission(BASELINE) or {}
     document = dict(submission.get("submission_doc") or {})
     if submission.get("source_ref") != SOURCE_REF or document.get("source_ref") != SOURCE_REF:
-        raise ExactRerunRefused("Sep16 recovery source reference differs")
+        raise ExactRerunRefused("Sep16 terminal recovery source reference differs")
     try:
         size = int(submission["source_size_bytes"])
         source_hash = str(document["source_sha256"])
         commit = str(document["source_commit"])
     except (KeyError, TypeError, ValueError) as exc:
-        raise ExactRerunRefused("Sep16 recovery source proof is incomplete") from exc
+        raise ExactRerunRefused("Sep16 terminal recovery source proof is incomplete") from exc
     if (
         not 0 < size <= source_bundle.MAX_SOURCE_ARCHIVE_BYTES
         or re.fullmatch(r"[0-9a-f]{64}", source_hash) is None
         or re.fullmatch(r"[0-9a-f]{40}", commit) is None
     ):
-        raise ExactRerunRefused("Sep16 recovery source proof is invalid")
+        raise ExactRerunRefused("Sep16 terminal recovery source proof is invalid")
     payload = _read_bounded(service.config.object_store, SOURCE_REF, size + 1)
     if len(payload) != size or _sha256(payload) != source_hash:
-        raise ExactRerunRefused("Sep16 recovery source readback differs")
+        raise ExactRerunRefused("Sep16 terminal recovery source readback differs")
     source_bundle.validate_source_archive(payload, require_license=True)
     if source_bundle.source_archive_commit(payload) != commit:
-        raise ExactRerunRefused("Sep16 recovery source commit differs")
+        raise ExactRerunRefused("Sep16 terminal recovery source commit differs")
     return size, source_hash, commit
 
 
@@ -230,19 +233,44 @@ def _recover(service: Any, args: argparse.Namespace) -> dict[str, Any]:
     if row.get("status") != "cancelled":
         raise ExactRerunRefused("Sep16 recovery round status differs")
     bank_hash = _bank_proof(service, row)
-    size, source_hash, commit = _recovery_source_proof(service)
+    terminal_size, terminal_hash, terminal_commit = _terminal_recovery_source_proof(
+        service
+    )
+    source, source_hash, commit = _source_proof(service, args.expected_lab_commit)
     schedule = _schedule_proof(row, args.forward_schedule_file)
     if args.dry_run:
         return {
             "status": "recovery_preflight_ok", "round_id": ROUND,
             "bank_sha256": bank_hash, "source_sha256": source_hash,
-            "source_commit": commit, "source_size_bytes": size,
+            "source_commit": commit, "source_size_bytes": len(source),
+            "source_ref": RECOVERY_SOURCE_REF,
+            "terminal_source_sha256": terminal_hash,
+            "terminal_source_commit": terminal_commit,
+            "terminal_source_size_bytes": terminal_size,
             "execute_namespace": RECOVERY_SUFFIX.removeprefix(":"),
             "verified_parallel_runner_slots": VERIFIED_RUNNER_SLOTS,
         }
+    try:
+        existing = _read_bounded(
+            service.config.object_store, RECOVERY_SOURCE_REF, len(source) + 1
+        )
+    except Exception:
+        service.config.object_store.put(RECOVERY_SOURCE_REF, source)
+    else:
+        if existing != source:
+            raise ExactRerunRefused("Sep16 recovery source object holds different bytes")
+    if _read_bounded(
+        service.config.object_store, RECOVERY_SOURCE_REF, len(source) + 1
+    ) != source:
+        raise ExactRerunRefused("Sep16 recovery source readback differs")
     result = service.store._transport.rpc(
         "lab_arena_prepare_sep16_baseline_recovery_v1",
-        {"p_forward_schedule": schedule},
+        {
+            "p_source_size_bytes": len(source),
+            "p_source_sha256": source_hash,
+            "p_source_commit": commit,
+            "p_forward_schedule": schedule,
+        },
     )
     if not isinstance(result, dict) or result.get("status") not in ("prepared", "existing"):
         raise ExactRerunRefused("Sep16 recovery RPC did not acknowledge the sealed rerun")
@@ -316,7 +344,8 @@ def _audit(service: Any) -> dict[str, Any]:
         "round_id": ROUND,
         "round_status": row.get("status"),
         "new_baseline_source_selected": bool(
-            (service.store.get_submission(BASELINE) or {}).get("source_ref") == SOURCE_REF
+            (service.store.get_submission(BASELINE) or {}).get("source_ref")
+            == (RECOVERY_SOURCE_REF if active_namespace == "rerun269" else SOURCE_REF)
         ),
         "archived_baseline_runs": len(archived),
         "archived_failed_rerun_runs": len(recovery_archived),
@@ -345,6 +374,7 @@ def build_parser() -> argparse.ArgumentParser:
         source_step.add_argument("--forward-schedule-file", type=Path, required=True)
         source_step.add_argument("--dry-run", action="store_true")
     recovery = commands.add_parser("recover")
+    recovery.add_argument("--expected-lab-commit", required=True)
     recovery.add_argument("--forward-schedule-file", type=Path, required=True)
     recovery.add_argument("--dry-run", action="store_true")
     scoring = commands.add_parser("open-scoring")

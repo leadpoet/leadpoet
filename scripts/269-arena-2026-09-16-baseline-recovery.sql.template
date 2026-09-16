@@ -44,15 +44,29 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_sep16_baseline_recovery_authority (
     archive_submission_id = 'baseline-2026-09-16-native-rerun265-archive'
   ),
   execute_namespace TEXT NOT NULL CHECK (execute_namespace = 'rerun269'),
-  source_ref TEXT NOT NULL CHECK (
-    source_ref = 'arena/arena-2026-09-16/sources/baseline-2026-09-16-native-rerun268.tar.gz'
+  terminal_source_ref TEXT NOT NULL CHECK (
+    terminal_source_ref = 'arena/arena-2026-09-16/sources/baseline-2026-09-16-native-rerun268.tar.gz'
   ),
-  source_size_bytes BIGINT NOT NULL CHECK (source_size_bytes = 524266),
-  source_sha256 TEXT NOT NULL CHECK (
-    source_sha256 = 'c8d188c4766008ac949c5ff794536fc905589f46657d4b1ed27f3a22385f11b0'
+  terminal_source_size_bytes BIGINT NOT NULL CHECK (
+    terminal_source_size_bytes = 524266
   ),
-  source_commit TEXT NOT NULL CHECK (
-    source_commit = '3afe71508636254eb31a172d94f5a63f4f84a5c2'
+  terminal_source_sha256 TEXT NOT NULL CHECK (
+    terminal_source_sha256 = 'c8d188c4766008ac949c5ff794536fc905589f46657d4b1ed27f3a22385f11b0'
+  ),
+  terminal_source_commit TEXT NOT NULL CHECK (
+    terminal_source_commit = '3afe71508636254eb31a172d94f5a63f4f84a5c2'
+  ),
+  recovery_source_ref TEXT NOT NULL CHECK (
+    recovery_source_ref = 'arena/arena-2026-09-16/sources/baseline-2026-09-16-recovery269.tar.gz'
+  ),
+  recovery_source_size_bytes BIGINT NOT NULL CHECK (
+    recovery_source_size_bytes = __SEALED_RECOVERY_SOURCE_SIZE_BYTES__
+  ),
+  recovery_source_sha256 TEXT NOT NULL CHECK (
+    recovery_source_sha256 = '__SEALED_RECOVERY_SOURCE_SHA256__'
+  ),
+  recovery_source_commit TEXT NOT NULL CHECK (
+    recovery_source_commit = '__SEALED_RECOVERY_SOURCE_COMMIT__'
   ),
   bank_sha256 TEXT NOT NULL CHECK (
     bank_sha256 = '42b417604acf15e612570687e8fbccef82fe7b0808364a6491b4a2a4bcb07390'
@@ -150,9 +164,14 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_sep16_baseline_recovery_audit (
   prior_rerun_audit_hash TEXT NOT NULL,
   release_authority_hash TEXT NOT NULL,
   bank_sha256 TEXT NOT NULL,
-  source_ref TEXT NOT NULL,
-  source_sha256 TEXT NOT NULL,
-  source_commit TEXT NOT NULL,
+  terminal_source_ref TEXT NOT NULL,
+  terminal_source_size_bytes BIGINT NOT NULL,
+  terminal_source_sha256 TEXT NOT NULL,
+  terminal_source_commit TEXT NOT NULL,
+  recovery_source_ref TEXT NOT NULL,
+  recovery_source_size_bytes BIGINT NOT NULL,
+  recovery_source_sha256 TEXT NOT NULL,
+  recovery_source_commit TEXT NOT NULL,
   started_at TIMESTAMPTZ NOT NULL DEFAULT pg_catalog.clock_timestamp()
 );
 ALTER TABLE public.lab_arena_sep16_baseline_recovery_audit
@@ -163,7 +182,9 @@ REVOKE ALL ON public.lab_arena_sep16_baseline_recovery_audit
 
 INSERT INTO public.lab_arena_sep16_baseline_recovery_authority (
   round_id, archive_round_id, archive_submission_id, execute_namespace,
-  source_ref, source_size_bytes, source_sha256, source_commit, bank_sha256,
+  terminal_source_ref, terminal_source_size_bytes, terminal_source_sha256,
+  terminal_source_commit, recovery_source_ref, recovery_source_size_bytes,
+  recovery_source_sha256, recovery_source_commit, bank_sha256,
   scorer_image_digest, terminal_round_hash,
   terminal_baseline_submission_hash, terminal_baseline_runs_hash,
   terminal_baseline_ledger_hash, terminal_baseline_run_count,
@@ -181,6 +202,9 @@ INSERT INTO public.lab_arena_sep16_baseline_recovery_authority (
   'arena/arena-2026-09-16/sources/baseline-2026-09-16-native-rerun268.tar.gz',
   524266, 'c8d188c4766008ac949c5ff794536fc905589f46657d4b1ed27f3a22385f11b0',
   '3afe71508636254eb31a172d94f5a63f4f84a5c2',
+  'arena/arena-2026-09-16/sources/baseline-2026-09-16-recovery269.tar.gz',
+  __SEALED_RECOVERY_SOURCE_SIZE_BYTES__, '__SEALED_RECOVERY_SOURCE_SHA256__',
+  '__SEALED_RECOVERY_SOURCE_COMMIT__',
   '42b417604acf15e612570687e8fbccef82fe7b0808364a6491b4a2a4bcb07390',
   'sha256:31ac47b38b4291396765b897df48e758741b8eb3bb9697be4d789e1d71597385',
   '__SEALED_TERMINAL_ROUND_HASH__',
@@ -337,12 +361,13 @@ BEGIN
      OR v_round.icp_set_date <> DATE '2026-09-15'
      OR v_baseline.round_id <> v_authority.round_id
      OR v_baseline.status <> 'frozen' OR NOT v_baseline.is_king
-     OR v_baseline.source_ref <> v_authority.source_ref
-     OR v_baseline.source_size_bytes <> v_authority.source_size_bytes
+     OR v_baseline.source_ref <> v_authority.terminal_source_ref
+     OR v_baseline.source_size_bytes <>
+          v_authority.terminal_source_size_bytes
      OR v_baseline.submission_doc ->> 'source_sha256' <>
-          v_authority.source_sha256
+          v_authority.terminal_source_sha256
      OR v_baseline.submission_doc ->> 'source_commit' <>
-          v_authority.source_commit
+          v_authority.terminal_source_commit
      OR NOT public.lab_arena_sep16_challenger_seals_valid_v1()
      OR EXISTS (
        SELECT 1 FROM public.lab_arena_runs
@@ -476,6 +501,9 @@ REVOKE ALL ON FUNCTION public.lab_arena_sep16_recovery_archive_valid_v1()
   FROM PUBLIC, anon, authenticated, service_role, lab_arena_service;
 
 CREATE OR REPLACE FUNCTION public.lab_arena_prepare_sep16_baseline_recovery_v1(
+  p_source_size_bytes BIGINT,
+  p_source_sha256 TEXT,
+  p_source_commit TEXT,
   p_forward_schedule JSONB
 )
 RETURNS JSONB
@@ -520,6 +548,13 @@ BEGIN
   SELECT * INTO STRICT v_authority
   FROM public.lab_arena_sep16_baseline_recovery_authority
   WHERE round_id = v_round_id FOR SHARE;
+  IF p_source_size_bytes IS DISTINCT FROM
+       v_authority.recovery_source_size_bytes
+     OR p_source_sha256 IS DISTINCT FROM v_authority.recovery_source_sha256
+     OR p_source_commit IS DISTINCT FROM v_authority.recovery_source_commit THEN
+    RAISE EXCEPTION 'Sep16 recovery source differs from authority'
+      USING ERRCODE = '22023';
+  END IF;
   IF p_forward_schedule IS DISTINCT FROM v_authority.forward_schedule THEN
     RAISE EXCEPTION 'Sep16 recovery schedule differs from authority'
       USING ERRCODE = '22023';
@@ -543,14 +578,29 @@ BEGIN
             v_authority.terminal_baseline_ledger_hash
        OR v_audit.prior_rerun_audit_hash <> v_authority.prior_rerun_audit_hash
        OR v_audit.release_authority_hash <> v_authority.release_authority_hash
+       OR v_audit.terminal_source_ref <> v_authority.terminal_source_ref
+       OR v_audit.terminal_source_size_bytes <>
+            v_authority.terminal_source_size_bytes
+       OR v_audit.terminal_source_sha256 <> v_authority.terminal_source_sha256
+       OR v_audit.terminal_source_commit <> v_authority.terminal_source_commit
+       OR v_audit.recovery_source_ref <> v_authority.recovery_source_ref
+       OR v_audit.recovery_source_size_bytes <>
+            v_authority.recovery_source_size_bytes
+       OR v_audit.recovery_source_sha256 <> v_authority.recovery_source_sha256
+       OR v_audit.recovery_source_commit <> v_authority.recovery_source_commit
        OR NOT public.lab_arena_sep16_recovery_archive_valid_v1()
        OR NOT public.lab_arena_sep16_challenger_seals_valid_v1()
        OR NOT EXISTS (
          SELECT 1 FROM public.lab_arena_submissions
          WHERE submission_id = v_baseline_id AND round_id = v_round_id
-           AND source_ref = v_authority.source_ref
-           AND submission_doc ->> 'source_sha256' = v_authority.source_sha256
-           AND submission_doc ->> 'source_commit' = v_authority.source_commit
+           AND source_ref = v_authority.recovery_source_ref
+           AND source_size_bytes = v_authority.recovery_source_size_bytes
+           AND submission_doc ->> 'source_ref' =
+                 v_authority.recovery_source_ref
+           AND submission_doc ->> 'source_sha256' =
+                 v_authority.recovery_source_sha256
+           AND submission_doc ->> 'source_commit' =
+                 v_authority.recovery_source_commit
        )
        OR (SELECT pg_catalog.count(DISTINCT assignment_id)
            FROM public.lab_arena_runs
@@ -669,7 +719,11 @@ BEGIN
     terminal_baseline_uncertain_microusd,
     challenger_runs_hash, challenger_submissions_hash, challenger_ledger_hash,
     challenger_ledger_max_entry_id, prior_rerun_audit_hash,
-    release_authority_hash, bank_sha256, source_ref, source_sha256, source_commit
+    release_authority_hash, bank_sha256,
+    terminal_source_ref, terminal_source_size_bytes,
+    terminal_source_sha256, terminal_source_commit,
+    recovery_source_ref, recovery_source_size_bytes,
+    recovery_source_sha256, recovery_source_commit
   ) VALUES (
     v_round_id, v_authority.archive_round_id, v_authority.archive_submission_id,
     v_authority.execute_namespace, pg_catalog.to_jsonb(v_round),
@@ -678,8 +732,11 @@ BEGIN
     v_challenger_runs_hash,
     v_challenger_submissions_hash, v_challenger_ledger_hash,
     v_challenger_ledger_max, v_prior_audit_hash, v_release_hash,
-    v_authority.bank_sha256, v_authority.source_ref, v_authority.source_sha256,
-    v_authority.source_commit
+    v_authority.bank_sha256,
+    v_authority.terminal_source_ref, v_authority.terminal_source_size_bytes,
+    v_authority.terminal_source_sha256, v_authority.terminal_source_commit,
+    v_authority.recovery_source_ref, v_authority.recovery_source_size_bytes,
+    v_authority.recovery_source_sha256, v_authority.recovery_source_commit
   );
   v_archive_configuration := v_round.configuration_doc ||
     pg_catalog.jsonb_build_object(
@@ -720,6 +777,18 @@ BEGIN
   IF v_count <> v_authority.terminal_baseline_ledger_count THEN
     RAISE EXCEPTION 'Sep16 recovery archive ledger count differs';
   END IF;
+  UPDATE public.lab_arena_submissions
+  SET source_ref = v_authority.recovery_source_ref,
+      source_size_bytes = v_authority.recovery_source_size_bytes,
+      submission_doc = submission_doc || pg_catalog.jsonb_build_object(
+        'source_ref', v_authority.recovery_source_ref,
+        'source_sha256', v_authority.recovery_source_sha256,
+        'source_commit', v_authority.recovery_source_commit
+      )
+  WHERE submission_id = v_baseline_id AND round_id = v_round_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Sep16 recovery baseline source switch failed';
+  END IF;
   v_new_configuration := pg_catalog.jsonb_set(
     v_round.configuration_doc, '{schedule}', p_forward_schedule, FALSE
   );
@@ -755,6 +824,17 @@ BEGIN
   ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER USER;
   IF NOT public.lab_arena_sep16_recovery_archive_valid_v1()
      OR NOT public.lab_arena_sep16_challenger_seals_valid_v1()
+     OR NOT EXISTS (
+       SELECT 1 FROM public.lab_arena_submissions
+       WHERE submission_id = v_baseline_id AND round_id = v_round_id
+         AND source_ref = v_authority.recovery_source_ref
+         AND source_size_bytes = v_authority.recovery_source_size_bytes
+         AND submission_doc ->> 'source_ref' = v_authority.recovery_source_ref
+         AND submission_doc ->> 'source_sha256' =
+               v_authority.recovery_source_sha256
+         AND submission_doc ->> 'source_commit' =
+               v_authority.recovery_source_commit
+     )
      OR (SELECT pg_catalog.count(*) FROM public.lab_arena_runs
          WHERE round_id = v_round_id AND submission_id = v_baseline_id
            AND kind = 'execute' AND status = 'pending'
@@ -818,11 +898,17 @@ BEGIN
   );
 END;
 $prepare_sep16_baseline_recovery$;
-ALTER FUNCTION public.lab_arena_prepare_sep16_baseline_recovery_v1(JSONB)
+ALTER FUNCTION public.lab_arena_prepare_sep16_baseline_recovery_v1(
+  BIGINT, TEXT, TEXT, JSONB
+)
   OWNER TO lab_arena_owner;
-REVOKE ALL ON FUNCTION public.lab_arena_prepare_sep16_baseline_recovery_v1(JSONB)
+REVOKE ALL ON FUNCTION public.lab_arena_prepare_sep16_baseline_recovery_v1(
+  BIGINT, TEXT, TEXT, JSONB
+)
   FROM PUBLIC, anon, authenticated, service_role, lab_arena_service;
-GRANT EXECUTE ON FUNCTION public.lab_arena_prepare_sep16_baseline_recovery_v1(JSONB)
+GRANT EXECUTE ON FUNCTION public.lab_arena_prepare_sep16_baseline_recovery_v1(
+  BIGINT, TEXT, TEXT, JSONB
+)
   TO lab_arena_service;
 
 -- Change only the exact Sep16 one-off namespace. Generic scoring, retries,

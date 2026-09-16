@@ -38,6 +38,16 @@ from tests.lab_arena.test_lab_arena_migration_postgres import claim
 
 ARCHIVE_ROUND = "arena-2026-09-16-rerun265archive"
 ARCHIVE_SUBMISSION = "baseline-2026-09-16-native-rerun265-archive"
+TERMINAL_SOURCE_REF = (
+    "arena/arena-2026-09-16/sources/"
+    "baseline-2026-09-16-native-rerun268.tar.gz"
+)
+RECOVERY_SOURCE_REF = (
+    "arena/arena-2026-09-16/sources/baseline-2026-09-16-recovery269.tar.gz"
+)
+RECOVERY_SOURCE_SIZE = 525000
+RECOVERY_SOURCE_SHA = "d" * 64
+RECOVERY_SOURCE_COMMIT = "e" * 40
 TEMPLATE = (
     Path(__file__).parents[2]
     / "scripts/269-arena-2026-09-16-baseline-recovery.sql.template"
@@ -221,6 +231,9 @@ def _render_recovery(connection, new_schedule):
         )
         run_count = cursor.fetchone()[0]
     values = {
+        "__SEALED_RECOVERY_SOURCE_SIZE_BYTES__": str(RECOVERY_SOURCE_SIZE),
+        "__SEALED_RECOVERY_SOURCE_SHA256__": RECOVERY_SOURCE_SHA,
+        "__SEALED_RECOVERY_SOURCE_COMMIT__": RECOVERY_SOURCE_COMMIT,
         "__SEALED_TERMINAL_ROUND_HASH__": seal["round"],
         "__SEALED_TERMINAL_BASELINE_SUBMISSION_HASH__": seal[
             "baseline_submission"
@@ -272,13 +285,25 @@ def _install_and_recover(connection, sql, schedule):
     with connection.cursor() as cursor:
         cursor.execute(sql)
         cursor.execute(
-            "SELECT public.lab_arena_prepare_sep16_baseline_recovery_v1(%s::jsonb)",
-            (json.dumps(schedule),),
+            "SELECT public.lab_arena_prepare_sep16_baseline_recovery_v1("
+            "%s,%s,%s,%s::jsonb)",
+            (
+                RECOVERY_SOURCE_SIZE,
+                RECOVERY_SOURCE_SHA,
+                RECOVERY_SOURCE_COMMIT,
+                json.dumps(schedule),
+            ),
         )
         prepared = cursor.fetchone()[0]
         cursor.execute(
-            "SELECT public.lab_arena_prepare_sep16_baseline_recovery_v1(%s::jsonb)",
-            (json.dumps(schedule),),
+            "SELECT public.lab_arena_prepare_sep16_baseline_recovery_v1("
+            "%s,%s,%s,%s::jsonb)",
+            (
+                RECOVERY_SOURCE_SIZE,
+                RECOVERY_SOURCE_SHA,
+                RECOVERY_SOURCE_COMMIT,
+                json.dumps(schedule),
+            ),
         )
         existing = cursor.fetchone()[0]
     connection.commit()
@@ -388,6 +413,36 @@ def test_recovery_archives_failure_and_publishes_positive_with_all_guards(
                 "SELECT public.lab_arena_sep16_recovery_archive_valid_v1()"
             )
             assert cursor.fetchone() == (True,)
+            cursor.execute(
+                "SELECT source_ref,source_size_bytes,"
+                "submission_doc->>'source_ref',"
+                "submission_doc->>'source_sha256',"
+                "submission_doc->>'source_commit' "
+                "FROM public.lab_arena_submissions WHERE submission_id=%s",
+                (BASELINE,),
+            )
+            assert cursor.fetchone() == (
+                RECOVERY_SOURCE_REF,
+                RECOVERY_SOURCE_SIZE,
+                RECOVERY_SOURCE_REF,
+                RECOVERY_SOURCE_SHA,
+                RECOVERY_SOURCE_COMMIT,
+            )
+            cursor.execute(
+                "SELECT source_ref,source_size_bytes,"
+                "submission_doc->>'source_ref',"
+                "submission_doc->>'source_sha256',"
+                "submission_doc->>'source_commit' "
+                "FROM public.lab_arena_submissions WHERE submission_id=%s",
+                (ARCHIVE_SUBMISSION,),
+            )
+            assert cursor.fetchone() == (
+                TERMINAL_SOURCE_REF,
+                NEW_SIZE,
+                TERMINAL_SOURCE_REF,
+                NEW_SHA,
+                NEW_COMMIT,
+            )
         assert _single_hash(
             connection,
             "lab_arena_sep16_baseline_rerun_audit",
@@ -525,12 +580,41 @@ def test_archive_allows_only_exact_late_failed_call_reconciliation(connect):
         recovery_schedule = _shift_schedule(old_schedule, minutes=45)
         migration = _render_recovery(connection, recovery_schedule)
         _install_and_recover(connection, migration, recovery_schedule)
+        sealed_recovered_state = _state_seal(connection)
+        wrong_sources = (
+            (RECOVERY_SOURCE_SIZE + 1, RECOVERY_SOURCE_SHA, RECOVERY_SOURCE_COMMIT),
+            (RECOVERY_SOURCE_SIZE, "0" * 64, RECOVERY_SOURCE_COMMIT),
+            (RECOVERY_SOURCE_SIZE, RECOVERY_SOURCE_SHA, "0" * 40),
+        )
+        for source_size, source_sha, source_commit in wrong_sources:
+            with connection.cursor() as cursor, pytest.raises(
+                Exception, match="source differs"
+            ):
+                cursor.execute(
+                    "SELECT public.lab_arena_prepare_sep16_baseline_recovery_v1("
+                    "%s,%s,%s,%s::jsonb)",
+                    (
+                        source_size,
+                        source_sha,
+                        source_commit,
+                        json.dumps(recovery_schedule),
+                    ),
+                )
+            connection.rollback()
+            assert _state_seal(connection) == sealed_recovered_state
         with connection.cursor() as cursor:
             with pytest.raises(Exception, match="schedule differs"):
                 cursor.execute(
                     "SELECT public.lab_arena_prepare_sep16_baseline_recovery_v1("
-                    "%s::jsonb)",
-                    (json.dumps({**recovery_schedule, "stage_1_close": "changed"}),),
+                    "%s,%s,%s,%s::jsonb)",
+                    (
+                        RECOVERY_SOURCE_SIZE,
+                        RECOVERY_SOURCE_SHA,
+                        RECOVERY_SOURCE_COMMIT,
+                        json.dumps(
+                            {**recovery_schedule, "stage_1_close": "changed"}
+                        ),
+                    ),
                 )
             connection.rollback()
         with connection.cursor() as cursor:

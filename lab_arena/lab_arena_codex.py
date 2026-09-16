@@ -31,6 +31,10 @@ MAX_LOG_BYTES = 64 * 1024
 SOCKET_TIMEOUT_SECONDS = 185
 DEFAULT_MAX_OUTPUT_TOKENS = 16_384
 MAX_OUTPUT_TOKENS = 32_768
+# The broker operation accepts tool output as ordered ``input_text`` parts of
+# this size.  Keep this standalone bridge dependency-free; a contract test
+# couples the value to operations.OPENROUTER_MAX_CONTENT_CHARS.
+TOOL_OUTPUT_TEXT_CHARS = 32_000
 
 
 class CodexRuntimeError(RuntimeError):
@@ -74,6 +78,50 @@ def _dispatch(socket_path: str, parameters: dict[str, Any]) -> tuple[int, bytes]
     if type(status) is not int or not 100 <= status <= 599:
         raise CodexRuntimeError("invalid worker status")
     return status, base64.b64decode(response["body_b64"], validate=True)
+
+
+def _chunk_tool_output_text(parameters: dict[str, Any]) -> dict[str, Any]:
+    """Split only valid oversized local-tool output text for the broker.
+
+    Codex can combine a large local-tool result into one string even though
+    the closed Responses operation represents long output as multiple ordered
+    ``input_text`` parts.  Malformed parts and all other input items remain
+    unchanged so the operation validator still rejects them.
+    """
+
+    items = parameters.get("input")
+    if not isinstance(items, list):
+        return parameters
+    for item in items:
+        if not isinstance(item, dict) or item.get("type") not in (
+                "function_call_output", "custom_tool_call_output"):
+            continue
+        output = item.get("output")
+        if isinstance(output, str) and len(output) > TOOL_OUTPUT_TEXT_CHARS:
+            item["output"] = [
+                {"type": "input_text", "text": output[offset:offset + TOOL_OUTPUT_TEXT_CHARS]}
+                for offset in range(0, len(output), TOOL_OUTPUT_TEXT_CHARS)
+            ]
+            continue
+        if not isinstance(output, list):
+            continue
+        parts = []
+        changed = False
+        for part in output:
+            if (isinstance(part, dict) and set(part) == {"type", "text"}
+                    and part.get("type") == "input_text"
+                    and isinstance(part.get("text"), str)
+                    and len(part["text"]) > TOOL_OUTPUT_TEXT_CHARS):
+                parts.extend(
+                    {"type": "input_text", "text": part["text"][offset:offset + TOOL_OUTPUT_TEXT_CHARS]}
+                    for offset in range(0, len(part["text"]), TOOL_OUTPUT_TEXT_CHARS)
+                )
+                changed = True
+            else:
+                parts.append(part)
+        if changed:
+            item["output"] = parts
+    return parameters
 
 
 def response_events(document: dict[str, Any]) -> Iterator[bytes]:
@@ -176,6 +224,7 @@ class ResponsesBridge:
                     if type(requested) is not int or not 1 <= requested <= max_output_tokens:
                         raise ValueError("invalid output token limit")
                     body["max_output_tokens"] = requested
+                    _chunk_tool_output_text(body)
                     status, response = _dispatch(owner.socket_path, body)
                     if 200 <= status < 300 and streaming:
                         try:

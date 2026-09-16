@@ -176,6 +176,30 @@ def test_recorded_native_wire_crosses_bridge_worker_broker_and_bills(monkeypatch
     assert sum(call["actual"] for call in store.calls.values()) == 24
 
 
+def test_bridge_chunks_recorded_large_custom_tool_result_without_text_loss(monkeypatch):
+    """The real Codex 0.154 typed output shape crosses the frozen operation."""
+    model = "openai/gpt-5.6-luna"
+    request = native_wire_request(model, "lite", continued=True)
+    original = "r" * 32_000 + "🙂" * 8_870
+    request["input"][-2]["output"] = [{"type": "input_text", "text": original}]
+    transport = FakeTransport([(200, response(model=model))])
+
+    with broker_socket(monkeypatch, transport, priced_models=(model,)) as (store, transport, path), codex.ResponsesBridge(str(path)) as bridge:
+        with httpx.Client(trust_env=False) as client:
+            reply = client.post(
+                bridge.base_url + "/responses",
+                headers={"Authorization": "Bearer " + bridge.token},
+                json=request,
+            )
+
+    assert reply.status_code == 200, reply.text
+    outbound = json.loads(transport.sent[0]["body"])
+    parts = outbound["input"][-2]["output"]
+    assert [len(part["text"]) for part in parts] == [32_000, 8_870]
+    assert "".join(part["text"] for part in parts) == original
+    assert len(store.calls) == 1
+
+
 def test_bridge_bills_real_worker_and_replays_sse(monkeypatch):
     with broker_socket(monkeypatch, FakeTransport([(200, response())])) as (store, transport, path), codex.ResponsesBridge(str(path)) as bridge:
         with httpx.Client(trust_env=False) as client:

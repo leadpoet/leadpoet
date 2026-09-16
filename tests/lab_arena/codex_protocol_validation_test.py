@@ -2,7 +2,7 @@
 
 import pytest
 
-from lab_arena import contracts, operations
+from lab_arena import contracts, lab_arena_codex as codex, operations
 
 
 def _schema(levels=4):
@@ -140,3 +140,69 @@ def test_encrypted_reasoning_history_uses_structural_string_ceiling():
     params["input"][0]["encrypted_content"] = "a" * 128_001
     with pytest.raises(operations.OperationRequestError):
         operations.validate_operation_request("openrouter.responses", params)
+
+
+def test_codex_tool_output_chunk_limit_matches_operation_contract():
+    assert codex.TOOL_OUTPUT_TEXT_CHARS == operations.OPENROUTER_MAX_CONTENT_CHARS
+
+
+@pytest.mark.parametrize("kind", ["function_call_output", "custom_tool_call_output"])
+def test_codex_chunks_only_oversized_tool_output_without_losing_unicode(kind):
+    limit = codex.TOOL_OUTPUT_TEXT_CHARS
+    text = "a" * (limit - 1) + "🙂β" + "z" * limit
+    params = {"model": "openai/gpt-5.4", "input": [
+        {"type": kind, "call_id": "call-1", "output": text},
+    ]}
+
+    result = codex._chunk_tool_output_text(params)
+    parts = result["input"][0]["output"]
+    assert [len(part["text"]) for part in parts] == [limit, limit, 1]
+    assert "".join(part["text"] for part in parts) == text
+    assert codex._chunk_tool_output_text(result) == result
+    operations.validate_operation_request("openrouter.responses", result)
+
+
+def test_codex_chunks_valid_typed_parts_in_order_and_preserves_invalid_parts():
+    limit = codex.TOOL_OUTPUT_TEXT_CHARS
+    invalid = {"type": "input_text", "text": "u" * (limit + 1), "future": True}
+    oversized = "界" * (limit + 1)
+    params = {"model": "openai/gpt-5.4", "input": [
+        {"type": "custom_tool_call", "call_id": "call-1", "name": "exec",
+         "input": "x" * (limit + 1)},
+        {"type": "custom_tool_call_output", "call_id": "call-1", "output": [
+            {"type": "input_text", "text": "before"},
+            {"type": "input_text", "text": oversized},
+            invalid,
+            {"type": "input_text", "text": "after"},
+        ]},
+        {"type": "message", "role": "user", "content": "m" * (limit + 1)},
+    ]}
+
+    result = codex._chunk_tool_output_text(params)
+    output = result["input"][1]["output"]
+    assert output[0] == {"type": "input_text", "text": "before"}
+    assert [len(output[1]["text"]), len(output[2]["text"])] == [limit, 1]
+    assert output[1]["text"] + output[2]["text"] == oversized
+    assert output[3] is invalid
+    assert output[4] == {"type": "input_text", "text": "after"}
+    assert result["input"][0]["input"] == "x" * (limit + 1)
+    assert result["input"][2]["content"] == "m" * (limit + 1)
+    with pytest.raises(operations.OperationRequestError):
+        operations.validate_operation_request("openrouter.responses", result)
+
+
+@pytest.mark.parametrize("size", [codex.TOOL_OUTPUT_TEXT_CHARS - 1, codex.TOOL_OUTPUT_TEXT_CHARS])
+def test_codex_leaves_boundary_tool_output_strings_unchanged(size):
+    output = "x" * size
+    params = {"input": [{"type": "function_call_output", "call_id": "call-1", "output": output}]}
+    assert codex._chunk_tool_output_text(params)["input"][0]["output"] is output
+
+
+def test_codex_worker_frame_cap_still_rejects_chunked_tool_output():
+    params = {"input": [{
+        "type": "custom_tool_call_output", "call_id": "call-1",
+        "output": "x" * 1_048_576,
+    }]}
+    codex._chunk_tool_output_text(params)
+    with pytest.raises(codex.CodexRuntimeError, match="request too large"):
+        codex._dispatch("/not-used", params)

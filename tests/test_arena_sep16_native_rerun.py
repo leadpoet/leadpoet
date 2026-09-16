@@ -10,6 +10,28 @@ from scripts import arena_sep16_native_rerun as rerun
 from tests.lab_arena.icp_fixtures import daily_icps
 
 
+def test_operator_uses_the_new_immutable_reseal_source_key():
+    assert rerun.SOURCE_REF == (
+        "arena/arena-2026-09-16/sources/"
+        "baseline-2026-09-16-native-rerun268.tar.gz"
+    )
+
+
+def test_concrete_reseal_contains_the_published_archive_proof():
+    sql = (
+        rerun.ROOT
+        / "scripts/268-arena-2026-09-16-latest-champion-reseal.sql"
+    ).read_text(encoding="utf-8")
+    assert "__SEALED_" not in sql
+    for value in (
+        "524266",
+        "c8d188c4766008ac949c5ff794536fc905589f46657d4b1ed27f3a22385f11b0",
+        "3afe71508636254eb31a172d94f5a63f4f84a5c2",
+        rerun.SOURCE_REF,
+    ):
+        assert value in sql
+
+
 class _Objects:
     def __init__(self, values=None):
         self.values = dict(values or {})

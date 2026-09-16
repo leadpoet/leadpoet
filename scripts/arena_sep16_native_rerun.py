@@ -28,7 +28,7 @@ BASELINE = "baseline-2026-09-16"
 BASIS_HASH = "sha256:b19a147f1c8cc8365e3cf7dcc96b827ffffdd6c1e8fad65ad9fc25c8895e493f"
 BANK_HASH = "42b417604acf15e612570687e8fbccef82fe7b0808364a6491b4a2a4bcb07390"
 SOURCE_URL = "https://github.com/leadpoet/champion_model/archive/refs/heads/lab.tar.gz"
-SOURCE_REF = "arena/arena-2026-09-16/sources/baseline-2026-09-16-native-rerun265.tar.gz"
+SOURCE_REF = "arena/arena-2026-09-16/sources/baseline-2026-09-16-native-rerun268.tar.gz"
 VERIFIED_RUNNER_SLOTS = 10
 
 

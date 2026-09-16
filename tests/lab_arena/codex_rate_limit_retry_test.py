@@ -103,6 +103,45 @@ def test_worker_retries_two_free_throttles_with_new_sequences_and_shared_deadlin
     assert len(worker._state.calls) == 3
 
 
+def test_responses_timeout_allows_existing_second_free_throttle_recovery(monkeypatch, tmp_path):
+    class TimedApi(Api):
+        def __init__(self, documents, clock, durations):
+            super().__init__(documents)
+            self.clock = clock
+            self.durations = iter(durations)
+
+        def provider(self, run_id, lease_token, frame):
+            self.clock[0] += next(self.durations)
+            return super().provider(run_id, lease_token, frame)
+
+    def dispatch(timeout_ms):
+        clock = [0.0]
+        api = TimedApi([
+            document(),
+            document(),
+            document(status=200, provider_status=200, actual=7, error_code=None),
+        ], clock, [40.0, 10.0, 1.0])
+        worker = server(tmp_path, api)
+        event = ClockEvent(clock)
+        worker._stopping = event
+        monkeypatch.setattr(rn.time, "monotonic", lambda: clock[0])
+        monkeypatch.setattr(rn.secrets, "randbelow", lambda _bound: 0)
+        outcome = worker._dispatch("openrouter.responses", PARAMETERS, timeout_ms)
+        return outcome, api, event, clock[0]
+
+    old_outcome, old_api, old_event, old_elapsed = dispatch(120_000)
+    assert old_outcome[1]["status"] == 502
+    assert len(old_api.frames) == 2
+    assert old_event.waits == [20.001]
+    assert old_elapsed == pytest.approx(70.001)
+
+    new_outcome, new_api, new_event, new_elapsed = dispatch(300_000)
+    assert new_outcome[0] is None and new_outcome[1]["status"] == 200
+    assert [frame["action_sequence"] for frame in new_api.frames] == [0, 1, 2]
+    assert new_event.waits == [20.001, 40.001]
+    assert new_elapsed == pytest.approx(111.002)
+
+
 @pytest.mark.parametrize("change", [
     {"actual": 1}, {"actual": False}, {"actual": "0"},
     {"outcome": "uncertain"}, {"provider_status": 500},

@@ -1036,6 +1036,22 @@ def test_provider_http_timeout_covers_the_requested_provider_window():
             "action_sequence": 0,
         },
     )
+    assert client.timeouts[-1].read == (
+        operations.BUDGET_ADMISSION_MAX_SECONDS
+        + operations.OPERATIONS["openrouter.chat"].timeout_seconds
+        + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+        + rn.PROVIDER_API_TIMEOUT_GRACE_SECONDS
+    )
+    api.provider(
+        "run-1",
+        "a" * 64,
+        {
+            "operation_id": "openrouter.responses",
+            "parameters": {},
+            "timeout_ms": 300_000,
+            "action_sequence": 1,
+        },
+    )
     assert client.timeouts[-1].read == rn.MAX_PROVIDER_API_TIMEOUT_SECONDS
     api.provider(
         "run-1",

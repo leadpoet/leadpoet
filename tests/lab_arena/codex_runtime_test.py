@@ -14,7 +14,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from lab_arena import broker as br, operations as ops, runner, runtime
+from lab_arena import broker as br, operations as ops, runner, runtime, shim
 from lab_arena import lab_arena_codex as codex
 from tests.lab_arena.test_lab_arena_broker import CONTEXT, FakeTransport, FakeLedgerStore, make_broker, price_table
 from tests.lab_arena.test_lab_arena_runner import lease
@@ -249,6 +249,56 @@ def test_session_isolates_login_and_provider_keys(monkeypatch, scrapingdog_value
         assert not (home / "auth.json").exists()
         assert 'request_max_retries = 0' in (home / "config.toml").read_text()
     assert not home.exists()
+
+
+def test_codex_timeout_layers_cover_the_derived_provider_window(monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", "/worker.sock")
+    monkeypatch.setenv("LAB_ARENA_WEB_EGRESS_SOCKET", "/egress.sock")
+    with codex.session(model="openai/gpt-5.6-sol") as environment:
+        config = (Path(environment["CODEX_HOME"]) / "config.toml").read_text()
+
+    sent = bytearray()
+    reply = json.dumps({
+        "status": 200,
+        "body_b64": "e30=",
+    }).encode()
+
+    class Socket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def settimeout(self, timeout):
+            assert timeout == 380
+
+        def connect(self, _path):
+            pass
+
+        def sendall(self, payload):
+            sent.extend(payload)
+
+        def recv(self, size):
+            framed = len(reply).to_bytes(4, "big") + reply
+            offset = getattr(self, "offset", 0)
+            chunk = framed[offset:offset + size]
+            self.offset = offset + len(chunk)
+            return chunk
+
+    monkeypatch.setattr(codex.socket, "socket", lambda *_args: Socket())
+    assert codex._dispatch("/worker.sock", {"model": "openai/gpt-5.6-sol", "input": "hi"}) == (200, b"{}")
+    size = int.from_bytes(sent[:4], "big")
+    operation_id, parameters, timeout_ms = shim.decode_operation_frame(sent[4:4 + size])
+    assert operation_id == "openrouter.responses"
+    assert parameters == {"model": "openai/gpt-5.6-sol", "input": "hi", "max_output_tokens": 4096}
+    assert timeout_ms == 300_000
+    assert ops.OPERATIONS["openrouter.responses"].timeout_seconds == 300
+    assert runner.MAX_PROVIDER_API_TIMEOUT_SECONDS == 365
+    assert codex.SOCKET_TIMEOUT_SECONDS == 380
+
+    assert "stream_idle_timeout_ms = 400000" in config
+    assert 400 > codex.SOCKET_TIMEOUT_SECONDS > runner.MAX_PROVIDER_API_TIMEOUT_SECONDS
 
 
 @pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="set ARENA_TEST_CODEX_BINARY for the real CLI protocol proof")

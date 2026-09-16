@@ -28,7 +28,7 @@ CODEX_BINARY = "/usr/local/bin/codex"
 MAX_REQUEST_BYTES = 1_000_000
 MAX_RESPONSE_BYTES = 4 * 1_048_576
 MAX_LOG_BYTES = 64 * 1024
-SOCKET_TIMEOUT_SECONDS = 185
+SOCKET_TIMEOUT_SECONDS = 380
 DEFAULT_MAX_OUTPUT_TOKENS = 16_384
 MAX_OUTPUT_TOKENS = 32_768
 # The broker operation accepts tool output as ordered ``input_text`` parts of
@@ -60,7 +60,7 @@ def _dispatch(socket_path: str, parameters: dict[str, Any]) -> tuple[int, bytes]
         "schema_version": "leadpoet.lab_arena.operation_frame.v1",
         "operation_id": "openrouter.responses",
         "parameters": parameters,
-        "timeout_ms": 120_000,
+        "timeout_ms": 300_000,
     }, separators=(",", ":"), allow_nan=False).encode()
     if len(payload) > 1_048_576:
         raise CodexRuntimeError("request too large")
@@ -300,7 +300,7 @@ def session(*, model: str, reasoning_effort: str = "medium", max_output_tokens: 
             'supports_websockets = false',
             'request_max_retries = 0',
             'stream_max_retries = 0',
-            'stream_idle_timeout_ms = 200000',
+            'stream_idle_timeout_ms = 400000',
             '',
         ])
         (home / "config.toml").write_text(config, encoding="utf-8")

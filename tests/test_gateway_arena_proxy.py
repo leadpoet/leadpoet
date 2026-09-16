@@ -200,6 +200,7 @@ def test_provider_proxy_allows_admission_execution_and_billing(monkeypatch, pref
 
     assert response.status_code == 200
     assert response.json() == {"status": "settled"}
+    assert observed[0].read == 380.0
     assert observed[0].read >= MAX_PROVIDER_API_TIMEOUT_SECONDS
     assert observed[0].connect == 3.0
     assert observed[0].write == 30.0

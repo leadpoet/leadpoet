@@ -1110,7 +1110,7 @@ _OPERATION_LIST = (
         },
         fixed_params={"stream": False, "store": False, "provider": dict(OPENROUTER_STRICT_PROVIDER_POLICY)},
         defaults={"max_output_tokens": OPENROUTER_MAX_OUTPUT_TOKENS},
-        timeout_seconds=120,
+        timeout_seconds=300,
         max_request_bytes=1_000_000,
         max_response_bytes=1_048_576,
         cost_rule={"kind": "openrouter_price_table", "max_output_tokens": OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS},

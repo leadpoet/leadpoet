@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Dict, Mapping, Optional, Protocol, Sequence, Tuple
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
@@ -109,6 +110,31 @@ _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES = 16 * 1024 * 1024
 # Documented post-mortem billing identity:
 # https://openrouter.ai/docs/guides/features/router-metadata#error-responses
 _OPENROUTER_GENERATION_HEADER = "x-generation-id"
+_RETRY_AFTER_ABSENT = object()
+_MAX_RETRY_AFTER_SECONDS = 3600
+
+
+def _retry_after_seconds(headers: Mapping[str, str]) -> object:
+    """Parse one bounded trusted Retry-After value for the worker only."""
+
+    if "retry-after" not in headers:
+        return _RETRY_AFTER_ABSENT
+    value = headers.get("retry-after")
+    if not isinstance(value, str) or not value or value != value.strip():
+        return None
+    if value.isdecimal():
+        if len(value) > 4:
+            return None
+        seconds = int(value)
+    else:
+        try:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                return None
+            seconds = max(0, math.ceil(retry_at.timestamp() - time.time()))
+        except (OverflowError, TypeError, ValueError):
+            return None
+    return seconds if seconds <= _MAX_RETRY_AFTER_SECONDS else None
 
 
 def _safe_exception_class(exc: BaseException) -> str:
@@ -2219,6 +2245,7 @@ class Broker:
         openrouter_effective_response: Optional[ProviderResponse] = None
         openrouter_generation_present = False
         openrouter_generation_id: Optional[str] = None
+        openrouter_retry_after_seconds: object = _RETRY_AFTER_ABSENT
         scrapingdog_observed_success_status: Optional[int] = None
         try:
             url, headers = inject_credential(outbound, secret)
@@ -2267,6 +2294,9 @@ class Broker:
                         raw_document = json.loads(response.body.decode("utf-8"))
                     except (UnicodeDecodeError, ValueError):
                         raw_document = None
+                    openrouter_retry_after_seconds = _retry_after_seconds(
+                        response.headers
+                    )
                     openrouter_native_cost = provider_costs.openrouter_cost(
                         raw_document
                     )
@@ -2776,6 +2806,16 @@ class Broker:
         if settle_status == "settled" and operations.provider_status_is_infrastructure(response.status):
             # An organizer account failure or upstream outage is infrastructure.
             summary.update({"outcome": "settled", "actual_microusd": actual, "status": sanitized_status, "provider_status": provider_status_for_summary, "response_hash": payload["response_hash"]})
+            if (
+                effective_operation_id == "openrouter.responses"
+                and provider_status_for_summary == 429
+                and type(actual) is int
+                and actual == 0
+                and openrouter_retry_after_seconds is not _RETRY_AFTER_ABSENT
+            ):
+                # Internal worker control data only. The model still receives
+                # the same generic provider-unavailable response.
+                summary["retry_after_seconds"] = openrouter_retry_after_seconds
             return _error_result("provider_unavailable", summary)
         if settle_status == "settled":
             summary.update({"outcome": "settled", "actual_microusd": actual, "status": sanitized_status, "provider_status": provider_status_for_summary, "response_hash": payload["response_hash"]})

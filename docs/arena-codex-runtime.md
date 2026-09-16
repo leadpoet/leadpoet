@@ -96,9 +96,14 @@ Hosted tools, remote images/files, server-side conversation IDs, background
 work and caller-selected routing are rejected. Research-provider calls still
 use the harness's Arena broker adapter. Codex's built-in hosted web search is
 disabled.
-Codex transport retries are disabled; the existing broker owns retry and cost
-recovery. Incomplete model responses retain actual billing and do not become
-successful sourcing calls.
+Codex transport retries are disabled; the existing broker owns cost recovery.
+The runner may retry a Responses request at most twice only after the broker
+proves the preceding attempt settled at zero cost with provider status 429.
+Each retry uses a new normal action sequence, consumes the existing call quota,
+honors a valid bounded `Retry-After`, and stays inside the worker request
+deadline. Uncertain, billed, idempotent, malformed and other failures are never
+retried. Stopping the worker cancels a pending backoff. Incomplete model
+responses retain actual billing and do not become successful sourcing calls.
 
 Codex disables its inner OS sandbox because the process is already inside
 gVisor, with a read-only image/source, an unprivileged UID, bounded writable

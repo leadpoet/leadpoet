@@ -17,6 +17,7 @@ import http.server
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import socketserver
@@ -77,6 +78,10 @@ MAX_PROVIDER_API_TIMEOUT_SECONDS = (
     + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
     + PROVIDER_API_TIMEOUT_GRACE_SECONDS
 )
+RESPONSES_RATE_LIMIT_RETRIES = 2
+RESPONSES_RATE_LIMIT_BACKOFF_SECONDS = (20.0, 40.0)
+RESPONSES_RATE_LIMIT_MIN_PROVIDER_SECONDS = 30.0
+RESPONSES_RATE_LIMIT_JITTER_MILLISECONDS = 2000
 DEFAULT_IMAGE_CACHE_MAX_BYTES = 16 * 1024 * 1024 * 1024
 DEFAULT_IMAGE_CACHE_MAX_ENTRIES = 32
 DEFAULT_SOURCE_CACHE_MAX_BYTES = 2 * 1024 * 1024 * 1024
@@ -1235,10 +1240,9 @@ class WorkerSocketServer:
         self._read_timeout_seconds = float(read_timeout_seconds)
         self._server: Optional[socketserver.ThreadingUnixStreamServer] = None
         self._thread: Optional[threading.Thread] = None
+        self._stopping = threading.Event()
 
-    def _dispatch(self, operation_id: str, parameters: Mapping[str, Any], timeout_ms: int) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-        """Bridge one validated operation to the Arena: ``(error_code, None)`` or ``(None, document)``."""
-
+    def _dispatch_once(self, operation_id: str, parameters: Mapping[str, Any], timeout_ms: int) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
         state = self._state
         with state.lock:
             sequence = state.action_sequence
@@ -1293,6 +1297,80 @@ class WorkerSocketServer:
                 state.refusals += 1
         return None, document
 
+    @staticmethod
+    def _responses_rate_limit_delay(call: Mapping[str, Any], retry: int) -> Optional[float]:
+        if not (
+            call.get("operation_id") == "openrouter.responses"
+            and call.get("provider") == "openrouter"
+            and call.get("funding_source") in ("host", "miner_key")
+            and call.get("outcome") == "settled"
+            and call.get("error_code") == "provider_unavailable"
+            and type(call.get("status")) is int
+            and call.get("status") == 502
+            and type(call.get("provider_status")) is int
+            and call.get("provider_status") == 429
+            and type(call.get("actual_microusd")) is int
+            and call.get("actual_microusd") == 0
+            and call.get("idempotent", False) is False
+            and 0 <= retry < RESPONSES_RATE_LIMIT_RETRIES
+        ):
+            return None
+        if "retry_after_seconds" in call:
+            hint = call["retry_after_seconds"]
+            if type(hint) is not int or not 0 <= hint <= 3600:
+                return None
+            delay = float(hint)
+        else:
+            delay = RESPONSES_RATE_LIMIT_BACKOFF_SECONDS[retry]
+        return delay + (
+            1 + secrets.randbelow(RESPONSES_RATE_LIMIT_JITTER_MILLISECONDS)
+        ) / 1000.0
+
+    def _dispatch(self, operation_id: str, parameters: Mapping[str, Any], timeout_ms: int) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+        """Bridge one operation, retrying only proved free Responses throttles."""
+
+        state = self._state
+        if operation_id != "openrouter.responses" or str(
+            state.lease.get("kind") or "execute"
+        ) != "execute":
+            return self._dispatch_once(operation_id, parameters, timeout_ms)
+        deadline = time.monotonic() + max(1, int(timeout_ms)) / 1000.0 + (
+            MAX_PROVIDER_API_TIMEOUT_SECONDS - MAX_PROVIDER_OPERATION_TIMEOUT_SECONDS
+        )
+        attempt_timeout_ms = timeout_ms
+        for retry in range(RESPONSES_RATE_LIMIT_RETRIES + 1):
+            if retry and self._stopping.is_set():
+                return error, document
+            error, document = self._dispatch_once(
+                operation_id, parameters, attempt_timeout_ms
+            )
+            if error or document is None or retry == RESPONSES_RATE_LIMIT_RETRIES:
+                return error, document
+            delay = (
+                self._responses_rate_limit_delay(document["call"], retry)
+                if type(document.get("status")) is int
+                and document.get("status") == 502
+                else None
+            )
+            if delay is None:
+                return error, document
+            remaining_provider_seconds = deadline - time.monotonic() - delay - (
+                MAX_PROVIDER_API_TIMEOUT_SECONDS - MAX_PROVIDER_OPERATION_TIMEOUT_SECONDS
+            )
+            if remaining_provider_seconds < RESPONSES_RATE_LIMIT_MIN_PROVIDER_SECONDS:
+                return error, document
+            if self._stopping.wait(delay):
+                return error, document
+            remaining_provider_seconds = deadline - time.monotonic() - (
+                MAX_PROVIDER_API_TIMEOUT_SECONDS - MAX_PROVIDER_OPERATION_TIMEOUT_SECONDS
+            )
+            if remaining_provider_seconds < RESPONSES_RATE_LIMIT_MIN_PROVIDER_SECONDS:
+                return error, document
+            attempt_timeout_ms = min(
+                int(timeout_ms), max(1, int(remaining_provider_seconds * 1000))
+            )
+        raise AssertionError("unreachable Responses retry loop")
+
     def handle_frame(self, raw: bytes) -> bytes:
         """The judge shim's transport: one length-prefixed operation frame."""
 
@@ -1332,6 +1410,7 @@ class WorkerSocketServer:
         return int(document["status"]), response_headers, payload
 
     def start(self) -> None:
+        self._stopping.clear()
         server_self = self
         slots = threading.BoundedSemaphore(self._max_connections)
 
@@ -1432,6 +1511,7 @@ class WorkerSocketServer:
         self._thread.start()
 
     def stop(self) -> None:
+        self._stopping.set()
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()

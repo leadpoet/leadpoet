@@ -40,6 +40,14 @@ RUN apt-get update \
 COPY requirements.txt /model/requirements.txt
 RUN pip install --no-cache-dir -r /model/requirements.txt
 
+# The same rootfs executes admitted Python harnesses. A native, checksum-pinned
+# Codex binary supports their agent loop without Node or a personal login.
+COPY scripts/install_arena_codex.py /tmp/install_arena_codex.py
+RUN python3 /tmp/install_arena_codex.py \
+    && ln -s /opt/arena-codex/bin/codex /usr/local/bin/codex \
+    && test "$(codex --version)" = "codex-cli 0.154.0" \
+    && rm /tmp/install_arena_codex.py
+
 # The evaluator's packages at their repository paths (RUNBOOK section 6): the
 # import closure of lab_arena, qualification, gateway, and leadpoet_verifier,
 # which reaches the support packages below as well.

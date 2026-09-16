@@ -34,7 +34,7 @@ import httpx
 
 from lab_arena import contracts, operations, provider_costs, scoring_provider_compat
 from lab_arena.contracts import ArenaContractError
-from lab_arena.store import ArenaStoreError
+from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable
 
 PRICE_TABLE_SCHEMA_VERSION = "leadpoet.lab_arena.openrouter_price_table.v1"
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
@@ -327,13 +327,15 @@ def actual_openrouter_cost_microusd(price_table: Mapping[str, Any], model: str, 
 def openrouter_normalized(parameters: Mapping[str, Any]) -> Dict[str, Any]:
     """The OpenRouter body the broker hashes and sends: the output cap is always explicit."""
 
-    requested = parameters.get("max_tokens")
-    cap = operations.OPENROUTER_MAX_OUTPUT_TOKENS
-    max_tokens = cap if requested is None else min(int(requested), cap)
+    token_field = "max_output_tokens" if "input" in parameters else "max_tokens"
+    requested = parameters.get(token_field)
+    cap = (operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS
+           if token_field == "max_output_tokens" else operations.OPENROUTER_MAX_OUTPUT_TOKENS)
+    max_tokens = operations.OPENROUTER_MAX_OUTPUT_TOKENS if requested is None else min(int(requested), cap)
     if max_tokens < 1:
         raise BrokerError("invalid_request")
     normalized = dict(parameters)
-    normalized["max_tokens"] = max_tokens
+    normalized[token_field] = max_tokens
     return normalized
 
 
@@ -1018,6 +1020,83 @@ class CallStore(Protocol):
 
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]: ...
 
+    def list_ledger(self, **kwargs: Any) -> Sequence[Dict[str, Any]]: ...
+
+
+def _reservation_readback_matches(
+    store: CallStore,
+    reservation_arguments: Mapping[str, Any],
+    state: Mapping[str, Any],
+) -> bool:
+    """Validate the durable reservation and current state after response loss."""
+
+    identity = reservation_arguments.get("call_identity")
+    if state.get("call_identity") != identity:
+        return False
+    rows = store.list_ledger(call_identity=identity, limit=64)
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes, bytearray)):
+        return False
+    if not rows or any(not isinstance(row, Mapping) for row in rows):
+        return False
+    entries = list(rows)
+    reservations = [row for row in entries if row.get("entry_kind") == "reservation"]
+    if len(reservations) != 1 or entries[0].get("entry_kind") != "reservation":
+        return False
+    reservation = reservations[0]
+    expected = {
+        "run_id": reservation_arguments.get("run_id"),
+        "call_identity": identity,
+        "operation_id": reservation_arguments.get("operation_id"),
+        "provider": reservation_arguments.get("provider"),
+        "funding_source": reservation_arguments.get("funding_source"),
+    }
+    prior_entry_id = 0
+    allowed_kinds = {
+        "reservation", "dispatch", "settlement", "uncertain", "recovery",
+    }
+    for entry in entries:
+        entry_id = entry.get("entry_id")
+        amount = entry.get("amount_microusd")
+        if (
+            any(entry.get(key) != value for key, value in expected.items())
+            or isinstance(entry_id, bool)
+            or not isinstance(entry_id, int)
+            or entry_id <= prior_entry_id
+            or entry.get("entry_kind") not in allowed_kinds
+            or isinstance(amount, bool)
+            or not isinstance(amount, int)
+            or amount < 0
+        ):
+            return False
+        prior_entry_id = entry_id
+    if len({entry.get("entry_kind") for entry in entries}) != len(entries):
+        return False
+    call_doc = reservation.get("entry_doc")
+    expected_call_doc = reservation_arguments.get("call_doc")
+    if not isinstance(call_doc, Mapping) or dict(call_doc) != dict(expected_call_doc):
+        return False
+    reserved_amount = reservation.get("amount_microusd")
+    if isinstance(reserved_amount, bool) or not isinstance(reserved_amount, int) or reserved_amount < 0:
+        return False
+    dynamic = call_doc.get("reserve_remaining_budget") is True
+    if not dynamic and reserved_amount != reservation_arguments.get("amount_microusd"):
+        return False
+    kind_to_status = {
+        "reservation": "reserved", "dispatch": "dispatched",
+        "settlement": "settled", "uncertain": "uncertain",
+        "recovery": "recovered", "refusal": "refused",
+    }
+    head = entries[-1]
+    if state.get("status") != kind_to_status.get(head.get("entry_kind")):
+        return False
+    state_amount = state.get("amount_microusd")
+    return (
+        not isinstance(state_amount, bool)
+        and isinstance(state_amount, int)
+        and state_amount >= 0
+        and state_amount == head.get("amount_microusd")
+    )
+
 
 def _validated_response_url(value: Any, *, secret: str = "") -> str:
     try:
@@ -1240,6 +1319,12 @@ def _provider_call_succeeded(
     if provider == "openrouter":
         if not isinstance(document, Mapping):
             return False
+        if document.get("object") == "response":
+            return (
+                document.get("status") == "completed"
+                and document.get("error") is None
+                and isinstance(document.get("output"), list)
+            )
         choices = document.get("choices")
         return isinstance(choices, list) and all(
             isinstance(choice, Mapping)
@@ -1375,7 +1460,7 @@ class Broker:
         if model not in self._price_table["models"]:
             raise BrokerError("model_not_allowed")
         normalized = openrouter_normalized(parameters)
-        return normalized, int(normalized["max_tokens"])
+        return normalized, int(normalized.get("max_output_tokens", normalized.get("max_tokens")))
 
     def reconcile_openrouter_cost(
         self,
@@ -1931,8 +2016,20 @@ class Broker:
             float(effective_operation.timeout_seconds),
         )
         reserve_deadline = time.monotonic() + operations.BUDGET_ADMISSION_MAX_SECONDS
+        reserve_readback_used = False
         while True:
-            reserved = self._store.reserve_call(**reservation_arguments)
+            try:
+                reserved = self._store.reserve_call(**reservation_arguments)
+            except ArenaStoreUnavailable:
+                if reserve_readback_used:
+                    raise
+                # The RPC can commit even when its HTTP response times out.
+                # Repeating the exact deterministic call identity serializes
+                # behind that transaction and returns its durable state (or
+                # creates the reservation if the first transaction rolled
+                # back). This never sends the paid provider request.
+                reserve_readback_used = True
+                continue
             if reserved.get("status") != "budget_busy":
                 break
             if time.monotonic() >= reserve_deadline:
@@ -1940,6 +2037,20 @@ class Broker:
                 return _error_result("provider_unavailable", summary)
             time.sleep(min(0.2, max(0.0, reserve_deadline - time.monotonic())))
         status = reserved.get("status")
+        # Terminal admission replies such as stale and refused do not create a
+        # reservation. Preserve their normal classification. States backed by
+        # a durable reservation must match the exact replayed call before the
+        # broker can reuse them or send a paid provider request.
+        if (
+            reserve_readback_used
+            and status in {
+                "reserved", "dispatched", "settled", "uncertain", "recovered",
+            }
+            and not _reservation_readback_matches(
+                self._store, reservation_arguments, reserved
+            )
+        ):
+            return _error_result("broker_unavailable", summary)
         if status == "stale":
             return _error_result("lease_stale", summary)
         if status == "champion_restart_required":
@@ -2086,7 +2197,10 @@ class Broker:
         if dispatched.get("status") == "stale":
             # The marker did not commit (stage closed or lease lost): the request is not sent.
             return _error_result("lease_stale", summary)
-        if dispatched.get("status") != "dispatched":
+        if (
+            dispatched.get("status") != "dispatched"
+            or dispatched.get("idempotent") is not False
+        ):
             summary["outcome"] = "uncertain"
             return _error_result("call_uncertain", summary)
         # Build the outbound request from the constant table and inject the credential.

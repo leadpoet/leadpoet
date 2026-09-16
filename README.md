@@ -161,6 +161,8 @@ For automation, set `OPENROUTER_API_KEY`, `OPENROUTER_MANAGEMENT_KEY`, and `DEEP
 
 Every miner submission must pass a full-code review before evaluation. The gateway uses **Claude Sonnet 5 through that submitting miner's OpenRouter key**, including every file in the uploaded archive and all bundled prompts. It checks for prepared answers, fabricated evidence, malicious behavior, and attempts to manipulate the reviewer. Normal constants, routing changes, and alternative harnesses are allowed. Review charges are recorded separately in the existing cost ledger. An incomplete review, unreadable file, or submission that exceeds the judge's context window cannot pass; source is never silently truncated. The submission status API reports review progress and cost.
 
+Temporary provider or transport failures may retry with increasing delays, up to six review attempts before the round's existing benchmark deadline; credential, credit, and invalid-source failures do not retry. Other incomplete responses retain the three-attempt limit. If review cannot pass, the admitted submission stays visible on the dashboard as not evaluated, with no score or published source.
+
 Do not include keys or `.env` files in the source directory. Placeholder-only `.env.example`, `.env.sample`, and `.env.template` files are allowed. `LICENSE.txt` or `LICENSE.md` can replace `LICENSE`, but it must stay beside `harness.py` and contain the same complete AGPL-3.0 text. Source limits are 10 MiB compressed, 50 MiB unpacked, and 1,000 files.
 
 Each hotkey can have one accepted model per daily round. To replace your queued

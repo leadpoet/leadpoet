@@ -228,7 +228,9 @@ def test_owner_change_and_missing_checksum_cannot_reset_allowance(store):
 
 def test_legacy_multiple_attempts_remain_and_migration_replay_is_safe():
     # Build real pre-limit history through migration 258, then upgrade in place.
-    old_migrations = CURRENT_SERVICE_MIGRATIONS[:-1]
+    old_migrations = CURRENT_SERVICE_MIGRATIONS[
+        :CURRENT_SERVICE_MIGRATIONS.index("262-lab-arena-one-replacement-attempt.sql")
+    ]
     with _legacy_database(old_migrations) as database:
         psycopg2, dsn = database
         transport = PsycopgTransport(lambda: psycopg2.connect(**dsn))

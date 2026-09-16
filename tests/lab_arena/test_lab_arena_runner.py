@@ -352,6 +352,22 @@ def test_execute_stages_restrictive_trusted_entrypoint_without_mutating_source(t
     assert stat.S_IMODE(parent_after.st_mode) == stat.S_IMODE(parent_before.st_mode) == 0o700
 
 
+@pytest.mark.parametrize("filename", ["lab_arena_checkpoint.py", "lab_arena_codex.py"])
+def test_trusted_runtime_helpers_are_staged_read_only(tmp_path, filename):
+    source = tmp_path / "trusted.py"
+    source.write_bytes(b"trusted_helper = True\n")
+    source.chmod(0o600)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    staged = rn._stage_agent_entrypoint(source, run_dir, filename=filename)
+    assert staged.name == filename
+    assert staged.read_bytes() == source.read_bytes()
+    assert stat.S_IMODE(staged.stat().st_mode) == 0o444
+    assert stat.S_IMODE(source.stat().st_mode) == 0o600
+    with pytest.raises(rn.RunnerError, match="filename is invalid"):
+        rn._stage_agent_entrypoint(source, run_dir, filename="../untrusted.py")
+
+
 def test_trusted_entrypoint_staging_rejects_symlink_source(tmp_path):
     source = tmp_path / "agent_entrypoint.py"
     source.write_text("trusted_entrypoint = True\n", encoding="utf-8")
@@ -454,7 +470,7 @@ def test_real_broker_openrouter_error_response_maps_to_provider_error_not_model_
     store.reserve_call.side_effect = lambda **request: {
         "status": "reserved", "amount_microusd": request["amount_microusd"]
     }
-    store.mark_dispatched.return_value = {"status": "dispatched"}
+    store.mark_dispatched.return_value = {"status": "dispatched", "idempotent": False}
     store.settle_call.return_value = {"status": "settled"}
     transport = Mock()
     transport.send.return_value = br.ProviderResponse(
@@ -498,6 +514,11 @@ def test_real_broker_openrouter_error_response_maps_to_provider_error_not_model_
     )
     assert broker_result.status == 502
     assert broker_result.call["error_code"] == "provider_unavailable"
+    assert broker_result.call["provider_status"] == 429
+    assert broker_result.call["outcome"] == "settled"
+    transport.send.assert_called_once()
+    assert store.settle_call.call_args.kwargs["actual_microusd"] == 0
+    store.mark_uncertain.assert_not_called()
 
     class ProviderFailureRuntime(BridgingRuntime):
         def run_icp(self, spec, **_):

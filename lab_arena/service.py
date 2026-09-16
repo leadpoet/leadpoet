@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, quality_policy
+from lab_arena import code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, quality_policy
 from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
@@ -1156,30 +1156,22 @@ class ArenaService:
         row = self._store.get_submission(submission_id)
         if row is None:
             raise ServiceError("submission_missing", 404)
-        self._round(str(row.get("round_id") or ""))
+        round_row = self._round(str(row.get("round_id") or ""))
         return {
             "submission_id": submission_id,
             "status": row["status"],
             "rejection_rule": row.get("rejection_rule"),
             "replaces_submission_id": row.get("replaces_submission_id"),
             "replaced_by_submission_id": row.get("replaced_by_submission_id"),
-            "code_review": self._public_code_review(row),
+            "code_review": self._public_code_review(row, round_row=round_row, now=self.now()),
         }
 
     @staticmethod
-    def _public_code_review(row: Mapping[str, Any]) -> Dict[str, Any]:
-        document = row.get("code_review_doc") or {}
-        return {
-            "status": row.get("code_review_status") or "pending",
-            "model": document.get("model"),
-            "file_count": document.get("file_count"),
-            "source_bytes": document.get("source_bytes"),
-            "cost_microusd": document.get("cost_microusd"),
-            "review_cost_microusd": document.get("review_cost_microusd"),
-            "cost_status": document.get("cost_status"),
-            "error_code": document.get("error_code"),
-            "categories": document.get("categories") or [],
-        }
+    def _public_code_review(
+        row: Mapping[str, Any], *, round_row: Optional[Mapping[str, Any]] = None,
+        now: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        return public_dashboard.code_review_summary(row, round_row=round_row, now=now)
 
     @staticmethod
     def _is_daily_baseline(row: Mapping[str, Any], round_row: Mapping[str, Any]) -> bool:
@@ -1661,7 +1653,10 @@ class ArenaService:
             row for row in accepted
             if not self._is_daily_baseline(row, round_row)
             and row.get("code_review_status") not in ("passed", "rejected")
-            and (row.get("code_review_status") == "reviewing" or int(row.get("code_review_attempts") or 0) < 3)
+            and (
+                row.get("code_review_status") == "reviewing"
+                or int(row.get("code_review_attempts") or 0) < code_review_policy.review_attempt_limit(row)
+            )
         ]
         if unresolved:
             deadline = (round_row["configuration_doc"].get("schedule") or {}).get("benchmark_deadline")
@@ -3669,7 +3664,9 @@ class ArenaService:
     def handle_provider(self, run_id: str, lease_token: str, frame: Any) -> Dict[str, Any]:
         if not isinstance(frame, Mapping) or set(frame) != {"operation_id", "parameters", "timeout_ms", "action_sequence"}:
             raise ServiceError("frame_invalid", 400)
-        contracts.check_strict_document(frame, contracts.PROVIDER_FRAME_LIMITS)
+        limits = (contracts.RESPONSES_PROVIDER_FRAME_LIMITS
+                  if frame["operation_id"] == "openrouter.responses" else contracts.PROVIDER_FRAME_LIMITS)
+        contracts.check_strict_document(frame, limits)
         run, context = self._run_context(run_id, lease_token)
         broker = self._broker_for(run["round_id"])
         result = broker.execute(context, operation_id=str(frame["operation_id"]), parameters=frame["parameters"], action_sequence=frame["action_sequence"], timeout_ms=int(frame["timeout_ms"]))

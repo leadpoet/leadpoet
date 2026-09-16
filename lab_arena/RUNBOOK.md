@@ -51,8 +51,14 @@ Only `code_review_status=passed` can freeze a miner into evaluation. The source
 must be complete UTF-8 text and fit in the 1M-token judge context, including
 output headroom. Requests disable context compression. Missing file coverage,
 truncated output, malformed verdicts, and unknown charges are incomplete reviews.
-The worker retries incomplete reviews at most three times, with a 60-second
-backoff. A live review claim expires after ten minutes so a restart can recover.
+Explicit HTTP 408/429/5xx, transport, and temporary preparation failures allow
+at most six attempts, with backoffs of 60, 120, 240, 480, and 900 seconds.
+Credential, credit, request, and invalid-source errors do not retry. Unknown
+errors, malformed successful responses, and missing charges retain the legacy
+three-attempt limit and 60-second backoff. A live review claim expires after ten
+minutes so a restart can recover. Claims start only after source replacement
+closes and before the existing benchmark deadline. A late result can settle
+its charge but cannot pass the review or admit a submission.
 After the normal submission cutoff, unresolved reviews may finish within the
 existing benchmark preparation window. Four reviews can run at once. At the
 benchmark deadline, submissions without a pass are excluded with
@@ -62,10 +68,15 @@ This does not change the daily evaluation schedule or numerical scoring.
 Review charges use `openrouter.code_review` in `lab_arena_ledger`, with
 `funding_source=miner_key`. They remain separate from sourcing cost eligibility.
 The submission status API exposes review status, file/byte counts, and cost.
-Only verdicts, counts, and category codes are persisted. Unknown provider charges retain their reservation
+The public list retains previously admitted review exclusions with no score or
+source release; it hides superseded and never-admitted uploads. Review and
+per-attempt ledger metadata retain only safe category codes, HTTP status, and
+retry flags, never provider prose, credentials, or submitted source.
+Unknown provider charges retain their reservation
 as uncertain; neither a worker crash nor a malformed response makes a free pass.
-Apply migration `207-lab-arena-code-review.sql` after migration 206 before
-restarting the gateway. The gateway preflight checks the review schema.
+Apply migration `263-lab-arena-code-review-recovery.sql` after migration 262
+before restarting the gateway. The gateway preflight checks the bounded retry
+capability as well as the existing review schema.
 
 No Dockerfile, public registry, image tag, commit identity, receipt, source
 digest, or release manifest is part of miner admission. The service validates

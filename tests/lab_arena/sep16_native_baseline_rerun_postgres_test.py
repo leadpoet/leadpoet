@@ -444,7 +444,9 @@ def _prepare(connection, schedule):
     return result
 
 
-def _stage1_scoring_items(connection, hotkeys, finalists, *, failed_position=None):
+def _stage1_scoring_items(
+    connection, hotkeys, finalists, *, failed_position=None, failed_positions=(),
+):
     with connection.cursor() as cursor:
         cursor.execute("ALTER TABLE public.lab_arena_runs DISABLE TRIGGER USER")
         cursor.execute("ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER USER")
@@ -455,12 +457,15 @@ def _stage1_scoring_items(connection, hotkeys, finalists, *, failed_position=Non
             "AND status='pending'",
             (ROUND, BASELINE),
         )
+        failed = set(failed_positions)
         if failed_position is not None:
+            failed.add(failed_position)
+        if failed:
             cursor.execute(
                 "UPDATE public.lab_arena_runs SET status='failed',"
                 "terminal_cause='model_error',output_ref=NULL,per_icp_score=NULL "
                 "WHERE round_id=%s AND submission_id=%s AND kind='execute' "
-                "AND icp_position=%s", (ROUND, BASELINE, failed_position),
+                "AND icp_position=ANY(%s)", (ROUND, BASELINE, sorted(failed)),
             )
         cursor.execute(
             "SELECT run_id,submission_id,stage,icp_position,attempt,kind,status,"
@@ -594,6 +599,35 @@ def test_prepare_is_sealed_and_preserves_miners_rewards_and_history(connect):
                         (role, table),
                     )
                     assert cursor.fetchone()[0] is False
+            private_functions = (
+                "public.lab_arena_open_scoring_sep16_baseline_only_v1(text,smallint,jsonb)",
+                "public.lab_arena_sep16_rerun_score_namespace_guard_v1()",
+                "public.lab_arena_sep16_challenger_seals_valid_v1()",
+                "public.lab_arena_sep16_rerun_publication_guard_v1()",
+            )
+            service_functions = (
+                "public.lab_arena_prepare_sep16_baseline_rerun_v1(bigint,text,text,text,jsonb)",
+                "public.lab_arena_open_sep16_baseline_scoring_v1(text,smallint,jsonb)",
+            )
+            for role in ("anon", "authenticated", "service_role"):
+                for function in private_functions + service_functions:
+                    cursor.execute(
+                        "SELECT has_function_privilege(%s,%s,'EXECUTE')",
+                        (role, function),
+                    )
+                    assert cursor.fetchone()[0] is False
+            for function in private_functions:
+                cursor.execute(
+                    "SELECT has_function_privilege('lab_arena_service',%s,'EXECUTE')",
+                    (function,),
+                )
+                assert cursor.fetchone()[0] is False
+            for function in service_functions:
+                cursor.execute(
+                    "SELECT has_function_privilege('lab_arena_service',%s,'EXECUTE')",
+                    (function,),
+                )
+                assert cursor.fetchone()[0] is True
         with connection.cursor() as cursor:
             with pytest.raises(Exception):
                 cursor.execute(
@@ -814,6 +848,36 @@ def test_scoring_accepts_recomputed_finalists_and_reuses_challenger_rows(connect
         connection.close()
 
 
+def test_generic_scoring_route_is_blocked_after_prepare(connect):
+    connection = connect()
+    try:
+        schedule, hotkeys, ids = _seed_observed_sep16(connection)
+        assert _prepare(connection, schedule)["status"] == "prepared"
+        items = _stage1_scoring_items(connection, hotkeys, [ids[1]])
+        with connection.cursor() as cursor:
+            with pytest.raises(Exception):
+                cursor.execute(
+                    "SELECT public.lab_arena_open_scoring_v2("
+                    "%s,1::smallint,%s::jsonb)", (ROUND, json.dumps(items)),
+                )
+        connection.rollback()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s "
+                "AND kind='score' AND assignment_id NOT LIKE '%%:score:rerun265' "
+                "AND stage_generation=10", (ROUND,),
+            )
+            assert cursor.fetchone()[0] == 0
+            cursor.execute(
+                "SELECT public.lab_arena_open_sep16_baseline_scoring_v1("
+                "%s,1::smallint,%s::jsonb)", (ROUND, json.dumps(items)),
+            )
+            assert cursor.fetchone()[0]["assignments"] == 10
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def test_prepare_and_scoring_replay_count_logical_assignments_after_retries(connect):
     connection = connect()
     try:
@@ -949,6 +1013,27 @@ def test_scoring_uses_normal_zero_row_for_one_failed_baseline_position(connect):
             opened = cursor.fetchone()[0]
             assert opened["status"] == "ok"
             assert opened["assignments"] == 9
+    finally:
+        connection.close()
+
+
+def test_scoring_allows_all_baseline_positions_to_be_normal_zero_rows(connect):
+    connection = connect()
+    try:
+        schedule, hotkeys, ids = _seed_observed_sep16(connection)
+        assert _prepare(connection, schedule)["status"] == "prepared"
+        items = _stage1_scoring_items(
+            connection, hotkeys, [ids[1]], failed_positions=range(10)
+        )
+        assert all(item["submission_id"] != BASELINE for item in items)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT public.lab_arena_open_sep16_baseline_scoring_v1("
+                "%s,1::smallint,%s::jsonb)", (ROUND, json.dumps(items)),
+            )
+            opened = cursor.fetchone()[0]
+            assert opened["status"] == "ok"
+            assert opened["assignments"] == 0
     finally:
         connection.close()
 

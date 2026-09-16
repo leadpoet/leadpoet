@@ -173,9 +173,47 @@ $clone_current_scoring$;
 ALTER FUNCTION public.lab_arena_open_scoring_sep16_baseline_only_v1(TEXT, SMALLINT, JSONB)
   OWNER TO lab_arena_owner;
 REVOKE ALL ON FUNCTION public.lab_arena_open_scoring_sep16_baseline_only_v1(TEXT, SMALLINT, JSONB)
-  FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.lab_arena_open_scoring_sep16_baseline_only_v1(TEXT, SMALLINT, JSONB)
-  FROM lab_arena_service;
+  FROM PUBLIC, anon, authenticated, service_role, lab_arena_service;
+
+-- Once prepare has recorded the official rerun, the normal driver must not
+-- open the committed plan through the generic integrity scorer.  The driver
+-- may race the one-off operator between plan commit and scoring open.  Reject
+-- that whole generic INSERT transaction and allow only the exact namespace
+-- created by lab_arena_open_sep16_baseline_scoring_v1 below.
+CREATE OR REPLACE FUNCTION public.lab_arena_sep16_rerun_score_namespace_guard_v1()
+RETURNS TRIGGER
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $sep16_rerun_score_namespace_guard$
+BEGIN
+  IF NEW.round_id = 'arena-2026-09-16'
+     AND NEW.kind = 'score'
+     AND EXISTS (
+       SELECT 1 FROM public.lab_arena_sep16_baseline_rerun_audit
+       WHERE round_id = NEW.round_id
+     )
+     AND (
+       NEW.submission_id <> 'baseline-2026-09-16'
+       OR NEW.assignment_id IS DISTINCT FROM
+            NEW.round_id || ':' || NEW.submission_id || ':' ||
+            NEW.stage::TEXT || ':' || NEW.icp_position::TEXT || ':score:rerun265'
+     ) THEN
+    RAISE EXCEPTION 'sep16 rerun scoring requires exact operator route'
+      USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END;
+$sep16_rerun_score_namespace_guard$;
+ALTER FUNCTION public.lab_arena_sep16_rerun_score_namespace_guard_v1()
+  OWNER TO lab_arena_owner;
+REVOKE ALL ON FUNCTION public.lab_arena_sep16_rerun_score_namespace_guard_v1()
+  FROM PUBLIC, anon, authenticated, service_role, lab_arena_service;
+DROP TRIGGER IF EXISTS lab_arena_sep16_rerun_score_namespace_guard
+  ON public.lab_arena_runs;
+CREATE TRIGGER lab_arena_sep16_rerun_score_namespace_guard
+  BEFORE INSERT ON public.lab_arena_runs
+  FOR EACH ROW
+  EXECUTE FUNCTION public.lab_arena_sep16_rerun_score_namespace_guard_v1();
 
 CREATE OR REPLACE FUNCTION public.lab_arena_prepare_sep16_baseline_rerun_v1(
   p_source_size_bytes BIGINT,
@@ -777,7 +815,7 @@ ALTER FUNCTION public.lab_arena_prepare_sep16_baseline_rerun_v1(
 ) OWNER TO lab_arena_owner;
 REVOKE ALL ON FUNCTION public.lab_arena_prepare_sep16_baseline_rerun_v1(
   BIGINT, TEXT, TEXT, TEXT, JSONB
-) FROM PUBLIC;
+) FROM PUBLIC, anon, authenticated, service_role, lab_arena_service;
 GRANT EXECUTE ON FUNCTION public.lab_arena_prepare_sep16_baseline_rerun_v1(
   BIGINT, TEXT, TEXT, TEXT, JSONB
 ) TO lab_arena_service;
@@ -852,7 +890,7 @@ $sep16_challenger_seals_valid$;
 ALTER FUNCTION public.lab_arena_sep16_challenger_seals_valid_v1()
   OWNER TO lab_arena_owner;
 REVOKE ALL ON FUNCTION public.lab_arena_sep16_challenger_seals_valid_v1()
-  FROM PUBLIC, lab_arena_service;
+  FROM PUBLIC, anon, authenticated, service_role, lab_arena_service;
 
 -- The ordinary service derives every work item from the committed plan and
 -- verified output objects. Refuse a partial or different request, then pass
@@ -913,7 +951,6 @@ BEGIN
   IF v_plan ->> 'round_id' <> p_round_id
      OR (v_plan ->> 'stage')::SMALLINT <> p_stage
      OR pg_catalog.jsonb_typeof(v_plan -> 'work_items') IS DISTINCT FROM 'array'
-     OR pg_catalog.jsonb_array_length(v_plan -> 'work_items') < 10
      OR pg_catalog.jsonb_array_length(p_work_items)
           <> pg_catalog.jsonb_array_length(v_plan -> 'work_items')
      OR (SELECT pg_catalog.count(DISTINCT item ->> 'scored_run_id')
@@ -1031,7 +1068,7 @@ $open_sep16_baseline_scoring$;
 ALTER FUNCTION public.lab_arena_open_sep16_baseline_scoring_v1(TEXT, SMALLINT, JSONB)
   OWNER TO lab_arena_owner;
 REVOKE ALL ON FUNCTION public.lab_arena_open_sep16_baseline_scoring_v1(TEXT, SMALLINT, JSONB)
-  FROM PUBLIC;
+  FROM PUBLIC, anon, authenticated, service_role, lab_arena_service;
 GRANT EXECUTE ON FUNCTION public.lab_arena_open_sep16_baseline_scoring_v1(TEXT, SMALLINT, JSONB)
   TO lab_arena_service;
 
@@ -1206,6 +1243,8 @@ END;
 $sep16_rerun_publication_guard$;
 ALTER FUNCTION public.lab_arena_sep16_rerun_publication_guard_v1()
   OWNER TO lab_arena_owner;
+REVOKE ALL ON FUNCTION public.lab_arena_sep16_rerun_publication_guard_v1()
+  FROM PUBLIC, anon, authenticated, service_role, lab_arena_service;
 DROP TRIGGER IF EXISTS lab_arena_sep16_rerun_publication_guard
   ON public.lab_arena_rounds;
 CREATE TRIGGER lab_arena_sep16_rerun_publication_guard

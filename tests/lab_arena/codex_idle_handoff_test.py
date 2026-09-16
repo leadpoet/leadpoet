@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import httpx
@@ -16,6 +17,9 @@ import pytest
 
 from lab_arena import broker as br
 from lab_arena import lab_arena_codex as codex
+from lab_arena import lab_arena_checkpoint
+from lab_arena import output as arena_output
+from lab_arena import runtime as arena_runtime
 from tests.lab_arena.codex_runtime_test import broker_socket, response
 from tests.lab_arena.test_lab_arena_broker import FakeTransport
 
@@ -61,10 +65,15 @@ def _abandoned_post(base_url: str, token: str) -> socket.socket:
     return client
 
 
-def test_interrupted_request_settles_before_finalization_checkpoint(monkeypatch):
+def test_interrupted_request_settles_before_finalization_checkpoint(monkeypatch, tmp_path):
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    output_path = output_dir / "companies.json"
+    monkeypatch.setenv("LAB_ARENA_OUTPUT_PATH", str(output_path))
+    final_text = "[]"
     final_output = [{
         "id": "msg-final", "type": "message", "role": "assistant", "status": "completed",
-        "content": [{"type": "output_text", "text": "CHECKPOINT_SAVED", "annotations": []}],
+        "content": [{"type": "output_text", "text": final_text, "annotations": []}],
     }]
     transport = BlockingFakeTransport([
         (200, response(id="research-old")),
@@ -113,11 +122,30 @@ def test_interrupted_request_settles_before_finalization_checkpoint(monkeypatch)
                 },
             )
 
-    assert finalizer.status_code == 200, finalizer.text
-    assert "CHECKPOINT_SAVED" in finalizer.text
+        assert finalizer.status_code == 200, finalizer.text
+        events = [
+            json.loads(line.removeprefix("data: "))
+            for line in finalizer.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        completed = next(event["response"] for event in events
+                         if event["type"] == "response.completed")
+        returned_text = completed["output"][0]["content"][0]["text"]
+        assert returned_text == final_text
+
+        lab_arena_checkpoint.write(
+            json.loads(returned_text),
+            output_path=Path(environment["LAB_ARENA_OUTPUT_PATH"]),
+        )
+        host_bytes = arena_runtime.read_output(SimpleNamespace(output_path=output_path))
+        assert host_bytes == b'{"companies":[]}'
+        assert arena_output.output_document_from_bytes(host_bytes)["companies"] == []
+        assert list(output_dir.iterdir()) == [output_path]
+
     assert transport.attempts == len(transport.sent) == len(store.calls) == 2
     assert all(call["kind"] == "settlement" for call in store.calls.values())
     assert all(call["terminal"]["call_succeeded"] is True for call in store.calls.values())
+    assert [call["actual"] for call in store.calls.values()] == [12, 12]
 
 
 @pytest.mark.parametrize("timeout", [
@@ -137,7 +165,7 @@ def test_session_environment_remains_subprocess_compatible_and_scoped(monkeypatc
     second_environment = None
     second_wait = None
 
-    with broker_socket(monkeypatch):
+    with broker_socket(monkeypatch) as (store, transport, _):
         with codex.session(model="openai/gpt-4o-mini") as first_environment:
             first_wait = first_environment.wait_idle
             assert isinstance(first_environment, dict)
@@ -176,5 +204,6 @@ def test_session_environment_remains_subprocess_compatible_and_scoped(monkeypatc
         first_environment.wait_idle(0)
     with pytest.raises(codex.CodexRuntimeError, match="session is closed"):
         second_environment.wait_idle(0)
+    assert not transport.sent and not store.calls
     assert not Path(first_environment["CODEX_HOME"]).exists()
     assert not Path(second_environment["CODEX_HOME"]).exists()

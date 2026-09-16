@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from lab_arena import broker as br
+from lab_arena import contracts, runtime, shim
 from lab_arena import runner as rn
 from tests.lab_arena.test_lab_arena_broker import (
     CONTEXT,
@@ -19,7 +21,12 @@ from tests.lab_arena.test_lab_arena_broker import (
     luna_price_table,
     make_broker,
 )
-from tests.lab_arena.test_lab_arena_runner import lease
+from tests.lab_arena.test_lab_arena_runner import (
+    BridgingRuntime,
+    FakeApi,
+    lease,
+    make_config,
+)
 
 PARAMETERS = {"model": "openai/gpt-4o-mini", "input": "research"}
 BODY = base64.b64encode(b'{"error":{"code":"provider_unavailable"}}').decode()
@@ -40,6 +47,43 @@ def document(*, provider_status=429, actual=0, outcome="settled", status=502,
         call["retry_after_seconds"] = retry_after
     return {"status": status, "headers": {"content-type": "application/json"},
             "body_b64": BODY, "call": call}
+
+
+def identified_document(sequence, **changes):
+    result = document(**changes)
+    result["call"]["call_identity"] = contracts.document_hash(
+        ["responses-retry", sequence]
+    )
+    result["call"]["action_sequence"] = sequence
+    if result["status"] == 200:
+        result["body_b64"] = base64.b64encode(
+            b'{"id":"resp-recovered","status":"completed","output":[]}'
+        ).decode()
+    return result
+
+
+class ResponsesThenTerminalRuntime(BridgingRuntime):
+    def __init__(self, statuses, *, timed_out=False):
+        super().__init__(output=None, exit_code=1, timed_out=timed_out, calls=0)
+        self.statuses = tuple(statuses)
+
+    def run_icp(self, spec, **_kwargs):
+        self.specs.append(spec)
+        os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
+        try:
+            for expected in self.statuses:
+                status, _headers, _body = shim.dispatch(
+                    "openrouter.responses", PARAMETERS, 120_000
+                )
+                assert status == expected
+        finally:
+            os.environ.pop(shim.WORKER_SOCKET_ENV, None)
+        return runtime.fake_result(
+            exit_code=self.exit_code,
+            timed_out=self.timed_out,
+            output_bytes=None,
+            stderr=b"model stopped without output",
+        )
 
 
 class Api:
@@ -107,6 +151,163 @@ def test_worker_retries_two_free_throttles_with_new_sequences_and_shared_deadlin
     assert [frame["timeout_ms"] for frame in api.frames] == [120_000, 99_999, 59_998]
     assert event.waits == [20.001, 40.001]
     assert len(worker._state.calls) == 3
+
+
+@pytest.mark.parametrize(
+    "timed_out,expected_terminal",
+    [(False, "model_error"), (True, "model_timeout")],
+)
+def test_recovered_transparent_retry_does_not_replace_later_model_terminal(
+    monkeypatch, tmp_path, timed_out, expected_terminal
+):
+    documents = [
+        identified_document(0, retry_after=0),
+        identified_document(
+            1,
+            provider_status=200,
+            actual=7,
+            status=200,
+            error_code=None,
+            idempotent=False,
+        ),
+    ]
+    statuses = [200]
+    if not timed_out:
+        documents.append(
+            identified_document(
+                2,
+                provider_status=None,
+                actual=0,
+                outcome="refused",
+                status=402,
+                error_code="budget_refused",
+                idempotent=False,
+            )
+        )
+        statuses.append(402)
+    api = FakeApi([lease("recovered-model-terminal")], broker_documents=documents)
+    (tmp_path / "work").mkdir()
+    monkeypatch.setattr(rn.secrets, "randbelow", lambda _bound: 0)
+
+    assert rn.Runner(
+        make_config(
+            tmp_path,
+            api,
+            ResponsesThenTerminalRuntime(statuses, timed_out=timed_out),
+        )
+    ).run_once() == 1
+
+    result = api.completions[0]["body"]["result"]
+    assert result["terminal_status"] == expected_terminal
+    assert result["resource_summary"]["provider_call_count"] == len(documents)
+    assert len(api.provider_frames) == len(documents)
+
+
+@pytest.mark.parametrize(
+    "documents,statuses",
+    [
+        (
+            [
+                identified_document(0, retry_after=0),
+                identified_document(
+                    1,
+                    provider_status=200,
+                    actual=7,
+                    status=200,
+                    error_code=None,
+                    idempotent=False,
+                ),
+                identified_document(
+                    2,
+                    provider_status=502,
+                    actual=0,
+                    status=502,
+                    error_code="provider_unavailable",
+                    idempotent=False,
+                ),
+            ],
+            [200, 502],
+        ),
+        (
+            [
+                document(retry_after=0),
+                identified_document(
+                    1,
+                    provider_status=200,
+                    actual=7,
+                    status=200,
+                    error_code=None,
+                    idempotent=False,
+                ),
+                identified_document(
+                    2,
+                    provider_status=None,
+                    actual=0,
+                    outcome="refused",
+                    status=402,
+                    error_code="budget_refused",
+                    idempotent=False,
+                ),
+            ],
+            [200, 402],
+        ),
+        (
+            [
+                identified_document(0, retry_after=0),
+                identified_document(1, retry_after=0),
+                identified_document(2, retry_after=0),
+            ],
+            [502],
+        ),
+        (
+            [
+                identified_document(
+                    0,
+                    provider_status=None,
+                    actual=0,
+                    status=502,
+                    error_code="provider_unavailable",
+                    idempotent=False,
+                ),
+                identified_document(
+                    1,
+                    provider_status=None,
+                    actual=0,
+                    outcome="refused",
+                    status=402,
+                    error_code="budget_refused",
+                    idempotent=False,
+                ),
+            ],
+            [502, 402],
+        ),
+    ],
+    ids=(
+        "later-visible-infrastructure",
+        "missing-retry-identity",
+        "exhausted-final-rate-limit",
+        "unproved-zero-cost-502-before-quota",
+    ),
+)
+def test_only_proved_recovered_retry_is_excluded_from_infrastructure_failure(
+    monkeypatch, tmp_path, documents, statuses
+):
+    api = FakeApi([lease("unrecovered-provider")], broker_documents=documents)
+    (tmp_path / "work").mkdir()
+    monkeypatch.setattr(rn.secrets, "randbelow", lambda _bound: 0)
+
+    assert rn.Runner(
+        make_config(
+            tmp_path,
+            api,
+            ResponsesThenTerminalRuntime(statuses),
+        )
+    ).run_once() == 1
+
+    result = api.completions[0]["body"]["result"]
+    assert result["terminal_status"] == "provider_error"
+    assert result["resource_summary"]["provider_call_count"] == len(documents)
+    assert len(api.provider_frames) == len(documents)
 
 
 def test_responses_timeout_allows_existing_second_free_throttle_recovery(monkeypatch, tmp_path):

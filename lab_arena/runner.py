@@ -1207,6 +1207,9 @@ class RunState:
     lease: Dict[str, Any]
     lease_token: str
     calls: List[Dict[str, Any]] = field(default_factory=list)
+    recovered_responses_retry_call_identities: set[str] = field(
+        default_factory=set
+    )
     action_sequence: int = 0
     refusals: int = 0  # refused calls answered by the Arena for this run
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -1330,6 +1333,36 @@ class WorkerSocketServer:
             1 + secrets.randbelow(RESPONSES_RATE_LIMIT_JITTER_MILLISECONDS)
         ) / 1000.0
 
+    @staticmethod
+    def _settled_responses_success_identity(
+        document: Mapping[str, Any],
+    ) -> Optional[str]:
+        """Identify one exact successful response delivered after a hidden retry."""
+
+        call = document.get("call")
+        if not (
+            type(document.get("status")) is int
+            and document.get("status") == 200
+            and isinstance(call, Mapping)
+            and call.get("operation_id") == "openrouter.responses"
+            and call.get("provider") == "openrouter"
+            and call.get("funding_source") in ("host", "miner_key")
+            and call.get("outcome") == "settled"
+            and type(call.get("status")) is int
+            and call.get("status") == 200
+            and type(call.get("provider_status")) is int
+            and call.get("provider_status") == 200
+            and type(call.get("actual_microusd")) is int
+            and call.get("actual_microusd") >= 0
+            and call.get("error_code") is None
+            and call.get("idempotent", False) is False
+        ):
+            return None
+        identity = call.get("call_identity")
+        if not isinstance(identity, str) or contracts.SHA256_RE.fullmatch(identity) is None:
+            return None
+        return identity
+
     def _dispatch(self, operation_id: str, parameters: Mapping[str, Any], timeout_ms: int) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
         """Bridge one operation, retrying only proved free Responses throttles."""
 
@@ -1342,13 +1375,27 @@ class WorkerSocketServer:
             MAX_PROVIDER_API_TIMEOUT_SECONDS - MAX_PROVIDER_OPERATION_TIMEOUT_SECONDS
         )
         attempt_timeout_ms = timeout_ms
+        hidden_retry_call_identities: List[str] = []
         for retry in range(RESPONSES_RATE_LIMIT_RETRIES + 1):
             if retry and self._stopping.is_set():
                 return error, document
             error, document = self._dispatch_once(
                 operation_id, parameters, attempt_timeout_ms
             )
-            if error or document is None or retry == RESPONSES_RATE_LIMIT_RETRIES:
+            if error or document is None:
+                return error, document
+            recovered_by = self._settled_responses_success_identity(document)
+            if (
+                hidden_retry_call_identities
+                and recovered_by is not None
+                and recovered_by not in hidden_retry_call_identities
+            ):
+                with state.lock:
+                    state.recovered_responses_retry_call_identities.update(
+                        hidden_retry_call_identities
+                    )
+                hidden_retry_call_identities.clear()
+            if retry == RESPONSES_RATE_LIMIT_RETRIES:
                 return error, document
             delay = (
                 self._responses_rate_limit_delay(document["call"], retry)
@@ -1370,6 +1417,12 @@ class WorkerSocketServer:
             )
             if remaining_provider_seconds < RESPONSES_RATE_LIMIT_MIN_PROVIDER_SECONDS:
                 return error, document
+            retry_identity = document["call"].get("call_identity")
+            if (
+                isinstance(retry_identity, str)
+                and contracts.SHA256_RE.fullmatch(retry_identity) is not None
+            ):
+                hidden_retry_call_identities.append(retry_identity)
             attempt_timeout_ms = min(
                 int(timeout_ms), max(1, int(remaining_provider_seconds * 1000))
             )
@@ -1946,12 +1999,28 @@ class AssignmentExecutor:
                 and call.get("error_code") in ("budget_refused", "budget_exhausted")
                 for call in state.calls
             )
+            with state.lock:
+                recovered_responses_retries = frozenset(
+                    state.recovered_responses_retry_call_identities
+                )
             provider_infrastructure_failed = any(
-                call.get("error_code") in ("broker_unavailable", "provider_unavailable")
-                or (
-                    operations.provider_status_is_infrastructure(call.get("provider_status"))
-                    and call.get("error_code") != "provider_request_refused"
-                    and not (call.get("funding_source") == "miner_key" and call.get("provider_status") in (401, 402, 403))
+                call.get("call_identity")
+                not in recovered_responses_retries
+                and (
+                    call.get("error_code") in (
+                        "broker_unavailable",
+                        "provider_unavailable",
+                    )
+                    or (
+                        operations.provider_status_is_infrastructure(
+                            call.get("provider_status")
+                        )
+                        and call.get("error_code") != "provider_request_refused"
+                        and not (
+                            call.get("funding_source") == "miner_key"
+                            and call.get("provider_status") in (401, 402, 403)
+                        )
+                    )
                 )
                 for call in state.calls
             )

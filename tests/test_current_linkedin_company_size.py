@@ -2804,3 +2804,91 @@ def test_structured_size_fallback_requires_complete_matching_web_identity(monkey
 
     assert result["observed_employee_count"] is None
     assert calls == []
+
+
+@pytest.mark.parametrize("needs_repair", [False, True])
+@pytest.mark.parametrize("structured", [False, True])
+def test_size_refresh_reuses_verified_homepage_transport_domain(
+    monkeypatch, needs_repair, structured,
+):
+    company = _company().model_copy(update={"company_website": "https://acme.com/"})
+    homepage = company_fit_unavailable("no homepage LinkedIn binding", details={
+        "verified_homepage_transport_domain": "acme.com",
+    })
+    calls = []
+    provider_calls = []
+
+    async def provider(**kwargs):
+        provider_calls.append(kwargs["telemetry_purpose"])
+        verdict = _verdict()
+        verdict["observed_company_website"] = "https://corporate.acme.com/"
+        if needs_repair and len(provider_calls) == 1:
+            verdict["industry_matches"] = None
+        return verdict, ""
+
+    async def fetch(url, **_kwargs):
+        calls.append(("page", url))
+        if structured:
+            return {"outcome": "insufficient_evidence", "url": url}
+        return {"employee_count": "11-50", "url": url,
+                "quote": "Company size 11-50 employees"}
+
+    async def profile(domain, url, **_kwargs):
+        calls.append(("profile", domain, url))
+        return {"employee_count": "11-50", "url": url,
+                "provider": "harvestapi_get_company",
+                "source_field": "employeeCountRange", "website": "https://acme.com/"}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", fetch)
+    monkeypatch.setattr(lead_scorer, "fetch_structured_linkedin_company_size", profile)
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        company, _icp(), require_company_fit_dimensions=True,
+        verified_homepage_identity=homepage,
+    ))
+
+    assert result.details["identity_receipt"]["decision"] == COMPANY_FIT_MATCH
+    assert result.decision == COMPANY_FIT_MATCH
+    assert calls == [("page", "https://www.linkedin.com/company/acme")] + (
+        [("profile", "acme.com", "https://www.linkedin.com/company/acme")]
+        if structured else []
+    )
+    assert len(provider_calls) == (2 if needs_repair else 1)
+
+
+@pytest.mark.parametrize("transport,field,value", [
+    ("", "observed_company_website", "https://corporate.acme.com/"),
+    ("other.com", "observed_company_website", "https://corporate.acme.com/"),
+    ("acme.com", "observed_company_website", "https://corporate.acme.com.other.com/"),
+    ("acme.com", "observed_company_name", "Other Company"),
+    ("acme.com", "observed_company_linkedin", "https://www.linkedin.com/company/other"),
+])
+def test_size_refresh_transport_context_does_not_approve_other_identity(
+    monkeypatch, transport, field, value,
+):
+    calls = []
+    company = _company().model_copy(update={"company_website": "https://acme.com/"})
+    verdict = _verdict()
+    verdict["observed_company_website"] = "https://corporate.acme.com/"
+    verdict[field] = value
+
+    async def provider(**_kwargs):
+        return dict(verdict), ""
+
+    async def unexpected_fetch(*args, **_kwargs):
+        calls.append(args)
+        return None
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", unexpected_fetch)
+    monkeypatch.setattr(lead_scorer, "fetch_structured_linkedin_company_size", unexpected_fetch)
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        company, _icp(), require_company_fit_dimensions=True,
+        verified_homepage_identity=company_fit_unavailable("test", details={
+            "verified_homepage_transport_domain": transport,
+        }),
+    ))
+    assert result.decision != COMPANY_FIT_MATCH
+    assert calls == []

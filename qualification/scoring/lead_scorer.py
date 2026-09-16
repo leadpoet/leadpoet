@@ -1674,6 +1674,7 @@ async def _refresh_linkedin_employee_size_observation(
     *,
     verified_homepage_identity: Mapping[str, str],
     invocation_cache: dict[str, Any],
+    verified_homepage_transport_domain: str = "",
 ) -> dict[str, Any]:
     """Replace a LinkedIn size observation only after exact identity binding."""
 
@@ -1724,7 +1725,10 @@ async def _refresh_linkedin_employee_size_observation(
     if anchor_slug:
         identity_matches = anchor_slug == evidence_slug
     else:
-        receipt = _web_identity_receipt(company, verdict)
+        receipt = _web_identity_receipt(
+            company, verdict,
+            verified_homepage_transport_domain=verified_homepage_transport_domain,
+        )
         identity_matches = (
             receipt.get("decision") == COMPANY_FIT_MATCH
             and receipt.get("evidence_source") == "company_web_reverification"
@@ -2628,6 +2632,7 @@ async def _llm_reverify_company(
             icp,
             verified_homepage_identity=verified_identity,
             invocation_cache=current_profile_cache,
+            verified_homepage_transport_domain=verified_transport_domain,
         )
     result = _reverify_decision(
         verdict,
@@ -2747,6 +2752,7 @@ async def _llm_reverify_company(
             icp,
             verified_homepage_identity=verified_identity,
             invocation_cache=current_profile_cache,
+            verified_homepage_transport_domain=verified_transport_domain,
         )
     repaired_result = _reverify_decision(
         repaired_verdict,

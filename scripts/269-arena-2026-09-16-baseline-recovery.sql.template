@@ -1,8 +1,9 @@
 -- Exact second baseline rerun recovery for arena-2026-09-16.
 -- Render only after the first native rerun is terminal and all active provider
 -- calls have closed. The migration seals that failed rerun; the operator RPC
--- archives it and creates twenty fresh assignments under the unchanged source,
--- policy, scoring, and two-attempt contract. Deployed runtime identity remains
+-- archives it with its original source, selects the separately sealed latest
+-- source for twenty fresh assignments, and keeps the policy, scoring, and
+-- two-attempt contract unchanged. Deployed runtime identity remains
 -- a separate release-operator precondition; this database seal does not claim it.
 BEGIN;
 SET LOCAL lock_timeout = '5s';

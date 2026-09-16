@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from lab_arena import scoring
+from scripts import arena_sep16_native_rerun as operator
 from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
 from tests.lab_arena.sep16_native_baseline_rerun_postgres_test import (
     BASELINE,
@@ -361,6 +362,14 @@ def test_resealed_source_prepares_scores_both_stages_and_publishes(connect):
                 (NEW_SIZE, NEW_SHA, NEW_COMMIT, BANK_HASH, json.dumps(new_schedule)),
             )
             assert cursor.fetchone()[0]["status"] == "prepared"
+            cursor.execute(
+                "SELECT source_ref,source_size_bytes,submission_doc->>'source_sha256',"
+                "submission_doc->>'source_commit' FROM public.lab_arena_submissions "
+                "WHERE submission_id=%s", (BASELINE,)
+            )
+            assert cursor.fetchone() == (
+                operator.SOURCE_REF, NEW_SIZE, NEW_SHA, NEW_COMMIT
+            )
         connection.commit()
 
         items = _stage1_scoring_items(connection, hotkeys, ids[1:])

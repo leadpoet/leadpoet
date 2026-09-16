@@ -18,6 +18,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
 MIGRATIONS = CURRENT_SERVICE_MIGRATIONS + (
     "264-lab-arena-codex-cost-reconciliation.sql",
     "265-arena-2026-09-16-native-baseline-rerun.sql",
+    "267-arena-2026-09-16-failed-cost-publication.sql",
 )
 ROUND = "arena-2026-09-16"
 BASELINE = "baseline-2026-09-16"
@@ -573,6 +574,76 @@ def _ready_for_publication(connection, hotkeys, baseline_score, *, failed_positi
         cursor.execute("ALTER TABLE public.lab_arena_runs ENABLE TRIGGER USER")
     connection.commit()
     return publication
+
+
+def _insert_baseline_cost_head(
+    connection, *, kind, entry_kind, identity_number, call_succeeded=None
+):
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT run_id,miner_hotkey,stage FROM public.lab_arena_runs "
+            "WHERE round_id=%s AND submission_id=%s AND kind=%s "
+            "AND status='accepted' ORDER BY icp_position,attempt LIMIT 1",
+            (ROUND, BASELINE, kind),
+        )
+        run_id, miner_hotkey, stage = cursor.fetchone()
+        entry_doc = {}
+        if entry_kind == "uncertain":
+            entry_doc = {
+                "reason": "worker_reported",
+                "call": {"call_succeeded": call_succeeded},
+            }
+        cursor.execute(
+            "INSERT INTO public.lab_arena_ledger (entry_kind,miner_hotkey,"
+            "round_id,submission_id,run_id,stage,call_identity,provider,"
+            "operation_id,amount_microusd,entry_doc) VALUES "
+            "(%s,%s,%s,%s,%s,%s,%s,'openrouter','openrouter.responses',"
+            "1000,%s::jsonb)",
+            (
+                entry_kind,
+                miner_hotkey,
+                ROUND,
+                BASELINE,
+                run_id,
+                stage,
+                "sha256:" + ("%064x" % identity_number),
+                json.dumps(entry_doc),
+            ),
+        )
+
+
+def _publication_preservation_state(connection):
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT jsonb_build_object("
+            "'reward_basis_hash',reward_basis_hash,"
+            "'reward_basis_doc',reward_basis_doc,"
+            "'signing_key_doc',signing_key_doc,"
+            "'reward_activated_at',reward_activated_at,"
+            "'effective_reward_epoch',effective_reward_epoch,"
+            "'baseline_submission',(SELECT to_jsonb(s) "
+            "FROM public.lab_arena_submissions s "
+            "WHERE s.round_id=r.round_id AND s.submission_id=%s),"
+            "'challenger_submissions',(SELECT jsonb_agg(to_jsonb(s) "
+            "ORDER BY submission_id) FROM public.lab_arena_submissions s "
+            "WHERE s.round_id=r.round_id AND s.submission_id<>%s),"
+            "'challenger_runs',(SELECT jsonb_agg(to_jsonb(x) ORDER BY run_id) "
+            "FROM public.lab_arena_runs x WHERE x.round_id=r.round_id "
+            "AND x.submission_id<>%s)) "
+            "FROM public.lab_arena_rounds r WHERE round_id=%s",
+            (BASELINE, BASELINE, BASELINE, ROUND),
+        )
+        return cursor.fetchone()[0]
+
+
+def _baseline_ledger_state(connection):
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT jsonb_agg(to_jsonb(l) ORDER BY entry_id) "
+            "FROM public.lab_arena_ledger l WHERE submission_id=%s",
+            (BASELINE,),
+        )
+        return cursor.fetchone()[0]
 
 
 def test_prepare_is_sealed_and_preserves_miners_rewards_and_history(connect):
@@ -1177,5 +1248,141 @@ def test_publication_guard_rejects_changed_miner_result(connect):
                 "SELECT status FROM public.lab_arena_rounds WHERE round_id=%s", (ROUND,),
             )
             assert cursor.fetchone() == ("scored",)
+    finally:
+        connection.close()
+
+
+def test_failed_cost_uncertainty_preserves_full_positive_publication(connect):
+    connection = connect()
+    try:
+        migration = (
+            Path(__file__).parents[2]
+            / "scripts/267-arena-2026-09-16-failed-cost-publication.sql"
+        )
+        connection.autocommit = True
+        with connection.cursor() as cursor:
+            cursor.execute(migration.read_text(encoding="utf-8"))
+            cursor.execute(migration.read_text(encoding="utf-8"))
+            cursor.execute(
+                "SELECT pg_get_functiondef(to_regprocedure("
+                "'public.lab_arena_sep16_rerun_publication_guard_v1()'))"
+            )
+            definition = cursor.fetchone()[0]
+        connection.autocommit = False
+        assert "v_execute_cost ->> 'uncertain_calls'" not in definition
+        assert "v_score_cost ->> 'uncertain_calls'" not in definition
+        for counter in (
+            "v_execute_cost ->> 'inflight_calls'",
+            "v_execute_cost ->> 'success_unresolved_calls'",
+            "v_score_cost ->> 'inflight_calls'",
+            "v_score_cost ->> 'success_unresolved_calls'",
+        ):
+            assert counter in definition
+
+        schedule, hotkeys, _ids = _seed_observed_sep16(connection)
+        assert _prepare(connection, schedule)["status"] == "prepared"
+        publication = _ready_for_publication(connection, hotkeys, 1.0)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(DISTINCT icp_position),avg(per_icp_score),"
+                "count(*) FILTER (WHERE status='accepted') "
+                "FROM public.lab_arena_runs WHERE round_id=%s "
+                "AND submission_id=%s AND kind='execute' "
+                "AND assignment_id LIKE '%%:rerun265'",
+                (ROUND, BASELINE),
+            )
+            position_count, aggregate, accepted_executions = cursor.fetchone()
+            assert position_count == 20
+            assert accepted_executions == 20
+            assert float(aggregate) == 1.0
+            cursor.execute(
+                "SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s "
+                "AND submission_id=%s AND kind='score' AND status='accepted' "
+                "AND assignment_id LIKE '%%:score:rerun265'",
+                (ROUND, BASELINE),
+            )
+            assert cursor.fetchone() == (20,)
+            assert next(
+                row["final_score"] for row in publication["final_ranking"]
+                if row["submission_id"] == BASELINE
+            ) == float(aggregate)
+            cursor.execute(
+                "ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER "
+                "lab_arena_integrity_publication_guard"
+            )
+        connection.commit()
+
+        for index, (kind, entry_kind, succeeded) in enumerate((
+            ("execute", "uncertain", True),
+            ("score", "uncertain", True),
+            ("execute", "reservation", None),
+            ("score", "reservation", None),
+        )):
+            _insert_baseline_cost_head(
+                connection,
+                kind=kind,
+                entry_kind=entry_kind,
+                identity_number=91000 + index,
+                call_succeeded=succeeded,
+            )
+            with connection.cursor() as cursor:
+                with pytest.raises(Exception, match="conflicts with sealed"):
+                    cursor.execute(
+                        "UPDATE public.lab_arena_rounds SET status='published',"
+                        "status_generation=status_generation+1,published_at=now(),"
+                        "publication_doc=%s::jsonb WHERE round_id=%s",
+                        (json.dumps(publication), ROUND),
+                    )
+            connection.rollback()
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT status FROM public.lab_arena_rounds WHERE round_id=%s",
+                    (ROUND,),
+                )
+                assert cursor.fetchone() == ("scored",)
+
+        _insert_baseline_cost_head(
+            connection,
+            kind="execute",
+            entry_kind="uncertain",
+            identity_number=92001,
+            call_succeeded=False,
+        )
+        _insert_baseline_cost_head(
+            connection,
+            kind="score",
+            entry_kind="uncertain",
+            identity_number=92002,
+            call_succeeded=False,
+        )
+        connection.commit()
+        with connection.cursor() as cursor:
+            for kind in ("execute", "score"):
+                cursor.execute(
+                    "SELECT public.lab_arena__successful_call_cost_state(%s,%s,NULL)",
+                    (BASELINE, kind),
+                )
+                state = cursor.fetchone()[0]
+                assert state["uncertain_calls"] == 1
+                assert state["success_unresolved_calls"] == 0
+                assert state["inflight_calls"] == 0
+
+        ledger_before = _baseline_ledger_state(connection)
+        protected_before = _publication_preservation_state(connection)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE public.lab_arena_rounds SET status='published',"
+                "status_generation=status_generation+1,published_at=now(),"
+                "publication_doc=%s::jsonb WHERE round_id=%s RETURNING status",
+                (json.dumps(publication), ROUND),
+            )
+            assert cursor.fetchone() == ("published",)
+            cursor.execute(
+                "ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER "
+                "lab_arena_integrity_publication_guard"
+            )
+        connection.commit()
+        assert _baseline_ledger_state(connection) == ledger_before
+        assert _publication_preservation_state(connection) == protected_before
     finally:
         connection.close()

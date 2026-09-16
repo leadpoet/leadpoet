@@ -438,10 +438,21 @@ BEGIN
                AND original.round_id = late.round_id
                AND original.submission_id = late.submission_id
                AND original.run_id = late.run_id
+               AND original.miner_hotkey = late.miner_hotkey
+               AND original.stage = late.stage
                AND original.call_identity = late.call_identity
                AND original.provider = late.provider
+               AND original.operation_id = late.operation_id
+               AND original.funding_source IS NOT DISTINCT FROM
+                     late.funding_source
                AND original.entry_id =
                    (late.entry_doc ->> 'reconciled_uncertainty_entry_id')::BIGINT
+               AND (
+                 (late.provider = 'deepline'
+                  AND late.entry_doc ->> 'deepline_delayed_reconciliation' = 'true')
+                 OR (late.provider = 'openrouter'
+                  AND late.entry_doc ->> 'openrouter_delayed_reconciliation' = 'true')
+               )
            )
          )
      );

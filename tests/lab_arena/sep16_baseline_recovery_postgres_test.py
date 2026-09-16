@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from lab_arena import scoring
+from lab_arena.store import hash_lease_token
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
 from tests.lab_arena.sep16_latest_champion_reseal_postgres_test import (
@@ -32,6 +33,7 @@ from tests.lab_arena.sep16_native_baseline_rerun_postgres_test import (
     _state_seal,
 )
 from tests.lab_arena.test_lab_arena_service_round import Harness
+from tests.lab_arena.test_lab_arena_migration_postgres import claim
 
 
 ARCHIVE_ROUND = "arena-2026-09-16-rerun265archive"
@@ -107,19 +109,54 @@ def _fail_both_attempts_and_cancel(connection):
             )
         cursor.execute("ALTER TABLE public.lab_arena_runs ENABLE TRIGGER USER")
         failed_run = first_attempts[0][0] + ":2"
+        call_identity = "sha256:" + "9" * 64
+        request_id = "ctx-tool-" + call_identity[7:39]
+        credential = "sha256:" + "a" * 64
+        common = (
+            "miner_hotkey,round_id,submission_id,run_id,stage,call_identity,"
+            "provider,operation_id,funding_source,amount_microusd,entry_doc"
+        )
         cursor.execute(
-            "INSERT INTO public.lab_arena_ledger (entry_kind,miner_hotkey,"
-            "round_id,submission_id,run_id,stage,call_identity,provider,"
-            "operation_id,amount_microusd,entry_doc) "
-            "SELECT 'uncertain',miner_hotkey,round_id,submission_id,run_id,stage,"
-            "%s,'deepline','failed-call',7000,%s::jsonb "
+            "INSERT INTO public.lab_arena_ledger (entry_kind," + common + ") "
+            "SELECT 'reservation',miner_hotkey,round_id,submission_id,run_id,"
+            "stage,%s,'deepline','deepline.execute','host',5000000,%s::jsonb "
             "FROM public.lab_arena_runs WHERE run_id=%s",
             (
-                "sha256:" + "9" * 64,
+                call_identity,
+                json.dumps(
+                    {
+                        "deepline_request_id": request_id,
+                        "tool": "find_companies",
+                        "credential_fingerprint": credential,
+                    }
+                ),
+                failed_run,
+            ),
+        )
+        cursor.execute(
+            "INSERT INTO public.lab_arena_ledger (entry_kind," + common + ") "
+            "SELECT 'dispatch',miner_hotkey,round_id,submission_id,run_id,stage,"
+            "%s,'deepline','deepline.execute','host',0,'{}'::jsonb "
+            "FROM public.lab_arena_runs WHERE run_id=%s",
+            (call_identity, failed_run),
+        )
+        cursor.execute(
+            "INSERT INTO public.lab_arena_ledger (entry_kind," + common + ") "
+            "SELECT 'uncertain',miner_hotkey,round_id,submission_id,run_id,stage,"
+            "%s,'deepline','deepline.execute','host',7000,%s::jsonb "
+            "FROM public.lab_arena_runs WHERE run_id=%s",
+            (
+                call_identity,
                 json.dumps(
                     {
                         "reason": "worker_reported",
-                        "call": {"call_succeeded": False},
+                        "call": {
+                            "reason": "missing_provider_cost",
+                            "call_succeeded": False,
+                            "deepline_request_id": request_id,
+                            "deepline_operation": "find_companies",
+                            "credential_fingerprint": credential,
+                        },
                     }
                 ),
                 failed_run,
@@ -496,34 +533,42 @@ def test_archive_allows_only_exact_late_failed_call_reconciliation(connect):
             connection.rollback()
         with connection.cursor() as cursor:
             cursor.execute(
-                "SELECT entry_id,miner_hotkey,run_id,stage,call_identity,provider "
+                "SELECT entry_id,miner_hotkey,run_id,stage,call_identity,provider,"
+                "operation_id,funding_source,"
+                "entry_doc#>>'{call,deepline_request_id}',"
+                "entry_doc#>>'{call,deepline_operation}',"
+                "entry_doc#>>'{call,credential_fingerprint}' "
                 "FROM public.lab_arena_ledger WHERE round_id=%s "
                 "AND submission_id=%s AND entry_kind='uncertain'",
                 (ARCHIVE_ROUND, ARCHIVE_SUBMISSION),
             )
-            entry_id, hotkey, run_id, stage, identity, provider = cursor.fetchone()
+            (
+                entry_id,
+                hotkey,
+                run_id,
+                stage,
+                identity,
+                provider,
+                operation_id,
+                funding_source,
+                request_id,
+                operation,
+                credential,
+            ) = cursor.fetchone()
             cursor.execute(
-                "INSERT INTO public.lab_arena_ledger (entry_kind,miner_hotkey,"
-                "round_id,submission_id,run_id,stage,call_identity,provider,"
-                "operation_id,amount_microusd,terminal_response,entry_doc) VALUES "
-                "('settlement',%s,%s,%s,%s,%s,%s,%s,'late-proof',0,%s::jsonb,%s::jsonb)",
+                "SELECT public.lab_arena_reconcile_deepline_cost_v1("
+                "%s,%s,%s,%s,%s,%s,%s,7000,'0.07')",
                 (
-                    hotkey,
                     ARCHIVE_ROUND,
-                    ARCHIVE_SUBMISSION,
                     run_id,
-                    stage,
                     identity,
-                    provider,
-                    json.dumps({"call_succeeded": False}),
-                    json.dumps(
-                        {
-                            "late_reconciliation": True,
-                            "reconciled_uncertainty_entry_id": entry_id,
-                        }
-                    ),
+                    entry_id,
+                    request_id,
+                    operation,
+                    credential,
                 ),
             )
+            assert cursor.fetchone()[0]["status"] == "settled"
             cursor.execute(
                 "SELECT public.lab_arena_sep16_recovery_archive_valid_v1()"
             )
@@ -531,9 +576,9 @@ def test_archive_allows_only_exact_late_failed_call_reconciliation(connect):
             cursor.execute(
                 "INSERT INTO public.lab_arena_ledger (entry_kind,miner_hotkey,"
                 "round_id,submission_id,run_id,stage,call_identity,provider,"
-                "operation_id,amount_microusd,terminal_response,entry_doc) VALUES "
-                "('settlement',%s,%s,%s,%s,%s,%s,%s,'unsealed-late-row',0,"
-                "%s::jsonb,'{}'::jsonb)",
+                "operation_id,funding_source,amount_microusd,terminal_response,"
+                "entry_doc) VALUES ('settlement',%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+                "0,%s::jsonb,'{}'::jsonb)",
                 (
                     hotkey,
                     ARCHIVE_ROUND,
@@ -542,6 +587,8 @@ def test_archive_allows_only_exact_late_failed_call_reconciliation(connect):
                     stage,
                     "sha256:" + "8" * 64,
                     provider,
+                    operation_id,
+                    funding_source,
                     json.dumps({"call_succeeded": False}),
                 ),
             )
@@ -550,5 +597,79 @@ def test_archive_allows_only_exact_late_failed_call_reconciliation(connect):
             )
             assert cursor.fetchone() == (False,)
         connection.rollback()
+    finally:
+        connection.close()
+
+
+def test_recovery_assignment_uses_normal_claim_and_two_attempt_limit(
+    connect, tmp_path
+):
+    connection = connect()
+    harness = Harness(connect, tmp_path, challengers=[], runners=["retry-proof"])
+    store = harness.service.store
+    try:
+        old_schedule, hotkeys, _ids = _seed_observed_sep16(connection)
+        _prepare_latest(connection, old_schedule)
+        _fail_both_attempts_and_cancel(connection)
+        recovery_schedule = _shift_schedule(old_schedule, minutes=45)
+        migration = _render_recovery(connection, recovery_schedule)
+        _install_and_recover(connection, migration, recovery_schedule)
+
+        first, token, _request_id, _request_hash = claim(
+            store,
+            ROUND,
+            hotkeys[5],
+            parallelism=1,
+            ceiling=10,
+            excluded=[hotkeys[5]],
+        )
+        assert first["status"] == "leased"
+        assert first["attempt"] == 1
+        assert first["assignment_id"].endswith(":rerun269")
+        failed = store.complete_attempt(
+            run_id=first["run_id"],
+            lease_token_hash=hash_lease_token(token),
+            result={"terminal_status": "provider_error"},
+            terminal_cause="provider_error",
+            output_ref="",
+        )
+        assert failed["status"] == "failed"
+        with connection.cursor() as cursor:
+            cursor.execute("ALTER TABLE public.lab_arena_runs DISABLE TRIGGER USER")
+            cursor.execute(
+                "UPDATE public.lab_arena_runs SET status='failed',"
+                "terminal_cause='model_error' WHERE round_id=%s "
+                "AND submission_id=%s AND kind='execute' AND status='pending' "
+                "AND assignment_id<>%s",
+                (ROUND, BASELINE, first["assignment_id"]),
+            )
+            cursor.execute("ALTER TABLE public.lab_arena_runs ENABLE TRIGGER USER")
+        connection.commit()
+
+        second, second_token, _request_id, _request_hash = claim(
+            store,
+            ROUND,
+            hotkeys[5],
+            parallelism=1,
+            ceiling=10,
+            excluded=[hotkeys[5]],
+        )
+        assert second["assignment_id"] == first["assignment_id"]
+        assert second["attempt"] == 2
+        second_failed = store.complete_attempt(
+            run_id=second["run_id"],
+            lease_token_hash=hash_lease_token(second_token),
+            result={"terminal_status": "provider_error"},
+            terminal_cause="provider_error",
+            output_ref="",
+        )
+        assert second_failed["status"] == "failed"
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*),max(attempt) FROM public.lab_arena_runs "
+                "WHERE assignment_id=%s",
+                (first["assignment_id"],),
+            )
+            assert cursor.fetchone() == (2, 2)
     finally:
         connection.close()

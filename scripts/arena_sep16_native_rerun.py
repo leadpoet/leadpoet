@@ -309,6 +309,9 @@ def _audit(service: Any) -> dict[str, Any]:
     active_namespace = (
         "rerun269" if rerun269_execute else "rerun265" if rerun265_execute else None
     )
+    active_score_suffix = (
+        ":score:" + active_namespace if active_namespace is not None else None
+    )
     return {
         "round_id": ROUND,
         "round_status": row.get("status"),
@@ -326,7 +329,8 @@ def _audit(service: Any) -> dict[str, Any]:
         "rerun_score_assignments": len({
             run.get("assignment_id") for run in runs
             if run.get("submission_id") == BASELINE and run.get("kind") == "score"
-            and str(run.get("assignment_id") or "").endswith(":score" + RECOVERY_SUFFIX)
+            and active_score_suffix is not None
+            and str(run.get("assignment_id") or "").endswith(active_score_suffix)
         }),
     }
 

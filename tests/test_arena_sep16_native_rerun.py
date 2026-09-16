@@ -393,3 +393,52 @@ def test_recovery_source_proof_revalidates_archive_and_commit(monkeypatch):
     with pytest.raises(rerun.ExactRerunRefused, match="commit differs"):
         rerun._recovery_source_proof(service)
     assert validations == [(payload, True)]
+
+
+@pytest.mark.parametrize("namespace", ["rerun265", "rerun269"])
+def test_audit_counts_scores_for_the_active_rerun_namespace(namespace):
+    runs = [
+        {
+            "assignment_id": f"assignment-{position}:{namespace}",
+            "submission_id": rerun.BASELINE,
+            "kind": "execute",
+        }
+        for position in range(2)
+    ] + [
+        {
+            "assignment_id": f"assignment-{position}:score:{namespace}",
+            "submission_id": rerun.BASELINE,
+            "kind": "score",
+        }
+        for position in range(2)
+    ] + [
+        {
+            "assignment_id": "unrelated:score:" + (
+                "rerun269" if namespace == "rerun265" else "rerun265"
+            ),
+            "submission_id": rerun.BASELINE,
+            "kind": "score",
+        }
+    ]
+
+    class AuditStore:
+        def get_round(self, round_id):
+            assert round_id == rerun.ROUND
+            return {
+                "round_id": round_id,
+                "status": "cancelled",
+                "reward_basis_hash": rerun.BASIS_HASH,
+            }
+
+        def get_submission(self, submission_id):
+            assert submission_id == rerun.BASELINE
+            return {"source_ref": rerun.SOURCE_REF}
+
+        def list_runs(self, round_id):
+            return runs if round_id == rerun.ROUND else []
+
+    result = rerun._audit(SimpleNamespace(store=AuditStore()))
+
+    assert result["active_rerun_namespace"] == namespace
+    assert result["rerun_execute_assignments"] == 2
+    assert result["rerun_score_assignments"] == 2

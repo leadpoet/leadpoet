@@ -358,7 +358,14 @@ def test_recovery273_preserves_history_and_publishes_positive(connect, tmp_path,
         migration273 = _render_recovery273(connection, schedule273)
         prepared = _install_and_recover273(connection, migration273, schedule273)
         assert prepared["archived_runs"] == 40
-        # The deployed 4738 daemon does not need the one-off admin RPC. Once
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT has_table_privilege('lab_arena_service',"
+                "'public.lab_arena_sep16_baseline_recovery273_authority','SELECT')"
+            )
+            assert cursor.fetchone() == (False,)
+        # The deployed 4738 daemon does not need the authority table or the
+        # one-off admin RPC after recovery preparation completes. Once
         # preparation is complete, all execution, scoring, aggregation, and
         # publication use the existing generic runtime calls and DB guards.
         monkeypatch.delitem(

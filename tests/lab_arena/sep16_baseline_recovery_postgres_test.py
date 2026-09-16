@@ -45,9 +45,11 @@ TERMINAL_SOURCE_REF = (
 RECOVERY_SOURCE_REF = (
     "arena/arena-2026-09-16/sources/baseline-2026-09-16-recovery269.tar.gz"
 )
-RECOVERY_SOURCE_SIZE = 525000
-RECOVERY_SOURCE_SHA = "d" * 64
-RECOVERY_SOURCE_COMMIT = "e" * 40
+RECOVERY_SOURCE_SIZE = 525059
+RECOVERY_SOURCE_SHA = (
+    "d5a132191ff9fa246ab348fcb91c3111db11d2175c5ed3375313134c411378d8"
+)
+RECOVERY_SOURCE_COMMIT = "851038141112868051dd5223c839682810042eea"
 TEMPLATE = (
     Path(__file__).parents[2]
     / "scripts/269-arena-2026-09-16-baseline-recovery.sql.template"
@@ -416,6 +418,7 @@ def test_recovery_archives_failure_and_publishes_positive_with_all_guards(
             cursor.execute(
                 "SELECT source_ref,source_size_bytes,"
                 "submission_doc->>'source_ref',"
+                "(submission_doc->>'source_size_bytes')::bigint,"
                 "submission_doc->>'source_sha256',"
                 "submission_doc->>'source_commit' "
                 "FROM public.lab_arena_submissions WHERE submission_id=%s",
@@ -425,12 +428,14 @@ def test_recovery_archives_failure_and_publishes_positive_with_all_guards(
                 RECOVERY_SOURCE_REF,
                 RECOVERY_SOURCE_SIZE,
                 RECOVERY_SOURCE_REF,
+                RECOVERY_SOURCE_SIZE,
                 RECOVERY_SOURCE_SHA,
                 RECOVERY_SOURCE_COMMIT,
             )
             cursor.execute(
                 "SELECT source_ref,source_size_bytes,"
                 "submission_doc->>'source_ref',"
+                "(submission_doc->>'source_size_bytes')::bigint,"
                 "submission_doc->>'source_sha256',"
                 "submission_doc->>'source_commit' "
                 "FROM public.lab_arena_submissions WHERE submission_id=%s",
@@ -440,8 +445,21 @@ def test_recovery_archives_failure_and_publishes_positive_with_all_guards(
                 TERMINAL_SOURCE_REF,
                 NEW_SIZE,
                 TERMINAL_SOURCE_REF,
+                NEW_SIZE,
                 NEW_SHA,
                 NEW_COMMIT,
+            )
+            cursor.execute(
+                "SELECT item->>'source_ref',"
+                "(item->>'source_size_bytes')::bigint "
+                "FROM public.lab_arena_rounds,"
+                "LATERAL jsonb_array_elements(participants) AS item "
+                "WHERE round_id=%s AND item->>'submission_id'=%s",
+                (ROUND, BASELINE),
+            )
+            assert cursor.fetchone() == (
+                RECOVERY_SOURCE_REF,
+                RECOVERY_SOURCE_SIZE,
             )
         assert _single_hash(
             connection,

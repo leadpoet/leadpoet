@@ -15,9 +15,11 @@ SEP16_ADMIN_RPCS = (
     (
         "lab_arena_prepare_sep16_baseline_recovery_v1",
         {
-            "p_source_size_bytes": 525000,
-            "p_source_sha256": "d" * 64,
-            "p_source_commit": "e" * 40,
+            "p_source_size_bytes": 525059,
+            "p_source_sha256": (
+                "d5a132191ff9fa246ab348fcb91c3111db11d2175c5ed3375313134c411378d8"
+            ),
+            "p_source_commit": "851038141112868051dd5223c839682810042eea",
             "p_forward_schedule": {"stage_1_close": "2026-09-17T04:00:00Z"},
         },
         (

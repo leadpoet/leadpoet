@@ -133,6 +133,25 @@ _JUDGE_FAILURE_CLASSES = frozenset(
 _PICKUP_PHASES = frozenset({"round_discovery", "claim"})
 _PICKUP_FAILURE_REASONS = frozenset({"request_failed", "claim_denied"})
 _IDLE_CLAIM_STATUSES = frozenset({"no_pending", "no_open_round", "stage_closed"})
+
+_EXECUTION_DIAGNOSTIC_PREFIX = b"LAB_ARENA_EXECUTION_DIAGNOSTIC "
+_EXECUTION_DIAGNOSTIC_MAX_BYTES = 256
+_EXECUTION_DIAGNOSTIC_FAILURE_CLASSES = frozenset(
+    {"timeout", "runtime_error", "validation_error", "os_error", "other"}
+)
+_EXECUTION_DIAGNOSTIC_REASONS = frozenset(
+    {
+        "deadline_or_idle_timeout",
+        "saved_dispatch_accounting",
+        "operational_block",
+        "two_failed_codex_exits",
+        "unchanged_exit_limit",
+        "invocation_limit",
+        "checkpoint_unavailable",
+        "output_validation",
+        "unexpected",
+    }
+)
 _KNOWN_CLAIM_DENIAL_CODES = frozenset(
     {
         "arena_store_unavailable",
@@ -220,6 +239,97 @@ def _log_judge_failure(
         file=sys.stderr,
         flush=True,
     )
+
+
+def _execution_diagnostic_from_stderr(stderr: Any) -> Optional[Dict[str, Any]]:
+    """Return the last valid untrusted supervisor diagnostic."""
+
+    if not isinstance(stderr, (bytes, bytearray)):
+        return None
+    latest = None
+    for raw_line in bytes(stderr).splitlines(keepends=True):
+        if (
+            len(raw_line) > _EXECUTION_DIAGNOSTIC_MAX_BYTES
+            or not raw_line.endswith(b"\n")
+            or b"\r" in raw_line
+            or not raw_line.startswith(_EXECUTION_DIAGNOSTIC_PREFIX)
+        ):
+            continue
+        payload = raw_line[len(_EXECUTION_DIAGNOSTIC_PREFIX) : -1]
+        try:
+            document = json.loads(payload.decode("ascii"))
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if not isinstance(document, dict):
+            continue
+        try:
+            canonical = json.dumps(
+                document, sort_keys=True, separators=(",", ":")
+            ).encode("ascii")
+        except (TypeError, UnicodeEncodeError):
+            continue
+        if canonical != payload or type(document.get("schema_version")) is not int:
+            continue
+        if document["schema_version"] != 1:
+            continue
+        if set(document) != {
+            "schema_version",
+            "event",
+            "failure_class",
+            "reason",
+        } or document.get("event") != "supervisor_failure":
+            continue
+        failure_class = document.get("failure_class")
+        reason = document.get("reason")
+        if (
+            not isinstance(failure_class, str)
+            or failure_class not in _EXECUTION_DIAGNOSTIC_FAILURE_CLASSES
+            or not isinstance(reason, str)
+            or reason not in _EXECUTION_DIAGNOSTIC_REASONS
+        ):
+            continue
+        latest = dict(document)
+    return latest
+
+
+def _log_execution_diagnostic(
+    run_id: str,
+    diagnostic: Optional[Mapping[str, Any]],
+    result: runtime.SandboxResult,
+) -> None:
+    """Write one fixed, informational sandbox diagnostic to the private journal."""
+
+    safe_run_id = _safe_judge_diagnostic_text(run_id, max_chars=128) or "-"
+    exit_code = result.exit_code
+    safe_exit_code = (
+        str(exit_code)
+        if type(exit_code) is int and -255 <= exit_code <= 255
+        else "-"
+    )
+    fields = [
+        "Lab Arena execution diagnostic:",
+        f"run_id={safe_run_id}",
+        "trust=untrusted" if diagnostic is not None else "trust=host_observed",
+        "event=supervisor_failure" if diagnostic is not None else "event=sandbox_outcome",
+    ]
+    if diagnostic is not None:
+        fields.extend(
+            (
+                f"failure_class={diagnostic['failure_class']}",
+                f"reason={diagnostic['reason']}",
+            )
+        )
+    fields.extend(
+        (
+            f"host_exit_code={safe_exit_code}",
+            f"host_timed_out={str(result.timed_out is True).lower()}",
+        )
+    )
+    try:
+        print(" ".join(fields), file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        # Informational telemetry must never change completion behavior.
+        pass
 
 
 def _log_pickup_failure(
@@ -1899,6 +2009,7 @@ class AssignmentExecutor:
         failure_detail: Any = ""
         output_document: Optional[Dict[str, Any]] = None
         result: Optional[runtime.SandboxResult] = None
+        execution_diagnostic: Optional[Dict[str, Any]] = None
         web_server = None
         worker = None
         evaluation_date = str(lease.get("evaluation_date") or config.evaluation_date)
@@ -2047,6 +2158,10 @@ class AssignmentExecutor:
                 )
                 server.start()
                 result = config.sandbox_runtime.run_icp(spec)
+                if not scoring_run:
+                    execution_diagnostic = _execution_diagnostic_from_stderr(
+                        result.stderr
+                    )
             if result.timed_out and not (
                 checkpoint_policy == contracts.CHECKPOINT_DEADLINE_POLICY
                 and not scoring_run and result.output_bytes is not None
@@ -2270,6 +2385,14 @@ class AssignmentExecutor:
             )
         elif not scoring_run and failure_diagnostic is not None:
             run_result["failure_diagnostic"] = failure_diagnostic
+        if not scoring_run and result is not None and (
+            execution_diagnostic is not None
+            or result.timed_out
+            or result.exit_code not in (None, 0)
+        ):
+            _log_execution_diagnostic(
+                str(lease["run_id"]), execution_diagnostic, result
+            )
         body = {"run_id": lease["run_id"], "result": run_result, "output": output_document, "lease_token": lease_token}
         return contracts.build_signed_request(
             scope=contracts.SCOPE_COMPLETE,

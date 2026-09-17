@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from lab_arena import contracts, lab_arena_checkpoint, runner
+from lab_arena import contracts, lab_arena_checkpoint, runner, runtime, scoring
 from lab_arena.api import create_app
 from lab_arena.service import ServiceError
 
@@ -216,12 +220,14 @@ def test_control_frame_denies_extra_fields_and_malformed_api_result(tmp_path):
     ) == {"error": "invalid_frame"}
     assert decoded(server.handle_frame(b"{")) == {"error": "invalid_frame"}
     assert state.quota_request_count == 0
+    assert state.trusted_quota_failure is False
     assert decoded(server.handle_frame(control_frame())) == {
         "error": "quota_unavailable"
     }
     assert state.action_sequence == 0
     assert state.refusals == 0
     assert state.calls == []
+    assert state.trusted_quota_failure is True
 
 
 def test_quota_reads_are_one_hz_cached_and_capped_without_counter_changes(
@@ -251,6 +257,7 @@ def test_quota_reads_are_one_hz_cached_and_capped_without_counter_changes(
     assert state.action_sequence == 0
     assert state.refusals == 0
     assert state.calls == []
+    assert state.trusted_quota_failure is False
 
 
 def test_concurrent_quota_reads_singleflight(tmp_path):
@@ -303,3 +310,259 @@ def test_sdk_failure_is_one_generic_exception(monkeypatch):
                 lab_arena_checkpoint.quota_usage()
         finally:
             server.stop()
+    assert state.trusted_quota_failure is True
+
+
+def test_successful_authoritative_reread_clears_quota_failure(tmp_path):
+    class RecoveringApi(QuotaApi):
+        def __init__(self):
+            super().__init__()
+            self.documents = [RuntimeError("private secret"), snapshot()]
+
+        def quota_usage(self, run_id, lease_token):
+            self.calls.append((run_id, lease_token))
+            document = self.documents.pop(0)
+            if isinstance(document, Exception):
+                raise document
+            return document
+
+    api = RecoveringApi()
+    state = runner.RunState(
+        lease={"run_id": "run-1"}, lease_token=LEASE_TOKEN
+    )
+    server = runner.WorkerSocketServer(tmp_path / "worker.sock", api, state)
+
+    assert decoded(server.handle_frame(control_frame())) == {
+        "error": "quota_unavailable"
+    }
+    assert state.trusted_quota_failure is True
+    assert decoded(server.handle_frame(control_frame())) == snapshot()
+    assert state.trusted_quota_failure is False
+
+
+class _ExecutorCache:
+    def __init__(self, root: Path, *, source: bool = False):
+        self.root = root
+        self.source = source
+
+    @contextmanager
+    def acquire(self, *_args, **_kwargs):
+        if self.source:
+            source = self.root / "source"
+            dependencies = self.root / "dependencies"
+            source.mkdir(parents=True, exist_ok=True)
+            dependencies.mkdir(parents=True, exist_ok=True)
+            yield source, dependencies
+        else:
+            self.root.mkdir(parents=True, exist_ok=True)
+            yield self.root
+
+
+class _CompletionQuotaApi(QuotaApi):
+    def __init__(self, document, *, completion_status="failed"):
+        super().__init__(document)
+        self.leases = [_execution_lease()]
+        self.completion_status = completion_status
+        self.completions = []
+
+    def claim(self, _envelope):
+        if not self.leases:
+            return {"status": "no_pending"}
+        return self.leases.pop(0)
+
+    def complete(self, envelope):
+        self.completions.append(envelope)
+        return {"status": self.completion_status}
+
+    def quota_usage(self, run_id, lease_token):
+        self.calls.append((run_id, lease_token))
+        document = (
+            self.document.pop(0)
+            if isinstance(self.document, list)
+            else self.document
+        )
+        if isinstance(document, Exception):
+            raise document
+        return document
+
+
+class _StagedQuotaPreflightRuntime:
+    def __init__(self, *, reads=1, output_bytes=None):
+        self.reads = reads
+        self.output_bytes = output_bytes
+        self.outcomes = []
+
+    def run_icp(self, spec, **_kwargs):
+        assert spec.checkpoint_module_path is not None
+        module_spec = importlib.util.spec_from_file_location(
+            "staged_lab_arena_checkpoint", spec.checkpoint_module_path
+        )
+        assert module_spec is not None and module_spec.loader is not None
+        staged_checkpoint = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(staged_checkpoint)
+        previous = os.environ.get(staged_checkpoint.WORKER_SOCKET_ENV)
+        os.environ[staged_checkpoint.WORKER_SOCKET_ENV] = str(spec.socket_path)
+        try:
+            for _ in range(self.reads):
+                try:
+                    self.outcomes.append(staged_checkpoint.quota_usage())
+                except staged_checkpoint.QuotaUnavailable:
+                    self.outcomes.append("quota_unavailable")
+        finally:
+            if previous is None:
+                os.environ.pop(staged_checkpoint.WORKER_SOCKET_ENV, None)
+            else:
+                os.environ[staged_checkpoint.WORKER_SOCKET_ENV] = previous
+        return runtime.fake_result(output_bytes=self.output_bytes)
+
+
+def _execution_lease():
+    digest = "sha256:" + "a" * 64
+    return {
+        "status": "leased",
+        "round_id": "arena-2026-09-16",
+        "run_id": "run-1",
+        "assignment_id": "assignment-1",
+        "submission_id": "submission-1",
+        "source_ref": "source-1",
+        "source_size_bytes": 1,
+        "lease_token": LEASE_TOKEN,
+        "kind": "execute",
+        "image_digest": digest,
+        "image_reference": "registry.example/arena@" + digest,
+        "evaluation_date": "2026-09-16",
+        "icp": {"max_companies": 5},
+    }
+
+
+def _run_preflight(tmp_path, api, sandbox):
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    with tempfile.TemporaryDirectory(prefix="quota-e2e-", dir="/tmp") as sockets:
+        config = runner.RunnerConfig(
+            round_id="arena-2026-09-16",
+            identity=runner.RunnerIdentity(
+                hotkey="5" * 48, sign=lambda _message: "signature"
+            ),
+            api=api,
+            sandbox_runtime=sandbox,
+            image_cache=_ExecutorCache(tmp_path / "image"),
+            source_cache=_ExecutorCache(tmp_path / "source", source=True),
+            work_dir=work_dir,
+            socket_root=Path(sockets),
+            clock=lambda: datetime(2026, 9, 16, tzinfo=timezone.utc),
+        )
+        arena_runner = runner.Runner(config)
+        try:
+            assert arena_runner.run_once() == 1
+            return arena_runner.completed
+        finally:
+            arena_runner.close()
+
+
+@pytest.mark.parametrize(
+    "quota_document",
+    [
+        RuntimeError("private secret"),
+        {**snapshot(), "private_field": "must fail closed"},
+    ],
+)
+def test_authoritative_quota_failure_without_output_completes_as_provider_error(
+    tmp_path, quota_document
+):
+    api = _CompletionQuotaApi(quota_document)
+    sandbox = _StagedQuotaPreflightRuntime()
+
+    completed = _run_preflight(tmp_path, api, sandbox)
+
+    assert sandbox.outcomes == ["quota_unavailable"]
+    assert completed == [{"run_id": "run-1", "result": {"status": "failed"}}]
+    assert len(api.completions) == 1
+    body = api.completions[0]["body"]
+    assert body["output"] is None
+    result = contracts.validate_run_result(body["result"])
+    assert result["terminal_status"] == "provider_error"
+    assert result["resource_summary"]["provider_call_count"] == 0
+    assert result["failure_diagnostic"] == {
+        "stage": "provider_call",
+        "error_class": "provider_unavailable",
+        "reason": "provider_error",
+    }
+    with pytest.raises(contracts.ArenaContractError, match="infrastructure reason"):
+        scoring.build_scoring_plan(
+            round_id="arena-2026-09-16",
+            stage=1,
+            runs=[
+                {
+                    "run_id": "run-1",
+                    "submission_id": "submission-1",
+                    "stage": 1,
+                    "icp_position": 0,
+                    "attempt": 1,
+                    "status": "failed",
+                    "terminal_cause": result["terminal_status"],
+                }
+            ],
+        )
+
+
+def test_quota_read_cap_is_client_misuse_and_stays_model_error(tmp_path):
+    api = _CompletionQuotaApi(snapshot())
+    sandbox = _StagedQuotaPreflightRuntime(
+        reads=runner.MAX_QUOTA_SNAPSHOT_REQUESTS + 1
+    )
+
+    _run_preflight(tmp_path, api, sandbox)
+
+    assert sandbox.outcomes[-1] == "quota_unavailable"
+    assert len(api.calls) == 1
+    result = api.completions[0]["body"]["result"]
+    assert result["terminal_status"] == "model_error"
+    assert result["resource_summary"]["provider_call_count"] == 0
+
+
+def test_successful_quota_reread_clears_completion_provenance(tmp_path):
+    api = _CompletionQuotaApi(
+        [RuntimeError("private secret"), snapshot()]
+    )
+    sandbox = _StagedQuotaPreflightRuntime(reads=2)
+
+    _run_preflight(tmp_path, api, sandbox)
+
+    assert sandbox.outcomes == ["quota_unavailable", snapshot()]
+    assert len(api.calls) == 2
+    result = api.completions[0]["body"]["result"]
+    assert result["terminal_status"] == "model_error"
+    assert "failure_diagnostic" not in result
+
+
+def test_valid_output_remains_accepted_after_authoritative_quota_failure(tmp_path):
+    api = _CompletionQuotaApi(
+        RuntimeError("private secret"), completion_status="accepted"
+    )
+    sandbox = _StagedQuotaPreflightRuntime(output_bytes=b'{"companies":[]}')
+
+    completed = _run_preflight(tmp_path, api, sandbox)
+
+    body = api.completions[0]["body"]
+    assert completed == [{"run_id": "run-1", "result": {"status": "accepted"}}]
+    assert sandbox.outcomes == ["quota_unavailable"]
+    assert body["result"]["terminal_status"] == "accepted"
+    assert "failure_diagnostic" not in body["result"]
+    assert body["output"]["companies"] == []
+
+
+def test_stale_quota_failure_completion_stays_stale_without_retry(tmp_path):
+    api = _CompletionQuotaApi(
+        RuntimeError("private secret"), completion_status="stale"
+    )
+    sandbox = _StagedQuotaPreflightRuntime()
+
+    completed = _run_preflight(tmp_path, api, sandbox)
+
+    assert completed == [{"run_id": "run-1", "result": {"status": "stale"}}]
+    assert len(api.completions) == 1
+    assert (
+        api.completions[0]["body"]["result"]["terminal_status"]
+        == "provider_error"
+    )

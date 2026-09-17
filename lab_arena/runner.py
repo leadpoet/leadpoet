@@ -1260,6 +1260,7 @@ class RunState:
     quota_snapshot_at: float = 0.0
     quota_snapshot_inflight: bool = False
     quota_snapshot_generation: int = 0
+    trusted_quota_failure: bool = False
     quota_condition: threading.Condition = field(
         default_factory=threading.Condition, repr=False
     )
@@ -1335,13 +1336,17 @@ class WorkerSocketServer:
             state.quota_snapshot_inflight = True
 
         snapshot = None
+        run_id = state.lease["run_id"]
+        lease_token = state.lease_token
         try:
-            document = self._api.quota_usage(
-                state.lease["run_id"], state.lease_token
-            )
-            snapshot = lab_arena_checkpoint.validate_quota_snapshot(document)
+            document = self._api.quota_usage(run_id, lease_token)
         except Exception:
-            snapshot = None
+            pass
+        else:
+            try:
+                snapshot = lab_arena_checkpoint.validate_quota_snapshot(document)
+            except lab_arena_checkpoint.QuotaUnavailable:
+                pass
 
         with condition:
             state.quota_snapshot_inflight = False
@@ -1349,9 +1354,11 @@ class WorkerSocketServer:
             if snapshot is None:
                 state.quota_snapshot = None
                 state.quota_snapshot_at = 0.0
+                state.trusted_quota_failure = True
             else:
                 state.quota_snapshot = dict(snapshot)
                 state.quota_snapshot_at = self._monotonic()
+                state.trusted_quota_failure = False
             condition.notify_all()
             return dict(snapshot) if snapshot is not None else None
 
@@ -2152,12 +2159,17 @@ class AssignmentExecutor:
                 )
                 for call in state.calls
             )
+            with state.quota_condition:
+                trusted_quota_failure = state.trusted_quota_failure
             if (
                 miner_credentials_failed or miner_scoring_funding_failed
             ) and terminal != "accepted":
                 terminal = "credential_error"
                 output_document = None
-            elif provider_infrastructure_failed and terminal != "accepted":
+            elif (
+                provider_infrastructure_failed
+                or (not scoring_run and trusted_quota_failure)
+            ) and terminal != "accepted":
                 terminal = "judge_error" if scoring_run else "provider_error"
                 output_document = None
                 if scoring_run and failure_diagnostic is None:
@@ -2192,8 +2204,14 @@ class AssignmentExecutor:
                     }
                 elif terminal == "invalid_output":
                     failure_diagnostic = execution_output_diagnostic
+                elif terminal == "provider_error" and trusted_quota_failure:
+                    failure_diagnostic = {
+                        "stage": "provider_call",
+                        "error_class": "provider_unavailable",
+                        "reason": "provider_error",
+                    }
                 else:
-                    # Provider and credential overrides own the final failure.
+                    # Other provider and credential overrides own the final failure.
                     failure_diagnostic = None
         except AgentDependencyError:
             if scoring_run:  # the trusted scorer has no submitted dependency tree

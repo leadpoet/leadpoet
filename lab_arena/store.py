@@ -54,6 +54,10 @@ SERVICE_ROLE_NAME = "lab_arena_service"
 SCORE_BATCH_SIZE = 500
 
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
+    "lab_arena_prepare_sep16_baseline_recovery275_v1": (
+        ("p_source_size_bytes", "bigint"), ("p_source_sha256", "text"),
+        ("p_source_commit", "text"), ("p_forward_schedule", "jsonb"),
+    ),
     "lab_arena_prepare_sep15_baseline_rerun_v1": (
         ("p_source_size_bytes", "bigint"), ("p_source_sha256", "text"),
         ("p_source_commit", "text"), ("p_bank_sha256", "text"),

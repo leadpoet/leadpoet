@@ -11,7 +11,24 @@ from lab_arena.store import ArenaStore, ArenaStoreError, FUNCTION_SIGNATURES, Po
 from lab_arena.store import ArenaStoreUnavailable
 
 
-SEP16_ADMIN_RPCS = (
+RECOVERY_ADMIN_RPCS = (
+    (
+        "lab_arena_prepare_sep17_baseline_recovery278_v1",
+        {
+            "p_source_size_bytes": 562595,
+            "p_source_sha256": "8" * 64,
+            "p_source_commit": "d" * 40,
+            "p_bank_sha256": "7" * 64,
+            "p_forward_schedule": {"stage_1_close": "2026-09-17T12:00:00Z"},
+        },
+        (
+            "p_source_size_bytes => %s::bigint",
+            "p_source_sha256 => %s::text",
+            "p_source_commit => %s::text",
+            "p_bank_sha256 => %s::text",
+            "p_forward_schedule => %s::jsonb",
+        ),
+    ),
     (
         "lab_arena_prepare_sep16_baseline_recovery277_v1",
         {
@@ -124,8 +141,8 @@ SEP16_ADMIN_RPCS = (
 )
 
 
-@pytest.mark.parametrize("function,params,_casts", SEP16_ADMIN_RPCS)
-def test_sep16_admin_rpc_is_allowed_through_postgrest(function, params, _casts):
+@pytest.mark.parametrize("function,params,_casts", RECOVERY_ADMIN_RPCS)
+def test_recovery_admin_rpc_is_allowed_through_postgrest(function, params, _casts):
     requests = []
 
     def handler(request):
@@ -148,8 +165,8 @@ def test_sep16_admin_rpc_is_allowed_through_postgrest(function, params, _casts):
     ).encode("utf-8")
 
 
-@pytest.mark.parametrize("function,params,casts", SEP16_ADMIN_RPCS)
-def test_sep16_admin_rpc_has_exact_psycopg_signature(function, params, casts):
+@pytest.mark.parametrize("function,params,casts", RECOVERY_ADMIN_RPCS)
+def test_recovery_admin_rpc_has_exact_psycopg_signature(function, params, casts):
     calls = []
 
     class Cursor:

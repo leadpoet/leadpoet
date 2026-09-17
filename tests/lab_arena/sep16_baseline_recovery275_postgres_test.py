@@ -61,17 +61,28 @@ RECOVERY_SOURCE_REF = (
     "arena/arena-2026-09-16/sources/"
     "baseline-2026-09-16-recovery275.tar.gz"
 )
-# Template-only fixture values. Production SQL must be rendered from the
-# separately verified public champion archive before it can be applied.
-RECOVERY_SOURCE_SIZE = 550000
+RECOVERY_SOURCE_SIZE = 556089
 RECOVERY_SOURCE_SHA = (
-    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    "dd877baf3f1210480b8bb1a0fdd62c9b0d75a1478da705a0db043d98978ffe67"
 )
-RECOVERY_SOURCE_COMMIT = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+RECOVERY_SOURCE_COMMIT = "396bcb277ce831fd92e31a80f556d2996812bbf4"
 TEMPLATE = (
     Path(__file__).parents[2]
     / "scripts/275-arena-2026-09-16-baseline-recovery.sql.template"
 )
+MIGRATION = TEMPLATE.with_suffix("")
+FORWARD_SCHEDULE = {
+    "benchmark_deadline": "2026-09-16T23:15:00Z",
+    "final_scoring_close": "2026-09-17T08:15:00Z",
+    "publication_deadline": "2026-09-17T08:45:00Z",
+    "stage_1_close": "2026-09-17T05:00:00Z",
+    "stage_1_scoring_close": "2026-09-17T06:30:00Z",
+    "stage_1_start": "2026-09-16T23:15:01Z",
+    "stage_2_close": "2026-09-17T06:45:00Z",
+    "stage_2_start": "2026-09-17T06:35:00Z",
+    "submission_cutoff": "2026-09-16T00:00:00Z",
+    "submission_open": "2026-09-15T00:00:00Z",
+}
 PRIOR_TEMPLATE = (
     Path(__file__).parents[2]
     / "scripts/273-arena-2026-09-16-baseline-recovery.sql.template"
@@ -375,19 +386,12 @@ def _restore_protected_rows(connection, captured, prior_captured):
 
 
 def _render_protected_recovery275(captured, new_schedule):
-    rendered = TEMPLATE.read_text(encoding="utf-8")
-    replacements = {
-        "__SEALED_RECOVERY_SOURCE_SIZE_BYTES__": str(RECOVERY_SOURCE_SIZE),
-        "__SEALED_RECOVERY_SOURCE_SHA256__": RECOVERY_SOURCE_SHA,
-        "__SEALED_RECOVERY_SOURCE_COMMIT__": RECOVERY_SOURCE_COMMIT,
-        "__SEALED_NEW_FORWARD_SCHEDULE_JSON__": json.dumps(
-            new_schedule, sort_keys=True, separators=(",", ":")
-        ),
-    }
-    for marker, value in replacements.items():
-        assert rendered.count(marker) == 2
-        rendered = rendered.replace(marker, value)
+    assert new_schedule == FORWARD_SCHEDULE
+    rendered = MIGRATION.read_text(encoding="utf-8")
     assert "__SEALED_" not in rendered
+    assert str(RECOVERY_SOURCE_SIZE) in rendered
+    assert RECOVERY_SOURCE_SHA in rendered
+    assert RECOVERY_SOURCE_COMMIT in rendered
     seal = captured["seal"]
     assert seal["terminal_baseline_run_count"] == 27
     assert seal["terminal_baseline_ledger_count"] == 4428
@@ -529,15 +533,22 @@ def _accept_recovery275_scores(connection, objects, stage, icps):
         cursor.execute("ALTER TABLE public.lab_arena_runs ENABLE TRIGGER USER")
 
 
-def test_recovery275_template_waits_for_exact_source_seal():
-    rendered = TEMPLATE.read_text(encoding="utf-8")
-    assert not TEMPLATE.with_suffix("").exists()
-    assert rendered.count("__SEALED_RECOVERY_SOURCE_SIZE_BYTES__") == 2
-    assert rendered.count("__SEALED_RECOVERY_SOURCE_SHA256__") == 2
-    assert rendered.count("__SEALED_RECOVERY_SOURCE_COMMIT__") == 2
-    assert rendered.count("__SEALED_NEW_FORWARD_SCHEDULE_JSON__") == 2
-    assert "terminal_baseline_run_count = 27" in rendered
-    assert "terminal_baseline_ledger_count = 4428" in rendered
+def test_recovery275_exact_migration_has_published_source_and_schedule_seal():
+    template = TEMPLATE.read_text(encoding="utf-8")
+    assert template.count("__SEALED_RECOVERY_SOURCE_SIZE_BYTES__") == 2
+    assert template.count("__SEALED_RECOVERY_SOURCE_SHA256__") == 2
+    assert template.count("__SEALED_RECOVERY_SOURCE_COMMIT__") == 2
+    assert template.count("__SEALED_NEW_FORWARD_SCHEDULE_JSON__") == 2
+
+    migration = MIGRATION.read_text(encoding="utf-8")
+    schedule = json.dumps(FORWARD_SCHEDULE, sort_keys=True, separators=(",", ":"))
+    assert "__SEALED_" not in migration
+    assert migration.count(str(RECOVERY_SOURCE_SIZE)) == 2
+    assert migration.count(RECOVERY_SOURCE_SHA) == 2
+    assert migration.count(RECOVERY_SOURCE_COMMIT) == 2
+    assert migration.count(schedule) == 2
+    assert "terminal_baseline_run_count = 27" in migration
+    assert "terminal_baseline_ledger_count = 4428" in migration
 
 
 def test_recovery275_replays_exact_protected_terminal_snapshot_twice(connect):
@@ -581,7 +592,7 @@ def test_recovery275_replays_exact_protected_terminal_snapshot_twice(connect):
                 "lab_arena_sep16_baseline_recovery273_audit",
             )
         }
-        schedule = _shift_schedule(seal["old_schedule"], minutes=90)
+        schedule = FORWARD_SCHEDULE
         migration = _render_protected_recovery275(captured, schedule)
 
         # A terminal ledger append after the snapshot must invalidate the seal.

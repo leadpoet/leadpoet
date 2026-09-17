@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 import pytest
@@ -200,6 +201,50 @@ def test_one_gate_is_shared_across_round_brokers_before_any_reservation():
     assert not thread1.is_alive() and not thread2.is_alive()
     assert results[1].status == results[2].status == 200
     assert first_store.log == second_store.log == ["reserve", "dispatch", "settle"]
+
+
+def test_four_slots_serve_ten_icps_without_reserving_queued_calls():
+    gate = br.OpenRouterSharedGate(max_concurrency=4)
+    release = threading.Event()
+    lock = threading.Lock()
+
+    class BlockingTransport:
+        active = 0
+        maximum = 0
+        calls = 0
+
+        def send(self, **_kwargs):
+            with lock:
+                self.active += 1
+                self.calls += 1
+                number = self.calls
+                self.maximum = max(self.maximum, self.active)
+            try:
+                assert release.wait(5)
+                return br.ProviderResponse(200, {"content-type": "application/json"},
+                                           json.dumps(response(id="gen-%d" % number)).encode())
+            finally:
+                with lock:
+                    self.active -= 1
+
+    transport = BlockingTransport()
+    brokers = [make_broker(store=FakeLedgerStore(), transport=transport,
+                           openrouter_shared_gate=gate) for _ in range(10)]
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = [pool.submit(broker.execute, context(index), operation_id="openrouter.responses",
+                               parameters=PARAMETERS, action_sequence=1, timeout_ms=120_000)
+                   for index, (broker, _, _) in enumerate(brokers)]
+        try:
+            wait_for(lambda: transport.active == 4 and queued(gate, fingerprint()) == 6)
+            assert sum(store.log == ["reserve", "dispatch"] for _, store, _ in brokers) == 4
+            assert sum(store.log == [] for _, store, _ in brokers) == 6
+        finally:
+            release.set()
+        results = [future.result(timeout=3) for future in futures]
+    assert transport.maximum == 4 and transport.calls == 10 and transport.active == 0
+    assert all(result.status == 200 for result in results)
+    assert all(store.log == ["reserve", "dispatch", "settle"] for _, store, _ in brokers)
+    assert queued(gate, fingerprint()) == 0
 
 
 def test_queued_cancellation_removes_waiter_without_ledger_or_provider_call():

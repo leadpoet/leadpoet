@@ -147,6 +147,47 @@ def test_benchmark_disclosure_scope_requires_no_other_scope():
         ])
 
 
+def test_openrouter_concurrency_scope_targets_only_gateway(monkeypatch, tmp_path, capsys):
+    key = tmp_path / "ssh.pem"
+    key.write_text("fixture")
+    calls = []
+    monkeypatch.setattr(MODULE, "_ssh", lambda host, ssh_key, request: calls.append((host, request)) or {"ok": True})
+    assert MODULE.main([
+        "--openrouter-max-concurrency", "4", "--check",
+        "--allowed-account", "493765492819", "--ssh-key", str(key),
+    ]) == 0
+    assert calls == [(MODULE.GATEWAY_HOST, {
+        "secret_id": MODULE.GATEWAY_SECRET,
+        "allowed_accounts": ["493765492819"],
+        "apply": False, "role": "openrouter_concurrency_only", "aliases": {},
+        "updates": {"LAB_ARENA_OPENROUTER_MAX_CONCURRENCY": "4"},
+    })]
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
+@pytest.mark.parametrize("options", [
+    ["--openrouter-max-concurrency", "0"],
+    ["--openrouter-max-concurrency", "11"],
+    ["--openrouter-max-concurrency", "4.0"],
+    ["--openrouter-max-concurrency", "4", "--scorer-image-only"],
+])
+def test_openrouter_concurrency_cli_rejects_invalid_or_mixed_scope(options):
+    with pytest.raises(SystemExit):
+        MODULE.build_parser().parse_args(options + ["--allowed-account", "493765492819"])
+
+
+def test_openrouter_concurrency_apply_requires_existing_authorization(monkeypatch, tmp_path, capsys):
+    key = tmp_path / "ssh.pem"
+    key.write_text("fixture")
+    monkeypatch.delenv(MODULE.AUTH_ENV, raising=False)
+    monkeypatch.setattr(MODULE, "_ssh", lambda *a: pytest.fail("unauthorized remote call"))
+    assert MODULE.main([
+        "--openrouter-max-concurrency", "4", "--apply",
+        "--allowed-account", "493765492819", "--ssh-key", str(key),
+    ]) == 2
+    assert MODULE.AUTH_ENV in capsys.readouterr().err
+
+
 def test_contacts_scopes_are_mutually_exclusive():
     with pytest.raises(SystemExit):
         MODULE.build_parser().parse_args([
@@ -552,6 +593,64 @@ def test_remote_scorer_image_scope_rejects_unrelated_targets(tmp_path):
         }
     )
     assert result == {"ok": False, "code": "scorer_image_scope_invalid"}
+
+
+@pytest.mark.parametrize("encoded", [False, True])
+@pytest.mark.parametrize("apply", [False, True])
+def test_remote_openrouter_concurrency_preserves_secret_and_reports_only_metadata(tmp_path, encoded, apply):
+    source = {"KEEP": "fixture-sensitive-value", "LAB_ARENA_REWARDS_ENABLED": "true",
+              "LAB_ARENA_MODE": "live", "LAB_ARENA_OPENROUTER_MAX_CONCURRENCY": "2"}
+    raw = json.dumps(source, separators=(",", ":")) if encoded else "".join(f"export {k}={v}\n" for k, v in source.items())
+    result, state = _run_remote_with_fake_aws(tmp_path, raw, return_state=True, request_override={
+        "role": "openrouter_concurrency_only", "aliases": {}, "service_key": "",
+        "apply": apply, "updates": {"LAB_ARENA_OPENROUTER_MAX_CONCURRENCY": "4"},
+    })
+    assert result["changed_keys"] == ["LAB_ARENA_OPENROUTER_MAX_CONCURRENCY"]
+    assert result["applied"] is apply
+    assert "fixture-sensitive-value" not in json.dumps(result)
+    assert state["versions"]["initial"] == raw
+    updated = state["versions"][state["current"]]
+    if not apply:
+        assert state["current"] == "initial" and len(state["versions"]) == 1
+    elif encoded:
+        assert json.loads(updated) == {**source, "LAB_ARENA_OPENROUTER_MAX_CONCURRENCY": "4"}
+    else:
+        assert updated == raw.replace("MAX_CONCURRENCY=2", "MAX_CONCURRENCY=4")
+
+
+@pytest.mark.parametrize("value", ["0", "11", "4.0", "04", "4\n", "", 4, True])
+def test_remote_openrouter_concurrency_rejects_invalid_values_without_write(tmp_path, value):
+    result = _run_remote_with_fake_aws(tmp_path, '{}', expect_success=False, request_override={
+        "role": "openrouter_concurrency_only", "aliases": {}, "service_key": "",
+        "updates": {"LAB_ARENA_OPENROUTER_MAX_CONCURRENCY": value},
+    })
+    assert result == {"ok": False, "code": "openrouter_concurrency_invalid"}
+    assert json.loads((tmp_path / "state.json").read_text())["current"] == "initial"
+
+
+@pytest.mark.parametrize("extra", [
+    {"secret_id": MODULE.VALIDATOR_SECRET},
+    {"aliases": {"OPENROUTER_API_KEY": "LAB_ARENA_OPENROUTER_API_KEY"}},
+    {"service_key": "sb_secret_fixture"},
+    {"updates": {"LAB_ARENA_OPENROUTER_MAX_CONCURRENCY": "4", "LAB_ARENA_REWARDS_ENABLED": "false"}},
+])
+def test_remote_openrouter_concurrency_rejects_scope_expansion(tmp_path, extra):
+    result = _run_remote_with_fake_aws(tmp_path, '{}', expect_success=False, request_override={
+        "role": "openrouter_concurrency_only", "aliases": {}, "service_key": "",
+        "updates": {"LAB_ARENA_OPENROUTER_MAX_CONCURRENCY": "4"}, **extra,
+    })
+    assert result == {"ok": False, "code": "openrouter_concurrency_scope_invalid"}
+    assert json.loads((tmp_path / "state.json").read_text())["current"] == "initial"
+
+
+def test_remote_openrouter_concurrency_noops_without_new_version(tmp_path):
+    raw = '{"KEEP":"same","LAB_ARENA_OPENROUTER_MAX_CONCURRENCY":"4"}'
+    result, state = _run_remote_with_fake_aws(tmp_path, raw, return_state=True, request_override={
+        "role": "openrouter_concurrency_only", "aliases": {}, "service_key": "",
+        "updates": {"LAB_ARENA_OPENROUTER_MAX_CONCURRENCY": "4"},
+    })
+    assert result["unchanged"] is True and result["applied"] is False
+    assert state == {"current": "initial", "versions": {"initial": raw}}
 
 
 def test_remote_benchmark_disclosure_scope_updates_only_target(tmp_path):

@@ -420,6 +420,17 @@ else:
         values[key] = raw_value
 
 updates = dict(request["updates"])
+if request["role"] == "openrouter_concurrency_only":
+    if (
+        secret_id != "leadpoet/prod/gateway/env"
+        or set(updates) != {"LAB_ARENA_OPENROUTER_MAX_CONCURRENCY"}
+        or request.get("aliases")
+        or request.get("service_key")
+    ):
+        fail("openrouter_concurrency_scope_invalid")
+    value = updates["LAB_ARENA_OPENROUTER_MAX_CONCURRENCY"]
+    if not isinstance(value, str) or not re.fullmatch(r"(?:[1-9]|10)", value):
+        fail("openrouter_concurrency_invalid")
 if request["role"] == "scorer_image_only":
     if set(updates) != {"LAB_ARENA_SCORER_IMAGE"} or request.get("aliases") or request.get("service_key"):
         fail("scorer_image_scope_invalid")
@@ -698,6 +709,7 @@ def build_parser() -> argparse.ArgumentParser:
     scope.add_argument("--miner-credentials-only", action="store_true", help="configure only the gateway miner KMS key from its existing Research Lab key")
     scope.add_argument("--testnet-proxy", choices=("enabled", "disabled"), default=None, help="configure only the fixed testnet gateway route; does not start a service or change mainnet")
     scope.add_argument("--scorer-image-only", action="store_true", help="configure only the gateway scorer image")
+    scope.add_argument("--openrouter-max-concurrency", type=int, choices=range(1, 11), default=None, help="configure only the gateway OpenRouter shared concurrency; activate with the canonical gateway restart")
     scope.add_argument("--validator-credential-kms-guard", action="store_true", help="from a gateway checkout, check or add the exact validator deny for Arena miner credential decrypts")
     scope.add_argument("--benchmark-disclosure-from", default=None, metavar="TIMESTAMP", help="set or clear the future benchmark disclosure timestamp")
     scope.add_argument("--contacts-from", default=None, metavar="TIMESTAMP", help="set or clear the future contact activation timestamp")
@@ -746,6 +758,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         or args.miner_credentials_only
         or args.testnet_proxy is not None
         or args.scorer_image_only
+        or args.openrouter_max_concurrency is not None
         or args.validator_credential_kms_guard
         or args.benchmark_disclosure_from is not None
         or getattr(args, "contacts_from", None) is not None
@@ -793,6 +806,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "secret_id": GATEWAY_SECRET, "allowed_accounts": args.allowed_account,
                 "apply": args.apply, "role": "scorer_image_only", "aliases": {},
                 "updates": {"LAB_ARENA_SCORER_IMAGE": args.scorer_image},
+            }
+            result = _ssh(args.gateway_host, args.ssh_key, request)
+            print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
+            return 0
+        if args.openrouter_max_concurrency is not None:
+            request = {
+                "secret_id": GATEWAY_SECRET, "allowed_accounts": args.allowed_account,
+                "apply": args.apply, "role": "openrouter_concurrency_only", "aliases": {},
+                "updates": {
+                    "LAB_ARENA_OPENROUTER_MAX_CONCURRENCY": str(args.openrouter_max_concurrency),
+                },
             }
             result = _ssh(args.gateway_host, args.ssh_key, request)
             print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))

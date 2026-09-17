@@ -109,6 +109,65 @@ def database():
     yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
 
 
+@pytest.fixture
+def migration_role_database():
+    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+
+
+def test_migration_role_needs_temporary_owner_schema_create(
+    migration_role_database,
+):
+    psycopg2, dsn = migration_role_database
+    connection = psycopg2.connect(**dsn)
+    broken = MIGRATION.read_text().replace(
+        "GRANT CREATE ON SCHEMA public TO lab_arena_owner;", ""
+    ).replace(
+        "REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;", ""
+    )
+    try:
+        restore_terminal(connection)
+        connection.autocommit = True
+        with connection.cursor() as cursor:
+            cursor.execute("CREATE ROLE recovery285_migration_runner NOLOGIN")
+            cursor.execute(
+                "GRANT lab_arena_owner TO recovery285_migration_runner"
+            )
+            cursor.execute(
+                "GRANT CREATE ON SCHEMA public TO recovery285_migration_runner "
+                "WITH GRANT OPTION"
+            )
+            cursor.execute("SET ROLE recovery285_migration_runner")
+            cursor.execute(
+                "SELECT current_setting('is_superuser')='off',"
+                "pg_catalog.pg_has_role(current_user,'lab_arena_owner','MEMBER'),"
+                "pg_catalog.has_schema_privilege("
+                "'lab_arena_owner','public','CREATE')"
+            )
+            assert cursor.fetchone() == (True, True, False)
+            with pytest.raises(Exception) as failure:
+                cursor.execute(broken)
+            assert getattr(failure.value, "pgcode", None) == "42501"
+            assert "permission denied for schema public" in str(failure.value)
+            cursor.execute("ROLLBACK")
+            cursor.execute("RESET ROLE")
+
+            cursor.execute("SET ROLE recovery285_migration_runner")
+            cursor.execute(MIGRATION.read_text())
+            cursor.execute(MIGRATION.read_text())
+            cursor.execute("RESET ROLE")
+            cursor.execute(
+                "SELECT pg_catalog.pg_get_userbyid(p.proowner),p.prosecdef,"
+                "pg_catalog.has_schema_privilege("
+                "'lab_arena_owner','public','CREATE') "
+                "FROM pg_catalog.pg_proc AS p WHERE p.oid="
+                "'public.lab_arena_prepare_sep17_baseline_recovery285_v1("
+                "bigint,text,text,text,jsonb)'::pg_catalog.regprocedure"
+            )
+            assert cursor.fetchone() == ("lab_arena_owner", True, False)
+    finally:
+        connection.close()
+
+
 def restore_terminal(connection):
     snapshot = captured()
     restore_recovery284_terminal(connection)

@@ -24,6 +24,10 @@ BEGIN
 END;
 $requires_sep17_recovery285$;
 
+-- The migration caller is a non-superuser member of lab_arena_owner. The new
+-- function owner needs CREATE on its schema while ownership is transferred.
+GRANT CREATE ON SCHEMA public TO lab_arena_owner;
+
 CREATE OR REPLACE FUNCTION public.lab_arena_prepare_sep17_baseline_recovery285_v1(
   p_source_size_bytes BIGINT,
   p_source_sha256 TEXT,
@@ -635,5 +639,7 @@ REVOKE ALL ON FUNCTION public.lab_arena_prepare_sep17_baseline_recovery285_v1(
 GRANT EXECUTE ON FUNCTION public.lab_arena_prepare_sep17_baseline_recovery285_v1(
   BIGINT, TEXT, TEXT, TEXT, JSONB
 ) TO lab_arena_service;
+
+REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
 
 COMMIT;

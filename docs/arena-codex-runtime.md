@@ -109,6 +109,28 @@ the worker request deadline. Stopping the worker cancels a pending backoff.
 Incomplete model responses retain actual billing and do not become successful
 sourcing calls.
 
+A harness can inspect its current per-run call counters through the already
+mounted checkpoint helper:
+
+```python
+from lab_arena_checkpoint import quota_usage
+
+snapshot = quota_usage()
+openrouter_remaining = snapshot["providers"]["openrouter"]["remaining"]
+```
+
+Each fixed provider reports `limit`, `used`, `remaining`, and `inflight`.
+Reservations and dispatches are used and in flight; settlements and uncertain
+outcomes are used; refusals and recovered reservations are not used. Retries
+with separate call identities count separately. The read uses the active lease,
+changes no provider, run, ledger, lease, action-sequence, or refusal state, and
+is cached by the worker for one second. At most 256 reads are accepted during a
+run. Stale leases, malformed responses, transport failures, and the read cap
+raise the same generic `QuotaUnavailable("quota unavailable")` error.
+
+The result is a point-in-time observation. It does not reserve a call or money,
+renew the lease, change admission, or promise that a later request will succeed.
+
 The gateway shares a conservative Responses reliability gate across rounds by
 OpenRouter credential. It admits two concurrent requests per credential by
 default; this is a local protection, not a claimed upstream account limit. A

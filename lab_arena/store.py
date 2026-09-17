@@ -45,6 +45,7 @@ SUCCESSFUL_CALL_COST_SCHEMA_VERSION = (
 PARALLEL_EXECUTION_SCHEMA_VERSION = (
     "leadpoet.lab_arena.parallel_execution_schema.v1"
 )
+RUN_QUOTA_SNAPSHOT_SCHEMA_VERSION = "leadpoet.lab_arena.quota_snapshot.v1"
 SERVICE_ROLE_NAME = "lab_arena_service"
 
 # Parameter order and PostgreSQL casts for every service-callable function.
@@ -94,6 +95,10 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     ),
     "lab_arena_freeze_champion_funding": (("p_round_id", "text"),),
     "lab_arena_provider_funding": (("p_run_id", "text"), ("p_provider", "text")),
+    "lab_arena_run_quota_snapshot_v1": (
+        ("p_run_id", "text"),
+        ("p_lease_token_hash", "text"),
+    ),
     "lab_arena_mark_champion_provider_fallback": (
         ("p_run_id", "text"), ("p_lease_token_hash", "text"),
         ("p_provider", "text"), ("p_evidence", "jsonb"),
@@ -688,6 +693,59 @@ class ArenaStore:
         return _require_mapping(self._transport.rpc(
             "lab_arena_provider_funding", {"p_run_id": run_id, "p_provider": provider}
         ), "provider_funding")
+
+    def run_quota_snapshot(
+        self, run_id: str, lease_token_hash: str
+    ) -> Dict[str, Any]:
+        """Read bounded counters for one active lease without renewing it."""
+
+        result = _require_mapping(
+            self._transport.rpc(
+                "lab_arena_run_quota_snapshot_v1",
+                {
+                    "p_run_id": run_id,
+                    "p_lease_token_hash": lease_token_hash,
+                },
+            ),
+            "run_quota_snapshot",
+        )
+        if set(result) != {"schema_version", "providers"} or result.get(
+            "schema_version"
+        ) != RUN_QUOTA_SNAPSHOT_SCHEMA_VERSION:
+            raise ArenaStoreError("run quota snapshot schema mismatch")
+        providers = result.get("providers")
+        if not isinstance(providers, Mapping) or set(providers) != {
+            "scrapingdog",
+            "deepline",
+            "openrouter",
+        }:
+            raise ArenaStoreError("run quota snapshot schema mismatch")
+        for counters in providers.values():
+            if not isinstance(counters, Mapping) or set(counters) != {
+                "limit",
+                "used",
+                "remaining",
+                "inflight",
+            }:
+                raise ArenaStoreError("run quota snapshot schema mismatch")
+            limit = counters.get("limit")
+            used = counters.get("used")
+            remaining = counters.get("remaining")
+            inflight = counters.get("inflight")
+            if (
+                any(
+                    isinstance(value, bool) or not isinstance(value, int)
+                    for value in (limit, used, remaining, inflight)
+                )
+                or limit < 1
+                or used < 0
+                or used > limit
+                or remaining != limit - used
+                or inflight < 0
+                or inflight > used
+            ):
+                raise ArenaStoreError("run quota snapshot schema mismatch")
+        return result
 
     def champion_provider_restart_required(self, run_id: str, provider: str) -> bool:
         return self.provider_funding(run_id, provider).get("restart_required") is True

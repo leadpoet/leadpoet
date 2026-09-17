@@ -105,6 +105,7 @@ CURRENT_SERVICE_MIGRATIONS = POSTGREST_MIGRATIONS + (
     "258-lab-arena-queued-submission-replacement.sql",
     "262-lab-arena-one-replacement-attempt.sql",
     "263-lab-arena-code-review-recovery.sql",
+    "274-lab-arena-run-quota-snapshot.sql",
 )
 
 

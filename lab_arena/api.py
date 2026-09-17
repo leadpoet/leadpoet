@@ -238,6 +238,16 @@ def create_app(service: ArenaService) -> FastAPI:
             disconnected,
         )
 
+    @app.get("/arena/v1/runs/{run_id}/quota")
+    async def run_quota(
+        run_id: str,
+        x_lab_arena_lease: Optional[str] = Header(default=None),
+    ) -> JSONResponse:
+        lease_token = _lease_header(x_lab_arena_lease)
+        return await no_store_public_call(
+            service.handle_quota_snapshot, run_id, lease_token
+        )
+
     @app.get("/arena/v1/runs/{run_id}/source")
     async def source(run_id: str, x_lab_arena_lease: Optional[str] = Header(default=None)) -> Any:
         lease_token = _lease_header(x_lab_arena_lease)

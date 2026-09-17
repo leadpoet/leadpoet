@@ -39,7 +39,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from lab_arena import integrity, contact_policy, intent_details_policy, quality_policy
-from lab_arena import contracts, images, leased_images, operations, runtime, scoring, shim, source_bundle
+from lab_arena import contracts, images, lab_arena_checkpoint, leased_images, operations, runtime, scoring, shim, source_bundle
 from lab_arena.contracts import ArenaContractError
 from lab_arena.output import (
     OutputInvalid,
@@ -56,6 +56,8 @@ CHECKPOINT_MODULE_PATH = Path(__file__).with_name("lab_arena_checkpoint.py").res
 CODEX_MODULE_PATH = Path(__file__).with_name("lab_arena_codex.py").resolve()
 WEB_BRIDGE_PATH = Path(__file__).with_name("web_egress_bridge.py").resolve()
 MAX_REFUSED_FRAMES = 25  # after this many refused calls the worker answers a run's frames locally
+MAX_QUOTA_SNAPSHOT_REQUESTS = 256
+QUOTA_SNAPSHOT_CACHE_SECONDS = 1.0
 # A request on the worker socket is either a length-prefixed operation frame
 # (first byte 0x00: the judge shim) or an HTTP request (an ASCII method).
 HTTP_FIRST_BYTES = b"GPHDO"
@@ -324,6 +326,8 @@ class ArenaApiClient(Protocol):
 
     def provider(self, run_id: str, lease_token: str, frame: Mapping[str, Any]) -> Dict[str, Any]: ...
 
+    def quota_usage(self, run_id: str, lease_token: str) -> Dict[str, Any]: ...
+
     def complete(self, envelope: Mapping[str, Any]) -> Dict[str, Any]: ...
 
     def source(self, run_id: str, lease_token: str) -> bytes: ...
@@ -456,6 +460,44 @@ class HttpArenaApiClient:
             headers={"x-lab-arena-lease": lease_token},
             timeout_seconds=timeout_seconds,
         )
+
+    def quota_usage(self, run_id: str, lease_token: str) -> Dict[str, Any]:
+        """Read one bounded active-lease quota snapshot."""
+
+        if not isinstance(run_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9._:-]{1,200}", run_id
+        ):
+            raise RunnerError("run quota is unavailable")
+        try:
+            with self._client.stream(
+                "GET",
+                self._base_url + "/arena/v1/runs/%s/quota" % run_id,
+                headers={"x-lab-arena-lease": lease_token},
+                timeout=httpx.Timeout(API_TIMEOUT_SECONDS),
+            ) as response:
+                if response.status_code != 200:
+                    raise RunnerError("run quota is unavailable")
+                declared = response.headers.get("content-length")
+                if declared is not None:
+                    try:
+                        if int(declared) > lab_arena_checkpoint.MAX_QUOTA_RESPONSE_BYTES:
+                            raise RunnerError("run quota is unavailable")
+                    except ValueError:
+                        raise RunnerError("run quota is unavailable") from None
+                chunks = []
+                total = 0
+                for chunk in response.iter_bytes():
+                    total += len(chunk)
+                    if total > lab_arena_checkpoint.MAX_QUOTA_RESPONSE_BYTES:
+                        raise RunnerError("run quota is unavailable")
+                    chunks.append(chunk)
+        except httpx.HTTPError:
+            raise RunnerError("run quota is unavailable") from None
+        try:
+            document = json.loads(b"".join(chunks).decode("utf-8"))
+            return lab_arena_checkpoint.validate_quota_snapshot(document)
+        except (UnicodeDecodeError, ValueError, lab_arena_checkpoint.QuotaUnavailable):
+            raise RunnerError("run quota is unavailable") from None
 
     def complete(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
         return self._post("/arena/v1/runs/%s/complete" % envelope["body"]["run_id"], envelope)
@@ -1213,6 +1255,14 @@ class RunState:
     action_sequence: int = 0
     refusals: int = 0  # refused calls answered by the Arena for this run
     lock: threading.Lock = field(default_factory=threading.Lock)
+    quota_request_count: int = 0
+    quota_snapshot: Optional[Dict[str, Any]] = None
+    quota_snapshot_at: float = 0.0
+    quota_snapshot_inflight: bool = False
+    quota_snapshot_generation: int = 0
+    quota_condition: threading.Condition = field(
+        default_factory=threading.Condition, repr=False
+    )
 
 
 def _timestamp(clock: Callable[[], datetime]) -> str:
@@ -1235,6 +1285,7 @@ class WorkerSocketServer:
         *,
         max_connections: int = MAX_WORKER_CONNECTIONS,
         read_timeout_seconds: float = WORKER_SOCKET_READ_TIMEOUT_SECONDS,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if isinstance(max_connections, bool) or not isinstance(max_connections, int) or max_connections < 1:
             raise RunnerError("worker socket connection limit is invalid")
@@ -1245,9 +1296,82 @@ class WorkerSocketServer:
         self._state = state
         self._max_connections = max_connections
         self._read_timeout_seconds = float(read_timeout_seconds)
+        self._monotonic = monotonic
         self._server: Optional[socketserver.ThreadingUnixStreamServer] = None
         self._thread: Optional[threading.Thread] = None
         self._stopping = threading.Event()
+
+    def _quota_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Cache and single-flight passive reads without touching call counters."""
+
+        state = self._state
+        condition = state.quota_condition
+        started_at = self._monotonic()
+        with condition:
+            if state.quota_request_count >= MAX_QUOTA_SNAPSHOT_REQUESTS:
+                return None
+            state.quota_request_count += 1
+            if (
+                state.quota_snapshot is not None
+                and started_at - state.quota_snapshot_at
+                < QUOTA_SNAPSHOT_CACHE_SECONDS
+            ):
+                return dict(state.quota_snapshot)
+            generation = state.quota_snapshot_generation
+            if state.quota_snapshot_inflight:
+                condition.wait_for(
+                    lambda: (
+                        not state.quota_snapshot_inflight
+                        or state.quota_snapshot_generation != generation
+                    ),
+                    timeout=API_TIMEOUT_SECONDS + 1.0,
+                )
+                if (
+                    state.quota_snapshot_generation != generation
+                    and state.quota_snapshot is not None
+                ):
+                    return dict(state.quota_snapshot)
+                return None
+            state.quota_snapshot_inflight = True
+
+        snapshot = None
+        try:
+            document = self._api.quota_usage(
+                state.lease["run_id"], state.lease_token
+            )
+            snapshot = lab_arena_checkpoint.validate_quota_snapshot(document)
+        except Exception:
+            snapshot = None
+
+        with condition:
+            state.quota_snapshot_inflight = False
+            state.quota_snapshot_generation += 1
+            if snapshot is None:
+                state.quota_snapshot = None
+                state.quota_snapshot_at = 0.0
+            else:
+                state.quota_snapshot = dict(snapshot)
+                state.quota_snapshot_at = self._monotonic()
+            condition.notify_all()
+            return dict(snapshot) if snapshot is not None else None
+
+    def _handle_quota_control(self, raw: bytes) -> Optional[bytes]:
+        """Handle the exact non-provider control frame, if one was supplied."""
+
+        try:
+            frame = json.loads(bytes(raw).decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return None
+        if not isinstance(frame, Mapping) or frame.get(
+            "schema_version"
+        ) != lab_arena_checkpoint.QUOTA_CONTROL_SCHEMA_VERSION:
+            return None
+        if dict(frame) != lab_arena_checkpoint.QUOTA_CONTROL_FRAME:
+            return shim.encode_worker_error("invalid_frame")
+        snapshot = self._quota_snapshot()
+        if snapshot is None:
+            return shim.encode_worker_error("quota_unavailable")
+        return contracts.canonical_json(snapshot).encode("utf-8")
 
     def _dispatch_once(self, operation_id: str, parameters: Mapping[str, Any], timeout_ms: int) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
         state = self._state
@@ -1430,6 +1554,10 @@ class WorkerSocketServer:
 
     def handle_frame(self, raw: bytes) -> bytes:
         """The judge shim's transport: one length-prefixed operation frame."""
+
+        control_response = self._handle_quota_control(raw)
+        if control_response is not None:
+            return control_response
 
         try:
             operation_id, parameters, timeout_ms = shim.decode_operation_frame(raw)

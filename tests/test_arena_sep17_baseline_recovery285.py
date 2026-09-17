@@ -11,9 +11,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import httpx
 
 from lab_arena import contracts, source_bundle
 from lab_arena.service import S3ObjectStore
+from lab_arena.store import PostgrestTransport
 from scripts import arena_sep17_baseline_recovery285 as r
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.test_lab_arena_contracts import base_round_configuration
@@ -145,6 +147,37 @@ def test_dry_run_fetches_and_validates_but_does_not_write(setup):
     result = invoke(setup, dry_run=True)
     assert result["status"] == "recovery285_preflight_ok"
     assert not setup.calls and not setup.client.writes
+
+
+def test_prepare_reaches_registered_production_transport(setup):
+    requests = []
+    original_rpc = setup.service.store._transport.rpc
+
+    def handler(request):
+        requests.append(request)
+        assert request.method == "POST"
+        assert request.url.path == (
+            "/rest/v1/rpc/lab_arena_prepare_sep17_baseline_recovery285_v1"
+        )
+        assert setup.client.data[r.SOURCE_REF] == setup.new
+        return httpx.Response(200, json=original_rpc(
+            request.url.path.rsplit("/", 1)[1], json.loads(request.content)
+        ))
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        setup.service.store._transport = PostgrestTransport(
+            "https://project.example", anon_key="anon", service_jwt="a.b.c",
+            http_client=client,
+        )
+        assert invoke(setup)["status"] == "prepared"
+    assert len(requests) == 1
+    assert setup.calls[0][1] == {
+        "p_source_size_bytes": len(setup.new),
+        "p_source_sha256": r._digest(setup.new),
+        "p_source_commit": r._archive_facts(setup.new)["source_commit"],
+        "p_bank_sha256": r.BANK_SHA256,
+        "p_forward_schedule": r.FORWARD_SCHEDULE,
+    }
 
 
 def test_replay_reads_frozen_recovery285_object_without_fetch_or_rewrite(setup):

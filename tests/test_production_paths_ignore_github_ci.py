@@ -70,6 +70,20 @@ def test_gateway_current_release_path_does_not_consult_github_ci() -> None:
     assert '"${shutdown_flag[@]}" >/dev/null 2>&1 || true' in sentry_summary
 
 
+def test_attested_release_workflow_is_manual_only_with_integrity_guards() -> None:
+    workflow = (ROOT / ".github/workflows/attested-v2-release.yml").read_text(
+        encoding="utf-8"
+    )
+    trigger = workflow[: workflow.index("\nconcurrency:")]
+    assert trigger == "name: Gateway Attested Release\n\non:\n  workflow_dispatch:\n"
+
+    assert 'test "$GITHUB_REF" = "refs/heads/main"' in workflow
+    assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in workflow
+    assert "leadpoet_acquire_docker_operation_lock_v2" in workflow
+    assert "leadpoet-gateway-v2-builder" in workflow
+    assert "leadpoet-validator-v2-builder" in workflow
+
+
 def test_normal_validator_restart_does_not_consult_github_ci() -> None:
     _assert_no_github_ci_gate(
         (

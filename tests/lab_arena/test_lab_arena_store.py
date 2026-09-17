@@ -13,6 +13,21 @@ from lab_arena.store import ArenaStoreUnavailable
 
 SEP16_ADMIN_RPCS = (
     (
+        "lab_arena_prepare_sep16_baseline_recovery277_v1",
+        {
+            "p_source_size_bytes": 560000,
+            "p_source_sha256": "7" * 64,
+            "p_source_commit": "2" * 40,
+            "p_forward_schedule": {"stage_1_close": "2026-09-18T18:00:00Z"},
+        },
+        (
+            "p_source_size_bytes => %s::bigint",
+            "p_source_sha256 => %s::text",
+            "p_source_commit => %s::text",
+            "p_forward_schedule => %s::jsonb",
+        ),
+    ),
+    (
         "lab_arena_prepare_sep16_baseline_recovery275_v1",
         {
             "p_source_size_bytes": 550000,
@@ -175,6 +190,34 @@ def test_sep16_admin_rpc_has_exact_psycopg_signature(function, params, casts):
         )
     assert values == expected_values
     transport.close()
+
+
+def test_transports_refuse_unknown_rpc_before_io():
+    requests = []
+
+    with httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: requests.append(request)
+            or httpx.Response(200, json={"status": "unexpected"})
+        )
+    ) as client:
+        postgrest = PostgrestTransport(
+            "https://project.example",
+            anon_key="anon",
+            service_jwt="a.b.c",
+            http_client=client,
+        )
+        with pytest.raises(ArenaStoreError, match="unknown Arena function"):
+            postgrest.rpc("lab_arena_unregistered_test_rpc", {})
+    assert requests == []
+
+    direct = PsycopgTransport(
+        lambda: pytest.fail("unknown RPC must not open a database connection"),
+        role=None,
+    )
+    with pytest.raises(ArenaStoreError, match="unknown Arena function"):
+        direct.rpc("lab_arena_unregistered_test_rpc", {})
+    direct.close()
 
 
 @pytest.mark.parametrize('limit', [None, 0, 2, True, '1', 1])

@@ -1210,7 +1210,7 @@ def test_provider_http_timeout_covers_the_requested_provider_window():
         {
             "operation_id": "deepline.execute",
             "parameters": {},
-            "timeout_ms": 60_000,
+            "timeout_ms": 240_000,
             "action_sequence": 1,
         },
     )
@@ -1411,7 +1411,10 @@ def test_a_model_speaks_plain_http_over_the_worker_socket(tmp_path):
 
 @pytest.mark.parametrize("transport_kind", ["frame", "http"])
 @pytest.mark.parametrize("native_billing", [False, True])
-def test_queued_deepline_billing_settles_through_worker_and_api(monkeypatch, transport_kind, native_billing):
+@pytest.mark.parametrize("provider_seconds", [20.0, 90.0])
+def test_queued_deepline_billing_settles_through_worker_and_api(
+    monkeypatch, transport_kind, native_billing, provider_seconds,
+):
     """Exercise both real socket protocols through the API client and broker."""
     import http.client
     from types import SimpleNamespace
@@ -1432,7 +1435,10 @@ def test_queued_deepline_billing_settles_through_worker_and_api(monkeypatch, tra
         def send(self, **kwargs):
             response = super().send(**kwargs)
             if kwargs["method"] == "POST":
-                elapsed[0] += 20.0
+                if kwargs["timeout_seconds"] < provider_seconds:
+                    elapsed[0] += kwargs["timeout_seconds"]
+                    raise br.ProviderTransportError("ReadTimeout")
+                elapsed[0] += provider_seconds
             return response
 
     provider = TimedProvider([
@@ -1467,7 +1473,7 @@ def test_queued_deepline_billing_settles_through_worker_and_api(monkeypatch, tra
         if transport_kind == "frame":
             monkeypatch.setenv(shim.WORKER_SOCKET_ENV, str(socket_path))
             status, _headers, body = shim.dispatch(
-                "deepline.execute", {"tool": "exa_search", "payload": {"query": "x"}}, 60_000,
+                "deepline.execute", {"tool": "exa_search", "payload": {"query": "x"}}, 240_000,
             )
         else:
             connection = http.client.HTTPConnection("code.deepline.com")
@@ -1490,8 +1496,8 @@ def test_queued_deepline_billing_settles_through_worker_and_api(monkeypatch, tra
             + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
             + rn.PROVIDER_API_TIMEOUT_GRACE_SECONDS
         ]
-        assert elapsed[0] == pytest.approx(33.0 if native_billing else 39.0)
-        assert provider.sent[0]["timeout"] == pytest.approx(60.0)
+        assert elapsed[0] == pytest.approx(provider_seconds + (13.0 if native_billing else 19.0))
+        assert provider.sent[0]["timeout"] == pytest.approx(240.0)
         assert sum(item["method"] == "POST" for item in provider.sent) == 1
         assert sum(item["method"] == "GET" for item in provider.sent) == (0 if native_billing else 4)
         assert len(store.calls) == 1

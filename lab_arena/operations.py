@@ -986,7 +986,10 @@ _OPERATION_LIST = (
         },
         fixed_params={},
         defaults={},
-        timeout_seconds=60,
+        # Paid integrations can need several minutes before returning a job
+        # identity. Preserve the caller's shorter timeout; allow the native
+        # Deepline 240-second window without changing the ICP hard deadline.
+        timeout_seconds=240,
         max_request_bytes=65_536,
         max_response_bytes=1_048_576,
         cost_rule=CALL_QUOTA_COST_RULE,

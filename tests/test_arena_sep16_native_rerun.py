@@ -4,8 +4,10 @@ import copy
 import json
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
+from lab_arena.store import PostgrestTransport
 from scripts import arena_sep16_native_rerun as rerun
 from tests.lab_arena.icp_fixtures import daily_icps
 
@@ -680,23 +682,34 @@ def test_recover277_reuses_exact_source_under_new_ref_and_calls_exact_rpc(
     assert service.store._transport.calls == []
     assert service.config.object_store.puts == []
 
-    service.store._transport.rpc = lambda name, arguments: (
-        service.store._transport.calls.append((name, arguments))
-        or {"status": "prepared", "baseline_execute_assignments": 20}
-    )
     args.dry_run = False
-    assert rerun._recover277(service, args)["status"] == "prepared"
-    assert service.store._transport.calls == [
-        (
-            "lab_arena_prepare_sep16_baseline_recovery277_v1",
-            {
-                "p_source_size_bytes": len(source),
-                "p_source_sha256": source_hash,
-                "p_source_commit": "e" * 40,
-                "p_forward_schedule": schedule,
-            },
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"status": "prepared", "baseline_execute_assignments": 20},
         )
-    ]
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        service.store._transport = PostgrestTransport(
+            "https://project.example",
+            anon_key="anon",
+            service_jwt="a.b.c",
+            http_client=client,
+        )
+        assert rerun._recover277(service, args)["status"] == "prepared"
+    assert len(requests) == 1
+    assert requests[0].url.path == (
+        "/rest/v1/rpc/lab_arena_prepare_sep16_baseline_recovery277_v1"
+    )
+    assert json.loads(requests[0].content) == {
+        "p_source_size_bytes": len(source),
+        "p_source_sha256": source_hash,
+        "p_source_commit": "e" * 40,
+        "p_forward_schedule": schedule,
+    }
     assert service.config.object_store.puts == [
         (rerun.RECOVERY277_SOURCE_REF, source)
     ]

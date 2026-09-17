@@ -13,6 +13,23 @@ from lab_arena.store import ArenaStoreUnavailable
 
 RECOVERY_ADMIN_RPCS = (
     (
+        "lab_arena_prepare_sep17_baseline_recovery284_v1",
+        {
+            "p_source_size_bytes": 582000,
+            "p_source_sha256": "8" * 64,
+            "p_source_commit": "a" * 40,
+            "p_bank_sha256": "5" * 64,
+            "p_forward_schedule": {"stage_1_close": "2026-09-17T22:00:00Z"},
+        },
+        (
+            "p_source_size_bytes => %s::bigint",
+            "p_source_sha256 => %s::text",
+            "p_source_commit => %s::text",
+            "p_bank_sha256 => %s::text",
+            "p_forward_schedule => %s::jsonb",
+        ),
+    ),
+    (
         "lab_arena_prepare_sep17_baseline_recovery283_v1",
         {
             "p_source_size_bytes": 581173,

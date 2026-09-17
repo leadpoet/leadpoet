@@ -66,11 +66,21 @@ RECOVERY_SOURCE_SHA = (
     "dd877baf3f1210480b8bb1a0fdd62c9b0d75a1478da705a0db043d98978ffe67"
 )
 RECOVERY_SOURCE_COMMIT = "396bcb277ce831fd92e31a80f556d2996812bbf4"
+RESEALED_SOURCE_SIZE = 556500
+RESEALED_SOURCE_SHA = (
+    "c86df33ae0f21164b46f9ab6b8e7dbcb116b7a53c49dbc43603a49b04067d104"
+)
+RESEALED_SOURCE_COMMIT = "2b8386b835de02739ddef6c182bdeba43c6ad467"
 TEMPLATE = (
     Path(__file__).parents[2]
     / "scripts/275-arena-2026-09-16-baseline-recovery.sql.template"
 )
 MIGRATION = TEMPLATE.with_suffix("")
+RESEAL_TEMPLATE = (
+    Path(__file__).parents[2]
+    / "scripts/276-arena-2026-09-16-recovery275-source-reseal.sql.template"
+)
+RESEAL_MIGRATION = RESEAL_TEMPLATE.with_suffix("")
 FORWARD_SCHEDULE = {
     "benchmark_deadline": "2026-09-16T23:15:00Z",
     "final_scoring_close": "2026-09-17T08:15:00Z",
@@ -478,14 +488,52 @@ def _render_recovery275(connection, new_schedule):
     return rendered
 
 
-def _install_and_recover275(connection, sql, schedule):
+def _render_recovery276(connection=None):
+    rendered = RESEAL_TEMPLATE.read_text(encoding="utf-8")
+    if connection is not None:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_catalog.to_jsonb(row_value)-'authorized_at'-"
+                "'recovery_source_size_bytes'-'recovery_source_sha256'-"
+                "'recovery_source_commit' FROM "
+                "public.lab_arena_sep16_baseline_recovery275_authority AS row_value"
+            )
+            expected = json.dumps(
+                cursor.fetchone()[0], sort_keys=True, separators=(",", ":")
+            )
+        start = rendered.index("$expected$") + len("$expected$")
+        end = rendered.index("$expected$", start)
+        rendered = rendered[:start] + expected + rendered[end:]
+    values = {
+        "__RESEALED_RECOVERY_SOURCE_SIZE_BYTES__": str(RESEALED_SOURCE_SIZE),
+        "__RESEALED_RECOVERY_SOURCE_SHA256__": RESEALED_SOURCE_SHA,
+        "__RESEALED_RECOVERY_SOURCE_COMMIT__": RESEALED_SOURCE_COMMIT,
+    }
+    for marker, value in values.items():
+        assert rendered.count(marker) >= 1
+        rendered = rendered.replace(marker, value)
+    assert "__RESEALED_" not in rendered
+    return rendered
+
+
+def _install_and_recover275(
+    connection,
+    sql,
+    schedule,
+    *,
+    source_size=RECOVERY_SOURCE_SIZE,
+    source_sha=RECOVERY_SOURCE_SHA,
+    source_commit=RECOVERY_SOURCE_COMMIT,
+    install_sql=True,
+):
     with connection.cursor() as cursor:
-        cursor.execute(sql)
-        cursor.execute(sql)
+        if install_sql:
+            cursor.execute(sql)
+            cursor.execute(sql)
         arguments = (
-            RECOVERY_SOURCE_SIZE,
-            RECOVERY_SOURCE_SHA,
-            RECOVERY_SOURCE_COMMIT,
+            source_size,
+            source_sha,
+            source_commit,
             json.dumps(schedule),
         )
         cursor.execute(
@@ -549,6 +597,172 @@ def test_recovery275_exact_migration_has_published_source_and_schedule_seal():
     assert migration.count(schedule) == 2
     assert "terminal_baseline_run_count = 27" in migration
     assert "terminal_baseline_ledger_count = 4428" in migration
+
+    reseal_template = RESEAL_TEMPLATE.read_text(encoding="utf-8")
+    assert reseal_template.count("__RESEALED_RECOVERY_SOURCE_SIZE_BYTES__") >= 1
+    assert reseal_template.count("__RESEALED_RECOVERY_SOURCE_SHA256__") >= 1
+    assert reseal_template.count("__RESEALED_RECOVERY_SOURCE_COMMIT__") >= 1
+    reseal = RESEAL_MIGRATION.read_text(encoding="utf-8")
+    assert "__RESEALED_" not in reseal
+    assert str(RESEALED_SOURCE_SIZE) in reseal
+    assert RESEALED_SOURCE_SHA in reseal
+    assert RESEALED_SOURCE_COMMIT in reseal
+
+
+def test_recovery276_reseals_only_unused_recovery275_and_fails_closed(connect):
+    connection = connect()
+    try:
+        schedule272, _hotkeys, _ids = _prepare_terminal_recovery273(connection)
+        schedule275 = _shift_schedule(schedule272, minutes=90)
+        migration275 = _render_recovery275(connection, schedule275)
+        with connection.cursor() as cursor:
+            cursor.execute(migration275)
+        connection.commit()
+        migration276 = _render_recovery276(connection)
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT relowner,relrowsecurity,relacl FROM pg_catalog.pg_class "
+                "WHERE oid='public.lab_arena_sep16_baseline_recovery275_authority'"
+                "::regclass"
+            )
+            acl_before = cursor.fetchone()
+            cursor.execute(
+                "SELECT pg_catalog.to_jsonb(row_value)-'authorized_at'-"
+                "'recovery_source_size_bytes'-'recovery_source_sha256'-"
+                "'recovery_source_commit' FROM "
+                "public.lab_arena_sep16_baseline_recovery275_authority AS row_value"
+            )
+            non_source_before = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT pg_get_functiondef("
+                "'public.lab_arena_prepare_sep16_baseline_recovery275_v1("
+                "bigint,text,text,jsonb)'::regprocedure)"
+            )
+            function_before = cursor.fetchone()[0]
+        terminal_before = _state_seal(connection)
+
+        with connection.cursor() as cursor:
+            cursor.execute(migration276)
+            cursor.execute(migration276)
+        connection.commit()
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT recovery_source_size_bytes,recovery_source_sha256,"
+                "recovery_source_commit FROM "
+                "public.lab_arena_sep16_baseline_recovery275_authority"
+            )
+            assert cursor.fetchone() == (
+                RESEALED_SOURCE_SIZE,
+                RESEALED_SOURCE_SHA,
+                RESEALED_SOURCE_COMMIT,
+            )
+            cursor.execute(
+                "SELECT conname,pg_get_constraintdef(oid,false) FROM "
+                "pg_catalog.pg_constraint WHERE conrelid="
+                "'public.lab_arena_sep16_baseline_recovery275_authority'::regclass "
+                "AND conname LIKE 'lab_arena_recovery275_source_%_ck' "
+                "ORDER BY conname"
+            )
+            assert cursor.fetchall() == [
+                (
+                    "lab_arena_recovery275_source_commit_ck",
+                    "CHECK ((recovery_source_commit = "
+                    f"'{RESEALED_SOURCE_COMMIT}'::text))",
+                ),
+                (
+                    "lab_arena_recovery275_source_sha256_ck",
+                    "CHECK ((recovery_source_sha256 = "
+                    f"'{RESEALED_SOURCE_SHA}'::text))",
+                ),
+                (
+                    "lab_arena_recovery275_source_size_ck",
+                    f"CHECK ((recovery_source_size_bytes = {RESEALED_SOURCE_SIZE}))",
+                ),
+            ]
+            cursor.execute(
+                "SELECT relowner,relrowsecurity,relacl FROM pg_catalog.pg_class "
+                "WHERE oid='public.lab_arena_sep16_baseline_recovery275_authority'"
+                "::regclass"
+            )
+            assert cursor.fetchone() == acl_before
+            cursor.execute(
+                "SELECT pg_catalog.to_jsonb(row_value)-'authorized_at'-"
+                "'recovery_source_size_bytes'-'recovery_source_sha256'-"
+                "'recovery_source_commit' FROM "
+                "public.lab_arena_sep16_baseline_recovery275_authority AS row_value"
+            )
+            assert cursor.fetchone()[0] == non_source_before
+            cursor.execute(
+                "SELECT pg_get_functiondef("
+                "'public.lab_arena_prepare_sep16_baseline_recovery275_v1("
+                "bigint,text,text,jsonb)'::regprocedure)"
+            )
+            assert cursor.fetchone()[0] == function_before
+            cursor.execute(
+                "SELECT count(*) FROM "
+                "public.lab_arena_sep16_baseline_recovery275_audit"
+            )
+            assert cursor.fetchone() == (0,)
+        assert _state_seal(connection) == terminal_before
+
+        with connection.cursor() as cursor, pytest.raises(
+            Exception, match="source differs"
+        ):
+            cursor.execute(
+                "SELECT public.lab_arena_prepare_sep16_baseline_recovery275_v1("
+                "%s,%s,%s,%s::jsonb)",
+                (
+                    RECOVERY_SOURCE_SIZE,
+                    RECOVERY_SOURCE_SHA,
+                    RECOVERY_SOURCE_COMMIT,
+                    json.dumps(schedule275),
+                ),
+            )
+        connection.rollback()
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "ALTER TABLE public.lab_arena_sep16_baseline_recovery275_authority "
+                "DROP CONSTRAINT lab_arena_recovery275_source_commit_ck"
+            )
+            cursor.execute(
+                "ALTER TABLE public.lab_arena_sep16_baseline_recovery275_authority "
+                "ADD CONSTRAINT lab_arena_recovery275_source_commit_ck "
+                "CHECK (pg_catalog.length(recovery_source_commit) > 0)"
+            )
+            with pytest.raises(Exception, match="source authority or constraints differ"):
+                cursor.execute(migration276)
+        connection.rollback()
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE public.lab_arena_rounds SET cancel_reason='drift' "
+                "WHERE round_id=%s",
+                (ROUND,),
+            )
+            with pytest.raises(Exception, match="sealed terminal state differs"):
+                cursor.execute(migration276)
+        connection.rollback()
+
+        prepared = _install_and_recover275(
+            connection,
+            migration275,
+            schedule275,
+            source_size=RESEALED_SOURCE_SIZE,
+            source_sha=RESEALED_SOURCE_SHA,
+            source_commit=RESEALED_SOURCE_COMMIT,
+            install_sql=False,
+        )
+        assert prepared["baseline_execute_assignments"] == 20
+        with connection.cursor() as cursor, pytest.raises(
+            Exception, match="already started"
+        ):
+            cursor.execute(migration276)
+        connection.rollback()
+    finally:
+        connection.close()
 
 
 def test_recovery275_replays_exact_protected_terminal_snapshot_twice(connect):
@@ -615,10 +829,12 @@ def test_recovery275_replays_exact_protected_terminal_snapshot_twice(connect):
         with connection.cursor() as cursor:
             cursor.execute(migration)
             cursor.execute(migration)
+            cursor.execute(RESEAL_MIGRATION.read_text(encoding="utf-8"))
+            cursor.execute(RESEAL_MIGRATION.read_text(encoding="utf-8"))
         connection.commit()
 
         wrong = (
-            RECOVERY_SOURCE_SIZE + 1,
+            RECOVERY_SOURCE_SIZE,
             RECOVERY_SOURCE_SHA,
             RECOVERY_SOURCE_COMMIT,
             json.dumps(schedule),
@@ -634,9 +850,9 @@ def test_recovery275_replays_exact_protected_terminal_snapshot_twice(connect):
         connection.rollback()
 
         arguments = (
-            RECOVERY_SOURCE_SIZE,
-            RECOVERY_SOURCE_SHA,
-            RECOVERY_SOURCE_COMMIT,
+            RESEALED_SOURCE_SIZE,
+            RESEALED_SOURCE_SHA,
+            RESEALED_SOURCE_COMMIT,
             json.dumps(schedule),
         )
         with connection.cursor() as cursor:
@@ -710,7 +926,19 @@ def test_recovery275_preserves_history_and_publishes_positive(connect, tmp_path,
         }
         schedule273 = _shift_schedule(schedule272, minutes=90)
         migration273 = _render_recovery275(connection, schedule273)
-        prepared = _install_and_recover275(connection, migration273, schedule273)
+        with connection.cursor() as cursor:
+            cursor.execute(migration273)
+            cursor.execute(_render_recovery276(connection))
+        connection.commit()
+        prepared = _install_and_recover275(
+            connection,
+            migration273,
+            schedule273,
+            source_size=RESEALED_SOURCE_SIZE,
+            source_sha=RESEALED_SOURCE_SHA,
+            source_commit=RESEALED_SOURCE_COMMIT,
+            install_sql=False,
+        )
         assert prepared["archived_runs"] == 40
         with connection.cursor() as cursor:
             cursor.execute(
@@ -744,13 +972,13 @@ def test_recovery275_preserves_history_and_publishes_positive(connect, tmp_path,
         prepared_state = _state_seal(connection)
         for arguments, message in (
             (
-                (RECOVERY_SOURCE_SIZE + 1, RECOVERY_SOURCE_SHA,
-                 RECOVERY_SOURCE_COMMIT, json.dumps(schedule273)),
+                (RESEALED_SOURCE_SIZE + 1, RESEALED_SOURCE_SHA,
+                 RESEALED_SOURCE_COMMIT, json.dumps(schedule273)),
                 "source differs",
             ),
             (
-                (RECOVERY_SOURCE_SIZE, RECOVERY_SOURCE_SHA,
-                 RECOVERY_SOURCE_COMMIT,
+                (RESEALED_SOURCE_SIZE, RESEALED_SOURCE_SHA,
+                 RESEALED_SOURCE_COMMIT,
                  json.dumps({**schedule273, "stage_1_close": "changed"})),
                 "schedule differs",
             ),
@@ -847,9 +1075,9 @@ def test_recovery275_preserves_history_and_publishes_positive(connect, tmp_path,
             )
             assert cursor.fetchone() == (
                 RECOVERY_SOURCE_REF,
-                RECOVERY_SOURCE_SIZE,
-                RECOVERY_SOURCE_SHA,
-                RECOVERY_SOURCE_COMMIT,
+                RESEALED_SOURCE_SIZE,
+                RESEALED_SOURCE_SHA,
+                RESEALED_SOURCE_COMMIT,
             )
         assert _single_hash(
             connection, "lab_arena_sep16_baseline_recovery_audit", f"round_id='{ROUND}'"

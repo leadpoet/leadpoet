@@ -694,13 +694,30 @@ BEGIN
        OR v_audit.archive_submission_id IS DISTINCT FROM
             v_authority.archive_submission_id
        OR v_audit.execute_namespace IS DISTINCT FROM v_authority.execute_namespace
+       OR v_audit.terminal_round_hash IS DISTINCT FROM
+            v_authority.terminal_round_hash
+       OR v_audit.terminal_baseline_submission_hash IS DISTINCT FROM
+            v_authority.terminal_baseline_submission_hash
+       OR v_audit.terminal_baseline_runs_hash IS DISTINCT FROM
+            v_authority.terminal_baseline_runs_hash
+       OR v_audit.terminal_baseline_ledger_hash IS DISTINCT FROM
+            v_authority.terminal_baseline_ledger_hash
+       OR v_audit.terminal_nonbaseline_ledger_hash IS DISTINCT FROM
+            v_authority.terminal_nonbaseline_ledger_hash
+       OR v_audit.terminal_nonbaseline_ledger_count IS DISTINCT FROM
+            v_authority.terminal_nonbaseline_ledger_count
+       OR v_audit.terminal_nonbaseline_ledger_max_entry_id IS DISTINCT FROM
+            v_authority.terminal_nonbaseline_ledger_max_entry_id
        OR v_audit.recovery_source_ref IS DISTINCT FROM
             v_authority.recovery_source_ref
+       OR v_audit.recovery_source_size_bytes IS DISTINCT FROM
+            v_authority.recovery_source_size_bytes
        OR v_audit.recovery_source_sha256 IS DISTINCT FROM
             v_authority.recovery_source_sha256
        OR v_audit.recovery_source_commit IS DISTINCT FROM
             v_authority.recovery_source_commit
        OR v_audit.bank_sha256 IS DISTINCT FROM v_authority.bank_sha256
+       OR v_audit.forward_schedule IS DISTINCT FROM v_authority.forward_schedule
        OR (SELECT configuration_doc FROM public.lab_arena_rounds
            WHERE round_id = v_round_id) IS DISTINCT FROM
             v_expected_configuration
@@ -725,6 +742,10 @@ BEGIN
                  v_authority.recovery_source_sha256
            AND submission_doc ->> 'source_commit' =
                  v_authority.recovery_source_commit
+           AND submission_doc ->> 'source_ref' =
+                 v_authority.recovery_source_ref
+           AND (submission_doc ->> 'source_size_bytes')::BIGINT =
+                 v_authority.recovery_source_size_bytes
        )
        OR (SELECT pg_catalog.count(DISTINCT assignment_id)
            FROM public.lab_arena_runs
@@ -734,7 +755,12 @@ BEGIN
        OR EXISTS (
          SELECT 1 FROM public.lab_arena_runs
          WHERE round_id = v_round_id AND submission_id = v_baseline_id
-           AND kind = 'execute' AND assignment_id NOT LIKE '%:rerun278'
+           AND kind = 'execute' AND (
+             assignment_id <> v_round_id || ':' || v_baseline_id || ':' ||
+               stage::TEXT || ':' || icp_position::TEXT || ':rerun278'
+             OR icp_position NOT BETWEEN 0 AND 19
+             OR stage <> CASE WHEN icp_position < 10 THEN 1 ELSE 2 END
+           )
        )
        OR (SELECT pg_catalog.count(*) FROM public.lab_arena_submissions
            WHERE round_id = v_round_id AND submission_id <> v_baseline_id) <>
@@ -995,6 +1021,16 @@ BEGIN
          WHERE round_id = v_round_id AND submission_id = v_baseline_id
            AND kind = 'execute' AND status = 'pending'
            AND assignment_id LIKE '%:rerun278') <> 20
+     OR EXISTS (
+       SELECT 1 FROM public.lab_arena_runs
+       WHERE round_id = v_round_id AND submission_id = v_baseline_id
+         AND kind = 'execute' AND (
+           assignment_id <> v_round_id || ':' || v_baseline_id || ':' ||
+             stage::TEXT || ':' || icp_position::TEXT || ':rerun278'
+           OR icp_position NOT BETWEEN 0 AND 19
+           OR stage <> CASE WHEN icp_position < 10 THEN 1 ELSE 2 END
+         )
+     )
      OR (SELECT pg_catalog.count(*) FROM public.lab_arena_ledger
          WHERE round_id = v_round_id AND submission_id = v_baseline_id) <> 0 THEN
     RAISE EXCEPTION 'Sep17 recovery278 postcondition differs';

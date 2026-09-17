@@ -24,25 +24,25 @@ BASELINE = "baseline-2026-09-17"
 BANK_REF = f"arena/{ROUND}/benchmark.json"
 BANK_SHA256 = "7023eca8a6518434d5010d31481c1d156aa96abb3e5565c30e033073b088c871"
 SOURCE_URL = "https://github.com/leadpoet/leadpoet-sales-agent/archive/refs/heads/lab.tar.gz"
-SOURCE_REF = f"arena/{ROUND}/sources/{BASELINE}-recovery278.tar.gz"
-SOURCE_COMMIT = "4ceae936b902433432a195f77af3f94559d80378"
-SOURCE_SHA256 = "f6d8ca05a33907489138b37b2089151d78a84a05e5c73020147a282a29383361"
-SOURCE_SIZE = 563105
-TERMINAL_SOURCE_REF = f"arena/{ROUND}/sources/{BASELINE}.tar.gz"
-TERMINAL_SOURCE_COMMIT = "ec4887f728b77002de570c4023415f8963995b79"
-TERMINAL_SOURCE_SHA256 = "858ad5b2e68e3c6c354c0e4e358264186cec206b83220a68719a6e217273d057"
-TERMINAL_SOURCE_SIZE = 547308
+SOURCE_REF = f"arena/{ROUND}/sources/{BASELINE}-recovery282.tar.gz"
+SOURCE_COMMIT = "5a89cee202416419ade064e85ff40499f51d34b0"
+SOURCE_SHA256 = "cfa4a9bf8093dd230e8643bec5508b675e6f4b0ded75ac3d0f4c2a23616b6e41"
+SOURCE_SIZE = 580050
+TERMINAL_SOURCE_REF = f"arena/{ROUND}/sources/{BASELINE}-recovery278.tar.gz"
+TERMINAL_SOURCE_COMMIT = "4ceae936b902433432a195f77af3f94559d80378"
+TERMINAL_SOURCE_SHA256 = "f6d8ca05a33907489138b37b2089151d78a84a05e5c73020147a282a29383361"
+TERMINAL_SOURCE_SIZE = 563105
 FORWARD_SCHEDULE = {
     "submission_open": "2026-09-16T00:00:00Z",
     "submission_cutoff": "2026-09-17T00:00:00Z",
-    "benchmark_deadline": "2026-09-17T06:00:00Z",
-    "stage_1_start": "2026-09-17T06:00:01Z",
-    "stage_1_close": "2026-09-17T12:00:00Z",
-    "stage_1_scoring_close": "2026-09-17T14:00:00Z",
-    "stage_2_start": "2026-09-17T14:00:01Z",
-    "stage_2_close": "2026-09-17T14:20:00Z",
-    "final_scoring_close": "2026-09-17T16:20:00Z",
-    "publication_deadline": "2026-09-17T16:50:00Z",
+    "benchmark_deadline": "2026-09-17T10:00:00Z",
+    "stage_1_start": "2026-09-17T10:00:01Z",
+    "stage_1_close": "2026-09-17T16:00:00Z",
+    "stage_1_scoring_close": "2026-09-17T18:00:00Z",
+    "stage_2_start": "2026-09-17T18:00:01Z",
+    "stage_2_close": "2026-09-17T18:20:00Z",
+    "final_scoring_close": "2026-09-17T20:20:00Z",
+    "publication_deadline": "2026-09-17T20:50:00Z",
 }
 
 
@@ -100,7 +100,8 @@ def prepare(service: Any, *, dry_run: bool, now: datetime | None = None) -> dict
     ):
         raise RecoveryRefused("frozen submission intake differs")
     config["schedule"] = dict(FORWARD_SCHEDULE)
-    config.setdefault("call_quotas", {})["openrouter"] = 200
+    if (config.get("call_quotas") or {}).get("openrouter") != 200:
+        raise RecoveryRefused("frozen execution quota differs")
     contracts.validate_round_configuration(config)
     if not replay:
         now = now or datetime.now(timezone.utc)
@@ -115,11 +116,11 @@ def prepare(service: Any, *, dry_run: bool, now: datetime | None = None) -> dict
         source = bytes(fetcher(SOURCE_URL, source_bundle.MAX_SOURCE_ARCHIVE_BYTES))
     _verify_archive(source, size=SOURCE_SIZE, digest=SOURCE_SHA256, commit=SOURCE_COMMIT)
     result = {
-        "status": "recovery278_preflight_ok", "round_id": ROUND,
+        "status": "recovery282_preflight_ok", "round_id": ROUND,
         "evaluation_date": "2026-09-17", "icp_set_date": "2026-09-16",
         "bank_sha256": BANK_SHA256, "source_ref": SOURCE_REF,
         "source_commit": SOURCE_COMMIT, "source_sha256": SOURCE_SHA256,
-        "source_size_bytes": SOURCE_SIZE, "execute_namespace": "rerun278",
+        "source_size_bytes": SOURCE_SIZE, "execute_namespace": "rerun282",
         "openrouter_calls_per_icp": 200, "replay": replay,
     }
     if dry_run:
@@ -132,7 +133,7 @@ def prepare(service: Any, *, dry_run: bool, now: datetime | None = None) -> dict
     if bytes(objects.get_bounded(SOURCE_REF, SOURCE_SIZE)) != source:
         raise RecoveryRefused("staged source readback differs")
     acknowledged = service.store._transport.rpc(
-        "lab_arena_prepare_sep17_baseline_recovery278_v1",
+        "lab_arena_prepare_sep17_baseline_recovery282_v1",
         {
             "p_source_size_bytes": SOURCE_SIZE, "p_source_sha256": SOURCE_SHA256,
             "p_source_commit": SOURCE_COMMIT, "p_bank_sha256": BANK_SHA256,
@@ -144,7 +145,7 @@ def prepare(service: Any, *, dry_run: bool, now: datetime | None = None) -> dict
     ) or acknowledged.get("round_id") != ROUND or (
         acknowledged.get("baseline_execute_assignments") != 20
         or acknowledged.get("openrouter_calls_per_icp") != 200
-        or acknowledged.get("execute_namespace") != "rerun278"
+        or acknowledged.get("execute_namespace") != "rerun282"
     ):
         raise RecoveryRefused("recovery RPC did not acknowledge the exact prepared cycle")
     return {**result, **acknowledged}

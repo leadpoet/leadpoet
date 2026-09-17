@@ -1,10 +1,8 @@
 """Source-only authority update before the sealed September17 recovery starts."""
 from __future__ import annotations
 
-import ast
 import json
 from pathlib import Path
-import re
 
 import pytest
 
@@ -14,14 +12,11 @@ from tests.lab_arena.lab_arena_pg_harness import (
 )
 from tests.lab_arena.sep17_baseline_recovery278_postgres_test import (
     BANK_SHA,
-    MIGRATION as RECOVERY278,
     ROUND,
     SCHEDULE,
-    SOURCE_COMMIT as OLD_COMMIT,
-    SOURCE_SHA as OLD_SHA,
-    SOURCE_SIZE as OLD_SIZE,
     _prepare as prepare_old,
     _restore,
+    historical_migration_text,
 )
 
 ROOT = Path(__file__).parents[2]
@@ -34,25 +29,12 @@ SOURCE_FIELDS = (
 
 
 def new_source() -> tuple[str, str, int]:
-    """Use the exact reviewed source identity selected by the operator."""
-    source = (ROOT / "scripts/arena_sep17_baseline_recovery.py").read_text()
-    constants = {}
-    for node in ast.parse(source).body:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id in {
-                    "SOURCE_COMMIT", "SOURCE_SHA256", "SOURCE_SIZE",
-                }:
-                    constants[target.id] = ast.literal_eval(node.value)
-    commit, digest, size = (
-        constants["SOURCE_COMMIT"], constants["SOURCE_SHA256"], constants["SOURCE_SIZE"],
+    """The committed 279 identity is independent of today's operator."""
+    return (
+        "4ceae936b902433432a195f77af3f94559d80378",
+        "6c9eeaac41386204a7817b00038e5a3f3545e1c205a2dc32de6889927ffe7245",
+        563030,
     )
-    assert re.fullmatch(r"[0-9a-f]{40}", commit)
-    assert re.fullmatch(r"[0-9a-f]{64}", digest)
-    assert type(size) is int and size > 0
-    assert commit != OLD_COMMIT
-    assert (commit, digest, size) != (OLD_COMMIT, OLD_SHA, OLD_SIZE)
-    return commit, digest, size
 
 
 def migration_text() -> str:
@@ -73,7 +55,7 @@ def connection():
     try:
         _restore(database)
         with database.cursor() as cursor:
-            cursor.execute(RECOVERY278.read_text())
+            cursor.execute(historical_migration_text())
         database.commit()
         yield database
     finally:

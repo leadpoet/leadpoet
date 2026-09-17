@@ -100,6 +100,14 @@ def _restore(connection) -> dict:
     return captured
 
 
+def historical_migration_text():
+    # This historical recovery admitted only before 06Z on September 17.
+    # Freeze only the disposable SQL clock so its guards remain testable later.
+    return MIGRATION.read_text().replace(
+        'pg_catalog.clock_timestamp()', "'2026-09-17T04:00:00Z'::TIMESTAMPTZ",
+    )
+
+
 def _prepare(cursor):
     cursor.execute(
         "SELECT public.lab_arena_prepare_sep17_baseline_recovery278_v1("
@@ -130,7 +138,7 @@ def test_recovery278_exact_fixture_replay_and_progress_idempotence(database):
             json.loads(row) for row in captured["submissions"]
             if json.loads(row)["submission_id"] == BASELINE
         )
-        migration = MIGRATION.read_text()
+        migration = historical_migration_text()
         with connection.cursor() as cursor:
             assert _full_hash(cursor, "submission_id<>%s" % "'" + BASELINE + "'") == (
                 NONBASELINE_LEDGER_HASH,
@@ -257,7 +265,7 @@ def test_recovery278_replay_rejects_active_and_archive_drift(database):
     try:
         _restore(connection)
         with connection.cursor() as cursor:
-            cursor.execute(MIGRATION.read_text())
+            cursor.execute(historical_migration_text())
             assert _prepare(cursor)["status"] == "prepared"
         connection.commit()
         cases = (
@@ -323,7 +331,7 @@ def test_recovery278_terminal_cost_state_fails_closed(database):
                 "SET search_path=pg_catalog,public AS $$ SELECT '{}'::jsonb $$"
             )
             with pytest.raises(Exception, match="terminal seal differs"):
-                cursor.execute(MIGRATION.read_text())
+                cursor.execute(historical_migration_text())
         connection.rollback()
     finally:
         connection.close()
@@ -336,7 +344,7 @@ def test_recovery278_uses_generic_scoring_and_preexecuted_stage2(database):
     try:
         _restore(connection)
         with connection.cursor() as cursor:
-            cursor.execute(MIGRATION.read_text())
+            cursor.execute(historical_migration_text())
             assert _prepare(cursor)["status"] == "prepared"
         connection.commit()
         with connection.cursor() as cursor:

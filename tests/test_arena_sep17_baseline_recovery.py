@@ -75,7 +75,7 @@ def setup(monkeypatch):
         monkeypatch.setattr(r, name, value)
     config = base_round_configuration()
     config.update(round_id=r.ROUND, schedule=dict(r.FORWARD_SCHEDULE), runner_slot_ceiling=20)
-    config["call_quotas"]["openrouter"] = 60
+    config["call_quotas"]["openrouter"] = 200
     row = {"round_id": r.ROUND, "evaluation_date": "2026-09-17",
            "icp_set_date": "2026-09-16", "benchmark_ref": r.BANK_REF,
            "status": "cancelled", "configuration_doc": config}
@@ -88,7 +88,7 @@ def setup(monkeypatch):
         calls.append((name, copy.deepcopy(args)))
         return {"status": "prepared", "round_id": r.ROUND,
                 "baseline_execute_assignments": 20, "openrouter_calls_per_icp": 200,
-                "execute_namespace": "rerun278"}
+                "execute_namespace": "rerun282"}
 
     def fetch(url, limit):
         fetches.append((url, limit))
@@ -123,7 +123,7 @@ def test_prepare_stages_conditional_source_then_exact_rpc(setup):
     result = invoke(setup)
     assert result["status"] == "prepared"
     assert setup.client.data[r.SOURCE_REF] == setup.new
-    assert setup.calls == [("lab_arena_prepare_sep17_baseline_recovery278_v1", {
+    assert setup.calls == [("lab_arena_prepare_sep17_baseline_recovery282_v1", {
         "p_source_size_bytes": r.SOURCE_SIZE, "p_source_sha256": r.SOURCE_SHA256,
         "p_source_commit": r.SOURCE_COMMIT, "p_bank_sha256": r.BANK_SHA256,
         "p_forward_schedule": r.FORWARD_SCHEDULE,
@@ -132,7 +132,7 @@ def test_prepare_stages_conditional_source_then_exact_rpc(setup):
     assert setup.client.data[r.SOURCE_REF] == setup.new
 
 
-@pytest.mark.parametrize("defect", ["day", "bank", "terminal_source", "latest_source", "intake", "status"])
+@pytest.mark.parametrize("defect", ["day", "bank", "terminal_source", "latest_source", "intake", "quota", "status"])
 def test_drift_fails_before_any_write(setup, defect):
     if defect == "day":
         setup.row["evaluation_date"] = "2026-09-16"
@@ -144,6 +144,8 @@ def test_drift_fails_before_any_write(setup, defect):
         setup.service.config.baseline_source_fetcher = lambda *_: b"wrong"
     elif defect == "intake":
         setup.row["configuration_doc"]["schedule"]["submission_cutoff"] = "2026-09-16T00:00:00Z"
+    elif defect == "quota":
+        setup.row["configuration_doc"]["call_quotas"]["openrouter"] = 60
     else:
         setup.row["status"] = "stage1"
     with pytest.raises(r.RecoveryRefused):
@@ -170,7 +172,7 @@ def test_access_error_never_becomes_missing_object_or_preparation(setup):
 
 def test_first_prepare_expires_but_progress_replay_uses_staged_identity(setup):
     with pytest.raises(r.RecoveryRefused, match="window"):
-        invoke(setup, hour=7)
+        invoke(setup, hour=11)
     setup.baseline["source_ref"] = r.SOURCE_REF
     setup.row["status"] = "stage2_scoring"
     setup.client.data[r.SOURCE_REF] = setup.new

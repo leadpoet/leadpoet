@@ -596,6 +596,7 @@ def test_deepline_primary_field_takes_precedence_and_zero_is_valid():
     ("tool", "credits", "microusd"),
     [
         ("predictleads_company_job_openings", "0.56", 56_000),
+        ("harvestapi_get_company", "0.03", 3_000),
         ("harvestapi_get_post", "0.03", 3_000),
         ("harvestapi_get_job", "0.01", 1_000),
         ("exa_answer", "0.07", 7_000),

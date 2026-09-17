@@ -8,6 +8,7 @@ import json
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 from urllib.parse import quote
@@ -1502,6 +1503,8 @@ def test_company_profile_uses_existing_billing_and_budget_controls():
                             action_sequence=0, timeout_ms=5000)
     assert result.status == 200
     assert json.loads(result.body)["result"]["data"]["element"] == company
+    assert result.call["reserved_microusd"] == 3000
+    assert "reservation_basis" not in result.call
     assert result.call["actual_microusd"] == 3000
     assert result.call["outcome"] == "settled"
     assert store.openrouter_capacity == 10_000_000 - 3000
@@ -1513,6 +1516,108 @@ def test_company_profile_uses_existing_billing_and_budget_controls():
     refused = broker.execute(CONTEXT, operation_id="deepline.execute", parameters=parameters,
                              action_sequence=1, timeout_ms=5000)
     assert refused.status == 402 and len(transport.sent) == 1
+
+
+def test_company_profile_fixed_reservation_enforces_cap_before_dispatch():
+    store = FakeLedgerStore(openrouter_capacity=2999)
+    broker, _store, transport = make_broker(store=store)
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "harvestapi_get_company", "payload": {"universalName": "example"}},
+        action_sequence=0,
+        timeout_ms=5000,
+    )
+
+    assert result.status == 402
+    assert result.call["outcome"] == "refused"
+    assert result.call["reason"] == "provider_cost_cap"
+    assert transport.sent == []
+
+
+def test_company_profile_transport_failure_holds_only_fixed_reservation():
+    store = FakeLedgerStore(openrouter_capacity=10_000)
+    broker, _store, transport = make_broker(store=store, transport=FakeTransport(fail=True))
+    parameters = {"tool": "harvestapi_get_company", "payload": {"url": "https://example.com"}}
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters=parameters,
+        action_sequence=0,
+        timeout_ms=5000,
+    )
+
+    assert result.status == 502
+    assert result.call["outcome"] == "uncertain"
+    assert result.call["reserved_microusd"] == result.call["actual_microusd"] == 3000
+    assert store.openrouter_capacity == 7000
+    sent_before_replay = len(transport.sent)
+    replay = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters=parameters,
+        action_sequence=0,
+        timeout_ms=5000,
+    )
+    assert replay.status == 409
+    assert json.loads(replay.body) == {"error": {"code": "call_uncertain"}}
+    assert len(transport.sent) == sent_before_replay
+    assert sum(sent["method"] == "POST" for sent in transport.sent) == 1
+
+
+def test_company_profile_does_not_block_concurrent_dynamic_admission(monkeypatch):
+    company_started = threading.Event()
+    release_company = threading.Event()
+
+    class ConcurrentTransport(FakeTransport):
+        def send(self, *, method, url, headers, body, timeout_seconds, max_response_bytes=None):
+            operation = json.loads(body)["operation"]
+            self.sent.append({"method": method, "url": url, "headers": dict(headers),
+                              "body": body, "timeout": timeout_seconds})
+            if operation == "harvestapi_get_company":
+                company_started.set()
+                assert release_company.wait(timeout=2)
+                payload = {"job_id": "company-profile-1", "status": "completed",
+                           "result": {"data": {"status": 200, "element": {}}},
+                           "billing": {"credits_charged": 0.03, "cost_usd": 0.003}}
+            else:
+                assert operation == "exa_search"
+                payload = {"job_id": "exa-search-1", "status": "completed", "results": [],
+                           "billing": {"credits_charged": 0.01, "cost_usd": 0.001}}
+            return br.ProviderResponse(
+                200, {"content-type": "application/json"}, json.dumps(payload).encode("utf-8")
+            )
+
+    monkeypatch.setattr(operations, "BUDGET_ADMISSION_MAX_SECONDS", 0)
+    broker, store, transport = make_broker(transport=ConcurrentTransport())
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        company = pool.submit(
+            broker.execute,
+            CONTEXT,
+            operation_id="deepline.execute",
+            parameters={"tool": "harvestapi_get_company", "payload": {"search": "example.com"}},
+            action_sequence=0,
+            timeout_ms=5000,
+        )
+        assert company_started.wait(timeout=2)
+        dynamic = broker.execute(
+            CONTEXT,
+            operation_id="deepline.execute",
+            parameters={"tool": "exa_search", "payload": {"query": "example"}},
+            action_sequence=1,
+            timeout_ms=5000,
+        )
+        release_company.set()
+        company_result = company.result(timeout=2)
+
+    assert company_result.status == dynamic.status == 200
+    assert company_result.call["reserved_microusd"] == company_result.call["actual_microusd"] == 3000
+    assert dynamic.call["reservation_basis"] == "remaining_budget_dynamic_deepline"
+    assert dynamic.call["actual_microusd"] == 1000
+    assert store.openrouter_capacity == 10_000_000 - 4000
+    assert [json.loads(sent["body"])["operation"] for sent in transport.sent] == [
+        "harvestapi_get_company", "exa_search"
+    ]
 
 
 def test_scrapingdog_credential_goes_in_the_query_and_never_in_the_model_response():

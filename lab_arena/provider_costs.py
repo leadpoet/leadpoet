@@ -59,6 +59,7 @@ _DEEPLINE_FIXED_CREDITS = {
     "exa_answer": Decimal("0.07"),
     "free_simple_company_search": Decimal("0"),
     "generic_http_request": Decimal("0"),
+    "harvestapi_get_company": Decimal("0.03"),
     "harvestapi_search_leads": Decimal("0.7"),
     "zerobounce_validate": Decimal("0.28"),
     "bounceban_verify_single": Decimal("0.06"),

@@ -71,6 +71,8 @@ def test_prepare_is_one_private_atomic_archive_and_preserves_reward_authority():
 
 def test_prior_archive_and_nonbaseline_evidence_remain_sealed():
     sql = TEMPLATE.read_text()
+    assert sql.count("WHERE round_id IN (v_round_id, 'arena-2026-09-18',") == 2
+    assert sql.count("'arena-2026-09-17-rerun284archive')") == 2
     assert "lab_arena_sep17_recovery284_archive_valid_v1()" in sql
     assert "lab_arena_sep17_recovery284_nonbaseline_ledger_valid_v1()" in sql
     assert "lab_arena_sep17_rerun286_nonbaseline_valid_v1()" in sql

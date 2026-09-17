@@ -467,6 +467,9 @@ BEGIN
       USING ERRCODE = '55000';
   END IF;
 
+  -- The ledger comparison covers the active round, next intake, and prior
+  -- recovery archive. Older ledger rows cannot match the exact mutation
+  -- predicate; do not copy the full billing history into transaction memory.
   SELECT pg_catalog.jsonb_build_object(
     'rounds', (SELECT COALESCE(pg_catalog.jsonb_agg(
       pg_catalog.to_jsonb(row_value) ORDER BY round_id), '[]'::JSONB)
@@ -483,7 +486,9 @@ BEGIN
     'ledger', (SELECT COALESCE(pg_catalog.jsonb_agg(
       pg_catalog.to_jsonb(row_value) ORDER BY entry_id), '[]'::JSONB)
       FROM public.lab_arena_ledger AS row_value
-      WHERE NOT (round_id = v_round_id AND submission_id = v_baseline_id)),
+      WHERE round_id IN (v_round_id, 'arena-2026-09-18',
+                         'arena-2026-09-17-rerun284archive')
+        AND NOT (round_id = v_round_id AND submission_id = v_baseline_id)),
     'weights', (SELECT COALESCE(pg_catalog.jsonb_agg(
       pg_catalog.to_jsonb(row_value) ORDER BY network, netuid, epoch), '[]'::JSONB)
       FROM public.lab_arena_accepted_weight_states AS row_value)
@@ -593,7 +598,9 @@ BEGIN
     'ledger', (SELECT COALESCE(pg_catalog.jsonb_agg(
       pg_catalog.to_jsonb(row_value) ORDER BY entry_id), '[]'::JSONB)
       FROM public.lab_arena_ledger AS row_value
-      WHERE NOT ((round_id = v_round_id AND submission_id = v_baseline_id)
+      WHERE round_id IN (v_round_id, 'arena-2026-09-18',
+                         'arena-2026-09-17-rerun284archive')
+        AND NOT ((round_id = v_round_id AND submission_id = v_baseline_id)
         OR (round_id = v_archive_round_id
           AND submission_id = v_archive_submission_id))),
     'weights', (SELECT COALESCE(pg_catalog.jsonb_agg(

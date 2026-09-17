@@ -12,6 +12,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration,
 )
 from tests.lab_arena.sep17_baseline_recovery278_postgres_test import (
+    SNAPSHOT as ORIGINAL_SNAPSHOT,
     _insert_rows, _restore as restore_original,
 )
 
@@ -19,6 +20,11 @@ ROOT = Path(__file__).parents[2]
 PRIVATE = Path('/private/tmp/leadpoet-tyche-rerun-evidence-20260915/private')
 SNAPSHOT = PRIVATE / 'sep17-recovery282-terminal-snapshot-20260917T080011Z.json'
 SNAPSHOT_SHA = 'bd53fb0caa0696403da6f5676419da25c9c70fbc7ed103e55c03e74267005dd7'
+BANK_SNAPSHOT = PRIVATE / 'sep17-original-bank.json'
+pytestmark = pytest.mark.skipif(
+    not all(path.is_file() for path in (SNAPSHOT, ORIGINAL_SNAPSHOT, BANK_SNAPSHOT)),
+    reason='Recovery282 requires protected production278/282 snapshots and the frozen ICP bank; release gates require zero skips.',
+)
 MIGRATION = ROOT / 'scripts/282-arena-2026-09-17-baseline-recovery.sql'
 ROUND = operator.ROUND
 BASELINE = operator.BASELINE
@@ -292,7 +298,7 @@ def test_normal_service_scores_twenty_and_publishes_positive_with_archives_intac
                       challengers=[], runners=['recovery282-proof'])
     service, objects = harness.service, harness.objects
     harness.clock.now = datetime(2026, 9, 17, 12, tzinfo=timezone.utc)
-    bank = json.loads((PRIVATE / 'sep17-original-bank.json').read_text())
+    bank = json.loads(BANK_SNAPSHOT.read_text())
     assert isinstance(bank, dict) and bank['round_id'] == ROUND
     from lab_arena import contracts
     assert hashlib.sha256(contracts.canonical_json(bank['icps']).encode()).hexdigest() == operator.BANK_SHA256

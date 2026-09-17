@@ -55,7 +55,7 @@ def archive(commit):
                 ("harness.py", b"def run_icp(icp): return []\n"),
                 ("LICENSE", Path(__file__).parents[1].joinpath("LICENSE").read_bytes()),
             ):
-                member = tarfile.TarInfo("champion_model-lab/" + name)
+                member = tarfile.TarInfo("leadpoet-sales-agent-lab/" + name)
                 member.size = len(data)
                 tar.addfile(member, io.BytesIO(data))
     return raw.getvalue()

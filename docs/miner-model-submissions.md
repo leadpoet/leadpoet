@@ -4,7 +4,7 @@ The miner menu opens the **Submit Model** flow.
 
 ## Source and credentials
 
-Fork the public [PydanticAI baseline](https://github.com/leadpoet/champion_model),
+Fork the public [public baseline](https://github.com/leadpoet/leadpoet-sales-agent),
 or provide another Python agent with this entrypoint in `harness.py`:
 
 ```python

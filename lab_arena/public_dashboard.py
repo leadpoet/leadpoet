@@ -14,7 +14,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 from lab_arena import code_review_policy, contracts, icp_disclosure, source_disclosure, verify
 
 
-PUBLIC_BASELINE_REPOSITORY = "https://github.com/leadpoet/champion_model/tree/lab"
+PUBLIC_BASELINE_REPOSITORY = "https://github.com/leadpoet/leadpoet-sales-agent/tree/lab"
 DEFAULT_RECENT_ROUND_LIMIT = 30
 MAX_RECENT_ROUND_LIMIT = 100
 _COST_REASONS = frozenset(

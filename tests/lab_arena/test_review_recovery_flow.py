@@ -155,7 +155,7 @@ class RecoveryReviewTransport(FakeProviderTransport):
                 assert self.release_first_dispatch.wait(timeout=5)
             if attempt in (1, 3):
                 return broker.ProviderResponse(
-                    503,
+                    404 if attempt == 1 else 503,
                     {"content-type": "application/json"},
                     b'{"error":"temporary"}',
                 )
@@ -278,6 +278,12 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
     assert duplicate["status"] == "busy"
     assert failed["status"] == "error"
     assert transport.attempts["RecoveredReplacement"] == 1
+    first_error = harness.service.store.get_submission(replacement_id)[
+        "code_review_doc"
+    ]
+    assert first_error["error_code"] == "code_review_provider_unavailable"
+    assert first_error["provider_http_status"] == 404
+    assert first_error["retryable"] is True
     first_kinds = _ledger_kinds(harness, replacement_id)
     assert first_kinds.count("reservation") == 1
     assert first_kinds.count("dispatch") == 1
@@ -333,6 +339,9 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
     recovered_kinds = _ledger_kinds(harness, replacement_id)
     assert recovered_kinds.count("reservation") == 5
     assert recovered_kinds.count("dispatch") == 5
+    assert reviewer.review(recovered)["status"] == "existing"
+    assert transport.attempts["RecoveredReplacement"] == 5
+    assert _ledger_kinds(harness, replacement_id) == recovered_kinds
 
     permanent = reviewer.review(
         harness.service.store.get_submission(permanent_id)

@@ -313,6 +313,7 @@ def test_typed_credential_failure_controls_retry_without_dispatch(
         (403, "code_review_provider_authentication", False),
         (402, "code_review_provider_credit", False),
         (400, "code_review_provider_request_rejected", False),
+        (404, "code_review_provider_unavailable", True),
         (408, "code_review_provider_timeout", True),
         (429, "code_review_provider_rate_limited", True),
         (503, "code_review_provider_unavailable", True),
@@ -361,7 +362,7 @@ def test_review_content_refusal_is_not_a_credential_failure(error_type, http_sta
     assert len(transport.sent) == 1
 
 
-@pytest.mark.parametrize("error_status", [401, 402, 403, 429, 503])
+@pytest.mark.parametrize("error_status", [401, 402, 403, 404, 429, 503])
 def test_review_embedded_provider_error_uses_same_typed_diagnostic(error_status):
     from lab_arena import code_review_policy
 

@@ -131,6 +131,13 @@ def provider_http_diagnostic(status: int) -> Dict[str, Any]:
             provider_http_status=status,
             retryable=True,
         )
+    if status == 404:
+        # OpenRouter can use 404 when no provider satisfies the route policy.
+        return diagnostic(
+            "code_review_provider_unavailable",
+            provider_http_status=status,
+            retryable=True,
+        )
     if 500 <= status <= 599:
         return diagnostic(
             "code_review_provider_unavailable",

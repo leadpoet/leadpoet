@@ -101,6 +101,7 @@ def test_prepare_request_contains_every_file_in_full_and_pydantic_style_passes()
         "data_collection": "deny",
         "zdr": True,
     }
+    assert prepared.parameters["response_format"] == {"type": "json_object"}
     assert prepared.reviewed_files == tuple(sorted(members))
     assert prepared.reviewed_file_bytes == sum(map(len, members.values()))
     submitted = json.loads(prepared.parameters["messages"][1]["content"])

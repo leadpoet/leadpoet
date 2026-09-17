@@ -1,5 +1,20 @@
 # Agent Instructions
 
+## Scoped production authorization: September 17 code-review routing repair
+
+On 2026-09-17 the user explicitly authorized the investigated code-review
+routing and HTTP 404 classification fixes, thorough tests, a push to main,
+and canonical gateway/normal-validator redeployment. Change strict provider
+JSON-schema generation to JSON-object generation while preserving local
+review validation, the model, source coverage, privacy, compression controls,
+and spending limits. Classify HTTP 404 as provider unavailable under existing
+bounded retries. Authority includes protected read-only production inspection,
+bounded organizer-funded provider tests, isolated transition tests, release
+verification, and canonical restarts. Preserve frozen miner source, historical
+reviews/results, actual costs, credential isolation, round rules, rewards,
+weights, and concurrent baseline work. Do not re-admit or rescore historical
+miner submissions. This scope ends after the fixes are deployed and verified.
+
 ## Scoped production authorization: September 16 miner root-cause repair
 
 On 2026-09-16 the user renewed investigation and repair of the reported miner

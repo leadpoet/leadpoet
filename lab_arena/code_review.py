@@ -198,37 +198,6 @@ def _read_all_text_files(source_archive: bytes) -> Tuple[ReviewFile, ...]:
     return tuple(sorted(files, key=lambda item: item.path))
 
 
-def _response_schema(paths: Tuple[str, ...]) -> Dict[str, Any]:
-    finding = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["category", "file", "evidence", "explanation"],
-        "properties": {
-            "category": {"type": "string", "enum": list(REVIEW_CATEGORIES)},
-            "file": {"type": "string", "enum": list(paths)},
-            "evidence": {"type": "string", "minLength": 1, "maxLength": 2_000},
-            "explanation": {"type": "string", "minLength": 1, "maxLength": 4_000},
-        },
-    }
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["verdict", "reviewed_files", "findings"],
-        "properties": {
-            "verdict": {"type": "string", "enum": ["pass", "reject"]},
-            "summary": {"type": "string", "minLength": 1, "maxLength": 4_000},
-            "reviewed_files": {
-                "type": "array",
-                "items": {"type": "string", "enum": list(paths)},
-                "minItems": len(paths),
-                "maxItems": len(paths),
-                "uniqueItems": True,
-            },
-            "findings": {"type": "array", "items": finding, "maxItems": 32},
-        },
-    }
-
-
 def prepare_request(
     source_archive: bytes,
     *,
@@ -273,18 +242,14 @@ def prepare_request(
             "data_collection": "deny",
             "zdr": True,
         },
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "arena_full_source_review",
-                "strict": True,
-                "schema": _response_schema(paths),
-            },
-        },
+        # JSON-object generation keeps the ZDR route eligible. parse_response
+        # below remains the strict, fail-closed contract boundary.
+        "response_format": {"type": "json_object"},
     }
     # UTF-8 bytes are a conservative token ceiling even for non-ASCII source.
-    # Count the complete canonical request because JSON escaping and the schema
-    # also consume context. The reserved completion must fit in the same window.
+    # Count the complete canonical request because JSON escaping and generation
+    # controls also consume context. The reserved completion must fit in the
+    # same window.
     input_bound = REQUEST_TOKEN_OVERHEAD + len(
         contracts.canonical_json(parameters).encode("utf-8")
     )

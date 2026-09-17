@@ -626,6 +626,60 @@ def _age_review_error(superuser, submission_id, seconds=1000):
         )
 
 
+def test_retryable_404_is_whitelisted_backed_off_and_can_pass(
+    recovery_store, recovery_superuser
+):
+    _round, submission_id, miner = accepted_recovery_submission(
+        recovery_store, "c1"
+    )
+    first_token = new_lease_token()
+    assert recovery_store.begin_submission_review(
+        submission_id, miner, first_token, 100, MODEL, 2, 1000
+    )["attempt"] == 1
+    first_error = recovery_error_doc(retryable=True)
+    first_error["provider_http_status"] = 404
+    finished = recovery_store.finish_submission_review(
+        submission_id, miner, first_token, "error", first_error, None
+    )
+    assert finished["ledger_status"] == "uncertain"
+    assert recovery_store.get_submission(submission_id)["code_review_doc"] == {
+        "cost_microusd": 100,
+        "cost_status": "uncertain",
+        "error_code": "code_review_provider_unavailable",
+        "file_count": 2,
+        "model": MODEL,
+        "provider_http_status": 404,
+        "review_cost_microusd": 100,
+        "retryable": True,
+        "schema_version": "leadpoet.lab_arena.code_review.result.v1",
+        "source_bytes": 1000,
+        "verdict": "error",
+    }
+    assert recovery_store.begin_submission_review(
+        submission_id, miner, new_lease_token(), 100, MODEL, 2, 1000
+    )["status"] == "backoff"
+
+    _age_review_error(recovery_superuser, submission_id)
+    second_token = new_lease_token()
+    claimed = recovery_store.begin_submission_review(
+        submission_id, miner, second_token, 100, MODEL, 2, 1000
+    )
+    assert claimed["status"] == "claimed" and claimed["attempt"] == 2
+    assert recovery_store.finish_submission_review(
+        submission_id, miner, second_token, "passed",
+        review_doc("pass", file_count=2, source_bytes=1000), 7,
+    )["status"] == "passed"
+    assert recovery_store.begin_submission_review(
+        submission_id, miner, new_lease_token(), 100, MODEL, 2, 1000
+    )["status"] == "existing"
+    ledger = recovery_store.list_ledger(submission_id=submission_id)
+    assert [entry["entry_kind"] for entry in ledger] == [
+        "reservation", "dispatch", "uncertain",
+        "reservation", "dispatch", "settlement",
+    ]
+    assert len({entry["call_identity"] for entry in ledger}) == 2
+
+
 def test_recovery_caps_permanent_legacy_and_final_expired_transient_claim(
     recovery_store, recovery_superuser
 ):

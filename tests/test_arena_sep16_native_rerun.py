@@ -576,6 +576,70 @@ def test_recover273_refuses_existing_different_source(monkeypatch, tmp_path):
     assert service.store._transport.calls == []
 
 
+def test_recover275_proves_prior_source_and_calls_exact_rpc(monkeypatch, tmp_path):
+    from lab_arena import source_bundle
+
+    terminal_payload = b"recovery273-champion-source"
+    recovery_payload = b"new-recovery275-champion-source"
+    service = _recovery_service(terminal_payload, recovery_payload)
+    terminal_hash = rerun._sha256(terminal_payload)
+    service.config.object_store.values = {
+        rerun.RECOVERY273_SOURCE_REF: terminal_payload,
+    }
+    service.store.get_submission = lambda _submission_id: {
+        "source_ref": rerun.RECOVERY273_SOURCE_REF,
+        "source_size_bytes": len(terminal_payload),
+        "submission_doc": {
+            "source_ref": rerun.RECOVERY273_SOURCE_REF,
+            "source_sha256": terminal_hash,
+            "source_commit": "c" * 40,
+        },
+    }
+    schedule = {"sealed": "recovery275-forward"}
+    monkeypatch.setattr(rerun, "_bank_proof", lambda *_args: rerun.BANK_HASH)
+    monkeypatch.setattr(rerun, "_schedule_proof", lambda *_args: schedule)
+    monkeypatch.setattr(source_bundle, "validate_source_archive", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        source_bundle,
+        "source_archive_commit",
+        lambda payload: "c" * 40 if payload == terminal_payload else "d" * 40,
+    )
+    args = SimpleNamespace(
+        expected_lab_commit="d" * 40,
+        forward_schedule_file=tmp_path / "schedule.json",
+        dry_run=True,
+    )
+
+    preflight = rerun._recover275(service, args)
+    assert preflight["status"] == "recovery275_preflight_ok"
+    assert preflight["source_ref"] == rerun.RECOVERY275_SOURCE_REF
+    assert preflight["terminal_source_commit"] == "c" * 40
+    assert preflight["execute_namespace"] == "rerun275"
+    assert service.store._transport.calls == []
+    assert service.config.object_store.puts == []
+
+    service.store._transport.rpc = lambda name, arguments: (
+        service.store._transport.calls.append((name, arguments))
+        or {"status": "prepared", "baseline_execute_assignments": 20}
+    )
+    args.dry_run = False
+    assert rerun._recover275(service, args)["status"] == "prepared"
+    assert service.store._transport.calls == [
+        (
+            "lab_arena_prepare_sep16_baseline_recovery275_v1",
+            {
+                "p_source_size_bytes": len(recovery_payload),
+                "p_source_sha256": rerun._sha256(recovery_payload),
+                "p_source_commit": "d" * 40,
+                "p_forward_schedule": schedule,
+            },
+        )
+    ]
+    assert service.config.object_store.puts == [
+        (rerun.RECOVERY275_SOURCE_REF, recovery_payload)
+    ]
+
+
 @pytest.mark.parametrize("drift", ["ref", "size", "hash", "commit"])
 def test_recover_refuses_unsealed_source(drift):
     payload = b"latest-tested-champion-source"
@@ -665,7 +729,9 @@ def test_recovery_source_proof_revalidates_archive_and_commit(monkeypatch):
     assert validations == [(payload, True)]
 
 
-@pytest.mark.parametrize("namespace", ["rerun265", "rerun269", "rerun272", "rerun273"])
+@pytest.mark.parametrize(
+    "namespace", ["rerun265", "rerun269", "rerun272", "rerun273", "rerun275"]
+)
 def test_audit_counts_scores_for_the_active_rerun_namespace(namespace):
     runs = [
         {
@@ -709,6 +775,7 @@ def test_audit_counts_scores_for_the_active_rerun_namespace(namespace):
                         "rerun269": rerun.RECOVERY_SOURCE_REF,
                         "rerun272": rerun.RECOVERY272_SOURCE_REF,
                         "rerun273": rerun.RECOVERY273_SOURCE_REF,
+                        "rerun275": rerun.RECOVERY275_SOURCE_REF,
                     }[namespace]
                 )
             }

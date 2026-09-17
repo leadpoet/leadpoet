@@ -341,6 +341,11 @@ Use the canonical gateway restart. For the validator, prepare a mode-0600
 environment file with the public configuration and local wallet path, then run
 the exact pushed main controller:
 
+Canonical gateway and normal-validator restarts do not wait for GitHub Actions
+test completion or GitHub release attestation. They still require the exact
+local commit and build identity, runtime integrity checks, and normal epoch,
+lease-drain, readiness, and live health gates.
+
 ```bash
 git -C /home/ec2-user/leadpoet/leadpoet fetch --no-tags origin main
 git -C /home/ec2-user/leadpoet/leadpoet show "$SHA:validator_restart.sh" \

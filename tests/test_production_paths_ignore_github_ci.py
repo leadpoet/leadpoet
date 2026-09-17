@@ -101,6 +101,7 @@ def test_rebenchmark_runtime_does_not_consult_github_ci() -> None:
         (
             "scripts/run_lab_arena_service.py",
             "scripts/arena_sep17_baseline_recovery.py",
+            "scripts/arena_sep17_baseline_recovery283.py",
             "lab_arena",
         )
     )

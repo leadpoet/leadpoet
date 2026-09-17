@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import socketserver
 import threading
 import time
 from contextlib import contextmanager
@@ -19,7 +20,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from lab_arena import contracts, runner as rn, runtime, scoring, shim
+from lab_arena import contracts, lab_arena_checkpoint, runner as rn, runtime, scoring, shim
 from lab_arena.api import create_app
 from lab_arena.proxy_workers import (
     ProxyWorkerPool,
@@ -32,6 +33,18 @@ from tests.lab_arena.lab_arena_pg_harness import (
 )
 from tests.lab_arena.successful_call_cost_round_test import CostHarness
 from tests.lab_arena.test_lab_arena_service_round import _start_round, keypair
+
+
+@pytest.fixture(autouse=True)
+def bounded_socket_shutdown_poll(monkeypatch):
+    """Keep real socket cleanup without a half-second delay per fixture run."""
+
+    serve_forever = socketserver.BaseServer.serve_forever
+
+    def serve_with_short_poll(server, poll_interval=0.5):
+        return serve_forever(server, poll_interval=min(poll_interval, 0.005))
+
+    monkeypatch.setattr(socketserver.BaseServer, "serve_forever", serve_with_short_poll)
 
 
 @pytest.fixture()
@@ -157,6 +170,13 @@ class _ExecutionEvidence:
             with self.harness.sandbox.lock:
                 os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
                 try:
+                    quota = lab_arena_checkpoint.quota_usage()
+                    assert quota["providers"]["openrouter"] == {
+                        "limit": contracts.CALL_QUOTAS_PER_ICP["openrouter"],
+                        "used": 0,
+                        "remaining": contracts.CALL_QUOTAS_PER_ICP["openrouter"],
+                        "inflight": 0,
+                    }
                     status, _headers, _body = shim.dispatch(
                         "openrouter.chat",
                         {

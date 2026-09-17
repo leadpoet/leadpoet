@@ -1948,6 +1948,79 @@ def test_luna_regional_unproved_provider_failure_keeps_full_reservation():
     assert store.log == ["reserve", "dispatch", "uncertain"]
 
 
+def test_canonical_failed_responses_retain_only_billing_structure_and_stay_uncertain():
+    private_text = "private source passage and provider account detail"
+    payload = {
+        "object": "response", "status": "failed", "error_type": "rate_limit_exceeded",
+        "error": {"code": "rate_limit_exceeded", "message": private_text},
+        "output": [], "usage": None,
+        "openrouter_metadata": {
+            "requested": br.OPENROUTER_LUNA_RESPONSES_MODEL, "is_byok": False,
+            "attempt": 1, "pipeline": [], "attempts": [{"status": 429, "detail": private_text}],
+        },
+    }
+    broker, store, transport = make_broker(transport=FakeTransport([(200, payload)]))
+    broker._price_table = luna_price_table()
+    result = broker.execute(CONTEXT, operation_id="openrouter.responses",
+                            parameters=LUNA_RESPONSES, action_sequence=0, timeout_ms=300_000)
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+    assert len(transport.sent) == 1
+    diagnostic = store.calls[result.call["call_identity"]]["uncertain_doc"]
+    assert diagnostic["openrouter_failed_response_structure"] == {
+        "schema_version": 1, "usage_kind": "null", "metadata_kind": "object",
+        "output_kind": "array", "output_count": 0, "rate_limit_error": True,
+        "requested_model_matches": True, "is_byok": False, "attempt": 1,
+        "pipeline_present": True, "pipeline_kind": "array", "pipeline_count": 0,
+        "attempts_present": True, "attempts_kind": "array", "attempts_count": 1,
+        "all_attempts_failed_http": True,
+    }
+    assert private_text not in json.dumps(diagnostic)
+    assert "openrouter_failed_response_structure" not in result.call
+    assert private_text.encode() not in result.body
+
+
+@pytest.mark.parametrize("invalid", [True, -1, 1_000_000_001, "private numeric field", {}, []])
+def test_failed_cost_structure_bounds_untrusted_scalar_fields(invalid):
+    document = {
+        "status": "failed", "error": {"code": "private provider error"},
+        "output": [{"text": "private lead"}],
+        "usage": {"cost": None, "input_tokens": invalid, "output_tokens": invalid,
+                  "total_tokens": invalid, "output_tokens_details": {"reasoning_tokens": invalid}},
+        "openrouter_metadata": {"requested": "private model", "is_byok": invalid,
+                                "attempt": invalid, "pipeline": "private pipeline", "attempts": [{}]},
+    }
+    structure = br._openrouter_failed_cost_structure(document, "expected-model")
+    assert structure["output_count"] == 1 and structure["rate_limit_error"] is False
+    assert all(structure[name] is None for name in ("input_tokens", "output_tokens", "total_tokens", "reasoning_tokens", "attempt"))
+    assert structure["is_byok"] is (True if invalid is True else None)
+    assert structure["requested_model_matches"] is False
+    assert structure["pipeline_count"] is None
+    assert structure["all_attempts_failed_http"] is False
+    assert "private" not in json.dumps(structure)
+
+
+def test_failed_cost_structure_never_infers_missing_arrays_or_success():
+    structure = br._openrouter_failed_cost_structure(
+        {"status": "failed", "openrouter_metadata": {}, "usage": {"output_tokens": 0}}, "model"
+    )
+    assert structure["output_count"] is None
+    assert structure["pipeline_present"] is False and structure["pipeline_count"] is None
+    assert structure["attempts_present"] is False and structure["all_attempts_failed_http"] is False
+    assert structure["output_tokens"] == 0 and structure["is_byok"] is None
+    for document in (None, [], {"status": "completed"}, {"status": "private status"}):
+        assert br._openrouter_failed_cost_structure(document, "model") == {}
+
+
+def test_failed_cost_structure_does_not_traverse_oversized_attempts():
+    structure = br._openrouter_failed_cost_structure(
+        {"status": "failed", "openrouter_metadata": {"attempts": [{"status": 429}] * 129}}, "model"
+    )
+    assert structure["attempts_count"] is None
+    assert structure["all_attempts_failed_http"] is False
+
+
 def test_openrouter_reported_model_alias_does_not_erase_actual_billing():
     payload = {
         "model": "openai/gpt-4o-mini-2024-07-18",

@@ -771,6 +771,62 @@ def deepline_cost_microusd(body: bytes) -> Optional[int]:
     return None if cost is None else cost.microusd
 
 
+def _openrouter_failed_cost_structure(document: Any, model: str) -> Dict[str, Any]:
+    """Keep bounded billing structure, never response content or billing authority."""
+
+    if not isinstance(document, Mapping) or document.get("status") != "failed":
+        return {}
+
+    def kind(value: Any) -> str:
+        if value is None:
+            return "null"
+        if isinstance(value, Mapping):
+            return "object"
+        if isinstance(value, list):
+            return "array"
+        return "other"
+
+    def bounded_integer(value: Any, maximum: int = 1_000_000_000) -> Optional[int]:
+        return value if type(value) is int and 0 <= value <= maximum else None
+
+    usage = document.get("usage")
+    metadata = document.get("openrouter_metadata")
+    output = document.get("output")
+    error = document.get("error")
+    code = error.get("code") if isinstance(error, Mapping) else None
+    result: Dict[str, Any] = {
+        "schema_version": 1,
+        "usage_kind": kind(usage),
+        "metadata_kind": kind(metadata),
+        "output_kind": kind(output),
+        "output_count": bounded_integer(len(output), 4096) if isinstance(output, list) else None,
+        "rate_limit_error": isinstance(code, str) and code == "rate_limit_exceeded",
+    }
+    if isinstance(usage, Mapping):
+        result["usage_cost_present"] = "cost" in usage
+        result["usage_cost_null"] = usage.get("cost") is None
+        for name in ("input_tokens", "output_tokens", "total_tokens"):
+            result[name] = bounded_integer(usage.get(name))
+        details = usage.get("output_tokens_details")
+        result["reasoning_tokens"] = bounded_integer(details.get("reasoning_tokens")) if isinstance(details, Mapping) else None
+    if isinstance(metadata, Mapping):
+        result["requested_model_matches"] = metadata.get("requested") == model
+        result["is_byok"] = metadata.get("is_byok") if type(metadata.get("is_byok")) is bool else None
+        result["attempt"] = bounded_integer(metadata.get("attempt"), 128)
+        for name in ("pipeline", "attempts"):
+            value = metadata.get(name)
+            result[name + "_present"] = name in metadata
+            result[name + "_kind"] = kind(value)
+            result[name + "_count"] = bounded_integer(len(value), 128) if isinstance(value, list) else None
+        attempts = metadata.get("attempts")
+        result["all_attempts_failed_http"] = (
+            isinstance(attempts, list) and 0 < len(attempts) <= 128
+            and all(isinstance(attempt, Mapping) and type(attempt.get("status")) is int
+                    and 400 <= attempt["status"] <= 599 for attempt in attempts)
+        )
+    return result
+
+
 def _missing_provider_cost_call_doc(
     response: ProviderResponse,
     document: Any,
@@ -780,6 +836,7 @@ def _missing_provider_cost_call_doc(
     deepline_response_request_id: Optional[str] = None,
     deepline_operation: Optional[str] = None,
     openrouter_generation_id: Optional[str] = None,
+    openrouter_model: Optional[str] = None,
     credential_fingerprint: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Return bounded structural diagnostics without provider content."""
@@ -802,6 +859,10 @@ def _missing_provider_cost_call_doc(
     top_status = document.get("status") if is_mapping else None
     if isinstance(top_status, str) and top_status in _DEEPLINE_JOB_STATUSES:
         diagnostics["top_level_job_status"] = top_status
+    if openrouter_model is not None:
+        structure = _openrouter_failed_cost_structure(document, openrouter_model)
+        if structure:
+            diagnostics["openrouter_failed_response_structure"] = structure
     if deepline_request_id is not None and deepline_operation is not None:
         diagnostics.update(
             {
@@ -3437,6 +3498,8 @@ class Broker:
                     deepline_response_request_id=deepline_response_request_id,
                     deepline_operation=deepline_operation,
                     openrouter_generation_id=openrouter_generation_id,
+                    openrouter_model=(effective_normalized.get("model")
+                                      if effective_operation.provider == "openrouter" else None),
                     credential_fingerprint=provider_credential_fingerprint,
                 )
                 if account_failure_evidence is not None:
@@ -3568,6 +3631,8 @@ class Broker:
                     deepline_response_request_id=deepline_response_request_id,
                     deepline_operation=deepline_operation,
                     openrouter_generation_id=openrouter_generation_id,
+                    openrouter_model=(effective_normalized.get("model")
+                                      if effective_operation.provider == "openrouter" else None),
                     credential_fingerprint=provider_credential_fingerprint,
                 )
                 uncertain_doc.update({

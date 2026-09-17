@@ -273,6 +273,108 @@ def test_broken_prior_epoch_does_not_block_current_epoch(tmp_path):
     assert broadcasts == ["0xdeadbeef"]
 
 
+def test_prior_poll_recovers_spec459_journal_after_spec464_reveal(tmp_path):
+    from leadpoet_canonical.subtensor_events_v2 import (
+        load_subtensor_events_profile_v2,
+        prove_timelocked_weights_reveal_v2,
+        validate_subtensor_events_profile_v2,
+    )
+
+    protected = _protected()
+    protected["runtime_spec_version"] = 459
+    protected["recovery_record"] = {
+        **protected["recovery_record"],
+        "authorization": {"runtime_spec_version": 459},
+    }
+    finalized = [
+        {
+            "status": "finalized",
+            "finalized": True,
+            "finalized_block_hash": "8" * 64,
+            "finalized_block": 1060,
+            "commit_included_block": 1050,
+            "weights_hash": "sha256:" + "5" * 64,
+            "validator_uid": 4,
+            "last_update": 1050,
+            "revealed_weights": [[0, 65535], [1, 100]],
+        }
+    ]
+
+    class Spec464RecoverySigner(_Signer):
+        def recover_arena_weight_extrinsic_v1(self, request):
+            assert request["recovery_record"]["authorization"][
+                "runtime_spec_version"
+            ] == 459
+            return super().recover_arena_weight_extrinsic_v1(request)
+
+        def confirm_arena_weight_extrinsic_v1(self, request):
+            fixture = json.loads(
+                (
+                    Path(__file__).resolve().parent
+                    / "fixtures"
+                    / "subtensor_events_spec464_block9088963.json"
+                ).read_text(encoding="utf-8")
+            )
+            profile = load_subtensor_events_profile_v2(spec_version=464)
+            profile = validate_subtensor_events_profile_v2(
+                profile,
+                genesis_hash=profile["genesis_hash"],
+                spec_version=464,
+                transaction_version=1,
+                metadata_raw=bytes.fromhex(fixture["metadata_hex"][2:]),
+                runtime_code_hash=fixture["runtime_code_storage_hash"],
+            )
+            expected = fixture["expected"]
+            proof = prove_timelocked_weights_reveal_v2(
+                bytes.fromhex(fixture["system_events"][2:]),
+                profile=profile,
+                event_count_raw=bytes.fromhex(fixture["system_event_count"][2:]),
+                expected_netuid=expected["netuid"],
+                expected_uid=expected["uid"],
+                expected_account_id_hex=expected["account_id_hex"],
+            )
+            assert proof["netuid"] == 71
+            assert profile["spec_version"] == 464
+            return super().confirm_arena_weight_extrinsic_v1(request)
+
+    signer = Spec464RecoverySigner(protected, finalized)
+    broadcasts = []
+    reported = []
+    orchestrator = _orchestrator(tmp_path, signer, broadcasts)
+    orchestrator.api.submit_chain_outcome = lambda document: (
+        reported.append(document) or {"status": "recorded"}
+    )
+
+    journal_path = tmp_path / "epoch-9-signed.json"
+    accepted_state = orchestrator._verified_state(9, {})
+    protected_body = dict(protected)
+    protected_schema = protected_body.pop("schema_version")
+    journal = {
+        **protected_body,
+        "schema_version": "leadpoet.arena.validator_signed_weight.v1",
+        "protected_schema_version": protected_schema,
+        "accepted_state": dict(accepted_state),
+        "valid_from_block": int(accepted_state["valid_from_block"]),
+        "valid_until_block": int(accepted_state["valid_until_block"]),
+    }
+    journal["record_hash"] = contracts.document_hash(journal)
+    journal_path.write_text(json.dumps(journal) + "\n", encoding="utf-8")
+    retained_journal = journal_path.read_bytes()
+    assert _read_hashed_json(journal_path)["runtime_spec_version"] == 459
+
+    orchestrator.poll_prior_outcomes(10)
+
+    outcome = _read_hashed_json(tmp_path / "epoch-9-outcome.json")
+    assert outcome["outcome"]["status"] == "finalized"
+    assert outcome["reported"] is True
+    assert len(reported) == 1
+    assert signer.prepares == 0
+    assert signer.recoveries == 1
+    assert signer.confirms == 1
+    assert broadcasts == []
+    assert journal_path.read_bytes() == retained_journal
+
+
 def test_prior_poll_skips_archived_attempts_but_warns_on_malformed_names(
     tmp_path, capsys
 ):

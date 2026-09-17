@@ -48,7 +48,10 @@ setup(
             "leadpoet_industry_taxonomy.json",
             "identity/public_suffix_list.dat",
         ],
-        "leadpoet_canonical": ["subtensor_events_profile_v2.json"],
+        "leadpoet_canonical": [
+            "subtensor_events_profile_v2.json",
+            "subtensor_events_profile_spec*_v2.json",
+        ],
         "leadpoet_canonical.config": ["stateful-epoch-cutover-sn71.json"],
         "validator_tee.enclave": [
             "chain_signing_profile_v2.json",

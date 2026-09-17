@@ -105,6 +105,10 @@ from pathlib import Path
 import sys
 sys.path.insert(0, sys.argv[1])
 import leadpoet_canonical.config
+from leadpoet_canonical.subtensor_events_v2 import (
+    DEFAULT_PROFILE_PATHS,
+    load_subtensor_events_profile_v2,
+)
 from neurons.validator import main
 from lab_arena.local_weight_signer import load_public_chain_signing_profile
 from Leadpoet.utils.subnet_epoch import (
@@ -112,6 +116,11 @@ from Leadpoet.utils.subnet_epoch import (
     ensure_cutover_manifest_configured, load_subnet_epoch_cutover,
 )
 assert callable(main)
+assert sorted(DEFAULT_PROFILE_PATHS) == [455, 456, 457, 458, 459, 464]
+for spec_version in sorted(DEFAULT_PROFILE_PATHS):
+    assert load_subtensor_events_profile_v2(
+        spec_version=spec_version
+    )["spec_version"] == spec_version
 for network in ('finney', 'test'):
     assert load_public_chain_signing_profile(network)['network'] == network
 assert DEFAULT_SN71_CUTOVER_MANIFEST_PATH.is_relative_to(Path(sys.argv[1]))

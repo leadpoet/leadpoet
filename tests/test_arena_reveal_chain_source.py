@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from pathlib import Path
 
 import pytest
 
@@ -32,13 +34,20 @@ VALIDATOR_HOTKEY = ss58_encode_account_id(VALIDATOR_ACCOUNT)
 COMMITMENT = b"arena-commitment"
 ROUND = 998_877
 WEIGHTS = [(0, 12_345), (2, 54_321)]
+SPEC464_FIXTURE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "subtensor_events_spec464_block9088963.json"
+)
 
 
 def _compact(value: int) -> bytes:
-    assert 0 <= value < (1 << 14)
+    assert 0 <= value < (1 << 30)
     if value < 64:
         return bytes((value << 2,))
-    return ((value << 2) | 1).to_bytes(2, "little")
+    if value < (1 << 14):
+        return ((value << 2) | 1).to_bytes(2, "little")
+    return ((value << 2) | 2).to_bytes(4, "little")
 
 
 def _commits(present: bool) -> str:
@@ -83,6 +92,49 @@ def _metagraph(block: int, *, recycle_uid: bool) -> str:
     raw.extend(b"\x01" + _compact(len(accounts)))
     raw.extend(b"".join(accounts))
     raw.extend(b"\x00" * 24)
+    return "0x" + raw.hex()
+
+
+def _metagraph_with_accounts(block: int, accounts) -> str:
+    raw = bytearray((1,))
+    raw.extend(_compact(NETUID))
+    raw.extend(b"\x00" * 4)
+    raw.extend(b"\x01" + bytes.fromhex("44" * 32))
+    raw.extend(b"\x00")
+    raw.extend(b"\x01" + _compact(block))
+    raw.extend(b"\x00" * 44)
+    raw.extend(b"\x01" + _compact(len(accounts)))
+    raw.extend(b"".join(accounts))
+    raw.extend(b"\x00" * 24)
+    return "0x" + raw.hex()
+
+
+def _weights_for(values) -> str:
+    raw = bytearray(_compact(len(values)))
+    for uid, weight in values:
+        raw.extend(int(uid).to_bytes(2, "little"))
+        raw.extend(int(weight).to_bytes(2, "little"))
+    return "0x" + raw.hex()
+
+
+def _last_update_for(size: int, validator_uid: int, block: int) -> str:
+    values = [0] * size
+    values[validator_uid] = int(block)
+    return "0x" + (
+        _compact(len(values))
+        + b"".join(value.to_bytes(8, "little") for value in values)
+    ).hex()
+
+
+def _commit_for(account: bytes, *, present: bool) -> str:
+    if not present:
+        return "0x00"
+    raw = bytearray(b"\x04")
+    raw.extend(account)
+    raw.extend((900).to_bytes(8, "little"))
+    raw.extend(_compact(len(COMMITMENT)))
+    raw.extend(COMMITMENT)
+    raw.extend(ROUND.to_bytes(8, "little"))
     return "0x" + raw.hex()
 
 
@@ -142,6 +194,73 @@ class ArchiveFixture:
         raise AssertionError("unexpected storage key %s" % key)
 
 
+class MeasuredSpec464ArchiveFixture:
+    def __init__(self) -> None:
+        self.fixture = json.loads(SPEC464_FIXTURE.read_text(encoding="utf-8"))
+        self.inclusion_block = int(self.fixture["inclusion_block"])
+        self.reveal_block = int(self.fixture["block_number"])
+        self.validator_uid = int(self.fixture["expected"]["uid"])
+        self.validator_account = bytes.fromhex(
+            self.fixture["expected"]["account_id_hex"]
+        )
+        account_count = max(self.validator_uid + 1, 4)
+        self.accounts = [
+            hashlib.sha256(("spec464-account:%d" % uid).encode()).digest()
+            for uid in range(account_count)
+        ]
+        self.accounts[self.validator_uid] = self.validator_account
+        recipient_uids = [
+            uid for uid in range(account_count) if uid != self.validator_uid
+        ][:2]
+        self.weights = [(recipient_uids[0], 12_345), (recipient_uids[1], 54_321)]
+        self.hashes = {
+            block: hashlib.sha256(("spec464-block:%d" % block).encode()).hexdigest()
+            for block in range(self.inclusion_block, self.reveal_block + 1)
+        }
+        self.hashes[self.reveal_block - 1] = self.fixture["parent_hash"]
+        self.hashes[self.reveal_block] = self.fixture["block_hash"].removeprefix("0x")
+        self.calls = []
+
+    def block_for_hash(self, value: str) -> int:
+        digest = value.removeprefix("0x")
+        return next(block for block, observed in self.hashes.items() if observed == digest)
+
+    def result(self, method, params):
+        self.calls.append((method, list(params)))
+        if method == "chain_getBlockHash":
+            return "0x" + self.hashes[int(params[0])]
+        if method == "state_getRuntimeVersion":
+            return {"specVersion": 464, "transactionVersion": 1}
+        if method == "state_getMetadata":
+            return self.fixture["metadata_hex"]
+        if method == "state_getStorageHash":
+            return self.fixture["runtime_code_storage_hash"]
+        block = self.block_for_hash(params[-1])
+        if method == "state_call":
+            return _metagraph_with_accounts(block, self.accounts)
+        assert method == "state_getStorage"
+        key = params[0]
+        if key == timelocked_weight_commits_storage_key(
+            netuid=NETUID, subnet_epoch_index=EPOCH
+        ):
+            return _commit_for(
+                self.validator_account, present=block < self.reveal_block
+            )
+        if key == weights_storage_key(
+            netuid=NETUID, validator_uid=self.validator_uid
+        ):
+            return _weights_for(self.weights)
+        if key == last_update_storage_key(netuid=NETUID):
+            return _last_update_for(
+                len(self.accounts), self.validator_uid, self.inclusion_block
+            )
+        if key == system_events_storage_key():
+            return self.fixture["system_events"]
+        if key == system_event_count_storage_key():
+            return self.fixture["system_event_count"]
+        raise AssertionError("unexpected storage key %s" % key)
+
+
 def _source(monkeypatch, fixture: ArchiveFixture, *, finalized_head: int = 130):
     source = ValidatorChainSourceV2(
         rpc_call=lambda **_: None, archive_rpc_call=lambda **_: None,
@@ -196,6 +315,31 @@ def _prove(source):
     )
 
 
+def _measured_spec464_source(fixture: MeasuredSpec464ArchiveFixture):
+    source = ValidatorChainSourceV2(
+        rpc_call=lambda **_: None,
+        archive_rpc_call=lambda **_: None,
+        epoch_authority_supplier=lambda: None,
+    )
+    source._call = lambda **kwargs: {"result": (
+        "0x" + fixture.hashes[fixture.reveal_block]
+        if kwargs["method"] == "chain_getFinalizedHead"
+        else {
+            "number": hex(fixture.reveal_block),
+            "stateRoot": "0x" + "11" * 32,
+            "extrinsicsRoot": "0x" + "22" * 32,
+            "parentHash": "0x" + fixture.hashes[fixture.reveal_block - 1],
+            "digest": {"logs": []},
+        }
+    )}
+    source._archive_call = lambda **kwargs: {
+        "result": fixture.result(kwargs["method"], kwargs["params"]),
+        "attempts": [{}],
+        "artifacts": [],
+    }
+    return source
+
+
 def test_historical_reveal_succeeds_after_latest_head_passed_deadline(monkeypatch):
     source = _source(monkeypatch, ArchiveFixture(), finalized_head=130)
     result = _prove(source)
@@ -205,7 +349,45 @@ def test_historical_reveal_succeeds_after_latest_head_passed_deadline(monkeypatc
     assert source._selected_profile_specs == [455]
 
 
-@pytest.mark.parametrize("spec_version", [456, 457, 458, 459])
+def test_spec464_exact_parent_runtime_and_transition_events_prove_reveal():
+    fixture = MeasuredSpec464ArchiveFixture()
+    source = _measured_spec464_source(fixture)
+    validator_hotkey = ss58_encode_account_id(fixture.validator_account)
+    result = source.prove_timelocked_reveal_transition(
+        netuid=NETUID,
+        validator_hotkey=validator_hotkey,
+        hotkey_public_key_hex=fixture.validator_account.hex(),
+        subnet_epoch_index=EPOCH,
+        commitment_hex=COMMITMENT.hex(),
+        reveal_round=ROUND,
+        inclusion_block=fixture.inclusion_block,
+        reveal_deadline_block=fixture.reveal_block + 10,
+        expected_weights=fixture.weights,
+        expected_recipient_uid_hotkeys=[
+            {"uid": uid, "hotkey": ss58_encode_account_id(fixture.accounts[uid])}
+            for uid, _weight in fixture.weights
+        ],
+        chain_profile={
+            "genesis_hash": "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03"
+        },
+    )
+
+    parent_hash = "0x" + fixture.hashes[fixture.reveal_block - 1]
+    transition_hash = "0x" + fixture.hashes[fixture.reveal_block]
+    assert result["reveal_block"] == fixture.reveal_block
+    assert result["validator_uid"] == fixture.validator_uid
+    assert result["event_witness"]["netuid"] == NETUID
+    assert result["event_witness"]["uid"] == fixture.validator_uid
+    assert ("state_getRuntimeVersion", [parent_hash]) in fixture.calls
+    assert ("state_getMetadata", [parent_hash]) in fixture.calls
+    assert ("state_getStorage", [system_events_storage_key(), transition_hash]) in fixture.calls
+    assert (
+        "state_getStorage",
+        [system_event_count_storage_key(), transition_hash],
+    ) in fixture.calls
+
+
+@pytest.mark.parametrize("spec_version", [456, 457, 458, 459, 464])
 def test_historical_reveal_selects_observed_runtime_profile(
     monkeypatch, spec_version
 ):

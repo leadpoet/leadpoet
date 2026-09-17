@@ -28,6 +28,7 @@ CURRENT_RUNTIME_FIXTURES = {
     457: ROOT / "tests" / "fixtures" / "subtensor_events_spec457_block9067004.json",
     458: ROOT / "tests" / "fixtures" / "subtensor_events_spec458_block9067366.json",
     459: ROOT / "tests" / "fixtures" / "subtensor_events_spec459_block9076006.json",
+    464: ROOT / "tests" / "fixtures" / "subtensor_events_spec464_block9088963.json",
 }
 
 
@@ -169,6 +170,12 @@ def test_real_spec455_archive_events_prove_exact_adjacent_reveal():
             "0x558275958401c026fa4a4159466d49eabd08c761f0c801390593fcba91dee69b",
             325,
         ),
+        (
+            464,
+            "23fdf88e8b63d9a030907b6f6648491306f47a97ed1c5bf08da8488b84624ed7",
+            "0x637844a3ad94d3bdbea45664b67bbfa07a31f21c087834a56a772ba27f612b9f",
+            178,
+        ),
     ),
 )
 def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
@@ -214,13 +221,19 @@ def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
         profile["measurement"]["system_event_count_raw_sha256"]
     )
 
+    metadata_binding = {"metadata_sha256": metadata_sha256}
+    if "metadata_hex" in fixture:
+        metadata_raw = bytes.fromhex(fixture["metadata_hex"][2:])
+        assert len(metadata_raw) == fixture["metadata_raw_bytes"]
+        assert hashlib.sha256(metadata_raw).hexdigest() == metadata_sha256
+        metadata_binding = {"metadata_raw": metadata_raw}
     validated = validate_subtensor_events_profile_v2(
         profile,
         genesis_hash=profile["genesis_hash"],
         spec_version=spec_version,
         transaction_version=1,
-        metadata_sha256=metadata_sha256,
         runtime_code_hash=runtime_code_hash,
+        **metadata_binding,
     )
     records = decode_system_events_v2(
         events_raw, profile=validated, event_count_raw=event_count_raw
@@ -250,6 +263,41 @@ def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
     assert proof["netuid"] == expected["netuid"]
     assert proof["uid"] == expected["uid"]
     assert proof["account_id_hex"] == expected["account_id_hex"]
+
+
+def test_spec464_exact_runtime_and_reveal_tampering_fail_closed():
+    fixture = json.loads(CURRENT_RUNTIME_FIXTURES[464].read_text(encoding="utf-8"))
+    profile = load_subtensor_events_profile_v2(spec_version=464)
+    metadata_raw = bytes.fromhex(fixture["metadata_hex"][2:])
+    events_raw = bytes.fromhex(fixture["system_events"][2:])
+    event_count_raw = bytes.fromhex(fixture["system_event_count"][2:])
+
+    changed_metadata = metadata_raw[:-1] + bytes((metadata_raw[-1] ^ 1,))
+    with pytest.raises(SubtensorEventsV2Error, match="metadata differs"):
+        validate_subtensor_events_profile_v2(
+            profile,
+            genesis_hash=profile["genesis_hash"],
+            spec_version=464,
+            transaction_version=1,
+            metadata_raw=changed_metadata,
+            runtime_code_hash=fixture["runtime_code_storage_hash"],
+        )
+    with pytest.raises(SubtensorEventsV2Error, match="runtime code differs"):
+        validate_subtensor_events_profile_v2(
+            profile,
+            genesis_hash=profile["genesis_hash"],
+            spec_version=464,
+            transaction_version=1,
+            metadata_raw=metadata_raw,
+            runtime_code_hash="0x" + "00" * 32,
+        )
+
+    pair = _measured_pair_bytes(fixture)
+    assert events_raw.count(pair) == 1
+    changed_pair = pair[:-33] + bytes((pair[-33] ^ 1,)) + pair[-32:]
+    changed_events = events_raw.replace(pair, changed_pair, 1)
+    with pytest.raises(SubtensorEventsV2Error, match="absent or ambiguous"):
+        _proof(profile, fixture, changed_events, event_count_raw)
 
 
 def test_unknown_runtime_profile_fails_closed():

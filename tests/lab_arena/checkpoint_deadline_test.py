@@ -148,6 +148,12 @@ def test_new_round_freezes_deadline_and_lease_while_legacy_opt_out_stays_300_sec
     assert current["checkpoint_deadline_policy"] == contracts.CHECKPOINT_DEADLINE_POLICY
     assert current["icp_wall_clock_seconds"] == 2700
     assert current["lease_ttl_seconds"] == 3600
+    assert current["call_quotas"] == {
+        "scrapingdog": 30,
+        "deepline": 30,
+        "openrouter": 200,
+    }
+    assert current["scoring_call_quotas"]["openrouter"] == 120
     with pytest.raises(contracts.ArenaContractError):
         contracts.validate_round_configuration(
             dict(current, icp_wall_clock_seconds=300)

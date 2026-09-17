@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: OpenRouter execution quota 200
+
+On 2026-09-17 the user explicitly authorized raising only the default Arena
+execution quota from 60 to 200 OpenRouter calls per ICP attempt and rerunning
+the same September 16 baseline through the existing sealed recovery path.
+Preserve frozen historical round configurations at 60 calls and accept only
+the exact historical and current execution quota profiles. Preserve Deepline
+and Scrapingdog execution quotas, judge quotas, dollar caps, the 45-minute
+deadline, scoring, source identity, credentials, billing, retries, rewards,
+weights, and concurrent work. This repository task covers the narrow tested
+source change only. The parent task owns any recovery migration, push,
+deployment, restart, or production mutation.
+
 ## Scoped production authorization: September 17 code-review routing repair
 
 On 2026-09-17 the user explicitly authorized the investigated code-review

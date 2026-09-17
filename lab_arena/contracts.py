@@ -42,7 +42,16 @@ ELIGIBILITY_MAX_EPOCHS = 45
 # The host supplies these provider keys. Every bundle receives the same
 # externally enforced call quota per provider and ICP attempt.
 PROVIDERS = ("scrapingdog", "deepline", "openrouter")
-CALL_QUOTAS_PER_ICP = {"scrapingdog": 30, "deepline": 30, "openrouter": 60}
+LEGACY_CALL_QUOTAS_PER_ICP = {
+    "scrapingdog": 30,
+    "deepline": 30,
+    "openrouter": 60,
+}
+CALL_QUOTAS_PER_ICP = {"scrapingdog": 30, "deepline": 30, "openrouter": 200}
+EXECUTION_CALL_QUOTA_PROFILES = (
+    LEGACY_CALL_QUOTAS_PER_ICP,
+    CALL_QUOTAS_PER_ICP,
+)
 # Judge calls made while scoring one work item (one output on one ICP), using
 # the same organizer-supplied provider accounts as bundle execution.
 # Sized from the real judge through the shim (tests/lab_arena/test_lab_arena_real_judge.py):
@@ -261,8 +270,13 @@ PROVIDER_FRAME_LIMITS = StrictLimits(
     max_total_bytes=1_100_000,
 )
 # Codex Responses frames can include a local namespace's JSON tool schemas.
-# The additional envelope levels are accepted only for that operation.
-RESPONSES_PROVIDER_FRAME_LIMITS = dataclasses.replace(PROVIDER_FRAME_LIMITS, max_depth=26)
+# The additional envelope levels and 200-call top-level history are accepted
+# only for that operation. Nested list fields retain their schema limits.
+RESPONSES_PROVIDER_FRAME_LIMITS = dataclasses.replace(
+    PROVIDER_FRAME_LIMITS,
+    max_depth=26,
+    max_list_items=768,
+)
 OUTPUT_LIMITS = StrictLimits(
     max_depth=8,
     max_list_items=200,
@@ -802,7 +816,11 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
         raise ArenaContractError("runner slot ceiling exceeds the public constant")
     if config["max_challengers"] > MAX_CHALLENGERS:
         raise ArenaContractError("max challengers exceeds the public constant")
-    if tuple(config["providers"]) != PROVIDERS or dict(config["call_quotas"]) != dict(CALL_QUOTAS_PER_ICP):
+    call_quotas = dict(config["call_quotas"])
+    if tuple(config["providers"]) != PROVIDERS or not any(
+        call_quotas == dict(profile)
+        for profile in EXECUTION_CALL_QUOTA_PROFILES
+    ):
         raise ArenaContractError("providers and call quotas are fixed public constants")
     if dict(config["scoring_call_quotas"]) != dict(SCORING_CALL_QUOTAS_PER_WORK_ITEM):
         raise ArenaContractError("scoring call quotas are fixed public constants")

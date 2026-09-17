@@ -20,8 +20,10 @@ MIGRATION = "274-lab-arena-run-quota-snapshot.sql"
 LEASE_TOKEN_HASH = "sha256:" + "a" * 64
 EXECUTE_ROUND = "arena-2026-09-16-qexec"
 SCORE_ROUND = "arena-2026-09-16-qscore"
+LEGACY_EXECUTE_ROUND = "arena-2026-09-16-qlegacy"
 EXECUTE_RUN = "quota-execute-run"
 SCORE_RUN = "quota-score-run"
+LEGACY_EXECUTE_RUN = "quota-legacy-execute-run"
 SUBMISSION = "quota-submission"
 MINER = hotkey("quota-snapshot-miner")
 
@@ -54,6 +56,10 @@ def seeded(connect):
             contracts.SCORING_CALL_QUOTAS_PER_WORK_ITEM
         ),
     }
+    legacy_configuration = {
+        **configuration,
+        "call_quotas": dict(contracts.LEGACY_CALL_QUOTAS_PER_ICP),
+    }
     try:
         with connection.cursor() as cursor:
             cursor.execute("SET session_replication_role=replica")
@@ -66,12 +72,15 @@ def seeded(connect):
                 "INSERT INTO public.lab_arena_rounds("
                 "round_id,status,stage_generation,configuration_doc) VALUES "
                 "(%s,'stage1',1,%s::jsonb),"
-                "(%s,'stage1_scoring',1,%s::jsonb)",
+                "(%s,'stage1_scoring',1,%s::jsonb),"
+                "(%s,'stage1',1,%s::jsonb)",
                 (
                     EXECUTE_ROUND,
                     json.dumps(configuration),
                     SCORE_ROUND,
                     json.dumps(configuration),
+                    LEGACY_EXECUTE_ROUND,
+                    json.dumps(legacy_configuration),
                 ),
             )
             cursor.execute(
@@ -87,6 +96,12 @@ def seeded(connect):
                 (SUBMISSION + "-score", SCORE_ROUND, MINER),
             )
             cursor.execute(
+                "INSERT INTO public.lab_arena_submissions("
+                "submission_id,round_id,miner_hotkey,status) "
+                "VALUES (%s,%s,%s,'frozen')",
+                (SUBMISSION + "-legacy", LEGACY_EXECUTE_ROUND, MINER),
+            )
+            cursor.execute(
                 "INSERT INTO public.lab_arena_runs("
                 "run_id,assignment_id,round_id,submission_id,miner_hotkey,"
                 "stage,icp_position,attempt,kind,status,runner_hotkey,"
@@ -95,6 +110,8 @@ def seeded(connect):
                 "(%s,%s,%s,%s,%s,1,0,1,'execute','leased',%s,%s,1,1,"
                 "clock_timestamp() + interval '1 hour'),"
                 "(%s,%s,%s,%s,%s,1,0,1,'score','leased',%s,%s,1,1,"
+                "clock_timestamp() + interval '1 hour'),"
+                "(%s,%s,%s,%s,%s,1,0,1,'execute','leased',%s,%s,1,1,"
                 "clock_timestamp() + interval '1 hour')",
                 (
                     EXECUTE_RUN,
@@ -108,6 +125,13 @@ def seeded(connect):
                     "quota-score-assignment",
                     SCORE_ROUND,
                     SUBMISSION + "-score",
+                    MINER,
+                    MINER,
+                    LEASE_TOKEN_HASH,
+                    LEGACY_EXECUTE_RUN,
+                    "quota-legacy-execute-assignment",
+                    LEGACY_EXECUTE_ROUND,
+                    SUBMISSION + "-legacy",
                     MINER,
                     MINER,
                     LEASE_TOKEN_HASH,
@@ -213,9 +237,9 @@ def test_snapshot_counts_latest_identity_heads_without_mutation(store, connect):
                 "inflight": 0,
             },
             "openrouter": {
-                "limit": 60,
+                "limit": 200,
                 "used": 8,
-                "remaining": 52,
+                "remaining": 192,
                 "inflight": 2,
             },
         },
@@ -242,6 +266,16 @@ def test_score_run_uses_frozen_judge_limits(store):
     }
     assert result["providers"]["scrapingdog"]["limit"] == 150
     assert result["providers"]["deepline"]["limit"] == 40
+
+
+def test_historical_execute_run_uses_its_frozen_60_call_limit(store):
+    result = store.run_quota_snapshot(LEGACY_EXECUTE_RUN, LEASE_TOKEN_HASH)
+    assert result["providers"]["openrouter"] == {
+        "limit": 60,
+        "used": 0,
+        "remaining": 60,
+        "inflight": 0,
+    }
 
 
 def test_wrong_and_stale_lease_fail_without_additional_mutation(store, connect):

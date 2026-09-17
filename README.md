@@ -79,7 +79,7 @@ uploaded archive again before it accepts the submission.
 
 Change the harness, model, prompts, and approved API routing. List Python dependencies in `requirements.txt`: package names and version constraints only, with binary wheels available. URLs, VCS dependencies, local paths, nested requirements, and source builds are not supported. Return at most five companies as a JSON list. Use `[]` if there are no valid matches.
 
-Each ICP execution attempt has a **five-minute wall-clock limit** and quotas of **60 OpenRouter, 30 Deepline, and 30 Scrapingdog calls**. The sandbox blocks direct network access. Keep the baseline's broker transport when changing the harness, or implement the same [broker protocol](lab_arena/shim.py) using the [approved operations](lab_arena/operations.py).
+Each new ICP execution attempt has a **45-minute wall-clock limit** and quotas of **200 OpenRouter, 30 Deepline, and 30 Scrapingdog calls**. Historical rounds keep the exact quotas frozen in their round configuration. The sandbox blocks direct network access. Keep the baseline's broker transport when changing the harness, or implement the same [broker protocol](lab_arena/shim.py) using the [approved operations](lab_arena/operations.py).
 
 The output below shows the exact supported fields. It is a format example, not a real company claim. `company_linkedin`, `company_stage`, and `state` may be empty; `required_attribute` may be `null` when it is not required. `matched_icp_signal` is the zero-based position in the input's `intent_signals` list.
 

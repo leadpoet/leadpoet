@@ -65,7 +65,11 @@ FIELD_FORMATS = ("https_url", "iso_date", "domain", "model_id")
 OPENROUTER_MAX_OUTPUT_TOKENS = 4096
 OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS = 32_768
 OPENROUTER_MAX_MESSAGES = 128
-OPENROUTER_RESPONSES_MAX_INPUT_ITEMS = 256
+# A native Responses history can add reasoning, call, and call-output items
+# for each brokered call. Keep enough top-level history for the 200-call
+# execution profile while the existing byte and nested-list limits still
+# bound the request.
+OPENROUTER_RESPONSES_MAX_INPUT_ITEMS = 768
 OPENROUTER_MAX_CONTENT_CHARS = 32_000
 # Copied from gateway/research_lab/key_vault.py (section 3.1): the broker
 # injects this policy into every chat body; it is table data so its hash is

@@ -39,9 +39,9 @@ def _native_input(*, tools=True, call=False):
     return items
 
 
-def _sixty_turn_native_history():
+def _native_history(turns):
     items = _native_input(tools=False)
-    for index in range(60):
+    for index in range(turns):
         call_id = "call-%d" % index
         items.extend([
             {"type": "reasoning", "id": "reasoning-%d" % index,
@@ -136,23 +136,27 @@ def test_responses_frame_allowance_is_scoped_and_shared_caps_remain():
     assert operations.OPERATION_LIMITS.max_depth == 12
     assert operations.RESPONSES_OPERATION_LIMITS.max_depth == 24
     assert operations.OPERATION_LIMITS.max_list_items == 128
-    assert operations.RESPONSES_OPERATION_LIMITS.max_list_items == 256
+    assert operations.RESPONSES_OPERATION_LIMITS.max_list_items == 768
     assert operations.OPERATION_LIMITS.max_total_bytes == 1_000_000
     assert operations.RESPONSES_OPERATION_LIMITS.max_total_bytes == 1_000_000
     assert operations.OPERATIONS["openrouter.chat"].max_request_bytes == 1_000_000
     assert operations.OPERATIONS["openrouter.responses"].max_request_bytes == 1_000_000
     assert contracts.RESPONSES_PROVIDER_FRAME_LIMITS.max_total_bytes == 1_100_000
-    assert contracts.CALL_QUOTAS_PER_ICP["openrouter"] == 60
+    assert contracts.RESPONSES_PROVIDER_FRAME_LIMITS.max_list_items == 768
+    assert contracts.PROVIDER_FRAME_LIMITS.max_list_items == 256
+    assert contracts.CALL_QUOTAS_PER_ICP["openrouter"] == 200
     assert operations.OPERATIONS["openrouter.chat"].cost_rule["max_output_tokens"] == 4096
     assert operations.OPERATIONS["openrouter.responses"].cost_rule["max_output_tokens"] == 32_768
     assert operations.operation_table_document()["operation_limit_overrides"]["openrouter.responses"] == {
         "max_depth": 24,
-        "max_list_items": 256,
+        "max_list_items": 768,
     }
 
 
-def test_responses_accepts_real_shaped_sixty_turn_history():
-    items = _sixty_turn_native_history()
+@pytest.mark.parametrize("turns", [60, 200])
+def test_responses_accepts_real_shaped_execute_quota_history(turns):
+    items = _native_history(turns)
+    assert len(items) == 2 + 3 * turns
     assert 128 < len(items) <= operations.OPENROUTER_RESPONSES_MAX_INPUT_ITEMS
     params = {"model": "openai/gpt-5.4", "input": items}
     frame = {"operation_id": "openrouter.responses", "parameters": params}
@@ -160,11 +164,22 @@ def test_responses_accepts_real_shaped_sixty_turn_history():
     assert operations.validate_operation_request("openrouter.responses", params)["input"] == items
 
 
-def test_responses_top_level_input_accepts_256_and_rejects_257_items():
+def test_responses_top_level_input_accepts_768_and_rejects_769_items():
     item = {"type": "message", "role": "user", "content": "continue"}
-    params = {"model": "openai/gpt-5.4", "input": [dict(item) for _ in range(256)]}
-    assert len(operations.validate_operation_request("openrouter.responses", params)["input"]) == 256
+    params = {
+        "model": "openai/gpt-5.4",
+        "input": [dict(item) for _ in range(768)],
+    }
+    frame = {"operation_id": "openrouter.responses", "parameters": params}
+    contracts.check_strict_document(frame, contracts.RESPONSES_PROVIDER_FRAME_LIMITS)
+    assert len(
+        operations.validate_operation_request("openrouter.responses", params)["input"]
+    ) == 768
     params["input"].append(dict(item))
+    with pytest.raises(contracts.ArenaContractError):
+        contracts.check_strict_document(
+            frame, contracts.RESPONSES_PROVIDER_FRAME_LIMITS
+        )
     with pytest.raises(operations.OperationRequestError):
         operations.validate_operation_request("openrouter.responses", params)
 

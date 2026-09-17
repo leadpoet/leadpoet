@@ -38,7 +38,22 @@ def test_public_constants_are_the_plan_values():
     assert c.LAB_ARENA_POOL_PERCENT == 25
     assert c.KING_POOL_SHARE_PERCENT_BY_WEEK == (100, 80, 60, 40, 20)
     assert (c.EPOCHS_PER_REWARD_WEEK, c.ELIGIBILITY_MAX_EPOCHS) == (140, 45)
-    assert c.PROVIDERS == ("scrapingdog", "deepline", "openrouter") and c.CALL_QUOTAS_PER_ICP == {"scrapingdog": 30, "deepline": 30, "openrouter": 60}
+    assert c.PROVIDERS == ("scrapingdog", "deepline", "openrouter")
+    assert c.CALL_QUOTAS_PER_ICP == {
+        "scrapingdog": 30,
+        "deepline": 30,
+        "openrouter": 200,
+    }
+    assert c.LEGACY_CALL_QUOTAS_PER_ICP == {
+        "scrapingdog": 30,
+        "deepline": 30,
+        "openrouter": 60,
+    }
+    assert c.SCORING_CALL_QUOTAS_PER_WORK_ITEM == {
+        "scrapingdog": 150,
+        "deepline": 40,
+        "openrouter": 120,
+    }
     assert (c.ICP_WALL_CLOCK_SECONDS, c.SCORING_WALL_CLOCK_SECONDS, c.LEASE_TTL_SECONDS) == (300, 900, 1200)
     from leadpoet_canonical.constants import EPOCH_LENGTH
 
@@ -217,6 +232,22 @@ def test_round_configuration_contains_only_plain_public_settings():
     adjustable = base_round_configuration()
     adjustable["reward_constants"]["pool_percent"] = 5
     assert c.validate_round_configuration(adjustable)["reward_constants"]["pool_percent"] == 5
+
+
+def test_round_configuration_accepts_only_frozen_execute_quota_profiles():
+    current = c.validate_round_configuration(base_round_configuration())
+    assert current["call_quotas"] == c.CALL_QUOTAS_PER_ICP
+
+    historical = base_round_configuration()
+    historical["call_quotas"] = dict(c.LEGACY_CALL_QUOTAS_PER_ICP)
+    validated = c.validate_round_configuration(historical)
+    assert validated["call_quotas"] == c.LEGACY_CALL_QUOTAS_PER_ICP
+
+    for openrouter_quota in (59, 61, 199, 201):
+        invalid = base_round_configuration()
+        invalid["call_quotas"]["openrouter"] = openrouter_quota
+        with pytest.raises(c.ArenaContractError, match="fixed public constants"):
+            c.validate_round_configuration(invalid)
 
 
 def test_parallel_twenty_icp_execution_is_an_optional_strict_boolean():

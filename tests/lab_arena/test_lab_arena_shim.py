@@ -504,7 +504,7 @@ def test_65_message_finalization_crosses_shim_and_broker_and_settles(monkeypatch
     assert len(transport.sent) == 1
     assert len(json.loads(transport.sent[0]["body"])["messages"]) == 65
     assert 0 < transport.sent[0]["timeout"] <= 5
-    assert contracts.CALL_QUOTAS_PER_ICP["openrouter"] == 60
+    assert contracts.CALL_QUOTAS_PER_ICP["openrouter"] == 200
     assert store.log == ["reserve", "dispatch", "settle"]
     call = next(iter(store.calls.values()))
     assert call["kind"] == "settlement" and call["actual"] == 1

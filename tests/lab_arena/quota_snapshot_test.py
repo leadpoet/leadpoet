@@ -41,9 +41,12 @@ def snapshot(*, openrouter_used: int = 8, openrouter_inflight: int = 2):
                 "inflight": 0,
             },
             "openrouter": {
-                "limit": 60,
+                "limit": contracts.CALL_QUOTAS_PER_ICP["openrouter"],
                 "used": openrouter_used,
-                "remaining": 60 - openrouter_used,
+                "remaining": (
+                    contracts.CALL_QUOTAS_PER_ICP["openrouter"]
+                    - openrouter_used
+                ),
                 "inflight": openrouter_inflight,
             },
         },

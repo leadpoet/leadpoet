@@ -29,6 +29,7 @@ RECOVERY_ARCHIVE_ROUND = "arena-2026-09-16-rerun265archive"
 RECOVERY272_ARCHIVE_ROUND = "arena-2026-09-16-rerun269archive"
 RECOVERY273_ARCHIVE_ROUND = "arena-2026-09-16-rerun272archive"
 RECOVERY275_ARCHIVE_ROUND = "arena-2026-09-16-rerun273archive"
+RECOVERY277_ARCHIVE_ROUND = "arena-2026-09-16-rerun275archive"
 BASELINE = "baseline-2026-09-16"
 BASIS_HASH = "sha256:b19a147f1c8cc8365e3cf7dcc96b827ffffdd6c1e8fad65ad9fc25c8895e493f"
 BANK_HASH = "42b417604acf15e612570687e8fbccef82fe7b0808364a6491b4a2a4bcb07390"
@@ -46,11 +47,15 @@ RECOVERY273_SOURCE_REF = (
 RECOVERY275_SOURCE_REF = (
     "arena/arena-2026-09-16/sources/baseline-2026-09-16-recovery275.tar.gz"
 )
+RECOVERY277_SOURCE_REF = (
+    "arena/arena-2026-09-16/sources/baseline-2026-09-16-recovery277.tar.gz"
+)
 VERIFIED_RUNNER_SLOTS = 10
 RECOVERY_SUFFIX = ":rerun269"
 RECOVERY272_SUFFIX = ":rerun272"
 RECOVERY273_SUFFIX = ":rerun273"
 RECOVERY275_SUFFIX = ":rerun275"
+RECOVERY277_SUFFIX = ":rerun277"
 
 
 def _require_round(row: Mapping[str, Any] | None, status: str) -> Mapping[str, Any]:
@@ -447,6 +452,58 @@ def _recover275(service: Any, args: argparse.Namespace) -> dict[str, Any]:
     return dict(result)
 
 
+def _recover277(service: Any, args: argparse.Namespace) -> dict[str, Any]:
+    row = service.store.get_round(ROUND)
+    if row is None or row.get("round_id") != ROUND or row.get("reward_basis_hash") != BASIS_HASH:
+        raise ExactRerunRefused("sealed Sep16 round state differs")
+    if row.get("status") != "cancelled":
+        raise ExactRerunRefused("Sep16 recovery277 round status differs")
+    bank_hash = _bank_proof(service, row)
+    terminal_size, terminal_hash, terminal_commit = _terminal_recovery_source_proof(
+        service, RECOVERY275_SOURCE_REF
+    )
+    source, source_hash, commit = _source_proof(service, args.expected_lab_commit)
+    schedule = _schedule_proof(row, args.forward_schedule_file)
+    if args.dry_run:
+        return {
+            "status": "recovery277_preflight_ok", "round_id": ROUND,
+            "bank_sha256": bank_hash, "source_sha256": source_hash,
+            "source_commit": commit, "source_size_bytes": len(source),
+            "source_ref": RECOVERY277_SOURCE_REF,
+            "terminal_source_sha256": terminal_hash,
+            "terminal_source_commit": terminal_commit,
+            "terminal_source_size_bytes": terminal_size,
+            "execute_namespace": RECOVERY277_SUFFIX.removeprefix(":"),
+            "verified_parallel_runner_slots": VERIFIED_RUNNER_SLOTS,
+            "openrouter_calls_per_icp": 200,
+        }
+    try:
+        existing = _read_bounded(
+            service.config.object_store, RECOVERY277_SOURCE_REF, len(source) + 1
+        )
+    except Exception:
+        service.config.object_store.put(RECOVERY277_SOURCE_REF, source)
+    else:
+        if existing != source:
+            raise ExactRerunRefused("Sep16 recovery277 source object holds different bytes")
+    if _read_bounded(
+        service.config.object_store, RECOVERY277_SOURCE_REF, len(source) + 1
+    ) != source:
+        raise ExactRerunRefused("Sep16 recovery277 source readback differs")
+    result = service.store._transport.rpc(
+        "lab_arena_prepare_sep16_baseline_recovery277_v1",
+        {
+            "p_source_size_bytes": len(source),
+            "p_source_sha256": source_hash,
+            "p_source_commit": commit,
+            "p_forward_schedule": schedule,
+        },
+    )
+    if not isinstance(result, dict) or result.get("status") not in ("prepared", "existing"):
+        raise ExactRerunRefused("Sep16 recovery277 RPC did not acknowledge the sealed rerun")
+    return dict(result)
+
+
 def _open_scoring(service: Any, stage: int) -> dict[str, Any]:
     if stage not in (1, 2):
         raise ExactRerunRefused("Sep16 scoring stage must be one or two")
@@ -497,6 +554,7 @@ def _audit(service: Any) -> dict[str, Any]:
     recovery272_archived = service.store.list_runs(RECOVERY272_ARCHIVE_ROUND)
     recovery273_archived = service.store.list_runs(RECOVERY273_ARCHIVE_ROUND)
     recovery275_archived = service.store.list_runs(RECOVERY275_ARCHIVE_ROUND)
+    recovery277_archived = service.store.list_runs(RECOVERY277_ARCHIVE_ROUND)
     rerun265_execute = {
         run.get("assignment_id") for run in runs
         if run.get("submission_id") == BASELINE and run.get("kind") == "execute"
@@ -522,8 +580,14 @@ def _audit(service: Any) -> dict[str, Any]:
         if run.get("submission_id") == BASELINE and run.get("kind") == "execute"
         and str(run.get("assignment_id") or "").endswith(RECOVERY275_SUFFIX)
     }
+    rerun277_execute = {
+        run.get("assignment_id") for run in runs
+        if run.get("submission_id") == BASELINE and run.get("kind") == "execute"
+        and str(run.get("assignment_id") or "").endswith(RECOVERY277_SUFFIX)
+    }
     active_namespace = (
-        "rerun275" if rerun275_execute
+        "rerun277" if rerun277_execute
+        else "rerun275" if rerun275_execute
         else "rerun273" if rerun273_execute
         else "rerun272" if rerun272_execute
         else "rerun269" if rerun269_execute
@@ -538,7 +602,8 @@ def _audit(service: Any) -> dict[str, Any]:
         "new_baseline_source_selected": bool(
             (service.store.get_submission(BASELINE) or {}).get("source_ref")
             == (
-                RECOVERY275_SOURCE_REF if active_namespace == "rerun275"
+                RECOVERY277_SOURCE_REF if active_namespace == "rerun277"
+                else RECOVERY275_SOURCE_REF if active_namespace == "rerun275"
                 else RECOVERY273_SOURCE_REF if active_namespace == "rerun273"
                 else RECOVERY272_SOURCE_REF if active_namespace == "rerun272"
                 else RECOVERY_SOURCE_REF if active_namespace == "rerun269"
@@ -550,14 +615,17 @@ def _audit(service: Any) -> dict[str, Any]:
         "archived_failed_recovery269_runs": len(recovery272_archived),
         "archived_failed_recovery272_runs": len(recovery273_archived),
         "archived_failed_recovery273_runs": len(recovery275_archived),
+        "archived_failed_recovery275_runs": len(recovery277_archived),
         "active_rerun_namespace": active_namespace,
         "rerun265_execute_assignments": len(rerun265_execute),
         "rerun269_execute_assignments": len(rerun269_execute),
         "rerun272_execute_assignments": len(rerun272_execute),
         "rerun273_execute_assignments": len(rerun273_execute),
         "rerun275_execute_assignments": len(rerun275_execute),
+        "rerun277_execute_assignments": len(rerun277_execute),
         "rerun_execute_assignments": len(
-            rerun275_execute if active_namespace == "rerun275"
+            rerun277_execute if active_namespace == "rerun277"
+            else rerun275_execute if active_namespace == "rerun275"
             else rerun273_execute if active_namespace == "rerun273"
             else rerun272_execute if active_namespace == "rerun272"
             else rerun269_execute if active_namespace == "rerun269"
@@ -597,6 +665,10 @@ def build_parser() -> argparse.ArgumentParser:
     recovery275.add_argument("--expected-lab-commit", required=True)
     recovery275.add_argument("--forward-schedule-file", type=Path, required=True)
     recovery275.add_argument("--dry-run", action="store_true")
+    recovery277 = commands.add_parser("recover277")
+    recovery277.add_argument("--expected-lab-commit", required=True)
+    recovery277.add_argument("--forward-schedule-file", type=Path, required=True)
+    recovery277.add_argument("--dry-run", action="store_true")
     scoring = commands.add_parser("open-scoring")
     scoring.add_argument("--stage", type=int, choices=(1, 2), required=True)
     commands.add_parser("audit")
@@ -625,6 +697,8 @@ def main(argv: list[str] | None = None) -> int:
             result = _recover273(service, args)
         elif args.command == "recover275":
             result = _recover275(service, args)
+        elif args.command == "recover277":
+            result = _recover277(service, args)
         elif args.command == "open-scoring":
             result = _open_scoring(service, args.stage)
         else:

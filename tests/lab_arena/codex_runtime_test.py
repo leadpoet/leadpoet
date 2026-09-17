@@ -468,6 +468,9 @@ def test_pinned_codex_retries_one_dropped_http_connection(monkeypatch, tmp_path)
             self.thread.start()
             return self
 
+        def wait_idle(self, _timeout_seconds):
+            return True
+
         def __exit__(self, *_args):
             self.server.shutdown()
             self.server.server_close()

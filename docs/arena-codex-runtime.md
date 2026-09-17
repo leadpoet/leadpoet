@@ -62,6 +62,21 @@ cancel a provider request. The finite timeout must be from 0 through 2,700
 seconds. The model still decides when to start finalization or write a
 checkpoint, and the capability becomes invalid when the session closes.
 
+`session` also accepts an optional zero-argument `request_guard`. The bridge
+calls it after validating an otherwise admissible Responses request and while
+holding the attempt-local request gate, immediately before worker dispatch.
+Only the exact value `True` permits dispatch. `False`, another return type, or
+an exception produces the same generic local HTTP 429 response without a
+worker frame, provider call, ledger entry or queue. With the default `None`,
+the bridge does not call a guard and retains its existing behavior.
+
+The guard is one local admission check per bridge HTTP request. It does not
+reserve quota: existing Codex, worker and credential retry paths can create
+more than one ledger identity around a model turn. A caller must obtain any
+authoritative state through a separate passive interface and own its phase and
+fallback decisions. The bridge does not infer quotas, deadlines or model
+finalization, and it does not change the request body.
+
 ## Request Path
 
 Codex posts to a private `127.0.0.1` Responses listener. The helper sends an

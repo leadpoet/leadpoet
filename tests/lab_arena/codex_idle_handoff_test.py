@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import socket
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from lab_arena import broker as br
 from lab_arena import lab_arena_codex as codex
 from lab_arena import lab_arena_checkpoint
 from lab_arena import output as arena_output
+from lab_arena import runner as arena_runner
 from lab_arena import runtime as arena_runtime
 from tests.lab_arena.codex_runtime_test import broker_socket, response
 from tests.lab_arena.test_lab_arena_broker import FakeTransport
@@ -63,6 +65,22 @@ def _abandoned_post(base_url: str, token: str) -> socket.socket:
     ).encode() + body
     client.sendall(request)
     return client
+
+
+def _post(environment, **changes):
+    document = {
+        "model": "openai/gpt-4o-mini",
+        "input": "unchanged input",
+        "stream": True,
+        "store": False,
+        **changes,
+    }
+    with httpx.Client(trust_env=False) as client:
+        return client.post(
+            environment["LAB_ARENA_CODEX_BASE_URL"] + "/responses",
+            headers={"Authorization": "Bearer " + environment["LAB_ARENA_CODEX_TOKEN"]},
+            json=document,
+        )
 
 
 def test_interrupted_request_settles_before_finalization_checkpoint(monkeypatch, tmp_path):
@@ -207,3 +225,195 @@ def test_session_environment_remains_subprocess_compatible_and_scoped(monkeypatc
     assert not transport.sent and not store.calls
     assert not Path(first_environment["CODEX_HOME"]).exists()
     assert not Path(second_environment["CODEX_HOME"]).exists()
+
+
+@pytest.mark.parametrize("guard", [False, 0, "allow", object()])
+def test_session_rejects_noncallable_guard_before_listener(monkeypatch, guard):
+    listeners = []
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", "/unused-worker.sock")
+    monkeypatch.setenv("LAB_ARENA_WEB_EGRESS_SOCKET", "/unused-egress.sock")
+    monkeypatch.setattr(
+        codex, "ThreadingHTTPServer",
+        lambda *_args, **_kwargs: listeners.append(True),
+    )
+    with pytest.raises(codex.CodexRuntimeError, match="request guard"):
+        with codex.session(model="openai/gpt-4o-mini", request_guard=guard):
+            pass
+    assert listeners == []
+
+
+@pytest.mark.parametrize("outcome", [False, None, 0, "allow", "exception", "base-exception"])
+def test_request_guard_refusal_is_generic_and_never_dispatches(monkeypatch, outcome):
+    calls = []
+
+    def guard():
+        calls.append("called")
+        if outcome == "exception":
+            raise RuntimeError("guard-secret-must-not-cross")
+        if outcome == "base-exception":
+            raise KeyboardInterrupt("guard-secret-must-not-cross")
+        return outcome
+
+    with broker_socket(monkeypatch) as (store, transport, path), codex.ResponsesBridge(
+            str(path), request_guard=guard) as bridge:
+        environment = {
+            "LAB_ARENA_CODEX_BASE_URL": bridge.base_url,
+            "LAB_ARENA_CODEX_TOKEN": bridge.token,
+        }
+        reply = _post(environment)
+        assert bridge.wait_idle(0) is True
+
+    assert reply.status_code == 429
+    assert reply.json() == {"error": {"message": "request unavailable"}}
+    assert "guard-secret-must-not-cross" not in reply.text
+    assert calls == ["called"]
+    assert not transport.sent and not store.calls
+
+
+def test_guard_runs_only_after_valid_request_while_active_and_preserves_body(monkeypatch):
+    observations = []
+
+    def guard():
+        observations.append(bridge.wait_idle(0))
+        return True
+
+    with broker_socket(monkeypatch, FakeTransport([(200, response())])) as (
+            store, transport, path), codex.ResponsesBridge(
+                str(path), request_guard=guard) as bridge:
+        with httpx.Client(trust_env=False) as client:
+            assert client.post(bridge.base_url + "/responses", json={}).status_code == 401
+            assert client.post(
+                bridge.base_url + "/responses",
+                headers={"Authorization": "Bearer " + bridge.token},
+                json={"store": True},
+            ).status_code == 400
+            assert client.post(bridge.base_url + "/other", json={}).status_code == 404
+        assert observations == []
+        reply = _post({
+            "LAB_ARENA_CODEX_BASE_URL": bridge.base_url,
+            "LAB_ARENA_CODEX_TOKEN": bridge.token,
+        })
+
+    assert reply.status_code == 200
+    assert observations == [False]
+    assert len(store.calls) == len(transport.sent) == 1
+    outbound = json.loads(transport.sent[0]["body"])
+    assert outbound["input"] == "unchanged input"
+
+
+def test_guard_is_once_per_bridge_post_across_existing_hidden_retries(monkeypatch):
+    calls = []
+    throttle = {"error": {"code": "rate_limit_exceeded", "message": "limited"}}
+    transport = FakeTransport([
+        (200, throttle, {"retry-after": "0"}),
+        (200, throttle, {"retry-after": "0"}),
+        (200, response(id="after-hidden-retries")),
+    ])
+    monkeypatch.setattr(arena_runner.secrets, "randbelow", lambda _bound: 0)
+
+    with broker_socket(monkeypatch, transport) as (store, transport, path), codex.ResponsesBridge(
+            str(path), request_guard=lambda: calls.append("called") or True) as bridge:
+        reply = _post({
+            "LAB_ARENA_CODEX_BASE_URL": bridge.base_url,
+            "LAB_ARENA_CODEX_TOKEN": bridge.token,
+        })
+
+    assert reply.status_code == 200, reply.text
+    assert calls == ["called"]
+    assert len(transport.sent) == len(store.calls) == arena_runner.RESPONSES_RATE_LIMIT_RETRIES + 1 == 3
+    assert br.CHAMPION_CREDENTIAL_PROVIDER_ATTEMPTS == 4
+    # These independent existing layers can compose. The guard is an
+    # admission check for one HTTP post, never a quota reservation.
+    assert br.CHAMPION_CREDENTIAL_PROVIDER_ATTEMPTS * (
+        arena_runner.RESPONSES_RATE_LIMIT_RETRIES + 1
+    ) == 12
+
+
+def test_request_guards_are_session_scoped_and_stale_sessions_do_not_call_them(monkeypatch):
+    first_calls = []
+    second_calls = []
+    transport = FakeTransport([(200, response(id="second-session"))])
+
+    with broker_socket(monkeypatch, transport) as (store, transport, _):
+        with codex.session(
+                model="openai/gpt-4o-mini",
+                request_guard=lambda: first_calls.append("first") or False,
+        ) as first:
+            assert _post(first).status_code == 429
+            with codex.session(
+                    model="openai/gpt-4o-mini",
+                    request_guard=lambda: second_calls.append("second") or True,
+            ) as second:
+                second_url = second["LAB_ARENA_CODEX_BASE_URL"]
+                second_token = second["LAB_ARENA_CODEX_TOKEN"]
+                assert _post(second).status_code == 200
+            assert _post(first).status_code == 429
+        first_url = first["LAB_ARENA_CODEX_BASE_URL"]
+        first_token = first["LAB_ARENA_CODEX_TOKEN"]
+
+        with httpx.Client(trust_env=False) as client:
+            for url, token in ((first_url, first_token), (second_url, second_token)):
+                with pytest.raises(httpx.ConnectError):
+                    client.post(
+                        url + "/responses",
+                        headers={"Authorization": "Bearer " + token},
+                        json={"model": "openai/gpt-4o-mini", "input": "stale"},
+                    )
+
+    assert first_calls == ["first", "first"]
+    assert second_calls == ["second"]
+    assert len(transport.sent) == len(store.calls) == 1
+
+
+@pytest.mark.skipif(
+    not os.environ.get("ARENA_TEST_CODEX_BINARY"),
+    reason="set ARENA_TEST_CODEX_BINARY to the exact Codex 0.154.0 package",
+)
+def test_native_codex_guard_refusal_exits_and_next_phase_proceeds(monkeypatch, tmp_path):
+    binary = os.environ["ARENA_TEST_CODEX_BINARY"]
+    assert subprocess.check_output([binary, "--version"], text=True).strip() == "codex-cli 0.154.0"
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        monkeypatch.setenv(name, "http://127.0.0.1:9")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+    phase = {"allow": False}
+    guard_calls = []
+
+    def guard():
+        guard_calls.append(phase["allow"])
+        return phase["allow"]
+
+    transport = FakeTransport([(200, response(output=[{
+        "id": "msg-guard", "type": "message", "role": "assistant", "status": "completed",
+        "content": [{"type": "output_text", "text": "ARENA_GUARD_PHASE_OK", "annotations": []}],
+    }]))])
+
+    with broker_socket(monkeypatch, transport) as (store, transport, _), codex.session(
+            model="openai/gpt-4o-mini", request_guard=guard) as environment:
+        def invoke(name):
+            final_path = tmp_path / (name + ".txt")
+            completed = subprocess.run(
+                [binary, "exec", "--skip-git-repo-check", "--ephemeral", "--color", "never",
+                 "-C", str(tmp_path), "-o", str(final_path), "-"],
+                input="Reply with the supplied final answer.",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=environment,
+                text=True,
+                timeout=30,
+            )
+            return completed, final_path
+
+        refused, refused_path = invoke("refused")
+        assert refused.returncode != 0
+        assert not refused_path.exists()
+        assert guard_calls == [False]
+        assert not transport.sent and not store.calls
+
+        phase["allow"] = True
+        accepted, accepted_path = invoke("accepted")
+
+    assert accepted.returncode == 0, accepted.stdout[-8000:]
+    assert accepted_path.read_text() == "ARENA_GUARD_PHASE_OK"
+    assert guard_calls == [False, True]
+    assert len(transport.sent) == len(store.calls) == 1

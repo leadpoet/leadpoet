@@ -22,7 +22,7 @@ import threading
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 CODEX_VERSION = "0.154.0"
 CODEX_BINARY = "/usr/local/bin/codex"
@@ -205,12 +205,21 @@ def response_events(document: dict[str, Any]) -> Iterator[bytes]:
 class ResponsesBridge:
     """Attempt-local listener. The only upstream is the bound worker socket."""
 
-    def __init__(self, socket_path: str, *, max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS) -> None:
+    def __init__(
+        self,
+        socket_path: str,
+        *,
+        max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+        request_guard: Callable[[], bool] | None = None,
+    ) -> None:
         if type(max_output_tokens) is not int or not 1 <= max_output_tokens <= MAX_OUTPUT_TOKENS:
             raise CodexRuntimeError("invalid Codex output token limit")
+        if request_guard is not None and not callable(request_guard):
+            raise CodexRuntimeError("invalid Codex request guard")
         self.socket_path = socket_path
         self.token = secrets.token_urlsafe(32)
         self._active = threading.BoundedSemaphore(1)
+        self._request_guard = request_guard
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -265,6 +274,14 @@ class ResponsesBridge:
                         raise ValueError("invalid output token limit")
                     body["max_output_tokens"] = requested
                     _chunk_tool_output_text(body)
+                    if owner._request_guard is not None:
+                        try:
+                            permitted = owner._request_guard()
+                        except BaseException:
+                            permitted = False
+                        if permitted is not True:
+                            self.reply(429, b'{"error":{"message":"request unavailable"}}')
+                            return
                     status, response = _dispatch(owner.socket_path, body)
                     if 200 <= status < 300 and streaming:
                         try:
@@ -311,7 +328,13 @@ class ResponsesBridge:
 
 
 @contextmanager
-def session(*, model: str, reasoning_effort: str = "medium", max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS) -> Iterator[CodexSessionEnvironment]:
+def session(
+    *,
+    model: str,
+    reasoning_effort: str = "medium",
+    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    request_guard: Callable[[], bool] | None = None,
+) -> Iterator[CodexSessionEnvironment]:
     """Yield an isolated child environment for a Codex CLI or SDK launcher.
 
     Call only inside an Arena execute sandbox with private loopback enabled.
@@ -323,7 +346,11 @@ def session(*, model: str, reasoning_effort: str = "medium", max_output_tokens: 
         raise CodexRuntimeError("Codex requires an Arena execute sandbox with private loopback")
     if not isinstance(model, str) or not model or "/" not in model or reasoning_effort not in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
         raise CodexRuntimeError("invalid Codex model or reasoning effort")
-    with tempfile.TemporaryDirectory(prefix="arena-codex-") as directory, ResponsesBridge(socket_path, max_output_tokens=max_output_tokens) as bridge:
+    if request_guard is not None and not callable(request_guard):
+        raise CodexRuntimeError("invalid Codex request guard")
+    with tempfile.TemporaryDirectory(prefix="arena-codex-") as directory, ResponsesBridge(
+            socket_path, max_output_tokens=max_output_tokens,
+            request_guard=request_guard) as bridge:
         home = Path(directory)
         config = '\n'.join([
             "model = " + json.dumps(model),

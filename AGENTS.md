@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: current September 17 baseline recovery
+
+On 2026-09-17 the user explicitly redirected the main recovery from the
+obsolete September 16 evaluation to the current `arena-2026-09-17` evaluation
+using its frozen September 16 ICP bank, the latest published Tyche source, and
+the 200-call OpenRouter execution quota. This scope authorizes the exact tested
+production migration, push, canonical gateway/normal-validator restart, and
+same-round recovery. Preserve the September 18 private intake, every frozen
+miner submission and review row, historical costs, scoring and disclosure
+policy, reward state, and concurrent work. Do not restore the obsolete round
+or add a generic recovery mechanism. Existing parent permissions remain in
+force for their agreed scope.
+
 ## Scoped production authorization: OpenRouter execution quota 200
 
 On 2026-09-17 the user explicitly authorized raising only the default Arena

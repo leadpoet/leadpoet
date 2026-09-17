@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from lab_arena import contracts, scoring
+from lab_arena import contracts, judgment_cache, scoring
 from lab_arena.store import hash_lease_token, new_lease_token
 from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS,
@@ -120,9 +120,10 @@ def _terminal_seals(connection):
     return round_doc, baseline, counts, hashes
 
 
-def _render_286(round_doc, baseline, counts, hashes, schedule):
+def _render_286(round_doc, baseline, counts, hashes, schedule, definition_hash):
     values = {
         "__FORWARD_SCHEDULE_JSON__": compact(schedule),
+        "__SCORING_DEFINITION_SHA256__": definition_hash,
         "__NEW_SOURCE_SIZE_BYTES__": str(SOURCE_286_SIZE),
         "__NEW_SOURCE_SHA256__": SOURCE_286_SHA,
         "__NEW_SOURCE_COMMIT__": SOURCE_286_COMMIT,
@@ -162,7 +163,7 @@ def _prepare(cursor, schedule):
 
 def _drive_cycle(
     service, objects, icps, *, runner_hotkey, score_suffix, retry_execute=False,
-    publish=True,
+    publish=True, model_version=0,
 ):
     saw_retry = False
     if retry_execute:
@@ -195,7 +196,8 @@ def _drive_cycle(
         assert claim["status"] == "leased" and claim["kind"] == "execute"
         saw_retry |= int(claim["attempt"]) == 2
         position = int(claim["icp_position"])
-        _proof_execution(objects, icps[position], 0, position, claim["run_id"])
+        version = model_version if position else 0
+        _proof_execution(objects, icps[position], version, position, claim["run_id"])
         assert service.store.complete_attempt(
             run_id=claim["run_id"], lease_token_hash=hash_lease_token(token),
             result={"terminal_status": "accepted"}, terminal_cause="accepted",
@@ -207,28 +209,43 @@ def _drive_cycle(
     score_assignments = []
     for stage in (1, 2):
         assert service.open_scoring(ROUND, stage)["assignments"] == 10
-        for _ in range(10):
+        stage_runs = [row for row in service.store.list_runs(ROUND, submission_id=BASELINE)
+                      if row["kind"] == "score" and row["stage"] == stage
+                      and row["assignment_id"].endswith(score_suffix)]
+        assert len(stage_runs) == 10
+        score_assignments.extend(row["assignment_id"] for row in stage_runs)
+        for _ in range(sum(row["status"] != "accepted" for row in stage_runs)):
             token = new_lease_token()
             request_id = contracts.new_request_id()
             run = service.store.claim_assignment(
                 round_id=ROUND, runner_hotkey=runner_hotkey,
-                declared_parallelism=1, slot_ceiling=20, excluded_miner_hotkeys=[],
+                declared_parallelism=1, slot_ceiling=20, excluded_miner_hotkeys=[runner_hotkey],
                 request_id=request_id,
                 request_hash=contracts.document_hash({"request_id": request_id}),
                 lease_token_hash=hash_lease_token(token),
             )
             assert run["status"] == "leased" and run["kind"] == "score"
             assert run["assignment_id"].endswith(score_suffix)
-            score_assignments.append(run["assignment_id"])
             position = int(run["icp_position"])
+            version = model_version if position else 0
             document = scoring.build_scoring_output(
-                run["scored_run_id"], [_proof_breakdown(_proof_company(icps[position], 0, position), 40)]
+                run["scored_run_id"], [_proof_breakdown(_proof_company(icps[position], version, position), 40)]
             )
             ref = "arena/score/%s.json" % run["run_id"]
             objects.put(ref, json.dumps(document).encode())
+            stored = service.store.get_run(run["run_id"])
+            evidence = judgment_cache.build_evidence_snapshot(
+                output=document, cache_scope=stored["judgment_scope_doc"],
+                source_score_run_id=run["run_id"],
+                source_scored_run_id=run["scored_run_id"],
+                source_output_ref=ref, source_runner_hotkey=runner_hotkey,
+                runner_authority_exclusions=run["runner_authority_exclusions"],
+            )
             assert service.store.complete_attempt(
                 run_id=run["run_id"], lease_token_hash=hash_lease_token(token),
                 result={"terminal_status": "accepted"}, terminal_cause="accepted", output_ref=ref,
+                judgment_evidence=evidence,
+                judgment_evidence_hash=contracts.document_hash(evidence),
             )["status"] == "accepted"
         assert service.close_scoring(ROUND, stage)["status"] == "closed"
         assert service.score_stage(ROUND, stage)["status"] == "ok"
@@ -270,15 +287,6 @@ def test_rerun286_atomic_prepare_normal_driver_and_full_transition(
             "7023eca8a6518434d5010d31481c1d156aa96abb3e5565c30e033073b088c871"
         )
         objects.put("arena/arena-2026-09-17/benchmark.json", json.dumps(bank).encode())
-        def judge(run, *, icp, companies, policy):
-            document = json.loads(objects.get(run["output_ref"]))
-            validated = scoring.validate_scoring_output_document(document)
-            return scoring.validate_breakdowns_for_item(
-                validated["breakdowns"], icp=icp, companies=companies,
-                max_scored_companies=int(policy["max_scored_companies"]),
-                integrity_policy=True, contacts_required=True,
-            )
-        monkeypatch.setattr(service, "_verified_breakdowns", judge)
         _drive_cycle(
             service, objects, bank["icps"], runner_hotkey=harness.runner_keys[0],
             score_suffix=":score",
@@ -300,22 +308,43 @@ def test_rerun286_atomic_prepare_normal_driver_and_full_transition(
         connection.commit()
 
         round_doc, baseline, counts, hashes = _terminal_seals(connection)
-        sql = _render_286(round_doc, baseline, counts, hashes, schedule)
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_get_functiondef('public.lab_arena_open_scoring_v2(text,smallint,jsonb)'::regprocedure)")
+            definition_hash = hashlib.sha256(cursor.fetchone()[0].encode()).hexdigest()
+        sql = _render_286(round_doc, baseline, counts, hashes, schedule, definition_hash)
         # A scorer body without the current cache-source integrity check cannot
         # install the namespace patch, and the failed transaction restores it.
-        with pytest.raises(Exception):
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT pg_get_functiondef("
-                    "'public.lab_arena_open_scoring_v2(text,smallint,jsonb)'::regprocedure)"
-                )
-                definition = cursor.fetchone()[0]
-                assert definition.count("lab_arena_judgment_cache_source_invalid") == 1
-                cursor.execute(definition.replace(
-                    "lab_arena_judgment_cache_source_invalid",
-                    "lab_arena_judgment_cache_source_untrusted",
-                ))
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_get_functiondef("
+                "'public.lab_arena_open_scoring_v2(text,smallint,jsonb)'::regprocedure)"
+            )
+            definition = cursor.fetchone()[0]
+            assert definition.count("lab_arena_judgment_cache_source_invalid") == 1
+            cursor.execute(definition.replace(
+                "lab_arena_judgment_cache_source_invalid",
+                "lab_arena_judgment_cache_source_untrusted",
+            ))
+            cursor.execute(
+                "SELECT pg_get_functiondef("
+                "'public.lab_arena_open_scoring_v2(text,smallint,jsonb)'::regprocedure)"
+            )
+            changed = cursor.fetchone()[0]
+            assert "lab_arena_judgment_cache_source_untrusted" in changed
+            assert "lab_arena_judgment_cache_source_invalid" not in changed
+            cursor.execute("SAVEPOINT expected_migration_failure")
+            with pytest.raises(Exception, match="current integrity scoring definition differs"):
                 cursor.execute(sql)
+            cursor.execute("ROLLBACK TO SAVEPOINT expected_migration_failure")
+        connection.rollback()
+        # The marker and assignment snippet alone cannot authorize a changed
+        # function body. Preserve both and change an unrelated body comment.
+        with connection.cursor() as cursor:
+            cursor.execute(definition.replace('BEGIN', 'BEGIN\n  -- unrelated definition drift', 1))
+            cursor.execute("SAVEPOINT expected_unrelated_drift_failure")
+            with pytest.raises(Exception, match="current integrity scoring definition differs"):
+                cursor.execute(sql)
+            cursor.execute("ROLLBACK TO SAVEPOINT expected_unrelated_drift_failure")
         connection.rollback()
         with connection.cursor() as cursor:
             cursor.execute(sql)
@@ -332,14 +361,25 @@ def test_rerun286_atomic_prepare_normal_driver_and_full_transition(
                      json.dumps(schedule)),
                 )
         connection.rollback()
-        with pytest.raises(Exception):
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "UPDATE public.lab_arena_runs SET assignment_id=assignment_id||':rerun286' "
-                    "WHERE run_id=(SELECT run_id FROM public.lab_arena_runs WHERE round_id=%s "
-                    "AND submission_id=%s LIMIT 1)", (ROUND, BASELINE),
-                )
+        with connection.cursor() as cursor:
+            cursor.execute("SET LOCAL session_replication_role=replica")
+            cursor.execute(
+                "UPDATE public.lab_arena_runs SET assignment_id=assignment_id||':rerun286' "
+                "WHERE run_id=(SELECT run_id FROM public.lab_arena_runs WHERE round_id=%s "
+                "AND submission_id=%s LIMIT 1)", (ROUND, BASELINE),
+            )
+            assert cursor.rowcount == 1
+            cursor.execute("SET LOCAL session_replication_role=origin")
+            cursor.execute(
+                "SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s "
+                "AND submission_id=%s AND assignment_id LIKE '%%:rerun286'",
+                (ROUND, BASELINE),
+            )
+            assert cursor.fetchone()[0] == 1
+            cursor.execute("SAVEPOINT expected_prepare_failure")
+            with pytest.raises(Exception, match="rerun286 replay differs"):
                 _prepare(cursor, schedule)
+            cursor.execute("ROLLBACK TO SAVEPOINT expected_prepare_failure")
         connection.rollback()
 
         with connection.cursor() as cursor:
@@ -424,7 +464,7 @@ def test_rerun286_atomic_prepare_normal_driver_and_full_transition(
         _drive_cycle(
             service, objects, bank["icps"],
             runner_hotkey=harness.runner_keys[0],
-            score_suffix=":score:rerun286", retry_execute=True, publish=False,
+            score_suffix=":score:rerun286", retry_execute=True, publish=False, model_version=1,
         )
 
         # Zero is a valid normal outcome. The rerun guard does not turn the
@@ -471,6 +511,31 @@ def test_rerun286_atomic_prepare_normal_driver_and_full_transition(
                 (ROUND, BASELINE),
             )
             assert cursor.fetchone() == (20, 20, 20)
+            cursor.execute(
+                "SELECT count(*) FROM public.lab_arena_judgment_cache cache "
+                "JOIN public.lab_arena_runs source ON source.run_id=cache.source_score_run_id "
+                "WHERE source.round_id=%s AND source.submission_id=%s "
+                "AND source.kind='score' AND source.status='accepted' "
+                "AND source.assignment_id LIKE '%%:score:rerun286' "
+                "AND source.runner_hotkey=cache.source_runner_hotkey "
+                "AND source.scored_run_id=cache.source_scored_run_id",
+                (ROUND, BASELINE),
+            )
+            assert cursor.fetchone()[0] == 19
+            # Identical position zero legitimately reuses immutable evidence from
+            # the archived baseline; changed outputs get new source judgments.
+            cursor.execute(
+                "SELECT count(*) FROM public.lab_arena_runs reused "
+                "JOIN public.lab_arena_runs source "
+                "ON source.run_id=reused.judgment_cache_source_run_id "
+                "WHERE reused.round_id=%s AND reused.submission_id=%s "
+                "AND reused.kind='score' AND reused.status='accepted' "
+                "AND reused.assignment_id LIKE '%%:score:rerun286' "
+                "AND source.round_id=%s AND source.kind='score' "
+                "AND source.status='accepted'",
+                (ROUND, BASELINE, ARCHIVE),
+            )
+            assert cursor.fetchone()[0] == 1
             cursor.execute(
                 "SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s "
                 "AND submission_id=%s AND kind='execute' AND attempt=2 "

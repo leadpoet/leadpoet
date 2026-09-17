@@ -16,6 +16,7 @@ def test_template_requires_all_live_seals_and_no_guessed_source_identity():
     sql = TEMPLATE.read_text()
     assert placeholders(sql) == {
         "__FORWARD_SCHEDULE_JSON__",
+        "__SCORING_DEFINITION_SHA256__",
         "__NEW_SOURCE_COMMIT__", "__NEW_SOURCE_SHA256__",
         "__NEW_SOURCE_SIZE_BYTES__",
         "__TERMINAL_ROUND_JSON__", "__TERMINAL_BASELINE_JSON__",

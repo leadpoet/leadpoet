@@ -1,0 +1,90 @@
+-- Update only the source approved for the still-unused September 17 recovery.
+-- Upstream Tyche added a native review-reference repair after 278 was installed.
+-- No round, run, submission, ledger, schedule, quota, or scoring row is changed.
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '120s';
+DO $sep17_reviewed_source279$
+DECLARE
+  v_before JSONB;
+  v_after JSONB;
+  v_constraint RECORD;
+  v_count INTEGER := 0;
+BEGIN
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('arena-2026-09-17-baseline-recovery278', 0)
+  );
+  LOCK TABLE public.lab_arena_sep17_baseline_recovery278_authority
+    IN ACCESS EXCLUSIVE MODE;
+  SELECT pg_catalog.to_jsonb(a) INTO STRICT v_before
+  FROM public.lab_arena_sep17_baseline_recovery278_authority a
+  WHERE round_id = 'arena-2026-09-17' FOR UPDATE;
+  IF v_before ->> 'recovery_source_commit' = '4ceae936b902433432a195f77af3f94559d80378'
+     AND v_before ->> 'recovery_source_sha256' = '6c9eeaac41386204a7817b00038e5a3f3545e1c205a2dc32de6889927ffe7245'
+     AND (v_before ->> 'recovery_source_size_bytes')::BIGINT = 563030 THEN
+    RETURN; -- An exact replay never modifies a running or completed recovery.
+  END IF;
+  -- Keep the terminal seal stable while replacing its unused source authority.
+  -- This follows recovery278's lock order. Exact replay above avoids locking
+  -- active run/ledger tables after recovery has already begun.
+  LOCK TABLE public.lab_arena_sep17_baseline_recovery278_audit
+    IN ACCESS EXCLUSIVE MODE;
+  LOCK TABLE public.lab_arena_rounds IN ACCESS EXCLUSIVE MODE;
+  LOCK TABLE public.lab_arena_submissions IN ACCESS EXCLUSIVE MODE;
+  LOCK TABLE public.lab_arena_runs IN ACCESS EXCLUSIVE MODE;
+  LOCK TABLE public.lab_arena_ledger IN ACCESS EXCLUSIVE MODE;
+  IF v_before ->> 'recovery_source_commit' IS DISTINCT FROM
+       'db54c917925cc4a9ba953eb64c604a38c2c803b1'
+     OR v_before ->> 'recovery_source_sha256' IS DISTINCT FROM
+       '8dc02f198bc4c5e5780236f079efb789aace28f5acbd54af2a512c45f6fb5ed1'
+     OR (v_before ->> 'recovery_source_size_bytes')::BIGINT IS DISTINCT FROM 562595
+     OR EXISTS (SELECT 1 FROM public.lab_arena_sep17_baseline_recovery278_audit)
+     OR public.lab_arena_sep17_recovery278_terminal_valid_v1() IS NOT TRUE THEN
+    RAISE EXCEPTION 'Sep17 source update requires the exact unused recovery278'
+      USING ERRCODE = '55000';
+  END IF;
+  -- Replace only the three one-column source checks created by migration278.
+  FOR v_constraint IN
+    SELECT c.conname
+    FROM pg_catalog.pg_constraint c
+    JOIN pg_catalog.pg_attribute a ON a.attrelid = c.conrelid
+      AND c.conkey = ARRAY[a.attnum]::SMALLINT[]
+    WHERE c.conrelid =
+      'public.lab_arena_sep17_baseline_recovery278_authority'::REGCLASS
+      AND c.contype = 'c'
+      AND a.attname IN ('recovery_source_commit', 'recovery_source_sha256',
+                       'recovery_source_size_bytes')
+  LOOP
+    EXECUTE pg_catalog.format(
+      'ALTER TABLE public.lab_arena_sep17_baseline_recovery278_authority DROP CONSTRAINT %I',
+      v_constraint.conname
+    );
+    v_count := v_count + 1;
+  END LOOP;
+  IF v_count <> 3 THEN
+    RAISE EXCEPTION 'Sep17 original source constraints differ';
+  END IF;
+  UPDATE public.lab_arena_sep17_baseline_recovery278_authority
+  SET recovery_source_commit = '4ceae936b902433432a195f77af3f94559d80378',
+      recovery_source_sha256 = '6c9eeaac41386204a7817b00038e5a3f3545e1c205a2dc32de6889927ffe7245',
+      recovery_source_size_bytes = 563030
+  WHERE round_id = 'arena-2026-09-17';
+  ALTER TABLE public.lab_arena_sep17_baseline_recovery278_authority
+    ADD CONSTRAINT recovery279_exact_reviewed_source CHECK (
+      recovery_source_commit = '4ceae936b902433432a195f77af3f94559d80378'
+      AND recovery_source_sha256 = '6c9eeaac41386204a7817b00038e5a3f3545e1c205a2dc32de6889927ffe7245'
+      AND recovery_source_size_bytes = 563030
+    );
+  SELECT pg_catalog.to_jsonb(a) INTO STRICT v_after
+  FROM public.lab_arena_sep17_baseline_recovery278_authority a
+  WHERE round_id = 'arena-2026-09-17';
+  IF (v_before - 'recovery_source_commit' - 'recovery_source_sha256'
+               - 'recovery_source_size_bytes') IS DISTINCT FROM
+     (v_after - 'recovery_source_commit' - 'recovery_source_sha256'
+              - 'recovery_source_size_bytes')
+     OR public.lab_arena_sep17_recovery278_terminal_valid_v1() IS NOT TRUE THEN
+    RAISE EXCEPTION 'Sep17 source update changed another recovery field';
+  END IF;
+END;
+$sep17_reviewed_source279$;
+COMMIT;

@@ -399,7 +399,18 @@ def _stage1_scores(service: Any, row: Mapping[str, Any]) -> Dict[str, float]:
     if row.get("status") != "published":
         return {}
     selected: Dict[tuple[str, int], Mapping[str, Any]] = {}
-    for run in service._store.list_runs(str(row["round_id"]), stage=1, kind="execute"):
+    # A published round accumulates one execute run per submission per ICP
+    # position per attempt, so this set grows with the round.  The public
+    # dashboard only needs the four fields the stage score is built from;
+    # fetching whole rows drags the full per-run scoring payloads across the
+    # wire on every public read and makes the read cost scale with how much
+    # scoring work the round happened to do.
+    for run in service._store.list_runs(
+        str(row["round_id"]),
+        stage=1,
+        kind="execute",
+        columns="submission_id,icp_position,attempt,per_icp_score",
+    ):
         if run.get("per_icp_score") is None:
             continue
         submission_id = str(run.get("submission_id") or "")

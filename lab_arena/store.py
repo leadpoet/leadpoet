@@ -1802,7 +1802,7 @@ class ArenaStore:
         rows = self._transport.select("lab_arena_runs", filters={"run_id": run_id}, limit=1)
         return rows[0] if rows else None
 
-    def list_runs(self, round_id: str, *, stage: Optional[int] = None, status: Optional[str] = None, submission_id: Optional[str] = None, kind: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_runs(self, round_id: str, *, stage: Optional[int] = None, status: Optional[str] = None, submission_id: Optional[str] = None, kind: Optional[str] = None, columns: str = "*") -> List[Dict[str, Any]]:
         filters: Dict[str, Any] = {"round_id": round_id}
         if stage is not None:
             filters["stage"] = int(stage)
@@ -1812,7 +1812,7 @@ class ArenaStore:
             filters["submission_id"] = submission_id
         if kind:
             filters["kind"] = kind
-        return self._transport.select("lab_arena_runs", filters=filters, order="run_id")
+        return self._transport.select("lab_arena_runs", filters=filters, order="run_id", columns=columns)
 
     def list_ledger(
         self,

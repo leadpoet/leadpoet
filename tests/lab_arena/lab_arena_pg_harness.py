@@ -102,6 +102,8 @@ CURRENT_SERVICE_MIGRATIONS = POSTGREST_MIGRATIONS + (
     "251-lab-arena-twenty-icp-promotion.sql",
     "254-lab-arena-baseline-cost-eligibility.sql",
     "255-lab-arena-parallel-twenty-icp-execution.sql",
+    "256-arena-2026-09-15-baseline-rerun.sql",
+    "257-arena-2026-09-16-open-round-45m-adoption.sql",
     "258-lab-arena-queued-submission-replacement.sql",
     "262-lab-arena-one-replacement-attempt.sql",
     "263-lab-arena-code-review-recovery.sql",

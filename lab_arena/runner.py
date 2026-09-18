@@ -1504,6 +1504,18 @@ class WorkerSocketServer:
         try:
             document = self._api.provider(state.lease["run_id"], state.lease_token, frame)
         except RunnerError:
+            # A gateway failure can occur before dispatch, after dispatch, or
+            # after settlement. Record only the host-observed infrastructure
+            # failure; do not claim a provider outcome or billing state.
+            with state.lock:
+                state.calls.append(
+                    {
+                        "operation_id": operation_id,
+                        "action_sequence": sequence,
+                        "outcome": "unknown",
+                        "error_code": "broker_unavailable",
+                    }
+                )
             return "worker_unavailable", None
         if not isinstance(document, Mapping) or set(document) != {
             "status",

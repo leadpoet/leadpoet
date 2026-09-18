@@ -5401,6 +5401,154 @@ def test_a_store_that_rejects_the_settlement_leaves_the_call_uncertain():
     store.settle_call = original
 
 
+@pytest.mark.parametrize(
+    ("fault", "expected_head", "expected_sends"),
+    [
+        ("none", "settlement", 1),
+        ("no_commit", "reservation", 0),
+        ("committed", "dispatch", 0),
+        ("concurrent_settlement", "settlement", 0),
+    ],
+)
+def test_dispatch_response_loss_never_redispatches_or_rewrites_durable_state(
+    fault, expected_head, expected_sends
+):
+    class DispatchResponseLossStore(FakeLedgerStore):
+        dispatch_attempts = 0
+
+        def mark_dispatched(self, **kwargs):
+            self.dispatch_attempts += 1
+            if fault == "no_commit" and self.dispatch_attempts == 1:
+                raise ArenaStoreUnavailable("synthetic response loss before commit")
+            result = super().mark_dispatched(**kwargs)
+            if fault in {"committed", "concurrent_settlement"} and self.dispatch_attempts == 1:
+                if fault == "concurrent_settlement":
+                    self.settle_call(
+                        **kwargs,
+                        actual_microusd=0,
+                        terminal_response={
+                            "status": 200,
+                            "headers": {"content-type": "application/json"},
+                            "body_b64": base64.b64encode(b'{"results":[]}').decode(),
+                            "call_succeeded": True,
+                        },
+                        lease_ttl_seconds=1200,
+                    )
+                raise ArenaStoreUnavailable("synthetic committed response loss")
+            return result
+
+    store = DispatchResponseLossStore()
+    broker, _store, transport = make_broker(
+        store=store,
+        transport=FakeTransport([(200, {"results": []})]),
+    )
+    execute = lambda: broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "dispatch loss"}},
+        action_sequence=17, timeout_ms=1000,
+    )
+    if fault == "none":
+        assert execute().status == 200
+    else:
+        with pytest.raises(ArenaStoreUnavailable):
+            execute()
+    assert len(transport.sent) == expected_sends
+    assert next(iter(store.calls.values()))["kind"] == expected_head
+
+
+def test_dispatch_response_loss_does_not_start_a_new_readback_or_provider_send():
+    class NoReadbackStore(FakeLedgerStore):
+        reserve_attempts = 0
+
+        def reserve_call(self, **kwargs):
+            self.reserve_attempts += 1
+            if self.reserve_attempts > 1:
+                raise AssertionError("unexpected dispatch-loss readback")
+            return super().reserve_call(**kwargs)
+
+        def mark_dispatched(self, **kwargs):
+            super().mark_dispatched(**kwargs)
+            raise ArenaStoreUnavailable("synthetic committed response loss")
+
+    store = NoReadbackStore()
+    broker, _store, transport = make_broker(store=store)
+    with pytest.raises(ArenaStoreUnavailable, match="committed response loss"):
+        broker.execute(
+            CONTEXT,
+            operation_id="deepline.execute",
+            parameters={"tool": "exa_search", "payload": {"query": "dispatch loss"}},
+            action_sequence=18,
+            timeout_ms=1000,
+        )
+    assert transport.sent == []
+    assert store.reserve_attempts == 1
+    assert next(iter(store.calls.values()))["kind"] == "dispatch"
+
+
+def test_duplicate_lost_idempotent_dispatch_response_does_not_rewrite_active_owner():
+    mark_barrier = threading.Barrier(2)
+    provider_started = threading.Event()
+    release_provider = threading.Event()
+
+    class DuplicateStore(FakeLedgerStore):
+        def mark_dispatched(self, **kwargs):
+            mark_barrier.wait(timeout=5)
+            result = super().mark_dispatched(**kwargs)
+            if result.get("idempotent") is True:
+                raise ArenaStoreUnavailable(
+                    "synthetic duplicate dispatch response loss"
+                )
+            return result
+
+    class BlockingTransport(FakeTransport):
+        def send(self, **kwargs):
+            provider_started.set()
+            assert release_provider.wait(timeout=5)
+            return super().send(**kwargs)
+
+    store = DuplicateStore()
+    brokers = [
+        make_broker(
+            store=store,
+            transport=BlockingTransport([(200, {"results": []})]),
+        )[0]
+        for _ in range(2)
+    ]
+    results, failures = [], []
+
+    def execute(candidate):
+        try:
+            results.append(candidate.execute(
+                CONTEXT,
+                operation_id="deepline.execute",
+                parameters={"tool": "exa_search", "payload": {"query": "duplicate"}},
+                action_sequence=19,
+                timeout_ms=1000,
+            ))
+        except Exception as exc:
+            failures.append(exc)
+
+    threads = [threading.Thread(target=execute, args=(candidate,)) for candidate in brokers]
+    for thread in threads:
+        thread.start()
+    assert provider_started.wait(timeout=5)
+    for _ in range(100):
+        if failures:
+            break
+        time.sleep(0.01)
+    assert len(failures) == 1
+    assert isinstance(failures[0], ArenaStoreUnavailable)
+    assert next(iter(store.calls.values()))["kind"] == "dispatch"
+    assert "uncertain" not in store.log
+    release_provider.set()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(results) == 1 and results[0].status == 200
+    assert next(iter(store.calls.values()))["kind"] == "settlement"
+
+
 def test_store_settlement_retry_reuses_paid_reply_and_releases_the_budget():
     envelope = {
         "job_id": "settle-retry-job", "status": "completed",

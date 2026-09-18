@@ -61,9 +61,11 @@ UNPROVEN. Rebrand VERIFIED needs an
 explicit first-party statement that the old and new names are the same entity,
 and must identify both names and both domains. A redirect or shared LinkedIn
 slug alone is insufficient. Headcount must be current company-wide headcount;
-department, office, job, associated-member count, stale, estimated, or mutually
-conflicting evidence is UNPROVEN. Use only a canonical LinkedIn band or a
-strict current integer. Do not resolve conflicts by preference or guesswork.
+department, office, job, associated-member count, or stale evidence is
+UNPROVEN. An exact entity-bound LinkedIn Company size/employeeCountRange is
+primary over a third-party exact estimate. Other conflicts are UNPROVEN. Use
+only a canonical LinkedIn band or a strict current integer. Do not resolve
+conflicts by preference or guesswork.
 
 Use submit_findings once. Return one finding for every requested target and no
 other target. VERIFIED means the requested claim is proven. CONTRADICTED means

@@ -92,6 +92,7 @@ from qualification.scoring.company_fit_decision import (
 from qualification.scoring.company_evidence_investigator import (
     investigate_company_evidence,
 )
+from qualification.scoring.evaluation_clock import evaluation_date
 from qualification.scoring.arena_integrity import (
     bounded_criterion_evidence,
     fit_evidence_url_hints,
@@ -1745,6 +1746,45 @@ def _structured_employee_size_decision(
     )
 
 
+def _structured_linkedin_resolves_exact_estimate_conflict(
+    verdict: Mapping[str, Any],
+    structured_evidence: Optional[Mapping[str, Any]],
+    verified_homepage_identity: Optional[Mapping[str, str]],
+) -> bool:
+    """Prefer only an exact-identity LinkedIn range over a third-party integer."""
+
+    if not isinstance(structured_evidence, Mapping):
+        return False
+    observed = verdict.get("observed_employee_count")
+    web_evidence = _dimension_web_evidence(verdict, "employee_size")
+    anchor = (
+        verified_homepage_identity
+        if isinstance(verified_homepage_identity, Mapping)
+        else {}
+    )
+    anchor_domain = str(anchor.get("registrable_dns_domain") or "").strip()
+    anchor_slug = str(anchor.get("linkedin_company_slug") or "").strip().casefold()
+    evidence_domain = _registrable_domain(
+        str(structured_evidence.get("website") or "")
+    )
+    evidence_slug = linkedin_company_page_slug(structured_evidence.get("url"))
+    return bool(
+        isinstance(observed, int)
+        and not isinstance(observed, bool)
+        and observed >= 0
+        and web_evidence["url"]
+        and web_evidence["quote"]
+        and not is_linkedin_evidence_url(web_evidence["url"])
+        and structured_evidence.get("provider") == STRUCTURED_PROFILE_PROVIDER
+        and structured_evidence.get("source_field") == STRUCTURED_PROFILE_SOURCE_FIELD
+        and structured_evidence.get("employee_count") in LINKEDIN_EMPLOYEE_BUCKETS
+        and anchor_domain
+        and anchor_slug
+        and evidence_domain == anchor_domain
+        and evidence_slug == anchor_slug
+    )
+
+
 async def _refresh_linkedin_employee_size_observation(
     verdict: Mapping[str, Any],
     company: CompanyOutput,
@@ -2063,10 +2103,19 @@ def _reverify_decision(
         structured_employee_size_evidence,
         icp,
     )
+    structured_linkedin_primary = bool(
+        employee_size_conflict
+        and structured_employee_size_decision != COMPANY_FIT_UNAVAILABLE
+        and _structured_linkedin_resolves_exact_estimate_conflict(
+            verdict,
+            structured_employee_size_evidence,
+            verified_homepage_identity,
+        )
+    )
     dimensions = {
         "employee_size": (
             COMPANY_FIT_UNAVAILABLE
-            if employee_size_conflict
+            if employee_size_conflict and not structured_linkedin_primary
             else (
                 structured_employee_size_decision
                 if structured_employee_size_decision != COMPANY_FIT_UNAVAILABLE
@@ -2156,19 +2205,50 @@ def _reverify_decision(
         **(
             {
                 "employee_size_conflict_receipt": {
-                    "status": "UNPROVEN",
-                    "reason_code": "conflicting_current_headcount",
-                    "resolution": "unresolved",
-                    "web_evidence": _dimension_web_evidence(
-                        verdict, "employee_size"
+                    "status": (
+                        "VERIFIED"
+                        if structured_employee_size_decision == COMPANY_FIT_MATCH
+                        else "CONTRADICTED"
                     ),
-                    "structured_evidence": dict(
+                    "reason_code": (
+                        "exact_entity_bound_linkedin_employee_count_range_primary"
+                    ),
+                    "resolution": (
+                        "structured_linkedin_employee_count_range_primary"
+                    ),
+                    "primary_method": (
+                        "harvestapi_exact_company_employeeCountRange"
+                    ),
+                    "observed_current_date": evaluation_date().isoformat(),
+                    "primary_source_url": str(
+                        (structured_employee_size_evidence or {}).get("url") or ""
+                    ),
+                    "primary_evidence": dict(
                         structured_employee_size_evidence or {}
+                    ),
+                    "displaced_third_party_evidence": _dimension_web_evidence(
+                        verdict, "employee_size"
                     ),
                 }
             }
-            if employee_size_conflict
-            else {}
+            if structured_linkedin_primary
+            else (
+                {
+                    "employee_size_conflict_receipt": {
+                        "status": "UNPROVEN",
+                        "reason_code": "conflicting_current_headcount",
+                        "resolution": "unresolved",
+                        "web_evidence": _dimension_web_evidence(
+                            verdict, "employee_size"
+                        ),
+                        "structured_evidence": dict(
+                            structured_employee_size_evidence or {}
+                        ),
+                    }
+                }
+                if employee_size_conflict
+                else {}
+            )
         ),
     }
     raw_reason = verdict.get("reason")
@@ -2485,7 +2565,16 @@ def _targeted_company_investigation_dimensions(
         and identity.get("submitted_domain") != identity.get("observed_domain")
     ):
         targets.append("rebrand")
-    if employee_size_conflict or dimensions.get("employee_size") == COMPANY_FIT_MISMATCH:
+    conflict_receipt = details.get("employee_size_conflict_receipt")
+    linkedin_primary = bool(
+        isinstance(conflict_receipt, Mapping)
+        and conflict_receipt.get("resolution")
+        == "structured_linkedin_employee_count_range_primary"
+    )
+    if not linkedin_primary and (
+        employee_size_conflict
+        or dimensions.get("employee_size") == COMPANY_FIT_MISMATCH
+    ):
         targets.append("headcount")
     return tuple(targets)
 

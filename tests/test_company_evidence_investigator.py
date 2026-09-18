@@ -29,6 +29,7 @@ from qualification.scoring.lead_scorer import (
     _refresh_linkedin_employee_size_observation,
     _reverify_decision,
     _stage_quote_supports_observation,
+    _targeted_company_investigation_dimensions,
 )
 
 
@@ -363,6 +364,136 @@ def test_conflicting_current_headcount_is_unproven():
     }
 
 
+def test_exact_entity_linkedin_range_is_primary_over_third_party_exact_estimate():
+    verdict = _complete_verdict(
+        observed_employee_count=7,
+        employee_size_matches=False,
+        employee_size_evidence_url="https://pitchbook.example/acme",
+        employee_size_evidence_quote="Acme has 7 employees.",
+    )
+    structured = {
+        "employee_count": "11-50",
+        "provider": "harvestapi_get_company",
+        "source_field": "employeeCountRange",
+        "url": "https://www.linkedin.com/company/acme",
+        "website": "https://acme.example/",
+    }
+    anchor = {
+        "normalized_name": "Acme",
+        "registrable_dns_domain": "acme.example",
+        "linkedin_company_slug": "acme",
+    }
+
+    result = _reverify_decision(
+        verdict,
+        "",
+        "",
+        icp=_icp(),
+        company=_company(),
+        verified_homepage_identity=anchor,
+        structured_employee_size_evidence=structured,
+        employee_size_conflict=True,
+        company_quality=True,
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert result.details["dimension_decisions"]["employee_size"] == COMPANY_FIT_MATCH
+    receipt = result.details["employee_size_conflict_receipt"]
+    assert receipt["status"] == "VERIFIED"
+    assert receipt["resolution"] == (
+        "structured_linkedin_employee_count_range_primary"
+    )
+    assert receipt["primary_method"] == (
+        "harvestapi_exact_company_employeeCountRange"
+    )
+    assert receipt["observed_current_date"]
+    assert receipt["primary_source_url"] == (
+        "https://www.linkedin.com/company/acme"
+    )
+    assert _targeted_company_investigation_dimensions(
+        result,
+        icp_stage="",
+        employee_size_conflict=True,
+    ) == ()
+
+    disjoint = _reverify_decision(
+        verdict,
+        "",
+        "",
+        icp=_icp(employee_count="51-200"),
+        company=_company(),
+        verified_homepage_identity=anchor,
+        structured_employee_size_evidence=structured,
+        employee_size_conflict=True,
+        company_quality=True,
+    )
+    assert disjoint.decision == COMPANY_FIT_MISMATCH
+    assert disjoint.details["employee_size_conflict_receipt"]["status"] == (
+        "CONTRADICTED"
+    )
+    assert _targeted_company_investigation_dimensions(
+        disjoint,
+        icp_stage="",
+        employee_size_conflict=True,
+    ) == ()
+
+
+def test_linkedin_primary_rejects_wrong_identity_member_count_and_linkedin_conflict():
+    verdict = _complete_verdict(
+        observed_employee_count=7,
+        employee_size_matches=False,
+        employee_size_evidence_url="https://pitchbook.example/acme",
+        employee_size_evidence_quote="Acme has 7 employees.",
+    )
+    structured = {
+        "employee_count": "11-50",
+        "provider": "harvestapi_get_company",
+        "source_field": "employeeCountRange",
+        "url": "https://www.linkedin.com/company/acme",
+        "website": "https://acme.example/",
+    }
+    anchor = {
+        "normalized_name": "Acme",
+        "registrable_dns_domain": "acme.example",
+        "linkedin_company_slug": "acme",
+    }
+
+    for rejected_evidence, rejected_verdict in (
+        (
+            dict(structured, url="https://www.linkedin.com/company/unrelated"),
+            verdict,
+        ),
+        (
+            dict(structured, source_field="employeeCount"),
+            verdict,
+        ),
+        (
+            structured,
+            dict(
+                verdict,
+                employee_size_evidence_url=(
+                    "https://www.linkedin.com/company/acme"
+                ),
+            ),
+        ),
+    ):
+        result = _reverify_decision(
+            rejected_verdict,
+            "",
+            "",
+            icp=_icp(),
+            company=_company(),
+            verified_homepage_identity=anchor,
+            structured_employee_size_evidence=rejected_evidence,
+            employee_size_conflict=True,
+            company_quality=True,
+        )
+        assert result.decision == COMPANY_FIT_UNAVAILABLE
+        assert result.details["employee_size_conflict_receipt"]["resolution"] == (
+            "unresolved"
+        )
+
+
 def test_arena_conflict_check_collects_structured_size_without_replacing_direct_proof(
     monkeypatch,
 ):
@@ -438,6 +569,39 @@ def test_structured_conflict_check_does_not_expand_calls_for_matching_headcount(
         },
         invocation_cache=cache,
         collect_structured_conflict=True,
+    ))
+
+    assert refreshed == verdict
+    assert "structured_attempted" not in cache
+
+
+def test_non_arena_mismatch_does_not_add_structured_fetch(monkeypatch):
+    async def unexpected_fetch(*_args, **_kwargs):
+        raise AssertionError("ordinary scoring must not add a structured provider call")
+
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_structured_linkedin_company_size",
+        unexpected_fetch,
+    )
+    verdict = _complete_verdict(
+        observed_employee_count=7,
+        employee_size_matches=False,
+        employee_size_evidence_url="https://pitchbook.example/acme",
+        employee_size_evidence_quote="Acme has 7 employees.",
+    )
+    cache = {}
+    refreshed = asyncio.run(_refresh_linkedin_employee_size_observation(
+        verdict,
+        _company(),
+        _icp(),
+        verified_homepage_identity={
+            "normalized_name": "Acme",
+            "registrable_dns_domain": "acme.example",
+            "linkedin_company_slug": "acme",
+        },
+        invocation_cache=cache,
+        collect_structured_conflict=False,
     ))
 
     assert refreshed == verdict

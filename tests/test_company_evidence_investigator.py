@@ -156,6 +156,53 @@ def test_decisive_quote_must_occur_in_fetched_page():
     assert locator_snippet_only["stage"]["status"] == "UNPROVEN"
 
 
+def test_submit_schema_advertises_only_requested_targets_and_count():
+    tools = investigator._tools(("headcount",))
+    submit = next(tool for tool in tools if tool["name"] == "submit_findings")
+    findings = submit["parameters"]["properties"]["findings"]
+    assert findings["minItems"] == 1
+    assert findings["maxItems"] == 1
+    assert findings["items"]["properties"]["target"]["enum"] == ["headcount"]
+
+    extra_target = {
+        "findings": [
+            _finding(
+                "headcount",
+                status="UNPROVEN",
+                observed_value=None,
+                evidence_url="",
+                evidence_quote="",
+            ),
+            _finding(
+                "stage",
+                status="UNPROVEN",
+                observed_value=None,
+                evidence_url="",
+                evidence_quote="",
+            ),
+        ]
+    }
+    assert _validated_findings(
+        extra_target,
+        targets=("headcount",),
+        fetched_pages={},
+        first_party_domains={"acme.example"},
+        identity_names={"acme"},
+    ) is None
+
+    two_target_tools = investigator._tools(("rebrand", "stage"))
+    two_target_submit = next(
+        tool for tool in two_target_tools if tool["name"] == "submit_findings"
+    )
+    two_target_findings = two_target_submit["parameters"]["properties"]["findings"]
+    assert two_target_findings["minItems"] == 2
+    assert two_target_findings["maxItems"] == 2
+    assert two_target_findings["items"]["properties"]["target"]["enum"] == [
+        "rebrand",
+        "stage",
+    ]
+
+
 def test_rebrand_needs_first_party_explicit_old_and_new_name_continuity():
     url = "https://help.wayground.com/rebrand"
     explicit = _finding(

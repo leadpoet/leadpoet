@@ -73,7 +73,8 @@ a different current value is proven. UNPROVEN means the evidence is absent,
 ambiguous, stale, scoped incorrectly, or conflicting."""
 
 
-def _tools() -> list[dict[str, Any]]:
+def _tools(targets: Sequence[str]) -> list[dict[str, Any]]:
+    requested_targets = sorted(dict.fromkeys(targets))
     return [
         {
             "type": "function",
@@ -114,13 +115,16 @@ def _tools() -> list[dict[str, Any]]:
                 "properties": {
                     "findings": {
                         "type": "array",
-                        "minItems": 1,
-                        "maxItems": 3,
+                        "minItems": len(requested_targets),
+                        "maxItems": len(requested_targets),
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
                             "properties": {
-                                "target": {"type": "string", "enum": sorted(TARGETS)},
+                                "target": {
+                                    "type": "string",
+                                    "enum": requested_targets,
+                                },
                                 "status": {"type": "string", "enum": sorted(STATUSES)},
                                 "observed_value": {"type": ["string", "integer", "null"]},
                                 "evidence_url": {"type": "string"},
@@ -595,7 +599,7 @@ async def investigate_company_evidence(
                                     if key != "type"
                                 },
                             }
-                            for tool in _tools()
+                            for tool in _tools(requested_targets)
                         ],
                         "tool_choice": (
                             {

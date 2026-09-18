@@ -8,7 +8,9 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from lab_arena import contracts
+from lab_arena.broker import BrokerError, RunContext
 from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport, hash_lease_token
+from lab_arena.submission_runtime import SubmissionProviderKeys
 from tests.lab_arena.lab_arena_pg_harness import (
     LAB_ARENA_SCORE_PAYER_MIGRATION,
     POSTGREST_MIGRATIONS,
@@ -269,14 +271,109 @@ def _account_call(
     }
 
 
-def test_promoted_champion_pays_for_scoring_without_a_run_fallback_snapshot(
+def test_provider_payer_matrix_and_revoked_champion_credential_fail_closed(
     score_payer_database,
 ):
+    organizer_store = _store(score_payer_database)
+    organizer_round_id = "arena-2026-09-09-orgpayer"
+    organizer_config = round_config(
+        organizer_round_id, [hotkey("organizer-payer-runner")]
+    )
+    assert organizer_store.create_round(
+        organizer_round_id, organizer_config
+    )["status"] == "created"
+    assert organizer_store.freeze_champion_funding(organizer_round_id) == {
+        "status": "frozen"
+    }
+    organizer_submission_id = "baseline-" + organizer_round_id.removeprefix(
+        "arena-"
+    )
+    organizer_hotkey = organizer_config["baseline_hotkey"]
+    assert organizer_store.register_submission(
+        organizer_round_id,
+        organizer_submission_id,
+        organizer_hotkey,
+        source_submission_doc(
+            organizer_round_id, organizer_submission_id, is_king=True
+        ),
+    )["status"] == "registered"
+    assert organizer_store.update_submission(
+        organizer_round_id, organizer_submission_id, "uploading", "accepted"
+    )["status"] == "ok"
+    assert organizer_store.update_submission(
+        organizer_round_id,
+        organizer_submission_id,
+        "accepted",
+        "frozen",
+        {"is_king": True},
+    )["status"] == "ok"
+
     store, connect, round_id, champion, _runner, execution, _token = (
         _seed_champion_run(score_payer_database, "scorepayer")
     )
+    champion_round_id = store.get_submission(champion["submission_id"])[
+        "round_id"
+    ]
     score_run_id = round_id + ":score-payer:1"
     with connect() as connection, connection.cursor() as cursor:
+        organizer_execute_run_id = organizer_round_id + ":execute-payer:1"
+        organizer_score_run_id = organizer_round_id + ":score-payer:1"
+        cursor.execute(
+            "INSERT INTO public.lab_arena_runs "
+            "(run_id, assignment_id, round_id, submission_id, miner_hotkey, "
+            "stage, icp_position, attempt, status, stage_generation, kind) "
+            "VALUES (%s,%s,%s,%s,%s,1,0,1,'pending',1,'execute')",
+            (
+                organizer_execute_run_id,
+                organizer_round_id + ":execute-payer",
+                organizer_round_id,
+                organizer_submission_id,
+                organizer_hotkey,
+            ),
+        )
+        cursor.execute(
+            "INSERT INTO public.lab_arena_runs "
+            "(run_id, assignment_id, round_id, submission_id, miner_hotkey, "
+            "stage, icp_position, attempt, status, stage_generation, kind, "
+            "scored_run_id) VALUES (%s,%s,%s,%s,%s,1,0,1,'pending',1,'score',%s)",
+            (
+                organizer_score_run_id,
+                organizer_round_id + ":score-payer",
+                organizer_round_id,
+                organizer_submission_id,
+                organizer_hotkey,
+                organizer_execute_run_id,
+            ),
+        )
+        miner_execute_run_id = champion_round_id + ":miner-execute-payer:1"
+        miner_score_run_id = champion_round_id + ":miner-score-payer:1"
+        cursor.execute(
+            "INSERT INTO public.lab_arena_runs "
+            "(run_id, assignment_id, round_id, submission_id, miner_hotkey, "
+            "stage, icp_position, attempt, status, stage_generation, kind) "
+            "VALUES (%s,%s,%s,%s,%s,1,0,1,'pending',1,'execute')",
+            (
+                miner_execute_run_id,
+                champion_round_id + ":miner-execute-payer",
+                champion_round_id,
+                champion["submission_id"],
+                champion["miner_hotkey"],
+            ),
+        )
+        cursor.execute(
+            "INSERT INTO public.lab_arena_runs "
+            "(run_id, assignment_id, round_id, submission_id, miner_hotkey, "
+            "stage, icp_position, attempt, status, stage_generation, kind, "
+            "scored_run_id) VALUES (%s,%s,%s,%s,%s,1,0,1,'pending',1,'score',%s)",
+            (
+                miner_score_run_id,
+                champion_round_id + ":miner-score-payer",
+                champion_round_id,
+                champion["submission_id"],
+                champion["miner_hotkey"],
+                miner_execute_run_id,
+            ),
+        )
         cursor.execute(
             "INSERT INTO public.lab_arena_runs "
             "(run_id, assignment_id, round_id, submission_id, miner_hotkey, "
@@ -292,15 +389,84 @@ def test_promoted_champion_pays_for_scoring_without_a_run_fallback_snapshot(
             ),
         )
 
+    for provider in contracts.PROVIDERS:
+        for run_id in (organizer_execute_run_id, organizer_score_run_id):
+            assert organizer_store.provider_funding(run_id, provider) == {
+                "status": "available",
+                "funding_source": "host",
+                "champion_funding": False,
+                "credential_submission_id": None,
+                "credential_miner_hotkey": None,
+                "restart_required": False,
+            }
+        for run_id in (miner_execute_run_id, miner_score_run_id):
+            assert store.provider_funding(run_id, provider) == {
+                "status": "available",
+                "funding_source": "miner_key",
+                "champion_funding": False,
+                "credential_submission_id": champion["submission_id"],
+                "credential_miner_hotkey": champion["miner_hotkey"],
+                "restart_required": False,
+            }
+        promoted_execution_funding = store.provider_funding(
+            execution["run_id"], provider
+        )
+        assert promoted_execution_funding["funding_source"] == "miner_key"
+        assert promoted_execution_funding["credential_submission_id"] == champion[
+            "submission_id"
+        ]
+        assert promoted_execution_funding["credential_miner_hotkey"] == champion[
+            "miner_hotkey"
+        ]
     assert store.get_run(score_run_id)["champion_funding_sources"] is None
-    assert store.provider_funding(score_run_id, "openrouter") == {
-        "status": "available",
-        "funding_source": "miner_key",
-        "champion_funding": True,
-        "credential_submission_id": champion["submission_id"],
-        "credential_miner_hotkey": champion["miner_hotkey"],
-        "restart_required": False,
-    }
+    for provider in contracts.PROVIDERS:
+        assert store.provider_funding(score_run_id, provider) == {
+            "status": "available",
+            "funding_source": "miner_key",
+            "champion_funding": True,
+            "credential_submission_id": champion["submission_id"],
+            "credential_miner_hotkey": champion["miner_hotkey"],
+            "restart_required": False,
+        }
+
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "ALTER TABLE public.lab_arena_submission_credentials "
+            "DISABLE TRIGGER USER"
+        )
+        cursor.execute(
+            "DELETE FROM public.lab_arena_submission_credentials "
+            "WHERE submission_id=%s AND miner_hotkey=%s AND provider='openrouter'",
+            (champion["submission_id"], champion["miner_hotkey"]),
+        )
+        assert cursor.rowcount == 1
+        cursor.execute(
+            "ALTER TABLE public.lab_arena_submission_credentials "
+            "ENABLE TRIGGER USER"
+        )
+    assert store.provider_funding(score_run_id, "openrouter")[
+        "funding_source"
+    ] == "miner_key"
+    keys = SubmissionProviderKeys(
+        store=store,
+        credentials=object(),
+        organizer_keys={"openrouter": "organizer-test-key"},
+    )
+    with pytest.raises(BrokerError, match="miner_credentials_unavailable"):
+        keys.credential_for(
+            RunContext(
+                run_id=score_run_id,
+                assignment_id=round_id + ":score-payer",
+                icp_position=0,
+                lease_token_hash=sha("score-payer-lease"),
+                miner_hotkey=execution["miner_hotkey"],
+                submission_id=execution["submission_id"],
+                stage=1,
+                kind="score",
+                round_id=round_id,
+            ),
+            "openrouter",
+        )
 
 
 def test_exact_owner_snapshot_has_no_secret_and_is_immutable(database):

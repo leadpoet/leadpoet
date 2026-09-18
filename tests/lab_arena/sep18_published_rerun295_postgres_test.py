@@ -14,6 +14,7 @@ from lab_arena import (
     contracts,
     intent_details_policy,
     judgment_cache,
+    integrity,
     output,
     scoring,
     verify,
@@ -238,7 +239,7 @@ def _future_schedule(old):
     }
 
 
-def _seed_published_terminal(connection, harness: Harness):
+def _seed_published_terminal(connection, harness: Harness, *, canonical_miner_ids=False):
     config = _configuration(ROUND)
     config.update(
         schedule={**config["schedule"], "benchmark_deadline": "2026-09-18T18:30:00Z"},
@@ -356,12 +357,27 @@ def _seed_published_terminal(connection, harness: Harness):
             )
             for position in range(20):
                 stage = 1 if position < 10 else 2
-                assignment = f"{ROUND}:{participant['submission_id']}:{stage}:{position}:terminal"
+                canonical = canonical_miner_ids and not participant["is_king"]
+                assignment = f"{ROUND}:{participant['submission_id']}:{stage}:{position}" + ("" if canonical else ":terminal")
                 run_id = assignment + ":1"
+                score_assignment = assignment + (":score" if canonical else ":score:terminal")
                 terminal_score, terminal_qualification = _proof_execution(
-                    harness.objects, daily_icps()[position], index, position, run_id
+                    harness.objects, daily_icps()[position], index, position, run_id,
+                    score_assignment + ":1" if canonical else None,
                 )
-                score_assignment = assignment + ":score:terminal"
+                scope = None
+                if canonical:
+                    companies = json.loads(harness.objects.get(f"arena/output/{run_id}.json"))["companies"]
+                    scope = judgment_cache.build_cache_scope(
+                        scoring_input=scoring.build_scoring_input(
+                            scored_run_id=run_id, icp=integrity.agent_visible_icp(
+                                daily_icps()[position], contacts_required=True),
+                            companies=companies, policy=config["scorer_policy"],
+                            evaluation_date="2026-09-18", contact_source_evidence={}),
+                        round_id=ROUND, network_name=config["network_name"], netuid=config["netuid"],
+                        scorer_image_digest=config["scorer_image_digest"],
+                        scorer_image_reference=config["scorer_image_reference"],
+                        integrity_policy=config["integrity_policy"])
                 cursor.execute(
                     "INSERT INTO public.lab_arena_runs("
                     "run_id,assignment_id,round_id,submission_id,miner_hotkey,stage,"
@@ -372,22 +388,52 @@ def _seed_published_terminal(connection, harness: Harness):
                         run_id, assignment, ROUND, participant["submission_id"],
                         participant["miner_hotkey"], stage, position,
                         f"arena/output/{run_id}.json",
-                        terminal_score if participant["is_king"] else None,
-                        json.dumps(terminal_qualification) if participant["is_king"] else None,
+                        terminal_score if participant["is_king"] or canonical else None,
+                        json.dumps(terminal_qualification) if participant["is_king"] or canonical else None,
                     ),
                 )
                 cursor.execute(
                     "INSERT INTO public.lab_arena_runs("
                     "run_id,assignment_id,round_id,submission_id,miner_hotkey,stage,"
                     "icp_position,attempt,kind,status,stage_generation,terminal_cause,"
-                    "output_ref,scored_run_id) VALUES ("
-                    "%s,%s,%s,%s,%s,%s,%s,1,'score','accepted',8,'accepted',%s,%s)",
+                    "output_ref,scored_run_id,judgment_cache_key,judgment_input_hash,judgment_scope_doc,"
+                    "runner_hotkey,judgment_cache_source_run_id) VALUES ("
+                    "%s,%s,%s,%s,%s,%s,%s,1,'score','accepted',8,'accepted',%s,%s,%s,%s,%s::jsonb,%s,%s)",
                     (
                         score_assignment + ":1", score_assignment, ROUND,
                         participant["submission_id"], participant["miner_hotkey"],
-                        stage, position, f"arena/terminal/{run_id}-score.json", run_id,
+                        stage, position, f"arena/score/{score_assignment}:1.json" if canonical else f"arena/terminal/{run_id}-score.json", run_id,
+                        scope["cache_key"] if scope else None,
+                        scope["scoring_input_hash"] if scope else None,
+                        json.dumps(scope) if scope else None,
+                        harness.runner_keys[0] if scope else None,
+                        score_assignment + ":1" if scope else None,
                     ),
                 )
+                if scope:
+                    score_id = score_assignment + ":1"
+                    score_ref = f"arena/score/{score_id}.json"
+                    evidence = judgment_cache.build_evidence_snapshot(
+                        output=json.loads(harness.objects.get(score_ref)), cache_scope=scope,
+                        source_score_run_id=score_id, source_scored_run_id=run_id,
+                        source_output_ref=score_ref, source_runner_hotkey=harness.runner_keys[0],
+                        runner_authority_exclusions=[harness.runner_keys[0]])
+                    cursor.execute(
+                        "INSERT INTO public.lab_arena_judgment_cache(cache_key,scope_doc,scoring_input_hash,"
+                        "evidence_hash,evidence_doc,source_score_run_id,source_scored_run_id,source_runner_hotkey) "
+                        "VALUES (%s,%s::jsonb,%s,%s,%s::jsonb,%s,%s,%s)",
+                        (scope["cache_key"], json.dumps(scope), scope["scoring_input_hash"],
+                         contracts.document_hash(evidence), json.dumps(evidence), score_id, run_id, harness.runner_keys[0]))
+        if canonical_miner_ids:
+            participant = participants[1]
+            cursor.execute(
+                "INSERT INTO public.lab_arena_ledger(entry_kind,miner_hotkey,round_id,submission_id,"
+                "run_id,stage,call_identity,provider,operation_id,funding_source,amount_microusd,entry_doc,terminal_response) "
+                "SELECT 'settlement',%s,%s,%s,%s,1,'sha256:'||encode(extensions.digest('retained-miner-'||n::text,'sha256'),'hex'),"
+                "'openrouter','openrouter.responses','host',1,'{}'::jsonb,'{\"call_succeeded\":true}'::jsonb "
+                "FROM generate_series(1,2898) n",
+                (participant["miner_hotkey"], ROUND, participant["submission_id"],
+                 f"{ROUND}:{participant['submission_id']}:1:0:1"))
         # This direct insert represents sealed historical terminal evidence; it
         # is not the active-cycle cost-path proof. IDs, amounts, and payloads
         # must survive the archive; routing IDs are the only allowed rewrite.

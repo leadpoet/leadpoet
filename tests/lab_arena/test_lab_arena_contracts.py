@@ -3,6 +3,7 @@ hashed documents, and the fixed public constants (labarena.md sections 1, 5, 9.1
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -325,6 +326,35 @@ def test_run_result_reward_basis_and_scoring_plan_contracts():
         "started_at": "2026-09-02T01:00:00Z", "finished_at": "2026-09-02T01:01:00Z", "terminal_status": "accepted",
     }
     assert c.validate_run_result(run_result)["terminal_status"] == "accepted"
+    transition = {
+        "schema_version": c.CHECKPOINT_TRANSITION_SCHEMA_VERSION,
+        "event": "checkpoint_transition",
+        "reason": "changed_accepted",
+        "checkpoint_count": 1,
+        "final_count": 1,
+        "rejected_count": 0,
+        "unresolved_count": 0,
+        "changed_count": 1,
+        "missing_count": 0,
+        "checkpoint_sha256": "sha256:" + "1" * 64,
+        "final_sha256": "sha256:" + "2" * 64,
+    }
+    old_round_trip = json.loads(json.dumps(run_result))
+    new_round_trip = json.loads(
+        json.dumps(dict(run_result, checkpoint_transition=transition))
+    )
+    assert "checkpoint_transition" not in c.validate_run_result(old_round_trip)
+    assert c.validate_run_result(new_round_trip)["checkpoint_transition"] == transition
+    for unsafe_transition in (
+        {**transition, "lead_url": "https://private.example"},
+        {**transition, "changed_count": True},
+        {**transition, "reason": "unchanged"},
+        {**transition, "final_sha256": transition["checkpoint_sha256"]},
+    ):
+        with pytest.raises(c.ArenaContractError):
+            c.validate_run_result(
+                dict(run_result, checkpoint_transition=unsafe_transition)
+            )
     failed_result = dict(
         run_result,
         terminal_status="judge_error",

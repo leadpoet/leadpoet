@@ -124,7 +124,12 @@ def execution_diagnostic_line(document, *, ending=b"\n"):
         document, sort_keys=True, separators=(",", ":")
     ).encode("ascii")
     line = runner._EXECUTION_DIAGNOSTIC_PREFIX + payload + ending
-    assert len(line) <= runner._EXECUTION_DIAGNOSTIC_MAX_BYTES
+    limit = (
+        runner._CHECKPOINT_TRANSITION_DIAGNOSTIC_MAX_BYTES
+        if document.get("event") == "checkpoint_transition"
+        else runner._EXECUTION_DIAGNOSTIC_MAX_BYTES
+    )
+    assert len(line) <= limit
     return line
 
 
@@ -136,6 +141,36 @@ def supervisor_diagnostic(
         "event": "supervisor_failure",
         "failure_class": failure_class,
         "reason": reason,
+    }
+
+
+def checkpoint_transition(
+    *,
+    checkpoint_count=0,
+    final_count=0,
+    rejected_count=0,
+    unresolved_count=0,
+    changed_count=0,
+    missing_count=0,
+    reason="unchanged",
+    checkpoint_sha256=None,
+    final_sha256=None,
+):
+    empty_hash = runner._checkpoint_output_sha256(
+        {"schema_version": contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION, "companies": []}
+    )
+    return {
+        "schema_version": contracts.CHECKPOINT_TRANSITION_SCHEMA_VERSION,
+        "event": "checkpoint_transition",
+        "reason": reason,
+        "checkpoint_count": checkpoint_count,
+        "final_count": final_count,
+        "rejected_count": rejected_count,
+        "unresolved_count": unresolved_count,
+        "changed_count": changed_count,
+        "missing_count": missing_count,
+        "checkpoint_sha256": checkpoint_sha256 or empty_hash,
+        "final_sha256": final_sha256 or empty_hash,
     }
 
 
@@ -193,6 +228,103 @@ def test_execution_diagnostic_parser_rejects_noncanonical_or_wrong_types():
     ) is None
 
 
+def test_checkpoint_transition_parser_keeps_only_closed_canonical_records():
+    valid = checkpoint_transition(
+        checkpoint_count=1,
+        rejected_count=1,
+        reason="rejected",
+        checkpoint_sha256="sha256:" + "1" * 64,
+    )
+    private = {**valid, "lead_name": "do-not-persist"}
+    wrong_count_type = {**valid, "rejected_count": True}
+    noncanonical = (
+        runner._EXECUTION_DIAGNOSTIC_PREFIX
+        + json.dumps(valid, sort_keys=False).encode("ascii")
+        + b"\n"
+    )
+    oversized = runner._EXECUTION_DIAGNOSTIC_PREFIX + b"x" * 600 + b"\n"
+
+    stderr = (
+        execution_diagnostic_line(private)
+        + execution_diagnostic_line(wrong_count_type)
+        + noncanonical
+        + oversized
+        + execution_diagnostic_line(valid, ending=b"\r\n")
+        + execution_diagnostic_line(valid)
+    )
+
+    assert runner._checkpoint_transition_from_stderr(stderr) == valid
+
+
+def test_accepted_empty_output_retains_bounded_rejection_transition(tmp_path):
+    transition = checkpoint_transition(
+        checkpoint_count=1,
+        rejected_count=1,
+        reason="rejected",
+        checkpoint_sha256="sha256:" + "1" * 64,
+    )
+    api = FakeApi([lease()])
+    sandbox = runtime.FakeRuntime(
+        [
+            runtime.fake_result(
+                output_bytes=VALID_EMPTY,
+                stderr=execution_diagnostic_line(transition),
+            )
+        ]
+    )
+    (tmp_path / "work").mkdir()
+
+    runner.Runner(make_config(tmp_path, api, sandbox)).run_once()
+
+    completion = api.completions[0]["body"]
+    assert completion["output"]["companies"] == []
+    assert completion["result"]["terminal_status"] == "accepted"
+    assert completion["result"]["checkpoint_transition"] == transition
+    assert "do-not-persist" not in json.dumps(completion)
+
+
+@pytest.mark.parametrize("exit_code", (0, 3))
+def test_ordinary_accepted_output_retains_unchanged_transition(tmp_path, exit_code):
+    transition = checkpoint_transition()
+    api = FakeApi([lease()])
+    sandbox = runtime.FakeRuntime(
+        [
+            runtime.fake_result(
+                exit_code=exit_code,
+                output_bytes=VALID_EMPTY,
+                stderr=execution_diagnostic_line(transition),
+            )
+        ]
+    )
+    (tmp_path / "work").mkdir()
+
+    runner.Runner(make_config(tmp_path, api, sandbox)).run_once()
+
+    result = api.completions[0]["body"]["result"]
+    assert result["terminal_status"] == "accepted"
+    assert result["checkpoint_transition"] == transition
+
+
+def test_forged_checkpoint_transition_cannot_bind_to_final_output(tmp_path):
+    forged = checkpoint_transition(final_sha256="sha256:" + "2" * 64)
+    api = FakeApi([lease()])
+    sandbox = runtime.FakeRuntime(
+        [
+            runtime.fake_result(
+                output_bytes=VALID_EMPTY,
+                stderr=execution_diagnostic_line(forged),
+            )
+        ]
+    )
+    (tmp_path / "work").mkdir()
+
+    runner.Runner(make_config(tmp_path, api, sandbox)).run_once()
+
+    result = api.completions[0]["body"]["result"]
+    assert result["terminal_status"] == "accepted"
+    assert "checkpoint_transition" not in result
+
+
 @pytest.mark.parametrize("mode, timed_out", [("fast", False), ("deadline", True)])
 def test_invalid_final_checkpoint_keeps_accepted_output_and_adds_safe_diagnostic(
     tmp_path, capsys, mode, timed_out
@@ -229,6 +361,26 @@ def test_invalid_final_checkpoint_keeps_accepted_output_and_adds_safe_diagnostic
         assert "host_timed_out=true" in journal
     else:
         assert "Lab Arena execution diagnostic:" not in journal
+
+
+def test_timeout_fallback_retains_unchanged_checkpoint_transition(tmp_path):
+    transition = checkpoint_transition()
+    api = FakeApi([checkpoint_lease()])
+    sandbox = CheckpointSequenceRuntime(
+        tmp_path / "runtime-work",
+        mode="deadline",
+        stderr=execution_diagnostic_line(transition),
+    )
+    sandbox.work_dir.mkdir()
+    (tmp_path / "work").mkdir()
+
+    runner.Runner(make_config(tmp_path, api, sandbox)).run_once()
+
+    completion = api.completions[0]["body"]
+    assert sandbox.result.timed_out is True
+    assert completion["output"]["companies"] == []
+    assert completion["result"]["terminal_status"] == "accepted"
+    assert completion["result"]["checkpoint_transition"] == transition
 
 
 def test_execution_diagnostic_crosses_runtime_capture_on_accepted_fallback(

@@ -266,11 +266,28 @@ def test_list_ledger_rejects_unbounded_or_invalid_limits(limit):
 def test_simple_stage_and_completion_rpc_shapes():
     transport = ShapeTransport()
     store = ArenaStore(transport)
+    transition = {
+        "schema_version": 1,
+        "event": "checkpoint_transition",
+        "reason": "rejected",
+        "checkpoint_count": 1,
+        "final_count": 0,
+        "rejected_count": 1,
+        "unresolved_count": 0,
+        "changed_count": 0,
+        "missing_count": 0,
+        "checkpoint_sha256": "sha256:" + "1" * 64,
+        "final_sha256": "sha256:" + "2" * 64,
+    }
+    result = {
+        "terminal_status": "accepted",
+        "checkpoint_transition": transition,
+    }
     store.open_stage("arena-2026-09-02", 1, [{"submission_id": "s1", "miner_hotkey": "h"}], [0, 1])
     store.complete_attempt(
         run_id="run-1",
         lease_token_hash="sha256:" + "1" * 64,
-        result={"terminal_status": "accepted"},
+        result=result,
         terminal_cause="accepted",
         output_ref="arena/round/run-1.json",
     )
@@ -289,7 +306,7 @@ def test_simple_stage_and_completion_rpc_shapes():
             {
                 "p_run_id": "run-1",
                 "p_lease_token_hash": "sha256:" + "1" * 64,
-                "p_result": {"terminal_status": "accepted"},
+                "p_result": result,
                 "p_terminal_cause": "accepted",
                 "p_output_ref": "arena/round/run-1.json",
             },

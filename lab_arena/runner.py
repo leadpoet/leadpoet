@@ -13,6 +13,7 @@ credential, and never chooses a miner or ICP.
 from __future__ import annotations
 
 import base64
+import hashlib
 import http.server
 import json
 import os
@@ -136,6 +137,7 @@ _IDLE_CLAIM_STATUSES = frozenset({"no_pending", "no_open_round", "stage_closed"}
 
 _EXECUTION_DIAGNOSTIC_PREFIX = b"LAB_ARENA_EXECUTION_DIAGNOSTIC "
 _EXECUTION_DIAGNOSTIC_MAX_BYTES = 256
+_CHECKPOINT_TRANSITION_DIAGNOSTIC_MAX_BYTES = 512
 _EXECUTION_DIAGNOSTIC_FAILURE_CLASSES = frozenset(
     {"timeout", "runtime_error", "validation_error", "os_error", "other"}
 )
@@ -290,6 +292,50 @@ def _execution_diagnostic_from_stderr(stderr: Any) -> Optional[Dict[str, Any]]:
             continue
         latest = dict(document)
     return latest
+
+
+def _checkpoint_transition_from_stderr(stderr: Any) -> Optional[Dict[str, Any]]:
+    """Return the last closed, informational checkpoint transition summary."""
+
+    if not isinstance(stderr, (bytes, bytearray)):
+        return None
+    latest = None
+    for raw_line in bytes(stderr).splitlines(keepends=True):
+        if (
+            len(raw_line) > _CHECKPOINT_TRANSITION_DIAGNOSTIC_MAX_BYTES
+            or not raw_line.endswith(b"\n")
+            or b"\r" in raw_line
+            or not raw_line.startswith(_EXECUTION_DIAGNOSTIC_PREFIX)
+        ):
+            continue
+        payload = raw_line[len(_EXECUTION_DIAGNOSTIC_PREFIX) : -1]
+        try:
+            document = json.loads(payload.decode("ascii"))
+            canonical = json.dumps(
+                document, sort_keys=True, separators=(",", ":")
+            ).encode("ascii")
+        except (TypeError, UnicodeDecodeError, ValueError):
+            continue
+        if canonical != payload:
+            continue
+        try:
+            latest = contracts.validate_checkpoint_transition(document)
+        except ArenaContractError:
+            continue
+    return latest
+
+
+def _checkpoint_output_sha256(document: Mapping[str, Any]) -> str:
+    """Hash the exact model checkpoint envelope without private field projection."""
+
+    payload = json.dumps(
+        {"companies": document["companies"]},
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
 def _log_execution_diagnostic(
@@ -2022,6 +2068,7 @@ class AssignmentExecutor:
         output_document: Optional[Dict[str, Any]] = None
         result: Optional[runtime.SandboxResult] = None
         execution_diagnostic: Optional[Dict[str, Any]] = None
+        checkpoint_transition: Optional[Dict[str, Any]] = None
         web_server = None
         worker = None
         evaluation_date = str(lease.get("evaluation_date") or config.evaluation_date)
@@ -2172,6 +2219,9 @@ class AssignmentExecutor:
                 result = config.sandbox_runtime.run_icp(spec)
                 if not scoring_run:
                     execution_diagnostic = _execution_diagnostic_from_stderr(
+                        result.stderr
+                    )
+                    checkpoint_transition = _checkpoint_transition_from_stderr(
                         result.stderr
                     )
             if result.timed_out and not (
@@ -2423,6 +2473,19 @@ class AssignmentExecutor:
             )
         elif not scoring_run and failure_diagnostic is not None:
             run_result["failure_diagnostic"] = failure_diagnostic
+        if (
+            not scoring_run
+            and terminal == "accepted"
+            and output_document is not None
+            and checkpoint_transition is not None
+            and checkpoint_transition["final_count"]
+            == len(output_document["companies"])
+            and checkpoint_transition["final_sha256"]
+            == _checkpoint_output_sha256(output_document)
+        ):
+            # The model owns the historical classification. The trusted host
+            # binds only its final count and hash, so this stays informational.
+            run_result["checkpoint_transition"] = checkpoint_transition
         if not scoring_run and result is not None and (
             execution_diagnostic is not None
             or result.timed_out

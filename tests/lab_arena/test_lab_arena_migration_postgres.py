@@ -1738,14 +1738,32 @@ def test_attempt_completion_validates_result_and_output_pair(store):
             "model_error",
             output_ref="arena/output.json",
         )
-    accepted = complete(
-        store,
-        response["run_id"],
-        lease_hash,
-        "accepted",
+    transition = {
+        "schema_version": 1,
+        "event": "checkpoint_transition",
+        "reason": "rejected",
+        "checkpoint_count": 1,
+        "final_count": 0,
+        "rejected_count": 1,
+        "unresolved_count": 0,
+        "changed_count": 0,
+        "missing_count": 0,
+        "checkpoint_sha256": "sha256:" + "1" * 64,
+        "final_sha256": "sha256:" + "2" * 64,
+    }
+    persisted_result = {
+        "terminal_status": "accepted",
+        "checkpoint_transition": transition,
+    }
+    accepted = store.complete_attempt(
+        run_id=response["run_id"],
+        lease_token_hash=lease_hash,
+        result=persisted_result,
+        terminal_cause="accepted",
         output_ref="arena/output.json",
     )
     assert accepted["status"] == "accepted"
+    assert store.get_run(response["run_id"])["result_doc"] == persisted_result
 
 
 def test_close_stage_races_hundred_operations_without_deadlock(connect):

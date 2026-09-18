@@ -99,6 +99,7 @@ ROUND_CONFIGURATION_SCHEMA_VERSION = "leadpoet.lab_arena.round_configuration.v1"
 SCORER_POLICY_SCHEMA_VERSION = "leadpoet.lab_arena.scorer_policy.v1"
 SCORING_PLAN_SCHEMA_VERSION = "leadpoet.lab_arena.scoring_plan.v1"
 RUN_RESULT_SCHEMA_VERSION = "leadpoet.lab_arena.run_result.v1"
+CHECKPOINT_TRANSITION_SCHEMA_VERSION = 1
 PUBLICATION_SCHEMA_VERSION = "leadpoet.lab_arena.publication.v1"
 REWARD_BASIS_SCHEMA_VERSION = "leadpoet.lab_arena.reward_basis.v1"
 OUTPUT_DOCUMENT_SCHEMA_VERSION = "leadpoet.lab_arena.output.v1"
@@ -1110,6 +1111,65 @@ def validate_scoring_plan(document: Any) -> Dict[str, Any]:
 # Run result
 # ---------------------------------------------------------------------------
 
+CHECKPOINT_TRANSITION_REASONS = (
+    "unchanged",
+    "rejected",
+    "unresolved",
+    "changed_accepted",
+    "missing_accepted",
+    "mixed",
+)
+CHECKPOINT_TRANSITION_FIELDS = (
+    F("schema_version", "int", choices=(CHECKPOINT_TRANSITION_SCHEMA_VERSION,)),
+    F("event", "str", choices=("checkpoint_transition",)),
+    F("reason", "str", choices=CHECKPOINT_TRANSITION_REASONS),
+    F("checkpoint_count", "int", minimum=0, maximum=5),
+    F("final_count", "int", minimum=0, maximum=5),
+    F("rejected_count", "int", minimum=0, maximum=5),
+    F("unresolved_count", "int", minimum=0, maximum=5),
+    F("changed_count", "int", minimum=0, maximum=5),
+    F("missing_count", "int", minimum=0, maximum=5),
+    F("checkpoint_sha256", "sha256"),
+    F("final_sha256", "sha256"),
+)
+
+
+def validate_checkpoint_transition(document: Any) -> Dict[str, Any]:
+    """Validate one payload-free, informational model checkpoint summary."""
+
+    result = validate_document(document, CHECKPOINT_TRANSITION_FIELDS)
+    reductions = {
+        "rejected": result["rejected_count"],
+        "unresolved": result["unresolved_count"],
+        "changed_accepted": result["changed_count"],
+        "missing_accepted": result["missing_count"],
+    }
+    removed_count = (
+        result["rejected_count"]
+        + result["unresolved_count"]
+        + result["missing_count"]
+    )
+    classified_count = removed_count + result["changed_count"]
+    if result["checkpoint_count"] != result["final_count"] + removed_count:
+        raise ArenaContractError("checkpoint transition counts do not balance")
+    if classified_count > result["checkpoint_count"]:
+        raise ArenaContractError("checkpoint transition classifications overlap")
+    active_reasons = [reason for reason, count in reductions.items() if count]
+    expected_reason = (
+        "unchanged"
+        if not active_reasons
+        else active_reasons[0]
+        if len(active_reasons) == 1
+        else "mixed"
+    )
+    if result["reason"] != expected_reason:
+        raise ArenaContractError("checkpoint transition reason does not match counts")
+    same_hash = result["checkpoint_sha256"] == result["final_sha256"]
+    if same_hash != (classified_count == 0):
+        raise ArenaContractError("checkpoint transition hashes do not match counts")
+    return result
+
+
 RUN_RESULT_FIELDS = (
     F("schema_version", "str", choices=(RUN_RESULT_SCHEMA_VERSION,)),
     F(
@@ -1140,6 +1200,12 @@ RUN_RESULT_FIELDS = (
     F("started_at", "iso8601"),
     F("finished_at", "iso8601"),
     F("terminal_status", "str", choices=("accepted", "model_timeout", "invalid_output", "budget_exhausted", "credential_error", "model_error", "provider_error", "judge_error", "judge_timeout")),
+    F(
+        "checkpoint_transition",
+        "object",
+        required=False,
+        fields=CHECKPOINT_TRANSITION_FIELDS,
+    ),
     F(
         "failure_diagnostic",
         "object",
@@ -1194,7 +1260,12 @@ RUN_RESULT_FIELDS = (
 def validate_run_result(document: Any) -> Dict[str, Any]:
     """Validate the small worker result carried by an authenticated completion."""
 
-    return validate_document(document, RUN_RESULT_FIELDS)
+    result = validate_document(document, RUN_RESULT_FIELDS)
+    if "checkpoint_transition" in result:
+        result["checkpoint_transition"] = validate_checkpoint_transition(
+            result["checkpoint_transition"]
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------

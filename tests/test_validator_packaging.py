@@ -123,7 +123,7 @@ from Leadpoet.utils.subnet_epoch import (
     ensure_cutover_manifest_configured, load_subnet_epoch_cutover,
 )
 assert callable(main)
-assert sorted(DEFAULT_PROFILE_PATHS) == [455, 456, 457, 458, 459, 464]
+assert sorted(DEFAULT_PROFILE_PATHS) == [455, 456, 457, 458, 459, 464, 466]
 for spec_version in sorted(DEFAULT_PROFILE_PATHS):
     assert load_subtensor_events_profile_v2(
         spec_version=spec_version

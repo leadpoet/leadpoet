@@ -273,7 +273,16 @@ def test_broken_prior_epoch_does_not_block_current_epoch(tmp_path):
     assert broadcasts == ["0xdeadbeef"]
 
 
-def test_prior_poll_recovers_spec459_journal_after_spec464_reveal(tmp_path):
+@pytest.mark.parametrize(
+    ("signed_spec", "reveal_spec", "fixture_name"),
+    [
+        (459, 464, "subtensor_events_spec464_block9088963.json"),
+        (464, 466, "subtensor_events_spec466_block9091482.json"),
+    ],
+)
+def test_prior_poll_recovers_signed_journal_after_runtime_upgrade_reveal(
+    tmp_path, signed_spec, reveal_spec, fixture_name
+):
     from leadpoet_canonical.subtensor_events_v2 import (
         load_subtensor_events_profile_v2,
         prove_timelocked_weights_reveal_v2,
@@ -281,10 +290,10 @@ def test_prior_poll_recovers_spec459_journal_after_spec464_reveal(tmp_path):
     )
 
     protected = _protected()
-    protected["runtime_spec_version"] = 459
+    protected["runtime_spec_version"] = signed_spec
     protected["recovery_record"] = {
         **protected["recovery_record"],
-        "authorization": {"runtime_spec_version": 459},
+        "authorization": {"runtime_spec_version": signed_spec},
     }
     finalized = [
         {
@@ -300,11 +309,11 @@ def test_prior_poll_recovers_spec459_journal_after_spec464_reveal(tmp_path):
         }
     ]
 
-    class Spec464RecoverySigner(_Signer):
+    class RuntimeUpgradeRecoverySigner(_Signer):
         def recover_arena_weight_extrinsic_v1(self, request):
             assert request["recovery_record"]["authorization"][
                 "runtime_spec_version"
-            ] == 459
+            ] == signed_spec
             return super().recover_arena_weight_extrinsic_v1(request)
 
         def confirm_arena_weight_extrinsic_v1(self, request):
@@ -312,14 +321,14 @@ def test_prior_poll_recovers_spec459_journal_after_spec464_reveal(tmp_path):
                 (
                     Path(__file__).resolve().parent
                     / "fixtures"
-                    / "subtensor_events_spec464_block9088963.json"
+                    / fixture_name
                 ).read_text(encoding="utf-8")
             )
-            profile = load_subtensor_events_profile_v2(spec_version=464)
+            profile = load_subtensor_events_profile_v2(spec_version=reveal_spec)
             profile = validate_subtensor_events_profile_v2(
                 profile,
                 genesis_hash=profile["genesis_hash"],
-                spec_version=464,
+                spec_version=reveal_spec,
                 transaction_version=1,
                 metadata_raw=bytes.fromhex(fixture["metadata_hex"][2:]),
                 runtime_code_hash=fixture["runtime_code_storage_hash"],
@@ -334,10 +343,10 @@ def test_prior_poll_recovers_spec459_journal_after_spec464_reveal(tmp_path):
                 expected_account_id_hex=expected["account_id_hex"],
             )
             assert proof["netuid"] == 71
-            assert profile["spec_version"] == 464
+            assert profile["spec_version"] == reveal_spec
             return super().confirm_arena_weight_extrinsic_v1(request)
 
-    signer = Spec464RecoverySigner(protected, finalized)
+    signer = RuntimeUpgradeRecoverySigner(protected, finalized)
     broadcasts = []
     reported = []
     orchestrator = _orchestrator(tmp_path, signer, broadcasts)
@@ -360,7 +369,7 @@ def test_prior_poll_recovers_spec459_journal_after_spec464_reveal(tmp_path):
     journal["record_hash"] = contracts.document_hash(journal)
     journal_path.write_text(json.dumps(journal) + "\n", encoding="utf-8")
     retained_journal = journal_path.read_bytes()
-    assert _read_hashed_json(journal_path)["runtime_spec_version"] == 459
+    assert _read_hashed_json(journal_path)["runtime_spec_version"] == signed_spec
 
     orchestrator.poll_prior_outcomes(10)
 

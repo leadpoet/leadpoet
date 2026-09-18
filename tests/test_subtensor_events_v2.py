@@ -29,6 +29,7 @@ CURRENT_RUNTIME_FIXTURES = {
     458: ROOT / "tests" / "fixtures" / "subtensor_events_spec458_block9067366.json",
     459: ROOT / "tests" / "fixtures" / "subtensor_events_spec459_block9076006.json",
     464: ROOT / "tests" / "fixtures" / "subtensor_events_spec464_block9088963.json",
+    466: ROOT / "tests" / "fixtures" / "subtensor_events_spec466_block9091482.json",
 }
 
 
@@ -176,6 +177,12 @@ def test_real_spec455_archive_events_prove_exact_adjacent_reveal():
             "0x637844a3ad94d3bdbea45664b67bbfa07a31f21c087834a56a772ba27f612b9f",
             178,
         ),
+        (
+            466,
+            "10ce142593327893249ac7d827633c61a92b66613d087246f59cae45a1b1e763",
+            "0xff4ba0da10fb8ac26fab3e446f23413ef7f91de4a604802097ece0b928d53a8e",
+            198,
+        ),
     ),
 )
 def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
@@ -265,9 +272,12 @@ def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
     assert proof["account_id_hex"] == expected["account_id_hex"]
 
 
-def test_spec464_exact_runtime_and_reveal_tampering_fail_closed():
-    fixture = json.loads(CURRENT_RUNTIME_FIXTURES[464].read_text(encoding="utf-8"))
-    profile = load_subtensor_events_profile_v2(spec_version=464)
+@pytest.mark.parametrize("spec_version", [464, 466])
+def test_exact_runtime_and_reveal_tampering_fail_closed(spec_version):
+    fixture = json.loads(
+        CURRENT_RUNTIME_FIXTURES[spec_version].read_text(encoding="utf-8")
+    )
+    profile = load_subtensor_events_profile_v2(spec_version=spec_version)
     metadata_raw = bytes.fromhex(fixture["metadata_hex"][2:])
     events_raw = bytes.fromhex(fixture["system_events"][2:])
     event_count_raw = bytes.fromhex(fixture["system_event_count"][2:])
@@ -277,7 +287,7 @@ def test_spec464_exact_runtime_and_reveal_tampering_fail_closed():
         validate_subtensor_events_profile_v2(
             profile,
             genesis_hash=profile["genesis_hash"],
-            spec_version=464,
+            spec_version=spec_version,
             transaction_version=1,
             metadata_raw=changed_metadata,
             runtime_code_hash=fixture["runtime_code_storage_hash"],
@@ -286,7 +296,7 @@ def test_spec464_exact_runtime_and_reveal_tampering_fail_closed():
         validate_subtensor_events_profile_v2(
             profile,
             genesis_hash=profile["genesis_hash"],
-            spec_version=464,
+            spec_version=spec_version,
             transaction_version=1,
             metadata_raw=metadata_raw,
             runtime_code_hash="0x" + "00" * 32,

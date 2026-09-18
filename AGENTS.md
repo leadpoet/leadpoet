@@ -1,5 +1,24 @@
 # Agent Instructions
 
+## Scoped production authorization: complete legacy code removal
+
+On 2026-09-17 the user explicitly authorized removal of every obsolete
+Research Lab, Fulfillment, sourcing, old competition, IM, incentive, worker,
+endpoint, configuration, compatibility, test, documentation and infrastructure
+path that is proven unnecessary for the current production Arena/Open Source
+Agent Competition. Physically delete confirmed obsolete code; do not preserve
+disabled implementations, archives or compatibility stubs. Authority includes
+protected production, credential, Supabase and related-repository inspection,
+narrow source and exact committed migration changes, pushes and safe merges,
+canonical gateway/normal-validator restarts, and production-equivalent and live
+end-to-end verification through the overnight operational skills. Preserve
+active miner admission, baseline/rebenchmark, parallel execution, providers,
+verifiers, checkpoints, accounting, recovery, promotion, rewards, dashboard,
+weights, historical data and concurrent work. Active cryptographic and release
+checks remain required even when they use legacy names. This scope ends after
+confirmed obsolete code is deleted, deployed, and current production is verified.
+
+
 ## Scoped production authorization: per-ICP sourcing cost accounting
 
 On 2026-09-17 the user explicitly authorized replacing submission-wide sourcing

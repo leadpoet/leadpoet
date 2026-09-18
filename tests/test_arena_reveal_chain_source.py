@@ -39,6 +39,11 @@ SPEC464_FIXTURE = (
     / "fixtures"
     / "subtensor_events_spec464_block9088963.json"
 )
+SPEC466_FIXTURE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "subtensor_events_spec466_block9091482.json"
+)
 
 
 def _compact(value: int) -> bytes:
@@ -194,9 +199,10 @@ class ArchiveFixture:
         raise AssertionError("unexpected storage key %s" % key)
 
 
-class MeasuredSpec464ArchiveFixture:
-    def __init__(self) -> None:
-        self.fixture = json.loads(SPEC464_FIXTURE.read_text(encoding="utf-8"))
+class MeasuredArchiveFixture:
+    def __init__(self, fixture_path: Path, spec_version: int) -> None:
+        self.fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        self.runtime_spec_version = spec_version
         self.inclusion_block = int(self.fixture["inclusion_block"])
         self.reveal_block = int(self.fixture["block_number"])
         self.validator_uid = int(self.fixture["expected"]["uid"])
@@ -205,7 +211,9 @@ class MeasuredSpec464ArchiveFixture:
         )
         account_count = max(self.validator_uid + 1, 4)
         self.accounts = [
-            hashlib.sha256(("spec464-account:%d" % uid).encode()).digest()
+            hashlib.sha256(
+                ("spec%d-account:%d" % (spec_version, uid)).encode()
+            ).digest()
             for uid in range(account_count)
         ]
         self.accounts[self.validator_uid] = self.validator_account
@@ -214,7 +222,9 @@ class MeasuredSpec464ArchiveFixture:
         ][:2]
         self.weights = [(recipient_uids[0], 12_345), (recipient_uids[1], 54_321)]
         self.hashes = {
-            block: hashlib.sha256(("spec464-block:%d" % block).encode()).hexdigest()
+            block: hashlib.sha256(
+                ("spec%d-block:%d" % (spec_version, block)).encode()
+            ).hexdigest()
             for block in range(self.inclusion_block, self.reveal_block + 1)
         }
         self.hashes[self.reveal_block - 1] = self.fixture["parent_hash"]
@@ -230,7 +240,10 @@ class MeasuredSpec464ArchiveFixture:
         if method == "chain_getBlockHash":
             return "0x" + self.hashes[int(params[0])]
         if method == "state_getRuntimeVersion":
-            return {"specVersion": 464, "transactionVersion": 1}
+            return {
+                "specVersion": self.runtime_spec_version,
+                "transactionVersion": 1,
+            }
         if method == "state_getMetadata":
             return self.fixture["metadata_hex"]
         if method == "state_getStorageHash":
@@ -315,7 +328,7 @@ def _prove(source):
     )
 
 
-def _measured_spec464_source(fixture: MeasuredSpec464ArchiveFixture):
+def _measured_source(fixture: MeasuredArchiveFixture):
     source = ValidatorChainSourceV2(
         rpc_call=lambda **_: None,
         archive_rpc_call=lambda **_: None,
@@ -349,9 +362,15 @@ def test_historical_reveal_succeeds_after_latest_head_passed_deadline(monkeypatc
     assert source._selected_profile_specs == [455]
 
 
-def test_spec464_exact_parent_runtime_and_transition_events_prove_reveal():
-    fixture = MeasuredSpec464ArchiveFixture()
-    source = _measured_spec464_source(fixture)
+@pytest.mark.parametrize(
+    ("fixture_path", "spec_version"),
+    [(SPEC464_FIXTURE, 464), (SPEC466_FIXTURE, 466)],
+)
+def test_exact_parent_runtime_and_transition_events_prove_reveal(
+    fixture_path, spec_version
+):
+    fixture = MeasuredArchiveFixture(fixture_path, spec_version)
+    source = _measured_source(fixture)
     validator_hotkey = ss58_encode_account_id(fixture.validator_account)
     result = source.prove_timelocked_reveal_transition(
         netuid=NETUID,
@@ -387,7 +406,7 @@ def test_spec464_exact_parent_runtime_and_transition_events_prove_reveal():
     ) in fixture.calls
 
 
-@pytest.mark.parametrize("spec_version", [456, 457, 458, 459, 464])
+@pytest.mark.parametrize("spec_version", [456, 457, 458, 459, 464, 466])
 def test_historical_reveal_selects_observed_runtime_profile(
     monkeypatch, spec_version
 ):

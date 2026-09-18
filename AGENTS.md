@@ -1,5 +1,20 @@
 # Agent Instructions
 
+## Scoped production authorization: per-ICP sourcing cost accounting
+
+On 2026-09-17 the user explicitly authorized replacing submission-wide sourcing
+cost admission and eligibility with per-ICP accounting for both baseline and
+miner models. Each ICP has a $4 sourcing admission limit across attempts and a
+final eligibility limit of $0.80 per verified qualified company/contact pair.
+Allow an already admitted provider call to finish and retain its output even
+if its settled cost crosses $4; refuse further paid sourcing calls only for
+that ICP. Preserve successful/failed/unconfirmed billing semantics, completed
+work, credentials, historical publications, scoring rules, and downstream
+promotion/rewards/weights. Authority includes narrow source and exact committed
+migration changes, pushes, canonical gateway/normal-validator restarts, and
+live end-to-end validation. Do not add a separate accounting subsystem or
+interrupt in-flight calls merely because the sourcing budget was reached.
+
 ## Scoped production authorization: sales-agent rename and CI-independent restart
 
 On 2026-09-17 the user explicitly authorized removing any GitHub attestation or

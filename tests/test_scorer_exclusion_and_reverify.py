@@ -55,6 +55,111 @@ def _icp(**over):
     return ICPPrompt(**base)
 
 
+@pytest.mark.parametrize(
+    "submitted_stage",
+    ["Private Equity", "private-equity-backed", "PE-backed"],
+)
+def test_private_equity_stage_alias_still_requires_independent_verification(
+    monkeypatch, submitted_stage
+):
+    import qualification.scoring.lead_scorer as scorer
+
+    company = _company().model_copy(update={"company_stage": submitted_stage})
+    icp = _icp(company_stage="Private Equity")
+    calls = []
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_match("homepage identity verified")
+
+    async def web(*_args, **_kwargs):
+        calls.append("web")
+        return company_fit_unavailable("independent stage proof missing")
+
+    monkeypatch.setattr(scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(scorer, "_llm_reverify_company", web)
+    result = asyncio.run(
+        _verify_company_fit(
+            company,
+            icp,
+            0.0,
+            1.0,
+            set(),
+            require_https_transport=True,
+        )
+    )
+
+    assert calls == ["web"]
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    "submitted_stage",
+    ["VC-backed", "Series B", "Growth"],
+)
+def test_private_equity_stage_alias_rejects_other_stage_families(
+    submitted_stage,
+):
+    import qualification.scoring.lead_scorer as scorer
+
+    company = _company().model_copy(update={"company_stage": submitted_stage})
+    icp = _icp(company_stage="Private Equity")
+    ok, reason = _run_competition_binary_fit_checks(
+        company, icp
+    )
+
+    assert ok is False
+    assert scorer._submitted_stage_decision(company, icp) == (
+        COMPANY_FIT_MISMATCH
+    )
+    assert reason == (
+        f"Company stage mismatch: '{submitted_stage}' vs 'Private Equity'"
+    )
+
+
+def test_claimed_required_attribute_failure_does_not_replace_web_verification(
+    monkeypatch,
+):
+    import qualification.scoring.lead_scorer as scorer
+
+    company_data = _company().model_dump(mode="json")
+    company_data.update(
+        {
+            "required_attribute": {
+                "text": "Uses workflow software",
+                "passed": False,
+                "evidence_url": "https://acme.com/about",
+                "evidence_quote": "Acme describes its workflow software.",
+                "explanation": "The agent marked its own claim false.",
+            }
+        }
+    )
+    company = CompanyOutput.model_validate(company_data)
+    calls = []
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_match("homepage identity verified")
+
+    async def web(*_args, **_kwargs):
+        calls.append("web")
+        return company_fit_unavailable("independent attribute proof missing")
+
+    monkeypatch.setattr(scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(scorer, "_llm_reverify_company", web)
+    result = asyncio.run(
+        _verify_company_fit(
+            company,
+            _icp(required_attribute="Uses workflow software"),
+            0.0,
+            1.0,
+            set(),
+            require_https_transport=True,
+        )
+    )
+
+    assert calls == ["web"]
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+
+
 def _complete_industry_disagreement_verdict():
     return {
         "observed_company_name": "Acme",

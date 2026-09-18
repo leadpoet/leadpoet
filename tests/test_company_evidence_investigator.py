@@ -111,6 +111,150 @@ def _competition_company_v5() -> dict:
     return row
 
 
+def test_investigator_prompt_preserves_equity_stage_across_later_debt():
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+
+    assert (
+        "A later loan, debt facility, or grant does not by itself supersede "
+        "that equity stage."
+    ) in prompt
+    assert (
+        "A later completed priced-equity round, controlling acquisition, or "
+        "IPO/listing event can supersede it"
+    ) in prompt
+    assert (
+        "a later Series C, controlling acquisition, or IPO can contradict "
+        "an earlier Series B"
+    ) in prompt
+    assert "later debt alone cannot" in prompt
+
+
+def test_repaired_stage_gap_gets_one_targeted_investigation(monkeypatch):
+    initial = _complete_verdict(
+        observed_employee_count=None,
+        employee_size_matches=None,
+        employee_size_evidence_url="",
+        employee_size_evidence_quote="",
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url="https://acme.example/investors",
+        stage_evidence_quote=(
+            "Acme common stock is listed on NASDAQ under ticker ACME."
+        ),
+    )
+    repaired = _complete_verdict(
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url="https://acme.example/about",
+        stage_evidence_quote="Acme launched its public product.",
+    )
+    calls = {"broad": 0, "investigator": 0}
+
+    async def provider(**_kwargs):
+        calls["broad"] += 1
+        return (initial if calls["broad"] == 1 else repaired), ""
+
+    async def keep_employee_observation(candidate, *_args, **_kwargs):
+        return candidate
+
+    async def bounded_investigation(*, targets, **_kwargs):
+        calls["investigator"] += 1
+        assert targets == ("stage",)
+        return {
+            "claims": {"stage": _finding("stage")},
+            "failure_reason": "",
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "_refresh_linkedin_employee_size_observation",
+        keep_employee_observation,
+    )
+    monkeypatch.setattr(
+        lead_scorer, "investigate_company_evidence", bounded_investigation
+    )
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _company().model_copy(update={"company_stage": "Public"}),
+            _icp(company_stage="Public"),
+            require_company_fit_dimensions=True,
+            evidence_investigator=True,
+        )
+    )
+
+    assert calls == {"broad": 2, "investigator": 1}
+    assert result.decision == COMPANY_FIT_MATCH
+    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MATCH
+
+
+def test_schema_repair_does_not_get_a_second_targeted_investigation(monkeypatch):
+    initial = _complete_verdict(
+        observed_employee_count=None,
+        employee_size_matches=None,
+        employee_size_evidence_url="",
+        employee_size_evidence_quote="",
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url="https://acme.example/about",
+        stage_evidence_quote="Acme launched its public product.",
+    )
+    repaired = _complete_verdict(
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url="https://acme.example/about",
+        stage_evidence_quote="Acme remains a public company.",
+    )
+    calls = {"broad": 0, "investigator": 0}
+
+    async def provider(**_kwargs):
+        calls["broad"] += 1
+        return (initial if calls["broad"] == 1 else repaired), ""
+
+    async def keep_employee_observation(candidate, *_args, **_kwargs):
+        return candidate
+
+    async def bounded_investigation(*, targets, **_kwargs):
+        calls["investigator"] += 1
+        assert targets == ("stage",)
+        return {
+            "claims": {
+                "stage": _finding(
+                    "stage",
+                    status="UNPROVEN",
+                    observed_value="",
+                    evidence_url="",
+                    evidence_quote="",
+                    reason="Current listing proof was not established.",
+                )
+            },
+            "failure_reason": "",
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "_refresh_linkedin_employee_size_observation",
+        keep_employee_observation,
+    )
+    monkeypatch.setattr(
+        lead_scorer, "investigate_company_evidence", bounded_investigation
+    )
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _company().model_copy(update={"company_stage": "Public"}),
+            _icp(company_stage="Public"),
+            require_company_fit_dimensions=True,
+            evidence_investigator=True,
+        )
+    )
+
+    assert calls == {"broad": 2, "investigator": 1}
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+
+
 def _complete_verdict(**overrides):
     verdict = {
         "observed_company_name": "Acme",

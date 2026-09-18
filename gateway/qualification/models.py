@@ -627,8 +627,19 @@ class RequiredAttributeClaim(BaseModel):
     text: str = Field("", max_length=2000, description="The attribute requirement text")
     passed: bool = Field(False, description="Model-reported validation outcome")
     evidence_url: str = Field("", max_length=2000, description="URL backing the claim")
-    evidence_quote: str = Field("", max_length=2000, description="Quote backing the claim")
+    # Public Arena output strings are bounded to 4,096 UTF-8 bytes before
+    # this internal bridge runs. Keep the quote field compatible with that
+    # accepted boundary so a valid source excerpt can reach independent
+    # verification. The other claim fields retain their narrower limits.
+    evidence_quote: str = Field("", max_length=4096, description="Quote backing the claim")
     explanation: str = Field("", max_length=2000, description="Model's reasoning")
+
+    @field_validator("evidence_quote")
+    @classmethod
+    def _bound_evidence_quote_bytes(cls, value: str) -> str:
+        if len(value.encode("utf-8", errors="surrogatepass")) > 4096:
+            raise ValueError("evidence_quote exceeds the public UTF-8 byte limit")
+        return value
 
 
 class CompanyOutput(BaseModel):

@@ -217,6 +217,89 @@ def test_internal_scorer_company_allows_missing_linkedin():
     assert CompanyOutput(**projected).company_linkedin == ""
 
 
+@pytest.mark.parametrize("quote_length", [2001, 2347, 4096])
+def test_public_required_attribute_quote_reaches_internal_judge(
+    monkeypatch, quote_length
+):
+    from gateway.qualification.models import CompanyOutput
+    from lab_arena.output import output_document_from_bytes
+    from qualification.competition_models import COMPETITION_OUTPUT_SCHEMA_V5
+    from qualification.scoring import lead_scorer
+    from qualification.scoring.competition import (
+        CompetitionCompanyScorer,
+        _normalized_company,
+    )
+
+    public = public_company("https://www.linkedin.com/company/acme")
+    public.pop("fit_summary")
+    public.pop("fit_evidence_urls")
+    public["intent_details"] = "Acme has current, verified buying intent."
+    for signal in public["intent_signals"]:
+        signal.pop("why_now")
+        signal.pop("snippet")
+    public["required_attribute"] = {
+        "text": "Uses workflow software",
+        "passed": False,
+        "evidence_url": "https://acme.example.com/about",
+        "evidence_quote": "q" * quote_length,
+        "explanation": "The submitted claim is independently checked.",
+    }
+    validated = output_document_from_bytes(
+        json.dumps([public]).encode("utf-8"),
+        expected_schema_version=COMPETITION_OUTPUT_SCHEMA_V5,
+    )["companies"]
+    projected = _normalized_company(
+        validated[0],
+        integrity_policy=True,
+        contacts_required=True,
+        company_quality=True,
+    )
+    assert len(
+        CompanyOutput(**projected).required_attribute.evidence_quote
+    ) == quote_length
+    judged = []
+
+    async def score_company(**kwargs):
+        internal = kwargs["company"]
+        assert isinstance(internal, CompanyOutput)
+        assert internal.required_attribute.passed is False
+        assert len(internal.required_attribute.evidence_quote) == quote_length
+        judged.append(internal.company_name)
+        return breakdown(73.0)
+
+    monkeypatch.setattr(
+        lead_scorer, "score_company_competition_intent", score_company
+    )
+    result = asyncio.run(
+        CompetitionCompanyScorer().score_with_breakdowns(
+            validated, make_icp(16), False
+        )
+    )
+
+    assert judged == ["Acme"]
+    assert result[0]["final_score"] == 73.0
+
+
+def test_required_attribute_quote_over_public_boundary_is_rejected():
+    from lab_arena.output import OutputInvalid, output_document_from_bytes
+
+    public = public_company("https://www.linkedin.com/company/acme")
+    public["required_attribute"] = {
+        "text": "Uses workflow software",
+        "passed": True,
+        "evidence_url": "https://acme.example.com/about",
+        "evidence_quote": "q" * 4097,
+        "explanation": "Evidence supplied.",
+    }
+
+    with pytest.raises(OutputInvalid, match="string too long"):
+        output_document_from_bytes(json.dumps([public]).encode("utf-8"))
+
+    public["required_attribute"]["evidence_quote"] = "é" * 2049
+    with pytest.raises(OutputInvalid, match="string too long"):
+        output_document_from_bytes(json.dumps([public]).encode("utf-8"))
+
+
 def _adapter_company(*, name: str, linkedin: str) -> dict:
     row = public_company(linkedin)
     row["company_name"] = name

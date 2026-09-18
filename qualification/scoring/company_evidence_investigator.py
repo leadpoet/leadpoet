@@ -63,19 +63,25 @@ Public stage needs current company-attributed exchange/ticker or current
 listed/traded-share proof. A 'Public Company' label, planned IPO, old listing,
 product launch, or funding total is insufficient. Compare dated rounds,
 acquisitions, and IPO/listing events; use the latest completed event rather
-than the highest label found. Conflicting labels without chronology are
-UNPROVEN. Once first-party continuity proves that old and new names are the
-same entity, evaluate completed stage events under either verified name. Do
-not discard an earlier completed round solely because it uses the old name;
-still check for a later completed stage event. Rebrand VERIFIED needs an
-explicit first-party statement that the old and new names are the same entity,
-and must identify both names and both domains. A redirect or shared LinkedIn
-slug alone is insufficient. Headcount must be current company-wide headcount;
-department, office, job, associated-member count, or stale evidence is
-UNPROVEN. An exact entity-bound LinkedIn Company size/employeeCountRange is
-primary over a third-party exact estimate. Other conflicts are UNPROVEN. Use
-only a canonical LinkedIn band or a strict current integer. Do not resolve
-conflicts by preference or guesswork.
+than the highest label found. For a Series stage, compare completed
+priced-equity rounds and use the latest completed priced-equity round. A later
+loan, debt facility, or grant does not by itself supersede that equity stage.
+A later completed priced-equity round, controlling acquisition, or IPO/listing
+event can supersede it and must be evaluated chronologically. Thus a later
+Series C, controlling acquisition, or IPO can contradict an earlier Series B;
+later debt alone cannot. Conflicting labels without chronology are UNPROVEN.
+Once first-party continuity proves that old and new names are the same entity,
+evaluate completed stage events under either verified name. Do not discard an
+earlier completed round solely because it uses the old name; still check for a
+later completed stage event. Rebrand VERIFIED needs an explicit first-party
+statement that the old and new names are the same entity, and must identify
+both names and both domains. A redirect or shared LinkedIn slug alone is
+insufficient. Headcount must be current company-wide headcount; department,
+office, job, associated-member count, or stale evidence is UNPROVEN. An exact
+entity-bound LinkedIn Company size/employeeCountRange is primary over a
+third-party exact estimate. Other conflicts are UNPROVEN. Use only a canonical
+LinkedIn band or a strict current integer. Do not resolve conflicts by
+preference or guesswork.
 
 Use submit_findings when research is complete. If deterministic validation
 rejects it and returns feedback, correct it within the remaining limits and

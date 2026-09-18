@@ -2753,6 +2753,106 @@ async def _request_company_reverify_json(
         )
 
 
+async def _run_targeted_company_evidence_investigation(
+    *,
+    company: "CompanyOutput",
+    icp: "ICPPrompt",
+    verdict: Mapping[str, Any],
+    investigation_targets: Sequence[str],
+    icp_attribute: str,
+    icp_stage: str,
+    verified_identity: Mapping[str, Any],
+    verified_transport_domain: str,
+    structured_employee_size_evidence: Optional[Mapping[str, Any]],
+    employee_size_conflict: bool,
+    company_quality: bool,
+) -> Tuple[
+    dict[str, Any],
+    CompanyFitDecisionResult,
+    Mapping[str, Any],
+    Mapping[str, Any],
+]:
+    """Run and project one bounded targeted investigation."""
+
+    employee_targets, _employee_targets_verified = (
+        _normalize_icp_employee_buckets(icp.employee_count)
+    )
+    investigation_diagnostic: dict[str, str] = {}
+    investigation = await investigate_company_evidence(
+        company_locator={
+            "name": company.company_name,
+            "website": company.company_website,
+            "linkedin": company.company_linkedin,
+        },
+        targets=investigation_targets,
+        requested_stage=icp_stage,
+        requested_employee_buckets=sorted(employee_targets),
+        prior_observations={
+            key: verdict.get(key)
+            for key in (
+                "observed_company_name",
+                "observed_company_website",
+                "observed_company_linkedin",
+                "observed_company_stage",
+                "stage_evidence_url",
+                "stage_evidence_quote",
+                "observed_employee_count",
+                "employee_size_evidence_url",
+                "employee_size_evidence_quote",
+            )
+        },
+        verified_homepage_identity=verified_identity,
+        diagnostic=investigation_diagnostic,
+    )
+    claims = investigation.get("claims")
+    if not isinstance(claims, Mapping):
+        claims = {}
+    if not claims:
+        unavailable = _with_verifier_failure_reason(
+            company_fit_unavailable(
+                "targeted company evidence investigation unavailable",
+                details={
+                    "investigation_targets": list(investigation_targets),
+                },
+            ),
+            investigation_diagnostic.get(VERIFIER_FAILURE_REASON_KEY),
+        )
+        return dict(verdict), unavailable, {}, {}
+    projected = _project_investigator_stage(
+        verdict,
+        claims.get("stage") if isinstance(claims.get("stage"), Mapping) else None,
+        icp_stage=icp_stage,
+    )
+    projected = _project_investigator_headcount(
+        projected,
+        (
+            claims.get("headcount")
+            if isinstance(claims.get("headcount"), Mapping)
+            else None
+        ),
+        icp=icp,
+        existing_conflict=employee_size_conflict,
+    )
+    rebrand_claim = claims.get("rebrand")
+    verified_rebrand_identity = (
+        rebrand_claim if isinstance(rebrand_claim, Mapping) else {}
+    )
+    projected_result = _reverify_decision(
+        projected,
+        icp_attribute,
+        icp_stage,
+        icp=icp,
+        company=company,
+        verified_homepage_identity=verified_identity,
+        verified_homepage_transport_domain=verified_transport_domain,
+        verified_rebrand_identity=verified_rebrand_identity,
+        structured_employee_size_evidence=structured_employee_size_evidence,
+        employee_size_conflict=employee_size_conflict,
+        company_quality=company_quality,
+    )
+    return projected, projected_result, claims, verified_rebrand_identity
+
+
 async def _llm_reverify_company(
     company: "CompanyOutput",
     icp: "ICPPrompt",
@@ -3014,81 +3114,28 @@ async def _llm_reverify_company(
         if require_company_fit_dimensions and evidence_investigator
         else ()
     )
+    claims: Mapping[str, Any] = {}
     if investigation_targets:
-        employee_targets, _employee_targets_verified = (
-            _normalize_icp_employee_buckets(icp.employee_count)
-        )
-        investigation_diagnostic: dict[str, str] = {}
-        investigation = await investigate_company_evidence(
-            company_locator={
-                "name": company.company_name,
-                "website": company.company_website,
-                "linkedin": company.company_linkedin,
-            },
-            targets=investigation_targets,
-            requested_stage=icp_stage,
-            requested_employee_buckets=sorted(employee_targets),
-            prior_observations={
-                key: verdict.get(key)
-                for key in (
-                    "observed_company_name",
-                    "observed_company_website",
-                    "observed_company_linkedin",
-                    "observed_company_stage",
-                    "stage_evidence_url",
-                    "stage_evidence_quote",
-                    "observed_employee_count",
-                    "employee_size_evidence_url",
-                    "employee_size_evidence_quote",
-                )
-            },
-            verified_homepage_identity=verified_identity,
-            diagnostic=investigation_diagnostic,
-        )
-        claims = investigation.get("claims")
-        if not isinstance(claims, Mapping):
-            claims = {}
-        if not claims:
-            return _with_verifier_failure_reason(
-                company_fit_unavailable(
-                    "targeted company evidence investigation unavailable",
-                    details={
-                        "investigation_targets": list(investigation_targets),
-                    },
-                ),
-                investigation_diagnostic.get(VERIFIER_FAILURE_REASON_KEY),
-            )
-        verdict = _project_investigator_stage(
+        (
             verdict,
-            claims.get("stage") if isinstance(claims.get("stage"), Mapping) else None,
-            icp_stage=icp_stage,
-        )
-        verdict = _project_investigator_headcount(
-            verdict,
-            (
-                claims.get("headcount")
-                if isinstance(claims.get("headcount"), Mapping)
-                else None
-            ),
-            icp=icp,
-            existing_conflict=employee_size_conflict,
-        )
-        rebrand_claim = claims.get("rebrand")
-        if isinstance(rebrand_claim, Mapping):
-            verified_rebrand_identity = rebrand_claim
-        result = _reverify_decision(
-            verdict,
-            icp_attribute,
-            icp_stage,
-            icp=icp,
+            result,
+            claims,
+            verified_rebrand_identity,
+        ) = await _run_targeted_company_evidence_investigation(
             company=company,
-            verified_homepage_identity=verified_identity,
-            verified_homepage_transport_domain=verified_transport_domain,
-            verified_rebrand_identity=verified_rebrand_identity,
+            icp=icp,
+            verdict=verdict,
+            investigation_targets=investigation_targets,
+            icp_attribute=icp_attribute,
+            icp_stage=icp_stage,
+            verified_identity=verified_identity,
+            verified_transport_domain=verified_transport_domain,
             structured_employee_size_evidence=structured_employee_size_evidence,
             employee_size_conflict=employee_size_conflict,
             company_quality=company_quality,
         )
+        if not claims:
+            return result
     incomplete = _incomplete_company_reverify_dimensions(
         result,
         icp_attribute=icp_attribute,
@@ -3268,6 +3315,39 @@ async def _llm_reverify_company(
         employee_size_conflict=employee_size_conflict,
         company_quality=company_quality,
     )
+    if not investigation_targets and evidence_investigator:
+        post_repair_investigation_targets = (
+            _targeted_company_investigation_dimensions(
+                repaired_result,
+                icp_stage=icp_stage,
+                employee_size_conflict=employee_size_conflict,
+            )
+        )
+        if post_repair_investigation_targets:
+            (
+                repaired_verdict,
+                repaired_result,
+                post_repair_claims,
+                verified_rebrand_identity,
+            ) = await _run_targeted_company_evidence_investigation(
+                company=company,
+                icp=icp,
+                verdict=repaired_verdict,
+                investigation_targets=post_repair_investigation_targets,
+                icp_attribute=icp_attribute,
+                icp_stage=icp_stage,
+                verified_identity=verified_identity,
+                verified_transport_domain=verified_transport_domain,
+                structured_employee_size_evidence=current_profile_cache.get(
+                    "structured_evidence"
+                ),
+                employee_size_conflict=employee_size_conflict,
+                company_quality=company_quality,
+            )
+            if not post_repair_claims:
+                return repaired_result
+            investigation_targets = post_repair_investigation_targets
+            claims = post_repair_claims
     repaired_incomplete = _incomplete_company_reverify_dimensions(
         repaired_result,
         icp_attribute=icp_attribute,
@@ -4304,7 +4384,14 @@ def _normalize_company_stage(value) -> str:
     if re.fullmatch(r"series\s*c\s*\+", text):
         return "series c+"
     text = re.sub(r"[^a-z0-9]+", " ", text)
-    return " ".join(text.split())
+    normalized = " ".join(text.split())
+    if normalized in {
+        "private equity",
+        "private equity backed",
+        "pe backed",
+    }:
+        return "private equity"
+    return normalized
 
 
 _SERIES_C_PLUS_MATCHING_STAGES = frozenset(

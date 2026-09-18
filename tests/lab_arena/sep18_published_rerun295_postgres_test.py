@@ -248,8 +248,13 @@ def _seed_published_terminal(connection, harness: Harness):
         runner_hotkeys=harness.runner_keys,
         baseline_hotkey=harness.baseline_hotkey,
         runner_slot_ceiling=20,
-        scorer_image_digest="sha256:" + "e" * 64,
-        scorer_image_reference="registry.example/scorer@sha256:" + "e" * 64,
+        scorer_image_digest=(
+            "sha256:31ac47b38b4291396765b897df48e758741b8eb3bb9697be4d789e1d71597385"
+        ),
+        scorer_image_reference=(
+            "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@"
+            "sha256:31ac47b38b4291396765b897df48e758741b8eb3bb9697be4d789e1d71597385"
+        ),
     )
     participants = [{
         "submission_id": BASELINE if index == 0 else f"sep18-miner-{index}",
@@ -643,6 +648,10 @@ def test_rerun295_full_published_transition_and_fail_closed_winner_guard(
         participants, terminal_publication = _seed_published_terminal(connection, harness)
         with connection.cursor() as cursor:
             round_doc, baseline, counts, hashes = _terminal_seals(cursor)
+            terminal_scorer_identity = {
+                key: round_doc["configuration_doc"][key]
+                for key in ("scorer_image_digest", "scorer_image_reference")
+            }
             schedule = _future_schedule(round_doc["configuration_doc"]["schedule"])
             cursor.execute(
                 "SELECT coalesce(jsonb_agg(to_jsonb(row_value) ORDER BY entry_id),'[]'::jsonb) "
@@ -671,6 +680,14 @@ def test_rerun295_full_published_transition_and_fail_closed_winner_guard(
         with connection.cursor() as cursor:
             assert _prepare(cursor, schedule)["status"] == "prepared"
             assert _prepare(cursor, schedule)["status"] == "existing"
+            cursor.execute(
+                "SELECT configuration_doc FROM public.lab_arena_rounds WHERE round_id=%s",
+                (ROUND,),
+            )
+            prepared_configuration = cursor.fetchone()[0]
+            assert {
+                key: prepared_configuration[key] for key in terminal_scorer_identity
+            } == terminal_scorer_identity
             cursor.execute(
                 "SELECT count(*),min((state->>'settled_microusd')::bigint),"
                 "max((state->>'reserved_or_uncertain_microusd')::bigint) FROM ("
@@ -800,6 +817,10 @@ def test_rerun295_full_published_transition_and_fail_closed_winner_guard(
                 "https://github.com/leadpoet/leadpoet-sales-agent/"
                 "archive/refs/heads/lab.tar.gz"
             )
+            assert {
+                key: final_round["configuration_doc"][key]
+                for key in terminal_scorer_identity
+            } == terminal_scorer_identity
             assert _prepare(cursor, schedule)["status"] == "existing"
         connection.commit()
     finally:

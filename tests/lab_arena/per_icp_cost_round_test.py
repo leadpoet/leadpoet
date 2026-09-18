@@ -84,7 +84,7 @@ def test_per_icp_overshoot_preserves_output_other_icps_restart_and_rewards(datab
                 name = company["company_name"]
                 raw = _positive_breakdown(name, urlsplit(company["company_website"]).hostname,
                                           name.lower().replace(" ", "-"))
-                score = 30 if name.startswith("PublicBaseline") else 60
+                score = 30.12345678901234 if name.startswith("PublicBaseline") else 60.12345678901234
                 raw.update(final_score=score, intent_signal_raw=score, intent_signal_final=score)
                 raw["intent_signals_detail"][0].update(raw=score, after_decay=score)
                 evidence = document["contact_source_evidence"][source_key(company)]

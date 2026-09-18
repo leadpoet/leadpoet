@@ -1730,10 +1730,15 @@ class ArenaService:
             "scorer_image_digest": self._config.defaults.scorer_image_digest,
             "scorer_image_reference": self._config.defaults.scorer_image_reference,
         }
-        refreshed_configuration = self._configuration_for_commit({
+        refreshed_configuration = {
             **dict(round_row.get("configuration_doc") or {}),
             **scorer_image,
-        })
+        }
+        if refreshed_configuration.get("mode") == "live" and (
+            "execution_cap_microusd" not in refreshed_configuration
+            or "cost_per_company_microusd" not in refreshed_configuration
+        ):
+            raise ServiceError("round_cost_policy_missing", 500)
         try:
             contracts.validate_round_configuration(refreshed_configuration)
         except ArenaContractError as exc:
@@ -1822,21 +1827,6 @@ class ArenaService:
             scorer_image_reference=scorer_image["scorer_image_reference"],
         )
         return {"status": transition.get("status"), "participants": len(participants)}
-
-    @staticmethod
-    def _configuration_for_commit(configuration: Mapping[str, Any]) -> Dict[str, Any]:
-        """Mirror the one-time SQL adoption for a legacy live open round."""
-
-        refreshed = dict(configuration)
-        if (
-            refreshed.get("mode") == "live"
-            and "cost_per_company_microusd" not in refreshed
-        ):
-            refreshed["execution_cap_microusd"] = DEFAULT_EXECUTION_CAP_MICROUSD
-            refreshed["cost_per_company_microusd"] = (
-                DEFAULT_COST_PER_COMPANY_MICROUSD
-            )
-        return refreshed
 
     def benchmark_icps(self, round_id: str) -> List[Dict[str, Any]]:
         round_row = self._round(round_id)

@@ -816,29 +816,6 @@ def test_new_round_defaults_freeze_eighty_dollars_and_eighty_cents_per_company()
     assert defaults.scoring_cap_microusd == 50_000_000
 
 
-def test_commit_preflight_adopts_only_legacy_live_round_budget():
-    legacy_live = ArenaService._configuration_for_commit(
-        {"mode": "live", "execution_cap_microusd": 5_000_000}
-    )
-    assert legacy_live["execution_cap_microusd"] == 80_000_000
-    assert legacy_live["cost_per_company_microusd"] == 800_000
-
-    typed_live = ArenaService._configuration_for_commit(
-        {
-            "mode": "live",
-            "execution_cap_microusd": 8_000_000,
-            "cost_per_company_microusd": 250_000,
-        }
-    )
-    assert typed_live["execution_cap_microusd"] == 8_000_000
-    assert typed_live["cost_per_company_microusd"] == 250_000
-
-    shadow = ArenaService._configuration_for_commit(
-        {"mode": "shadow", "execution_cap_microusd": 123_000}
-    )
-    assert shadow == {"mode": "shadow", "execution_cap_microusd": 123_000}
-
-
 def _startup_service(
     cost_rpc_result,
     *,

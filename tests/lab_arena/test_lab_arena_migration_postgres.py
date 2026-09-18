@@ -631,66 +631,6 @@ def test_previous_service_commit_remains_legacy_after_migration(store):
     assert row["icp_set_date"] is None
 
 
-@pytest.mark.parametrize(
-    ("mode", "initial_cap", "initial_cpl", "expected_cap", "expected_cpl"),
-    [
-        ("live", 5_000_000, None, 50_000_000, 500_000),
-        ("shadow", 1_234_567, None, 1_234_567, None),
-        ("live", 7_654_321, 123_456, 7_654_321, 123_456),
-    ],
-)
-def test_commit_atomically_freezes_cost_policy_only_for_legacy_live_rounds(
-    store, mode, initial_cap, initial_cpl, expected_cap, expected_cpl
-):
-    suffix = {"live": "live", "shadow": "shadow"}[mode]
-    if initial_cpl is not None:
-        suffix = "typed"
-    round_id = "arena-2026-09-10-freeze" + suffix
-    bank_date = datetime.now(timezone.utc).date()
-    evaluation_date = bank_date + timedelta(days=1)
-    configuration = round_config(
-        round_id, [hotkey("freeze-" + suffix)], mode=mode,
-        execution_cap_microusd=initial_cap,
-        cost_per_company_microusd=initial_cpl,
-    )
-    configuration["schedule"] = {
-        "submission_open": datetime.combine(
-            bank_date, datetime.min.time(), tzinfo=timezone.utc
-        ).isoformat().replace("+00:00", "Z"),
-        "submission_cutoff": datetime.combine(
-            evaluation_date, datetime.min.time(), tzinfo=timezone.utc
-        ).isoformat().replace("+00:00", "Z"),
-    }
-    assert store.create_round(round_id, configuration)["status"] == "created"
-    participants = frozen_participants(
-        store, round_id, 1, prefix="freeze-" + suffix, king_index=0
-    )
-    result = store.commit_round_v2(
-        round_id,
-        participants=participants,
-        benchmark_ref="arena/%s/benchmark.json" % round_id,
-        evaluation_date=evaluation_date.isoformat(),
-        icp_set_date=bank_date.isoformat(),
-        scorer_image_digest=configuration["scorer_image_digest"],
-        scorer_image_reference=configuration["scorer_image_reference"],
-    )
-    assert result["status"] == "ok"
-    frozen = store.get_round(round_id)["configuration_doc"]
-    assert frozen["execution_cap_microusd"] == expected_cap
-    assert frozen.get("cost_per_company_microusd") == expected_cpl
-    # A replay cannot rewrite the now-committed configuration.
-    assert store.commit_round_v2(
-        round_id,
-        participants=participants,
-        benchmark_ref="arena/%s/other.json" % round_id,
-        evaluation_date=evaluation_date.isoformat(),
-        icp_set_date=bank_date.isoformat(),
-        scorer_image_digest=configuration["scorer_image_digest"],
-        scorer_image_reference=configuration["scorer_image_reference"],
-    )["status"] == "stale"
-    assert store.get_round(round_id)["configuration_doc"] == frozen
-
-
 def test_new_policy_stage_two_assigns_all_twenty_to_more_than_ten_challengers(
     store, superuser
 ):

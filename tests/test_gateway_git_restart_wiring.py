@@ -650,7 +650,12 @@ def test_gateway_restart_rechecks_real_memory_after_shutdown() -> None:
     )
 
     assert pre_shutdown < shutdown < post_shutdown < activation
-    assert "gateway_memory_ready_after_running_gateway_shutdown" not in script
+    assert "gateway_memory_ready_after_running_gateway_shutdown" in _shell_function_source(
+        script, "wait_for_gateway_build_memory"
+    )
+    assert "worker_process.py" not in _shell_function_source(
+        script, "gateway_memory_ready_after_running_gateway_shutdown"
+    )
     assert 'pkill -9 -f "/gateway/research_lab/worker_process[.]py"' not in script
 
 
@@ -1545,3 +1550,117 @@ def test_gateway_restart_does_not_require_closed_model_identity() -> None:
     assert "RESEARCH_LAB_PRIVATE_REPO_BRANCH" not in script
     assert "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI" not in script
     assert "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID" not in script
+
+
+
+def _run_current_restart_helpers(names, command, *, environment=None):
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    source = "\n\n".join(_shell_function_source(script, name) for name in names)
+    env = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("AWS_") and key not in {
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy",
+            "all_proxy", "BOTO_CONFIG", "LEADPOET_AWS_INSTANCE_ROLE_ONLY",
+        }
+    }
+    env.update(environment or {})
+    return subprocess.run(
+        ["bash", "-c", "set -euo pipefail\n" + source + "\n" + command],
+        env=env, check=False, capture_output=True, text=True, timeout=5,
+    )
+
+
+@pytest.mark.parametrize("delegated", [False, True])
+def test_current_restart_aws_authority_helpers_execute_and_reject_delegation(delegated):
+    result = _run_current_restart_helpers(
+        ["scrub_gateway_bootstrap_aws_environment", "validate_gateway_aws_authority"],
+        'validate_gateway_aws_authority\nprintf "%s %s\\n" "$AWS_REGION" "$LEADPOET_AWS_INSTANCE_ROLE_ONLY"',
+        environment={"AWS_PROFILE": "forbidden-fixture-profile"} if delegated else {},
+    )
+    if delegated:
+        assert result.returncode != 0
+        assert "inherited delegated AWS authority: AWS_PROFILE" in result.stderr
+        assert "forbidden-fixture-profile" not in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "us-east-1 true\n"
+
+
+def test_current_restart_deployment_helpers_execute_exact_plan_commands(tmp_path):
+    capture = tmp_path / "calls.jsonl"
+    helper = tmp_path / "helper.py"
+    helper.write_text(
+        "import json,os,sys\n"
+        "with open(os.environ['CALL_CAPTURE'],'a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')\n"
+        "if sys.argv[1]=='field': print('c'*40)\n"
+    )
+    result = _run_current_restart_helpers(
+        ["deployment_field", "finalize_deployment_record"],
+        'deployment_field target_sha\nfinalize_deployment_record succeeded completed',
+        environment={
+            "GATEWAY_GIT_HELPER": str(helper), "CALL_CAPTURE": str(capture),
+            "GATEWAY_DEPLOY_PLAN_FILE": str(tmp_path / "plan.json"),
+            "GATEWAY_TEE_EIF_ROOT": str(tmp_path / "eif"),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "c" * 40
+    assert [json.loads(row) for row in capture.read_text().splitlines()] == [
+        ["field", "--plan-file", str(tmp_path / "plan.json"), "--name", "target_sha"],
+        ["finalize", "--plan-file", str(tmp_path / "plan.json"), "--status", "succeeded",
+         "--stage", "completed", "--eif-root", str(tmp_path / "eif")],
+    ]
+
+
+@pytest.mark.parametrize("blocked", [False, True])
+def test_current_restart_memory_wait_executes_guard_and_fails_closed(tmp_path, blocked):
+    guard = tmp_path / "guard.py"
+    capture = tmp_path / "memory-calls"
+    guard.write_text(
+        "import os,sys\n"
+        "with open(os.environ['CALL_CAPTURE'],'a') as f: f.write('guard\\n')\n"
+        "print('{\"status\":\"blocked\"}')\n"
+        "sys.exit(int(os.environ['BLOCKED']))\n"
+    )
+    result = _run_current_restart_helpers(
+        ["wait_for_gateway_build_memory"],
+        'sleep() { :; }\nwait_for_gateway_build_memory 0 2',
+        environment={"GATEWAY_HOST_MEMORY_GUARD_PATH": str(guard),
+                     "CALL_CAPTURE": str(capture), "BLOCKED": str(int(blocked))},
+    )
+    assert capture.read_text().splitlines() == ["guard"] * (2 if blocked else 1)
+    assert (result.returncode != 0) == blocked
+    if blocked:
+        assert "did not recover within the bounded wait" in result.stderr
+
+
+@pytest.mark.parametrize("correct_cwd", [False, True])
+def test_current_restart_native_gateway_memory_recovery_checks_process_identity(tmp_path, correct_cwd):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    proc = tmp_path / "proc" / "123"
+    proc.mkdir(parents=True)
+    (proc / "status").write_text(f"Uid:\t{os.getuid()}\nVmRSS:\t4194304 kB\n")
+    fields = ["0"] * 22
+    fields[3] = "1"
+    fields[21] = "99"
+    (proc / "stat").write_text(" ".join(fields))
+    (proc / "cmdline").write_bytes(os.fsencode(sys.executable) + b"\0-u\0-m\0gateway.main\0")
+    (proc / "cwd").symlink_to(repo if correct_cwd else tmp_path)
+    report = tmp_path / "memory.json"
+    report.write_text(json.dumps({"schema_version": "leadpoet.gateway_host_memory_guard.v2",
+                                 "status": "blocked", "minimum_available_memory_mib": 16384,
+                                 "available_memory_mib": 14336}))
+    result = _run_current_restart_helpers(
+        ["gateway_memory_ready_after_running_gateway_shutdown"],
+        "gateway_memory_ready_after_running_gateway_shutdown "
+        + shlex.quote(str(report)) + " 123 " + shlex.quote(str(proc.parent)),
+        environment={"GATEWAY_PYTHON_BIN": sys.executable, "LEADPOET_REPO_ROOT": str(repo),
+                     "GATEWAY_RECLAIMABLE_MEMORY_SAFETY_MARGIN_MIB": "2048"},
+    )
+    if correct_cwd:
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)["reclaimable_gateway_memory_mib"] == 4096
+    else:
+        assert result.returncode != 0
+        assert "working directory differs" in result.stderr

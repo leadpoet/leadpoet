@@ -89,6 +89,9 @@ from qualification.scoring.company_fit_decision import (
     reconcile_company_fit_decisions,
     strict_company_fit_boolean,
 )
+from qualification.scoring.company_evidence_investigator import (
+    investigate_company_evidence,
+)
 from qualification.scoring.arena_integrity import (
     bounded_criterion_evidence,
     fit_evidence_url_hints,
@@ -1294,6 +1297,7 @@ def _web_identity_receipt(
     *,
     verified_homepage_identity: Optional[Mapping[str, Any]] = None,
     verified_homepage_transport_domain: str = "",
+    verified_rebrand_identity: Optional[Mapping[str, Any]] = None,
     company_quality: bool = False,
 ) -> dict[str, Any]:
     """Bind the independently observed web identity to the submitted company."""
@@ -1324,6 +1328,78 @@ def _web_identity_receipt(
         evidence_source="company_web_reverification",
         company_quality=company_quality,
     )
+    rebrand = (
+        verified_rebrand_identity
+        if isinstance(verified_rebrand_identity, Mapping)
+        else {}
+    )
+    if (
+        receipt.get("decision") != COMPANY_FIT_MATCH
+        and rebrand.get("status") == "VERIFIED"
+    ):
+        old_name = re.sub(r"[^a-z0-9]+", "", str(rebrand.get("old_name") or "").casefold())
+        new_name = re.sub(r"[^a-z0-9]+", "", str(rebrand.get("new_name") or "").casefold())
+        submitted_raw_name = re.sub(
+            r"[^a-z0-9]+", "", str(company.company_name or "").casefold()
+        )
+        observed_raw_name = re.sub(
+            r"[^a-z0-9]+", "", str(observed_values["name"] or "").casefold()
+        )
+        old_domain = str(rebrand.get("old_domain") or "").casefold()
+        new_domain = str(rebrand.get("new_domain") or "").casefold()
+        shared_slug = str(rebrand.get("shared_linkedin_slug") or "").casefold()
+        submitted_slug = str(receipt.get("submitted_linkedin_slug") or "").casefold()
+        observed_slug = str(receipt.get("observed_linkedin_slug") or "").casefold()
+        names_bind = bool(
+            old_name
+            and new_name
+            and observed_raw_name in {old_name, new_name}
+            and (
+                submitted_raw_name in {old_name, new_name}
+                or (old_name in submitted_raw_name and new_name in submitted_raw_name)
+            )
+        )
+        domains_bind = bool(
+            old_domain
+            and new_domain
+            and old_domain != new_domain
+            and {old_domain, new_domain}
+            == {
+                str(receipt.get("submitted_domain") or "").casefold(),
+                str(receipt.get("observed_domain") or "").casefold(),
+            }
+        )
+        linkedin_binds = bool(
+            submitted_slug
+            and observed_slug
+            and submitted_slug == observed_slug
+            and (not shared_slug or shared_slug == submitted_slug)
+        )
+        if names_bind and domains_bind and linkedin_binds:
+            receipt.update(
+                decision=COMPANY_FIT_MATCH,
+                reason_code="verified_rebrand_continuity",
+                rebrand_evidence_url=str(rebrand.get("evidence_url") or ""),
+                rebrand_evidence_quote=str(rebrand.get("evidence_quote") or "")[:2000],
+                verified_old_name=str(rebrand.get("old_name") or "")[:200],
+                verified_new_name=str(rebrand.get("new_name") or "")[:200],
+                verified_old_domain=old_domain,
+                verified_new_domain=new_domain,
+            )
+            return receipt
+    if (
+        receipt.get("decision") == COMPANY_FIT_MISMATCH
+        and receipt.get("reason_code") == "identity_mismatch"
+        and rebrand.get("status") == "UNPROVEN"
+        and receipt.get("submitted_domain")
+        and receipt.get("observed_domain")
+        and receipt.get("submitted_domain") != receipt.get("observed_domain")
+    ):
+        receipt.update(
+            decision=COMPANY_FIT_UNAVAILABLE,
+            reason_code="rebrand_continuity_unproven",
+        )
+        return receipt
     verified_anchor_receipt: Mapping[str, str] = {}
     if isinstance(verified_homepage_identity, Mapping):
         anchor_name = verified_homepage_identity.get("normalized_name")
@@ -1879,7 +1955,9 @@ def _reverify_decision(
     company: Optional[CompanyOutput] = None,
     verified_homepage_identity: Optional[Mapping[str, str]] = None,
     verified_homepage_transport_domain: str = "",
+    verified_rebrand_identity: Optional[Mapping[str, Any]] = None,
     structured_employee_size_evidence: Optional[Mapping[str, Any]] = None,
+    employee_size_conflict: bool = False,
     company_quality: bool = False,
 ) -> CompanyFitDecisionResult:
     """Classify web proof as a match, conflict, or unavailable outcome.
@@ -1902,6 +1980,7 @@ def _reverify_decision(
             verified_homepage_transport_domain=(
                 verified_homepage_transport_domain
             ),
+            verified_rebrand_identity=verified_rebrand_identity,
             company_quality=company_quality,
         )
         identity_decision = str(identity_receipt.get("decision") or "")
@@ -1952,9 +2031,13 @@ def _reverify_decision(
     )
     dimensions = {
         "employee_size": (
-            structured_employee_size_decision
-            if structured_employee_size_decision != COMPANY_FIT_UNAVAILABLE
-            else _decision_from_observed_employee_size(verdict, icp)
+            COMPANY_FIT_UNAVAILABLE
+            if employee_size_conflict
+            else (
+                structured_employee_size_decision
+                if structured_employee_size_decision != COMPANY_FIT_UNAVAILABLE
+                else _decision_from_observed_employee_size(verdict, icp)
+            )
         ),
         "industry": _industry_evidence_decision(
             verdict.get("observed_industry"),
@@ -2035,6 +2118,7 @@ def _reverify_decision(
                 "attribute_evidence",
             )
         },
+        "employee_size_conflict": bool(employee_size_conflict),
     }
     raw_reason = verdict.get("reason")
     reason = (
@@ -2292,6 +2376,150 @@ def _has_explicitly_unproven_fit_dimensions(
     return True
 
 
+def _employee_size_sources_conflict(
+    verdict: Mapping[str, Any],
+    structured_evidence: Optional[Mapping[str, Any]],
+) -> bool:
+    """Return true only for two complete, different headcount observations."""
+
+    if not isinstance(structured_evidence, Mapping):
+        return False
+    structured_bucket = _normalize_linkedin_employee_bucket(
+        structured_evidence.get("employee_count")
+    )
+    observed = verdict.get("observed_employee_count")
+    try:
+        from qualification.employee_buckets import (
+            normalize_observed_employee_count_bucket,
+        )
+
+        observed_bucket = normalize_observed_employee_count_bucket(
+            observed, default=None
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    evidence = _dimension_web_evidence(verdict, "employee_size")
+    return bool(
+        structured_bucket
+        and observed_bucket
+        and structured_bucket != observed_bucket
+        and evidence["url"]
+        and evidence["quote"]
+    )
+
+
+def _targeted_company_investigation_dimensions(
+    result: CompanyFitDecisionResult,
+    *,
+    icp_stage: str,
+    employee_size_conflict: bool,
+) -> tuple[str, ...]:
+    """Select only disputed stage, rebrand, and headcount dimensions."""
+
+    details = result.details if isinstance(result.details, Mapping) else {}
+    raw_dimensions = details.get("dimension_decisions")
+    dimensions = raw_dimensions if isinstance(raw_dimensions, Mapping) else {}
+    targets: list[str] = []
+    if (
+        icp_stage
+        and dimensions.get("stage")
+        in {COMPANY_FIT_MISMATCH, COMPANY_FIT_UNAVAILABLE}
+    ):
+        targets.append("stage")
+    identity = details.get("identity_receipt")
+    if isinstance(identity, Mapping) and (
+        details.get("identity_decision") != COMPANY_FIT_MATCH
+        and identity.get("submitted_domain")
+        and identity.get("observed_domain")
+        and identity.get("submitted_domain") != identity.get("observed_domain")
+    ):
+        targets.append("rebrand")
+    if employee_size_conflict or dimensions.get("employee_size") == COMPANY_FIT_MISMATCH:
+        targets.append("headcount")
+    return tuple(targets)
+
+
+def _project_investigator_stage(
+    verdict: Mapping[str, Any],
+    finding: Optional[Mapping[str, Any]],
+    *,
+    icp_stage: str,
+) -> dict[str, Any]:
+    """Replace only stage fields when fetched evidence proves a current stage."""
+
+    projected = dict(verdict)
+    value = finding or {}
+    if value.get("status") not in {"VERIFIED", "CONTRADICTED"}:
+        return projected
+    observed = _normalize_company_stage(value.get("observed_value"))
+    url = _valid_web_evidence_url(value.get("evidence_url"))
+    quote = str(value.get("evidence_quote") or "").strip()[:2000]
+    if not observed or not url or not quote:
+        return projected
+    projected.update(
+        observed_company_stage=observed,
+        stage_matches=_company_stage_matches(observed, icp_stage),
+        stage_evidence_url=url,
+        stage_evidence_quote=quote,
+    )
+    nested = verdict.get("dimension_evidence")
+    if isinstance(nested, Mapping):
+        nested_copy = dict(nested)
+        nested_copy["stage"] = {"url": url, "quote": quote}
+        projected["dimension_evidence"] = nested_copy
+    return projected
+
+
+def _project_investigator_headcount(
+    verdict: Mapping[str, Any],
+    finding: Optional[Mapping[str, Any]],
+    *,
+    icp: ICPPrompt,
+    existing_conflict: bool,
+) -> dict[str, Any]:
+    """Apply fetched current headcount only when no source conflict remains."""
+
+    projected = dict(verdict)
+    value = finding or {}
+    if (
+        existing_conflict
+        or value.get("status") not in {"VERIFIED", "CONTRADICTED"}
+    ):
+        return projected
+    observed_value = value.get("observed_value")
+    if isinstance(observed_value, bool) or not isinstance(
+        observed_value, (str, int)
+    ):
+        return projected
+    try:
+        from qualification.employee_buckets import (
+            normalize_observed_employee_count_bucket,
+        )
+
+        observed_bucket = normalize_observed_employee_count_bucket(
+            observed_value, default=None
+        )
+    except Exception:  # noqa: BLE001
+        return projected
+    targets, targets_verified = _normalize_icp_employee_buckets(icp.employee_count)
+    url = _valid_web_evidence_url(value.get("evidence_url"))
+    quote = str(value.get("evidence_quote") or "").strip()[:2000]
+    if not observed_bucket or not targets_verified or not url or not quote:
+        return projected
+    projected.update(
+        observed_employee_count=observed_value,
+        employee_size_matches=observed_bucket in targets,
+        employee_size_evidence_url=url,
+        employee_size_evidence_quote=quote,
+    )
+    nested = verdict.get("dimension_evidence")
+    if isinstance(nested, Mapping):
+        nested_copy = dict(nested)
+        nested_copy["employee_size"] = {"url": url, "quote": quote}
+        projected["dimension_evidence"] = nested_copy
+    return projected
+
+
 async def _request_company_reverify_json(
     *,
     key: str,
@@ -2399,6 +2627,7 @@ async def _llm_reverify_company(
     require_company_fit_dimensions: bool = False,
     verified_homepage_identity: Optional[CompanyFitDecisionResult] = None,
     company_quality: bool = False,
+    evidence_investigator: bool = False,
 ) -> CompanyFitDecisionResult:
     """Web-grounded re-verification of the model-REPORTED attribute claim and
     stage label — the two dimensions where the scorer otherwise trusts model
@@ -2619,6 +2848,14 @@ async def _llm_reverify_company(
             verified_homepage_identity=verified_identity,
             invocation_cache=current_profile_cache,
         )
+    structured_employee_size_evidence = current_profile_cache.get(
+        "structured_evidence"
+    )
+    employee_size_conflict = _employee_size_sources_conflict(
+        verdict,
+        structured_employee_size_evidence,
+    )
+    verified_rebrand_identity: Mapping[str, Any] = {}
     result = _reverify_decision(
         verdict,
         icp_attribute,
@@ -2627,17 +2864,109 @@ async def _llm_reverify_company(
         company=company,
         verified_homepage_identity=verified_identity,
         verified_homepage_transport_domain=verified_transport_domain,
-        structured_employee_size_evidence=current_profile_cache.get(
-            "structured_evidence"
-        ),
+        structured_employee_size_evidence=structured_employee_size_evidence,
+        employee_size_conflict=employee_size_conflict,
         company_quality=company_quality,
     )
+    investigation_targets = (
+        _targeted_company_investigation_dimensions(
+            result,
+            icp_stage=icp_stage,
+            employee_size_conflict=employee_size_conflict,
+        )
+        if require_company_fit_dimensions and evidence_investigator
+        else ()
+    )
+    if investigation_targets:
+        employee_targets, _employee_targets_verified = (
+            _normalize_icp_employee_buckets(icp.employee_count)
+        )
+        investigation_diagnostic: dict[str, str] = {}
+        investigation = await investigate_company_evidence(
+            company_locator={
+                "name": company.company_name,
+                "website": company.company_website,
+                "linkedin": company.company_linkedin,
+            },
+            targets=investigation_targets,
+            requested_stage=icp_stage,
+            requested_employee_buckets=sorted(employee_targets),
+            prior_observations={
+                key: verdict.get(key)
+                for key in (
+                    "observed_company_name",
+                    "observed_company_website",
+                    "observed_company_linkedin",
+                    "observed_company_stage",
+                    "stage_evidence_url",
+                    "stage_evidence_quote",
+                    "observed_employee_count",
+                    "employee_size_evidence_url",
+                    "employee_size_evidence_quote",
+                )
+            },
+            verified_homepage_identity=verified_identity,
+            diagnostic=investigation_diagnostic,
+        )
+        claims = investigation.get("claims")
+        if not isinstance(claims, Mapping):
+            claims = {}
+        if not claims:
+            return _with_verifier_failure_reason(
+                company_fit_unavailable(
+                    "targeted company evidence investigation unavailable",
+                    details={
+                        "investigation_targets": list(investigation_targets),
+                    },
+                ),
+                investigation_diagnostic.get(VERIFIER_FAILURE_REASON_KEY),
+            )
+        verdict = _project_investigator_stage(
+            verdict,
+            claims.get("stage") if isinstance(claims.get("stage"), Mapping) else None,
+            icp_stage=icp_stage,
+        )
+        verdict = _project_investigator_headcount(
+            verdict,
+            (
+                claims.get("headcount")
+                if isinstance(claims.get("headcount"), Mapping)
+                else None
+            ),
+            icp=icp,
+            existing_conflict=employee_size_conflict,
+        )
+        rebrand_claim = claims.get("rebrand")
+        if isinstance(rebrand_claim, Mapping):
+            verified_rebrand_identity = rebrand_claim
+        result = _reverify_decision(
+            verdict,
+            icp_attribute,
+            icp_stage,
+            icp=icp,
+            company=company,
+            verified_homepage_identity=verified_identity,
+            verified_homepage_transport_domain=verified_transport_domain,
+            verified_rebrand_identity=verified_rebrand_identity,
+            structured_employee_size_evidence=structured_employee_size_evidence,
+            employee_size_conflict=employee_size_conflict,
+            company_quality=company_quality,
+        )
     incomplete = _incomplete_company_reverify_dimensions(
         result,
         icp_attribute=icp_attribute,
         icp_stage=icp_stage,
     )
     if not incomplete:
+        return result
+    investigated_dimensions = {
+        {"stage": "stage", "headcount": "employee_size", "rebrand": "identity"}[target]
+        for target in investigation_targets
+    }
+    if investigation_targets and set(incomplete).issubset(investigated_dimensions):
+        # The bounded investigator already exhausted the allowed research for
+        # these disputes. Keep its UNPROVEN result instead of asking the broad
+        # schema repair to re-run otherwise complete dimensions.
         return result
 
     # One repair is allowed only after a syntactically valid verifier object
@@ -2738,6 +3067,29 @@ async def _llm_reverify_company(
             verified_homepage_identity=verified_identity,
             invocation_cache=current_profile_cache,
         )
+    repaired_verdict = _project_investigator_stage(
+        repaired_verdict,
+        (
+            claims.get("stage")
+            if investigation_targets
+            and isinstance(claims, Mapping)
+            and isinstance(claims.get("stage"), Mapping)
+            else None
+        ),
+        icp_stage=icp_stage,
+    )
+    repaired_verdict = _project_investigator_headcount(
+        repaired_verdict,
+        (
+            claims.get("headcount")
+            if investigation_targets
+            and isinstance(claims, Mapping)
+            and isinstance(claims.get("headcount"), Mapping)
+            else None
+        ),
+        icp=icp,
+        existing_conflict=employee_size_conflict,
+    )
     repaired_result = _reverify_decision(
         repaired_verdict,
         icp_attribute,
@@ -2746,9 +3098,11 @@ async def _llm_reverify_company(
         company=company,
         verified_homepage_identity=verified_identity,
         verified_homepage_transport_domain=verified_transport_domain,
+        verified_rebrand_identity=verified_rebrand_identity,
         structured_employee_size_evidence=current_profile_cache.get(
             "structured_evidence"
         ),
+        employee_size_conflict=employee_size_conflict,
         company_quality=company_quality,
     )
     repaired_incomplete = _incomplete_company_reverify_dimensions(
@@ -2911,6 +3265,7 @@ async def _verify_company_fit(
     *,
     require_https_transport: bool,
     company_quality: bool = False,
+    evidence_investigator: bool = False,
 ) -> CompanyFitDecisionResult:
     """One official public/Research Lab company-fit verifier.
 
@@ -3050,7 +3405,7 @@ async def _verify_company_fit(
     # company verdict: continue to the later web verifier, which must still
     # return a complete independently bound identity and every active
     # dimension before this company can pass.
-    if identity.decision == COMPANY_FIT_MISMATCH:
+    if identity.decision == COMPANY_FIT_MISMATCH and not evidence_investigator:
         aggregate = aggregate_company_fit_decisions(
             dimensions, stage_required=stage_required
         )
@@ -3071,6 +3426,7 @@ async def _verify_company_fit(
             identity
         ),
         company_quality=company_quality,
+        evidence_investigator=evidence_investigator,
     )
     web_details = web.details if isinstance(web.details, Mapping) else {}
     observed_raw = web_details.get("dimension_decisions") or {}
@@ -3288,6 +3644,7 @@ async def score_company_competition_intent(
     is_reference_model: bool = False,
     integrity_policy: bool = False,
     company_quality: bool = False,
+    evidence_investigator: bool = False,
 ) -> LeadScoreBreakdown:
     """Score one Arena company with binary fit gates and 0-100 intent score.
 
@@ -3308,6 +3665,7 @@ async def score_company_competition_intent(
         seen_companies,
         require_https_transport=True,
         company_quality=company_quality,
+        evidence_investigator=evidence_investigator,
     )
     gate_receipts = [company_fit.receipt("company_fit")]
     if company_fit.decision != COMPANY_FIT_MATCH:

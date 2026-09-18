@@ -123,6 +123,7 @@ def test_plain_quotas_and_priced_model_access_keep_judge_models_private_to_scori
 # ---------------------------------------------------------------------------
 
 JUDGE_SOURCE_FILES = (
+    "qualification/scoring/company_evidence_investigator.py",
     "qualification/scoring/lead_scorer.py",
     "qualification/scoring/intent_signal_gate.py",
     "qualification/scoring/verification_helpers.py",

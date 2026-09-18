@@ -246,6 +246,7 @@ def lab_scorer(policy: Mapping[str, Any], *, contact_source_evidence: Optional[M
         contacts_required=contact_policy.scorer_enabled(validated),
         contact_source_evidence=contact_source_evidence,
         company_quality=quality_policy.scorer_enabled(validated),
+        evidence_investigator=True,
     )
 
     def score(companies: Sequence[Mapping[str, Any]], icp: Mapping[str, Any], is_reference_model: bool) -> Any:
@@ -254,6 +255,7 @@ def lab_scorer(policy: Mapping[str, Any], *, contact_source_evidence: Optional[M
     score.integrity_policy = contact_policy.integrity_adapter(adapter)
     score.contacts_required = contact_policy.scorer_enabled(validated)
     score.company_quality = quality_policy.scorer_enabled(validated)
+    score.evidence_investigator = True
     return score
 
 

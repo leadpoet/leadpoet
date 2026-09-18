@@ -820,9 +820,11 @@ class CompetitionCompanyScorer:
         contacts_required: bool = False,
         contact_source_evidence: Mapping[str, Any] | None = None,
         company_quality: bool = False,
+        evidence_investigator: bool = False,
     ) -> None:
         self.company_quality = bool(company_quality)
         self.contacts_required = bool(contacts_required)
+        self.evidence_investigator = bool(evidence_investigator)
         self.integrity_policy = bool(integrity_policy or self.contacts_required or self.company_quality)
         self.contact_source_evidence = (
             dict(contact_source_evidence)
@@ -953,6 +955,7 @@ class CompetitionCompanyScorer:
                 seen_companies=(seen_companies if not self.integrity_policy else set()),
                 is_reference_model=bool(is_reference_model),
                 integrity_policy=self.integrity_policy,
+                evidence_investigator=self.evidence_investigator,
                 **({"company_quality": True} if self.company_quality else {}),
             )
             breakdown = (

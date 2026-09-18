@@ -56,7 +56,10 @@ from qualification.company_quality import (
     canonical_us_state as canonical_quality_us_state,
     is_united_states,
 )
-from qualification.employee_buckets import LINKEDIN_EMPLOYEE_BUCKETS
+from qualification.employee_buckets import (
+    LINKEDIN_EMPLOYEE_BUCKETS,
+    normalize_observed_employee_count_bucket,
+)
 from qualification.scoring.pre_checks import (
     check_country_match,
     run_company_zero_checks,
@@ -2519,16 +2522,10 @@ def _employee_size_sources_conflict(
         structured_evidence.get("employee_count")
     )
     observed = verdict.get("observed_employee_count")
-    try:
-        from qualification.employee_buckets import (
-            normalize_observed_employee_count_bucket,
-        )
-
-        observed_bucket = normalize_observed_employee_count_bucket(
-            observed, default=None
-        )
-    except Exception:  # noqa: BLE001
-        return False
+    observed_bucket = (
+        _normalize_linkedin_employee_bucket(observed)
+        or normalize_observed_employee_count_bucket(observed, default=None)
+    )
     evidence = _dimension_web_evidence(verdict, "employee_size")
     return bool(
         structured_bucket
@@ -2631,16 +2628,12 @@ def _project_investigator_headcount(
         observed_value, (str, int)
     ):
         return projected
-    try:
-        from qualification.employee_buckets import (
-            normalize_observed_employee_count_bucket,
-        )
-
-        observed_bucket = normalize_observed_employee_count_bucket(
+    observed_bucket = (
+        _normalize_linkedin_employee_bucket(observed_value)
+        or normalize_observed_employee_count_bucket(
             observed_value, default=None
         )
-    except Exception:  # noqa: BLE001
-        return projected
+    )
     targets, targets_verified = _normalize_icp_employee_buckets(icp.employee_count)
     url = _valid_web_evidence_url(value.get("evidence_url"))
     quote = str(value.get("evidence_quote") or "").strip()[:2000]

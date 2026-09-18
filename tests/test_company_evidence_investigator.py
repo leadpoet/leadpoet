@@ -638,6 +638,63 @@ def test_fetched_current_headcount_repairs_a_nonconflicting_false_negative():
     )
     assert unchanged["observed_employee_count"] == "2-10"
 
+    canonical_band = dict(finding, observed_value="11-50")
+    projected_band = _project_investigator_headcount(
+        verdict,
+        canonical_band,
+        icp=_icp(),
+        existing_conflict=False,
+    )
+    assert projected_band["observed_employee_count"] == "11-50"
+    assert projected_band["employee_size_matches"] is True
+
+    for invalid_value in ("11ish-50ish", "100000-200000"):
+        rejected = _project_investigator_headcount(
+            verdict,
+            dict(finding, observed_value=invalid_value),
+            icp=_icp(),
+            existing_conflict=False,
+        )
+        assert rejected["observed_employee_count"] == "2-10"
+
+
+def test_conflicting_third_party_ranges_remain_unproven():
+    verdict = _complete_verdict(
+        observed_employee_count="11-50",
+        employee_size_matches=True,
+        employee_size_evidence_url="https://directory.example/acme",
+        employee_size_evidence_quote="Acme Company size 11-50 employees.",
+    )
+    structured = {
+        "employee_count": "51-200",
+        "provider": "harvestapi_get_company",
+        "source_field": "employeeCountRange",
+        "url": "https://www.linkedin.com/company/acme",
+        "website": "https://acme.example/",
+    }
+    assert _employee_size_sources_conflict(verdict, structured) is True
+
+    result = _reverify_decision(
+        verdict,
+        "",
+        "",
+        icp=_icp(),
+        company=_company(),
+        verified_homepage_identity={
+            "normalized_name": "Acme",
+            "registrable_dns_domain": "acme.example",
+            "linkedin_company_slug": "acme",
+        },
+        structured_employee_size_evidence=structured,
+        employee_size_conflict=True,
+        company_quality=True,
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    receipt = result.details["employee_size_conflict_receipt"]
+    assert receipt["status"] == "UNPROVEN"
+    assert receipt["resolution"] == "unresolved"
+
 
 def test_headcount_finding_binds_value_and_rejects_scoped_counts():
     url = "https://acme.example/about"

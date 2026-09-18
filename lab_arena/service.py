@@ -3889,7 +3889,8 @@ class ArenaService:
             == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
             and not any(
                 entry.get("entry_kind") == "refusal"
-                and (entry.get("entry_doc") or {}).get("reason") == "money_cap"
+                and (entry.get("entry_doc") or {}).get("reason")
+                in contracts.PER_ICP_POLICY_BUDGET_STOP_REASONS
                 for entry in self._store.list_ledger(
                     run_id=run_id, entry_kind="refusal"
                 )

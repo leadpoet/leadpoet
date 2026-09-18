@@ -1937,31 +1937,36 @@ def test_valid_fallback_output_survives_a_refused_provider_call(tmp_path):
     [
         (("money_cap",), True, False, "budget_exhausted"),
         (("provider_unavailable", "money_cap"), True, False, "budget_exhausted"),
+        (("provider_unavailable", "per_icp_quota"), True, False, "budget_exhausted"),
+        (("provider_unavailable", "stage_quota"), True, False, "budget_exhausted"),
         (("money_cap", "provider_unavailable"), True, False, "provider_error"),
+        (("per_icp_quota", "provider_unavailable"), True, False, "provider_error"),
         (("provider_unavailable", "money_cap"), False, False, "provider_error"),
+        (("provider_unavailable", "per_icp_quota"), False, False, "provider_error"),
         (("provider_unavailable", "money_cap"), True, True, "accepted"),
+        (("provider_unavailable", "per_icp_quota"), True, True, "accepted"),
     ],
 )
-def test_per_icp_money_cap_only_replaces_earlier_provider_failure(
+def test_per_icp_authoritative_budget_stop_only_replaces_earlier_provider_failure(
     tmp_path, ordered_errors, per_icp_policy, valid_output, expected
 ):
     documents = []
     for sequence, error in enumerate(ordered_errors):
-        money_cap = error == "money_cap"
-        status = 402 if money_cap else 502
-        body = b'{"error":{"code":"budget_refused"}}' if money_cap else b'{"error":{"code":"provider_unavailable"}}'
+        budget_stop = error in {"money_cap", "per_icp_quota", "stage_quota"}
+        status = 402 if budget_stop else 502
+        body = b'{"error":{"code":"budget_refused"}}' if budget_stop else b'{"error":{"code":"provider_unavailable"}}'
         call = {
             "call_identity": contracts.document_hash(["mixed-call", sequence]),
             "operation_id": "deepline.execute",
             "action_sequence": sequence,
             "reserved_microusd": 0,
             "actual_microusd": 0,
-            "outcome": "refused" if money_cap else "settled",
-            "error_code": "budget_refused" if money_cap else error,
-            "provider_status": None if money_cap else 503,
+            "outcome": "refused" if budget_stop else "settled",
+            "error_code": "budget_refused" if budget_stop else error,
+            "provider_status": None if budget_stop else 503,
         }
-        if money_cap:
-            call["reason"] = "money_cap"
+        if budget_stop:
+            call["reason"] = error
         documents.append({
             "status": status,
             "headers": {"content-type": "application/json", "content-length": str(len(body))},

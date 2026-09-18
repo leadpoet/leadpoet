@@ -108,6 +108,9 @@ PROVIDER_CALL_SCHEMA_VERSION = "leadpoet.lab_arena.provider_call.v1"
 SUBMISSION_COSTS_SCHEMA_VERSION = "leadpoet.lab_arena.submission_costs.v1"
 SUCCESSFUL_CALLS_COST_POLICY = "successful_calls_v1"
 PER_ICP_SUCCESSFUL_CALLS_COST_POLICY = "successful_calls_per_icp_v1"
+PER_ICP_POLICY_BUDGET_STOP_REASONS = frozenset(
+    {"money_cap", "per_icp_quota", "stage_quota"}
+)
 PER_ICP_EXECUTION_CAP_MICROUSD = 4_000_000
 PER_ICP_QUALIFIED_PAIR_CAP_MICROUSD = 800_000
 SIGNING_KEY_DOCUMENT_SCHEMA_VERSION = "leadpoet.lab_arena.signing_key.v1"

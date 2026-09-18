@@ -196,7 +196,13 @@ def test_per_icp_overshoot_preserves_output_other_icps_restart_and_rewards(datab
     fixtures.assert_canary_absent(harness, connect)
 
 
-def test_per_icp_money_cap_after_provider_failure_does_not_cancel_round(database, tmp_path):
+@pytest.mark.parametrize(
+    ("stop_reason", "day", "epoch"),
+    [("money_cap", 29, 31801), ("per_icp_quota", 30, 31802)],
+)
+def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
+    database, tmp_path, stop_reason, day, epoch
+):
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
     harness = PerIcpHarness(connect, tmp_path, challengers=[], runners=["alpha"])
@@ -249,10 +255,13 @@ def test_per_icp_money_cap_after_provider_failure_does_not_cancel_round(database
         submission_id = spec.source_dir.parent.name.removeprefix("submission-")
         position = int(document["icp"]["icp_id"].rsplit("_", 1)[-1]) - 1
         if harness.flavors[submission_id] == "PublicBaseline" and position == 0:
-            calls = (("1.00", "failed"), ("3.10", "ok"), ("0.01", "refused"))
             with harness.sandbox.lock:
                 os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
                 try:
+                    if stop_reason == "money_cap":
+                        calls = (("1.00", "failed"), ("3.10", "ok"), ("0.01", "refused"))
+                    else:
+                        calls = (("1.00", "failed"),)
                     for cost, outcome in calls:
                         status, _, _ = shim.dispatch(
                             "openrouter.chat",
@@ -274,6 +283,16 @@ def test_per_icp_money_cap_after_provider_failure_does_not_cancel_round(database
                             "refused": 402,
                         }[outcome]
                         observed.append((outcome, status))
+                    if stop_reason == "per_icp_quota":
+                        for index in range(31):
+                            status, _, _ = shim.dispatch(
+                                "deepline.execute",
+                                {"tool": "exa_search", "payload": {"query": "fintech"}},
+                                5000,
+                            )
+                            expected = 200 if index < 30 else 402
+                            assert status == expected
+                            observed.append(("quota_ok" if index < 30 else "quota_refused", status))
                 finally:
                     os.environ.pop(shim.WORKER_SOCKET_ENV, None)
             return runtime.fake_result(
@@ -300,7 +319,7 @@ def test_per_icp_money_cap_after_provider_failure_does_not_cancel_round(database
         )
 
     harness.sandbox.run_icp = run_icp
-    participants = fixtures._start_round(harness, day=29, epoch=31801)
+    participants = fixtures._start_round(harness, day=day, epoch=epoch)
     assert participants == 1
     harness.clock.advance_to(harness.schedule()["stage_1_start"])
     assert harness.service.advance_round(harness.round_id)["assignments"] == 10
@@ -324,14 +343,24 @@ def test_per_icp_money_cap_after_provider_failure_does_not_cancel_round(database
     assert len(accepted) == 19
     assert len(budget_stops) == 1
     assert budget_stops[0]["icp_position"] == 0
-    assert observed == [("failed", 502), ("ok", 200), ("refused", 402)]
-    assert "0.01|ok" not in harness.provider.dispatched
+    if stop_reason == "money_cap":
+        assert observed == [("failed", 502), ("ok", 200), ("refused", 402)]
+        assert "0.01|ok" not in harness.provider.dispatched
+    else:
+        assert observed.count(("quota_ok", 200)) == 30
+        assert observed.count(("quota_refused", 402)) == 1
+        refusal_entries = harness.service.store.list_ledger(
+            run_id=budget_stops[0]["run_id"], entry_kind="refusal"
+        )
+        assert [entry["entry_doc"]["reason"] for entry in refusal_entries] == [
+            "per_icp_quota"
+        ]
 
     result = saved["publication_doc"]["final_ranking"][0]
     assert result["submission_id"] == baseline_id
     assert result["eligible"] is True
     assert result["final_score"] > 0
     per_icp = {item["icp_position"]: item for item in result["cost_summary"]["per_icp"]}
-    assert per_icp[0]["eligible"] is False
+    assert per_icp[0]["eligible"] is (stop_reason == "per_icp_quota")
     assert all(per_icp[position]["eligible"] for position in range(1, 20))
     fixtures.assert_canary_absent(harness, connect)

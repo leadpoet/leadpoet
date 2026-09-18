@@ -2275,25 +2275,27 @@ class AssignmentExecutor:
                 )
             )
             provider_infrastructure_failed = bool(infrastructure_failures)
-            money_cap_sequences = [
+            budget_stop_sequences = [
                 call.get("action_sequence")
                 for call in completed_calls
                 if call.get("error_code") == "budget_refused"
                 and call.get("outcome") == "refused"
-                and call.get("reason") == "money_cap"
+                and call.get("reason")
+                in contracts.PER_ICP_POLICY_BUDGET_STOP_REASONS
                 and type(call.get("action_sequence")) is int
             ]
             infrastructure_sequences = [
                 call.get("action_sequence") for call in infrastructure_failures
                 if type(call.get("action_sequence")) is int
             ]
-            per_icp_money_cap_ended_attempt = (
+            per_icp_budget_stop_ended_attempt = (
                 not scoring_run
                 and lease.get("sourcing_cost_eligibility_policy")
                 == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
-                and bool(money_cap_sequences)
+                and bool(budget_stop_sequences)
                 and len(infrastructure_sequences) == len(infrastructure_failures)
-                and max(money_cap_sequences) > max(infrastructure_sequences, default=-1)
+                and max(budget_stop_sequences)
+                > max(infrastructure_sequences, default=-1)
             )
             with state.quota_condition:
                 trusted_quota_failure = state.trusted_quota_failure
@@ -2305,7 +2307,7 @@ class AssignmentExecutor:
             elif not scoring_run and trusted_quota_failure and terminal != "accepted":
                 terminal = "provider_error"
                 output_document = None
-            elif per_icp_money_cap_ended_attempt and terminal != "accepted":
+            elif per_icp_budget_stop_ended_attempt and terminal != "accepted":
                 terminal = "budget_exhausted"
                 output_document = None
             elif provider_infrastructure_failed and terminal != "accepted":

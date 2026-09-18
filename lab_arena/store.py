@@ -56,7 +56,7 @@ SCORE_BATCH_SIZE = 500
 
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_per_icp_cost_schema_v1": (),
-    "lab_arena_prepare_sep18_published_rerun292_v1": (
+    "lab_arena_prepare_sep18_published_rerun293_v1": (
         ("p_source_size_bytes", "bigint"), ("p_source_sha256", "text"),
         ("p_source_commit", "text"), ("p_bank_sha256", "text"),
         ("p_forward_schedule", "jsonb"),

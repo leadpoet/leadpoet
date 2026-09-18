@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seal and prepare the one-time Sep18 published-baseline rerun292."""
+"""Seal and prepare the one-time Sep18 published-baseline rerun293."""
 from __future__ import annotations
 
 import argparse
@@ -33,13 +33,13 @@ TERMINAL_SOURCE_URL = (
     "https://github.com/leadpoet/champion_model/"
     "archive/refs/heads/lab.tar.gz"
 )
-SOURCE_REF = f"arena/{ROUND}/sources/{BASELINE}-rerun292.tar.gz"
+SOURCE_REF = f"arena/{ROUND}/sources/{BASELINE}-rerun293.tar.gz"
 TERMINAL_SOURCE_REF = f"arena/{ROUND}/sources/{BASELINE}.tar.gz"
 TERMINAL_SOURCE_SIZE_BYTES = 604_847
 TERMINAL_SOURCE_SHA256 = "7e1bb0747014a57bc50f48f9f822d1a7c936682d63f06564e978d23f54eb7fc1"
 TERMINAL_SOURCE_COMMIT = "e5341f85829ad196b4a1cb58b38a34155697c8d4"
 NEW_SOURCE_COMMIT = "008ce9b8b027d9808e7a2c70a47e43686e426e1e"
-PREFLIGHT_SCHEMA = "leadpoet.sep18_published_rerun292.preflight.v1"
+PREFLIGHT_SCHEMA = "leadpoet.sep18_published_rerun293.preflight.v1"
 READ_PAGE_SIZE = 500
 MAX_SEALED_ROWS = 100_000
 
@@ -356,7 +356,7 @@ def prepare(
         now = now or datetime.now(timezone.utc)
         deadline = datetime.fromisoformat(schedule["benchmark_deadline"].replace("Z", "+00:00"))
         if now >= deadline:
-            raise RerunRefused("Sep18 rerun292 admission window has closed")
+            raise RerunRefused("Sep18 rerun293 admission window has closed")
     terminal_facts = preflight.get("terminal_source")
     if not isinstance(terminal_facts, Mapping):
         raise RerunRefused("sealed terminal source facts are missing")
@@ -401,9 +401,9 @@ def prepare(
     }:
         raise RerunRefused("lab source archive differs from reviewed identity")
     result = {
-        "status": "rerun292_preflight_ok", "round_id": ROUND,
+        "status": "rerun293_preflight_ok", "round_id": ROUND,
         "bank_sha256": BANK_SHA256, **facts,
-        "execute_namespace": "rerun292", "score_namespace": "score:rerun292",
+        "execute_namespace": "rerun293", "score_namespace": "score:rerun293",
         "openrouter_calls_per_icp": 200, "replay": replay,
     }
     if dry_run:
@@ -416,7 +416,7 @@ def prepare(
         if bytes(objects.get_bounded(SOURCE_REF, source_bundle.MAX_SOURCE_ARCHIVE_BYTES)) != source:
             raise RerunRefused("staged source readback differs")
     acknowledged = service.store._transport.rpc(
-        "lab_arena_prepare_sep18_published_rerun292_v1",
+        "lab_arena_prepare_sep18_published_rerun293_v1",
         {
             "p_source_size_bytes": facts["source_size_bytes"],
             "p_source_sha256": facts["source_sha256"],
@@ -428,13 +428,13 @@ def prepare(
     if not isinstance(acknowledged, dict) or acknowledged.get("status") not in ("prepared", "existing") or (
         acknowledged.get("round_id") != ROUND
         or acknowledged.get("baseline_execute_assignments") != 20
-        or acknowledged.get("execute_namespace") != "rerun292"
-        or acknowledged.get("score_namespace") != "score:rerun292"
+        or acknowledged.get("execute_namespace") != "rerun293"
+        or acknowledged.get("score_namespace") != "score:rerun293"
         or any(acknowledged.get(key) != facts[key] for key in (
             "source_size_bytes", "source_sha256", "source_commit"
         ))
     ):
-        raise RerunRefused("rerun292 RPC did not acknowledge the exact prepared cycle")
+        raise RerunRefused("rerun293 RPC did not acknowledge the exact prepared cycle")
     return {**result, **acknowledged}
 
 
@@ -493,10 +493,10 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(value, sort_keys=True))
         return 0
     except RerunRefused as exc:
-        print(f"Sep18 rerun292 refused: {exc}", file=sys.stderr)
+        print(f"Sep18 rerun293 refused: {exc}", file=sys.stderr)
         return 2
     except Exception:
-        print("Sep18 rerun292 failed; inspect redacted service logs", file=sys.stderr)
+        print("Sep18 rerun293 failed; inspect redacted service logs", file=sys.stderr)
         return 3
 
 

@@ -14,7 +14,7 @@ import pytest
 from lab_arena import contracts, source_bundle
 from lab_arena.service import DEFAULT_BASELINE_SOURCE_URL, S3ObjectStore
 from lab_arena.store import FUNCTION_SIGNATURES
-from scripts import arena_sep18_published_rerun292 as r
+from scripts import arena_sep18_published_rerun293 as r
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.sep18_open_quota287_postgres_test import _configuration
 from tests.lab_arena.test_lab_arena_contracts import base_round_configuration
@@ -176,7 +176,7 @@ def setup(monkeypatch):
         return {
             "status": "prepared", "round_id": r.ROUND,
             "baseline_execute_assignments": 20,
-            "execute_namespace": "rerun292", "score_namespace": "score:rerun292",
+            "execute_namespace": "rerun293", "score_namespace": "score:rerun293",
             **{key: facts[key] for key in (
                 "source_size_bytes", "source_sha256", "source_commit"
             )},
@@ -306,13 +306,13 @@ def test_collect_preflight_requires_frozen_evaluation_identity(setup, field, val
 def test_prepare_stages_exact_archive_and_calls_typed_rpc(setup):
     result = invoke(setup)
     facts = r._source_facts(setup.new, r.SOURCE_REF)
-    assert result["execute_namespace"] == "rerun292"
-    assert result["score_namespace"] == "score:rerun292"
+    assert result["execute_namespace"] == "rerun293"
+    assert result["score_namespace"] == "score:rerun293"
     assert setup.fetches == [(r.SOURCE_URL, source_bundle.MAX_SOURCE_ARCHIVE_BYTES)]
     assert setup.client.data[r.SOURCE_REF] == setup.new
-    prepare_calls = [call for call in setup.calls if call[0].endswith("rerun292_v1")]
+    prepare_calls = [call for call in setup.calls if call[0].endswith("rerun293_v1")]
     assert prepare_calls == [(
-        "lab_arena_prepare_sep18_published_rerun292_v1",
+        "lab_arena_prepare_sep18_published_rerun293_v1",
         {
             "p_source_size_bytes": facts["source_size_bytes"],
             "p_source_sha256": facts["source_sha256"],
@@ -324,9 +324,9 @@ def test_prepare_stages_exact_archive_and_calls_typed_rpc(setup):
 
 
 def test_dry_run_has_no_write_or_prepare_rpc(setup):
-    assert invoke(setup, dry_run=True)["status"] == "rerun292_preflight_ok"
+    assert invoke(setup, dry_run=True)["status"] == "rerun293_preflight_ok"
     assert not setup.client.writes
-    assert not [call for call in setup.calls if call[0].endswith("rerun292_v1")]
+    assert not [call for call in setup.calls if call[0].endswith("rerun293_v1")]
 
 
 @pytest.mark.parametrize("defect", ["round", "baseline", "run", "ledger", "claim", "cost"])
@@ -351,11 +351,11 @@ def test_sealed_or_quiescent_drift_fails_before_write(setup, defect):
     with pytest.raises(r.RerunRefused):
         invoke(setup)
     assert not setup.client.writes
-    assert not [call for call in setup.calls if call[0].endswith("rerun292_v1")]
+    assert not [call for call in setup.calls if call[0].endswith("rerun293_v1")]
 
 
 def test_rpc_signature_is_role_bound_and_exact():
-    assert FUNCTION_SIGNATURES["lab_arena_prepare_sep18_published_rerun292_v1"] == (
+    assert FUNCTION_SIGNATURES["lab_arena_prepare_sep18_published_rerun293_v1"] == (
         ("p_source_size_bytes", "bigint"), ("p_source_sha256", "text"),
         ("p_source_commit", "text"), ("p_bank_sha256", "text"),
         ("p_forward_schedule", "jsonb"),
@@ -373,7 +373,7 @@ def test_source_url_is_current_default_while_terminal_metadata_stays_frozen():
         "archive/refs/heads/lab.tar.gz"
     )
     assert r.TERMINAL_SOURCE_REF.endswith("baseline-2026-09-18.tar.gz")
-    assert r.SOURCE_REF.endswith("baseline-2026-09-18-rerun292.tar.gz")
+    assert r.SOURCE_REF.endswith("baseline-2026-09-18-rerun293.tar.gz")
     assert r.TERMINAL_SOURCE_SIZE_BYTES == 604_847
     assert r.TERMINAL_SOURCE_SHA256 == (
         "7e1bb0747014a57bc50f48f9f822d1a7c936682d63f06564e978d23f54eb7fc1"

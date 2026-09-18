@@ -930,6 +930,18 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
         requests[0]["messages"][1]["content"].split("\n", 1)[1]
     )
     assert input_document["evaluation_date"] == "2026-09-18"
+    assert input_document["investigation_limits"] == {
+        "reasoning_turns": 8,
+        "search_calls": 2,
+        "fetch_calls": 3,
+        "admission_deadline_seconds": 110.0,
+    }
+    assert "official company investor-relations pages" in (
+        requests[0]["messages"][0]["content"]
+    )
+    assert "never combine a quote from one page" in (
+        requests[0]["messages"][0]["content"]
+    )
 
 
 def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatch):
@@ -1030,6 +1042,8 @@ def test_harness_retries_deterministically_rejected_stage_quote(monkeypatch):
         else:
             feedback = json.loads(payload["messages"][-1]["content"])
             assert feedback["error"] == "deterministic_evidence_validation_failed"
+            assert "Never repeat a rejected quote" in feedback["instruction"]
+            assert "Fetch another useful source" in feedback["instruction"]
             assert feedback["rejected_findings"] == [{
                 "target": "stage",
                 "reason": (
@@ -1210,7 +1224,7 @@ def test_harness_closes_search_budget_and_admission_boundary(monkeypatch):
         del headers
         reasoning_turns.append(payload)
         turn = len(reasoning_turns)
-        if turn <= 4:
+        if turn < investigator.MAX_REASONING_TURNS:
             name, arguments = "search_web", {"query": f"Acme query {turn}"}
         else:
             name, arguments = "submit_findings", {

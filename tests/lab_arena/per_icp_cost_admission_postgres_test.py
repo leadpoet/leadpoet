@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
 from lab_arena import contracts
-from lab_arena.store import hash_lease_token
+from lab_arena.store import ArenaStoreError, hash_lease_token
 from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
@@ -17,6 +18,7 @@ from tests.lab_arena.parallel_twenty_icp_execution_postgres_test import (
 )
 from tests.lab_arena.test_lab_arena_migration_postgres import claim, sha
 from tests.lab_arena.test_lab_arena_migration_postgres import open_round
+from tests.lab_arena.test_lab_arena_migration_postgres import expire_now
 from tests.lab_arena.test_lab_arena_service_round import Harness
 
 
@@ -41,6 +43,28 @@ def _reserve(store, lease, token, label, amount):
             lease["run_id"], "scrapingdog"
         )["funding_source"],
         amount_microusd=amount, call_doc={"request_hash": sha(label)},
+    )
+    return identity, result
+
+
+def _reserve_dynamic(store, lease, token, label):
+    identity = contracts.provider_call_identity(
+        attempt=lease["attempt"], assignment_id=lease["assignment_id"],
+        icp_position=lease["icp_position"], action_sequence=0,
+        operation_id="deepline.execute", request_hash=sha(label),
+    )
+    result = store.reserve_call(
+        run_id=lease["run_id"], lease_token_hash=hash_lease_token(token),
+        call_identity=identity, operation_id="deepline.execute",
+        provider="deepline",
+        funding_source=store.provider_funding(
+            lease["run_id"], "deepline"
+        )["funding_source"],
+        amount_microusd=0,
+        call_doc={
+            "request_hash": sha(label), "tool": "exa_search",
+            "reserve_remaining_budget": True,
+        },
     )
     return identity, result
 
@@ -98,8 +122,18 @@ def test_paid_admission_is_per_icp_and_counts_retries(database, tmp_path):
     )
     assert admitted["status"] == "reserved"
     _settle(store, first, first_token, overshoot_id, 250_000)
+    replay_id, replay = _reserve(
+        store, first, first_token, "overshoot", 250_000
+    )
+    assert replay_id == overshoot_id
+    assert (replay["status"], replay["idempotent"]) == ("settled", True)
     _, refused = _reserve(store, first, first_token, "after-cap", 1)
     assert (refused["status"], refused["reason"]) == ("refused", "money_cap")
+    free_after_id, free_after_cap = _reserve(
+        store, first, first_token, "free-after-cap", 0
+    )
+    assert free_after_cap["status"] == "reserved"
+    _settle(store, first, first_token, free_after_id, 0)
 
     # Another ICP remains independent. A billed failed request still uses the
     # admission budget, although it does not enter final cost eligibility.
@@ -198,6 +232,79 @@ def test_marker_absent_round_keeps_legacy_aggregate_money_cap(database):
     assert (refused["status"], refused["reason"]) == ("refused", "money_cap")
 
 
+def test_retry_and_dynamic_reservations_keep_the_icp_boundary(database, tmp_path):
+    connect = lambda: database[0].connect(**database[1])
+    harness = Harness(connect, tmp_path, challengers=[], runners=["retry"])
+    harness.service.config.defaults = replace(
+        harness.service.config.defaults, per_icp_cost_policy=True,
+        integrity_from="2000-01-01T00:00:00Z",
+    )
+    _start_parallel_round(harness, "arena-2099-02-03-c3", slot_ceiling=2)
+    store = harness.service.store
+    runner = harness.runner_keys[0]
+    first, first_token = claim(
+        store, harness.round_id, runner, parallelism=2, ceiling=2
+    )[:2]
+    other, other_token = claim(
+        store, harness.round_id, runner, parallelism=2, ceiling=2
+    )[:2]
+    first_id, _ = _reserve(store, first, first_token, "retry-first", 1)
+    _settle(store, first, first_token, first_id, 1_000_000)
+    connection = connect()
+    connection.autocommit = True
+    try:
+        expire_now(connection, first["run_id"])
+    finally:
+        connection.close()
+    assert store.expire_leases(harness.round_id)["retried"] == 1
+    retry, retry_token = claim(
+        store, harness.round_id, runner, parallelism=2, ceiling=2
+    )[:2]
+    assert (retry["assignment_id"], retry["attempt"]) == (
+        first["assignment_id"], 2
+    )
+    with pytest.raises(ArenaStoreError, match="lab_arena_call_identity_foreign"):
+        store.reserve_call(
+            run_id=retry["run_id"],
+            lease_token_hash=hash_lease_token(retry_token),
+            call_identity=first_id, operation_id="scrapingdog.scrape",
+            provider="scrapingdog",
+            funding_source=store.provider_funding(
+                retry["run_id"], "scrapingdog"
+            )["funding_source"],
+            amount_microusd=1, call_doc={"request_hash": sha("foreign")},
+        )
+    dynamic_id, dynamic = _reserve_dynamic(
+        store, retry, retry_token, "retry-dynamic"
+    )
+    assert dynamic["amount_microusd"] == 3_000_000
+    other_dynamic_id, other_dynamic = _reserve_dynamic(
+        store, other, other_token, "other-dynamic"
+    )
+    assert other_dynamic["amount_microusd"] == 4_000_000
+    assert dynamic_id != other_dynamic_id
+
+
+def test_simultaneous_paid_admission_reserves_exactly_one(database, tmp_path):
+    connect = lambda: database[0].connect(**database[1])
+    harness = Harness(connect, tmp_path, challengers=[], runners=["race"])
+    harness.service.config.defaults = replace(
+        harness.service.config.defaults, per_icp_cost_policy=True,
+        integrity_from="2000-01-01T00:00:00Z",
+    )
+    _start_parallel_round(harness, "arena-2099-02-04-c4", slot_ceiling=2)
+    store = harness.service.store
+    lease, token = claim(
+        store, harness.round_id, harness.runner_keys[0], parallelism=2, ceiling=2
+    )[:2]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(
+            lambda label: _reserve(store, lease, token, label, 100_000)[1],
+            ("race-a", "race-b"),
+        ))
+    assert sorted(row["status"] for row in results) == ["budget_busy", "reserved"]
+
+
 def test_migration_replays_and_exposes_scoped_capability(database):
     psycopg2, dsn = database
     connection = psycopg2.connect(**dsn)
@@ -214,5 +321,30 @@ def test_migration_replays_and_exposes_scoped_capability(database):
                 "version": 289,
                 "policy": "successful_calls_per_icp_v1",
             }
+            signatures = (
+                "public.lab_arena_icp_cost_eligibility(text,text,integer,integer)",
+                "public.lab_arena_per_icp_cost_schema_v1()",
+                "public.lab_arena__successful_icp_cost_state(text,text,integer)",
+                "public.lab_arena__per_icp_publication_valid(text,jsonb)",
+            )
+            for signature in signatures:
+                for role in ("anon", "authenticated", "service_role"):
+                    cursor.execute(
+                        "SELECT has_function_privilege(%s,%s,'EXECUTE')",
+                        (role, signature),
+                    )
+                    assert cursor.fetchone()[0] is False
+            for signature in signatures[:2]:
+                cursor.execute(
+                    "SELECT has_function_privilege('lab_arena_service',%s,'EXECUTE')",
+                    (signature,),
+                )
+                assert cursor.fetchone()[0] is True
+            for signature in signatures[2:]:
+                cursor.execute(
+                    "SELECT has_function_privilege('lab_arena_service',%s,'EXECUTE')",
+                    (signature,),
+                )
+                assert cursor.fetchone()[0] is False
     finally:
         connection.close()

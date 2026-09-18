@@ -400,7 +400,9 @@ BEGIN
     v_total_qualified := v_total_qualified
       + (v_summary ->> 'qualified_company_count')::BIGINT;
     IF pg_catalog.jsonb_typeof(v_row -> 'returned_company_count') IS DISTINCT FROM 'number'
-       OR (v_row ->> 'returned_company_count')::BIGINT NOT BETWEEN 0 AND 50 THEN
+       OR (v_row ->> 'returned_company_count')::NUMERIC NOT BETWEEN 0 AND 5
+       OR (v_row ->> 'returned_company_count')::NUMERIC <>
+         pg_catalog.trunc((v_row ->> 'returned_company_count')::NUMERIC) THEN
       RAISE EXCEPTION 'lab_arena_publication_cost_report_mismatch' USING ERRCODE = '22023';
     END IF;
     v_total_returned := v_total_returned

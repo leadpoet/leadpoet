@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Stage top-level Research Lab runtime packages into the gateway Docker context.
+# Stage protected gateway runtime sources into the gateway Docker context.
 # The Nitro enclave build only sees ~/gateway, so runtime dependencies imported
 # as top-level packages must be copied under gateway/_attested_runtime first.
 
@@ -67,7 +67,7 @@ if [ ! -d "$SOURCE_GATEWAY_ROOT" ]; then
   exit 1
 fi
 
-echo "Staging attested Research Lab runtime packages"
+echo "Staging protected gateway runtime sources"
 echo "  Gateway root:  $GATEWAY_ROOT"
 echo "  Source root:   $SOURCE_ROOT"
 echo "  Source commit: $ATTESTED_COMMIT_SHA"

@@ -406,7 +406,7 @@ def test_exact_entity_linkedin_range_is_primary_over_third_party_exact_estimate(
     assert receipt["primary_method"] == (
         "harvestapi_exact_company_employeeCountRange"
     )
-    assert receipt["observed_current_date"]
+    assert receipt["evaluation_date"]
     assert receipt["primary_source_url"] == (
         "https://www.linkedin.com/company/acme"
     )

@@ -2219,7 +2219,7 @@ def _reverify_decision(
                     "primary_method": (
                         "harvestapi_exact_company_employeeCountRange"
                     ),
-                    "observed_current_date": evaluation_date().isoformat(),
+                    "evaluation_date": evaluation_date().isoformat(),
                     "primary_source_url": str(
                         (structured_employee_size_evidence or {}).get("url") or ""
                     ),

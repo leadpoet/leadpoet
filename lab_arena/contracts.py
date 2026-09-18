@@ -1144,16 +1144,9 @@ def validate_checkpoint_transition(document: Any) -> Dict[str, Any]:
         "changed_accepted": result["changed_count"],
         "missing_accepted": result["missing_count"],
     }
-    removed_count = (
-        result["rejected_count"]
-        + result["unresolved_count"]
-        + result["missing_count"]
-    )
-    classified_count = removed_count + result["changed_count"]
+    removed_count = sum(reductions.values())
     if result["checkpoint_count"] != result["final_count"] + removed_count:
         raise ArenaContractError("checkpoint transition counts do not balance")
-    if classified_count > result["checkpoint_count"]:
-        raise ArenaContractError("checkpoint transition classifications overlap")
     active_reasons = [reason for reason, count in reductions.items() if count]
     expected_reason = (
         "unchanged"
@@ -1165,7 +1158,7 @@ def validate_checkpoint_transition(document: Any) -> Dict[str, Any]:
     if result["reason"] != expected_reason:
         raise ArenaContractError("checkpoint transition reason does not match counts")
     same_hash = result["checkpoint_sha256"] == result["final_sha256"]
-    if same_hash != (classified_count == 0):
+    if same_hash != (removed_count == 0):
         raise ArenaContractError("checkpoint transition hashes do not match counts")
     return result
 

@@ -331,7 +331,7 @@ def test_run_result_reward_basis_and_scoring_plan_contracts():
         "event": "checkpoint_transition",
         "reason": "changed_accepted",
         "checkpoint_count": 1,
-        "final_count": 1,
+        "final_count": 0,
         "rejected_count": 0,
         "unresolved_count": 0,
         "changed_count": 1,

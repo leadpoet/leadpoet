@@ -74,6 +74,13 @@ def test_chain_and_normal_weight_signing_contracts_remain_protected():
     } <= set(PROTECTED_SYMBOLS["leadpoet_canonical/chain_source_v2.py"])
 
 
+def test_targeted_verifier_and_its_caller_remain_protected():
+    assert {
+        "_llm_reverify_company",
+        "_run_targeted_company_evidence_investigation",
+    } <= set(PROTECTED_SYMBOLS["qualification/scoring/lead_scorer.py"])
+
+
 def test_enclave_surface_stages_every_external_protected_source(tmp_path: Path):
     enclave_root = tmp_path / "gateway"
     for relative_path in PROTECTED_SYMBOLS:

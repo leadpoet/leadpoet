@@ -11,6 +11,7 @@ import pytest
 from gateway.tee import release_archive_v2 as release_archive
 from gateway.tee import verify_release_artifacts_v2 as artifact_verifier
 from gateway.tee.release_archive_v2 import (
+    ARCHIVE_SCHEMA_VERSION,
     ReleaseArchiveCacheMiss,
     ReleaseArchiveV2Error,
     archive_verified_release,
@@ -23,6 +24,9 @@ from gateway.tee.release_archive_v2 import (
 )
 from gateway.tee.release_manifest_v2 import (
     BUILD_EVIDENCE_SCHEMA_VERSION,
+    HISTORICAL_TWO_ROLE_TOPOLOGY_HASH,
+    LOCAL_RELEASE_SCHEMA_VERSION,
+    build_local_release_identity,
     build_release_manifest,
 )
 from gateway.tee.topology import ROLE_SPECS, topology_hash
@@ -140,6 +144,130 @@ def _release_fixture(root: Path, commit_character: str):
         json.dumps(verification), encoding="utf-8"
     )
     return gateway_root, eif_root, release_path, release
+
+
+def _local_archive_fixture(root: Path, *, historical: bool):
+    root.mkdir(parents=True)
+    commit = ("b" if historical else "a") * 40
+    role_specs = (
+        {
+            "gateway_coordinator": {"service_role": "gateway_coordinator"},
+            "gateway_scoring": {"service_role": "gateway_scoring"},
+        }
+        if historical
+        else ROLE_SPECS
+    )
+    expected_topology_hash = (
+        HISTORICAL_TWO_ROLE_TOPOLOGY_HASH if historical else topology_hash()
+    )
+    build_results = []
+    files = {}
+    verification_roles = []
+    for index, (role, spec) in enumerate(sorted(role_specs.items()), start=1):
+        pcr0 = ("%x" % index) * 96
+        eif_bytes = ("local-eif:" + role).encode("ascii")
+        image_hash = _sha(("local-image:" + role).encode("ascii"))
+        identity_hash = _sha(("local-identity:" + role).encode("ascii"))
+        build_results.append(
+            {
+                "role": role,
+                "commit_sha": commit,
+                "pcr0": pcr0,
+                "image_id": image_hash,
+                "source_manifest_hash": _sha(("source:" + role).encode("ascii")),
+                "build_identity_hash": identity_hash,
+                "execution_manifest_hash": _sha(("execution:" + role).encode("ascii")),
+                "dependency_lock_hash": _sha(("dependency:" + role).encode("ascii")),
+                "dockerfile_hash": _sha(("dockerfile:" + role).encode("ascii")),
+                "topology_hash": expected_topology_hash,
+            }
+        )
+        artifacts = {
+            "tee-enclave-%s.eif" % role: eif_bytes,
+            "enclave-build-%s.json" % role: json.dumps(
+                {"Measurements": {"PCR0": pcr0}}
+            ).encode("utf-8"),
+            "enclave-image-%s.txt" % role: (image_hash + "\n").encode("ascii"),
+            "build-identities/%s.json" % role: json.dumps(
+                {"identity_hash": identity_hash}
+            ).encode("utf-8"),
+        }
+        for relative, content in artifacts.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+            files[relative] = {"sha256": _sha(content), "size_bytes": len(content)}
+        verification_roles.append(
+            {"physical_role": role, "eif_hash": _sha(eif_bytes), "pcr0": pcr0}
+        )
+
+    if historical:
+        roles = {
+            result["role"]: {
+                "physical_role": result["role"],
+                "service_role": role_specs[result["role"]]["service_role"],
+                "commit_sha": result["commit_sha"],
+                "pcr0": result["pcr0"],
+                "normalized_image_hash": result["image_id"],
+                "source_manifest_hash": result["source_manifest_hash"],
+                "build_identity_hash": result["build_identity_hash"],
+                "execution_manifest_hash": result["execution_manifest_hash"],
+                "dependency_lock_hash": result["dependency_lock_hash"],
+                "dockerfile_hash": result["dockerfile_hash"],
+                "topology_hash": result["topology_hash"],
+                "verified_build_count": 1,
+            }
+            for result in build_results
+        }
+        release_body = {
+            "schema_version": LOCAL_RELEASE_SCHEMA_VERSION,
+            "commit_sha": commit,
+            "topology_hash": expected_topology_hash,
+            "roles": {role: roles[role] for role in sorted(roles)},
+            "verified_build_count": len(roles),
+        }
+        release = {**release_body, "release_hash": sha256_json(release_body)}
+    else:
+        release = build_local_release_identity(build_results)
+
+    manifest_bytes = json.dumps(release, sort_keys=True).encode("utf-8")
+    (root / "gateway-v2-release-manifest.json").write_bytes(manifest_bytes)
+    files["gateway-v2-release-manifest.json"] = {
+        "sha256": _sha(manifest_bytes), "size_bytes": len(manifest_bytes),
+    }
+    verification_bytes = json.dumps(
+        {"release_hash": release["release_hash"], "roles": verification_roles},
+        sort_keys=True,
+    ).encode("utf-8")
+    (root / "gateway-v2-local-verification.json").write_bytes(verification_bytes)
+    files["gateway-v2-local-verification.json"] = {
+        "sha256": _sha(verification_bytes), "size_bytes": len(verification_bytes),
+    }
+    archive_body = {
+        "schema_version": ARCHIVE_SCHEMA_VERSION,
+        "release_hash": release["release_hash"],
+        "commit_sha": release["commit_sha"],
+        "archived_at": "2026-09-18T04:00:00Z",
+        "files": files,
+    }
+    (root / "archive.json").write_text(
+        json.dumps({**archive_body, "archive_hash": sha256_json(archive_body)}),
+        encoding="utf-8",
+    )
+    return release
+
+
+@pytest.mark.parametrize("historical", [False, True])
+def test_gateway_archive_reads_current_and_retained_local_release_topologies(
+    tmp_path, historical
+):
+    archive = tmp_path / ("historical" if historical else "current")
+    release = _local_archive_fixture(archive, historical=historical)
+
+    verified = verify_archive_directory(archive)
+
+    assert verified["release_hash"] == release["release_hash"]
+    assert verified["commit_sha"] == release["commit_sha"]
 
 
 def test_verified_gateway_release_is_archived_as_complete_immutable_set(tmp_path):

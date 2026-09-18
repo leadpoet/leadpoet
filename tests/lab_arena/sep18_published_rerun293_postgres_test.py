@@ -9,8 +9,17 @@ from pathlib import Path
 
 import pytest
 
-from lab_arena import contracts, judgment_cache, scoring
+from lab_arena import (
+    contact_policy,
+    contracts,
+    intent_details_policy,
+    judgment_cache,
+    output,
+    scoring,
+    verify,
+)
 from lab_arena.store import hash_lease_token, new_lease_token
+from qualification.scoring.arena_integrity import canonical_company_identity
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS,
@@ -19,11 +28,6 @@ from tests.lab_arena.lab_arena_pg_harness import (
 from tests.lab_arena.per_icp_cost_admission_postgres_test import (
     _reserve as _reserve_cost_call,
     _settle as _settle_cost_call,
-)
-from tests.lab_arena.sep16_native_baseline_rerun_postgres_test import (
-    _proof_breakdown,
-    _proof_company,
-    _proof_execution,
 )
 from tests.lab_arena.sep18_open_quota287_postgres_test import _configuration
 from tests.lab_arena.test_lab_arena_service_round import Harness
@@ -59,6 +63,112 @@ def database():
 
 def _compact(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _proof_company(icp, index, position):
+    name = "Proof %d %d" % (index, position)
+    domain = "proof-%d-%d.example.com" % (index, position)
+    return {
+        "company_name": name,
+        "company_website": "https://" + domain,
+        "company_linkedin": "https://www.linkedin.com/company/proof-%d-%d"
+        % (index, position),
+        "industry": icp["industry"],
+        "employee_count": icp["employee_count"][0],
+        "company_stage": str(icp.get("company_stage") or ""),
+        "country": icp.get("country") or "United States",
+        "state": "California",
+        "intent_details": (
+            "%s announced a relevant operating milestone in August 2026. "
+            "That activity indicates current demand aligned with this ICP."
+        ) % name,
+        "intent_signals": [{
+            "description": "Announced a relevant operating milestone",
+            "url": "https://" + domain + "/news",
+            "date": "2026-08-01",
+            "matched_icp_signal": 0,
+        }],
+        "contact": {
+            "full_name": "Alex Proof",
+            "job_title": "VP Engineering",
+            "email": "alex@" + domain,
+        },
+    }
+
+
+def _proof_breakdown(company, score):
+    identity = canonical_company_identity(company).key
+    qualified = float(score) > 0
+    checks = {key: {"status": "pass"} for key in (
+        "claim", "identity", "source", "company", "role", "location",
+        "email_attribution", "email_verification",
+    )}
+    return {
+        "final_score": float(score),
+        "company_index": 0,
+        "company_identity_key": identity,
+        "company_identity_alias_keys": [identity],
+        "company_qualified": qualified,
+        "duplicate_company": False,
+        "contact_identity_key": "contact:" + identity,
+        "contact_qualified": qualified,
+        "email_status": "valid" if qualified else "invalid",
+        "contact_verification": {
+            "decision": "verified" if qualified else "mismatch",
+            "subchecks": checks,
+        },
+        "verifier_gate_receipts": [
+            {"gate": "company_fit", "decision": "match"},
+            {"gate": "intent_details", "decision": "match"},
+        ],
+        "intent_signals_detail": [{
+            "matched_icp_signal": 0,
+            "after_decay": 50.0,
+            "judge_verdict": {
+                "decision": "verified",
+                "verification_trace": {
+                    "intent_verdict": {
+                        "signal_evaluations": [{"signal_status": "supported"}]
+                    }
+                },
+            },
+        }],
+        "failure_reason": "",
+    }
+
+
+def _proof_execution(objects, icp, index, position, execute_id, score_id=None):
+    company = _proof_company(icp, index, position)
+    document = output.output_document_from_bytes(
+        json.dumps({
+            "schema_version": intent_details_policy.OUTPUT_SCHEMA,
+            "companies": [company],
+        }).encode(),
+        expected_schema_version=intent_details_policy.OUTPUT_SCHEMA,
+    )
+    objects.put("arena/output/%s.json" % execute_id, json.dumps(document).encode())
+    breakdown = _proof_breakdown(company, 40 if index == 0 else 0)
+    if score_id is not None:
+        objects.put(
+            "arena/score/%s.json" % score_id,
+            json.dumps(scoring.build_scoring_output(execute_id, [breakdown])).encode(),
+        )
+    row = verify.scored_row(
+        "proof", position, execute_id, icp, document["companies"], [breakdown],
+        scoring.build_scorer_policy(
+            scoring_adapter_version=contact_policy.SCORING_ADAPTER,
+            intent_details=True,
+        ),
+    )
+    identity = canonical_company_identity(company).key
+    receipt = {"companies": [{
+        "company_index": 0,
+        "company_identity_key": identity,
+        "company_qualified": breakdown["company_qualified"],
+        "duplicate_company": False,
+        "contact_qualified": breakdown["contact_qualified"],
+    }]}
+    return row["per_icp_score"], receipt
 
 
 def _publication_definition(cursor) -> str:

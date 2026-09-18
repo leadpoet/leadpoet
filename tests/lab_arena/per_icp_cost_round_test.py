@@ -11,6 +11,7 @@ import subprocess
 from dataclasses import replace
 from copy import deepcopy
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
@@ -66,7 +67,13 @@ class PerIcpHarness(QualityHarness):
 
 @pytest.fixture
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS + ("289-lab-arena-per-icp-cost-policy.sql",))
+    yield from database_with_lab_arena_migration(
+        CURRENT_SERVICE_MIGRATIONS
+        + (
+            "289-lab-arena-per-icp-cost-policy.sql",
+            "292-lab-arena-null-final-score-publication.sql",
+        )
+    )
 
 
 def test_per_icp_overshoot_preserves_output_other_icps_restart_and_rewards(database, tmp_path):
@@ -364,3 +371,212 @@ def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
     assert per_icp[0]["eligible"] is (stop_reason == "per_icp_quota")
     assert all(per_icp[position]["eligible"] for position in range(1, 20))
     fixtures.assert_canary_absent(harness, connect)
+
+
+def test_all_budget_exhausted_challenger_publishes_null_score(database, tmp_path):
+    psycopg2, dsn = database
+    connect = lambda: psycopg2.connect(**dsn)
+    harness = PerIcpHarness(
+        connect, tmp_path, challengers=["Empty", "Healthy"], runners=["alpha"]
+    )
+    original = harness.sandbox.run_icp
+
+    def run_icp(spec, **kwargs):
+        document = json.loads((spec.input_dir / runtime.INPUT_FILE_NAME).read_text())
+        if document.get("schema_version") == scoring.SCORING_INPUT_SCHEMA_VERSION:
+            def judge(companies, buyer, _reference):
+                company = companies[0]
+                name = company["company_name"]
+                raw = _positive_breakdown(
+                    name,
+                    urlsplit(company["company_website"]).hostname,
+                    name.lower().replace(" ", "-"),
+                )
+                raw.update(
+                    final_score=30,
+                    intent_signal_raw=30,
+                    intent_signal_final=30,
+                )
+                raw["intent_signals_detail"][0].update(raw=30, after_decay=30)
+                evidence = document["contact_source_evidence"][source_key(company)]
+                _merge_contact_breakdown(
+                    raw,
+                    asyncio.run(_contact_result(company, buyer, evidence)),
+                )
+                return apply_company_judgment_context(
+                    companies, [raw], contacts_required=True
+                )
+
+            judge.company_quality = judge.integrity_policy = judge.contacts_required = True
+            full, new = scoring.score_quality_work_item(
+                {"scored_run_id": document["scored_run_id"]},
+                icp=document["icp"],
+                companies=document["companies"],
+                scorer=judge,
+                cache_context=document["company_judgment_cache"],
+            )
+            return runtime.fake_result(
+                exit_code=0,
+                output_bytes=json.dumps(
+                    scoring.build_scoring_output(
+                        document["scored_run_id"], full, company_judgments=new
+                    )
+                ).encode(),
+            )
+
+        submission_id = spec.source_dir.parent.name.removeprefix("submission-")
+        if harness.flavors[submission_id] == "Empty":
+            with harness.sandbox.lock:
+                os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
+                try:
+                    for cost, expected in (("4.10", 200), ("0.01", 402)):
+                        status, _, _ = shim.dispatch(
+                            "openrouter.chat",
+                            {
+                                "model": "openai/gpt-4o-mini",
+                                "messages": [
+                                    {"role": "user", "content": cost + "|ok"}
+                                ],
+                                "max_tokens": 100,
+                            },
+                            5000,
+                        )
+                        assert status == expected
+                finally:
+                    os.environ.pop(shim.WORKER_SOCKET_ENV, None)
+            return runtime.fake_result(
+                exit_code=1,
+                output_bytes=None,
+                stderr=b"controlled no output after per-ICP budget stop",
+            )
+
+        result = original(spec, **kwargs)
+        assert result.output_bytes
+        rows = json.loads(result.output_bytes)["companies"]
+        for company in rows:
+            company.update(
+                company_linkedin=(
+                    "https://linkedin.com/company/"
+                    + company["company_name"].lower().replace(" ", "-")
+                ),
+                state="CA",
+            )
+            company["contact"] = _claim(company, valid_role=True)
+        return runtime.fake_result(
+            exit_code=0,
+            output_bytes=json.dumps({"companies": rows}).encode(),
+        )
+
+    harness.sandbox.run_icp = run_icp
+    participants = fixtures._start_round(harness, day=31, epoch=31803)
+    assert participants == 3
+    harness.clock.advance_to(harness.schedule()["stage_1_start"])
+    assert harness.service.advance_round(harness.round_id)["assignments"] == 30
+    harness.run_stage_with_runners(1)
+    assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+    assert harness.service.advance_round(harness.round_id)["assignments"] == 20
+    assert harness.status() == "stage1_scoring"
+    harness.advance_until("published", runners=1)
+
+    saved = harness.service.store.get_round(harness.round_id)
+    empty_id = next(
+        submission_id
+        for submission_id, flavor in harness.flavors.items()
+        if flavor == "Empty"
+    )
+    assert empty_id in saved["finalists"]
+    empty_runs = harness.service.store.list_runs(
+        harness.round_id, submission_id=empty_id, kind="execute"
+    )
+    assert len(empty_runs) == 20
+    assert all(run["terminal_cause"] == "budget_exhausted" for run in empty_runs)
+    assert all(run["per_icp_score"] == 0 for run in empty_runs)
+
+    ranking = {
+        row["submission_id"]: row
+        for row in saved["publication_doc"]["final_ranking"]
+    }
+    assert len(ranking) == participants
+    assert ranking[empty_id]["final_score"] is None
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT public.lab_arena__per_icp_publication_valid(%s,%s::jsonb)",
+            (harness.round_id, json.dumps(ranking[empty_id])),
+        )
+        assert cursor.fetchone()[0] is True
+
+        accepted_challenger = next(
+            row
+            for row in ranking.values()
+            if not row["is_baseline"] and row["submission_id"] != empty_id
+        )
+        assert accepted_challenger["final_score"] > 0
+        forged = deepcopy(accepted_challenger)
+        forged["final_score"] = None
+        with pytest.raises(psycopg2.Error) as rejected:
+            cursor.execute(
+                "SELECT public.lab_arena__per_icp_publication_valid(%s,%s::jsonb)",
+                (harness.round_id, json.dumps(forged)),
+            )
+        assert rejected.value.pgcode == "22023"
+        connection.rollback()
+
+        baseline = next(row for row in ranking.values() if row["is_baseline"])
+        assert baseline["final_score"] > 0
+        forged = deepcopy(baseline)
+        forged["final_score"] = None
+        with pytest.raises(psycopg2.Error) as rejected:
+            cursor.execute(
+                "SELECT public.lab_arena__per_icp_publication_valid(%s,%s::jsonb)",
+                (harness.round_id, json.dumps(forged)),
+            )
+        assert rejected.value.pgcode == "22023"
+        connection.rollback()
+
+    fixtures.assert_canary_absent(harness, connect)
+
+
+def test_null_score_publication_migration_replays_and_rolls_back(database):
+    psycopg2, dsn = database
+    migration = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "292-lab-arena-null-final-score-publication.sql"
+    ).read_text(encoding="utf-8")
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_catalog.pg_get_functiondef("
+                "'public.lab_arena__per_icp_publication_valid(text,jsonb)'"
+                "::pg_catalog.regprocedure)"
+            )
+            original = cursor.fetchone()[0]
+            cursor.execute(migration)
+            cursor.execute(migration)
+            cursor.execute(
+                "SELECT pg_catalog.pg_get_functiondef("
+                "'public.lab_arena__per_icp_publication_valid(text,jsonb)'"
+                "::pg_catalog.regprocedure)"
+            )
+            assert cursor.fetchone()[0] == original
+
+            failing = migration.replace(
+                "RETURN TRUE;", "RETURN FALSE;", 1
+            ).replace(
+                "pg_catalog.strpos(v_definition, 'v_is_baseline') = 0 THEN",
+                "pg_catalog.strpos(v_definition, 'deliberate_missing_marker') = 0 THEN",
+                1,
+            )
+            with pytest.raises(psycopg2.Error):
+                cursor.execute(failing)
+            cursor.execute("ROLLBACK")
+            cursor.execute(
+                "SELECT pg_catalog.pg_get_functiondef("
+                "'public.lab_arena__per_icp_publication_valid(text,jsonb)'"
+                "::pg_catalog.regprocedure)"
+            )
+            assert cursor.fetchone()[0] == original
+    finally:
+        connection.close()

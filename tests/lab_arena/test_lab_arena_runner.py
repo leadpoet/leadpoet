@@ -549,6 +549,112 @@ def test_real_broker_openrouter_error_response_maps_to_provider_error_not_model_
     assert api.completions[0]["body"]["output"] is None
 
 
+def test_gateway_provider_failure_records_host_infrastructure_summary(tmp_path):
+    class UnavailableApi(FakeApi):
+        def provider(self, run_id, lease_token, frame):
+            raise rn.RunnerError("synthetic gateway 503", http_status=503)
+
+    state = rn.RunState(lease=lease("r1"), lease_token="tok-r1")
+    server = rn.WorkerSocketServer(tmp_path / "worker.sock", UnavailableApi([]), state)
+    frame = shim.build_operation_frame(
+        "deepline.execute",
+        {"tool": "exa_search", "payload": {"query": "x"}},
+        1000,
+    )
+
+    assert json.loads(server.handle_frame(frame)) == {
+        "error": "worker_unavailable"
+    }
+    assert state.calls == [
+        {
+            "operation_id": "deepline.execute",
+            "action_sequence": 0,
+            "outcome": "unknown",
+            "error_code": "broker_unavailable",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("valid_output", "expected_terminal"),
+    [(False, "provider_error"), (True, "accepted")],
+)
+def test_committed_dispatch_response_loss_maps_real_broker_run_to_provider_error(
+    tmp_path, valid_output, expected_terminal
+):
+    from tests.lab_arena.test_lab_arena_broker import (
+        CONTEXT,
+        FakeLedgerStore,
+        FakeTransport,
+        make_broker,
+    )
+
+    class CommitThenLoseStore(FakeLedgerStore):
+        def mark_dispatched(self, **kwargs):
+            result = super().mark_dispatched(**kwargs)
+            raise br.ArenaStoreUnavailable("synthetic committed response loss")
+
+    provider_broker, store, transport = make_broker(
+        store=CommitThenLoseStore(),
+        transport=FakeTransport([(200, {"results": []})]),
+    )
+
+    class BrokerApi(FakeApi):
+        def provider(self, run_id, lease_token, frame):
+            try:
+                return provider_broker.execute(
+                    CONTEXT,
+                    operation_id=frame["operation_id"],
+                    parameters=frame["parameters"],
+                    action_sequence=frame["action_sequence"],
+                    timeout_ms=frame["timeout_ms"],
+                ).to_document()
+            except br.ArenaStoreUnavailable as exc:
+                raise rn.RunnerError("synthetic gateway 503", http_status=503) from exc
+
+    class NoOutputRuntime(BridgingRuntime):
+        def run_icp(self, spec, **_):
+            self.specs.append(spec)
+            os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
+            try:
+                try:
+                    status, _headers, body = shim.dispatch(
+                        "deepline.execute",
+                        {"tool": "exa_search", "payload": {"query": "x"}},
+                        1000,
+                    )
+                except (shim.ShimTransportError, shim.ShimProviderError):
+                    pass
+                else:
+                    assert status == 502
+                    assert json.loads(body) == {
+                        "error": {"code": "provider_unavailable"}
+                    }
+            finally:
+                os.environ.pop(shim.WORKER_SOCKET_ENV, None)
+            output = (
+                json.dumps({"companies": [valid_company(1)]}).encode()
+                if valid_output
+                else None
+            )
+            return runtime.fake_result(
+                exit_code=0 if valid_output else 1,
+                output_bytes=output,
+            )
+
+    api = BrokerApi([lease()])
+    (tmp_path / "work").mkdir()
+    assert rn.Runner(make_config(tmp_path, api, NoOutputRuntime())).run_once() == 1
+
+    result = contracts.validate_run_result(api.completions[0]["body"]["result"])
+    assert result["terminal_status"] == expected_terminal
+    assert result["resource_summary"]["provider_call_count"] == 1
+    assert transport.sent == []
+    # The host classification changes, but ambiguous accounting stays open for
+    # the existing lease-expiry recovery. No handler claims dispatch ownership.
+    assert next(iter(store.calls.values()))["kind"] == "dispatch"
+
+
 def test_run_once_respects_max_claims_and_images_export_once(tmp_path):
     leases = [lease("r%d" % i, i) for i in range(5)]
     api = FakeApi(leases)

@@ -154,14 +154,27 @@ does not search `PATH` or download a replacement binary. For an installation
 at `/usr/bin/runsc`, explicitly configure that path instead.
 
 For Finney SN71, the validator includes the public RPC endpoint, gateway URL,
-and trusted gateway signing-key hash. No API keys or public-configuration
-exports are needed. Keep existing state and work paths on updates. On a first
-installation, choose persistent writable directories:
+and trusted gateway signing-key hash. No public-configuration exports are
+needed. The root `env.example` configures Gateway/Arena services; do not copy it
+for a normal validator. Validators do not need `SUPABASE_URL`,
+`SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, or `OPENROUTER_API_KEY`.
+Provider credentials remain in the gateway broker.
+
+Scoring also requires at least one Webshare proxy in the validator environment.
+Use your own proxy credentials in `LAB_ARENA_WEBSHARE_PROXY_1`; add indexed
+settings for more proxies. Each proxy must pass the startup connection and
+distinct public exit-IP checks. See [proxy configuration](arena_parallel_icps.md#validator-configuration)
+for details and reuse of an existing proxy file. Without a configured proxy,
+scoring setup fails and retries while the independent weight loop continues.
+
+Keep existing state and work paths on updates. On a first installation, choose
+persistent writable directories and replace the proxy placeholders below:
 
 ```bash
 export LAB_ARENA_VALIDATOR_STATE_DIR="$PWD/validator-state"
 export LAB_ARENA_RUNNER_WORK_DIR="$PWD/arena-runner"
 export LAB_ARENA_RUNSC_PATH=/usr/local/bin/runsc
+export LAB_ARENA_WEBSHARE_PROXY_1='https://USER:PASSWORD@YOUR_PROXY_HOST:PORT'
 
 python -m lab_arena.validator \
   --netuid 71 --subtensor.network finney \
@@ -277,6 +290,10 @@ It exits nonzero with a reason on failure. Success explicitly reports
 `sandbox_execution=not_checked`; it does not prove mounts, sandbox execution,
 gateway authorization, or accepted scoring. This mode is mutually exclusive
 with `--check-only` and `--once`.
+
+Neither `--check-only` nor `--check-scoring-only` validates proxy configuration
+or connectivity. Normal scoring startup performs those checks; a readiness
+pass does not replace the required proxy configuration above.
 
 | Reason | Required action |
 | --- | --- |

@@ -5,6 +5,8 @@ from datetime import date
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from gateway.qualification.models import CompanyOutput, ICPPrompt
 from lab_arena import scoring as arena_scoring
 from lab_arena import operations as arena_operations
@@ -71,6 +73,29 @@ def _icp(**overrides) -> ICPPrompt:
     }
     values.update(overrides)
     return ICPPrompt(**values)
+
+
+def _competition_company() -> dict:
+    return {
+        "company_name": "Acme",
+        "company_website": "https://acme.example",
+        "company_linkedin": "https://www.linkedin.com/company/acme",
+        "industry": "Software",
+        "employee_count": "11-50",
+        "company_stage": "",
+        "country": "United States",
+        "state": "California",
+        "fit_summary": "Acme supplies SaaS software.",
+        "fit_evidence_urls": ["https://acme.example/about"],
+        "intent_signals": [{
+            "matched_icp_signal": 0,
+            "description": "Acme announced a completed funding event.",
+            "date": "2026-09-01",
+            "why_now": "The completed event is a current buying signal.",
+            "url": "https://news.example/acme",
+            "snippet": "Acme announced a completed funding event.",
+        }],
+    }
 
 
 def _complete_verdict(**overrides):
@@ -1386,3 +1411,101 @@ def test_only_the_lab_scorer_activates_the_investigator_by_default():
     )
     assert scorer.evidence_investigator is True
     assert scorer.company_quality is False
+
+
+@pytest.mark.parametrize(
+    "investigation_failure",
+    [None, PROVIDER_ERROR_FAILURE_REASON, MALFORMED_RESPONSE_FAILURE_REASON],
+)
+def test_targeted_stage_classification_through_lab_scorer(
+    monkeypatch, investigation_failure
+):
+    verdict = _complete_verdict(
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url="https://evidence.example/stage",
+        stage_evidence_quote="Acme launched its public product.",
+    )
+    calls = {"broad": 0, "investigator": 0}
+
+    async def prechecks(*_args, **_kwargs):
+        return lead_scorer.company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return lead_scorer.company_fit_match("homepage identity verified")
+
+    async def broad_provider(**_kwargs):
+        calls["broad"] += 1
+        return verdict, ""
+
+    async def bounded_investigation(*, diagnostic, **kwargs):
+        calls["investigator"] += 1
+        assert kwargs["targets"] == ("stage",)
+        if investigation_failure:
+            diagnostic[VERIFIER_FAILURE_REASON_KEY] = investigation_failure
+            return {
+                "claims": {},
+                "failure_reason": investigation_failure,
+            }
+        return {
+            "claims": {
+                "stage": _finding(
+                    "stage",
+                    status="UNPROVEN",
+                    observed_value="",
+                    evidence_url="",
+                    evidence_quote="",
+                    reason="No current listing proof was found.",
+                )
+            },
+            "failure_reason": "",
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(
+        lead_scorer, "_request_company_reverify_json", broad_provider
+    )
+    monkeypatch.setattr(
+        lead_scorer, "investigate_company_evidence", bounded_investigation
+    )
+    scorer = arena_scoring.lab_scorer(
+        arena_scoring.build_scorer_policy(
+            scoring_adapter_version="qualification_contacts_v3"
+        )
+    )
+    company = _competition_company()
+    icp = _icp(
+        company_stage="Public",
+        intent_signals=["Announced a completed funding event"],
+    ).model_dump(mode="json")
+
+    if investigation_failure:
+        with pytest.raises(arena_scoring.ScoringError):
+            arena_scoring.score_work_item(
+                {"scored_run_id": "targeted-investigator-failure"},
+                icp=icp,
+                companies=[company],
+                scorer=scorer,
+                max_retries=3,
+            )
+        assert calls == {"broad": 3, "investigator": 3}
+        return
+
+    accepted = arena_scoring.score_work_item(
+        {"scored_run_id": "targeted-unproven-stage"},
+        icp=icp,
+        companies=[company],
+        scorer=scorer,
+        max_retries=3,
+    )
+    receipt = accepted[0]["verifier_gate_receipts"][0]
+
+    assert calls == {"broad": 1, "investigator": 1}
+    assert accepted[0]["final_score"] == 0.0
+    assert receipt["decision"] == COMPANY_FIT_UNAVAILABLE
+    assert receipt["failure_class"] == "insufficient_fit_evidence"
+    assert receipt["company_fit_dimensions"]["stage"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )

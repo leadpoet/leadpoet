@@ -3104,6 +3104,31 @@ async def _llm_reverify_company(
         # The bounded investigator already exhausted the allowed research for
         # these disputes. Keep its UNPROVEN result instead of asking the broad
         # schema repair to re-run otherwise complete dimensions.
+        if (
+            result.decision == COMPANY_FIT_UNAVAILABLE
+            and _has_explicitly_unproven_fit_dimensions(
+                verdict,
+                incomplete,
+                icp=icp,
+                linkedin_refresh_outcome=str(
+                    current_profile_cache.get("refresh_outcome") or ""
+                ),
+                identity_receipt=(
+                    result.details.get("identity_receipt")
+                    if isinstance(result.details, Mapping)
+                    else None
+                ),
+            )
+        ):
+            return company_fit_unavailable(
+                result.reason,
+                details={
+                    **result.details,
+                    "failure_class": (
+                        INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS
+                    ),
+                },
+            )
         return result
 
     # One repair is allowed only after a syntactically valid verifier object

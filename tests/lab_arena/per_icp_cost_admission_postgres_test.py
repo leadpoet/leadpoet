@@ -58,6 +58,19 @@ def _settle(store, lease, token, identity, amount, succeeded=True):
     )["status"] == "settled"
 
 
+def _uncertain(store, lease, token, identity, *, succeeded):
+    lease_hash = hash_lease_token(token)
+    assert store.mark_dispatched(
+        run_id=lease["run_id"], lease_token_hash=lease_hash,
+        call_identity=identity,
+    )["status"] == "dispatched"
+    assert store.mark_uncertain(
+        run_id=lease["run_id"], lease_token_hash=lease_hash,
+        call_identity=identity,
+        call_doc={"reason": "transport_failure", "call_succeeded": succeeded},
+    )["status"] == "uncertain"
+
+
 def test_paid_admission_is_per_icp_and_counts_retries(database, tmp_path):
     connect = lambda: database[0].connect(**database[1])
     harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
@@ -139,9 +152,35 @@ def test_zero_cost_calls_do_not_close_paid_admission(database, tmp_path):
     )[:2]
     free_id, free = _reserve(store, lease, token, "free", 0)
     assert free["status"] == "reserved"
-    _, paid = _reserve(store, lease, token, "paid", 1)
+    paid_id, paid = _reserve(store, lease, token, "paid", 1)
     assert paid["status"] == "reserved"
     assert free_id != paid["call_identity"]
+    _settle(store, lease, token, free_id, 0)
+    _settle(store, lease, token, paid_id, 200_000)
+
+    uncertain_id, uncertain = _reserve(
+        store, lease, token, "small-uncertain", 100_000
+    )
+    assert uncertain["status"] == "reserved"
+    _uncertain(store, lease, token, uncertain_id, succeeded=True)
+    _, admitted = _reserve(store, lease, token, "after-small-uncertain", 1)
+    assert admitted["status"] == "reserved"
+    _uncertain(
+        store, lease, token, admitted["call_identity"], succeeded=False
+    )
+    cost = store.icp_cost_eligibility(
+        round_id=harness.round_id, submission_id=lease["submission_id"],
+        icp_position=lease["icp_position"], qualified_company_count=5,
+    )
+    assert cost["eligibility_reason"] == "provider_cost_uncertain"
+
+    large_id, large = _reserve(
+        store, lease, token, "large-uncertain", 4_000_000
+    )
+    assert large["status"] == "reserved"
+    _uncertain(store, lease, token, large_id, succeeded=False)
+    _, refused = _reserve(store, lease, token, "after-large-uncertain", 1)
+    assert (refused["status"], refused["reason"]) == ("refused", "money_cap")
 
 
 def test_marker_absent_round_keeps_legacy_aggregate_money_cap(database):

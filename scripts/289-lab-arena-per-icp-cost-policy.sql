@@ -297,15 +297,15 @@ BEGIN
         'status', 'budget_busy', 'idempotent', FALSE,
         'call_identity', p_call_identity, 'lease_expires_at', v_expires
       );
-    ELSIF (v_icp_cost ->> 'paid_uncertain_calls')::BIGINT > 0 THEN
-      v_reason := 'provider_cost_uncertain';
-    ELSIF (v_icp_cost ->> 'settled_microusd')::BIGINT >=
+    ELSIF (v_icp_cost ->> 'settled_microusd')::BIGINT
+          + (v_icp_cost ->> 'reserved_or_uncertain_microusd')::BIGINT >=
           (v_round.configuration_doc ->> 'execution_icp_cap_microusd')::BIGINT THEN
       v_reason := 'money_cap';
     ELSIF v_dynamic THEN
       p_amount_microusd :=
         (v_round.configuration_doc ->> 'execution_icp_cap_microusd')::BIGINT
-        - (v_icp_cost ->> 'settled_microusd')::BIGINT;
+        - (v_icp_cost ->> 'settled_microusd')::BIGINT
+        - (v_icp_cost ->> 'reserved_or_uncertain_microusd')::BIGINT;
     END IF;
   END IF;
   IF v_reason IS NULL THEN

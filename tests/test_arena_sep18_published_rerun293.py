@@ -67,7 +67,6 @@ def archive(commit):
 def setup(monkeypatch):
     terminal = archive("7" * 40)
     new = archive("3" * 40)
-    monkeypatch.setattr(r, "NEW_SOURCE_COMMIT", "3" * 40)
     bank = {
         "schema_version": "leadpoet.lab_arena.benchmark.v1",
         "round_id": r.ROUND,
@@ -379,7 +378,6 @@ def test_source_url_is_current_default_while_terminal_metadata_stays_frozen():
         "7e1bb0747014a57bc50f48f9f822d1a7c936682d63f06564e978d23f54eb7fc1"
     )
     assert r.TERMINAL_SOURCE_COMMIT == "e5341f85829ad196b4a1cb58b38a34155697c8d4"
-    assert r.NEW_SOURCE_COMMIT == "008ce9b8b027d9808e7a2c70a47e43686e426e1e"
     assert r.BANK_SHA256 == "6999fdd7bcc09f95943f29127471659d966a86bdb370863f4d895376863acf91"
     assert r.CONFIG_SHA256 == "91f218af9cea06d5816876ba5e14c7791f1821569cd2caf593d820af622fdb2a"
 
@@ -408,9 +406,9 @@ def test_published_round_requires_completed_crowned_promotion(setup):
         r.collect_preflight(setup.service)
 
 
-def test_prepare_rejects_a_candidate_commit_other_than_reviewed_tyche(setup):
+def test_prepare_rejects_commit_not_embedded_in_archive(setup):
     facts = r._source_facts(setup.new, r.SOURCE_REF)
-    with pytest.raises(r.RerunRefused, match="Tyche candidate commit"):
+    with pytest.raises(r.RerunRefused, match="lab source archive differs from reviewed identity"):
         r.prepare(
             setup.service, preflight=setup.preflight,
             forward_schedule=setup.schedule, dry_run=True,

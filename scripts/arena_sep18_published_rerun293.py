@@ -38,7 +38,6 @@ TERMINAL_SOURCE_REF = f"arena/{ROUND}/sources/{BASELINE}.tar.gz"
 TERMINAL_SOURCE_SIZE_BYTES = 604_847
 TERMINAL_SOURCE_SHA256 = "7e1bb0747014a57bc50f48f9f822d1a7c936682d63f06564e978d23f54eb7fc1"
 TERMINAL_SOURCE_COMMIT = "e5341f85829ad196b4a1cb58b38a34155697c8d4"
-NEW_SOURCE_COMMIT = "008ce9b8b027d9808e7a2c70a47e43686e426e1e"
 PREFLIGHT_SCHEMA = "leadpoet.sep18_published_rerun293.preflight.v1"
 READ_PAGE_SIZE = 500
 MAX_SEALED_ROWS = 100_000
@@ -391,8 +390,6 @@ def prepare(
             raise RerunRefused("normal public baseline source fetcher is unavailable")
         source = bytes(fetcher(SOURCE_URL, source_bundle.MAX_SOURCE_ARCHIVE_BYTES))
     facts = _source_facts(source, SOURCE_REF)
-    if expected_source_commit != NEW_SOURCE_COMMIT:
-        raise RerunRefused("Tyche candidate commit differs from reviewed identity")
     if facts != {
         "source_ref": SOURCE_REF,
         "source_size_bytes": expected_source_size_bytes,

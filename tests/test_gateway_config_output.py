@@ -90,10 +90,11 @@ def test_gateway_env_loader_skips_static_aws_keys_for_instance_role(
 
 def test_gateway_config_accepts_instance_role_without_static_keys(monkeypatch):
     monkeypatch.setenv("LEADPOET_AWS_INSTANCE_ROLE_ONLY", "true")
-    monkeypatch.setattr(config, "AWS_ACCESS_KEY_ID", None)
-    monkeypatch.setattr(config, "AWS_SECRET_ACCESS_KEY", None)
-    monkeypatch.setattr(config, "AWS_PROFILE", None)
+    for key in config._AWS_STATIC_CREDENTIAL_KEYS:
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(config, "SUPABASE_URL", "https://example.supabase.co")
     monkeypatch.setattr(config, "SUPABASE_SERVICE_ROLE_KEY", "configured")
 
+    assert config._instance_role_only() is True
+    assert not (config._AWS_STATIC_CREDENTIAL_KEYS & set(config.os.environ))
     assert config.validate_config() is True

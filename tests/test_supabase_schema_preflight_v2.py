@@ -11,6 +11,7 @@ from gateway.tee.supabase_schema_preflight_v2 import (
     PRIVATE_ARENA_MIGRATIONS,
     REQUIRED_SUPABASE_V2_RPCS,
     REQUIRED_SUPABASE_V2_SCHEMA,
+    STATEFUL_EPOCH_AUTHORITY,
     SupabaseSchemaPreflightV2Error,
     verify_required_supabase_v2_schema,
 )
@@ -18,11 +19,15 @@ from gateway.tee.supabase_schema_preflight_v2 import (
 
 def test_required_migrations_use_canonical_deployment_filenames():
     root = Path(__file__).resolve().parents[1]
-    paths = {row[0] for row in REQUIRED_SUPABASE_V2_SCHEMA + REQUIRED_SUPABASE_V2_RPCS}
+    authorities = {
+        row[0] for row in REQUIRED_SUPABASE_V2_SCHEMA + REQUIRED_SUPABASE_V2_RPCS
+    }
+    paths = {authority for authority in authorities if authority.startswith("scripts/")}
     for relative in paths:
         path = root / relative
         assert path.is_file()
         assert re.fullmatch(r"[0-9]{2,4}-[a-z0-9][a-z0-9-]*\.sql", path.name)
+    assert authorities - paths == {STATEFUL_EPOCH_AUTHORITY}
 
 
 def _environment():
@@ -201,9 +206,7 @@ def test_preflight_accepts_current_schema_without_retired_host_receipt_storage()
 
 
 @pytest.mark.parametrize("missing", [
-    "research_lab_provider_evidence_cache_v2",
     "research_lab_stateful_subnet_epoch_cutovers_v1",
-    "put_research_lab_provider_evidence_cache_v2",
     "research_lab_stateful_subnet_epoch_cutover_public_state_v1",
     "lab_arena_publish_weight_state_v1",
     "lab_arena_has_recent_participation_v1",

@@ -54,11 +54,11 @@ def test_gateway_current_release_path_does_not_consult_github_ci() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     local_build = script.index("Building the exact local gateway runtime identity")
     local_ready = script.index('record_gateway_restart_timing "local_release_ready"')
-    historical_fallback = script.index(
-        "Acquiring the exact historical attested V2 release channel"
+    release_preflight = script.index(
+        "Validating the prepared V2 release before production shutdown"
     )
-    shutdown = script.index("Stopping existing gateway and Research Lab worker processes")
-    assert local_build < local_ready < historical_fallback < shutdown
+    shutdown = script.index("Stopping existing gateway and Lab Arena processes")
+    assert local_build < local_ready < release_preflight < shutdown
 
     sentry_start = script.index("emit_gateway_restart_sentry_summary() {")
     sentry_end = script.index("\n}\n", sentry_start)

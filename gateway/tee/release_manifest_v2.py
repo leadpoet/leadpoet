@@ -132,7 +132,12 @@ def build_local_release_identity(
     return {**body, "release_hash": _sha256_json(body)}
 
 
-def _validate_local_release_identity(value: Mapping[str, Any]) -> Dict[str, Any]:
+def _validate_local_release_identity_for_topology(
+    value: Mapping[str, Any],
+    *,
+    role_specs: Mapping[str, Mapping[str, Any]],
+    expected_topology_hash: str,
+) -> Dict[str, Any]:
     fields = {
         "schema_version",
         "commit_sha",
@@ -143,27 +148,26 @@ def _validate_local_release_identity(value: Mapping[str, Any]) -> Dict[str, Any]
     }
     if not isinstance(value, Mapping) or set(value) != fields:
         raise ReleaseManifestV2Error("local release fields do not match schema")
+    if value.get("schema_version") != LOCAL_RELEASE_SCHEMA_VERSION:
+        raise ReleaseManifestV2Error("unsupported local release schema")
+    commit = str(value.get("commit_sha") or "").strip().lower()
+    if not _COMMIT_RE.fullmatch(commit) or value.get("commit_sha") != commit:
+        raise ReleaseManifestV2Error("local release commit is invalid")
+    if value.get("topology_hash") != expected_topology_hash:
+        raise ReleaseManifestV2Error("local release topology differs")
     roles = value.get("roles")
-    if not isinstance(roles, Mapping):
+    if not isinstance(roles, Mapping) or set(roles) != set(role_specs):
         raise ReleaseManifestV2Error("local release roles are invalid")
-    results = []
+    release_build_count = value.get("verified_build_count")
+    if (
+        not isinstance(release_build_count, int)
+        or isinstance(release_build_count, bool)
+        or release_build_count != len(role_specs)
+    ):
+        raise ReleaseManifestV2Error("local release build count is invalid")
     for role, summary in roles.items():
         if not isinstance(summary, Mapping):
             raise ReleaseManifestV2Error("local release role is invalid")
-        results.append(
-            {
-                "role": role,
-                "commit_sha": summary.get("commit_sha"),
-                "pcr0": summary.get("pcr0"),
-                "image_id": summary.get("normalized_image_hash"),
-                "source_manifest_hash": summary.get("source_manifest_hash"),
-                "build_identity_hash": summary.get("build_identity_hash"),
-                "execution_manifest_hash": summary.get("execution_manifest_hash"),
-                "dependency_lock_hash": summary.get("dependency_lock_hash"),
-                "dockerfile_hash": summary.get("dockerfile_hash"),
-                "topology_hash": summary.get("topology_hash"),
-            }
-        )
         if set(summary) != {
             "physical_role",
             "service_role",
@@ -173,16 +177,43 @@ def _validate_local_release_identity(value: Mapping[str, Any]) -> Dict[str, Any]
             raise ReleaseManifestV2Error("local release role fields are invalid")
         if summary.get("physical_role") != role:
             raise ReleaseManifestV2Error("local release role name differs")
-        if summary.get("service_role") != ROLE_SPECS.get(role, {}).get(
+        if summary.get("service_role") != role_specs.get(role, {}).get(
             "service_role"
         ):
             raise ReleaseManifestV2Error("local release service role differs")
-        if summary.get("verified_build_count") != 1:
+        if summary.get("commit_sha") != commit:
+            raise ReleaseManifestV2Error("local release role commit differs")
+        if summary.get("topology_hash") != expected_topology_hash:
+            raise ReleaseManifestV2Error("local release role topology differs")
+        role_build_count = summary.get("verified_build_count")
+        if (
+            not isinstance(role_build_count, int)
+            or isinstance(role_build_count, bool)
+            or role_build_count != 1
+        ):
             raise ReleaseManifestV2Error("local release build count is invalid")
-    rebuilt = build_local_release_identity(results)
-    if dict(value) != rebuilt:
+        pcr0 = str(summary.get("pcr0") or "")
+        if not _PCR0_RE.fullmatch(pcr0) or pcr0 == "0" * 96:
+            raise ReleaseManifestV2Error("local release role PCR0 is invalid")
+        for field in DETERMINISTIC_FIELDS:
+            if field in {"commit_sha", "pcr0"}:
+                continue
+            if summary.get(field) != _hash(summary.get(field), field):
+                raise ReleaseManifestV2Error(
+                    "local release role %s is not normalized" % field
+                )
+    body = {field: value[field] for field in fields if field != "release_hash"}
+    if value.get("release_hash") != _sha256_json(body):
         raise ReleaseManifestV2Error("local release identity hash mismatch")
-    return rebuilt
+    return dict(value)
+
+
+def _validate_local_release_identity(value: Mapping[str, Any]) -> Dict[str, Any]:
+    return _validate_local_release_identity_for_topology(
+        value,
+        role_specs=ROLE_SPECS,
+        expected_topology_hash=topology_hash(),
+    )
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -482,6 +513,15 @@ def validate_historical_release_manifest(
     role_specs = historical_two_role_specs(
         expected_topology_hash=expected_topology_hash
     )
+    if (
+        isinstance(value, Mapping)
+        and value.get("schema_version") == LOCAL_RELEASE_SCHEMA_VERSION
+    ):
+        return _validate_local_release_identity_for_topology(
+            value,
+            role_specs=role_specs,
+            expected_topology_hash=expected_topology_hash,
+        )
     return _validate_independent_release_manifest(
         value,
         role_specs=role_specs,

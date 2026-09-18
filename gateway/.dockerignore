@@ -18,7 +18,6 @@ hotpatch-backups/
 # The EIF is produced from the image; copying an old EIF into the image bloats
 # the build context and can exhaust the gateway root volume.
 tee/*.eif
-tee-enclave.eif
 _attested_runtime/**/*.pyc
 _attested_runtime/**/__pycache__/
 

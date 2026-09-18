@@ -710,9 +710,18 @@ def test_completion_requires_lease_owner_and_accepts_authorized_owner():
     assert _completion_service().handle_complete({}) == {"status": "failed"}
 
 
-@pytest.mark.parametrize("money_cap_proof", [False, True])
-def test_per_icp_budget_completion_requires_authoritative_money_cap(
-    money_cap_proof,
+@pytest.mark.parametrize(
+    ("proof_reason", "accepted"),
+    [
+        (None, False),
+        ("provider_cost_uncertain", False),
+        ("money_cap", True),
+        ("per_icp_quota", True),
+        ("stage_quota", True),
+    ],
+)
+def test_per_icp_budget_completion_requires_authoritative_budget_stop(
+    proof_reason, accepted,
 ):
     service = _completion_service()
     validated, round_row = service._request_round()
@@ -731,8 +740,8 @@ def test_per_icp_budget_completion_requires_authoritative_money_cap(
     def ledger(**kwargs):
         assert kwargs == {"run_id": "run-1", "entry_kind": "refusal"}
         return (
-            [{"entry_kind": "refusal", "entry_doc": {"reason": "money_cap"}}]
-            if money_cap_proof else []
+            [{"entry_kind": "refusal", "entry_doc": {"reason": proof_reason}}]
+            if proof_reason is not None else []
         )
     service._store = SimpleNamespace(
         get_run=lambda _run_id: run,
@@ -741,7 +750,7 @@ def test_per_icp_budget_completion_requires_authoritative_money_cap(
         or {"status": "failed"},
     )
 
-    if not money_cap_proof:
+    if not accepted:
         with pytest.raises(ServiceError, match="run_result_budget_unproved"):
             service.handle_complete({})
         assert completed == []

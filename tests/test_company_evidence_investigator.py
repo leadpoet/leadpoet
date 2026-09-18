@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import date
 import json
+from types import SimpleNamespace
 
 from gateway.qualification.models import CompanyOutput, ICPPrompt
 from lab_arena import scoring as arena_scoring
@@ -18,6 +19,7 @@ from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_UNAVAILABLE,
 )
 from qualification.scoring.linkedin_company_size import (
+    MALFORMED_RESPONSE_FAILURE_REASON,
     PROVIDER_ERROR_FAILURE_REASON,
     VERIFIER_FAILURE_REASON_KEY,
 )
@@ -349,6 +351,16 @@ def test_conflicting_current_headcount_is_unproven():
     )
     assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert result.details["dimension_decisions"]["employee_size"] == COMPANY_FIT_UNAVAILABLE
+    assert result.details["employee_size_conflict_receipt"] == {
+        "status": "UNPROVEN",
+        "reason_code": "conflicting_current_headcount",
+        "resolution": "unresolved",
+        "web_evidence": {
+            "url": "https://evidence.example/headcount",
+            "quote": "PitchBook lists 7 employees.",
+        },
+        "structured_evidence": structured,
+    }
 
 
 def test_arena_conflict_check_collects_structured_size_without_replacing_direct_proof(
@@ -399,6 +411,37 @@ def test_arena_conflict_check_collects_structured_size_without_replacing_direct_
         ("acme.example", "https://www.linkedin.com/company/acme")
     ]
     assert _employee_size_sources_conflict(refreshed, structured) is True
+
+
+def test_structured_conflict_check_does_not_expand_calls_for_matching_headcount(
+    monkeypatch,
+):
+    async def unexpected_fetch(*_args, **_kwargs):
+        raise AssertionError("matching direct evidence must not add a provider call")
+
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_structured_linkedin_company_size",
+        unexpected_fetch,
+    )
+    verdict = _complete_verdict()
+    cache = {}
+
+    refreshed = asyncio.run(_refresh_linkedin_employee_size_observation(
+        verdict,
+        _company(),
+        _icp(),
+        verified_homepage_identity={
+            "normalized_name": "Acme",
+            "registrable_dns_domain": "acme.example",
+            "linkedin_company_slug": "acme",
+        },
+        invocation_cache=cache,
+        collect_structured_conflict=True,
+    ))
+
+    assert refreshed == verdict
+    assert "structured_attempted" not in cache
 
 
 def test_fetched_current_headcount_repairs_a_nonconflicting_false_negative():
@@ -571,6 +614,155 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
         requests[0]["messages"][1]["content"].split("\n", 1)[1]
     )
     assert input_document["evaluation_date"] == "2026-09-18"
+
+
+def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatch):
+    url = "https://acme.example/investors"
+    quote = "Acme common stock is listed on NASDAQ under ticker ACME."
+    reasoning_requests = []
+    search_queries = []
+    fetched_urls = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        reasoning_requests.append(payload)
+        turn = len(reasoning_requests)
+        if turn == 1:
+            name, arguments = "search_web", {"query": "Acme current stock listing"}
+        elif turn == 2:
+            name, arguments = "fetch_page", {"url": url}
+        else:
+            name, arguments = "submit_findings", {
+                "findings": [_finding("stage", evidence_url=url, evidence_quote=quote)]
+            }
+        return 200, {
+            "choices": [{"message": {"tool_calls": [{
+                "id": f"call-{turn}",
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }]}}]
+        }
+
+    async def fake_search(_session, query, *, key):
+        del key
+        search_queries.append(query)
+        return {"results": [{"url": url}], "notice": "discovery_only_not_evidence"}
+
+    async def fake_fetch(_session, requested_url):
+        fetched_urls.append(requested_url)
+        return {"ok": True, "url": requested_url, "text": quote}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("stage",),
+        requested_stage="Public",
+    ))
+
+    assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["claims"]["stage"]["evidence_quote"] == quote
+    assert result["usage"] == {
+        "reasoning_turns": 3,
+        "search_calls": 1,
+        "fetch_calls": 1,
+    }
+    assert search_queries == ["Acme current stock listing"]
+    assert fetched_urls == [url]
+    assert all(
+        request["model"] == investigator.INVESTIGATOR_MODEL
+        for request in reasoning_requests
+    )
+    assert reasoning_requests[-1]["tool_choice"] == "auto"
+
+
+def test_harness_rejects_multiple_tool_calls_as_malformed(monkeypatch):
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers, payload
+        call = {
+            "id": "call",
+            "type": "function",
+            "function": {
+                "name": "search_web",
+                "arguments": json.dumps({"query": "Acme"}),
+            },
+        }
+        return 200, {"choices": [{"message": {"tool_calls": [call, call]}}]}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    diagnostic = {}
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("stage",),
+        diagnostic=diagnostic,
+    ))
+
+    assert result["claims"] == {}
+    assert result["failure_reason"] == MALFORMED_RESPONSE_FAILURE_REASON
+    assert diagnostic[VERIFIER_FAILURE_REASON_KEY] == MALFORMED_RESPONSE_FAILURE_REASON
+
+
+def test_harness_closes_search_budget_and_admission_boundary(monkeypatch):
+    reasoning_turns = []
+    provider_searches = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        reasoning_turns.append(payload)
+        turn = len(reasoning_turns)
+        if turn <= 3:
+            name, arguments = "search_web", {"query": f"Acme query {turn}"}
+        else:
+            name, arguments = "submit_findings", {
+                "findings": [_finding(
+                    "stage",
+                    status="UNPROVEN",
+                    observed_value=None,
+                    evidence_url="",
+                    evidence_quote="",
+                )]
+            }
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{turn}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_search(_session, query, *, key):
+        del key
+        provider_searches.append(query)
+        return {"results": [], "notice": "discovery_only_not_evidence"}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("stage",),
+    ))
+    assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["usage"]["search_calls"] == investigator.MAX_SEARCH_CALLS
+    assert len(provider_searches) == investigator.MAX_SEARCH_CALLS
+
+    monotonic_values = iter((0.0, investigator.ADMISSION_DEADLINE_SECONDS + 1.0))
+    monkeypatch.setattr(
+        investigator,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(monotonic_values)),
+    )
+    admission_result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("stage",),
+    ))
+    assert admission_result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert admission_result["usage"]["reasoning_turns"] == 0
 
 
 def test_embedded_reasoning_provider_error_is_typed_infrastructure(monkeypatch):

@@ -1778,6 +1778,7 @@ async def _refresh_linkedin_employee_size_observation(
             ).strip().casefold()
             if (
                 collect_structured_conflict
+                and direct_decision == COMPANY_FIT_MISMATCH
                 and not invocation_cache.get("structured_attempted")
                 and anchor_name
                 and anchor_domain
@@ -2152,6 +2153,23 @@ def _reverify_decision(
             )
         },
         "employee_size_conflict": bool(employee_size_conflict),
+        **(
+            {
+                "employee_size_conflict_receipt": {
+                    "status": "UNPROVEN",
+                    "reason_code": "conflicting_current_headcount",
+                    "resolution": "unresolved",
+                    "web_evidence": _dimension_web_evidence(
+                        verdict, "employee_size"
+                    ),
+                    "structured_evidence": dict(
+                        structured_employee_size_evidence or {}
+                    ),
+                }
+            }
+            if employee_size_conflict
+            else {}
+        ),
     }
     raw_reason = verdict.get("reason")
     reason = (

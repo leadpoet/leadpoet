@@ -715,6 +715,9 @@ def run_validator_loops(*, orchestrator, runner_factory, epoch_supplier, stop,
 def main(argv=None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    from lab_arena.validator_startup import maybe_reexec_rootful
+
+    maybe_reexec_rootful(args, sys.argv[1:] if argv is None else argv)
     if args.check_scoring_only:
         from lab_arena.runtime_host import prepare_scoring_host, scoring_host_details
 

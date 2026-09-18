@@ -28,7 +28,7 @@ setup(
     author="Leadpoet",  
     author_email="hello@leadpoet.com",  
     license="AGPL-3.0-only",
-    packages=find_packages(include=['Leadpoet', 'Leadpoet.*', 'gateway', 'gateway.*', 'leadpoet_canonical', 'leadpoet_canonical.*', 'qualification', 'qualification.*', 'leadpoet_verifier', 'leadpoet_verifier.*', 'leadpoet_observability', 'leadpoet_observability.*', 'lab_arena', 'lab_arena.*', 'validator_tee', 'validator_tee.enclave']) + ['leadpoet_canonical.config'],
+    packages=find_packages(include=['Leadpoet', 'Leadpoet.*', 'gateway', 'gateway.*', 'leadpoet_canonical', 'leadpoet_canonical.*', 'qualification', 'qualification.*', 'leadpoet_verifier', 'leadpoet_verifier.*', 'leadpoet_observability', 'leadpoet_observability.*', 'lab_arena', 'lab_arena.*', 'neurons', 'validator_tee', 'validator_tee.enclave']) + ['leadpoet_canonical.config'],
     # Ship the existing public mapping as package data, without a second copy
     # in the source tree or a change to deployment's config/ path.
     package_dir={"leadpoet_canonical.config": "config"},

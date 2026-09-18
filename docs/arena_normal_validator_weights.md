@@ -1,7 +1,9 @@
 # Normal Arena validators
 
-The primary, Yuma, Rizzo, and other subnet validators use the same
-`lab_arena.validator` process with their own local Bittensor hotkey.
+The primary, Yuma, Rizzo, and other subnet validators run
+`python neurons/validator.py` with their own local Bittensor hotkey. This entry
+point runs the same `lab_arena.validator` implementation as the installed
+`leadpoet-validate` command and the managed service.
 Nitro, an enclave, KMS key unwrapping, and the retired auditor client are not
 needed to run this process.
 
@@ -135,11 +137,13 @@ local signer's Python modules, public chain profiles, and SN71 epoch mapping.
 It does not require Nitro or enclave tooling.
 
 Use Linux x86_64 and the existing runsc setup to score models. The current
-sandbox uses rootful namespaces. For full scoring, use the supplied systemd
-service, which runs this same entry point as root, or run the command below
-from a root shell with the validator's wallet path set explicitly. An ordinary
-unprivileged shell can submit weights but cannot launch this sandbox as
-configured. This is an existing sandbox requirement, not a signing mode.
+sandbox requires root for its mounts, resource limits and isolated worker
+identity. Normal startup uses existing non-interactive sudo permission when
+available. It keeps the same Python environment, wallet, state and runner paths,
+and configured proxies. It never prompts for a password, changes sudo policy,
+or starts a second validator. A root process, including the supplied systemd
+service, continues directly. Without the required permission, weights still
+run and scoring reports `root_required`. Code cannot grant missing host rights.
 Root inside a restricted container may still lack the required mount and
 namespace capabilities; use the installed-runtime probe below to verify them.
 
@@ -176,11 +180,7 @@ export LAB_ARENA_RUNNER_WORK_DIR="$PWD/arena-runner"
 export LAB_ARENA_RUNSC_PATH=/usr/local/bin/runsc
 export LAB_ARENA_WEBSHARE_PROXY_1='https://USER:PASSWORD@YOUR_PROXY_HOST:PORT'
 
-# Keep the existing validator paths and proxy settings when changing the
-# process identity. `sudo` preserves only these named settings; the explicit
-# wallet path below prevents a switch to `/root`.
-sudo --preserve-env=LAB_ARENA_VALIDATOR_STATE_DIR,LAB_ARENA_RUNNER_WORK_DIR,LAB_ARENA_RUNSC_PATH,LAB_ARENA_WEBSHARE_PROXY_1 \
-  /absolute/path/to/.venv-arena/bin/python -m lab_arena.validator \
+python neurons/validator.py \
   --netuid 71 --subtensor.network finney \
   --wallet.name YOUR_WALLET --wallet.hotkey YOUR_HOTKEY \
   --wallet.path /absolute/path/to/YOUR_WALLETS_DIRECTORY
@@ -308,7 +308,7 @@ pass does not replace the required proxy configuration above.
 | `runsc_probe_timeout` | Investigate why the installed runtime's version check hangs. |
 | `runsc_probe_cleanup_failed` | Inspect the host for a stuck version-check process; forced cleanup could not be confirmed. |
 | `unsupported_host` | Use Linux x86_64 for this Arena integration. |
-| `root_required` | Use the configured rootful service with the existing wallet path. |
+| `root_required` | The process is not root and existing non-interactive sudo permission was unavailable. Scoring cannot start; weights continue. |
 | `unsafe_work_directory` | Inspect the reported path; preserve its contents and correct the configuration. |
 | `work_directory_unwritable` | Check ownership, permissions, read-only mounts, and available storage. |
 | `sandbox_launch_failed` | Run the installed-runtime probe and investigate sandbox capabilities. |

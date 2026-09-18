@@ -176,7 +176,11 @@ export LAB_ARENA_RUNNER_WORK_DIR="$PWD/arena-runner"
 export LAB_ARENA_RUNSC_PATH=/usr/local/bin/runsc
 export LAB_ARENA_WEBSHARE_PROXY_1='https://USER:PASSWORD@YOUR_PROXY_HOST:PORT'
 
-python -m lab_arena.validator \
+# Keep the existing validator paths and proxy settings when changing the
+# process identity. `sudo` preserves only these named settings; the explicit
+# wallet path below prevents a switch to `/root`.
+sudo --preserve-env=LAB_ARENA_VALIDATOR_STATE_DIR,LAB_ARENA_RUNNER_WORK_DIR,LAB_ARENA_RUNSC_PATH,LAB_ARENA_WEBSHARE_PROXY_1 \
+  /absolute/path/to/.venv-arena/bin/python -m lab_arena.validator \
   --netuid 71 --subtensor.network finney \
   --wallet.name YOUR_WALLET --wallet.hotkey YOUR_HOTKEY \
   --wallet.path /absolute/path/to/YOUR_WALLETS_DIRECTORY

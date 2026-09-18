@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).parents[1]
-TEMPLATE = ROOT / "scripts/293-arena-2026-09-18-published-baseline-rerun.sql.template"
+TEMPLATE = ROOT / "scripts/294-arena-2026-09-18-published-baseline-rerun.sql.template"
 
 
 def placeholders(value: str) -> set[str]:
@@ -40,15 +40,15 @@ def test_current_scorer_changes_only_admitted_baseline_namespace():
     assert "lab_arena_judgment_cache_source_invalid" in sql
     assert sql.count("v_definition := pg_catalog.replace") == 1
     assert "THEN ':rerun286'" in sql
-    assert "THEN ':rerun293' ELSE '' END" in sql
+    assert "THEN ':rerun294' ELSE '' END" in sql
     assert "NEW.submission_id = 'baseline-2026-09-18'" in sql
-    assert "':score:rerun293'" in sql
+    assert "':score:rerun294'" in sql
     assert "lab_arena_open_sep18_baseline_scoring" not in sql
 
 
 def test_requires_null_score_publication_contract_from_migration_292():
     sql = TEMPLATE.read_text()
-    assert "apply migration 292 before rerun293" in sql
+    assert "apply migration 292 before rerun294" in sql
     assert "lab_arena_per_icp_null_final_score_v1" in sql
     assert "v_accepted_count" in sql
     assert "v_is_baseline" in sql
@@ -63,8 +63,8 @@ def test_prepare_is_one_private_atomic_archive_and_preserves_activated_authority
     assert "arena-2026-09-18-rerun291archive" in sql
     assert "authorized_sep18_rerun291_baseline_archive" in sql
     assert "'mode', 'shadow', 'rewards_enabled', FALSE" in sql
-    assert "assignment_id LIKE '%:rerun293'" in sql
-    assert "assignment_id NOT LIKE '%:score:rerun293'" in sql
+    assert "assignment_id LIKE '%:rerun294'" in sql
+    assert "assignment_id NOT LIKE '%:score:rerun294'" in sql
     for field in (
         "reward_basis_hash", "reward_basis_doc", "signing_key_doc",
         "effective_reward_epoch", "reward_activated_at", "king_outcome",
@@ -87,9 +87,9 @@ def test_no_sep17_archive_chain_and_all_nonbaseline_evidence_remains_sealed():
     assert "recovery284" not in sql
     assert "rerun284archive" not in sql
     assert "arena-2026-09-17-rerun285archive" in sql
-    assert "lab_arena_sep18_published_rerun293_nonbaseline_valid_v1()" in sql
+    assert "lab_arena_sep18_published_rerun294_nonbaseline_valid_v1()" in sql
     assert sql.count(
-        "OR public.lab_arena_sep18_published_rerun293_nonbaseline_valid_v1()"
+        "OR public.lab_arena_sep18_published_rerun294_nonbaseline_valid_v1()"
     ) == 1  # terminal seal applies only at the archive/reopen boundary
     assert "__TERMINAL_NONBASELINE_SUBMISSION_COUNT__" in sql
     assert "__TERMINAL_NONBASELINE_RUN_COUNT__" in sql
@@ -115,7 +115,7 @@ def test_publication_guard_seals_only_winner_identity_not_new_scores_or_source()
             in sql
         )
     guard = sql[sql.index(
-        "CREATE OR REPLACE FUNCTION public.lab_arena_sep18_published_rerun293_publication_guard_v1"
+        "CREATE OR REPLACE FUNCTION public.lab_arena_sep18_published_rerun294_publication_guard_v1"
     ):]
     assert "NEW.publication_doc IS DISTINCT FROM" not in guard
     assert "NEW.publication_doc #>> '{final_ranking" not in guard

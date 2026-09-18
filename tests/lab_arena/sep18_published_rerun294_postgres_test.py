@@ -1,4 +1,4 @@
-"""Hermetic PostgreSQL proof for the Sep18 published baseline rerun293."""
+"""Hermetic PostgreSQL proof for the Sep18 published baseline rerun294."""
 from __future__ import annotations
 
 import hashlib
@@ -33,7 +33,7 @@ from tests.lab_arena.sep18_open_quota287_postgres_test import _configuration
 from tests.lab_arena.test_lab_arena_service_round import Harness
 
 ROOT = Path(__file__).parents[2]
-TEMPLATE = ROOT / "scripts/293-arena-2026-09-18-published-baseline-rerun.sql.template"
+TEMPLATE = ROOT / "scripts/294-arena-2026-09-18-published-baseline-rerun.sql.template"
 ROUND = "arena-2026-09-18"
 BASELINE = "baseline-2026-09-18"
 ARCHIVE = "arena-2026-09-18-rerun291archive"
@@ -46,7 +46,7 @@ NEW_SOURCE_SIZE = 610_292
 NEW_SOURCE_SHA = "d" * 64
 NEW_SOURCE_COMMIT = "3" * 40
 HISTORICAL_CALL_IDENTITY = "sha256:" + hashlib.sha256(
-    b"rerun293-unrelated-historical-sentinel"
+    b"rerun294-unrelated-historical-sentinel"
 ).hexdigest()
 
 
@@ -497,7 +497,7 @@ def _render(cursor, round_doc, baseline, counts, hashes, schedule):
 
 def _prepare(cursor, schedule):
     cursor.execute(
-        "SELECT public.lab_arena_prepare_sep18_published_rerun293_v1("
+        "SELECT public.lab_arena_prepare_sep18_published_rerun294_v1("
         "%s,%s,%s,%s,%s::jsonb)",
         (NEW_SOURCE_SIZE, NEW_SOURCE_SHA, NEW_SOURCE_COMMIT, BANK_SHA, json.dumps(schedule)),
     )
@@ -527,7 +527,7 @@ def _drive_cycle(service, objects, icps, runner_hotkey):
     assert first["status"] == "leased" and first["kind"] == "execute"
     assert (first["icp_position"], first["attempt"]) == (0, 1)
     first_identity, first_reserved = _reserve_cost_call(
-        service.store, first, token, "rerun293-icp0-attempt1", 300_000
+        service.store, first, token, "rerun294-icp0-attempt1", 300_000
     )
     assert first_reserved["status"] == "reserved"
     _settle_cost_call(
@@ -555,7 +555,7 @@ def _drive_cycle(service, objects, icps, runner_hotkey):
         if position == 0:
             assert claim["attempt"] == 2
             retry_identity, retry_reserved = _reserve_cost_call(
-                service.store, claim, token, "rerun293-icp0-attempt2", 400_000
+                service.store, claim, token, "rerun294-icp0-attempt2", 400_000
             )
             assert retry_reserved["status"] == "reserved"
             _settle_cost_call(
@@ -627,7 +627,7 @@ def _drive_cycle(service, objects, icps, runner_hotkey):
             assert service.close_stage(ROUND, 2)["status"] == "ok"
 
 
-def test_rerun293_full_published_transition_and_fail_closed_winner_guard(
+def test_rerun294_full_published_transition_and_fail_closed_winner_guard(
     database, tmp_path,
 ):
     psycopg2, dsn = database
@@ -754,7 +754,7 @@ def test_rerun293_full_published_transition_and_fail_closed_winner_guard(
             cursor.execute(
                 "CREATE TRIGGER round_guard_probe BEFORE UPDATE ON round_guard_probe "
                 "FOR EACH ROW EXECUTE FUNCTION "
-                "public.lab_arena_sep18_published_rerun293_publication_guard_v1()"
+                "public.lab_arena_sep18_published_rerun294_publication_guard_v1()"
             )
             with pytest.raises(Exception, match="sealed reward, winner"):
                 cursor.execute("UPDATE round_guard_probe SET status='published' WHERE round_id=%s", (ROUND,))

@@ -5,7 +5,7 @@ BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 
-DO $requires_sep18_published_rerun293$
+DO $requires_sep18_published_rerun294$
 DECLARE
   v_cost_schema JSONB;
   v_publication_definition TEXT;
@@ -26,13 +26,13 @@ BEGIN
      OR pg_catalog.to_regclass('public.lab_arena_submissions') IS NULL
      OR pg_catalog.to_regclass('public.lab_arena_runs') IS NULL
      OR pg_catalog.to_regclass('public.lab_arena_ledger') IS NULL THEN
-    RAISE EXCEPTION 'apply current Arena schema before rerun293';
+    RAISE EXCEPTION 'apply current Arena schema before rerun294';
   END IF;
   SELECT public.lab_arena_per_icp_cost_schema_v1() INTO v_cost_schema;
   IF v_cost_schema IS DISTINCT FROM
        '{"schema_version":"leadpoet.lab_arena.per_icp_cost_schema.v1",'
        '"version":289,"policy":"successful_calls_per_icp_v1"}'::JSONB THEN
-    RAISE EXCEPTION 'Sep18 rerun293 per-ICP cost schema differs';
+    RAISE EXCEPTION 'Sep18 rerun294 per-ICP cost schema differs';
   END IF;
   SELECT pg_catalog.pg_get_functiondef(
     'public.lab_arena__per_icp_publication_valid(text,jsonb)'::pg_catalog.regprocedure
@@ -42,16 +42,16 @@ BEGIN
      ) = 0
      OR pg_catalog.strpos(v_publication_definition, 'v_accepted_count') = 0
      OR pg_catalog.strpos(v_publication_definition, 'v_is_baseline') = 0 THEN
-    RAISE EXCEPTION 'apply migration 292 before rerun293';
+    RAISE EXCEPTION 'apply migration 292 before rerun294';
   END IF;
 END;
-$requires_sep18_published_rerun293$;
+$requires_sep18_published_rerun294$;
 
 GRANT CREATE ON SCHEMA public TO lab_arena_owner;
 
 -- Keep the normal driver. Change only the admitted Sep18 baseline assignment
 -- suffix and require the exact current integrity scorer definition.
-DO $bind_rerun293_score_namespace$
+DO $bind_rerun294_score_namespace$
 DECLARE
   v_definition TEXT;
   v_old_assignment TEXT := $old$
@@ -81,7 +81,7 @@ $old$;
                     SELECT 1 FROM public.lab_arena_rounds
                     WHERE round_id = 'arena-2026-09-18-rerun291archive'
                   )
-           THEN ':rerun293' ELSE '' END;
+           THEN ':rerun294' ELSE '' END;
 $new$;
 BEGIN
   v_definition := pg_catalog.pg_get_functiondef(
@@ -125,13 +125,13 @@ BEGIN
     RAISE EXCEPTION 'current integrity scoring namespace binding differs';
   END IF;
 END;
-$bind_rerun293_score_namespace$;
+$bind_rerun294_score_namespace$;
 
-CREATE OR REPLACE FUNCTION public.lab_arena_sep18_published_rerun293_score_namespace_guard_v1()
+CREATE OR REPLACE FUNCTION public.lab_arena_sep18_published_rerun294_score_namespace_guard_v1()
 RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog, public
-AS $sep18_published_rerun293_score_namespace_guard$
+AS $sep18_published_rerun294_score_namespace_guard$
 BEGIN
   IF NEW.round_id = 'arena-2026-09-18'
      AND NEW.submission_id = 'baseline-2026-09-18'
@@ -143,29 +143,29 @@ BEGIN
      AND NEW.assignment_id IS DISTINCT FROM
            NEW.round_id || ':' || NEW.submission_id || ':' ||
            NEW.stage::TEXT || ':' || NEW.icp_position::TEXT ||
-           ':score:rerun293' THEN
-    RAISE EXCEPTION 'Sep18 rerun293 scoring requires exact baseline namespace'
+           ':score:rerun294' THEN
+    RAISE EXCEPTION 'Sep18 rerun294 scoring requires exact baseline namespace'
       USING ERRCODE = '55000';
   END IF;
   RETURN NEW;
 END;
-$sep18_published_rerun293_score_namespace_guard$;
-ALTER FUNCTION public.lab_arena_sep18_published_rerun293_score_namespace_guard_v1()
+$sep18_published_rerun294_score_namespace_guard$;
+ALTER FUNCTION public.lab_arena_sep18_published_rerun294_score_namespace_guard_v1()
   OWNER TO lab_arena_owner;
-REVOKE ALL ON FUNCTION public.lab_arena_sep18_published_rerun293_score_namespace_guard_v1()
+REVOKE ALL ON FUNCTION public.lab_arena_sep18_published_rerun294_score_namespace_guard_v1()
   FROM PUBLIC, anon, authenticated, service_role, lab_arena_service;
-DROP TRIGGER IF EXISTS lab_arena_sep18_published_rerun293_score_namespace_guard
+DROP TRIGGER IF EXISTS lab_arena_sep18_published_rerun294_score_namespace_guard
   ON public.lab_arena_runs;
-CREATE TRIGGER lab_arena_sep18_published_rerun293_score_namespace_guard
+CREATE TRIGGER lab_arena_sep18_published_rerun294_score_namespace_guard
   BEFORE INSERT ON public.lab_arena_runs
   FOR EACH ROW
-  EXECUTE FUNCTION public.lab_arena_sep18_published_rerun293_score_namespace_guard_v1();
+  EXECUTE FUNCTION public.lab_arena_sep18_published_rerun294_score_namespace_guard_v1();
 
-CREATE OR REPLACE FUNCTION public.lab_arena_sep18_rerun291_archive_valid293_v1()
+CREATE OR REPLACE FUNCTION public.lab_arena_sep18_rerun291_archive_valid294_v1()
 RETURNS BOOLEAN
 LANGUAGE plpgsql STABLE SECURITY DEFINER
 SET search_path = pg_catalog, public, extensions
-AS $sep18_rerun291_archive_valid293$
+AS $sep18_rerun291_archive_valid294$
 DECLARE
   v_terminal_round CONSTANT JSONB :=
     $terminal_round$__TERMINAL_ROUND_JSON__$terminal_round$::JSONB;
@@ -255,17 +255,17 @@ BEGIN
         AND status IN ('pending', 'leased', 'submitted')
     );
 END;
-$sep18_rerun291_archive_valid293$;
-ALTER FUNCTION public.lab_arena_sep18_rerun291_archive_valid293_v1()
+$sep18_rerun291_archive_valid294$;
+ALTER FUNCTION public.lab_arena_sep18_rerun291_archive_valid294_v1()
   OWNER TO lab_arena_owner;
-REVOKE ALL ON FUNCTION public.lab_arena_sep18_rerun291_archive_valid293_v1()
+REVOKE ALL ON FUNCTION public.lab_arena_sep18_rerun291_archive_valid294_v1()
   FROM PUBLIC, anon, authenticated, service_role, lab_arena_service;
 
-CREATE OR REPLACE FUNCTION public.lab_arena_sep18_published_rerun293_nonbaseline_valid_v1()
+CREATE OR REPLACE FUNCTION public.lab_arena_sep18_published_rerun294_nonbaseline_valid_v1()
 RETURNS BOOLEAN
 LANGUAGE plpgsql STABLE SECURITY DEFINER
 SET search_path = pg_catalog, public, extensions
-AS $sep18_published_rerun293_nonbaseline_valid$
+AS $sep18_published_rerun294_nonbaseline_valid$
 DECLARE
   v_submissions_hash TEXT;
   v_runs_hash TEXT;
@@ -311,13 +311,13 @@ BEGIN
      AND v_runs_hash = '__TERMINAL_NONBASELINE_RUNS_HASH__'
      AND v_ledger_hash = '__TERMINAL_NONBASELINE_LEDGER_HASH__';
 END;
-$sep18_published_rerun293_nonbaseline_valid$;
-ALTER FUNCTION public.lab_arena_sep18_published_rerun293_nonbaseline_valid_v1()
+$sep18_published_rerun294_nonbaseline_valid$;
+ALTER FUNCTION public.lab_arena_sep18_published_rerun294_nonbaseline_valid_v1()
   OWNER TO lab_arena_owner;
-REVOKE ALL ON FUNCTION public.lab_arena_sep18_published_rerun293_nonbaseline_valid_v1()
+REVOKE ALL ON FUNCTION public.lab_arena_sep18_published_rerun294_nonbaseline_valid_v1()
   FROM PUBLIC, anon, authenticated, service_role, lab_arena_service;
 
-CREATE OR REPLACE FUNCTION public.lab_arena_prepare_sep18_published_rerun293_v1(
+CREATE OR REPLACE FUNCTION public.lab_arena_prepare_sep18_published_rerun294_v1(
   p_source_size_bytes BIGINT,
   p_source_sha256 TEXT,
   p_source_commit TEXT,
@@ -327,7 +327,7 @@ CREATE OR REPLACE FUNCTION public.lab_arena_prepare_sep18_published_rerun293_v1(
 RETURNS JSONB
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
 SET search_path = pg_catalog, public, extensions
-AS $prepare_sep18_published_rerun293$
+AS $prepare_sep18_published_rerun294$
 DECLARE
   v_round_id CONSTANT TEXT := 'arena-2026-09-18';
   v_baseline_id CONSTANT TEXT := 'baseline-2026-09-18';
@@ -335,7 +335,7 @@ DECLARE
   v_archive_submission_id CONSTANT TEXT :=
     'baseline-2026-09-18-rerun291archive';
   v_source_ref CONSTANT TEXT :=
-    'arena/arena-2026-09-18/sources/baseline-2026-09-18-rerun293.tar.gz';
+    'arena/arena-2026-09-18/sources/baseline-2026-09-18-rerun294.tar.gz';
   v_terminal_source_ref CONSTANT TEXT :=
     'arena/arena-2026-09-18/sources/baseline-2026-09-18.tar.gz';
   v_bank_sha256 CONSTANT TEXT :=
@@ -370,11 +370,11 @@ BEGIN
      OR p_source_commit IS DISTINCT FROM '__NEW_SOURCE_COMMIT__'
      OR p_bank_sha256 IS DISTINCT FROM v_bank_sha256
      OR p_forward_schedule IS DISTINCT FROM v_forward_schedule THEN
-    RAISE EXCEPTION 'Sep18 rerun293 source, bank, or schedule differs'
+    RAISE EXCEPTION 'Sep18 rerun294 source, bank, or schedule differs'
       USING ERRCODE = '22023';
   END IF;
   PERFORM pg_catalog.pg_advisory_xact_lock(
-    pg_catalog.hashtextextended('arena-2026-09-18-published-rerun293', 0)
+    pg_catalog.hashtextextended('arena-2026-09-18-published-rerun294', 0)
   );
   LOCK TABLE public.lab_arena_rounds IN ACCESS EXCLUSIVE MODE;
   LOCK TABLE public.lab_arena_submissions IN ACCESS EXCLUSIVE MODE;
@@ -413,9 +413,9 @@ BEGIN
      OR EXISTS (
        SELECT 1 FROM public.lab_arena_runs
        WHERE round_id = v_round_id AND submission_id = v_baseline_id
-         AND assignment_id LIKE '%:rerun293'
+         AND assignment_id LIKE '%:rerun294'
      ) THEN
-    IF public.lab_arena_sep18_rerun291_archive_valid293_v1() IS NOT TRUE
+    IF public.lab_arena_sep18_rerun291_archive_valid294_v1() IS NOT TRUE
        OR v_round.configuration_doc IS DISTINCT FROM v_new_configuration
        OR v_round.participants IS DISTINCT FROM v_new_participants
        OR v_round.status NOT IN (
@@ -467,20 +467,20 @@ BEGIN
        OR (SELECT pg_catalog.count(DISTINCT assignment_id)
            FROM public.lab_arena_runs
            WHERE round_id = v_round_id AND submission_id = v_baseline_id
-             AND kind = 'execute' AND assignment_id LIKE '%:rerun293') <> 20
+             AND kind = 'execute' AND assignment_id LIKE '%:rerun294') <> 20
        OR EXISTS (
          SELECT 1 FROM public.lab_arena_runs
          WHERE round_id = v_round_id AND submission_id = v_baseline_id
            AND kind = 'score'
-           AND assignment_id NOT LIKE '%:score:rerun293'
+           AND assignment_id NOT LIKE '%:score:rerun294'
        ) THEN
-      RAISE EXCEPTION 'Sep18 rerun293 replay differs' USING ERRCODE = '55000';
+      RAISE EXCEPTION 'Sep18 rerun294 replay differs' USING ERRCODE = '55000';
     END IF;
     RETURN pg_catalog.jsonb_build_object(
       'status', 'existing', 'round_id', v_round_id,
       'baseline_execute_assignments', 20,
-      'execute_namespace', 'rerun293',
-      'score_namespace', 'score:rerun293',
+      'execute_namespace', 'rerun294',
+      'score_namespace', 'score:rerun294',
       'source_size_bytes', p_source_size_bytes,
       'source_sha256', p_source_sha256,
       'source_commit', p_source_commit
@@ -489,7 +489,7 @@ BEGIN
 
   IF (p_forward_schedule ->> 'benchmark_deadline')::TIMESTAMPTZ <=
        pg_catalog.clock_timestamp() THEN
-    RAISE EXCEPTION 'Sep18 rerun293 admission window has closed'
+    RAISE EXCEPTION 'Sep18 rerun294 admission window has closed'
       USING ERRCODE = '22023';
   END IF;
   SELECT pg_catalog.count(*) INTO v_unsettled_cost_count
@@ -580,7 +580,7 @@ BEGIN
      OR v_unsettled_cost_count <> 0
      OR EXISTS (SELECT 1 FROM public.lab_arena_rounds
                 WHERE round_id = v_archive_round_id)
-     OR public.lab_arena_sep18_published_rerun293_nonbaseline_valid_v1() IS NOT TRUE THEN
+     OR public.lab_arena_sep18_published_rerun294_nonbaseline_valid_v1() IS NOT TRUE THEN
     RAISE EXCEPTION 'Sep18 published terminal differs'
       USING ERRCODE = '55000';
   END IF;
@@ -655,7 +655,7 @@ BEGIN
   WHERE round_id = v_round_id AND submission_id = v_baseline_id;
   GET DIAGNOSTICS v_count = ROW_COUNT;
   IF v_count <> __TERMINAL_BASELINE_RUN_COUNT__ THEN
-    RAISE EXCEPTION 'Sep18 rerun293 run archive count differs';
+    RAISE EXCEPTION 'Sep18 rerun294 run archive count differs';
   END IF;
   UPDATE public.lab_arena_ledger
   SET round_id = v_archive_round_id,
@@ -663,7 +663,7 @@ BEGIN
   WHERE round_id = v_round_id AND submission_id = v_baseline_id;
   GET DIAGNOSTICS v_count = ROW_COUNT;
   IF v_count <> __TERMINAL_BASELINE_LEDGER_COUNT__ THEN
-    RAISE EXCEPTION 'Sep18 rerun293 ledger archive count differs';
+    RAISE EXCEPTION 'Sep18 rerun294 ledger archive count differs';
   END IF;
   UPDATE public.lab_arena_submissions
   SET source_ref = v_source_ref,
@@ -677,7 +677,7 @@ BEGIN
         )
   WHERE round_id = v_round_id AND submission_id = v_baseline_id;
   IF NOT FOUND THEN
-    RAISE EXCEPTION 'Sep18 rerun293 baseline update differs';
+    RAISE EXCEPTION 'Sep18 rerun294 baseline update differs';
   END IF;
   UPDATE public.lab_arena_rounds
   SET status = 'stage1',
@@ -697,7 +697,7 @@ BEGIN
   FOR v_position IN 0 .. 19 LOOP
     v_stage := CASE WHEN v_position < 10 THEN 1 ELSE 2 END;
     v_assignment := v_round_id || ':' || v_baseline_id || ':' ||
-      v_stage::TEXT || ':' || v_position::TEXT || ':rerun293';
+      v_stage::TEXT || ':' || v_position::TEXT || ':rerun294';
     INSERT INTO public.lab_arena_runs (
       run_id, assignment_id, round_id, submission_id, miner_hotkey,
       stage, icp_position, attempt, kind, status, stage_generation
@@ -780,7 +780,7 @@ BEGIN
       )
   );
   IF v_protected_after IS DISTINCT FROM v_protected_before
-     OR public.lab_arena_sep18_rerun291_archive_valid293_v1() IS NOT TRUE
+     OR public.lab_arena_sep18_rerun291_archive_valid294_v1() IS NOT TRUE
      OR (SELECT pg_catalog.to_jsonb(row_value) - 'updated_at'
          FROM public.lab_arena_rounds AS row_value
          WHERE round_id = v_round_id) IS DISTINCT FROM
@@ -793,7 +793,7 @@ BEGIN
          WHERE round_id = v_round_id AND submission_id = v_baseline_id
            AND kind = 'execute' AND status = 'pending'
            AND output_ref IS NULL AND attempt = 1
-           AND assignment_id LIKE '%:rerun293') <> 20
+           AND assignment_id LIKE '%:rerun294') <> 20
      OR EXISTS (SELECT 1 FROM public.lab_arena_ledger
                 WHERE round_id = v_round_id AND submission_id = v_baseline_id)
      OR EXISTS (
@@ -812,7 +812,7 @@ BEGIN
      OR EXISTS (SELECT 1 FROM public.lab_arena_runs
                 WHERE round_id = v_round_id AND submission_id = v_baseline_id
                   AND kind = 'score') THEN
-    RAISE EXCEPTION 'Sep18 rerun293 atomic preservation differs'
+    RAISE EXCEPTION 'Sep18 rerun294 atomic preservation differs'
       USING ERRCODE = '55000';
   END IF;
   RETURN pg_catalog.jsonb_build_object(
@@ -820,30 +820,30 @@ BEGIN
     'baseline_execute_assignments', 20,
     'archived_runs', __TERMINAL_BASELINE_RUN_COUNT__,
     'archived_ledger_entries', __TERMINAL_BASELINE_LEDGER_COUNT__,
-    'execute_namespace', 'rerun293',
-    'score_namespace', 'score:rerun293',
+    'execute_namespace', 'rerun294',
+    'score_namespace', 'score:rerun294',
     'openrouter_calls_per_icp', 200,
     'source_size_bytes', p_source_size_bytes,
     'source_sha256', p_source_sha256,
     'source_commit', p_source_commit
   );
 END;
-$prepare_sep18_published_rerun293$;
-ALTER FUNCTION public.lab_arena_prepare_sep18_published_rerun293_v1(
+$prepare_sep18_published_rerun294$;
+ALTER FUNCTION public.lab_arena_prepare_sep18_published_rerun294_v1(
   BIGINT, TEXT, TEXT, TEXT, JSONB
 ) OWNER TO lab_arena_owner;
-REVOKE ALL ON FUNCTION public.lab_arena_prepare_sep18_published_rerun293_v1(
+REVOKE ALL ON FUNCTION public.lab_arena_prepare_sep18_published_rerun294_v1(
   BIGINT, TEXT, TEXT, TEXT, JSONB
 ) FROM PUBLIC, anon, authenticated, service_role, lab_arena_service;
-GRANT EXECUTE ON FUNCTION public.lab_arena_prepare_sep18_published_rerun293_v1(
+GRANT EXECUTE ON FUNCTION public.lab_arena_prepare_sep18_published_rerun294_v1(
   BIGINT, TEXT, TEXT, TEXT, JSONB
 ) TO lab_arena_service;
 
-CREATE OR REPLACE FUNCTION public.lab_arena_sep18_published_rerun293_publication_guard_v1()
+CREATE OR REPLACE FUNCTION public.lab_arena_sep18_published_rerun294_publication_guard_v1()
 RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog, public
-AS $sep18_published_rerun293_publication_guard$
+AS $sep18_published_rerun294_publication_guard$
 DECLARE
   v_terminal_round CONSTANT JSONB :=
     $terminal_round$__TERMINAL_ROUND_JSON__$terminal_round$::JSONB;
@@ -912,31 +912,31 @@ BEGIN
             IS DISTINCT FROM
             ((v_terminal_round -> 'configuration_doc') - 'schedule' -
              'baseline_source_url')
-       OR public.lab_arena_sep18_rerun291_archive_valid293_v1() IS NOT TRUE
+       OR public.lab_arena_sep18_rerun291_archive_valid294_v1() IS NOT TRUE
        OR (SELECT pg_catalog.count(DISTINCT assignment_id)
            FROM public.lab_arena_runs
            WHERE round_id = NEW.round_id
              AND submission_id = 'baseline-2026-09-18'
-             AND kind = 'execute' AND assignment_id LIKE '%:rerun293') <> 20
+             AND kind = 'execute' AND assignment_id LIKE '%:rerun294') <> 20
        OR (SELECT pg_catalog.count(DISTINCT icp_position)
            FROM public.lab_arena_runs
            WHERE round_id = NEW.round_id
              AND submission_id = 'baseline-2026-09-18'
-             AND kind = 'execute' AND assignment_id LIKE '%:rerun293'
+             AND kind = 'execute' AND assignment_id LIKE '%:rerun294'
              AND per_icp_score IS NOT NULL) <> 20
        OR EXISTS (
          SELECT 1 FROM public.lab_arena_runs
          WHERE round_id = NEW.round_id
            AND submission_id = 'baseline-2026-09-18'
            AND kind = 'score'
-           AND assignment_id NOT LIKE '%:score:rerun293'
+           AND assignment_id NOT LIKE '%:score:rerun294'
        )
        OR EXISTS (
          SELECT 1 FROM public.lab_arena_runs AS executed
          WHERE executed.round_id = NEW.round_id
            AND executed.submission_id = 'baseline-2026-09-18'
            AND executed.kind = 'execute'
-           AND executed.assignment_id LIKE '%:rerun293'
+           AND executed.assignment_id LIKE '%:rerun294'
            AND executed.status = 'accepted'
            AND NOT EXISTS (
              SELECT 1 FROM public.lab_arena_runs AS judged
@@ -944,7 +944,7 @@ BEGIN
                AND judged.submission_id = executed.submission_id
                AND judged.kind = 'score' AND judged.status = 'accepted'
                AND judged.scored_run_id = executed.run_id
-               AND judged.assignment_id LIKE '%:score:rerun293'
+               AND judged.assignment_id LIKE '%:score:rerun294'
            )
        )
        OR EXISTS (SELECT 1 FROM public.lab_arena_runs
@@ -952,23 +952,23 @@ BEGIN
                     AND status IN ('pending', 'leased', 'submitted'))
        OR v_unsettled_cost_count <> 0
        THEN
-      RAISE EXCEPTION 'Sep18 rerun293 publication conflicts with sealed reward, winner, source, cost, or completion state'
+      RAISE EXCEPTION 'Sep18 rerun294 publication conflicts with sealed reward, winner, source, cost, or completion state'
         USING ERRCODE = '55000';
     END IF;
   END IF;
   RETURN NEW;
 END;
-$sep18_published_rerun293_publication_guard$;
-ALTER FUNCTION public.lab_arena_sep18_published_rerun293_publication_guard_v1()
+$sep18_published_rerun294_publication_guard$;
+ALTER FUNCTION public.lab_arena_sep18_published_rerun294_publication_guard_v1()
   OWNER TO lab_arena_owner;
-REVOKE ALL ON FUNCTION public.lab_arena_sep18_published_rerun293_publication_guard_v1()
+REVOKE ALL ON FUNCTION public.lab_arena_sep18_published_rerun294_publication_guard_v1()
   FROM PUBLIC, anon, authenticated, service_role, lab_arena_service;
-DROP TRIGGER IF EXISTS lab_arena_sep18_published_rerun293_publication_guard
+DROP TRIGGER IF EXISTS lab_arena_sep18_published_rerun294_publication_guard
   ON public.lab_arena_rounds;
-CREATE TRIGGER lab_arena_sep18_published_rerun293_publication_guard
+CREATE TRIGGER lab_arena_sep18_published_rerun294_publication_guard
   BEFORE UPDATE ON public.lab_arena_rounds
   FOR EACH ROW
-  EXECUTE FUNCTION public.lab_arena_sep18_published_rerun293_publication_guard_v1();
+  EXECUTE FUNCTION public.lab_arena_sep18_published_rerun294_publication_guard_v1();
 
 REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
 NOTIFY pgrst, 'reload schema';

@@ -201,7 +201,7 @@ BEGIN
          AND kind = 'execute' AND stage = 2 AND attempt = 3
          AND icp_position IN (10, 11, 13, 14, 19)
          AND (status <> 'failed' OR terminal_cause <> 'budget_exhausted'
-              OR result_doc ->> 'terminal_status' <> 'budget_exhausted'
+              OR result_doc ->> 'terminal_status' IS DISTINCT FROM 'budget_exhausted'
               OR output_ref IS NOT NULL)
      ) THEN
     RAISE EXCEPTION 'sep18 expired-position recovery execution state differs';
@@ -236,6 +236,14 @@ BEGIN
        ) AS heads WHERE entry_kind IN ('reservation', 'dispatch')
      ) THEN
     RAISE EXCEPTION 'sep18 expired-position recovery accounting state differs';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_trigger
+    WHERE tgrelid = 'public.lab_arena_rounds'::regclass
+      AND tgname = 'lab_arena_rounds_write_once' AND tgenabled = 'O'
+  ) THEN
+    RAISE EXCEPTION 'sep18 expired-position recovery round guard is not enabled';
   END IF;
 
   v_round_stable := to_jsonb(v_round) - 'status' - 'status_generation'

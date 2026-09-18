@@ -336,6 +336,11 @@ def test_expired_position_recovery_preserves_history_and_reaches_scoring(databas
             + TARGET_RUN + "'",
             "target state differs",
         ),
+        (
+            "UPDATE public.lab_arena_runs SET result_doc=NULL WHERE run_id='"
+            + ROUND + ":" + BASELINE + ":2:10:3'",
+            "execution state differs",
+        ),
     ),
 )
 def test_expired_position_recovery_rejects_changed_state_atomically(

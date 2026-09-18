@@ -911,6 +911,12 @@ def _startup_service(
             "version": 230,
             "policy": "successful_calls_v1",
         },
+        submission_replacement_schema=lambda: {
+            "schema_version": "leadpoet.lab_arena.submission_replacement_schema.v1",
+            "version": 258,
+            "replacement_freeze_seconds": 3600,
+            "max_replacement_attempts": 1,
+        },
         _transport=transport,
     )
     service._objects = Objects()
@@ -935,6 +941,27 @@ def test_startup_probes_cost_rpc_grant_and_missing_submission_path():
     assert service.startup_checks()["current_round"] is None
     assert transport.cost_probe_seen is True
     assert transport.baseline_cost_schema_seen is True
+
+
+def test_per_icp_startup_requires_its_database_capability():
+    service, _ = _startup_service(ArenaStoreError("lab_arena_submission_missing"))
+    service._config.defaults.per_icp_cost_policy = True
+    probes = []
+
+    def available():
+        probes.append(True)
+
+    service._store.per_icp_cost_schema = available
+    assert service.startup_checks()["current_round"] is None
+    assert probes == [True]
+
+    def unavailable():
+        raise ArenaStoreError("function is unavailable")
+
+    service._store.per_icp_cost_schema = unavailable
+    with pytest.raises(ServiceError) as caught:
+        service.startup_checks()
+    assert caught.value.code == "per_icp_cost_schema_unavailable"
 
 
 @pytest.mark.parametrize(

@@ -30,6 +30,7 @@ CURRENT_RUNTIME_FIXTURES = {
     459: ROOT / "tests" / "fixtures" / "subtensor_events_spec459_block9076006.json",
     464: ROOT / "tests" / "fixtures" / "subtensor_events_spec464_block9088963.json",
     466: ROOT / "tests" / "fixtures" / "subtensor_events_spec466_block9091482.json",
+    467: ROOT / "tests" / "fixtures" / "subtensor_events_spec467_block9095804.json",
 }
 
 
@@ -183,6 +184,12 @@ def test_real_spec455_archive_events_prove_exact_adjacent_reveal():
             "0xff4ba0da10fb8ac26fab3e446f23413ef7f91de4a604802097ece0b928d53a8e",
             198,
         ),
+        (
+            467,
+            "1dcdc906dc30bba1a07323fd48bd0554fdedff0ef5b5391a171a0d1b24f19093",
+            "0x2f175dcc64196ec8a6b9235f8d7cfd84efef6c68bb925c4455949591cef9f6d2",
+            266,
+        ),
     ),
 )
 def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
@@ -272,7 +279,7 @@ def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
     assert proof["account_id_hex"] == expected["account_id_hex"]
 
 
-@pytest.mark.parametrize("spec_version", [464, 466])
+@pytest.mark.parametrize("spec_version", [464, 466, 467])
 def test_exact_runtime_and_reveal_tampering_fail_closed(spec_version):
     fixture = json.loads(
         CURRENT_RUNTIME_FIXTURES[spec_version].read_text(encoding="utf-8")

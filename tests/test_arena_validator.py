@@ -278,6 +278,7 @@ def test_broken_prior_epoch_does_not_block_current_epoch(tmp_path):
     [
         (459, 464, "subtensor_events_spec464_block9088963.json"),
         (464, 466, "subtensor_events_spec466_block9091482.json"),
+        (466, 467, "subtensor_events_spec467_block9095804.json"),
     ],
 )
 def test_prior_poll_recovers_signed_journal_after_runtime_upgrade_reveal(

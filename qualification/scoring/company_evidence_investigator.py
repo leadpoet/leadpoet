@@ -603,7 +603,7 @@ async def investigate_company_evidence(
                                 "function": {"name": "submit_findings"},
                             }
                             if force_submit
-                            else "auto"
+                            else "required"
                         ),
                         "parallel_tool_calls": False,
                         "temperature": 0.0,

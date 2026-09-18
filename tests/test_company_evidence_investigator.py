@@ -879,7 +879,43 @@ def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatc
     replayed_call = reasoning_requests[1]["messages"][-2]["tool_calls"][0]
     assert set(replayed_call) == {"id", "type", "function"}
     assert set(replayed_call["function"]) == {"name", "arguments"}
-    assert reasoning_requests[-1]["tool_choice"] == "auto"
+    assert all(
+        request["tool_choice"] == "required"
+        for request in reasoning_requests
+    )
+
+
+def test_required_tool_turn_does_not_interpret_provider_prose(monkeypatch):
+    requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        arena_operations.validate_operation_request("openrouter.chat", payload)
+        requests.append(payload)
+        return 200, {
+            "choices": [{"message": {
+                "content": (
+                    "Acme common stock is listed on NASDAQ under ticker ACME."
+                )
+            }}]
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    diagnostic = {}
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("stage",),
+        requested_stage="Public",
+        diagnostic=diagnostic,
+    ))
+
+    assert requests[0]["tool_choice"] == "required"
+    assert result["claims"] == {}
+    assert result["failure_reason"] == MALFORMED_RESPONSE_FAILURE_REASON
+    assert diagnostic[VERIFIER_FAILURE_REASON_KEY] == MALFORMED_RESPONSE_FAILURE_REASON
 
 
 def test_harness_rejects_multiple_tool_calls_as_malformed(monkeypatch):

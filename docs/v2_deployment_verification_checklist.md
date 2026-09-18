@@ -97,14 +97,10 @@ source. A manifest generated from an uncommitted working tree is not sufficient.
 
 ## Deployment evidence
 
-Gateway scoring capacity follows the distinct configured proxy profiles that
-pass the existing transport preflight. Add or remove proxy entries in the
-protected environment, then use the canonical restart. Do not set
-`RESEARCH_LAB_SCORING_WORKER_PROCESS_COUNT` in the production secret: the restart
-derives its runtime value from the verified profiles. Duplicate URLs count
-once; failed profiles are excluded; an empty verified list blocks cutover.
-Check that the transition report and installed `scoring_proxy_*.json` files
-have the same count after a change.
+Arena scoring capacity follows the configured validator proxy profiles and
+local memory checks. Keep its normal sandbox and transport readiness checks.
+After deployment, verify that parallel work completes through the current
+Arena runner and that no retired worker is needed.
 
 Code push and deployment are separate actions. Follow the authorized deployment
 scope. Before replacing a working process, run the normal validator's
@@ -122,24 +118,3 @@ an authorized deployment, record actual
 finalized chain readback for each configured normal validator. Report local
 tests, provisioning, and live chain results separately. Never claim live weight
 submission from readiness or an HTTP acknowledgement alone.
-
-For the first transition, apply additive migration 202 while the gateway is
-running. Invoke the exact `origin/main` transition wrapper documented in
-`docs/arena_normal_validator_weights.md`. It installs the gateway-only
-controller and holds the canonical restart lock. The restart stops the old
-producers and then waits at its exact migration 203 barrier. Apply the exact
-203 SQL. For the 2026-09-10 transition, apply exact migration 204 while that
-barrier remains held; it changes only the reviewed open round's runner list and
-fails if the frozen configuration differs. Apply migration 205 before releasing
-the barrier because current execution leases query optional credential
-availability even for submissions without that credential. Then verify the 203
-capability RPC and use the exact completion helper. The
-helper checks the live capability and the candidate, SQL hash, and invocation
-binding against the protected persistent gateway environment before the
-restart can activate the new gateway. The temporary parent environment has
-already been scrubbed at this point. Do not write the completion marker by
-hand.
-
-If migration 203 succeeds but a later restart stage fails, rerun the ordinary
-canonical exact-commit restart. Migration 203 is idempotent, the new schema
-preflight is then fully enabled, and no legacy incentive table is required.

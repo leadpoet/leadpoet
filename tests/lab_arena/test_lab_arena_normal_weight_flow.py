@@ -19,7 +19,10 @@ from fastapi.testclient import TestClient
 from lab_arena import contracts, signing
 from lab_arena.api import create_app
 from lab_arena.service import ServiceError
-from lab_arena.local_weight_signer import LocalArenaWeightSigner
+from lab_arena.local_weight_signer import (
+    LocalArenaWeightSigner,
+    load_public_chain_signing_profile,
+)
 from lab_arena.store import ArenaStoreError
 from lab_arena.promotion import GitPromoter
 from lab_arena.validator import (
@@ -40,7 +43,6 @@ from tests.lab_arena.test_lab_arena_service_round import (
 )
 from tests.postgres_migration_harness import SCRIPTS
 from validator_tee.enclave.arena_weight_signer import ArenaWeightSigner
-from validator_tee.enclave.arena_hotkey import load_chain_signing_profile
 
 RETIRED_INCENTIVE_TABLES = (
     "research_reimbursement_awards",
@@ -559,7 +561,10 @@ def test_scoring_reward_normal_validators_restart_and_chain_readback(
         "finney", 71, working_key.ss58_address
     )
 
-    profile = load_chain_signing_profile(Path("validator_tee/enclave/chain_signing_profile_v2.json"))
+    profile = load_public_chain_signing_profile(
+        "finney",
+        path=Path("validator_tee/enclave/chain_signing_profile_v2.json"),
+    )
     outcomes, vectors = [], []
     miner = Keypair.create_from_uri("//ArenaWeightMiner")
     harness.chain.runners.append(miner.ss58_address)

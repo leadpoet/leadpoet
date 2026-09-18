@@ -13,7 +13,6 @@ LAST_GOOD_MANIFEST="${GATEWAY_LAST_GOOD_MANIFEST:-/home/ec2-user/.config/leadpoe
 TOPOLOGY_MODE="${GATEWAY_TEE_TOPOLOGY_MODE:-full}"
 ROLES=(
   gateway_coordinator
-  gateway_scoring
 )
 
 publish_built_eif_for_verification() {
@@ -40,7 +39,7 @@ leadpoet_acquire_docker_operation_lock_v2
 python3 "$SCRIPT_DIR/topology.py" --verify "$SCRIPT_DIR/topology.json"
 if [ "$TOPOLOGY_MODE" = "full" ]; then
   test -s "$RELEASE_MANIFEST" || {
-    echo "ERROR: approved six-build V2 release manifest is missing: $RELEASE_MANIFEST" >&2
+    echo "ERROR: approved coordinator V2 release manifest is missing: $RELEASE_MANIFEST" >&2
     exit 1
   }
   python3 "$SCRIPT_DIR/release_manifest_v2.py" --verify "$RELEASE_MANIFEST"

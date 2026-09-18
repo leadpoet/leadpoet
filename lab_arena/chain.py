@@ -10,10 +10,7 @@ What this module deliberately does not do:
 - It never chooses a network from ``BITTENSOR_NETWORK``. ``ArenaChainConfig``
   carries one explicit ``wss://`` or ``ws://`` endpoint and
   ``connect_substrate`` opens exactly that endpoint. The Lab helper
-  ``gateway.qualification.utils.chain`` keeps a module-global connection that
-  is selected by environment and swallows read errors to ``None``; only its
-  two pure functions, ``get_transfer_details`` and
-  ``verify_sr25519_signature``, are imported here.
+  ``gateway.qualification.utils.chain`` provides the pure ``verify_sr25519_signature`` helper imported here.
 - It never returns ``None`` for a failed read and never synthesizes
   ``"Unknown"`` extrinsics. Every failure raises ``ArenaChainError`` or one of
   its subclasses so callers fail closed.

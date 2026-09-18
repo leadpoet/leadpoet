@@ -50,6 +50,6 @@ def test_icp_set_carries_exclusions_and_hash_covers_them():
 
 
 def test_disabled_env_yields_empty_lists():
-    with mock.patch.dict(os.environ, {"RESEARCH_LAB_ICP_EXCLUSIONS_ENABLED": "0"}):
+    with mock.patch.dict(os.environ, {"LAB_ARENA_ICP_EXCLUSIONS_ENABLED": "0"}):
         icps, _d, _h = gen.generate_icp_set(20260717, base_seed=3)
     assert all(icp["excluded_companies"] == [] for icp in icps)

@@ -1,1 +1,0 @@
-"""Shared validator scoring utilities."""

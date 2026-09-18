@@ -16,8 +16,8 @@ import tempfile
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from gateway.tee.release_manifest_v2 import (
-    HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
-    historical_three_role_specs,
+    HISTORICAL_TWO_ROLE_TOPOLOGY_HASH,
+    historical_two_role_specs,
     validate_prior_release_manifest,
     validate_release_manifest,
 )
@@ -107,14 +107,14 @@ def _load_regular_json(path: Path, field: str) -> Dict[str, Any]:
 
 
 def _normalize_role_pcr0s(value: Any, field: str) -> Dict[str, str]:
-    historical_roles = set(
-        historical_three_role_specs(
-            expected_topology_hash=HISTORICAL_THREE_ROLE_TOPOLOGY_HASH
+    historical_two_roles = set(
+        historical_two_role_specs(
+            expected_topology_hash=HISTORICAL_TWO_ROLE_TOPOLOGY_HASH
         )
     )
     if not isinstance(value, Mapping) or set(value) not in (
         set(ROLE_SPECS),
-        historical_roles,
+        historical_two_roles,
     ):
         raise ReleaseArchiveV2Error("%s is incomplete" % field)
     normalized: Dict[str, str] = {}

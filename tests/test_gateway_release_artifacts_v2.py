@@ -135,14 +135,16 @@ def test_local_role_artifacts_must_match_approved_six_build_release(tmp_path):
 
 def test_local_eif_hash_is_recorded_even_when_build_metadata_differs(tmp_path):
     gateway_root, eif_root, release, _observed = _fixture(tmp_path)
-    (eif_root / "tee-enclave-gateway_scoring.eif").write_bytes(b"tampered")
+    (eif_root / "tee-enclave-gateway_coordinator.eif").write_bytes(b"tampered")
     result = verify_release_artifacts(
         release_manifest=release,
         gateway_root=gateway_root,
         eif_root=eif_root,
     )
     role = next(
-        item for item in result["roles"] if item["physical_role"] == "gateway_scoring"
+        item
+        for item in result["roles"]
+        if item["physical_role"] == "gateway_coordinator"
     )
     assert role["eif_hash"] == _sha256(b"tampered")
 

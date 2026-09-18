@@ -5,31 +5,31 @@ FROM python:3.9.24-slim-bookworm@sha256:9b89d7e0d7e84de70c5e441198fdccb25b8d3831
 ARG SOURCE_DATE_EPOCH=0
 ARG LEADPOET_ENCLAVE_ROLE=gateway_coordinator
 
-# The scoring implementation uses Python 3.9 syntax. The exact x86_64 base
-# manifest and all wheels are immutable inputs to independent PCR0 rebuilds.
+# The exact x86_64 base manifest and all wheels are immutable inputs to
+# independent PCR0 rebuilds.
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONHASHSEED=0
 ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 ENV LEADPOET_ENCLAVE_ROLE=${LEADPOET_ENCLAVE_ROLE}
 ENV PYTHONPATH=/app:/app/gateway/_attested_runtime
 
-# Install the exact live scoring dependency closure from the offline wheelhouse.
-COPY _enclave_source/tee/requirements-scoring-py39.in /tmp/requirements-scoring-py39.in
-COPY _enclave_source/tee/requirements-scoring-py39.lock /tmp/requirements-scoring-py39.lock
-COPY _enclave_source/tee/scoring_wheelhouse.py /tmp/scoring_wheelhouse.py
+# Install the exact identity-enclave dependency closure from the offline wheelhouse.
+COPY _enclave_source/tee/requirements-enclave-py39.in /tmp/requirements-enclave-py39.in
+COPY _enclave_source/tee/requirements-enclave-py39.lock /tmp/requirements-enclave-py39.lock
+COPY _enclave_source/tee/enclave_wheelhouse.py /tmp/enclave_wheelhouse.py
 COPY _enclave_source/tee/wheelhouse/ /tmp/wheelhouse/
-RUN python3 /tmp/scoring_wheelhouse.py verify-wheelhouse \
-        --input /tmp/requirements-scoring-py39.in \
-        --lock /tmp/requirements-scoring-py39.lock \
+RUN python3 /tmp/enclave_wheelhouse.py verify-wheelhouse \
+        --input /tmp/requirements-enclave-py39.in \
+        --lock /tmp/requirements-enclave-py39.lock \
         --wheelhouse /tmp/wheelhouse \
-    && python3 -m pip install --no-index --find-links=/tmp/wheelhouse --no-deps --no-cache-dir --no-compile --require-hashes -r /tmp/requirements-scoring-py39.lock \
-    && python3 /tmp/scoring_wheelhouse.py verify-installed \
-        --lock /tmp/requirements-scoring-py39.lock \
+    && python3 -m pip install --no-index --find-links=/tmp/wheelhouse --no-deps --no-cache-dir --no-compile --require-hashes -r /tmp/requirements-enclave-py39.lock \
+    && python3 /tmp/enclave_wheelhouse.py verify-installed \
+        --lock /tmp/requirements-enclave-py39.lock \
     && (find /usr -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete 2>/dev/null || true) \
     && (find /usr -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true) \
     && (find /usr -exec touch -h -d @0 {} + 2>/dev/null || true) \
-    && rm -rf /tmp/wheelhouse /tmp/requirements-scoring-py39.in \
-        /tmp/requirements-scoring-py39.lock /tmp/scoring_wheelhouse.py
+    && rm -rf /tmp/wheelhouse /tmp/requirements-enclave-py39.in \
+        /tmp/requirements-enclave-py39.lock /tmp/enclave_wheelhouse.py
 
 # Set working directory
 WORKDIR /app
@@ -37,16 +37,7 @@ WORKDIR /app
 # Copy ENTIRE gateway directory for code_hash verification
 # Build context must be gateway root, not tee/ subdirectory
 COPY _enclave_source/ /app/gateway/
-# These packages are imported by Research Lab as top-level modules at runtime.
-# They must be staged into the gateway build context before enclave build so
-# PCR0 and code_hash bind to the same runtime code the host process imports.
-RUN test -d /app/gateway/_attested_runtime/research_lab \
-    && test -d /app/gateway/_attested_runtime/Leadpoet \
-    && test -d /app/gateway/_attested_runtime/leadpoet_verifier \
-    && test -d /app/gateway/_attested_runtime/schemas \
-    && test -d /app/gateway/_attested_runtime/leadpoet_canonical \
-    && test -d /app/gateway/_attested_runtime/qualification \
-    && test -d /app/gateway/_attested_runtime/validator_models
+RUN test -d /app/gateway/_attested_runtime/leadpoet_canonical
 
 RUN python3 /app/gateway/tee/scoring_import_closure.py verify-staged \
     --gateway-root /app/gateway \
@@ -62,7 +53,7 @@ RUN test -f "/app/gateway/_attested_runtime/gateway_enclave_build_identities/${L
 RUN python3 /app/gateway/tee/build_identity.py verify \
     --gateway-root /app/gateway \
     --role "${LEADPOET_ENCLAVE_ROLE}"
-RUN python3 -c "from bittensor_wallet import Keypair; import gateway.qualification.models; import qualification.scoring.lead_scorer; import qualification.scoring.intent_verification_three_stage; import validator_models.automated_checks"
+RUN python3 -c "import cbor2, cryptography; import gateway.tee.tee_service; import leadpoet_canonical.attested_v2"
 # Create keys directory
 RUN mkdir -p /app/gateway/keys
 

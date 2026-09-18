@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-import runpy
-from pathlib import Path
+from lab_arena import miner_cli
 
 
-ROOT = Path(__file__).resolve().parents[2]
-MINER = runpy.run_path(
-    str(ROOT / "scripts" / "lab_arena_miner.py"), run_name="lab_arena_miner_module"
-)
+def test_console_entrypoint_defaults_to_interactive(monkeypatch):
+    monkeypatch.setattr(miner_cli.sys, "argv", ["leadpoet"])
+    monkeypatch.setattr(miner_cli, "interactive", lambda _args: 17)
+    assert miner_cli.main() == 17
 
 
 def test_submit_model_uses_source_wallet_and_environment_credentials():
-    parser = MINER["build_parser"]()
+    parser = miner_cli.build_parser()
     args = parser.parse_args(
         [
             "submit-model",
@@ -36,14 +35,14 @@ def test_submit_model_uses_source_wallet_and_environment_credentials():
 
 
 def test_submit_source_remains_a_compatibility_alias():
-    args = MINER["build_parser"]().parse_args(
+    args = miner_cli.build_parser().parse_args(
         ["submit-source", "--source", "./agent"]
     )
     assert args.command == "submit-source"
 
 
 def test_retired_image_and_manual_envelope_commands_are_absent():
-    parser = MINER["build_parser"]()
+    parser = miner_cli.build_parser()
     for command in ("submission-body", "sign"):
         try:
             parser.parse_args([command])
@@ -54,18 +53,17 @@ def test_retired_image_and_manual_envelope_commands_are_absent():
 
 
 def test_scripted_submission_formats_real_failure(monkeypatch, capsys):
-    args = MINER["build_parser"]().parse_args(["submit-model", "--source", "./agent"])
-    globals_ = MINER["submit_source"].__globals__
-    monkeypatch.setitem(globals_, "submission_credentials_from_environment", lambda: {
+    args = miner_cli.build_parser().parse_args(["submit-model", "--source", "./agent"])
+    monkeypatch.setattr(miner_cli, "submission_credentials_from_environment", lambda: {
         "openrouter_api_key": "openrouter-execution-secret",
         "openrouter_management_key": "openrouter-management-secret",
         "deepline_api_key": "deepline-execution-secret",
     })
-    monkeypatch.setitem(globals_, "_keypair", lambda _args: object())
-    monkeypatch.setitem(globals_, "submit_agent_source", lambda **_kwargs: (_ for _ in ()).throw(
-        MINER["MinerSubmissionError"]("source_upload_failed", "http_403\nopenrouter-execution-secret")
+    monkeypatch.setattr(miner_cli, "_keypair", lambda _args: object())
+    monkeypatch.setattr(miner_cli, "submit_agent_source", lambda **_kwargs: (_ for _ in ()).throw(
+        miner_cli.MinerSubmissionError("source_upload_failed", "http_403\nopenrouter-execution-secret")
     ))
-    assert MINER["submit_source"](args) == 2
+    assert miner_cli.submit_source(args) == 2
     rendered = capsys.readouterr().err
     assert "source_upload_failed (http_403\\x0a[REDACTED])" in rendered
     assert "TypeError" not in rendered

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import base64
-import gzip
 import json
 
 import pytest
@@ -25,7 +23,6 @@ from leadpoet_canonical.chain_source_v2 import (
     resolve_reveal_period_metadata_default_v2,
     ss58_encode_account_id,
     timelocked_weight_commits_storage_key,
-    validate_arweave_checkpoint_event,
     weights_storage_key,
 )
 
@@ -337,47 +334,4 @@ def test_weight_storage_key_and_decoder_match_live_finney_metadata_shape():
                 + (3).to_bytes(2, "little")
                 + (2).to_bytes(2, "little")
             ).hex()
-        )
-
-
-def test_arweave_checkpoint_requires_exact_event_and_merkle_commitment():
-    signed = {"signed_event": {"payload": {"ok": True}}}
-    event = {
-        "sequence": 7,
-        "event_hash": "1" * 64,
-        "signed_log_entry": signed,
-    }
-    leaf = __import__("hashlib").sha256(
-        json.dumps(event, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    checkpoint = {
-        "header": {
-            "checkpoint_number": 4,
-            "event_count": 1,
-            "merkle_root": leaf,
-            "sequence_range": {"first": 7, "last": 7},
-        },
-        "signature": "ignored-by-historical-inclusion-check",
-        "events_compressed": base64.b64encode(
-            gzip.compress(json.dumps([event]).encode())
-        ).decode(),
-        "tree_levels": [[leaf]],
-    }
-    result = validate_arweave_checkpoint_event(
-        checkpoint,
-        expected_event_hash="1" * 64,
-        expected_signed_log_entry=signed,
-        expected_sequence=7,
-        expected_merkle_root=leaf,
-    )
-    assert result["checkpoint_number"] == 4
-    tampered = json.loads(json.dumps(checkpoint))
-    tampered["tree_levels"] = [["2" * 64]]
-    with pytest.raises(ChainSourceV2Error, match="Merkle tree differs"):
-        validate_arweave_checkpoint_event(
-            tampered,
-            expected_event_hash="1" * 64,
-            expected_signed_log_entry=signed,
-            expected_sequence=7,
-            expected_merkle_root=leaf,
         )

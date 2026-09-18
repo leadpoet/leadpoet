@@ -853,16 +853,16 @@ def test_service_uses_configured_registry_client_for_scorer():
     assert "registry = images.RegistryClient()" not in scorer_block
 
 
-def test_miner_credentials_scope_changes_only_kms_alias(tmp_path):
-    source = {"RESEARCH_LAB_OPENROUTER_KEY_KMS_KEY_ID": "alias/existing-key",
+def test_miner_credentials_scope_changes_only_requested_kms_key(tmp_path):
+    source = {"LAB_ARENA_CREDENTIAL_KMS_KEY_ID": "alias/existing-key",
               "LAB_ARENA_MODE": "live", "LAB_ARENA_DAILY_CUTOFF_UTC": "6",
               "LAB_ARENA_SERVICE_KEY": "sb_secret_unchanged"}
     updated = json.loads(_run_remote_with_fake_aws(
         tmp_path, json.dumps(source), request_override={
-            "role": "miner_credentials", "updates": {}, "service_key": "",
-            "aliases": {"RESEARCH_LAB_OPENROUTER_KEY_KMS_KEY_ID": "LAB_ARENA_CREDENTIAL_KMS_KEY_ID"},
+            "role": "miner_credentials", "updates": {"LAB_ARENA_CREDENTIAL_KMS_KEY_ID": "alias/new-key"}, "service_key": "",
+            "aliases": {},
         }))
-    assert updated == dict(source, LAB_ARENA_CREDENTIAL_KMS_KEY_ID="alias/existing-key")
+    assert updated == dict(source, LAB_ARENA_CREDENTIAL_KMS_KEY_ID="alias/new-key")
 
 
 def test_miner_credentials_scope_does_not_require_service_key_or_touch_validator(monkeypatch, tmp_path, capsys):
@@ -874,7 +874,7 @@ def test_miner_credentials_scope_does_not_require_service_key_or_touch_validator
     assert MODULE.main(["--miner-credentials-only", "--check", "--allowed-account", "493765492819", "--ssh-key", str(key)]) == 0
     assert len(calls) == 1 and calls[0][0] == MODULE.GATEWAY_HOST
     assert calls[0][1]["updates"] == {} and calls[0][1]["apply"] is False
-    assert list(calls[0][1]["aliases"].values()) == ["LAB_ARENA_CREDENTIAL_KMS_KEY_ID"]
+    assert calls[0][1]["aliases"] == {}
     assert json.loads(capsys.readouterr().out)["ok"] is True
 
 

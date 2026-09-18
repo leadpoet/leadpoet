@@ -17,15 +17,9 @@ BUILD_CONTEXT_TMP="$GATEWAY_ROOT/.enclave_source.tmp"
 WHEELHOUSE_ROOT="$GATEWAY_ROOT/_enclave_wheelhouse"
 WHEELHOUSE_TMP="$GATEWAY_ROOT/.enclave_wheelhouse.tmp"
 OFFLINE_ARTIFACT_ROOT="${GATEWAY_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts}"
-OFFLINE_WHEELHOUSE_ROOT="$OFFLINE_ARTIFACT_ROOT/scoring-wheelhouse-py39"
+OFFLINE_WHEELHOUSE_ROOT="$OFFLINE_ARTIFACT_ROOT/enclave-wheelhouse-py39"
 PACKAGES=(
-  "Leadpoet"
-  "research_lab"
-  "leadpoet_verifier"
-  "schemas"
   "leadpoet_canonical"
-  "qualification"
-  "validator_models"
 )
 
 if ! command -v rsync >/dev/null 2>&1; then
@@ -63,8 +57,8 @@ else
 fi
 
 SOURCE_GATEWAY_ROOT="$SOURCE_ROOT/gateway"
-SCORING_REQUIREMENTS_INPUT="$SOURCE_GATEWAY_ROOT/tee/requirements-scoring-py39.in"
-SCORING_REQUIREMENTS_LOCK="$SOURCE_GATEWAY_ROOT/tee/requirements-scoring-py39.lock"
+ENCLAVE_REQUIREMENTS_INPUT="$SOURCE_GATEWAY_ROOT/tee/requirements-enclave-py39.in"
+ENCLAVE_REQUIREMENTS_LOCK="$SOURCE_GATEWAY_ROOT/tee/requirements-enclave-py39.lock"
 PROTECTED_WORKFLOW_MANIFEST="$SOURCE_GATEWAY_ROOT/tee/protected_workflows.json"
 TOPOLOGY_MANIFEST="$SOURCE_GATEWAY_ROOT/tee/topology.json"
 
@@ -130,12 +124,12 @@ python3 "$SOURCE_GATEWAY_ROOT/tee/topology.py" --verify "$TOPOLOGY_MANIFEST"
 cp "$TOPOLOGY_MANIFEST" "$TMP_ROOT/topology.json"
 
 mkdir -p "$TMP_ROOT/gateway_enclave_build_identities"
-for role in gateway_coordinator gateway_scoring; do
+for role in gateway_coordinator; do
   python3 "$SOURCE_GATEWAY_ROOT/tee/build_identity.py" build \
     --gateway-root "$SOURCE_GATEWAY_ROOT" \
     --source-root "$SOURCE_ROOT" \
     --manifest "$TMP_ROOT/scoring_import_closure.json" \
-    --dependency-lock "$SCORING_REQUIREMENTS_LOCK" \
+    --dependency-lock "$ENCLAVE_REQUIREMENTS_LOCK" \
     --protected-manifest "$TMP_ROOT/protected_workflows.json" \
     --topology-manifest "$TMP_ROOT/topology.json" \
     --role "$role" \
@@ -156,19 +150,18 @@ mv "$TMP_ROOT" "$DEST_ROOT"
 rm -rf "$WHEELHOUSE_TMP"
 mkdir -p "$WHEELHOUSE_TMP"
 test -d "$OFFLINE_WHEELHOUSE_ROOT" || {
-  echo "ERROR: prepared offline scoring wheelhouse is unavailable: $OFFLINE_WHEELHOUSE_ROOT" >&2
-  echo "Run gateway/tee/prepare_offline_artifacts_v2.sh before release builds" >&2
+  echo "ERROR: prepared offline enclave wheelhouse is unavailable: $OFFLINE_WHEELHOUSE_ROOT" >&2
   exit 1
 }
 if find "$OFFLINE_WHEELHOUSE_ROOT" -mindepth 1 -maxdepth 1 \
     \( ! -type f -o ! -name '*.whl' \) | grep -q .; then
-  echo "ERROR: offline scoring wheelhouse contains an unexpected entry" >&2
+  echo "ERROR: offline enclave wheelhouse contains an unexpected entry" >&2
   exit 1
 fi
 rsync -a --delete "$OFFLINE_WHEELHOUSE_ROOT/" "$WHEELHOUSE_TMP/"
-python3 "$SOURCE_GATEWAY_ROOT/tee/scoring_wheelhouse.py" verify-wheelhouse \
-  --input "$SCORING_REQUIREMENTS_INPUT" \
-  --lock "$SCORING_REQUIREMENTS_LOCK" \
+python3 "$SOURCE_GATEWAY_ROOT/tee/enclave_wheelhouse.py" verify-wheelhouse \
+  --input "$ENCLAVE_REQUIREMENTS_INPUT" \
+  --lock "$ENCLAVE_REQUIREMENTS_LOCK" \
   --wheelhouse "$WHEELHOUSE_TMP"
 python3 "$SOURCE_GATEWAY_ROOT/tee/normalize_attested_runtime.py" --root "$WHEELHOUSE_TMP"
 rm -rf "$WHEELHOUSE_ROOT"

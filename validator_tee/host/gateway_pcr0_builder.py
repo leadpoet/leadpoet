@@ -35,10 +35,7 @@ from validator_tee.host.docker_image_normalizer_v2 import normalize_docker_image
 
 CACHE_SCHEMA_VERSION = "leadpoet.gateway_pcr0_cache.v2"
 DEFAULT_CACHE_SIZE = 20
-GATEWAY_ROLES = (
-    "gateway_coordinator",
-    "gateway_scoring",
-)
+GATEWAY_ROLES = tuple(sorted(ROLE_SPECS))
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _PCR0_RE = re.compile(r"^[0-9a-f]{96}$")
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")

@@ -1,16 +1,6 @@
 from __future__ import annotations
 
-import asyncio
-import gzip
 import unittest
-from unittest.mock import AsyncMock, patch
-
-from leadpoet_verifier.identity.network import (
-    IdentityFetchError,
-    _decode_bounded,
-    fetch_page,
-    is_public_address,
-)
 from leadpoet_verifier.identity.normalization import (
     NormalizationError,
     exact_or_legal_name_match,
@@ -100,89 +90,6 @@ class CompanyIdentityNormalizationTests(unittest.TestCase):
         self.assertFalse(exact_or_legal_name_match("Studio 42", "Studio 24"))
         self.assertFalse(exact_or_legal_name_match("AC", "Acme Corporation"))
         self.assertEqual(normalize_name("ACME GmbH"), "acme gmbh")
-
-    def test_public_address_filter_blocks_all_special_ranges(self) -> None:
-        for address in (
-            "127.0.0.1", "10.0.0.1", "172.16.0.1", "192.168.1.1",
-            "169.254.169.254", "100.64.0.1", "0.0.0.0", "224.0.0.1",
-            "192.0.2.1", "::1", "fc00::1", "fe80::1", "2001:db8::1",
-        ):
-            with self.subTest(address=address):
-                self.assertFalse(is_public_address(address))
-        self.assertTrue(is_public_address("93.184.216.34"))
-        self.assertTrue(is_public_address("2606:2800:220:1:248:1893:25c8:1946"))
-
-    def test_bounded_decoder_rejects_compression_bombs_and_unknown_encodings(self) -> None:
-        self.assertEqual(_decode_bounded(gzip.compress(b"hello"), "gzip"), b"hello")
-        compressor = __import__("zlib").compressobj(wbits=-__import__("zlib").MAX_WBITS)
-        raw_deflate = compressor.compress(b"hello") + compressor.flush()
-        self.assertEqual(_decode_bounded(raw_deflate, "deflate"), b"hello")
-        bomb = gzip.compress(b"x" * (1024 * 1024 + 1))
-        with self.assertRaisesRegex(IdentityFetchError, "response_body_too_large"):
-            _decode_bounded(bomb, "gzip")
-        with self.assertRaisesRegex(IdentityFetchError, "unsupported_content_encoding"):
-            _decode_bounded(b"hello", "br")
-        with self.assertRaisesRegex(IdentityFetchError, "invalid_compressed_response"):
-            _decode_bounded(b"not-gzip", "gzip")
-
-
-class CompanyIdentityNetworkTests(unittest.IsolatedAsyncioTestCase):
-    async def test_each_redirect_is_renormalized_reresolved_and_connection_pinned(self) -> None:
-        resolutions: list[tuple[str, int]] = []
-
-        async def resolver(host: str, port: int) -> list[str]:
-            resolutions.append((host, port))
-            return ["93.184.216.34"]
-
-        request = AsyncMock(side_effect=[
-            (301, {"location": "https://www.example.com/home"}, b""),
-            (200, {"content-type": "text/html"}, b"<html>ok</html>"),
-        ])
-        with patch("leadpoet_verifier.identity.network._request_one_hop", request):
-            page = await fetch_page("http://example.com", resolve_host=resolver)
-
-        self.assertEqual(resolutions, [("example.com", 80), ("www.example.com", 443)])
-        self.assertEqual(page.final_url, "https://www.example.com/home")
-        self.assertEqual(len(page.redirects), 1)
-        self.assertEqual(request.call_args_list[0].args[1], ["93.184.216.34"])
-
-    async def test_private_or_mixed_dns_answers_never_reach_transport(self) -> None:
-        request = AsyncMock()
-
-        async def resolver(_host: str, _port: int) -> list[str]:
-            return ["93.184.216.34", "169.254.169.254"]
-
-        with (
-            patch("leadpoet_verifier.identity.network._request_one_hop", request),
-            self.assertRaisesRegex(IdentityFetchError, "dns_non_public_address"),
-        ):
-            await fetch_page("https://example.com", resolve_host=resolver)
-        request.assert_not_awaited()
-
-    async def test_https_downgrade_redirect_fails_closed(self) -> None:
-        async def resolver(_host: str, _port: int) -> list[str]:
-            return ["93.184.216.34"]
-
-        request = AsyncMock(return_value=(301, {"location": "http://example.com"}, b""))
-        with (
-            patch("leadpoet_verifier.identity.network._request_one_hop", request),
-            self.assertRaisesRegex(IdentityFetchError, "https_downgrade_redirect"),
-        ):
-            await fetch_page("https://example.com", resolve_host=resolver)
-
-    async def test_redirect_loops_and_nonstandard_ports_fail_closed(self) -> None:
-        async def resolver(_host: str, _port: int) -> list[str]:
-            return ["93.184.216.34"]
-
-        request = AsyncMock(return_value=(302, {"location": "/"}, b""))
-        with (
-            patch("leadpoet_verifier.identity.network._request_one_hop", request),
-            self.assertRaisesRegex(IdentityFetchError, "redirect_loop"),
-        ):
-            await fetch_page("https://example.com", resolve_host=resolver)
-        with self.assertRaisesRegex(IdentityFetchError, "non_standard_port_forbidden"):
-            await fetch_page("https://example.com:8443", resolve_host=resolver)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -34,17 +34,10 @@ from gateway.qualification.models import (
 
 def test_new_verifier_runtime_annotations_evaluate_on_python39() -> None:
     modules = (
-        "leadpoet_verifier.contracts",
-        "leadpoet_verifier.deepline_repair",
         "leadpoet_verifier.industry_fit",
         "leadpoet_verifier.industry_taxonomy",
         "leadpoet_verifier.semantic_gates",
-        "leadpoet_verifier.identity.binding",
-        "leadpoet_verifier.identity.canonical",
-        "leadpoet_verifier.identity.models",
         "leadpoet_verifier.identity.normalization",
-        "leadpoet_verifier.identity.observation",
-        "leadpoet_verifier.identity.policy",
     )
 
     for module_name in modules:
@@ -344,15 +337,6 @@ def test_identity_linkedin_url_canonicalization() -> None:
     )
     b = normalize_linkedin_company_url("https://linkedin.com/company/acme-corp")
     assert a == b
-
-
-def test_identity_canonical_hash_forbids_floats() -> None:
-    from leadpoet_verifier.identity.canonical import canonical_sha256
-
-    with pytest.raises(Exception):
-        canonical_sha256({"score": 1.5})
-    # Deterministic over key order.
-    assert canonical_sha256({"a": 1, "b": "x"}) == canonical_sha256({"b": "x", "a": 1})
 
 
 # ---------------------------------------------------------------------------

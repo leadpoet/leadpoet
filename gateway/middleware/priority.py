@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import secrets
 import threading
 from collections import Counter
 from dataclasses import dataclass
@@ -62,34 +61,9 @@ OTHER_CLASS = RouteClass(
 )
 
 
-VALIDATOR_EXACT = {
-    "/validate",
-    "/weights/submit",
-    # Every stage of the V2 weight-submission exchange must share the
-    # validator pool. Before this, only /weights/submit/v2 was reserved:
-    # the input fetch, finalize POST, subnet-epoch captures, and the
-    # attested-allocation fetch all fell to the OTHER pool (8s shed,
-    # shared with miscellaneous traffic), so near block 300 under load
-    # the most critical calls of the epoch could be shed with a 503
-    # while ordinary traffic held slots. A shed allocation fetch eats
-    # one of the validator's four fetch attempts inside its 90s budget.
-    "/weights/submit/v2",
-    "/weights/finalize/v2",
-    "/weights/inputs/v2",
-    "/weights/subnet-epoch/candidate/v1",
-    "/weights/subnet-epoch/boundary/v1",
-}
-VALIDATOR_PREFIXES = (
-    "/epoch/",
-    "/qualification/validator/",
-)
-_ALLOCATION_PREFIX = "/research-lab/allocations/"
-_INTERNAL_KEY_HEADER = b"x-leadpoet-internal-key"
-MINER_EXACT = {
-    "/presign",
-    "/submit",
-    "/submit/",
-}
+VALIDATOR_EXACT: set[str] = set()
+VALIDATOR_PREFIXES = ("/epoch/",)
+MINER_EXACT: set[str] = set()
 MINER_PREFIXES = (
     "/arena/v1/submissions/",
     "/testnet/arena/v1/submissions/",
@@ -109,29 +83,9 @@ def classify_path(path: str) -> str:
 
 
 def classify_scope(scope: Scope) -> str:
-    """Reserve allocation capacity only for the authenticated validator path."""
+    """Classify one request using the retained gateway routes."""
 
-    path = str(scope.get("path") or "")
-    if not path.startswith(_ALLOCATION_PREFIX):
-        return classify_path(path)
-
-    configured_key = os.getenv("RESEARCH_LAB_INTERNAL_API_KEY", "")
-    values = [
-        value
-        for name, value in scope.get("headers", ())
-        if name.lower() == _INTERNAL_KEY_HEADER
-    ]
-    if not configured_key or len(values) != 1:
-        return "other"
-    try:
-        provided_key = values[0].decode("utf-8")
-    except (AttributeError, UnicodeDecodeError):
-        return "other"
-    return (
-        "validator"
-        if secrets.compare_digest(provided_key, configured_key)
-        else "other"
-    )
+    return classify_path(str(scope.get("path") or ""))
 
 
 class _Pool:

@@ -40,11 +40,15 @@ def test_gateway_restart_drains_arena_claims_before_shutdown() -> None:
     authorize = script.index("--phase gateway_destructive", drain)
     destructive = script.index("GATEWAY_DESTRUCTIVE_PHASE_STARTED=1", authorize)
     ready = script.index("--phase gateway_ready", destructive)
-    final_runtime = script.index('GATEWAY_DEPLOY_STAGE="miner_maintenance_runtime_verify"', ready)
-    release = script.index('GATEWAY_DEPLOY_STAGE="lab_arena_claim_guard_release"', final_runtime)
+    attestation = script.index(
+        "http://localhost:8000/attestation/document >/dev/null", ready
+    )
+    release = script.index(
+        'GATEWAY_DEPLOY_STAGE="lab_arena_claim_guard_release"', attestation
+    )
     completed = script.index('GATEWAY_DEPLOY_STAGE="completed"', release)
 
-    assert drain < authorize < destructive < ready < final_runtime < release < completed
+    assert drain < authorize < destructive < ready < attestation < release < completed
     assert "abort_lab_arena_restart_guard_before_destructive" in _shell_function_source(
         script, "on_gateway_restart_exit"
     )
@@ -353,25 +357,21 @@ def test_unpinned_gateway_local_build_follows_new_main_before_shutdown() -> None
         script.index('if ! wait_for_gateway_offline_artifact_prepare; then'),
     )
     acquisition_end = script.index(
-        'echo "Preparing commit-bound KMS credential envelopes"',
+        'echo "Installing gateway host Python dependencies before production shutdown"',
         acquisition_start,
     )
     release_build = script[acquisition_start:acquisition_end]
-    assert release_build.count("follow_superseding_gateway_release") == 3
+    assert release_build.count("follow_superseding_gateway_release") == 2
     assert release_build.index("follow_superseding_gateway_release") < (
         release_build.index("gateway/tee/build_local_release_v2.sh")
     )
-    assert "Acquiring the exact historical attested V2 release channel" in release_build
+    assert "Building the exact local gateway runtime identity" in release_build
+    assert "Acquiring the exact historical attested V2 release channel" not in release_build
     assert '--expected-commit "$PREPARED_GATEWAY_SHA"' in release_build
     assert '--gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"' in release_build
-    historical = release_build.index(
-        "Acquiring the exact historical attested V2 release channel"
-    )
-    assert release_build.index('[ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ]') < (
-        release_build.index("--ensure", historical)
-    )
+    assert "incomplete or unsupported V2 release acquisition contract" in release_build
     assert script.index("follow_superseding_gateway_release") < script.index(
-        'echo "Stopping existing gateway and Research Lab worker processes"'
+        'echo "Stopping existing gateway and Lab Arena processes"'
     )
 
 
@@ -450,9 +450,9 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
         (
             'echo "Preparing exact gateway commit from configured GitHub branch"',
             'echo "Capturing the official subnet restart window before release acquisition"',
-            'echo "Preparing exact hash-locked V2 build artifacts during release acquisition"',
+            'echo "Preparing exact hash-locked enclave dependencies during release acquisition"',
             'echo "Validating the prepared V2 release before production shutdown"',
-            'echo "Stopping existing gateway and Research Lab worker processes"',
+            'echo "Stopping existing gateway and Lab Arena processes"',
             'echo "Waiting for :8000 to free"',
             'echo "Activating prepared gateway Git commit after process shutdown"',
             'GATEWAY_RESTART_PHASE=post_activate',
@@ -463,7 +463,6 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
             'bash "$GATEWAY_ROOT/tee/stage_attested_runtime.sh"',
             'echo "Installing Python dependencies"',
             'echo "Relaunching gateway with cloned runtime env"',
-            'unset RESEARCH_LAB_EVIDENCE_PROXY_URL',
             'setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main',
             'for attempt in $(seq 1 120)',
             'curl -fsS http://localhost:8000/health',
@@ -493,8 +492,8 @@ def test_gateway_restart_fails_closed_on_all_authoritative_readiness_routes() ->
     assert "http://localhost:8000/health/v2-authority >/dev/null" in script
     assert "wait_for_gateway_v2_authority" in script
     assert "http://localhost:8000/research-lab/status" not in script
-    assert "http://localhost:8000/attest >/dev/null" in script
-    assert "http://localhost:8000/attest || true" not in script
+    assert "http://localhost:8000/attestation/document >/dev/null" in script
+    assert "http://localhost:8000/attestation/document || true" not in script
 
 
 def test_gateway_restart_retries_v2_authority_after_base_health(
@@ -615,37 +614,13 @@ def test_gateway_restart_does_not_kill_colocated_runner_builds() -> None:
 
 
 
-def test_gateway_restart_exports_attested_artifact_bucket_to_runtime() -> None:
-    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-
-    assert (
-        'RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET="${'
-        'RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET:-$GATEWAY_V2_RELEASE_BUCKET}"'
-        in script
-    )
-    assert "export RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET" in script
-    assert (
-        'RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET="'
-        '$RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET" \\'
-        in script
-    )
-
-
-
-
-
-
-
-
-
-
 def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     materialize = script.index("Materializing the prepared commit for pre-shutdown V2 tooling")
     restart_window = script.index("Capturing the official subnet restart window before release acquisition")
-    artifact_prepare = script.index("Preparing exact hash-locked V2 build artifacts during release acquisition")
+    artifact_prepare = script.index("Preparing exact hash-locked enclave dependencies during release acquisition")
     preflight = script.index("Validating the prepared V2 release before production shutdown")
-    shutdown = script.index("Stopping existing gateway and Research Lab worker processes")
+    shutdown = script.index("Stopping existing gateway and Lab Arena processes")
     assert materialize < restart_window < artifact_prepare < preflight < shutdown
     assert "verify_weight_submission_ready_v2" not in script
     assert "bootstrap_active_ancestry_checkpoints_v2" not in script
@@ -655,7 +630,7 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
 def test_gateway_restart_isolates_candidate_release_until_shutdown() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     prepare = script.index("Materializing the prepared commit for pre-shutdown V2 tooling")
-    shutdown = script.index("Stopping existing gateway and Research Lab worker processes")
+    shutdown = script.index("Stopping existing gateway and Lab Arena processes")
     pre_shutdown = script[prepare:shutdown]
     assert '--gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"' in pre_shutdown
     assert '--gateway-output "$GATEWAY_V2_RELEASE_MANIFEST"' not in pre_shutdown
@@ -663,109 +638,11 @@ def test_gateway_restart_isolates_candidate_release_until_shutdown() -> None:
 
 
 
-def test_gateway_restart_counts_only_exact_live_gateway_as_reclaimable(
-    tmp_path: Path,
-) -> None:
-    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    helper_source = _shell_function_source(
-        script,
-        "gateway_memory_ready_after_running_gateway_shutdown",
-    )
-    repo_root = tmp_path / "repo"
-    (repo_root / "gateway").mkdir(parents=True)
-    proc_root = tmp_path / "proc"
-    process_root = proc_root / "123"
-    process_root.mkdir(parents=True)
-    (process_root / "status").write_text(
-        f"Uid:\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\n"
-        "VmRSS:\t12582912 kB\n",
-        encoding="utf-8",
-    )
-    (process_root / "stat").write_text(
-        "123 (python3) S " + " ".join(["1"] * 30) + "\n",
-        encoding="utf-8",
-    )
-    command_path = process_root / "cmdline"
-    command_path.write_bytes(
-        b"\0".join(
-            value.encode("utf-8")
-            for value in (sys.executable, "-u", "-m", "gateway.main", "")
-        )
-    )
-    (process_root / "cwd").symlink_to(repo_root)
-    report_path = tmp_path / "memory.json"
-    report_path.write_text(
-        json.dumps(
-            {
-                "available_memory_mib": 7000,
-                "minimum_available_memory_mib": 16384,
-                "schema_version": "leadpoet.gateway_host_memory_guard.v2",
-                "status": "blocked",
-            }
-        ),
-        encoding="utf-8",
-    )
-    harness = f"""set -euo pipefail
-{helper_source}
-GATEWAY_PYTHON_BIN="$1"
-LEADPOET_REPO_ROOT="$2"
-GATEWAY_RECLAIMABLE_MEMORY_SAFETY_MARGIN_MIB=2048
-gateway_memory_ready_after_running_gateway_shutdown "$3" "$4" "$5"
-"""
-    arguments = [
-        "bash",
-        "-c",
-        harness,
-        "gateway-reclaimable-memory-test",
-        sys.executable,
-        str(repo_root),
-        str(report_path),
-        "123",
-        str(proc_root),
-    ]
-
-    completed = subprocess.run(
-        arguments,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert json.loads(completed.stdout) == {
-        "available_memory_mib": 7000,
-        "minimum_available_memory_mib": 16384,
-        "reclaimable_gateway_memory_mib": 12288,
-        "reclaimable_gateway_parent_memory_mib": 12288,
-        "reclaimable_gateway_worker_count": 0,
-        "reclaimable_gateway_worker_memory_mib": 0,
-        "safety_margin_mib": 2048,
-        "schema_version": "leadpoet.gateway_reclaimable_memory.v1",
-        "status": "ready_after_gateway_shutdown",
-    }
-
-    command_path.write_bytes(
-        b"\0".join(
-            value.encode("utf-8")
-            for value in (sys.executable, "-u", "-m", "gateway.other", "")
-        )
-    )
-    rejected = subprocess.run(
-        arguments,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    assert rejected.returncode != 0
-    assert "running gateway command differs" in rejected.stderr
-
-
 def test_gateway_restart_rechecks_real_memory_after_shutdown() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     pre_shutdown = script.index("wait_for_gateway_build_memory 1")
     shutdown = script.index(
-        'echo "Stopping existing gateway and Research Lab worker processes"'
+        'echo "Stopping existing gateway and Lab Arena processes"'
     )
     post_shutdown = script.index("wait_for_gateway_build_memory 0 10", shutdown)
     activation = script.index(
@@ -773,120 +650,8 @@ def test_gateway_restart_rechecks_real_memory_after_shutdown() -> None:
     )
 
     assert pre_shutdown < shutdown < post_shutdown < activation
-    assert "gateway_memory_ready_after_running_gateway_shutdown" in script[
-        :shutdown
-    ]
-    assert 'pkill -9 -f "/gateway/research_lab/worker_process[.]py"' in script[
-        shutdown:post_shutdown
-    ]
-
-
-def test_gateway_restart_counts_exact_direct_worker_children_as_reclaimable(
-    tmp_path: Path,
-) -> None:
-    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    helper_source = _shell_function_source(
-        script,
-        "gateway_memory_ready_after_running_gateway_shutdown",
-    )
-    repo_root = tmp_path / "repo"
-    worker_script = repo_root / "gateway" / "research_lab" / "worker_process.py"
-    worker_script.parent.mkdir(parents=True)
-    worker_script.write_text("# worker\n", encoding="utf-8")
-    proc_root = tmp_path / "proc"
-
-    def write_process(pid: str, ppid: str, rss_kib: int, argv: tuple[str, ...]) -> None:
-        process_root = proc_root / pid
-        process_root.mkdir(parents=True)
-        (process_root / "status").write_text(
-            f"Uid:\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\t{os.getuid()}\n"
-            f"VmRSS:\t{rss_kib} kB\n",
-            encoding="utf-8",
-        )
-        (process_root / "stat").write_text(
-            f"{pid} (python3) S {ppid} " + " ".join(["1"] * 29) + "\n",
-            encoding="utf-8",
-        )
-        (process_root / "cmdline").write_bytes(
-            b"\0".join(value.encode("utf-8") for value in (*argv, ""))
-        )
-        (process_root / "cwd").symlink_to(repo_root)
-
-    write_process("123", "1", 524288, (sys.executable, "-u", "-m", "gateway.main"))
-    for pid, kind, index, total, prefix in (
-        ("456", "hosted", "0", "10", "research-lab-worker"),
-        ("789", "scoring", "0", "25", "research-lab-scorer"),
-    ):
-        write_process(
-            pid,
-            "123",
-            2097152,
-            (
-                sys.executable,
-                str(worker_script),
-                "--kind",
-                kind,
-                "--worker-index",
-                index,
-                "--total-workers",
-                total,
-                "--worker-prefix",
-                prefix,
-                "--log-level",
-                "INFO",
-            ),
-        )
-
-    report_path = tmp_path / "memory.json"
-    report_path.write_text(
-        json.dumps(
-            {
-                "available_memory_mib": 14000,
-                "minimum_available_memory_mib": 16384,
-                "schema_version": "leadpoet.gateway_host_memory_guard.v2",
-                "status": "blocked",
-            }
-        ),
-        encoding="utf-8",
-    )
-    harness = f"""set -euo pipefail
-{helper_source}
-GATEWAY_PYTHON_BIN="$1"
-LEADPOET_REPO_ROOT="$2"
-GATEWAY_RECLAIMABLE_MEMORY_SAFETY_MARGIN_MIB=2048
-gateway_memory_ready_after_running_gateway_shutdown "$3" "$4" "$5"
-"""
-    completed = subprocess.run(
-        [
-            "bash",
-            "-c",
-            harness,
-            "gateway-worker-memory-test",
-            sys.executable,
-            str(repo_root),
-            str(report_path),
-            "123",
-            str(proc_root),
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    assert completed.returncode == 0, completed.stderr
-    result = json.loads(completed.stdout)
-    assert result["reclaimable_gateway_parent_memory_mib"] == 512
-    assert result["reclaimable_gateway_worker_count"] == 2
-    assert result["reclaimable_gateway_worker_memory_mib"] == 4096
-    assert result["reclaimable_gateway_memory_mib"] == 4608
-
-
-
-
-
-
-
-
+    assert "gateway_memory_ready_after_running_gateway_shutdown" not in script
+    assert 'pkill -9 -f "/gateway/research_lab/worker_process[.]py"' not in script
 
 
 def test_gateway_offline_artifact_prepare_overlaps_release_and_fails_closed(
@@ -903,7 +668,7 @@ def test_gateway_offline_artifact_prepare_overlaps_release_and_fails_closed(
     )
     preflight_tree = tmp_path / "candidate"
     prepare_script = (
-        preflight_tree / "gateway" / "tee" / "prepare_offline_artifacts_v2.sh"
+        preflight_tree / "gateway" / "tee" / "prepare_offline_enclave_dependencies.sh"
     )
     prepare_script.parent.mkdir(parents=True)
     prepare_script.write_text(
@@ -1029,7 +794,7 @@ def test_gateway_exit_cleanup_terminates_offline_artifact_prepare(
     )
     preflight_tree = tmp_path / "candidate"
     prepare_script = (
-        preflight_tree / "gateway" / "tee" / "prepare_offline_artifacts_v2.sh"
+        preflight_tree / "gateway" / "tee" / "prepare_offline_enclave_dependencies.sh"
     )
     prepare_script.parent.mkdir(parents=True)
     prepare_script.write_text(
@@ -1120,7 +885,7 @@ def test_gateway_background_launch_waits_for_owned_process_group_before_return(
     )
     preflight_tree = tmp_path / "candidate"
     prepare_script = (
-        preflight_tree / "gateway" / "tee" / "prepare_offline_artifacts_v2.sh"
+        preflight_tree / "gateway" / "tee" / "prepare_offline_enclave_dependencies.sh"
     )
     prepare_script.parent.mkdir(parents=True)
     prepare_script.write_text("#!/bin/bash\nsleep 300\n", encoding="utf-8")
@@ -1175,7 +940,7 @@ def test_gateway_restart_verifies_prepared_and_activated_candidate_git_blobs() -
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     preflight = script.index("gateway.tee.restart_preflight_v2")
     shutdown = script.index(
-        'echo "Stopping existing gateway and Research Lab worker processes"'
+        'echo "Stopping existing gateway and Lab Arena processes"'
     )
     activation = script.index(
         'echo "Activating prepared gateway Git commit after process shutdown"'
@@ -1211,7 +976,7 @@ def test_gateway_restart_installs_declared_host_dependencies_before_shutdown() -
         'echo "Installing gateway host Python dependencies before production shutdown"'
     )
     shutdown = script.index(
-        'echo "Stopping existing gateway and Research Lab worker processes"'
+        'echo "Stopping existing gateway and Lab Arena processes"'
     )
     post_activate_install = script.index('echo "Installing Python dependencies"')
 
@@ -1220,7 +985,6 @@ def test_gateway_restart_installs_declared_host_dependencies_before_shutdown() -
     assert 'requirements_file="$GATEWAY_PREFLIGHT_TREE/requirements.txt"' in script
     assert "bittensor==10.5.0" in requirements
     assert "async-substrate-interface==2.2.1" in requirements
-    assert "publicsuffix2>=2.20191221" in requirements
     assert "leadpoet-subnet substrate-interface" in script
     assert "py-scale-codec scalecodec" in script
     metadata_cleanup = script.index(
@@ -1248,21 +1012,6 @@ def test_gateway_restart_installs_declared_host_dependencies_before_shutdown() -
         'echo "Gateway remains running; production shutdown has not started." >&2'
         in script[dependency_preflight:shutdown]
     )
-
-
-def test_migration_203_barrier_is_after_old_producer_shutdown_and_before_activation() -> None:
-    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    shutdown = script.index("Stopping existing gateway and Research Lab worker processes")
-    lab_stop = script.index(
-        'stop_lab_arena_service "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER"', shutdown
-    )
-    barrier = script.index("wait_for_exact_migration_203", lab_stop)
-    activation = script.index("Activating prepared gateway Git commit", barrier)
-    assert shutdown < lab_stop < barrier < activation
-    assert '"old_producers_stopped":True' in script
-    assert '"migration_203_verified":True' in script
-    assert "stat.S_IMODE(info.st_mode) != 0o600" in script
-    assert "doc == expected" in script
 
 
 def test_gateway_restart_records_nonblocking_commit_bound_stage_timings() -> None:
@@ -1489,138 +1238,6 @@ GATEWAY_RESTART_TIMING_FILE="$ledger"
         assert "ERROR: gateway restart timing ledger" in rejected.stderr, mode
 
 
-def test_miner_bootstrap_exec_preserves_stable_cwd_and_timing_ledger(
-    tmp_path: Path,
-) -> None:
-    restart = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    branch = restart.index(
-        '  GATEWAY_DEPLOY_STAGE="miner_maintenance_pre_hydration"'
-    )
-    body = restart[branch : restart.index("\nfi\n", branch)]
-
-    repo_root = tmp_path / "repo"
-    bootstrap_root = tmp_path / "bootstrap"
-    candidate_root = bootstrap_root / "candidate"
-    timing_dir = tmp_path / "timings"
-    result_file = tmp_path / "result"
-    repo_root.mkdir()
-    candidate_root.mkdir(parents=True)
-    timing_dir.mkdir()
-
-    python_stub = tmp_path / "bootstrap-python"
-    python_stub.write_text(
-        "#!/bin/bash\n"
-        "set -euo pipefail\n"
-        'test "$1" = -P\n'
-        'test "$2" = -m\n'
-        'test "$PWD" = /\n'
-        'test "$GATEWAY_RESTART_STARTED_EPOCH" = 1700000000\n'
-        'test "$GATEWAY_RESTART_TIMING_DIR" = "$EXPECTED_TIMING_DIR"\n'
-        'test "$GATEWAY_RESTART_TIMING_FILE" = "$EXPECTED_TIMING_FILE"\n'
-        'test "$GATEWAY_RESTART_TIMING_INITIALIZED" = 1\n'
-        'rm -rf -- "$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT"\n'
-        "/bin/sleep 1.1\n"
-        'test "$PWD" = /\n'
-        'test -s "$GATEWAY_RESTART_TIMING_FILE"\n'
-        "printf '%s\\n%s\\n%s\\n' "
-        '"$PWD" "$GATEWAY_RESTART_STARTED_EPOCH" '
-        '"$GATEWAY_RESTART_TIMING_FILE" '
-        '>"$RESULT_FILE"\n'
-    )
-    python_stub.chmod(0o700)
-
-    started_epoch = "1700000000"
-    timing_file = timing_dir / "gateway-1700000000-probe.jsonl"
-    timing_file.write_text(
-        '{"stage":"invoked","status":"reached"}\n', encoding="utf-8"
-    )
-    probe = candidate_root / "gw_restart.sh"
-    probe.write_text(
-        "#!/bin/bash\n"
-        "set -euo pipefail\n"
-        f"GATEWAY_RESTART_STARTED_EPOCH={started_epoch}\n"
-        f"GATEWAY_RESTART_TIMING_DIR={shlex.quote(str(timing_dir))}\n"
-        f"GATEWAY_RESTART_TIMING_FILE={shlex.quote(str(timing_file))}\n"
-        "GATEWAY_RESTART_TIMING_INITIALIZED=1\n"
-        + body
-        + "\n",
-        encoding="utf-8",
-    )
-    probe.chmod(0o700)
-
-    probe_environment = dict(os.environ)
-    for name in (
-        "GATEWAY_RESTART_STARTED_EPOCH",
-        "GATEWAY_RESTART_TIMING_DIR",
-        "GATEWAY_RESTART_TIMING_FILE",
-        "GATEWAY_RESTART_TIMING_INITIALIZED",
-    ):
-        probe_environment.pop(name, None)
-    probe_environment.update(
-        {
-            "EXPECTED_TIMING_DIR": str(timing_dir),
-            "EXPECTED_TIMING_FILE": str(timing_file),
-            "GATEWAY_HOST_RESTART_SCRIPT": str(tmp_path / "host-restart"),
-            "GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_PLAN": str(
-                bootstrap_root / "plan.json"
-            ),
-            "GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT": str(bootstrap_root),
-            "GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE": str(
-                tmp_path / "handoff"
-            ),
-            "GATEWAY_MINER_MAINTENANCE_HANDOFF_NONCE": "0" * 64,
-            "GATEWAY_PYTHON_BIN": str(python_stub),
-            "GATEWAY_RESTART_CONTROLLER_CURRENT": str(tmp_path / "current"),
-            "LEADPOET_REPO_ROOT": str(repo_root),
-            "REQUESTED_GATEWAY_DEPLOY_COMMIT": "1" * 40,
-            "RESULT_FILE": str(result_file),
-            "bootstrap_candidate_root": str(candidate_root),
-        }
-    )
-    completed = subprocess.run(
-        ["/bin/bash", str(probe)],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=10,
-        env=probe_environment,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    assert "getcwd" not in completed.stderr
-    assert "timing ledger is unavailable" not in completed.stderr
-    assert not bootstrap_root.exists()
-    assert result_file.read_text(encoding="utf-8").splitlines() == [
-        "/",
-        started_epoch,
-        str(timing_file),
-    ]
-
-
-def test_gateway_restart_checks_shared_maintenance_without_retired_admin_command() -> None:
-    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    v2_health = "if ! wait_for_gateway_v2_authority; then"
-    shared_status = "BUILD_INFO_RESPONSE="
-    maintenance_runtime = (
-        "-m gateway.tee.gateway_miner_maintenance_restart_v1"
-    )
-    completed = 'GATEWAY_DEPLOY_STAGE="completed"'
-
-    assert "resume-restart-maintenance" not in script
-    for command in (
-        "pause-autoresearch",
-        "resume-autoresearch",
-        "pause-scoring",
-        "resume-scoring",
-    ):
-        assert f"-m gateway.research_lab.admin {command}" not in script
-    assert (
-        script.rindex(shared_status)
-        < script.rindex(maintenance_runtime)
-        < script.rindex(completed)
-    )
-
-
 def test_gateway_restart_uses_one_canonical_checkout_for_host_processes() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     assert 'LEADPOET_REPO_ROOT="${LEADPOET_REPO_ROOT:-/home/ec2-user/leadpoet_repo}"' in script
@@ -1701,56 +1318,18 @@ def test_gateway_restart_runs_prepared_modules_from_candidate_checkout(
     )
 
 
-def test_gateway_restart_disables_the_retired_host_provider_proxy() -> None:
-    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    assert 'pkill -9 -f "gateway.research_lab.provider_evidence_proxy"' in script
-    assert '"$GATEWAY_PYTHON_BIN" -m gateway.research_lab.provider_evidence_proxy' not in script
-    assert "legacy_v1" not in script
-    assert "unset RESEARCH_LAB_EVIDENCE_PROXY_URL" in script
-
-
-def test_gateway_restart_starts_tee_egress_before_v2_readiness() -> None:
-    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    managed_service_cleanup = (
-        "sudo systemctl stop leadpoet-tee-egress-forwarder.service"
-    )
-    cleanup = 'pkill -9 -f "gateway.utils.tee_egress_forwarder"'
-    launch = (
-        '-m gateway.utils.tee_egress_forwarder \\\n'
-        '    >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" '
-        '2>&1 < /dev/null \\\n'
-        '    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &'
-    )
-    readiness = '"$GATEWAY_PYTHON_BIN" -m gateway.tee.verify_v2_runtime_ready'
-
-    assert managed_service_cleanup in script
-    assert cleanup in script
-    assert launch in script
-    assert (
-        script.index(managed_service_cleanup)
-        < script.index(cleanup)
-        < script.index(launch)
-        < script.index(readiness)
-    )
-
-
 def test_gateway_restart_has_fail_closed_lock_and_official_epoch_gate() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     assert 'flock -n 9' in script
     assert 'another gateway restart is already running' in script
     assert "Recovering gateway restart lock inherited by a detached runtime process" in script
     assert "leadpoet_ensure_post_activation_docker_operation_lock_v2" in script
-    assert (
-        '-m gateway.utils.tee_inter_enclave_relay \\\n'
-        '    >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" '
-        '2>&1 < /dev/null \\\n'
-        '    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &'
-    ) in script
+    assert "gateway.utils.tee_inter_enclave_relay" not in script
     assert 'VALIDATOR_GATEWAY_PCR0_CACHE_FILE' not in script
     assert 'independent_gateway_identity' not in script
     gate = "Leadpoet.utils.restart_epoch_gate"
     release = "gateway/tee/build_local_release_v2.sh"
-    shutdown = 'echo "Stopping existing gateway and Research Lab worker processes"'
+    shutdown = 'echo "Stopping existing gateway and Lab Arena processes"'
     assert gate in script
     gate_offset = script.index(gate)
     assert gate_offset < script.index(release, gate_offset) < script.index(shutdown)
@@ -1887,34 +1466,6 @@ with open(sys.argv[2], "w", encoding="utf-8") as handle:
     assert "another gateway restart is already running" not in result.stderr
 
 
-def test_gateway_fallback_logs_stay_outside_canonical_checkout(tmp_path: Path) -> None:
-    checkout_cwd = tmp_path / "checkout"
-    fallback_dir = tmp_path / "legacy-flat" / "gateway" / "logs" / "tee_fallback"
-    checkout_cwd.mkdir()
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "from gateway.utils.logger import FALLBACK_LOG_DIR; print(FALLBACK_LOG_DIR)",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=10,
-        cwd=checkout_cwd,
-        env={
-            **os.environ,
-            "PYTHONPATH": str(ROOT),
-            "GATEWAY_TEE_FALLBACK_LOG_DIR": str(fallback_dir),
-        },
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert Path(result.stdout.splitlines()[-1]) == fallback_dir
-    assert fallback_dir.is_dir()
-    assert not (checkout_cwd / "gateway").exists()
-
-
 def test_gateway_restart_pins_all_build_provenance_to_selected_sha() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     role_builder = (ROOT / "gateway" / "tee" / "build_role_enclaves.sh").read_text(
@@ -1982,11 +1533,8 @@ def test_gateway_docker_image_copies_complete_runtime_package_graph() -> None:
     for path in (
         "leadpoet_canonical",
         "leadpoet_verifier",
-        "research_lab",
         "qualification",
-        "validator_models",
         "Leadpoet",
-        "schemas",
     ):
         assert f"COPY {path}/ ./{path}/" in dockerfile
 
@@ -1997,150 +1545,3 @@ def test_gateway_restart_does_not_require_closed_model_identity() -> None:
     assert "RESEARCH_LAB_PRIVATE_REPO_BRANCH" not in script
     assert "RESEARCH_LAB_PRIVATE_MODEL_MANIFEST_URI" not in script
     assert "RESEARCH_LAB_PRIVATE_MODEL_KMS_KEY_ID" not in script
-
-
-def test_gateway_restart_wires_automatic_signed_dev_snapshot_refresh() -> None:
-    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-
-    assert (
-        'export RESEARCH_LAB_DEV_SNAPSHOT_AUTO_REFRESH_ENABLED="${'
-        'RESEARCH_LAB_DEV_SNAPSHOT_AUTO_REFRESH_ENABLED:-true}"'
-    ) in script
-    assert (
-        'export RESEARCH_LAB_DEV_SNAPSHOT_RECORD_ENABLED="${'
-        'RESEARCH_LAB_DEV_SNAPSHOT_RECORD_ENABLED:-true}"'
-    ) in script
-    assert (
-        'export RESEARCH_LAB_DEV_SNAPSHOT_KMS_KEY_ID="${'
-        'RESEARCH_LAB_DEV_SNAPSHOT_KMS_KEY_ID:-alias/'
-        'leadpoet-research-lab-artifact-signing}"'
-    ) in script
-
-
-@pytest.mark.parametrize(
-    "failure_reason",
-    ["status_true", "durable_secret_drift", "locked_channel_drift"],
-)
-def test_failed_miner_maintenance_runtime_gate_stops_before_terminal_success(
-    tmp_path: Path,
-    failure_reason: str,
-) -> None:
-    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    start = script.index(
-        'GATEWAY_DEPLOY_STAGE="miner_maintenance_runtime_verify"'
-    )
-    terminal = 'finalize_deployment_record succeeded "$GATEWAY_DEPLOY_STAGE" >/dev/null'
-    end = script.index(terminal, start) + len(terminal)
-    gate = script[start:end]
-    stopped = tmp_path / "runtime-stopped"
-    succeeded = tmp_path / "terminal-success"
-    fake_python = tmp_path / "verify-runtime"
-    fake_python.write_text(
-        "#!/bin/bash\nprintf '%s\\n' "
-        + shlex.quote(failure_reason)
-        + " >&2\nexit 86\n",
-        encoding="utf-8",
-    )
-    fake_python.chmod(0o700)
-    harness = tmp_path / "runtime-gate.sh"
-    harness.write_text(
-        "#!/bin/bash\nset -Eeuo pipefail\n"
-        f"LEADPOET_REPO_ROOT={shlex.quote(str(tmp_path))}\n"
-        f"GATEWAY_PYTHON_BIN={shlex.quote(str(fake_python))}\n"
-        "GATEWAY_DEPLOY_SHA='" + "a" * 40 + "'\n"
-        f"GATEWAY_V2_RELEASE_MANIFEST={shlex.quote(str(tmp_path / 'release.json'))}\n"
-        f"stop_failed_miner_maintenance_runtime() {{ touch {shlex.quote(str(stopped))}; }}\n"
-        f"finalize_deployment_record() {{ touch {shlex.quote(str(succeeded))}; }}\n"
-        + gate
-        + "\n",
-        encoding="utf-8",
-    )
-
-    result = subprocess.run(
-        ["bash", str(harness)],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-
-    assert result.returncode == 1
-    assert stopped.exists()
-    assert not succeeded.exists()
-
-
-def test_failed_miner_maintenance_cleanup_kills_all_new_runtime_groups(
-    tmp_path: Path,
-) -> None:
-    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    cleanup = _shell_function_source(
-        script, "stop_failed_miner_maintenance_runtime"
-    )
-    late_runtime = tmp_path / "late-runtime"
-    ready_paths = [tmp_path / f"ready-{index}" for index in range(3)]
-    harness = tmp_path / "runtime-cleanup.sh"
-    launch_code = (
-        "import os,signal,sys,time\n"
-        "os.setsid()\n"
-        "open(sys.argv[1], 'w').write(str(os.getpid()))\n"
-        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-        "time.sleep(7)\n"
-        "open(sys.argv[2], 'w').write('unsafe')\n"
-        "time.sleep(30)\n"
-    )
-    launch_lines = []
-    pid_names = (
-        "GATEWAY_LAUNCHER_PID",
-        "TEE_EGRESS_FORWARDER_PID",
-        "INTER_ENCLAVE_RELAY_PID",
-    )
-    for name, ready in zip(pid_names, ready_paths):
-        launch_lines.extend(
-            [
-                "python3 -c "
-                + shlex.quote(launch_code)
-                + " "
-                + shlex.quote(str(ready))
-                + " "
-                + shlex.quote(str(late_runtime))
-                + " &",
-                f"{name}=$!",
-            ]
-        )
-    harness.write_text(
-        "#!/bin/bash\nset -Eeuo pipefail\n"
-        + cleanup
-        + "\n"
-        + "sudo() { return 0; }\n"
-        + "GATEWAY_ROOT="
-        + shlex.quote(str(tmp_path / "gateway"))
-        + "\n"
-        + "\n".join(launch_lines)
-        + "\n"
-        + "for _ in $(seq 1 200); do\n"
-        + "  [ -s "
-        + shlex.quote(str(ready_paths[0]))
-        + " ] && [ -s "
-        + shlex.quote(str(ready_paths[1]))
-        + " ] && [ -s "
-        + shlex.quote(str(ready_paths[2]))
-        + " ] && break\n"
-        + "  sleep 0.01\ndone\n"
-        + "stop_failed_miner_maintenance_runtime\n"
-        + "sleep 2.5\n"
-        + "test ! -e "
-        + shlex.quote(str(late_runtime))
-        + "\n",
-        encoding="utf-8",
-    )
-
-    result = subprocess.run(
-        ["bash", str(harness)],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert not late_runtime.exists()

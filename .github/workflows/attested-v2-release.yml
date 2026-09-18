@@ -103,7 +103,7 @@ jobs:
         id: source_prepare
         run: |
           export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$RUNNER_TEMP/offline-artifacts"
-          nice -n 10 ionice -c2 -n7 bash gateway/tee/prepare_offline_artifacts_v2.sh
+          nice -n 10 ionice -c2 -n7 bash gateway/tee/prepare_offline_enclave_dependencies.sh
 
       - name: Build gateway evidence
         id: gateway_build
@@ -293,7 +293,7 @@ jobs:
         id: source_prepare
         run: |
           export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$RUNNER_TEMP/offline-artifacts"
-          nice -n 10 ionice -c2 -n7 bash gateway/tee/prepare_offline_artifacts_v2.sh
+          nice -n 10 ionice -c2 -n7 bash gateway/tee/prepare_offline_enclave_dependencies.sh
 
       - name: Build independent gateway evidence
         id: gateway_build

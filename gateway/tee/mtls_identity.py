@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 from cryptography.x509.oid import NameOID
 
-from leadpoet_canonical.attested_v2 import ROLE_PURPOSES, validate_boot_identity
+from leadpoet_canonical.attested_v2 import validate_boot_identity
 
 
 class MutualAttestationError(ValueError):
@@ -78,7 +78,7 @@ def _public_key_hex(public_key: Ed25519PublicKey) -> str:
 
 
 def generate_ephemeral_tls_identity(*, service_role: str) -> Dict[str, Any]:
-    if service_role not in ROLE_PURPOSES:
+    if service_role != "gateway_coordinator":
         raise MutualAttestationError("unsupported attested TLS service role")
     private_key = Ed25519PrivateKey.generate()
     public_key = private_key.public_key()

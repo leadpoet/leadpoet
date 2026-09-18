@@ -825,48 +825,6 @@ def finalize_deployment(
     return document
 
 
-def repair_last_good_role_pcr0s(
-    *, last_good_file: Path, archive_root: Path
-) -> dict[str, Any]:
-    from gateway.tee.release_archive_v2 import (
-        DEFAULT_RETAIN_RELEASES,
-        ReleaseArchiveV2Error,
-        _archived_role_pcr0s,
-        load_last_good_release,
-        verify_archive_index,
-    )
-
-    document = _read_json(last_good_file)
-    try:
-        validated = load_last_good_release(last_good_file)
-        target = validated["commit_sha"]
-        existing = validated["role_pcr0s"]
-        index = verify_archive_index(
-            archive_root=archive_root,
-            minimum_releases=1,
-            maximum_releases=DEFAULT_RETAIN_RELEASES,
-        )
-        matches = [
-            item for item in index["releases"] if item["commit_sha"] == target
-        ]
-        if len(matches) != 1:
-            raise GatewayGitDeployError("last-good archive is not unique")
-        archived = _archived_role_pcr0s(archive_root, matches[0])
-    except ReleaseArchiveV2Error as exc:
-        raise GatewayGitDeployError(str(exc)) from exc
-    if archived == existing:
-        return document
-    if set(existing) - set(archived) != {"gateway_autoresearch"} or any(
-        existing.get(role) != pcr0 for role, pcr0 in archived.items()
-    ):
-        raise GatewayGitDeployError("last-good retained role PCR0s differ from archive")
-    repaired = {**document, "role_pcr0s": archived}
-    if _read_json(last_good_file) != document:
-        raise GatewayGitDeployError("last-good deployment changed during repair")
-    _atomic_write_json(last_good_file, repaired)
-    return repaired
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -920,9 +878,6 @@ def _parser() -> argparse.ArgumentParser:
     finalize.add_argument("--status", required=True, choices=("succeeded", "failed"))
     finalize.add_argument("--stage", required=True)
     finalize.add_argument("--eif-root", type=Path, default=Path("/home/ec2-user/tee"))
-    repair = subparsers.add_parser("repair-last-good-role-pcr0s")
-    repair.add_argument("--last-good-file", required=True, type=Path)
-    repair.add_argument("--archive-root", required=True, type=Path)
     return parser
 
 
@@ -949,24 +904,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "activate":
             document = activate_deployment(plan_file=args.plan_file)
             print(document["target_sha"])
-            return 0
-        if args.command == "repair-last-good-role-pcr0s":
-            before = _read_json(args.last_good_file)
-            document = repair_last_good_role_pcr0s(
-                last_good_file=args.last_good_file,
-                archive_root=args.archive_root,
-            )
-            print(
-                json.dumps(
-                    {
-                        "status": "verified"
-                        if before == document
-                        else "repaired",
-                        "target_sha": document["target_sha"],
-                    },
-                    sort_keys=True,
-                )
-            )
             return 0
         if args.command == "verify-tree":
             evidence = record_tree_verification(

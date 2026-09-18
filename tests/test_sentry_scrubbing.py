@@ -143,7 +143,7 @@ def test_one_protected_link_redacts_the_whole_exception_chain():
 def test_protected_thread_frame_marks_whole_event_protected():
     event = _exception_event("gateway.api.validate", value="looks harmless")
     event["threads"] = {
-        "values": [{"stacktrace": {"frames": [_frame("miner_models.intent_model")]}}]
+        "values": [{"stacktrace": {"frames": [_frame("qualification.scoring.lead_scorer")]}}]
     }
     scrubbed = scrub_event(event)
     assert scrubbed["exception"]["values"][0]["value"] == REDACTED_PROTECTED
@@ -169,9 +169,8 @@ def test_host_model_provider_and_lead_surfaces_are_protected():
     for module in (
         "gateway.tee.model_sandbox_v2",
         "gateway.tee.provider_broker_v2",
-        "gateway.tee.scoring_executor_v2",
-        "Leadpoet.base.validator",
-        "Leadpoet.validator.reward",
+        "gateway.tee.scoring_executor",
+        "qualification.scoring.lead_scorer",
     ):
         event = scrub_event(_exception_event(module, value="private model or lead body"))
         assert event["exception"]["values"][0]["value"] == REDACTED_PROTECTED

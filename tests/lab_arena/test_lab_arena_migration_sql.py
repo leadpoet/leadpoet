@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import re
 from pathlib import Path
 
@@ -55,10 +54,6 @@ JUDGMENT_CACHE_SQL = (
 SCORE_INTEGRITY_SQL = (SCRIPTS / "213-lab-arena-score-integrity.sql").read_text(
     encoding="utf-8"
 )
-HISTORICAL_UPLOAD_MIGRATION = SCRIPTS / "191-lab-arena-upload-recovery.sql"
-HISTORICAL_UPLOAD_SHA256 = (
-    "42913cf44d0d1f69a465731e75045af634c1b2600ab0e8fba24530ada979f8d7"
-)
 
 SERVICE_FUNCTIONS = (
     "lab_arena_whoami",
@@ -92,14 +87,9 @@ TABLES = (
 def test_arena_migrations_are_uniquely_numbered():
     numbered = {}
     for path in SCRIPTS.glob("*.sql"):
-        # This exact path was applied before the Arena migration moved to 193.
-        # Keep its blob for snapshot history, but never select it as a forward migration.
-        if path == HISTORICAL_UPLOAD_MIGRATION:
-            continue
         match = re.match(r"^(\d+)-", path.name)
         if match and int(match.group(1)) >= 100:
             numbered.setdefault(int(match.group(1)), []).append(path.name)
-    assert numbered[178] == ["178-research-lab-source-add-miner-status.sql"]
     assert numbered[179] == ["179-lab-arena-v1.sql"]
     assert numbered[180] == ["180-lab-arena-daily-competition.sql"]
     assert numbered[181] == ["181-lab-arena-source-submissions.sql"]
@@ -107,12 +97,10 @@ def test_arena_migrations_are_uniquely_numbered():
     assert numbered[183] == ["183-lab-arena-miner-reward-basis.sql"]
     assert numbered[184] == ["184-lab-arena-scoring-failure-isolation.sql"]
     assert numbered[185] == ["185-lab-arena-miner-credentials.sql"]
-    assert numbered[186] == ["186-research-lab-source-add-provisioned-status.sql"]
     assert numbered[187] == ["187-lab-arena-promotion-threshold.sql"]
     assert numbered[188] == ["188-lab-arena-baseline-promotion.sql"]
     assert numbered[189] == ["189-lab-arena-round-network-scope.sql"]
     assert numbered[190] == ["190-lab-arena-restart-claim-drain.sql"]
-    assert numbered[191] == ["191-fresh-network-subnet-epoch-authority.sql"]
     assert numbered[193] == ["193-lab-arena-upload-recovery.sql"]
     assert numbered[194] == ["194-lab-arena-open-scorer-refresh.sql"]
     assert numbered[197] == ["197-lab-arena-reward-chain-scope.sql"]
@@ -186,58 +174,8 @@ def test_retired_incentive_schema_is_removed_without_scoring_scope_growth():
     assert "enforce_temporary_testnet401_weight_submission_epoch_scope_v1" in RETIRED_INCENTIVE_BRIDGE_SQL
 
 
-def test_historical_reward_and_weight_function_inventory_is_classified():
-    create_function = re.compile(
-        r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:public\.)?([a-zA-Z0-9_]+)",
-        re.I | re.S,
-    )
-    historical = {
-        name
-        for path in SCRIPTS.glob("*.sql")
-        for name in create_function.findall(path.read_text(encoding="utf-8"))
-    }
-    retired = {
-        name for name in historical
-        if (
-            name.startswith("persist_research_lab_allocation_")
-            or name.startswith("persist_research_lab_chain_realized_")
-            or name.startswith("research_lab_allocation_frontier_")
-            or name.startswith("research_lab_compact_weight_")
-            or name == "research_lab_champion_lifetime_credit_contract_v1"
-            or name.startswith("enforce_temporary_testnet401_")
-        )
-    }
-    assert retired == {
-        "persist_research_lab_allocation_frontier_bootstrap_v2",
-        "persist_research_lab_allocation_settlement_frontier_v2",
-        "persist_research_lab_chain_realized_lifetime_settlement_v2",
-        "persist_research_lab_chain_realized_settlement_v1",
-        "persist_research_lab_chain_realized_unattributed_v2",
-        "research_lab_allocation_frontier_bootstrap_contract_v2",
-        "research_lab_allocation_frontier_historical_source_contract_v1",
-        "research_lab_champion_lifetime_credit_contract_v1",
-        "research_lab_compact_weight_settlement_contract_v1",
-        "enforce_temporary_testnet401_execution_result_epoch_scope_v1",
-        "enforce_temporary_testnet401_weight_submission_epoch_scope_v1",
-    }
-    for pattern in (
-        "persist_research_lab_chain_realized_%",
-        "persist_research_lab_allocation_%",
-        "research_lab_allocation_frontier_%",
-        "research_lab_compact_weight_%",
-    ):
-        assert pattern in RETIRED_INCENTIVE_BRIDGE_SQL
-    # These similarly named functions remain by design: current Arena state,
-    # generic epoch-table integrity, and the one public namespace reader.
-    assert "lab_arena_publish_weight_state_v1" not in retired
-    assert "validate_research_lab_stateful_subnet_epoch_v1" not in retired
-    assert "research_lab_stateful_subnet_epoch_cutover_public_state_v1" not in retired
 
 
-def test_historical_upload_migration_is_retained_byte_for_byte():
-    assert hashlib.sha256(HISTORICAL_UPLOAD_MIGRATION.read_bytes()).hexdigest() == (
-        HISTORICAL_UPLOAD_SHA256
-    )
 
 
 def test_network_scope_migration_keeps_legacy_finney_defaults_queryable():

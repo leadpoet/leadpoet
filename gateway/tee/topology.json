@@ -1,9 +1,6 @@
 {
-  "benchmark_concurrency": 5,
-  "candidate_concurrency": 5,
-  "global_scoring_pool_size": 10,
-  "host_reserved_memory_mib": 65536,
-  "host_reserved_vcpus": 8,
+  "host_reserved_memory_mib": 122880,
+  "host_reserved_vcpus": 14,
   "production_instance_type": "r7i.4xlarge",
   "production_parent_memory_mib": 131072,
   "production_parent_vcpus": 16,
@@ -12,18 +9,9 @@
       "cid": 16,
       "memory_mib": 8192,
       "service_role": "gateway_coordinator",
-      "vcpus": 2,
-      "worker_assignment": "none"
-    },
-    "gateway_scoring": {
-      "cid": 17,
-      "configured_worker_source": "encrypted_proxy_profiles",
-      "memory_mib": 57344,
-      "service_role": "gateway_scoring",
-      "vcpus": 6,
-      "worker_assignment": "all_configured"
+      "vcpus": 2
     }
   },
-  "schema_version": "leadpoet.gateway_enclave_topology.v2",
-  "topology_hash": "sha256:54a650379cf4de64420db84b09d304159ab5e196531fd6dbb1f33270ac12cece"
+  "schema_version": "leadpoet.gateway_enclave_topology.v3",
+  "topology_hash": "sha256:a1967ce0dbbef1d84bf8efd82238ddb4b4c82653b5181ec2f8ba803327f462c2"
 }

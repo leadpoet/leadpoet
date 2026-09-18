@@ -206,17 +206,6 @@ def test_protected_application_signer_accepts_only_canonical_arena_claim():
         arena_weights.classify_arena_signed_request_message(message, validator_hotkey=HOTKEYS[1])
 
 
-def test_arena_enclave_mode_closes_legacy_rpc_surface(monkeypatch):
-    from validator_tee.enclave import tee_service
-
-    monkeypatch.setenv("LEADPOET_ENCLAVE_MODE", "arena")
-    denied = tee_service.handle_request({"command": "configure_authoritative_v2"})
-    assert denied == {"status": "error", "error": "RPC is outside Arena enclave mode"}
-    health = tee_service.handle_request({"command": "health"})
-    assert health["status"] == "ok"
-    assert health["arena_weight_signer_v1_supported"] is True
-
-
 def _chain_profile():
     return {
         "schema_version": CHAIN_SIGNING_PROFILE_SCHEMA_VERSION, "network": "finney",

@@ -130,12 +130,6 @@ docs/research_lab_phase*_tracker.md
 docs/research_lab_production_enablement_checklist.md
 docs/research_lab_production_activation_runbook.md
 
-# Legacy miner code - no longer used (replaced by lead_sorcerer_main)
-miner_models/get_leads.py
-
-# Burn validator script 
-neurons/burn.py
-
 # Test files (contain credentials - DO NOT COMMIT)
 test_*.py
 test_*.sh
@@ -168,10 +162,6 @@ gateway/BUILD_INFO.json
 docker-compose.gateway.yml
 docker-compose.minio.yml
 .env
-
-# Company name cache (runtime file)
-validator_models/company_name_cache.json
-neurons/.pending_equivocation_check.json
 
 # Validator logs (local testing)
 validator_logs.txt

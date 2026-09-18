@@ -10,29 +10,27 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PREPARE_SCRIPT = ROOT / "gateway" / "tee" / "prepare_offline_artifacts_v2.sh"
+PREPARE_SCRIPT = (
+    ROOT / "gateway" / "tee" / "prepare_offline_enclave_dependencies.sh"
+)
 LOCK_SCRIPT = ROOT / "validator_tee" / "scripts" / "docker_operation_lock_v2.sh"
 
 
-def test_offline_artifact_downloads_remain_unlocked_but_publication_is_locked() -> None:
+def test_offline_dependency_downloads_remain_unlocked_but_publication_is_locked() -> None:
     script = PREPARE_SCRIPT.read_text(encoding="utf-8")
 
     download = script.index("python3 -m pip download")
-    runtime_download = script.index("curl --fail --location")
     acquire = script.index("leadpoet_acquire_docker_operation_lock_v2")
     publish = script.index('rm -rf "$WHEELHOUSE"')
-    exact_readback = script.index(
-        '--lock "$RUNSC_LOCK" --artifact "$ARTIFACT_ROOT/$RUNSC_NAME"', publish
-    )
+    exact_readback = script.index("verify-wheelhouse", publish)
     release = script.index("leadpoet_release_docker_operation_lock_v2")
 
     assert download < acquire
-    assert runtime_download < acquire
     assert acquire < publish < exact_readback < release
 
 
 @pytest.mark.skipif(shutil.which("flock") is None, reason="flock is Linux-only")
-def test_offline_artifact_publication_waits_for_active_cache_consumer(
+def test_offline_dependency_publication_waits_for_active_cache_consumer(
     tmp_path: Path,
 ) -> None:
     lock_file = tmp_path / "docker-operation-v2.lock"

@@ -706,7 +706,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--apply", action="store_true", help="apply after an authorized check")
     scope = parser.add_mutually_exclusive_group()
     scope.add_argument("--prepare-runner", action="store_true", help="inspect or create the dedicated host-only runner signer")
-    scope.add_argument("--miner-credentials-only", action="store_true", help="configure only the gateway miner KMS key from its existing Research Lab key")
+    scope.add_argument("--miner-credentials-only", action="store_true", help="inspect or configure only the gateway Arena miner KMS key")
     scope.add_argument("--testnet-proxy", choices=("enabled", "disabled"), default=None, help="configure only the fixed testnet gateway route; does not start a service or change mainnet")
     scope.add_argument("--scorer-image-only", action="store_true", help="configure only the gateway scorer image")
     scope.add_argument("--openrouter-max-concurrency", type=int, choices=range(1, 11), default=None, help="configure only the gateway OpenRouter shared concurrency; activate with the canonical gateway restart")
@@ -889,9 +889,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             request = {
                 "secret_id": GATEWAY_SECRET, "allowed_accounts": args.allowed_account,
                 "apply": args.apply, "role": "miner_credentials", "updates": {},
-                "aliases": {
-                    "RESEARCH_LAB_OPENROUTER_KEY_KMS_KEY_ID": "LAB_ARENA_CREDENTIAL_KMS_KEY_ID"
-                },
+                "aliases": {},
             }
             if args.miner_credential_kms_key_id is not None:
                 request["aliases"] = {}

@@ -1,303 +1,44 @@
-# Gateway Git Deployment Runbook
+# Gateway deployment
 
-The gateway runs all host code from the complete checkout at
-`/home/ec2-user/leadpoet_repo`. The canonical paired operator command is:
+The gateway serves the public API and forwards competition requests to the
+Arena service. The normal validator runs scoring jobs and submits weights
+with its local hotkey.
 
-```bash
-: "${EXPECTED_SHA:?set the full release SHA}"
-: "${LOCAL_READINESS_PYTHON:?set an absolute venv bin/python path}"
-cd /path/to/the/exact/candidate/checkout
-bash scripts/restart_attested_release_local.sh \
-  --commit "$EXPECTED_SHA" \
-  --local-python "$LOCAL_READINESS_PYTHON" \
-  --component all
-```
+## Release
 
-The restart selects the supplied exact commit,
-stops the existing processes, fast-forwards the checkout to that exact commit,
-builds the local gateway and validator runtime identities, and then runs the
-cleanup, PCR0, enclave, dependency, process launch, and health workflow. It
-does not wait for GitHub attestation or GitHub Actions. Gateway and validator controllers may run concurrently,
-but validator activation is not independent: preparation may overlap the
-gateway restart, while every exact-release validator waits at the
-application-image boundary for the same gateway release described below.
+1. Fetch `origin/main`. Keep local and concurrent changes intact.
+2. Run the current tests in [the deployment checklist](v2_deployment_verification_checklist.md)
+   from the exact candidate checkout. Run real PostgreSQL checks for changes
+   to database contracts.
+3. Commit and merge the reviewed change. Fetch again and record the exact full
+   SHA to deploy. Apply required committed migrations through the configured
+   migration helper before starting code that needs them.
+4. Invoke the installed canonical gateway controller:
 
-`--commit <full-sha>` is the canonical operator-only, one-invocation release
-selector. The host keeps selector-aware restart controllers and their
-pre-selection helpers outside the mutable runtime checkout. A rollback changes
-only the exact runtime checkout; it cannot replace the newer controller with
-the selected older script. `GATEWAY_DEPLOY_COMMIT` remains accepted for
-installed-launcher compatibility during an N-1-to-N handoff. Persistent copies
-in Secrets Manager or the cached/runtime environment are ignored and are not
-inherited by the relaunched gateway. Normal restarts therefore always follow
-the fetched head of `GITHUB_BRANCH`.
+   ```bash
+   /home/ec2-user/gw_restart.sh --commit <full-commit-sha>
+   ```
 
-## One-Time Cutover
+   It owns release verification, claim draining, process replacement,
+   runtime measurements, and readiness checks. Do not invoke inner controllers
+   or replace a live source tree by hand. Respect a rejected epoch gate and
+   retry when the canonical controller permits it.
+5. If the validator changed, run the exact committed `validator_restart.sh`
+   with `VALIDATOR_DEPLOY_COMMIT` set to the same full SHA. See
+   [normal validator operations](arena_normal_validator_weights.md).
 
-Invoke the cutover operator at or before official SN71 block 300. The operator
-must capture that start as its first operational action. The same captured
-start remains valid while local release preparation, gateway restart, and
-validator restart continue after block 300; later stages must not reapply the
-deadline. The intended migration commit must already be on the configured Git
-branch.
-
-```bash
-/home/ec2-user/bin/research-lab-admin pause-scoring \
-  --reason gateway_restart \
-  --actor-ref operator:gateway-restart
-
-/home/ec2-user/bin/research-lab-admin pause-autoresearch \
-  --reason gateway_restart \
-  --actor-ref operator:gateway-restart
-
-/home/ec2-user/bin/research-lab-admin status
-```
-
-On the gateway host, verify and bootstrap the existing full checkout. This is
-the only manual Git update; subsequent updates happen inside `gw_restart.sh`.
-
-```bash
-set -euo pipefail
-cd /home/ec2-user/leadpoet_repo
-test "$(git remote get-url origin)" = "https://github.com/leadpoet/leadpoet.git"
-test -z "$(git status --porcelain=v1 --untracked-files=all)"
-git fetch origin
-git checkout main
-git pull --ff-only origin main
-grep -q 'GATEWAY_GIT_DEPLOY_PROTOCOL="1"' gw_restart.sh
-test -f scripts/gateway_git_deploy.py
-
-mkdir -p /home/ec2-user/.config/leadpoet/restart-backups
-cp -p /home/ec2-user/gw_restart.sh \
-  "/home/ec2-user/.config/leadpoet/restart-backups/gw_restart.sh.flat.$(date -u +%Y%m%dT%H%M%SZ)"
-install -m 700 gw_restart.sh /home/ec2-user/gw_restart.sh
-```
-
-After that checkout update, reinstall the admin wrapper from the operator's
-local repository so status and resume commands also import only the canonical
-checkout:
-
-```bash
-LEADPOET_PROD_WRITE_APPROVED=yes \
-  bash scripts/install_research_lab_admin_wrapper.sh leadpoet-gateway
-```
-
-Verify the installed wrapper before starting the restart:
-
-```bash
-grep -q '/home/ec2-user/leadpoet_repo' /home/ec2-user/bin/research-lab-admin
-```
-
-Do not delete `/home/ec2-user/gateway` during this migration. It retains the
-existing logs, secrets, and initial emergency-recovery source tree. The Git
-checkout must resolve both key paths absolutely; absent overrides default to:
-
-- `/home/ec2-user/gateway/secrets/gateway_private_key.pem`
-- `/home/ec2-user/gateway/secrets/arweave_keyfile.json`
-
-## First Release With Miner-Maintenance Control
-
-The deployed N-1 controller hydrates the gateway secret before it fetches and
-materializes the candidate. The first release containing the protected
-miner-maintenance helper must therefore use the paired exact-candidate option.
-Do not run a separate remote helper or an unpinned host wrapper:
-
-```bash
-set -euo pipefail
-: "${EXPECTED_ATTESTED_SHA:?set the full attested release SHA}"
-: "${LOCAL_READINESS_PYTHON:?set an absolute venv bin/python path}"
-[[ "$EXPECTED_ATTESTED_SHA" =~ ^[0-9a-f]{40}$ ]]
-cd /path/to/the/exact/candidate/checkout
-bash scripts/restart_attested_release_local.sh \
-  --commit "$EXPECTED_ATTESTED_SHA" \
-  --local-python "$LOCAL_READINESS_PYTHON" \
-  --component all \
-  --disable-miner-submissions-before-restart
-```
-
-The paired operator first proves that its own script and the installed-controller
-verifier are the selected candidate's exact Git blobs. It rejects replacement
-refs, grafts, alternates, unsafe Git environment overrides, non-production
-release prefixes, alternate secret identities, and single-component use. On
-the gateway it verifies and seals the complete installed controller bundle
-before executing its deployment helper.
-
-The exact candidate archive acquires the canonical gateway lock on descriptor 9.
-Under that lock, it verifies the candidate tree, immutable release channel,
-protected source, instance-role authority, and installed controller.
-
-The optional maintenance helper sets `RESEARCH_LAB_MINER_SUBMISSIONS_ENABLED`
-to `false` with exact Secrets Manager version-stage readback. Its private
-crash journal preserves the original version topology across interruptions.
-The sealed, unlinked invocation proof binds the candidate, installed controller,
-secret version, document hash, stage topology, hydrated environment, and live
-process identity. No persistent restart authority is created.
-
-Before shutdown and after startup, the candidate verifies those commitments
-and requires the runtime miner-submission flag to remain false. Arena uses its
-separate fenced admission guard, lease drain, and destructive authorization.
-Its ownership and generation checks must pass before the gateway stops.
-
-All proof descriptors and controller snapshots are closed after handoff or
-failure. A failed maintenance restart leaves global miner submissions disabled.
-Retry the same exact paired command after resolving the reported cause.
-
-## Normal Restart
-
-The checkout must have no visible tracked, staged, or untracked files. Ignored
-generated enclave/build artifacts are allowed and are rebuilt by the existing
-workflow.
-
-Once the durable gateway source contains the explicit `false` value,
-ordinary exact-SHA restarts need no persistent proof. Preflight still checks
-parent hydration, instance-role secret readback, the exact hydrated cache,
-the locked release channel, and Arena's independent drain guard. A stale or
-direct launcher with a true value fails before shutdown.
-
-```bash
-: "${LOCAL_READINESS_PYTHON:?set an absolute venv bin/python path}"
-cd /path/to/the/exact/candidate/checkout
-bash scripts/restart_attested_release_local.sh \
-  --commit "$EXPECTED_ATTESTED_SHA" \
-  --local-python "$LOCAL_READINESS_PYTHON" \
-  --component all
-```
-
-`--local-python` is required. It must select a dependency-complete virtual
-environment containing the declared `cbor2` and `cryptography` packages. The
-operator executes its local readiness phases with `-I -S`, admits only the
-exact candidate root plus that venv's site-packages, and never falls back to an
-ambient system interpreter.
-
-If an authorized operation must transition miner submissions from true to
-false, use the paired `--disable-miner-submissions-before-restart` command
-above. Do not invoke the fixed-purpose apply CLI manually; the paired path owns
-the canonical lock, recovery journal, exact controller handoff, and post-start
-proof.
-
-If GitHub fetch, branch validation, remote validation, or checkout cleanliness
-fails, the restart exits before stopping the running gateway. Failures after
-process shutdown preserve the existing behavior: the command exits without
-automatic rollback or automatic workflow resume.
+GitHub workflow status is diagnostic. It does not authorize or block a
+canonical restart. Local release identity and cryptographic checks remain
+mandatory.
 
 ## Verification
 
-After a successful restart, verify the exact commit and process roots before
-resuming protected workflows:
+Verify the gateway build identity, Arena API, validator installed identity,
+and canonical restart results. Check accepted execution and scoring records,
+publication, reward state, and finalized chain outcomes. Use a reward-disabled
+shadow round for paid diagnostic runs. Do not inject test submissions or
+synthetic rewards into the live competition.
 
-```bash
-set -euo pipefail
-cd /home/ec2-user/leadpoet_repo
-DEPLOYED_SHA="$(git rev-parse HEAD)"
-test "$(curl -fsS http://127.0.0.1:8000/build-info | python3 -c 'import json,sys; print(json.load(sys.stdin)["git_commit"])')" = "$DEPLOYED_SHA"
-curl -fsS http://127.0.0.1:8000/health
-curl -fsS http://127.0.0.1:8000/attest >/dev/null
-/home/ec2-user/bin/research-lab-admin status
-```
-
-The latest attempt and last successful deployment records are:
-
-```text
-/home/ec2-user/.config/leadpoet/deployments/gateway-current.json
-/home/ec2-user/.config/leadpoet/deployments/gateway-last-good.json
-```
-
-The restart leaves other workflow controls unchanged. Verify the gateway
-status and Arena restart-guard release after both stages finish:
-
-```bash
-curl -fsS http://127.0.0.1:8000/research-lab/status
-/home/ec2-user/bin/research-lab-admin status
-```
-
-Do not resume other workflows unless the operator requests that change.
-
-## Rollback
-
-Rollback is a paired gateway-and-validator deployment. A gateway-only
-`gateway-last-good.json` record is not sufficient evidence that the same
-validator release completed successfully. Select one full 40-character commit
-that:
-
-- Is reachable from `origin/main`.
-- Has one immutable release channel containing matching gateway and validator
-  manifests.
-- Provides the authoritative V2 endpoints, envelope schemas, receipt formats,
-  signing authorization, and canonical weight protocol consumed by current
-  public auditors.
-- Has passed the exact reverse restart rehearsal from the currently installed
-  launcher.
-
-The compatibility check intentionally does not compare protected implementation
-hashes or require later reliability fixes. Those differences inform the
-operator's rollback choice but do not make an otherwise attested,
-auditor-protocol-compatible release categorically ineligible.
-
-When invoking the two lower-level controllers manually, pass the same full SHA
-to both. They may be launched concurrently: the validator can complete its
-release checks, rebuild, Nitro/runtime/hotkey preparation, and exact
-application-image build while `gw_restart.sh --commit <full-sha>` is still
-running. The host validator controller is installed by every successful
-current release and remains outside the detached runtime checkout, so the same
-command remains available after rollback. Prefer the coordinated command
-below, which owns the exact-SHA success/failure marker and cleanup contract
-rather than relying on two independent terminals.
-
-The canonical operator command coordinates both restarts while preserving one
-restart-start decision and one selected release:
-
-```bash
-bash scripts/restart_attested_release_local.sh \
-  --commit <full-sha> \
-  --local-python </absolute/venv/bin/python>
-```
-
-Use `--component gateway` or `--component validator` only when the other
-component is already running that exact commit. A mismatch fails before the
-requested component restarts and instructs the operator to use the default
-paired mode. In paired mode the validator captures its official restart start
-first, then prepares in parallel with the gateway. The validator may select and
-verify Git/release inputs, stop the old runtime, rebuild its EIF, launch and
-provision Nitro, start the opaque chain relay, and build the exact application
-image before gateway completion. It may not start a validator coordinator or
-worker until all of these conditions hold:
-
-- The application image commit label equals the selected full SHA.
-- Its immutable image ID has been captured and remains unchanged across the
-  wait.
-- The unique coordination marker contains that exact SHA.
-- Public gateway V2 authority health, build-info, and immutable release
-  evidence all report that exact SHA.
-
-The coordinator does not approve a release itself. Both installed restart
-controllers independently build and verify the selected local source, runtime
-artifacts, PCR0, current-auditor compatibility, and normal readiness checks.
-These local checks do not require a GitHub release, attestation job, or test
-job. The validator wrapper repeats the three live gateway checks after
-coordinator startup.
-If a failed attempt already completed the N-1-to-N Git handoff, a retry may
-invoke the repository launcher only after proving that its checkout and
-launcher blob equal the selected SHA. The coordinated expected SHA is checked
-again after the remote pull, before release preparation or shutdown, so a
-concurrent branch advance fails while the existing validator is still running.
-
-If the gateway restart fails, the coordinator immediately terminates the
-validator SSH job and publishes a commit-bound failure marker concurrently
-through a bounded write, so slow marker transport cannot delay signal cleanup
-even if the validator already consumed a prior success marker. Candidate
-re-execution and secret hydration cannot replace the paired operator's
-coordination path or bounded wait policy. The waiting validator exits without
-starting a coordinator or worker and removes prepared validator containers,
-host validator/relay processes, Nitro enclave, and Docker lock. A
-selected historical deployer that predates the image-prepared barrier falls
-back to the same exact-SHA gateway check immediately before invoking that
-deployer. Because old-runtime shutdown is one of the overlapped preparation
-stages, a late gateway failure may leave the validator safely stopped; rerun
-the paired command after fixing the gateway.
-
-Rollback runs the same enclave rebuild and restart workflow. It does not reuse
-newer EIFs or bypass PCR0, attestation, import, or health checks. A commit from
-an earlier implementation generation is rejected only if it lacks the public
-protocol required by current auditors or fails the normal exact release gates.
-A subsequent roll-forward must run the exact forward rehearsal from the rolled
-back commit before production use.
+A healthy HTTP endpoint alone does not prove scoring or weights are healthy.
+Keep the prior release identity and accepted work for recovery, and use the
+canonical controllers for any rollback.

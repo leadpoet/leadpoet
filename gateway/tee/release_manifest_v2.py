@@ -25,11 +25,10 @@ LOCAL_RELEASE_SCHEMA_VERSION = "leadpoet.gateway_local_release.v1"
 BUILDER_DOMAINS = frozenset({"gateway", "validator"})
 BUILDS_PER_DOMAIN = 3
 PROTECTED_BASELINE_COMMIT = "7c9766b71d4c08b0059f6e3230dbe742b1d58e79"
-HISTORICAL_THREE_ROLE_TOPOLOGY_HASH = (
-    "sha256:a13a1b16fb1501f953b2396aba88b87d7e5e0d3cfac4079b9230ea6165a88f34"
+HISTORICAL_TWO_ROLE_TOPOLOGY_HASH = (
+    "sha256:54a650379cf4de64420db84b09d304159ab5e196531fd6dbb1f33270ac12cece"
 )
-_HISTORICAL_THREE_ROLE_SPECS = {
-    "gateway_autoresearch": {"service_role": "gateway_autoresearch"},
+_HISTORICAL_TWO_ROLE_SPECS = {
     "gateway_coordinator": {"service_role": "gateway_coordinator"},
     "gateway_scoring": {"service_role": "gateway_scoring"},
 }
@@ -444,18 +443,17 @@ def _validate_independent_release_manifest(
     return dict(value)
 
 
-def historical_three_role_specs(
+def historical_two_role_specs(
     *, expected_topology_hash: str
 ) -> Dict[str, Dict[str, str]]:
-    """Return the one retired topology only after an exact caller opt-in."""
+    """Return the installed two-role topology after an exact hash opt-in."""
 
-    if expected_topology_hash != HISTORICAL_THREE_ROLE_TOPOLOGY_HASH:
+    if expected_topology_hash != HISTORICAL_TWO_ROLE_TOPOLOGY_HASH:
         raise ReleaseManifestV2Error(
             "historical release topology hash is unsupported"
         )
     return {
-        role: dict(spec)
-        for role, spec in _HISTORICAL_THREE_ROLE_SPECS.items()
+        role: dict(spec) for role, spec in _HISTORICAL_TWO_ROLE_SPECS.items()
     }
 
 
@@ -477,11 +475,11 @@ def validate_release_manifest(value: Mapping[str, Any]) -> Dict[str, Any]:
 def validate_historical_release_manifest(
     value: Mapping[str, Any],
     *,
-    expected_topology_hash: str = HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+    expected_topology_hash: str = HISTORICAL_TWO_ROLE_TOPOLOGY_HASH,
 ) -> Dict[str, Any]:
-    """Validate the exact known three-role release topology."""
+    """Validate the exact installed two-role release topology."""
 
-    role_specs = historical_three_role_specs(
+    role_specs = historical_two_role_specs(
         expected_topology_hash=expected_topology_hash
     )
     return _validate_independent_release_manifest(
@@ -498,11 +496,12 @@ def validate_prior_release_manifest(
 
     if (
         isinstance(value, Mapping)
-        and value.get("topology_hash") == HISTORICAL_THREE_ROLE_TOPOLOGY_HASH
+        and value.get("topology_hash")
+        == HISTORICAL_TWO_ROLE_TOPOLOGY_HASH
     ):
         return validate_historical_release_manifest(
             value,
-            expected_topology_hash=HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
+            expected_topology_hash=str(value["topology_hash"]),
         )
     return validate_release_manifest(value)
 

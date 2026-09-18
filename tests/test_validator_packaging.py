@@ -70,6 +70,10 @@ def test_wheel_dependencies_match_requirements(distributions, origin):
     with zipfile.ZipFile(distributions[origin]) as archive:
         metadata_path = next(n for n in archive.namelist() if n.endswith("/METADATA"))
         metadata = Parser().parsestr(archive.read(metadata_path).decode())
+        entry_points_path = next(
+            n for n in archive.namelist() if n.endswith("/entry_points.txt")
+        )
+        entry_points = archive.read(entry_points_path).decode()
     declared = [
         Requirement(line.split("#", 1)[0].strip())
         for line in (ROOT / "requirements.txt").read_text().splitlines()
@@ -80,9 +84,12 @@ def test_wheel_dependencies_match_requirements(distributions, origin):
     names = [canonicalize_name(req.name) for req in declared]
     assert "bt" not in names
     assert "firecrawl-py" not in names
-    assert names.count("firecrawl") == 1
-    assert names.count("pyyaml") == 1
+    assert "firecrawl" not in names
+    assert "pyyaml" not in names
     assert metadata["Requires-Python"] == ">=3.11"
+    assert "leadpoet = lab_arena.miner_cli:main" in entry_points
+    assert "leadpoet-validate = lab_arena.validator:main" in entry_points
+    assert "neurons." not in entry_points
 
 
 @pytest.mark.parametrize("origin", ["source", "sdist"])
@@ -109,7 +116,7 @@ from leadpoet_canonical.subtensor_events_v2 import (
     DEFAULT_PROFILE_PATHS,
     load_subtensor_events_profile_v2,
 )
-from neurons.validator import main
+from lab_arena.validator import main
 from lab_arena.local_weight_signer import load_public_chain_signing_profile
 from Leadpoet.utils.subnet_epoch import (
     CUTOVER_JSON_ENV, CUTOVER_PATH_ENV, DEFAULT_SN71_CUTOVER_MANIFEST_PATH,

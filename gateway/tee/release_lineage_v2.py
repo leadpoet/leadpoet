@@ -1,21 +1,13 @@
-"""Verify receipt ancestry across independently attested V2 releases."""
+"""Verify measured gateway boots against immutable release lineage."""
 
 from __future__ import annotations
 
-from functools import lru_cache
-import json
 import re
-from typing import Any, Callable, Dict, Mapping, Sequence
+from typing import Any, Callable, Dict, Mapping
 
-from gateway.tee.release_manifest_v2 import (
-    HISTORICAL_THREE_ROLE_TOPOLOGY_HASH,
-    prior_role_expectation,
-    validate_prior_release_manifest,
-    validate_release_manifest,
-)
+from gateway.tee.release_manifest_v2 import validate_release_manifest
 from gateway.tee.topology import ROLE_SPECS
 from leadpoet_canonical.attested_v2 import (
-    CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION,
     sha256_json,
     verify_boot_identity_nitro,
 )
@@ -30,15 +22,7 @@ _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PCR0_RE = re.compile(r"^[0-9a-f]{96}$")
 _MAX_COMPACT_RELEASES = 512
 _APPROVED_RELEASE_ROLES = frozenset(ROLE_SPECS)
-_HISTORICAL_RELEASE_ROLES = _APPROVED_RELEASE_ROLES | {
-    "gateway_autoresearch"
-}
-_RETIRED_VALIDATOR_RELEASE_ROLES = _APPROVED_RELEASE_ROLES | {
-    "validator_weights"
-}
-_RETIRED_VALIDATOR_HISTORICAL_RELEASE_ROLES = (
-    _HISTORICAL_RELEASE_ROLES | {"validator_weights"}
-)
+_PRIOR_RELEASE_ROLES = _APPROVED_RELEASE_ROLES | {"gateway_scoring"}
 
 
 class ReleaseLineageV2Error(RuntimeError):
@@ -51,8 +35,6 @@ def _validate_compact_release_lineage_v2(
     expected_current_commit: str | None = None,
     expected_current_gateway_release_hash: str | None = None,
     allow_historical_current: bool = False,
-    expected_historical_topology_hash: str | None = None,
-    allow_retired_validator_roles: bool = False,
 ) -> Dict[str, Any]:
     """Validate the immutable compact release authority used inside enclaves."""
 
@@ -98,30 +80,14 @@ def _validate_compact_release_lineage_v2(
             )
         roles = release.get("roles")
         observed_roles = set(roles) if isinstance(roles, Mapping) else set()
-        if expected_historical_topology_hash is not None:
-            if (
-                expected_historical_topology_hash
-                != HISTORICAL_THREE_ROLE_TOPOLOGY_HASH
-            ):
-                raise ReleaseLineageV2Error(
-                    "historical release topology hash is unsupported"
-                )
-            allowed_roles = {_HISTORICAL_RELEASE_ROLES}
-        elif allow_retired_validator_roles:
-            allowed_roles = (
-                {_RETIRED_VALIDATOR_RELEASE_ROLES}
-                if commit == current_commit and not allow_historical_current
-                else {
-                    _RETIRED_VALIDATOR_RELEASE_ROLES,
-                    _RETIRED_VALIDATOR_HISTORICAL_RELEASE_ROLES,
-                }
-            )
-        else:
-            allowed_roles = (
-                {_APPROVED_RELEASE_ROLES}
-                if commit == current_commit and not allow_historical_current
-                else {_APPROVED_RELEASE_ROLES, _HISTORICAL_RELEASE_ROLES}
-            )
+        allowed_roles = (
+            {_APPROVED_RELEASE_ROLES}
+            if commit == current_commit and not allow_historical_current
+            else {
+                _APPROVED_RELEASE_ROLES,
+                _PRIOR_RELEASE_ROLES,
+            }
+        )
         if not isinstance(roles, Mapping) or frozenset(observed_roles) not in allowed_roles:
             raise ReleaseLineageV2Error(
                 "compact release lineage roles are incomplete"
@@ -241,37 +207,6 @@ def validate_prior_compact_release_lineage_v2(
     )
 
 
-def validate_retired_validator_compact_release_lineage_v2(
-    value: Mapping[str, Any],
-) -> Dict[str, Any]:
-    """Validate the exact installed lineage from before validator retirement."""
-
-    return _validate_compact_release_lineage_v2(
-        value,
-        allow_historical_current=True,
-        allow_retired_validator_roles=True,
-    )
-
-
-def validate_historical_compact_release_lineage_v2(
-    value: Mapping[str, Any],
-    *,
-    expected_topology_hash: str,
-    expected_current_commit: str | None = None,
-    expected_current_gateway_release_hash: str | None = None,
-) -> Dict[str, Any]:
-    """Validate an all-three-role lineage for one exact historical target."""
-
-    return _validate_compact_release_lineage_v2(
-        value,
-        expected_current_commit=expected_current_commit,
-        expected_current_gateway_release_hash=(
-            expected_current_gateway_release_hash
-        ),
-        expected_historical_topology_hash=expected_topology_hash,
-    )
-
-
 def _build_compact_release_lineage_boot_verifier_v2(
     lineage: Mapping[str, Any],
     *,
@@ -326,203 +261,3 @@ def build_compact_release_lineage_boot_verifier_v2(
         lineage_validator=validate_compact_release_lineage_v2,
         boot_verifier=boot_verifier,
     )
-
-
-def build_historical_compact_release_lineage_boot_verifier_v2(
-    lineage: Mapping[str, Any],
-    *,
-    expected_topology_hash: str,
-    boot_verifier: Callable[..., Mapping[str, Any]] | None = None,
-) -> Callable[[Mapping[str, Any]], Mapping[str, Any]]:
-    return _build_compact_release_lineage_boot_verifier_v2(
-        lineage,
-        lineage_validator=lambda value: (
-            validate_historical_compact_release_lineage_v2(
-                value,
-                expected_topology_hash=expected_topology_hash,
-            )
-        ),
-        boot_verifier=boot_verifier,
-    )
-
-
-def _checkpoint_issuer_boot_identity(
-    proof: Mapping[str, Any],
-) -> Mapping[str, Any]:
-    certificate = proof.get("certificate")
-    issuer = (
-        certificate.get("issuer_boot_identity")
-        if isinstance(certificate, Mapping)
-        else None
-    )
-    if not isinstance(issuer, Mapping):
-        raise ReleaseLineageV2Error(
-            "checkpoint ancestry issuer boot identity is unavailable"
-        )
-    return issuer
-
-
-def _required_boot_identities(
-    parent_graphs: Sequence[Mapping[str, Any]],
-    parent_ancestry_proofs: Sequence[Mapping[str, Any]] = (),
-) -> tuple[Mapping[str, Any], ...]:
-    identities: list[Mapping[str, Any]] = []
-    for graph in parent_graphs:
-        if not isinstance(graph, Mapping):
-            raise ReleaseLineageV2Error("receipt ancestry graph is invalid")
-        for identity in graph.get("boot_identities") or ():
-            if not isinstance(identity, Mapping):
-                raise ReleaseLineageV2Error(
-                    "receipt ancestry boot identity is invalid"
-                )
-            identities.append(identity)
-        if graph.get("schema_version") == (
-            CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
-        ):
-            proof = graph.get("ancestry_proof")
-            if not isinstance(proof, Mapping):
-                raise ReleaseLineageV2Error(
-                    "checkpoint ancestry proof is unavailable"
-                )
-            identities.append(_checkpoint_issuer_boot_identity(proof))
-    for proof in parent_ancestry_proofs:
-        if not isinstance(proof, Mapping):
-            raise ReleaseLineageV2Error("checkpoint ancestry proof is invalid")
-        identities.append(_checkpoint_issuer_boot_identity(proof))
-    return tuple(identities)
-
-
-def _required_commits(
-    parent_graphs: Sequence[Mapping[str, Any]],
-    parent_ancestry_proofs: Sequence[Mapping[str, Any]] = (),
-) -> set[str]:
-    commits = {
-        str(identity.get("commit_sha") or "").lower()
-        for identity in _required_boot_identities(
-            parent_graphs,
-            parent_ancestry_proofs,
-        )
-    }
-    if "" in commits:
-        raise ReleaseLineageV2Error(
-            "receipt ancestry contains a boot identity without a commit"
-        )
-    return commits
-
-
-@lru_cache(maxsize=512)
-def _fetch_historical_release(commit: str) -> Dict[str, Any]:
-    """Fetch a gateway release without importing validator-only packages."""
-
-    normalized_commit = str(commit or "").lower()
-    if not _COMMIT_RE.fullmatch(normalized_commit):
-        raise ReleaseLineageV2Error("historical release commit is invalid")
-
-    import boto3
-
-    key = (
-        f"{_RELEASE_CHANNEL_PREFIX}/{normalized_commit}/"
-        "release-channel-v2.json"
-    )
-    try:
-        response = boto3.client("s3").get_object(
-            Bucket=_RELEASE_CHANNEL_BUCKET,
-            Key=key,
-        )
-        channel = json.loads(response["Body"].read())
-    except Exception as exc:
-        raise ReleaseLineageV2Error(
-            "historical release channel is unavailable or invalid"
-        ) from exc
-
-    try:
-        from gateway.tee.release_channel_v2 import validate_prior_release_channel_v2
-        return validate_prior_release_channel_v2(
-            channel, expected_commit=normalized_commit
-        )
-    except Exception as exc:
-        raise ReleaseLineageV2Error(
-            "historical release channel is invalid"
-        ) from exc
-
-
-def load_approved_release_lineage_v2(
-    *,
-    current_release: Mapping[str, Any],
-    parent_graphs: Sequence[Mapping[str, Any]],
-    parent_ancestry_proofs: Sequence[Mapping[str, Any]] = (),
-    release_channel_loader: Callable[[str], Mapping[str, Any]] | None = None,
-) -> Dict[str, Dict[str, Any]]:
-    """Load exact manifests for every boot that can authorize ancestry."""
-
-    current = validate_release_manifest(current_release)
-    identities = _required_boot_identities(
-        parent_graphs,
-        parent_ancestry_proofs,
-    )
-    required = {
-        str(identity.get("commit_sha") or "").lower()
-        for identity in identities
-    }
-    if "" in required:
-        raise ReleaseLineageV2Error(
-            "receipt ancestry contains a boot identity without a commit"
-        )
-    releases: Dict[str, Dict[str, Any]] = {
-        str(current["commit_sha"]): current
-    }
-    loader = release_channel_loader or _fetch_historical_release
-    commits_to_load = required - set(releases)
-    for commit in sorted(commits_to_load):
-        loaded = loader(commit)
-        if not isinstance(loaded, Mapping):
-            raise ReleaseLineageV2Error("historical release channel is invalid")
-        manifest = loaded.get("gateway_release_manifest", loaded)
-        release = validate_prior_release_manifest(manifest)
-        if release.get("commit_sha") != commit:
-            raise ReleaseLineageV2Error("historical release channel commit differs")
-        releases[commit] = release
-    if required - set(releases):
-        raise ReleaseLineageV2Error("receipt release lineage is incomplete")
-    return releases
-
-
-def build_release_lineage_boot_verifier_v2(
-    releases: Mapping[str, Mapping[str, Any]],
-):
-    """Build a fail-closed Nitro verifier for approved release manifests."""
-
-    approved_gateway = {}
-    for commit, entry in releases.items():
-        normalized_commit = str(commit).lower()
-        gateway_manifest = entry.get("gateway_release_manifest", entry)
-        approved_gateway[normalized_commit] = validate_prior_release_manifest(
-            gateway_manifest
-        )
-
-    def verify(identity: Mapping[str, Any]) -> Mapping[str, Any]:
-        commit = str(identity.get("commit_sha") or "").lower()
-        physical_role = str(identity.get("physical_role") or "")
-        release = approved_gateway.get(commit)
-        if release is None:
-            raise ReleaseLineageV2Error(
-                "boot commit is absent from approved V2 release lineage"
-            )
-        expectation = prior_role_expectation(release, physical_role)
-        for field in (
-            "commit_sha",
-            "pcr0",
-            "build_manifest_hash",
-            "dependency_lock_hash",
-        ):
-            if identity.get(field) != expectation[field]:
-                raise ReleaseLineageV2Error(
-                    f"boot {field} differs from approved V2 release lineage"
-                )
-        return verify_boot_identity_nitro(
-            identity,
-            expected_pcr0=expectation["pcr0"],
-            certificate_validity_at_attestation_time=True,
-        )
-
-    return verify

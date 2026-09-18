@@ -1,4 +1,4 @@
-"""Build and verify the gateway enclave execution import closure.
+"""Build and verify the gateway identity-enclave import closure.
 
 The production gateway checkout is split: ``gateway/`` lives under
 ``$HOME/gateway`` while shared packages live under ``$HOME`` and are staged
@@ -32,83 +32,26 @@ SCHEMA_VERSION = "leadpoet.gateway_execution_import_closure.v3"
 MANIFEST_RELATIVE_PATH = "_attested_runtime/scoring_import_closure.json"
 
 MEASURED_DATA_PATHS = (
-    "gateway/api/role_patterns.json",
     "gateway/tee/protected_workflows.json",
     "gateway/tee/topology.json",
-    "gateway/utils/area_city_mappings.json",
-    "gateway/utils/english_word_cities.txt",
-    "gateway/utils/geo_lookup_fast.json",
-    "gateway/utils/industry_equivalence.json",
-    "leadpoet_verifier/identity/public_suffix_list.dat",
-    "leadpoet_verifier/leadpoet_industry_taxonomy.json",
     "leadpoet_canonical/subtensor_events_profile_v2.json",
-    "schemas/evidence_bundle.schema.json",
-    "schemas/execution_trace.schema.json",
-    "schemas/results_ledger_row.schema.json",
 )
 
 PACKAGE_NAMES = (
     "gateway",
-    "Leadpoet",
     "leadpoet_canonical",
-    "leadpoet_verifier",
-    "qualification",
-    "research_lab",
-    "validator_models",
 )
 
 ENTRYPOINT_MODULES = (
     "gateway.tee.tee_service",
-    "gateway.tee.scoring_executor",
-    "qualification.scoring.lead_scorer",
     "leadpoet_canonical.attested_v2",
     "gateway.tee.protected_workflows",
 )
 
-# The qualification path loads these with importlib, so AST imports cannot
-# discover them.
-DYNAMIC_IMPORT_MODULES = (
-    "gateway.qualification.models",
-    "gateway.qualification.config",
-    "gateway.qualification.utils.helpers",
-    "qualification.scoring.lead_scorer",
-    "qualification.scoring.verification_helpers",
-)
+DYNAMIC_IMPORT_MODULES = ()
 
 ROLE_ENTRYPOINT_MODULES = {
-    "gateway_coordinator": (
-        "gateway.tee.tee_service",
-        "gateway.tee.artifact_persistence_v2",
-        "gateway.tee.artifact_vault_v2",
-        "gateway.tee.coordinator_executor_v2",
-        "gateway.tee.egress_framing",
-        "gateway.tee.egress_policy",
-        "gateway.tee.egress_proxy",
-        "gateway.tee.execution_job_manager_v2",
-        "gateway.tee.inter_enclave_tls",
-        "gateway.tee.kms_recipient_v2",
-        "gateway.tee.mtls_identity",
-        "gateway.tee.provider_broker_v2",
-        "gateway.tee.provider_evidence_v2",
-        "gateway.tee.provider_evidence_cache_store_v2",
-        "gateway.tee.provider_semantics_v2",
-        "gateway.tee.rpc_authority",
-        "gateway.tee.runtime_identity_v2",
-        "gateway.tee.topology",
-        "gateway.tee.protected_workflows",
-        "leadpoet_canonical.attested_v2",
-    ),
-    "gateway_scoring": ENTRYPOINT_MODULES
-    + DYNAMIC_IMPORT_MODULES
-    + (
-        "gateway.tee.execution_job_manager_v2",
-        "gateway.tee.mtls_identity",
-        "gateway.tee.provider_client_v2",
-        "gateway.tee.rpc_authority",
-        "gateway.tee.runtime_identity_v2",
-        "gateway.tee.scoring_executor_v2",
-        "validator_models.automated_checks",
-    ),
+    "gateway_coordinator": ENTRYPOINT_MODULES,
 }
 
 

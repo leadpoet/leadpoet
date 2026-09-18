@@ -58,7 +58,6 @@ COPY leadpoet_verifier/ /model/leadpoet_verifier/
 COPY leadpoet_canonical/ /model/leadpoet_canonical/
 COPY leadpoet_observability/ /model/leadpoet_observability/
 COPY Leadpoet/ /model/Leadpoet/
-COPY validator_models/ /model/validator_models/
 COPY validator_tee/ /model/validator_tee/
 COPY lab_arena/scorer_entrypoint.py /model/scorer_entrypoint.py
 

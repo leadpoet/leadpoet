@@ -8,8 +8,6 @@ GATEWAY_LOG_ROOT="${GATEWAY_LOG_ROOT:-/home/ec2-user/gateway}"
 GATEWAY_LOG_FILE="${GATEWAY_LOG_FILE:-$GATEWAY_LOG_ROOT/gateway.log}"
 LAB_ARENA_SERVICE_LOG_FILE="${LAB_ARENA_SERVICE_LOG_FILE:-$GATEWAY_LOG_ROOT/lab_arena_service.log}"
 LAB_ARENA_SERVICE_STATE_FILE="${LAB_ARENA_SERVICE_STATE_FILE:-/home/ec2-user/.config/leadpoet/lab-arena-service-process.json}"
-GATEWAY_PRIVATE_KEY_PATH="${GATEWAY_PRIVATE_KEY_PATH:-$GATEWAY_LOG_ROOT/secrets/gateway_private_key.pem}"
-ARWEAVE_KEYFILE_PATH="${ARWEAVE_KEYFILE_PATH:-$GATEWAY_LOG_ROOT/secrets/arweave_keyfile.json}"
 GATEWAY_RESTART_GIT_SSH_COMMAND="${GATEWAY_RESTART_GIT_SSH_COMMAND:-}"
 GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-/home/ec2-user/.config/leadpoet/gateway.env}"
 LEADPOET_GATEWAY_ENV_SECRET_ID="${LEADPOET_GATEWAY_ENV_SECRET_ID:-leadpoet/prod/gateway/env}"
@@ -22,9 +20,6 @@ ENV_SECRET="/tmp/gw_env_secret.sh"
 MIN_FREE_KB=$((10 * 1024 * 1024))
 EXPECTED_AWS_ACCOUNT="493765492819"
 LEGACY_FOUR_FILE_CONTROLLER_BOUNDARY="202cd66a41f17f3030bcf6889d381cd3ecfd8f1c"
-HISTORICAL_THREE_ROLE_TOPOLOGY_HASH="sha256:a13a1b16fb1501f953b2396aba88b87d7e5e0d3cfac4079b9230ea6165a88f34"
-HISTORICAL_THREE_ROLE_TOPOLOGY_BLOB="f79cf108e4a98ca950a0087d786958f92c5f691f"
-GATEWAY_HISTORICAL_TOPOLOGY_HASH=""
 ENV_BACKUP_DIR="/home/ec2-user/.config/leadpoet/env-backups"
 GATEWAY_RESTART_CONTROLLER_ROOT="${GATEWAY_RESTART_CONTROLLER_ROOT:-/home/ec2-user/.config/leadpoet/restart-controller/gateway}"
 GATEWAY_RESTART_CONTROLLER_CURRENT="$GATEWAY_RESTART_CONTROLLER_ROOT/current"
@@ -58,12 +53,6 @@ GATEWAY_V2_HEALTH_DEADLINE_SECONDS="${GATEWAY_V2_HEALTH_DEADLINE_SECONDS:-600}"
 GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT="${GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT:-}"
 GATEWAY_RESTART_STARTED_EPOCH="${GATEWAY_RESTART_STARTED_EPOCH:-$(date -u +%s)}"
 GATEWAY_RESTART_INVOCATION_ID="${GATEWAY_RESTART_INVOCATION_ID:-gateway-${GATEWAY_RESTART_STARTED_EPOCH}-$$}"
-GATEWAY_MIGRATION_203_SQL_SHA256="${GATEWAY_MIGRATION_203_SQL_SHA256:-}"
-GATEWAY_MIGRATION_203_BARRIER_FILE="${GATEWAY_MIGRATION_203_BARRIER_FILE:-/home/ec2-user/.config/leadpoet/migration-203-barrier.json}"
-GATEWAY_MIGRATION_203_COMPLETION_FILE="${GATEWAY_MIGRATION_203_COMPLETION_FILE:-/home/ec2-user/.config/leadpoet/migration-203-complete.json}"
-GATEWAY_MIGRATION_203_WAIT_SECONDS="${GATEWAY_MIGRATION_203_WAIT_SECONDS:-900}"
-export GATEWAY_MIGRATION_203_SQL_SHA256 GATEWAY_MIGRATION_203_BARRIER_FILE
-export GATEWAY_MIGRATION_203_COMPLETION_FILE GATEWAY_MIGRATION_203_WAIT_SECONDS
 GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="${GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID:-$GATEWAY_RESTART_INVOCATION_ID}"
 GATEWAY_RELEASE_ATTEMPTS_USED="${GATEWAY_RELEASE_ATTEMPTS_USED:-0}"
 GATEWAY_RESTART_TIMING_DIR="${GATEWAY_RESTART_TIMING_DIR:-/home/ec2-user/.config/leadpoet/restart-timings}"
@@ -71,72 +60,8 @@ GATEWAY_RESTART_TIMING_FILE="${GATEWAY_RESTART_TIMING_FILE:-$GATEWAY_RESTART_TIM
 GATEWAY_RESTART_TIMING_INITIALIZED="${GATEWAY_RESTART_TIMING_INITIALIZED:-0}"
 PREPARED_GATEWAY_SHA="${PREPARED_GATEWAY_SHA:-}"
 LAB_ARENA_RESTART_GUARD_GENERATION="${LAB_ARENA_RESTART_GUARD_GENERATION:-}"
-GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_PLAN=""
-GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT=""
-GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE=""
-GATEWAY_MINER_MAINTENANCE_HANDOFF_NONCE=""
-
-wait_for_exact_migration_203() {
-  local deadline
-  [ -n "$GATEWAY_MIGRATION_203_SQL_SHA256" ] || return 0
-  if ! [[ "$GATEWAY_MIGRATION_203_SQL_SHA256" =~ ^[0-9a-f]{64}$ ]] \
-      || ! [[ "$GATEWAY_MIGRATION_203_WAIT_SECONDS" =~ ^[1-9][0-9]{0,3}$ ]]; then
-    echo "ERROR: migration 203 barrier configuration is invalid" >&2
-    return 1
-  fi
-  mkdir -p "$(dirname "$GATEWAY_MIGRATION_203_BARRIER_FILE")"
-  rm -f -- "$GATEWAY_MIGRATION_203_COMPLETION_FILE"
-  "$GATEWAY_PYTHON_BIN" - "$GATEWAY_MIGRATION_203_BARRIER_FILE" \
-    "$PREPARED_GATEWAY_SHA" "$GATEWAY_MIGRATION_203_SQL_SHA256" \
-    "$GATEWAY_RESTART_INVOCATION_ID" <<'PY'
-import json, os, sys, tempfile
-from pathlib import Path
-path = Path(sys.argv[1])
-doc = {"schema_version":"leadpoet.gateway.migration_203_barrier.v1",
-       "candidate_commit":sys.argv[2], "sql_sha256":sys.argv[3],
-       "restart_invocation_id":sys.argv[4], "old_producers_stopped":True}
-fd, name = tempfile.mkstemp(prefix=".migration-203.", dir=str(path.parent))
-try:
-    with os.fdopen(fd, "w", encoding="ascii") as handle:
-        json.dump(doc, handle, sort_keys=True, separators=(",", ":")); handle.write("\n")
-        handle.flush(); os.fsync(handle.fileno())
-    os.chmod(name, 0o600); os.replace(name, path)
-finally:
-    try: os.unlink(name)
-    except FileNotFoundError: pass
-PY
-  echo "Migration 203 barrier ready; old incentive producers are stopped"
-  deadline=$((SECONDS + GATEWAY_MIGRATION_203_WAIT_SECONDS))
-  while [ "$SECONDS" -lt "$deadline" ]; do
-    if "$GATEWAY_PYTHON_BIN" - "$GATEWAY_MIGRATION_203_COMPLETION_FILE" \
-      "$PREPARED_GATEWAY_SHA" "$GATEWAY_MIGRATION_203_SQL_SHA256" \
-      "$GATEWAY_RESTART_INVOCATION_ID" <<'PY'
-import json, os, stat, sys
-path = sys.argv[1]
-try:
-    info = os.lstat(path)
-    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.geteuid() or info.st_size > 4096:
-        raise ValueError("unsafe completion file")
-    with open(path, "r", encoding="ascii") as handle: doc = json.load(handle)
-except (OSError, ValueError, json.JSONDecodeError):
-    raise SystemExit(1)
-expected = {"schema_version":"leadpoet.gateway.migration_203_complete.v1",
-            "candidate_commit":sys.argv[2], "sql_sha256":sys.argv[3],
-            "restart_invocation_id":sys.argv[4], "migration_203_verified":True}
-raise SystemExit(0 if doc == expected else 1)
-PY
-    then
-      echo "Exact migration 203 completion received"
-      return 0
-    fi
-    sleep 2
-  done
-  echo "ERROR: exact migration 203 completion was not received; gateway remains stopped" >&2
-  return 1
-}
-
 if [ -n "$GATEWAY_RESTART_AUTHORITY_ROOT" ]; then
-  if ! [[ "$GATEWAY_RESTART_AUTHORITY_ROOT" =~ ^/tmp/gateway-restart-controller-bootstrap\.[A-Za-z0-9]+/authority$|^/tmp/gateway-miner-maintenance-bootstrap\.[A-Za-z0-9]+/authority$ ]] \
+  if ! [[ "$GATEWAY_RESTART_AUTHORITY_ROOT" =~ ^/tmp/gateway-restart-controller-bootstrap\.[A-Za-z0-9]+/authority$ ]] \
       || ! [[ "$GATEWAY_RESTART_AUTHORITY_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
       || [ ! -r "$GATEWAY_RESTART_AUTHORITY_ROOT/gw_restart.sh" ] \
       || [ -L "$GATEWAY_RESTART_AUTHORITY_ROOT/gw_restart.sh" ]; then
@@ -257,8 +182,6 @@ verify_controller_process_helper() {
   if [ "$process_helper" = "/proc/self/fd/195" ]; then
     "$GATEWAY_PYTHON_BIN" - "$process_helper" <<'PY'
 import fcntl
-import hashlib
-import json
 import os
 import stat
 import sys
@@ -287,26 +210,6 @@ try:
             != required_seals
         ):
             raise SystemExit("controller process helper descriptor identity is unsafe")
-        if os.environ.get("GATEWAY_MINER_MAINTENANCE_PROOF_FD") != "190":
-            raise SystemExit("controller process helper proof descriptor is unavailable")
-        proof = os.fstat(190)
-        if (
-            not stat.S_ISREG(proof.st_mode)
-            or proof.st_uid != os.geteuid()
-            or proof.st_gid != os.getegid()
-            or stat.S_IMODE(proof.st_mode) != 0o400
-            or not os.get_inheritable(190)
-            or int(fcntl.fcntl(190, fcntl.F_GET_SEALS)) & required_seals
-            != required_seals
-        ):
-            raise SystemExit("controller process helper proof identity is unsafe")
-        process_payload = os.pread(195, 4 * 1024 * 1024 + 1, 0)
-        proof_payload = os.pread(190, 32 * 1024 + 1, 0)
-        document = json.loads(proof_payload.decode("ascii"))
-        expected = document.get("controller_process_helper_sha256")
-        observed = "sha256:" + hashlib.sha256(process_payload).hexdigest()
-        if expected != observed:
-            raise SystemExit("controller process helper proof commitment differs")
     finally:
         os.close(descriptor)
 except OSError as exc:
@@ -341,8 +244,7 @@ start_lab_arena_service() {
   fi
   mkdir -p "$(dirname "$LAB_ARENA_SERVICE_LOG_FILE")"
   cd "$LEADPOET_REPO_ROOT"
-  env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
-    -u GATEWAY_CONTROLLER_PROCESS_HELPER \
+  env -u GATEWAY_CONTROLLER_PROCESS_HELPER \
     -u LAB_ARENA_PROCESS_HELPER \
     -u GATEWAY_RESTART_AUTHORITY_ROOT \
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
@@ -483,7 +385,6 @@ GATEWAY_V2_RELEASE_ARCHIVE_ROOT="${GATEWAY_V2_RELEASE_ARCHIVE_ROOT:-$GATEWAY_TEE
 GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS="${GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS:-86400}"
 GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS="${GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS:-604800}"
 GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES="${GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES:-64}"
-RESEARCH_LAB_TEE_PROTOCOL="${RESEARCH_LAB_TEE_PROTOCOL:-}"
 GATEWAY_V2_CONFIG_DIR="${GATEWAY_V2_CONFIG_DIR:-/home/ec2-user/.config/leadpoet/v2}"
 GATEWAY_V2_RELEASE_MANIFEST="${GATEWAY_V2_RELEASE_MANIFEST:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-manifest.json}"
 GATEWAY_V2_RELEASE_LINEAGE="${GATEWAY_V2_RELEASE_LINEAGE:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-lineage.json}"
@@ -492,11 +393,8 @@ GATEWAY_V2_RELEASE_LINEAGE="${GATEWAY_V2_RELEASE_LINEAGE:-$GATEWAY_TEE_EIF_ROOT/
 # bound to the release that actually booted it until destructive cutover.
 GATEWAY_PREPARED_V2_RELEASE_MANIFEST="${GATEWAY_PREPARED_V2_RELEASE_MANIFEST:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.candidate-release.json}"
 GATEWAY_PREPARED_V2_RELEASE_LINEAGE="${GATEWAY_PREPARED_V2_RELEASE_LINEAGE:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.candidate-release-lineage.json}"
-GATEWAY_V2_ARTIFACT_POLICY="${GATEWAY_V2_ARTIFACT_POLICY:-$GATEWAY_V2_CONFIG_DIR/encrypted-artifact-policy.json}"
 GATEWAY_V2_RELEASE_BUCKET="${GATEWAY_V2_RELEASE_BUCKET:-leadpoet-attested-v2-artifacts-493765492819}"
-RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET="${RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET:-$GATEWAY_V2_RELEASE_BUCKET}"
 GATEWAY_V2_RELEASE_PREFIX="${GATEWAY_V2_RELEASE_PREFIX:-attested-v2/releases}"
-GATEWAY_V2_KMS_KEY_ID="${GATEWAY_V2_KMS_KEY_ID:-arn:aws:kms:us-east-1:493765492819:key/c5412928-093e-4bf5-aafc-7b27c02f1445}"
 export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="${GATEWAY_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts}"
 GATEWAY_DEPLOY_STAGE="${GATEWAY_DEPLOY_STAGE:-bootstrap}"
 GATEWAY_DEPLOY_COMPLETED=0
@@ -510,8 +408,6 @@ LEADPOET_DOCKER_OPERATION_LOCK_FILE="${LEADPOET_DOCKER_OPERATION_LOCK_FILE:-/hom
 # every later parent environment reload.
 GATEWAY_RESTART_PATH_AUTHORITY_KEYS=(
   GATEWAY_ENV_FILE
-  GATEWAY_PRIVATE_KEY_PATH
-  ARWEAVE_KEYFILE_PATH
   GATEWAY_RESTART_GIT_SSH_COMMAND
   LEADPOET_GATEWAY_ENV_SECRET_ID
   GATEWAY_RESTART_CONTROLLER_ROOT
@@ -529,11 +425,9 @@ GATEWAY_RESTART_PATH_AUTHORITY_KEYS=(
   GATEWAY_V2_RELEASE_LINEAGE
   GATEWAY_PREPARED_V2_RELEASE_MANIFEST
   GATEWAY_PREPARED_V2_RELEASE_LINEAGE
-  GATEWAY_V2_ARTIFACT_POLICY
   GATEWAY_V2_OFFLINE_ARTIFACT_ROOT
   GATEWAY_V2_RELEASE_PREFIX
   GATEWAY_V2_RELEASE_BUCKET
-  GATEWAY_V2_KMS_KEY_ID
 )
 GATEWAY_RESTART_PATH_AUTHORITY_VALUES=()
 for authority_key in "${GATEWAY_RESTART_PATH_AUTHORITY_KEYS[@]}"; do
@@ -591,38 +485,6 @@ while [ "$#" -gt 0 ]; do
       REQUESTED_GATEWAY_DEPLOY_COMMIT="$requested_commit"
       shift
       ;;
-    --miner-maintenance-bootstrap-plan)
-      if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
-        echo "ERROR: --miner-maintenance-bootstrap-plan requires a path" >&2
-        exit 2
-      fi
-      GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_PLAN="$2"
-      shift 2
-      ;;
-    --miner-maintenance-bootstrap-root)
-      if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
-        echo "ERROR: --miner-maintenance-bootstrap-root requires a path" >&2
-        exit 2
-      fi
-      GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT="$2"
-      shift 2
-      ;;
-    --miner-maintenance-handoff-file)
-      if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
-        echo "ERROR: --miner-maintenance-handoff-file requires a path" >&2
-        exit 2
-      fi
-      GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE="$2"
-      shift 2
-      ;;
-    --miner-maintenance-handoff-nonce)
-      if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
-        echo "ERROR: --miner-maintenance-handoff-nonce requires a value" >&2
-        exit 2
-      fi
-      GATEWAY_MINER_MAINTENANCE_HANDOFF_NONCE="$2"
-      shift 2
-      ;;
     *)
       echo "ERROR: unsupported gateway restart argument: $1" >&2
       exit 2
@@ -634,57 +496,11 @@ if [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ] \
   echo "ERROR: --commit must be a lowercase full 40-character SHA" >&2
   exit 2
 fi
-miner_maintenance_bootstrap_values=(
-  "$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_PLAN"
-  "$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT"
-  "$GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE"
-  "$GATEWAY_MINER_MAINTENANCE_HANDOFF_NONCE"
-)
-miner_maintenance_bootstrap_count=0
-for bootstrap_value in "${miner_maintenance_bootstrap_values[@]}"; do
-  [ -n "$bootstrap_value" ] && miner_maintenance_bootstrap_count=$((miner_maintenance_bootstrap_count + 1))
-done
-if [ "$miner_maintenance_bootstrap_count" -ne 0 ] \
-    && [ "$miner_maintenance_bootstrap_count" -ne 4 ]; then
-  echo "ERROR: miner-maintenance bootstrap arguments must be supplied together" >&2
-  exit 2
-fi
-if [ -n "${GATEWAY_MINER_MAINTENANCE_PROOF_FD:-}" ]; then
-  if [ "$miner_maintenance_bootstrap_count" -ne 0 ] \
-      || [ "$GATEWAY_MINER_MAINTENANCE_PROOF_FD" != "190" ] \
-      || [ ! -r "/proc/$$/fd/190" ]; then
-    echo "ERROR: miner-maintenance invocation proof descriptor is invalid" >&2
-    exit 2
-  fi
-fi
-if [ "$miner_maintenance_bootstrap_count" -eq 4 ]; then
-  if [ -z "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ]; then
-    echo "ERROR: miner-maintenance bootstrap requires --commit" >&2
-    exit 2
-  fi
-  if ! [[ "$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT" =~ ^/tmp/gateway-miner-maintenance-bootstrap\.[A-Za-z0-9]+$ ]] \
-      || [ "$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_PLAN" != \
-        "$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT/plan.json" ] \
-      || ! [[ "$GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE" =~ ^/tmp/leadpoet-gateway-miner-maintenance-handoff\.[A-Za-z0-9._-]+$ ]] \
-      || ! [[ "$GATEWAY_MINER_MAINTENANCE_HANDOFF_NONCE" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "ERROR: miner-maintenance bootstrap authority is invalid" >&2
-    exit 2
-  fi
-fi
 if ! [[ "$GATEWAY_RELEASE_SUPERSESSION_COUNT" =~ ^[0-9]+$ ]] \
     || ! [[ "$GATEWAY_RELEASE_SUPERSESSION_MAX" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: gateway release supersession counters are invalid" >&2
   exit 2
 fi
-V2_CREDENTIAL_ENVELOPES=(
-  "$GATEWAY_V2_CONFIG_DIR/artifact_master_key.json"
-  "$GATEWAY_V2_CONFIG_DIR/openrouter.json"
-  "$GATEWAY_V2_CONFIG_DIR/exa.json"
-  "$GATEWAY_V2_CONFIG_DIR/scrapingdog.json"
-  "$GATEWAY_V2_CONFIG_DIR/deepline.json"
-  "$GATEWAY_V2_CONFIG_DIR/supabase_service_role.json"
-  "$GATEWAY_V2_CONFIG_DIR/truelist.json"
-)
 GATEWAY_HOST_EXTRA_PYTHON_PACKAGES=(
   minio
   awscli
@@ -809,69 +625,22 @@ cancel_gateway_owned_process_group() {
   rm -f -- "$ready_marker"
 }
 
-stop_failed_miner_maintenance_runtime() {
-  local process_pid=""
-  echo "Stopping the newly launched gateway after miner-maintenance verification failure" >&2
-  for process_pid in \
-      "${GATEWAY_LAUNCHER_PID:-}" \
-      "${TEE_EGRESS_FORWARDER_PID:-}" \
-      "${INTER_ENCLAVE_RELAY_PID:-}"; do
-    if ! [[ "$process_pid" =~ ^[1-9][0-9]*$ ]]; then
-      continue
-    fi
-    kill -TERM -- "-$process_pid" 2>/dev/null || true
-    kill -TERM "$process_pid" 2>/dev/null || true
-  done
-  for _ in $(seq 1 50); do
-    local running=0
-    for process_pid in \
-        "${GATEWAY_LAUNCHER_PID:-}" \
-        "${TEE_EGRESS_FORWARDER_PID:-}" \
-        "${INTER_ENCLAVE_RELAY_PID:-}"; do
-      if [[ "$process_pid" =~ ^[1-9][0-9]*$ ]] \
-          && { kill -0 -- "-$process_pid" 2>/dev/null \
-            || kill -0 "$process_pid" 2>/dev/null; }; then
-        running=1
-      fi
-    done
-    [ "$running" -eq 0 ] && break
-    sleep 0.1
-  done
-  for process_pid in \
-      "${GATEWAY_LAUNCHER_PID:-}" \
-      "${TEE_EGRESS_FORWARDER_PID:-}" \
-      "${INTER_ENCLAVE_RELAY_PID:-}"; do
-    if ! [[ "$process_pid" =~ ^[1-9][0-9]*$ ]]; then
-      continue
-    fi
-    kill -KILL -- "-$process_pid" 2>/dev/null || true
-    kill -KILL "$process_pid" 2>/dev/null || true
-    wait "$process_pid" 2>/dev/null || true
-  done
-  sudo systemctl stop leadpoet-tee-egress-forwarder.service 2>/dev/null || true
-  if [ -r "$GATEWAY_ROOT/tee/stop_enclave.sh" ]; then
-    sudo bash "$GATEWAY_ROOT/tee/stop_enclave.sh" >/dev/null 2>&1 || true
-  else
-    sudo nitro-cli terminate-enclave --all >/dev/null 2>&1 || true
-  fi
-}
-
 start_gateway_offline_artifact_prepare() {
   local prepare_script process_group_marker
   local -a prepare_command
-  prepare_script="$GATEWAY_PREFLIGHT_TREE/gateway/tee/prepare_offline_artifacts_v2.sh"
+  prepare_script="$GATEWAY_PREFLIGHT_TREE/gateway/tee/prepare_offline_enclave_dependencies.sh"
   if [ -n "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID" ]; then
-    echo "ERROR: V2 offline artifact preparation is already running" >&2
+    echo "ERROR: identity-enclave dependency preparation is already running" >&2
     return 1
   fi
   if [ ! -r "$prepare_script" ]; then
-    echo "ERROR: prepared V2 offline artifact helper is unavailable" >&2
+    echo "ERROR: prepared identity-enclave dependency helper is unavailable" >&2
     return 1
   fi
   if ! mkdir -p "$(dirname "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG")" \
       || ! : > "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG" \
       || ! chmod 600 "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG"; then
-    echo "ERROR: V2 offline artifact preparation log is unavailable" >&2
+    echo "ERROR: identity-enclave dependency preparation log is unavailable" >&2
     return 1
   fi
   process_group_marker="${GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG}.process-group"
@@ -885,8 +654,7 @@ start_gateway_offline_artifact_prepare() {
   # Own the whole helper process group so an interrupted curl/pip/rsync child
   # cannot outlive the candidate tree.  Keep this release-independent work at
   # low CPU and I/O priority while the attestation runner is building.
-  env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
-    -u GATEWAY_CONTROLLER_PROCESS_HELPER \
+  env -u GATEWAY_CONTROLLER_PROCESS_HELPER \
     -u LAB_ARENA_PROCESS_HELPER \
     -u GATEWAY_GIT_HELPER \
     -u GATEWAY_HOST_MEMORY_GUARD_PATH \
@@ -915,19 +683,19 @@ os.execvp(sys.argv[3], sys.argv[3:])
   if ! wait_for_gateway_owned_process_group \
       "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID" \
       "$process_group_marker" \
-      "V2 offline artifact preparation"; then
+      "identity-enclave dependency preparation"; then
     GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID=""
     return 1
   fi
-  echo "Started candidate V2 offline artifact preparation as PID $GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID"
-  echo "Offline artifact preparation log: $GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG"
+  echo "Started candidate identity-enclave dependency preparation as PID $GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID"
+  echo "Offline enclave dependency preparation log: $GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG"
 }
 
 wait_for_gateway_offline_artifact_prepare() {
   local prepare_pid status=0
   prepare_pid="$GATEWAY_OFFLINE_ARTIFACT_PREPARE_PID"
   if [ -z "$prepare_pid" ]; then
-    echo "ERROR: V2 offline artifact preparation was not started" >&2
+    echo "ERROR: identity-enclave dependency preparation was not started" >&2
     return 1
   fi
   if wait "$prepare_pid"; then
@@ -940,7 +708,7 @@ wait_for_gateway_offline_artifact_prepare() {
   cat "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG"
   if [ "$status" -ne 0 ]; then
     record_gateway_restart_timing "offline_artifact_prepare_complete" "failed"
-    echo "ERROR: V2 offline artifact preparation failed before shutdown" >&2
+    echo "ERROR: identity-enclave dependency preparation failed before shutdown" >&2
     return "$status"
   fi
   record_gateway_restart_timing "offline_artifact_prepare_complete" "passed"
@@ -1053,12 +821,45 @@ follow_superseding_gateway_release() {
     GATEWAY_PREPARED_V2_RELEASE_LINEAGE="$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
     GATEWAY_V2_RELEASE_BUCKET="$GATEWAY_V2_RELEASE_BUCKET" \
     GATEWAY_V2_RELEASE_PREFIX="$GATEWAY_V2_RELEASE_PREFIX" \
-    GATEWAY_V2_ARTIFACT_POLICY="$GATEWAY_V2_ARTIFACT_POLICY" \
-    RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET="$RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET" \
     GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
     GATEWAY_DEPLOY_STAGE=bootstrap \
     exec bash "$superseding_tree/gw_restart.sh"
 }
+
+run_prepared_gateway_module() {
+  (
+    cd "$GATEWAY_PREFLIGHT_TREE"
+    PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" -m "$@"
+  )
+}
+
+on_gateway_restart_exit() {
+  local status="$?"
+  if [ "$status" -ne 0 ]; then
+    abort_lab_arena_restart_guard_before_destructive
+    record_gateway_restart_timing "${GATEWAY_DEPLOY_STAGE:-unknown}" "failed" \
+      >/dev/null 2>&1 || true
+  fi
+  emit_gateway_restart_sentry_summary "$status"
+  cancel_gateway_offline_artifact_prepare
+  rm -f -- \
+    "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
+    "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
+    2>/dev/null || true
+  if [ -n "${GATEWAY_PREFLIGHT_TREE:-}" ]; then
+    rm -rf "$GATEWAY_PREFLIGHT_TREE"
+  fi
+  if [ -n "${GATEWAY_RELEASE_FOLLOW_ROOT:-}" ]; then
+    rm -rf "$GATEWAY_RELEASE_FOLLOW_ROOT"
+  fi
+  if [ "$status" -ne 0 ] \
+      && [ "$GATEWAY_DEPLOY_COMPLETED" != "1" ] \
+      && [ -f "$GATEWAY_DEPLOY_PLAN_FILE" ] \
+      && [ -f "$GATEWAY_GIT_HELPER" ]; then
+    finalize_deployment_record failed "$GATEWAY_DEPLOY_STAGE" >/dev/null 2>&1 || true
+  fi
+}
+trap on_gateway_restart_exit EXIT
 
 install_gateway_python_dependencies() {
   local dependency_fingerprint legacy_project_metadata pip_scope=() requirements_file
@@ -1154,352 +955,6 @@ select_gateway_python_runtime() {
   echo "Gateway Python runtime: $GATEWAY_PYTHON_BIN ($version)"
 }
 
-report_gateway_v2_bootstrap_pending() {
-  local missing=() path
-  for path in \
-    "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-    "$GATEWAY_V2_ARTIFACT_POLICY" \
-    "${V2_CREDENTIAL_ENVELOPES[@]}"; do
-    [ -e "$path" ] || missing+=("$path")
-  done
-  if [ "${#missing[@]}" -eq 0 ]; then
-    return 1
-  fi
-  python3 - "${missing[@]}" <<'PY'
-import json
-import sys
-print(json.dumps({
-    "schema_version": "leadpoet.gateway_v2_first_activation.v1",
-    "status": "bootstrap_pending",
-    "production_shutdown_started": False,
-    "missing_paths": sys.argv[1:],
-    "required_external_approvals": [],
-}, sort_keys=True, indent=2))
-PY
-  echo "Gateway remains untouched. Complete the V2 bootstrap ceremony, then rerun this restart." >&2
-  return 0
-}
-
-deployment_field() {
-  python3 "$GATEWAY_GIT_HELPER" field \
-    --plan-file "$GATEWAY_DEPLOY_PLAN_FILE" \
-    --name "$1"
-}
-
-finalize_deployment_record() {
-  local status="$1"
-  local stage="$2"
-  python3 "$GATEWAY_GIT_HELPER" finalize \
-    --plan-file "$GATEWAY_DEPLOY_PLAN_FILE" \
-    --status "$status" \
-    --stage "$stage" \
-    --eif-root "$GATEWAY_TEE_EIF_ROOT"
-}
-
-cleanup_gateway_miner_maintenance_bootstrap() {
-  if [ -n "${GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE:-}" ] \
-      && [[ "$GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE" =~ ^/tmp/leadpoet-gateway-miner-maintenance-handoff\.[A-Za-z0-9._-]+$ ]]; then
-    rm -f -- "$GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE" 2>/dev/null || true
-  fi
-  if [ -n "${GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT:-}" ] \
-      && [[ "$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT" =~ ^/tmp/gateway-miner-maintenance-bootstrap\.[A-Za-z0-9]+$ ]]; then
-    rm -rf -- "$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT" 2>/dev/null || true
-  fi
-}
-
-scrub_gateway_bootstrap_aws_environment() {
-  unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
-    AWS_SECURITY_TOKEN AWS_PROFILE AWS_DEFAULT_PROFILE \
-    AWS_SHARED_CREDENTIALS_FILE AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN \
-    AWS_ROLE_SESSION_NAME AWS_CONTAINER_CREDENTIALS_FULL_URI \
-    AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_CONFIG_FILE AWS_CA_BUNDLE \
-    AWS_ENDPOINT_URL AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_STS \
-    AWS_ENDPOINT_URL_SECRETSMANAGER AWS_EC2_METADATA_SERVICE_ENDPOINT \
-    AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE AWS_METADATA_SERVICE_TIMEOUT \
-    AWS_METADATA_SERVICE_NUM_ATTEMPTS BOTO_CONFIG HTTP_PROXY HTTPS_PROXY \
-    ALL_PROXY http_proxy https_proxy all_proxy
-  export AWS_REGION=us-east-1
-  export AWS_DEFAULT_REGION=us-east-1
-}
-
-validate_gateway_aws_authority() {
-  local name value
-  for name in \
-    AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
-    AWS_SECURITY_TOKEN AWS_PROFILE AWS_DEFAULT_PROFILE \
-    AWS_SHARED_CREDENTIALS_FILE AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN \
-    AWS_ROLE_SESSION_NAME AWS_CONTAINER_CREDENTIALS_FULL_URI \
-    AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_CONFIG_FILE AWS_CA_BUNDLE \
-    AWS_ENDPOINT_URL AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_STS \
-    AWS_ENDPOINT_URL_SECRETSMANAGER AWS_EC2_METADATA_SERVICE_ENDPOINT \
-    AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE AWS_METADATA_SERVICE_TIMEOUT \
-    AWS_METADATA_SERVICE_NUM_ATTEMPTS BOTO_CONFIG HTTP_PROXY HTTPS_PROXY \
-    ALL_PROXY http_proxy https_proxy all_proxy; do
-    value="${!name-}"
-    if [ -n "$value" ]; then
-      echo "ERROR: gateway restart inherited delegated AWS authority: $name" >&2
-      return 1
-    fi
-  done
-  if { [ -n "${AWS_REGION:-}" ] && [ "$AWS_REGION" != "us-east-1" ]; } \
-      || { [ -n "${AWS_DEFAULT_REGION:-}" ] \
-        && [ "$AWS_DEFAULT_REGION" != "us-east-1" ]; }; then
-    echo "ERROR: gateway restart AWS region differs from us-east-1" >&2
-    return 1
-  fi
-  if [ -n "${LEADPOET_AWS_INSTANCE_ROLE_ONLY:-}" ] \
-      && [ "${LEADPOET_AWS_INSTANCE_ROLE_ONLY,,}" != "true" ]; then
-    echo "ERROR: gateway restart instance-role-only authority differs" >&2
-    return 1
-  fi
-  scrub_gateway_bootstrap_aws_environment
-  export LEADPOET_AWS_INSTANCE_ROLE_ONLY=true
-}
-
-on_gateway_restart_exit() {
-  local status="$?"
-  if [ "$status" -ne 0 ]; then
-    abort_lab_arena_restart_guard_before_destructive
-  fi
-  if [ "$status" -ne 0 ]; then
-    record_gateway_restart_timing "${GATEWAY_DEPLOY_STAGE:-unknown}" "failed" \
-      >/dev/null 2>&1 || true
-  fi
-  emit_gateway_restart_sentry_summary "$status"
-  cancel_gateway_offline_artifact_prepare
-  cleanup_gateway_miner_maintenance_bootstrap
-  rm -f -- \
-    "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-    "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
-    2>/dev/null || true
-  if [ -n "${GATEWAY_PREFLIGHT_TREE:-}" ]; then
-    rm -rf "$GATEWAY_PREFLIGHT_TREE"
-  fi
-  if [ -n "${GATEWAY_RELEASE_FOLLOW_ROOT:-}" ]; then
-    rm -rf "$GATEWAY_RELEASE_FOLLOW_ROOT"
-  fi
-  if [ "$status" -ne 0 ] \
-      && [ "$GATEWAY_DEPLOY_COMPLETED" != "1" ] \
-      && [ -f "$GATEWAY_DEPLOY_PLAN_FILE" ] \
-      && [ -f "$GATEWAY_GIT_HELPER" ]; then
-    finalize_deployment_record failed "$GATEWAY_DEPLOY_STAGE" >/dev/null 2>&1 || true
-  fi
-}
-
-gateway_memory_ready_after_running_gateway_shutdown() {
-  "$GATEWAY_PYTHON_BIN" - \
-    "$1" "$2" "$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
-    "$GATEWAY_RECLAIMABLE_MEMORY_SAFETY_MARGIN_MIB" "${3:-/proc}" <<'PY'
-import json
-import os
-from pathlib import Path
-import sys
-
-report_path = Path(sys.argv[1])
-pid_text = sys.argv[2]
-repo_root = Path(sys.argv[3]).resolve()
-python_bin = Path(sys.argv[4]).resolve()
-safety_margin_mib = int(sys.argv[5])
-proc_root = Path(sys.argv[6])
-if not pid_text.isdigit() or int(pid_text) <= 1:
-    raise SystemExit("running gateway PID is invalid")
-
-report = json.loads(report_path.read_text(encoding="utf-8"))
-if (
-    not isinstance(report, dict)
-    or report.get("schema_version") != "leadpoet.gateway_host_memory_guard.v2"
-    or report.get("status") != "blocked"
-    or report.get("minimum_available_memory_mib") != 16384
-):
-    raise SystemExit("blocked gateway memory report is invalid")
-available_mib = report.get("available_memory_mib")
-if (
-    not isinstance(available_mib, int)
-    or isinstance(available_mib, bool)
-    or available_mib < 0
-):
-    raise SystemExit("available gateway memory is invalid")
-
-process_root = proc_root / pid_text
-
-
-def read_process(selected_process_root):
-    status = (selected_process_root / "status").read_text(encoding="utf-8")
-    stat_fields = (selected_process_root / "stat").read_text(encoding="utf-8").split()
-    argv = tuple(
-        value.decode("utf-8", errors="strict")
-        for value in (selected_process_root / "cmdline").read_bytes().split(b"\0")
-        if value
-    )
-    cwd = Path(os.readlink(selected_process_root / "cwd")).resolve()
-    fields = {}
-    for line in status.splitlines():
-        key, separator, value = line.partition(":")
-        if separator:
-            fields[key] = value.strip()
-    return {
-        "ppid": int(stat_fields[3]),
-        "start_ticks": int(stat_fields[21]),
-        "uid": int(fields["Uid"].split()[0]),
-        "rss_kib": int(fields["VmRSS"].split()[0]),
-        "argv": argv,
-        "cwd": cwd,
-    }
-
-
-try:
-    first = read_process(process_root)
-    second = read_process(process_root)
-except (IndexError, KeyError, OSError, UnicodeError, ValueError) as exc:
-    raise SystemExit("running gateway process identity is unavailable") from exc
-if first != second:
-    raise SystemExit("running gateway process identity changed")
-if first["uid"] != os.getuid() or not first["argv"]:
-    raise SystemExit("running gateway process owner is invalid")
-if Path(first["argv"][0]).resolve() != python_bin:
-    raise SystemExit("running gateway interpreter differs")
-suffix = first["argv"][1:]
-if suffix == ("-u", "-m", "gateway.main"):
-    allowed_cwds = {repo_root, repo_root / "gateway"}
-elif suffix == ("-u", "main.py"):
-    allowed_cwds = {repo_root / "gateway"}
-else:
-    raise SystemExit("running gateway command differs")
-if first["cwd"] not in allowed_cwds:
-    raise SystemExit("running gateway working directory differs")
-
-worker_script = (repo_root / "gateway" / "research_lab" / "worker_process.py").resolve()
-worker_rss_kib = 0
-worker_count = 0
-for child_root in proc_root.iterdir():
-    if not child_root.name.isdigit() or child_root.name == pid_text:
-        continue
-    try:
-        child_first = read_process(child_root)
-        child_second = read_process(child_root)
-    except (IndexError, KeyError, OSError, UnicodeError, ValueError):
-        continue
-    if child_first != child_second or child_first["ppid"] != int(pid_text):
-        continue
-    child_argv = child_first["argv"]
-    if (
-        child_first["uid"] != os.getuid()
-        or child_first["cwd"] != repo_root
-        or len(child_argv) != 12
-        or Path(child_argv[0]).resolve() != python_bin
-        or Path(child_argv[1]).resolve() != worker_script
-        or child_argv[2] != "--kind"
-        or child_argv[3] not in {"hosted", "scoring"}
-        or child_argv[4] != "--worker-index"
-        or not child_argv[5].isdigit()
-        or child_argv[6] != "--total-workers"
-        or not child_argv[7].isdigit()
-        or child_argv[8] != "--worker-prefix"
-        or not child_argv[9]
-        or child_argv[10] != "--log-level"
-        or child_argv[11] != "INFO"
-    ):
-        continue
-    worker_rss_kib += child_first["rss_kib"]
-    worker_count += 1
-
-reclaimable_gateway_mib = first["rss_kib"] // 1024
-reclaimable_worker_mib = worker_rss_kib // 1024
-reclaimable_mib = reclaimable_gateway_mib + reclaimable_worker_mib
-required_mib = int(report["minimum_available_memory_mib"])
-if available_mib + reclaimable_mib < required_mib + safety_margin_mib:
-    raise SystemExit("gateway shutdown would not recover enough build memory")
-print(
-    json.dumps(
-        {
-            "available_memory_mib": available_mib,
-            "minimum_available_memory_mib": required_mib,
-            "reclaimable_gateway_memory_mib": reclaimable_mib,
-            "reclaimable_gateway_parent_memory_mib": reclaimable_gateway_mib,
-            "reclaimable_gateway_worker_count": worker_count,
-            "reclaimable_gateway_worker_memory_mib": reclaimable_worker_mib,
-            "safety_margin_mib": safety_margin_mib,
-            "schema_version": "leadpoet.gateway_reclaimable_memory.v1",
-            "status": "ready_after_gateway_shutdown",
-        },
-        sort_keys=True,
-    )
-)
-PY
-}
-
-wait_for_gateway_build_memory() {
-  local allow_running_gateway_reclaim="${1:-0}"
-  local max_attempts="${2:-300}"
-  local guard="$GATEWAY_HOST_MEMORY_GUARD_PATH"
-  local report
-  if ! [[ "$max_attempts" =~ ^[1-9][0-9]*$ ]] \
-      || { [ "$allow_running_gateway_reclaim" != "0" ] \
-        && [ "$allow_running_gateway_reclaim" != "1" ]; }; then
-    echo "ERROR: gateway memory wait configuration is invalid" >&2
-    return 1
-  fi
-  if [ ! -r "$guard" ]; then
-    echo "ERROR: gateway host memory guard is unavailable: $guard" >&2
-    return 1
-  fi
-  report="$(mktemp /tmp/gateway-memory-ready.XXXXXX.json)"
-  for attempt in $(seq 1 "$max_attempts"); do
-    if python3 "$guard" \
-        --cleanup-disposable-tests \
-        --cleanup-stale-vsock-probes \
-        --minimum-available-mib 16384 >"$report"; then
-      cat "$report"
-      rm -f "$report"
-      return 0
-    fi
-    if [ "$allow_running_gateway_reclaim" = "1" ] \
-        && gateway_memory_ready_after_running_gateway_shutdown \
-          "$report" "${PID:-}"; then
-      rm -f "$report"
-      return 0
-    fi
-    if [ "$attempt" -eq 1 ] || [ $((attempt % 10)) -eq 0 ]; then
-      echo "Waiting for 16 GiB available memory (${attempt}/${max_attempts})"
-      cat "$report"
-    fi
-    sleep 6
-  done
-  echo "ERROR: gateway build memory did not recover within the bounded wait" >&2
-  cat "$report" >&2
-  rm -f "$report"
-  return 1
-}
-
-run_prepared_gateway_module() {
-  (
-    cd "$GATEWAY_PREFLIGHT_TREE"
-    PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" -m "$@"
-  )
-}
-
-validate_runtime_secret_paths() {
-  local key value
-  for key in GATEWAY_PRIVATE_KEY_PATH ARWEAVE_KEYFILE_PATH; do
-    value="${!key:-}"
-    if [ -z "$value" ] && [ "$key" = "GATEWAY_PRIVATE_KEY_PATH" ]; then
-      value="$GATEWAY_LOG_ROOT/secrets/gateway_private_key.pem"
-    elif [ -z "$value" ]; then
-      value="$GATEWAY_LOG_ROOT/secrets/arweave_keyfile.json"
-    fi
-    printf -v "$key" '%s' "$value"
-    export "$key"
-    if [[ "$value" != /* ]]; then
-      echo "ERROR: $key must be configured as an absolute path for Git-checkout deployment" >&2
-      return 1
-    fi
-    if [ ! -f "$value" ]; then
-      echo "ERROR: configured $key file does not exist" >&2
-      return 1
-    fi
-  done
-}
-
 enforce_deployment_environment() {
   unset BUILD_ID BUILD_TIME_UTC BUILD_TIMESTAMP GITHUB_TAG GIT_TAG
   export LEADPOET_REPO_ROOT GATEWAY_ROOT GATEWAY_LOG_ROOT GATEWAY_LOG_FILE
@@ -1507,12 +962,7 @@ enforce_deployment_environment() {
   export GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS
   export GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS
   export GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES
-  export GATEWAY_MIGRATION_203_SQL_SHA256 GATEWAY_MIGRATION_203_BARRIER_FILE
-  export GATEWAY_MIGRATION_203_COMPLETION_FILE GATEWAY_MIGRATION_203_WAIT_SECONDS
-  export RESEARCH_LAB_TEE_PROTOCOL
   export GATEWAY_V2_CONFIG_DIR GATEWAY_V2_RELEASE_MANIFEST GATEWAY_V2_RELEASE_LINEAGE
-  export GATEWAY_V2_ARTIFACT_POLICY
-  export RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET
   export LEADPOET_LOCAL_RELEASE_COMMIT_SHA LEADPOET_LOCAL_GATEWAY_RELEASE
   export GATEWAY_TEE_FALLBACK_LOG_DIR="$GATEWAY_LOG_ROOT/gateway/logs/tee_fallback"
   export PYTHONPATH="$LEADPOET_REPO_ROOT"
@@ -1525,9 +975,6 @@ enforce_deployment_environment() {
   export GATEWAY_BUILD_INFO_GIT_ROOT="$LEADPOET_REPO_ROOT"
   export GATEWAY_BUILD_INFO_FILE="$GATEWAY_ROOT/BUILD_INFO.json"
   export RESEARCH_LAB_RUNTIME_SOURCE_ROOT="$LEADPOET_REPO_ROOT"
-  export RESEARCH_LAB_DEV_SNAPSHOT_AUTO_REFRESH_ENABLED="${RESEARCH_LAB_DEV_SNAPSHOT_AUTO_REFRESH_ENABLED:-true}"
-  export RESEARCH_LAB_DEV_SNAPSHOT_RECORD_ENABLED="${RESEARCH_LAB_DEV_SNAPSHOT_RECORD_ENABLED:-true}"
-  export RESEARCH_LAB_DEV_SNAPSHOT_KMS_KEY_ID="${RESEARCH_LAB_DEV_SNAPSHOT_KMS_KEY_ID:-alias/leadpoet-research-lab-artifact-signing}"
   export ATTESTED_RUNTIME_COMMIT_SHA="$GATEWAY_DEPLOY_SHA"
   export ATTESTED_RUNTIME_GIT_REPO_URL="$GATEWAY_DEPLOY_REMOTE"
 }
@@ -1744,10 +1191,7 @@ for entry in Path("/proc").iterdir():
         cwd = (entry / "cwd").resolve()
     except (OSError, UnicodeDecodeError):
         continue
-    is_stale_build = (
-        "docker build -f " in argv
-        and "/validator_models/containerizing/Dockerfile" in argv
-    ) or "pip install --no-cache-dir -r requirements.txt" in argv
+    is_stale_build = "pip install --no-cache-dir -r requirements.txt" in argv
     if is_stale_build and (cwd == repo_root or repo_root in cwd.parents):
         try:
             os.kill(int(entry.name), requested_signal)
@@ -1853,8 +1297,6 @@ acquire_gateway_restart_lock() {
     lock_holder_found=1
     holder_command="$(tr '\0' ' ' < "/proc/$holder_pid/cmdline" 2>/dev/null || true)"
     case "$holder_command" in
-      *"gateway.utils.tee_inter_enclave_relay"*|\
-      *"gateway.utils.tee_egress_forwarder"*|\
       *" -m gateway.main "*)
         ;;
       *)
@@ -1929,49 +1371,6 @@ if [ "$GATEWAY_RESTART_PHASE" = "prepare" ]; then
   validate_gateway_aws_authority
 fi
 
-if [ "$miner_maintenance_bootstrap_count" -eq 4 ]; then
-  bootstrap_script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-  bootstrap_candidate_root="$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT/candidate"
-  if [ "$GATEWAY_RESTART_PHASE" != "prepare" ] \
-      || [ "${GATEWAY_RESTART_LOCK_HELD:-0}" != "1" ] \
-      || [ ! -e "/proc/$$/fd/9" ] \
-      || [ "$(readlink "/proc/$$/fd/9" 2>/dev/null || true)" != "$GATEWAY_RESTART_LOCK_FILE" ] \
-      || [ "$bootstrap_script_root" != "$bootstrap_candidate_root" ] \
-      || [ -e "$GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE" ] \
-      || [ "$LEADPOET_GATEWAY_ENV_SECRET_ID" != "leadpoet/prod/gateway/env" ] \
-      || [ "${AWS_REGION:-us-east-1}" != "us-east-1" ] \
-      || [ "${AWS_DEFAULT_REGION:-us-east-1}" != "us-east-1" ] \
-      || [ ! -x "$GATEWAY_HOST_RESTART_SCRIPT" ]; then
-    echo "ERROR: miner-maintenance bootstrap did not acquire an isolated canonical handoff" >&2
-    exit 1
-  fi
-
-  GATEWAY_DEPLOY_STAGE="miner_maintenance_pre_hydration"
-  export GATEWAY_DEPLOY_STAGE
-  echo "Preparing disabled miner submissions from the exact candidate under the canonical restart lock"
-  export GATEWAY_RESTART_STARTED_EPOCH
-  export GATEWAY_RESTART_TIMING_DIR
-  export GATEWAY_RESTART_TIMING_FILE
-  export GATEWAY_RESTART_TIMING_INITIALIZED
-  export PYTHONDONTWRITEBYTECODE=1
-  export PYTHONPATH="$bootstrap_candidate_root"
-  cd /
-  exec env \
-    -u GATEWAY_RESTART_AUTHORITY_ROOT \
-    -u GATEWAY_RESTART_AUTHORITY_COMMIT \
-    "$GATEWAY_PYTHON_BIN" \
-    -P -m gateway.tee.gateway_miner_maintenance_restart_v1 \
-    --bootstrap-exec \
-    --expected-commit "$REQUESTED_GATEWAY_DEPLOY_COMMIT" \
-    --repo-root "$LEADPOET_REPO_ROOT" \
-    --plan-file "$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_PLAN" \
-    --bootstrap-root "$GATEWAY_MINER_MAINTENANCE_BOOTSTRAP_ROOT" \
-    --controller-current "$GATEWAY_RESTART_CONTROLLER_CURRENT" \
-    --host-restart-path "$GATEWAY_HOST_RESTART_SCRIPT" \
-    --handoff-file "$GATEWAY_MINER_MAINTENANCE_HANDOFF_FILE" \
-    --handoff-nonce "$GATEWAY_MINER_MAINTENANCE_HANDOFF_NONCE"
-fi
-
 if [ "$GATEWAY_RESTART_PHASE" = "prepare" ]; then
 cd "$GATEWAY_ROOT"
 
@@ -2025,8 +1424,6 @@ restart_only_keys = {
     "LEADPOET_INTERNAL_SECRET",
     "GATEWAY_DEPLOY_COMMIT",
     "GATEWAY_ENV_FILE",
-    "GATEWAY_PRIVATE_KEY_PATH",
-    "ARWEAVE_KEYFILE_PATH",
     "GATEWAY_RESTART_GIT_SSH_COMMAND",
     "GATEWAY_PYTHON_BIN",
     "GATEWAY_RESTART_CONTROLLER_ROOT",
@@ -2038,15 +1435,12 @@ restart_only_keys = {
     "LAB_ARENA_RESTART_GUARD_GENERATION",
     "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
     "GATEWAY_RESTART_INVOCATION_ID",
-    "GATEWAY_MINER_MAINTENANCE_PROOF_FD",
     "GATEWAY_CONTROLLER_PROCESS_HELPER",
     "LAB_ARENA_PROCESS_HELPER",
     "GATEWAY_GIT_HELPER",
     "GATEWAY_HOST_MEMORY_GUARD_PATH",
-    "GATEWAY_V2_ARTIFACT_POLICY",
     "GATEWAY_V2_CONFIG_DIR",
     "GATEWAY_V2_DEFER_WORKER_FLEETS",
-    "GATEWAY_V2_KMS_KEY_ID",
     "GATEWAY_V2_OFFLINE_ARTIFACT_ROOT",
     "GATEWAY_V2_RELEASE_BUCKET",
     "GATEWAY_V2_RELEASE_ARCHIVE_ROOT",
@@ -2158,8 +1552,6 @@ skip_keys = {
     "GATEWAY_LOG_FILE",
     "GATEWAY_TEE_EIF_ROOT",
     "GATEWAY_ENV_FILE",
-    "GATEWAY_PRIVATE_KEY_PATH",
-    "ARWEAVE_KEYFILE_PATH",
     "GATEWAY_RESTART_GIT_SSH_COMMAND",
     "GATEWAY_PYTHON_BIN",
     "GATEWAY_RESTART_CONTROLLER_ROOT",
@@ -2170,9 +1562,7 @@ skip_keys = {
     "PREPARED_GATEWAY_SHA",
     "LAB_ARENA_RESTART_GUARD_GENERATION",
     "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
-    "GATEWAY_V2_ARTIFACT_POLICY",
     "GATEWAY_V2_CONFIG_DIR",
-    "GATEWAY_V2_KMS_KEY_ID",
     "GATEWAY_V2_OFFLINE_ARTIFACT_ROOT",
     "GATEWAY_V2_RELEASE_BUCKET",
     "GATEWAY_V2_RELEASE_ARCHIVE_ROOT",
@@ -2189,7 +1579,6 @@ skip_keys = {
     "GATEWAY_HOST_MEMORY_GUARD_PATH",
     "GATEWAY_CONTROLLER_PROCESS_HELPER",
     "LAB_ARENA_PROCESS_HELPER",
-    "GATEWAY_MINER_MAINTENANCE_PROOF_FD",
     "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT",
     "GATEWAY_RESTART_PHASE",
     "GATEWAY_RESTART_STARTED_EPOCH",
@@ -2312,8 +1701,6 @@ skip_keys = {
     "GATEWAY_LOG_FILE",
     "GATEWAY_TEE_EIF_ROOT",
     "GATEWAY_ENV_FILE",
-    "GATEWAY_PRIVATE_KEY_PATH",
-    "ARWEAVE_KEYFILE_PATH",
     "GATEWAY_RESTART_GIT_SSH_COMMAND",
     "GATEWAY_PYTHON_BIN",
     "GATEWAY_RESTART_CONTROLLER_ROOT",
@@ -2324,9 +1711,7 @@ skip_keys = {
     "PREPARED_GATEWAY_SHA",
     "LAB_ARENA_RESTART_GUARD_GENERATION",
     "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
-    "GATEWAY_V2_ARTIFACT_POLICY",
     "GATEWAY_V2_CONFIG_DIR",
-    "GATEWAY_V2_KMS_KEY_ID",
     "GATEWAY_V2_OFFLINE_ARTIFACT_ROOT",
     "GATEWAY_V2_RELEASE_BUCKET",
     "GATEWAY_V2_RELEASE_ARCHIVE_ROOT",
@@ -2343,7 +1728,6 @@ skip_keys = {
     "GATEWAY_HOST_MEMORY_GUARD_PATH",
     "GATEWAY_CONTROLLER_PROCESS_HELPER",
     "LAB_ARENA_PROCESS_HELPER",
-    "GATEWAY_MINER_MAINTENANCE_PROOF_FD",
     "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT",
     "GATEWAY_RESTART_PHASE",
     "GATEWAY_RESTART_STARTED_EPOCH",
@@ -2415,8 +1799,6 @@ printf 'export LEADPOET_RESTART_INVOCATION_ID=%q\n' \
 printf 'export AWS_REGION=us-east-1\n' >> "$ENV_CLONE"
 printf 'export AWS_DEFAULT_REGION=us-east-1\n' >> "$ENV_CLONE"
 printf 'export LEADPOET_AWS_INSTANCE_ROLE_ONLY=true\n' >> "$ENV_CLONE"
-printf 'export GATEWAY_PRIVATE_KEY_PATH=%q\n' "$GATEWAY_PRIVATE_KEY_PATH" >> "$ENV_CLONE"
-printf 'export ARWEAVE_KEYFILE_PATH=%q\n' "$ARWEAVE_KEYFILE_PATH" >> "$ENV_CLONE"
 if [ -n "$GATEWAY_RESTART_GIT_SSH_COMMAND" ]; then
   printf 'export GATEWAY_RESTART_GIT_SSH_COMMAND=%q\n' \
     "$GATEWAY_RESTART_GIT_SSH_COMMAND" >> "$ENV_CLONE"
@@ -2435,38 +1817,11 @@ if ! select_gateway_python_runtime; then
   exit 1
 fi
 
-# Read the protocol only after the live environment and Secrets Manager have
-# been merged. Authoritative V2 is the sole production protocol.
-RESEARCH_LAB_TEE_PROTOCOL="$(
-  set -a
-  . "$ENV_CLONE"
-  set +a
-  printf '%s' "${RESEARCH_LAB_TEE_PROTOCOL:-v2}"
-)"
-RESEARCH_LAB_TEE_PROTOCOL="$(
-  printf '%s' "$RESEARCH_LAB_TEE_PROTOCOL" | tr '[:upper:]' '[:lower:]'
-)"
-case "$RESEARCH_LAB_TEE_PROTOCOL" in
-  v2|authoritative_v2)
-    RESEARCH_LAB_TEE_PROTOCOL="v2"
-    ;;
-  *)
-    echo "ERROR: RESEARCH_LAB_TEE_PROTOCOL must be v2; V1 authority is retired" >&2
-    exit 1
-    ;;
-esac
-export RESEARCH_LAB_TEE_PROTOCOL
-# Keep every later environment reload on the normalized V2 value.
-printf 'export RESEARCH_LAB_TEE_PROTOCOL=%q\n' \
-  "$RESEARCH_LAB_TEE_PROTOCOL" >> "$ENV_CLONE"
-echo "Research Lab TEE protocol: $RESEARCH_LAB_TEE_PROTOCOL"
-
 echo "Validating absolute gateway secret paths for canonical Git checkout"
 (
   set -a
   . "$ENV_CLONE"
   set +a
-  validate_runtime_secret_paths
 )
 
 if [ ! -f "$GATEWAY_GIT_HELPER" ]; then
@@ -2487,26 +1842,6 @@ PREPARED_GATEWAY_SHA="$(
     --last-good-file "$GATEWAY_LAST_GOOD_MANIFEST"
 )"
 echo "Prepared gateway commit: $PREPARED_GATEWAY_SHA"
-PREPARED_GATEWAY_TOPOLOGY_ENTRY="$(
-  git -C "$LEADPOET_REPO_ROOT" ls-tree \
-    "$PREPARED_GATEWAY_SHA" -- gateway/tee/topology.json
-)" || {
-  echo "ERROR: prepared gateway topology Git identity is unavailable" >&2
-  exit 1
-}
-if ! [[ "$PREPARED_GATEWAY_TOPOLOGY_ENTRY" =~ ^100644\ blob\ [0-9a-f]{40}$'\t'gateway/tee/topology.json$ ]]; then
-  echo "ERROR: prepared gateway topology is not one regular Git blob" >&2
-  exit 1
-fi
-PREPARED_GATEWAY_TOPOLOGY_BLOB="${PREPARED_GATEWAY_TOPOLOGY_ENTRY#100644 blob }"
-PREPARED_GATEWAY_TOPOLOGY_BLOB="${PREPARED_GATEWAY_TOPOLOGY_BLOB%%$'\t'*}"
-if [ "$PREPARED_GATEWAY_TOPOLOGY_BLOB" = "$HISTORICAL_THREE_ROLE_TOPOLOGY_BLOB" ] \
-    && ! git -C "$LEADPOET_REPO_ROOT" cat-file -e \
-      "$PREPARED_GATEWAY_SHA:gateway/tee/build_local_release_v2.sh" 2>/dev/null \
-    && ! git -C "$LEADPOET_REPO_ROOT" cat-file -e \
-      "$PREPARED_GATEWAY_SHA:gateway/tee/local_release_v2.py" 2>/dev/null; then
-  GATEWAY_HISTORICAL_TOPOLOGY_HASH="$HISTORICAL_THREE_ROLE_TOPOLOGY_HASH"
-fi
 POST_ACTIVATE_GATEWAY_HOST_RESTART_SCRIPT="$GATEWAY_HOST_RESTART_SCRIPT"
 ORIGIN_MAIN_GATEWAY_SHA="$(git -C "$LEADPOET_REPO_ROOT" rev-parse origin/main)"
 if [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ] \
@@ -2553,7 +1888,7 @@ if ! GATEWAY_RESTART_EPOCH_REPORT="$(
 fi
 printf '%s\n' "$GATEWAY_RESTART_EPOCH_REPORT"
 
-echo "Preparing exact hash-locked V2 build artifacts during release acquisition"
+echo "Preparing exact hash-locked enclave dependencies during release acquisition"
 if ! start_gateway_offline_artifact_prepare; then
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 75
@@ -2570,18 +1905,8 @@ if ! follow_superseding_gateway_release; then
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 75
 fi
-if [ -f "$GATEWAY_LAST_GOOD_MANIFEST" ] \
-    && [ -f "$GATEWAY_V2_RELEASE_ARCHIVE_ROOT/index.json" ]; then
-  echo "Verifying and repairing retired last-good gateway role measurements"
-  PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" python3 \
-    "$GATEWAY_PREFLIGHT_TREE/scripts/gateway_git_deploy.py" \
-    repair-last-good-role-pcr0s \
-    --last-good-file "$GATEWAY_LAST_GOOD_MANIFEST" \
-    --archive-root "$GATEWAY_V2_RELEASE_ARCHIVE_ROOT"
-fi
 GATEWAY_LOCAL_RELEASE_SCRIPT="$GATEWAY_PREFLIGHT_TREE/gateway/tee/build_local_release_v2.sh"
 GATEWAY_LOCAL_RELEASE_MODULE="$GATEWAY_PREFLIGHT_TREE/gateway/tee/local_release_v2.py"
-GATEWAY_HISTORICAL_RELEASE_MODULE="$GATEWAY_PREFLIGHT_TREE/gateway/tee/release_channel_v2.py"
 if [ -f "$GATEWAY_LOCAL_RELEASE_SCRIPT" ] \
     && [ -r "$GATEWAY_LOCAL_RELEASE_SCRIPT" ] \
     && [ ! -L "$GATEWAY_LOCAL_RELEASE_SCRIPT" ] \
@@ -2623,44 +1948,6 @@ if [ -f "$GATEWAY_LOCAL_RELEASE_SCRIPT" ] \
     exit 75
   fi
   record_gateway_restart_timing "local_release_ready"
-elif [ ! -e "$GATEWAY_LOCAL_RELEASE_SCRIPT" ] \
-    && [ ! -L "$GATEWAY_LOCAL_RELEASE_SCRIPT" ] \
-    && [ ! -e "$GATEWAY_LOCAL_RELEASE_MODULE" ] \
-    && [ ! -L "$GATEWAY_LOCAL_RELEASE_MODULE" ] \
-    && [ -f "$GATEWAY_HISTORICAL_RELEASE_MODULE" ] \
-    && [ -r "$GATEWAY_HISTORICAL_RELEASE_MODULE" ] \
-    && [ ! -L "$GATEWAY_HISTORICAL_RELEASE_MODULE" ] \
-    && [ "$GATEWAY_HISTORICAL_TOPOLOGY_HASH" = "$HISTORICAL_THREE_ROLE_TOPOLOGY_HASH" ] \
-    && [ -n "$REQUESTED_GATEWAY_DEPLOY_COMMIT" ] \
-    && [ "$PREPARED_GATEWAY_SHA" != "$ORIGIN_MAIN_GATEWAY_SHA" ]; then
-  echo "Acquiring the exact historical attested V2 release channel"
-  GATEWAY_DEPLOY_STAGE="historical_release_acquisition"
-  export GATEWAY_DEPLOY_STAGE
-  unset LEADPOET_LOCAL_RELEASE_COMMIT_SHA LEADPOET_LOCAL_GATEWAY_RELEASE
-  record_gateway_restart_timing "release_wait_started"
-  V2_RELEASE_READY=0
-  for attempt in $(seq 1 300); do
-    GATEWAY_RELEASE_ATTEMPTS_USED="$attempt"
-    if follow_superseding_gateway_release \
-        && run_prepared_gateway_module gateway.tee.release_channel_v2 \
-        --ensure \
-        --expected-commit "$PREPARED_GATEWAY_SHA" \
-        --bucket "$GATEWAY_V2_RELEASE_BUCKET" \
-        --prefix "$GATEWAY_V2_RELEASE_PREFIX" \
-        --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"; then
-      V2_RELEASE_READY=1
-      break
-    fi
-    echo "Exact historical V2 release is not published yet; waiting inside the valid restart invocation (${attempt}/300)"
-    sleep 12
-  done
-  if [ "$V2_RELEASE_READY" != "1" ]; then
-    echo "ERROR: exact historical attested V2 release is unavailable for $PREPARED_GATEWAY_SHA" >&2
-    echo "Gateway remains running; production shutdown has not started." >&2
-    exit 75
-  fi
-  record_gateway_restart_timing "release_ready"
-  record_gateway_restart_timing "historical_release_ready"
 else
   echo "ERROR: selected release has an incomplete or unsupported V2 release acquisition contract" >&2
   echo "Gateway remains running; production shutdown has not started." >&2
@@ -2668,82 +1955,6 @@ else
 fi
 if ! follow_superseding_gateway_release; then
   echo "Gateway remains running; production shutdown has not started." >&2
-  exit 75
-fi
-
-echo "Preparing commit-bound KMS credential envelopes"
-GATEWAY_DEPLOY_STAGE="v2_credential_envelope_preparation"
-export GATEWAY_DEPLOY_STAGE
-gateway_envelope_schema_args=()
-if [ -n "$GATEWAY_MIGRATION_203_SQL_SHA256" ]; then
-  gateway_envelope_schema_args+=(--defer-incentive-retirement-schema)
-fi
-if ! run_prepared_gateway_module gateway.tee.prepare_gateway_envelopes_v2 \
-    --install \
-    --env-file "$ENV_CLONE" \
-    --kms-key-id "$GATEWAY_V2_KMS_KEY_ID" \
-    --deploy-commit "$PREPARED_GATEWAY_SHA" \
-    --output-dir "$GATEWAY_V2_CONFIG_DIR" \
-    "${gateway_envelope_schema_args[@]}"; then
-  echo "ERROR: gateway V2 credential envelope preparation failed before shutdown" >&2
-  exit 75
-fi
-
-(
-  cd "$GATEWAY_PREFLIGHT_TREE"
-  PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \
-  "$GATEWAY_PYTHON_BIN" - "$ENV_CLONE" "$GATEWAY_V2_CONFIG_DIR/gateway-v2-env-transition.json" <<'PY'
-import sys
-
-from gateway.tee.prepare_gateway_envelopes_v2 import (
-    scrub_parent_environment_file_v2,
-)
-
-scrub_parent_environment_file_v2(
-    environment_path=sys.argv[1],
-    transition_report_path=sys.argv[2],
-)
-print("Scrubbed commit-bound provider plaintext from prepared parent environment")
-PY
-)
-
-if [ ! -e "$GATEWAY_V2_ARTIFACT_POLICY" ]; then
-  echo "Installing the public production V2 artifact policy"
-  python3 - "$GATEWAY_V2_ARTIFACT_POLICY" <<'PY'
-import json
-import os
-from pathlib import Path
-import sys
-import tempfile
-
-destination = Path(sys.argv[1])
-destination.parent.mkdir(parents=True, exist_ok=True)
-value = {
-    "schema_version": "leadpoet.encrypted_artifact_policy.v2",
-    "bucket_host": (
-        "leadpoet-attested-v2-artifacts-493765492819."
-        "s3.us-east-1.amazonaws.com"
-    ),
-    "key_prefix": "/encrypted-artifacts/",
-    "minimum_retention_days": 365,
-}
-descriptor, temporary_name = tempfile.mkstemp(
-    prefix=".artifact-policy.", dir=str(destination.parent)
-)
-try:
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        json.dump(value, handle, sort_keys=True, indent=2)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.chmod(temporary_name, 0o600)
-    os.replace(temporary_name, destination)
-finally:
-    Path(temporary_name).unlink(missing_ok=True)
-PY
-fi
-
-if report_gateway_v2_bootstrap_pending; then
   exit 75
 fi
 
@@ -2758,35 +1969,18 @@ fi
 record_gateway_restart_timing "dependency_preflight_complete"
 
 echo "Validating the prepared V2 release before production shutdown"
-  GATEWAY_DEPLOY_STAGE="v2_pre_shutdown_preflight"
-  export GATEWAY_DEPLOY_STAGE
-  V2_PREFLIGHT_CREDENTIAL_ARGS=()
-  for envelope in "${V2_CREDENTIAL_ENVELOPES[@]}"; do
-    V2_PREFLIGHT_CREDENTIAL_ARGS+=(--credential-envelope "$envelope")
-  done
-  V2_PREFLIGHT_ACCEPTANCE_ARGS=()
-  if [ -n "${GATEWAY_HISTORICAL_TOPOLOGY_HASH:-}" ]; then
-    V2_PREFLIGHT_ACCEPTANCE_ARGS=(
-      --acceptance-corpus-manifest \
-        "$GATEWAY_V2_CONFIG_DIR/acceptance-corpus-v2.json"
-      --acceptance-corpus-root \
-        "$GATEWAY_V2_CONFIG_DIR/acceptance-corpus-v2"
-    )
-  fi
-  if ! run_prepared_gateway_module gateway.tee.restart_preflight_v2 \
-      --deploy-commit "$PREPARED_GATEWAY_SHA" \
-      --release-manifest "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-      --topology-manifest "$GATEWAY_PREFLIGHT_TREE/gateway/tee/topology.json" \
-      --artifact-policy "$GATEWAY_V2_ARTIFACT_POLICY" \
-      --config-dir "$GATEWAY_V2_CONFIG_DIR" \
-      --parent-env-file "$ENV_CLONE" \
-      "${V2_PREFLIGHT_ACCEPTANCE_ARGS[@]}" \
-      --topology-mode "${GATEWAY_TEE_TOPOLOGY_MODE:-full}" \
-      "${V2_PREFLIGHT_CREDENTIAL_ARGS[@]}"; then
-    rm -rf "$GATEWAY_PREFLIGHT_TREE"
-    echo "ERROR: prepared V2 release failed before-shutdown validation" >&2
-    exit 1
-  fi
+GATEWAY_DEPLOY_STAGE="v2_pre_shutdown_preflight"
+export GATEWAY_DEPLOY_STAGE
+if ! run_prepared_gateway_module gateway.tee.restart_preflight_v2 \
+    --deploy-commit "$PREPARED_GATEWAY_SHA" \
+    --release-manifest "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
+    --topology-manifest "$GATEWAY_PREFLIGHT_TREE/gateway/tee/topology.json" \
+    --config-dir "$GATEWAY_V2_CONFIG_DIR" \
+    --topology-mode "${GATEWAY_TEE_TOPOLOGY_MODE:-full}"; then
+  rm -rf "$GATEWAY_PREFLIGHT_TREE"
+  echo "ERROR: prepared V2 release failed before-shutdown validation" >&2
+  exit 1
+fi
 DOCKER_LOCK_HELPER="$GATEWAY_PREFLIGHT_TREE/validator_tee/scripts/docker_operation_lock_v2.sh"
 if [ ! -r "$DOCKER_LOCK_HELPER" ]; then
   echo "ERROR: prepared Docker operation lock helper is unavailable" >&2
@@ -2810,23 +2004,6 @@ if ! drain_lab_arena_for_restart "$GATEWAY_PREFLIGHT_TREE"; then
   exit 1
 fi
 
-echo "Rechecking shared miner maintenance at the destructive boundary"
-GATEWAY_DEPLOY_STAGE="miner_maintenance_shutdown_verification"
-export GATEWAY_DEPLOY_STAGE
-if ! (
-    set -a
-    . "$ENV_CLONE"
-    set +a
-    run_prepared_gateway_module \
-      gateway.tee.gateway_miner_maintenance_restart_v1 \
-      --verify-shutdown-quiescence \
-      --expected-commit "$PREPARED_GATEWAY_SHA"
-  ); then
-  echo "ERROR: shared miner-maintenance authority changed before shutdown" >&2
-  echo "Gateway remains running; production shutdown has not started." >&2
-  exit 1
-fi
-
 GATEWAY_DEPLOY_STAGE="lab_arena_destructive_authorization"
 export GATEWAY_DEPLOY_STAGE
 if ! run_lab_arena_restart_guard "$GATEWAY_PREFLIGHT_TREE" authorize \
@@ -2843,26 +2020,17 @@ if ! verify_controller_process_helper "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER"; 
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 1
 fi
-echo "Stopping existing gateway and Research Lab worker processes"
+echo "Stopping existing gateway and Lab Arena processes"
 GATEWAY_DESTRUCTIVE_PHASE_STARTED=1
 export GATEWAY_DESTRUCTIVE_PHASE_STARTED
-sudo systemctl stop leadpoet-tee-egress-forwarder.service 2>/dev/null || true
-sudo systemctl reset-failed leadpoet-tee-egress-forwarder.service 2>/dev/null || true
 pkill -9 -f "python3 main.py" 2>/dev/null || true
 pkill -9 -f "python3 -u main.py" 2>/dev/null || true
 pkill -9 -f "python3 -u -m gateway.main" 2>/dev/null || true
 pkill -9 -f "uvicorn" 2>/dev/null || true
-pkill -9 -f "run_research_lab_hosted_worker" 2>/dev/null || true
-pkill -9 -f "/gateway/research_lab/worker_process[.]py" 2>/dev/null || true
-pkill -9 -f "gateway.research_lab.provider_evidence_proxy" 2>/dev/null || true
-pkill -9 -f "provider_evidence_proxy" 2>/dev/null || true
-pkill -9 -f "gateway.utils.tee_inter_enclave_relay" 2>/dev/null || true
-pkill -9 -f "gateway.utils.tee_egress_forwarder" 2>/dev/null || true
 stop_lab_arena_service "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER"
 rm -rf "$GATEWAY_PREFLIGHT_TREE"
 GATEWAY_PREFLIGHT_TREE=""
 
-wait_for_exact_migration_203
 
 echo "Stopping stuck local validator Docker builds or pip installs"
 stop_local_stale_build_processes TERM
@@ -2919,8 +2087,6 @@ exec env \
   GATEWAY_LOG_ROOT="$GATEWAY_LOG_ROOT" \
   GATEWAY_LOG_FILE="$GATEWAY_LOG_FILE" \
   GATEWAY_ENV_FILE="$GATEWAY_ENV_FILE" \
-  GATEWAY_PRIVATE_KEY_PATH="$GATEWAY_PRIVATE_KEY_PATH" \
-  ARWEAVE_KEYFILE_PATH="$ARWEAVE_KEYFILE_PATH" \
   GATEWAY_RESTART_GIT_SSH_COMMAND="$GATEWAY_RESTART_GIT_SSH_COMMAND" \
   GATEWAY_GIT_HELPER="$GATEWAY_GIT_HELPER" \
   GATEWAY_RESTART_CONTROLLER_ROOT="$GATEWAY_RESTART_CONTROLLER_ROOT" \
@@ -2951,7 +2117,6 @@ exec env \
   GATEWAY_RELEASE_FOLLOW_ROOT="$GATEWAY_RELEASE_FOLLOW_ROOT" \
   GATEWAY_RELEASE_SUPERSESSION_COUNT="$GATEWAY_RELEASE_SUPERSESSION_COUNT" \
   GATEWAY_RELEASE_SUPERSESSION_MAX="$GATEWAY_RELEASE_SUPERSESSION_MAX" \
-  RESEARCH_LAB_TEE_PROTOCOL="$RESEARCH_LAB_TEE_PROTOCOL" \
   GATEWAY_V2_CONFIG_DIR="$GATEWAY_V2_CONFIG_DIR" \
   GATEWAY_V2_RELEASE_MANIFEST="$GATEWAY_V2_RELEASE_MANIFEST" \
   GATEWAY_V2_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE" \
@@ -2959,8 +2124,6 @@ exec env \
   GATEWAY_PREPARED_V2_RELEASE_LINEAGE="$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
   GATEWAY_V2_RELEASE_BUCKET="$GATEWAY_V2_RELEASE_BUCKET" \
   GATEWAY_V2_RELEASE_PREFIX="$GATEWAY_V2_RELEASE_PREFIX" \
-  GATEWAY_V2_ARTIFACT_POLICY="$GATEWAY_V2_ARTIFACT_POLICY" \
-  RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET="$RESEARCH_LAB_ATTESTED_V2_ARTIFACT_BUCKET" \
   GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
   GATEWAY_DEPLOY_STAGE="$GATEWAY_DEPLOY_STAGE" \
   bash "$GATEWAY_POST_ACTIVATE_REEXEC_SCRIPT" "$@"
@@ -3046,7 +2209,6 @@ set -a
 set +a
 restore_gateway_restart_path_authority
 enforce_deployment_environment
-validate_runtime_secret_paths
 GATEWAY_DEPLOY_STAGE="runtime_env_and_ecr"
 export GATEWAY_DEPLOY_STAGE
 export AWS_REGION="${AWS_REGION:-us-east-1}"
@@ -3092,10 +2254,8 @@ if str(bt.__version__) != "10.5.0":
     raise RuntimeError(f"gateway Bittensor SDK mismatch: {bt.__version__}")
 repo_root = Path(os.environ["LEADPOET_REPO_ROOT"]).resolve()
 modules = (
-    "gateway.research_lab.config",
     "leadpoet_canonical",
     "qualification",
-    "validator_models",
     "Leadpoet",
 )
 for module_name in modules:
@@ -3123,12 +2283,7 @@ attested_root = (gateway_root / "_attested_runtime").resolve()
 sys.path = [str(attested_root), str(repo_root)] + [
     path for path in sys.path if path not in {str(attested_root), str(repo_root)}
 ]
-importlib.import_module("gateway.research_lab.config")
-for module_name in (
-    "leadpoet_canonical",
-    "qualification",
-    "validator_models",
-):
+for module_name in ("leadpoet_canonical",):
     module = importlib.import_module(module_name)
     origin = Path(module.__file__).resolve()
     if not origin.is_relative_to(attested_root):
@@ -3143,7 +2298,7 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
   GATEWAY_TEE_SKIP_STAGE=1 bash "$GATEWAY_ROOT/tee/build_role_enclaves.sh"
   record_gateway_restart_timing "gateway_role_eifs_built"
   echo "Cleaning temporary role Docker images/layers before gateway relaunch"
-  for role in gateway_autoresearch gateway_coordinator gateway_scoring; do
+  for role in gateway_coordinator; do
     sudo docker rmi -f "tee-enclave:${role}" 2>/dev/null || true
   done
   sudo docker builder prune -af 2>/dev/null || true
@@ -3154,55 +2309,10 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     GATEWAY_ROOT="$GATEWAY_ROOT" \
     GATEWAY_TEE_EIF_ROOT="$GATEWAY_TEE_EIF_ROOT" \
     GATEWAY_ENV_FILE="$GATEWAY_ENV_FILE" \
-    RESEARCH_LAB_TEE_PROTOCOL="$RESEARCH_LAB_TEE_PROTOCOL" \
     bash ./start_enclave.sh
   record_gateway_restart_timing "gateway_enclaves_started"
 
-  echo "Starting parent-side opaque enclave egress forwarder"
-  cd "$LEADPOET_REPO_ROOT"
-  env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
-    -u GATEWAY_GIT_HELPER \
-    -u GATEWAY_HOST_MEMORY_GUARD_PATH \
-    -u GATEWAY_RESTART_AUTHORITY_ROOT \
-    -u GATEWAY_RESTART_AUTHORITY_COMMIT \
-    -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
-    -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
-    PYTHONPATH="$LEADPOET_REPO_ROOT" \
-    setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.utils.tee_egress_forwarder \
-    >> "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" 2>&1 < /dev/null \
-    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
-  TEE_EGRESS_FORWARDER_PID="$!"
-  sleep 2
-  if ! ps -p "$TEE_EGRESS_FORWARDER_PID" >/dev/null 2>&1; then
-    tail -80 "$GATEWAY_LOG_ROOT/tee_egress_forwarder.log" || true
-    echo "ERROR: parent-side enclave egress forwarder did not start" >&2
-    exit 1
-  fi
-
-  echo "Starting opaque inter-enclave TLS relay"
-  cd "$LEADPOET_REPO_ROOT"
-  env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
-    -u GATEWAY_GIT_HELPER \
-    -u GATEWAY_HOST_MEMORY_GUARD_PATH \
-    -u GATEWAY_CONTROLLER_PROCESS_HELPER \
-    -u LAB_ARENA_PROCESS_HELPER \
-    -u GATEWAY_RESTART_AUTHORITY_ROOT \
-    -u GATEWAY_RESTART_AUTHORITY_COMMIT \
-    -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
-    -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
-    PYTHONPATH="$LEADPOET_REPO_ROOT" \
-    setsid "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_inter_enclave_relay \
-    >> "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" 2>&1 < /dev/null \
-    7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
-  INTER_ENCLAVE_RELAY_PID="$!"
-  sleep 2
-  if ! ps -p "$INTER_ENCLAVE_RELAY_PID" >/dev/null 2>&1; then
-    tail -80 "$GATEWAY_LOG_ROOT/inter_enclave_relay.log" || true
-    echo "ERROR: inter-enclave relay did not start" >&2
-    exit 1
-  fi
-
-  echo "Bootstrapping mutually attested V2 enclave runtime"
+  echo "Bootstrapping measured coordinator enclave runtime"
   GATEWAY_DEPLOY_STAGE="v2_runtime_bootstrap"
   export GATEWAY_DEPLOY_STAGE
   test -s "$GATEWAY_V2_RELEASE_MANIFEST" || {
@@ -3213,41 +2323,13 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     echo "ERROR: local V2 build lineage is missing" >&2
     exit 1
   }
-  test -s "$GATEWAY_V2_ARTIFACT_POLICY" || {
-    echo "ERROR: encrypted V2 artifact policy is missing" >&2
-    exit 1
-  }
-  echo "Verifying the encrypted TLS proxy profile for the V2 scoring worker"
-  PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m gateway.research_lab.provider_profiles_v2 \
-    --config-dir "$GATEWAY_V2_CONFIG_DIR" \
-    --require-worker-proxies
-  V2_BOOTSTRAP_ARGS=()
-  V2_PROVISION_ARGS=()
-  for envelope in "${V2_CREDENTIAL_ENVELOPES[@]}"; do
-    test -s "$envelope" || {
-      echo "ERROR: encrypted V2 credential envelope is missing: $envelope" >&2
-      exit 1
-    }
-    V2_BOOTSTRAP_ARGS+=(--credential-envelope "$envelope")
-    V2_PROVISION_ARGS+=(--envelope "$envelope")
-  done
   PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_v2_bootstrap \
     --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
     --gateway-release-lineage "$GATEWAY_V2_RELEASE_LINEAGE" \
-    "${V2_BOOTSTRAP_ARGS[@]}" \
-    --protected-workflow-manifest "$GATEWAY_ROOT/_attested_runtime/protected_workflows.json" \
-    --encrypted-artifact-policy "$GATEWAY_V2_ARTIFACT_POLICY" \
-    --config-dir "$GATEWAY_V2_CONFIG_DIR"
+    --protected-workflow-manifest "$GATEWAY_ROOT/_attested_runtime/protected_workflows.json"
   record_gateway_restart_timing "v2_runtime_bootstrapped"
 
-  echo "Provisioning KMS ciphertext directly to the attested coordinator"
-  GATEWAY_DEPLOY_STAGE="v2_kms_provision"
-  export GATEWAY_DEPLOY_STAGE
-  PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_kms_provision_v2 \
-    "${V2_PROVISION_ARGS[@]}"
-  record_gateway_restart_timing "v2_kms_provisioned"
-
-echo "Verifying V2 provider and execution-manager readiness"
+echo "Verifying measured V2 runtime identity readiness"
 GATEWAY_DEPLOY_STAGE="v2_runtime_readiness"
 export GATEWAY_DEPLOY_STAGE
 PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m gateway.tee.verify_v2_runtime_ready
@@ -3267,7 +2349,6 @@ set -a
 set +a
 restore_gateway_restart_path_authority
 enforce_deployment_environment
-validate_runtime_secret_paths
 export PATH="$HOME/.local/bin:$PATH"
 export AWS_REGION="${AWS_REGION:-us-east-1}"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
@@ -3282,8 +2363,7 @@ export LEADPOET_AWS_INSTANCE_ROLE_ONLY=true
 leadpoet_release_docker_operation_lock_v2
 
 cd "$LEADPOET_REPO_ROOT"
-env -u GATEWAY_MINER_MAINTENANCE_PROOF_FD \
-  -u GATEWAY_GIT_HELPER \
+env -u GATEWAY_GIT_HELPER \
   -u GATEWAY_HOST_MEMORY_GUARD_PATH \
   -u GATEWAY_CONTROLLER_PROCESS_HELPER \
   -u LAB_ARENA_PROCESS_HELPER \
@@ -3366,24 +2446,12 @@ print(f"verified gateway /build-info commit: {actual}")
 VERIFY_BUILD_INFO
 
 echo "Verifying gateway attestation status"
-timeout 30 curl -fsS http://localhost:8000/attest >/dev/null
+timeout 30 curl -fsS http://localhost:8000/attestation/document >/dev/null
 
 GATEWAY_DEPLOY_STAGE="host_restart_script_install"
 export GATEWAY_DEPLOY_STAGE
 install_successful_restart_script
 
-GATEWAY_DEPLOY_STAGE="miner_maintenance_runtime_verify"
-export GATEWAY_DEPLOY_STAGE
-echo "Revalidating exact-candidate miner maintenance state against the live runtime"
-if ! PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
-    -m gateway.tee.gateway_miner_maintenance_restart_v1 \
-    --verify-runtime \
-    --expected-commit "$GATEWAY_DEPLOY_SHA" \
-    --repo-root "$LEADPOET_REPO_ROOT" \
-    --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST"; then
-  stop_failed_miner_maintenance_runtime
-  exit 1
-fi
 GATEWAY_DEPLOY_STAGE="lab_arena_claim_guard_release"
 export GATEWAY_DEPLOY_STAGE
 if ! run_lab_arena_restart_guard "$LEADPOET_REPO_ROOT" release \
@@ -3395,12 +2463,6 @@ LAB_ARENA_RESTART_GUARD_GENERATION=""
 GATEWAY_DEPLOY_STAGE="completed"
 export GATEWAY_DEPLOY_STAGE
 finalize_deployment_record succeeded "$GATEWAY_DEPLOY_STAGE" >/dev/null
-if [ -n "${GATEWAY_MINER_MAINTENANCE_PROOF_FD:-}" ]; then
-  exec 190>&- 191>&- 192>&- 193>&- 194>&- 195>&-
-  unset GATEWAY_MINER_MAINTENANCE_PROOF_FD
-  unset GATEWAY_HOST_MEMORY_GUARD_PATH
-  unset GATEWAY_CONTROLLER_PROCESS_HELPER LAB_ARENA_PROCESS_HELPER
-fi
 GATEWAY_DEPLOY_COMPLETED=1
 rm -f "$GATEWAY_DEPLOY_PLAN_FILE" || true
 record_gateway_restart_timing "completed" "passed"

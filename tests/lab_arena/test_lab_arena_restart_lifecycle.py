@@ -112,16 +112,13 @@ def test_arena_service_loads_only_scoped_json_values(tmp_path, monkeypatch) -> N
 def test_arena_service_rejects_invalid_scoped_values_before_restore(
     tmp_path, monkeypatch, document
 ) -> None:
-    from gateway.tee.prepare_gateway_envelopes_v2 import (
-        GatewayEnvelopePreparationV2Error,
-    )
     from scripts import run_lab_arena_service
 
     environment = tmp_path / "gateway.env"
     environment.write_text(document, encoding="utf-8")
     monkeypatch.delenv("LAB_ARENA_MODE", raising=False)
 
-    with pytest.raises(GatewayEnvelopePreparationV2Error):
+    with pytest.raises(ValueError):
         run_lab_arena_service.load_scoped_environment(environment)
 
     assert "LAB_ARENA_MODE" not in os.environ

@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Mapping
 
 PROXY_NAME = re.compile(
-    r"(?:LAB_ARENA_WEBSHARE_PROXY|QUALIFICATION_WEBSHARE_PROXY|WEBSHARE_PROXY|"
-    r"RESEARCH_LAB_V2_SCORING_HTTPS_PROXY)_[1-9][0-9]*\Z"
+    r"(?:LAB_ARENA_WEBSHARE_PROXY|QUALIFICATION_WEBSHARE_PROXY)_"
+    r"[1-9][0-9]*\Z"
 )
 
 

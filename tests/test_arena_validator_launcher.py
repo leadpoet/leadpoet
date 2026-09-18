@@ -53,8 +53,8 @@ def test_snapshot_imports_only_canonical_proxy_entries(tmp_path, capsys):
     proxy_env.write_text(
         "\n".join(
             (
-                f"QUALIFICATION_WEBSHARE_PROXY_2={shlex.quote(first_proxy)}",
-                f"QUALIFICATION_WEBSHARE_PROXY_9={shlex.quote(second_proxy)}",
+                f"LAB_ARENA_WEBSHARE_PROXY_2={shlex.quote(first_proxy)}",
+                f"LAB_ARENA_WEBSHARE_PROXY_9={shlex.quote(second_proxy)}",
                 "OPENROUTER_API_KEY=unrelated-provider-secret",
                 "BT_WALLET_COLDKEY=unrelated-wallet-secret",
                 "",
@@ -76,7 +76,6 @@ def test_snapshot_imports_only_canonical_proxy_entries(tmp_path, capsys):
 
     generated = destination.read_text()
     assert "LAB_ARENA_PROXY_ENV_FILE" not in generated
-    assert "QUALIFICATION_WEBSHARE_PROXY" not in generated
     assert "OPENROUTER_API_KEY" not in generated
     assert "unrelated-provider-secret" not in generated
     assert "BT_WALLET_COLDKEY" not in generated
@@ -106,7 +105,7 @@ def test_snapshot_rejects_nonprivate_secondary_without_creating_output(
 ):
     proxy_env = tmp_path / "validator.env"
     proxy_env.write_text(
-        "QUALIFICATION_WEBSHARE_PROXY_1=https://user:private-value@proxy.example:443\n"
+        "LAB_ARENA_WEBSHARE_PROXY_1=https://user:private-value@proxy.example:443\n"
     )
     proxy_env.chmod(0o644)
     source = _env(

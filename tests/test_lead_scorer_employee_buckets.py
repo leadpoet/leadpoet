@@ -17,7 +17,7 @@ from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MISMATCH,
     COMPANY_FIT_UNAVAILABLE,
 )
-from research_lab.employee_buckets import (
+from qualification.employee_buckets import (
     LINKEDIN_EMPLOYEE_BUCKETS,
     normalize_observed_employee_count_bucket,
 )

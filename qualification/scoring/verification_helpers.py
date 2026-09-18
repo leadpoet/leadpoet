@@ -26,8 +26,7 @@ Note: ScrapingDog handles its own proxy rotation internally.
 No external proxies (like Webshare) are needed for benchmarks.
 
 CRITICAL: This is NEW intent verification logic for qualification only.
-Do NOT modify any existing verification code in validator_models/ or
-lead verification scripts.
+Do not modify the current Arena verification contract through this helper.
 """
 
 import os

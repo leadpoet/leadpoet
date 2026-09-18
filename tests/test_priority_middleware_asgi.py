@@ -49,11 +49,8 @@ class _Collector:
 
 
 def test_classify_path_routes_active_endpoints():
-    assert classify_path("/weights/submit/v2") == "validator"
     assert classify_path("/epoch/24123") == "validator"
-    assert classify_path("/fulfillment/requests/active") == "other"
-    assert classify_path("/research-lab/source-adapters") == "other"
-    assert classify_path("/research-lab/source-adapters/status") == "other"
+    assert classify_path("/arena/v1/submissions/example") == "miner"
     assert classify_path("/anything-else") == "other"
 
 
@@ -64,7 +61,7 @@ def test_http_request_passes_through_and_releases_slot():
 
     mw = PriorityMiddleware(app)
     send = _Collector()
-    asyncio.run(mw(_http_scope("/weights/submit/v2"), _receive, send))
+    asyncio.run(mw(_http_scope("/epoch/state"), _receive, send))
 
     assert send.status == 200
     # The validator slot must be fully released after a normal response.
@@ -79,7 +76,7 @@ def test_downstream_exception_releases_slot_and_propagates():
     mw = PriorityMiddleware(app)
     send = _Collector()
     with pytest.raises(RuntimeError, match="endpoint failed"):
-        asyncio.run(mw(_http_scope("/weights/submit/v2"), _receive, send))
+        asyncio.run(mw(_http_scope("/epoch/state"), _receive, send))
 
     assert mw.pools["validator"].in_flight == 0  # released despite the raise
 
@@ -123,7 +120,7 @@ def test_no_slot_leak_under_repeated_exceptions():
     async def drive():
         for _ in range(50):
             with pytest.raises(RuntimeError):
-                await mw(_http_scope("/weights/submit/v2"), _receive, _Collector())
+                await mw(_http_scope("/epoch/state"), _receive, _Collector())
 
     asyncio.run(drive())
     # 50 failing requests must leave zero in-flight and full capacity.
@@ -202,13 +199,13 @@ def test_integration_in_real_starlette_stack():
     async def boom(request):
         raise RuntimeError("kaboom")
 
-    app = Starlette(routes=[Route("/validate", ok), Route("/boom", boom)])
+    app = Starlette(routes=[Route("/health", ok), Route("/boom", boom)])
     app.add_middleware(PriorityMiddleware, max_concurrent_miners=75)
 
     client = TestClient(app, raise_server_exceptions=False)
-    assert client.get("/validate").status_code == 200
+    assert client.get("/health").status_code == 200
     # An unhandled endpoint error becomes a clean 500 via ServerErrorMiddleware,
     # never a masked deque error, and the slot is released.
     assert client.get("/boom").status_code == 500
     # Subsequent requests still succeed (no slot leak from the error above).
-    assert client.get("/validate").status_code == 200
+    assert client.get("/health").status_code == 200

@@ -44,68 +44,52 @@ def test_current_channel_contains_only_gateway_authority():
  bad=copy.deepcopy(channel); bad["validator_release_manifest"]={}
  with pytest.raises(ReleaseChannelV2Error,match="fields"): validate_release_channel_v2(bad)
 
-def test_historical_validator_field_is_hash_covered_but_not_authority():
- gateway=_manifest(); body={"schema_version":"leadpoet.attested_release_channel.v2","commit_sha":COMMIT,"gateway_release_manifest":gateway,"validator_release_manifest":{"opaque":"historical"}}
- old={**body,"channel_hash":sha256_json(body)}
- assert validate_prior_release_channel_v2(old)["validator_release_manifest"]=={"opaque":"historical"}
- tampered=copy.deepcopy(old); tampered["validator_release_manifest"]["opaque"]="changed"
- with pytest.raises(ReleaseChannelV2Error,match="hash"): validate_prior_release_channel_v2(tampered)
+def test_prior_channel_accepts_v3_only_and_rejects_validator_payload():
+ channel=build_release_channel_v2(gateway_release_manifest=_manifest())
+ assert validate_prior_release_channel_v2(channel)==channel
+ old=copy.deepcopy(channel); old["validator_release_manifest"]={"opaque":"retired"}
+ with pytest.raises(ReleaseChannelV2Error,match="fields"):
+  validate_prior_release_channel_v2(old)
 
 
-def _retired_validator_lineage():
+def _installed_two_role_lineage():
  current = build_release_channel_v2(gateway_release_manifest=_manifest("1" * 40))
  historical = build_release_channel_v2(gateway_release_manifest=_manifest("2" * 40))
  lineage = build_release_lineage_v2(
   [current, historical], current_commit="1" * 40
  )
- for commit, release in lineage["releases"].items():
+ for release in lineage["releases"].values():
   template = next(iter(release["roles"].values()))
-  release["roles"]["validator_weights"] = dict(template)
-  if commit == "2" * 40:
-   release["roles"]["gateway_autoresearch"] = dict(template)
+  release["roles"]["gateway_scoring"] = {
+   **template,
+   "pcr0": "e" * 96,
+   "build_manifest_hash": _hash("e"),
+  }
  body = {key: value for key, value in lineage.items() if key != "lineage_hash"}
  return {**body, "lineage_hash": sha256_json(body)}
 
 
-def test_installed_prior_lineage_discards_retired_physical_roles():
- prior = _retired_validator_lineage()
- projected = release_channel_v2._project_installed_prior_release_lineage_v2(
-  prior
- )
- assert set(projected["releases"]["1" * 40]["roles"]) == set(ROLE_SPECS)
- assert set(projected["releases"]["2" * 40]["roles"]) == set(ROLE_SPECS)
- assert projected["releases"]["1" * 40]["channel_hash"] == (
-  prior["releases"]["1" * 40]["channel_hash"]
- )
- assert release_channel_v2._project_installed_prior_release_lineage_v2(
-  projected
- ) == projected
-
-
-def test_installed_prior_lineage_discards_historical_autoresearch_only():
- prior = _retired_validator_lineage()
- for release in prior["releases"].values():
-  release["roles"].pop("validator_weights")
- body = {key: value for key, value in prior.items() if key != "lineage_hash"}
- prior["lineage_hash"] = sha256_json(body)
+def test_installed_prior_lineage_accepts_exact_two_role_history():
+ prior = _installed_two_role_lineage()
  projected = release_channel_v2._project_installed_prior_release_lineage_v2(
   prior
  )
  assert all(
-  set(release["roles"]) == set(ROLE_SPECS)
+  set(release["roles"]) == {"gateway_coordinator", "gateway_scoring"}
   for release in projected["releases"].values()
  )
+ assert projected == prior
 
 
-def test_installed_prior_lineage_rejects_hash_and_retired_role_binding_drift():
- prior = _retired_validator_lineage()
+def test_installed_prior_lineage_rejects_hash_and_scoring_binding_drift():
+ prior = _installed_two_role_lineage()
  with pytest.raises(ReleaseLineageV2Error, match="hash differs"):
   release_channel_v2._project_installed_prior_release_lineage_v2(
    {**prior, "lineage_hash": _hash("9")}
   )
 
  drifted = copy.deepcopy(prior)
- drifted["releases"]["2" * 40]["roles"]["validator_weights"][
+ drifted["releases"]["2" * 40]["roles"]["gateway_scoring"][
   "commit_sha"
  ] = "3" * 40
  body = {key: value for key, value in drifted.items() if key != "lineage_hash"}
@@ -121,7 +105,7 @@ def test_fetch_retains_projected_installed_ancestors_for_generic_boot_proof(
  gateway_path = tmp_path / "gateway.json"
  gateway_path.write_text(json.dumps(_manifest(current_commit)))
  prior_path = tmp_path / "lineage.json"
- prior_path.write_text(json.dumps(_retired_validator_lineage()))
+ prior_path.write_text(json.dumps(_installed_two_role_lineage()))
  monkeypatch.setenv("LEADPOET_LOCAL_RELEASE_COMMIT_SHA", current_commit)
  monkeypatch.setenv("LEADPOET_LOCAL_GATEWAY_RELEASE", str(gateway_path))
  monkeypatch.setenv("LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE", str(prior_path))
@@ -136,8 +120,11 @@ def test_fetch_retains_projected_installed_ancestors_for_generic_boot_proof(
  assert set(lineage["releases"]) == {
   current_commit, "1" * 40, "2" * 40
  }
- assert all(set(item["roles"]) == set(ROLE_SPECS)
-            for item in lineage["releases"].values())
+ assert set(lineage["releases"][current_commit]["roles"]) == set(ROLE_SPECS)
+ for commit in ("1" * 40, "2" * 40):
+  assert set(lineage["releases"][commit]["roles"]) == {
+   "gateway_coordinator", "gateway_scoring"
+  }
  prior_role = lineage["releases"]["2" * 40]["roles"][
   "gateway_coordinator"
  ]
@@ -158,7 +145,7 @@ def test_fetch_rejects_installed_commit_outside_bounded_git_ancestry(
  gateway_path = tmp_path / "gateway.json"
  gateway_path.write_text(json.dumps(_manifest(current_commit)))
  prior_path = tmp_path / "lineage.json"
- prior_path.write_text(json.dumps(_retired_validator_lineage()))
+ prior_path.write_text(json.dumps(_installed_two_role_lineage()))
  monkeypatch.setenv("LEADPOET_LOCAL_RELEASE_COMMIT_SHA", current_commit)
  monkeypatch.setenv("LEADPOET_LOCAL_GATEWAY_RELEASE", str(gateway_path))
  monkeypatch.setenv("LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE", str(prior_path))

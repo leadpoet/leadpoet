@@ -92,31 +92,22 @@ def _validate_release_configuration(
         "release_roles",
         "peer_releases",
         "gateway_release_lineage",
-        "provider_ref_hashes",
-        "job_lease_slot_ref_hashes",
-        "provider_retry_policy_hashes",
-        "provider_registry_hash",
         "protected_workflow_manifest_hash",
-        "encrypted_artifact_policy",
-        "encrypted_artifact_policy_hash",
-        "artifact_master_key_ref_hash",
-        "research_lab_execution_config",
-        "research_lab_execution_config_hash",
-        "execution_worker_count",
-        "configured_worker_count",
     }
     if set(configuration) != expected_fields:
         raise RuntimeIdentityV2Error("V2 runtime release fields are incomplete")
     if configuration.get("bootstrap_schema_version") != BOOTSTRAP_SCHEMA_VERSION:
         raise RuntimeIdentityV2Error("V2 bootstrap schema is invalid")
     _validate_hash(configuration.get("release_hash"), "release_hash")
+    _validate_hash(
+        configuration.get("protected_workflow_manifest_hash"),
+        "protected_workflow_manifest_hash",
+    )
     if configuration.get("release_commit_sha") != build_identity.get("commit_sha"):
         raise RuntimeIdentityV2Error("V2 release commit differs from measured build")
     if configuration.get("own_build_identity_hash") != build_identity.get("identity_hash"):
         raise RuntimeIdentityV2Error("V2 release build identity differs from measured build")
-    from gateway.tee.release_lineage_v2 import (
-        validate_compact_release_lineage_v2,
-    )
+    from gateway.tee.release_lineage_v2 import validate_compact_release_lineage_v2
 
     try:
         validate_compact_release_lineage_v2(
@@ -125,9 +116,7 @@ def _validate_release_configuration(
             expected_current_gateway_release_hash=str(configuration["release_hash"]),
         )
     except Exception as exc:
-        raise RuntimeIdentityV2Error(
-            "V2 gateway release lineage is invalid"
-        ) from exc
+        raise RuntimeIdentityV2Error("V2 gateway release lineage is invalid") from exc
     if (
         configuration.get("protected_workflow_manifest_hash")
         != build_identity.get("protected_manifest_hash")
@@ -135,85 +124,6 @@ def _validate_release_configuration(
         raise RuntimeIdentityV2Error(
             "V2 protected workflow manifest differs from measured build"
         )
-    for field in (
-        "provider_registry_hash",
-        "protected_workflow_manifest_hash",
-        "encrypted_artifact_policy_hash",
-        "artifact_master_key_ref_hash",
-        "research_lab_execution_config_hash",
-    ):
-        _validate_hash(configuration.get(field), field)
-    from gateway.tee.research_lab_runtime_config_v2 import (
-        research_lab_execution_config_hash,
-        validate_research_lab_execution_config,
-    )
-
-    research_lab_config = configuration.get("research_lab_execution_config")
-    if not isinstance(research_lab_config, Mapping):
-        raise RuntimeIdentityV2Error(
-            "V2 Research Lab execution configuration is missing"
-        )
-    try:
-        normalized_research_lab_config = validate_research_lab_execution_config(
-            research_lab_config
-        )
-    except Exception as exc:
-        raise RuntimeIdentityV2Error(
-            "V2 Research Lab execution configuration is invalid"
-        ) from exc
-    if dict(research_lab_config) != normalized_research_lab_config:
-        raise RuntimeIdentityV2Error(
-            "V2 Research Lab execution configuration is not normalized"
-        )
-    if research_lab_execution_config_hash(normalized_research_lab_config) != (
-        configuration.get("research_lab_execution_config_hash")
-    ):
-        raise RuntimeIdentityV2Error(
-            "V2 Research Lab execution configuration hash mismatch"
-        )
-    from gateway.tee.provider_broker_v2 import provider_registry_hash
-
-    if provider_registry_hash(
-        execution_config=normalized_research_lab_config
-    ) != configuration.get("provider_registry_hash"):
-        raise RuntimeIdentityV2Error(
-            "V2 provider registry differs from Research Lab execution configuration"
-        )
-    from gateway.tee.artifact_persistence_v2 import validate_artifact_policy
-
-    artifact_policy = configuration.get("encrypted_artifact_policy")
-    if not isinstance(artifact_policy, Mapping):
-        raise RuntimeIdentityV2Error("V2 encrypted artifact policy is missing")
-    normalized_artifact_policy = validate_artifact_policy(artifact_policy)
-    if dict(artifact_policy) != normalized_artifact_policy:
-        raise RuntimeIdentityV2Error("V2 encrypted artifact policy is not normalized")
-    if sha256_json(normalized_artifact_policy) != configuration.get(
-        "encrypted_artifact_policy_hash"
-    ):
-        raise RuntimeIdentityV2Error("V2 encrypted artifact policy hash mismatch")
-    for field in (
-        "provider_ref_hashes",
-        "job_lease_slot_ref_hashes",
-        "provider_retry_policy_hashes",
-    ):
-        value = configuration.get(field)
-        if not isinstance(value, Mapping) or not value:
-            raise RuntimeIdentityV2Error("%s is incomplete" % field)
-        for name, digest in value.items():
-            if not str(name or "").strip():
-                raise RuntimeIdentityV2Error("%s contains an empty name" % field)
-            _validate_hash(digest, "%s.%s" % (field, name))
-    from gateway.tee.provider_broker_v2 import (
-        expected_job_credential_slot_ref_hashes,
-    )
-
-    if dict(configuration["job_lease_slot_ref_hashes"]) != (
-        expected_job_credential_slot_ref_hashes()
-    ):
-        raise RuntimeIdentityV2Error(
-            "V2 job credential slots differ from measured policy"
-        )
-
     release_roles = configuration.get("release_roles")
     expected_release_roles = set(ROLE_SPECS)
     if not isinstance(release_roles, Mapping) or set(release_roles) != expected_release_roles:
@@ -281,23 +191,6 @@ def _validate_release_configuration(
             expectation.get("build_manifest_hash"),
             "peer build_manifest_hash",
         )
-
-    execution_worker_count = configuration.get("execution_worker_count")
-    configured_worker_count = configuration.get("configured_worker_count")
-    if physical_role == "gateway_coordinator":
-        valid_worker_counts = (
-            execution_worker_count == 0 and configured_worker_count == 0
-        )
-    elif physical_role == "gateway_scoring":
-        valid_worker_counts = (
-            execution_worker_count == 10
-            and isinstance(configured_worker_count, int)
-            and 0 < configured_worker_count <= 500
-        )
-    else:
-        valid_worker_counts = False
-    if not valid_worker_counts:
-        raise RuntimeIdentityV2Error("V2 worker count differs from approved topology")
 
 
 def nsm_attestation_document(*, user_data: bytes, signing_pubkey: bytes) -> bytes:
@@ -550,14 +443,3 @@ class RuntimeIdentityV2:
             if self._runtime_configuration is None:
                 raise RuntimeIdentityV2Error("V2 runtime identity is not configured")
             return json.loads(canonical_json(self._runtime_configuration))
-
-
-    def apply_research_lab_behavior_environment(self) -> None:
-        from gateway.tee.research_lab_runtime_config_v2 import (
-            apply_behavior_environment,
-        )
-
-        configuration = self.runtime_configuration()["configuration"]
-        apply_behavior_environment(
-            configuration["research_lab_execution_config"]
-        )

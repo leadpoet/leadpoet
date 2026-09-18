@@ -11,7 +11,7 @@ from gateway.tasks.icp_generator import (
     STAGE_EMPLOYEE_BUCKETS,
     generate_single_icp,
 )
-from research_lab.employee_buckets import GENERATED_EMPLOYEE_BUCKETS
+from qualification.employee_buckets import GENERATED_EMPLOYEE_BUCKETS
 
 
 def test_every_stage_has_coherent_buckets():
@@ -70,7 +70,7 @@ def test_company_goal_allocation_invariants():
 
 
 def test_icp_set_pins_uniform_goal_of_five(monkeypatch):
-    monkeypatch.setenv("RESEARCH_LAB_ICP_EXCLUSIONS_ENABLED", "0")  # no live LLM in tests
+    monkeypatch.setenv("LAB_ARENA_ICP_EXCLUSIONS_ENABLED", "0")  # no live LLM in tests
     from gateway.tasks.icp_generator import generate_icp_set
     icps, _dist, _h = generate_icp_set(20260715, base_seed=42)
     goals = [icp["max_companies"] for icp in icps]

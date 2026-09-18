@@ -1,0 +1,5 @@
+# Exact gateway identity-enclave dependency set for CPython 3.9.24/x86_64.
+cbor2==5.4.6
+cffi==1.15.1
+cryptography==41.0.7
+pycparser==2.21

@@ -1,25 +1,25 @@
 """
-LeadPoet Trustless Gateway
-=========================
+LeadPoet Arena Gateway
+======================
 
-Open-source FastAPI gateway for trustless lead validation.
+FastAPI gateway for Arena proxying, epoch reads, and measured runtime identity.
 
 Endpoints:
 - GET /: Health check + build info
-- POST /presign: Generate presigned URLs for miner submission
 - GET /health: Kubernetes health check
+- GET /attestation/document: Measured Nitro runtime identity
+- /arena/*: Arena service proxy
 """
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from datetime import datetime
 from contextlib import asynccontextmanager
 import sys
 import os
 import asyncio
 
-# Add import roots for gateway package and attested Research Lab runtime deps.
+# Add import roots for the gateway package and attested enclave dependencies.
 _GATEWAY_DIR = os.path.dirname(os.path.abspath(__file__))
 _PACKAGE_PARENT = os.path.dirname(_GATEWAY_DIR)
 _ATTESTED_RUNTIME_DIR = os.path.join(_GATEWAY_DIR, "_attested_runtime")
@@ -56,7 +56,7 @@ except Exception as _sentry_exc:  # error monitoring must never break startup
 
 # Import configuration
 from gateway.build_info import get_build_info
-from gateway.config import BUILD_ID, GITHUB_COMMIT, TIMESTAMP_TOLERANCE_SECONDS
+from gateway.config import BUILD_ID, GITHUB_COMMIT
 
 _configure_sentry_context(
     component="gateway",
@@ -66,29 +66,15 @@ _configure_sentry_context(
 )
 
 # Import models
-from gateway.models.events import SubmissionRequestEvent, EventType
-from gateway.models.responses import PresignedURLResponse, HealthResponse
-
-# Import utilities
-from gateway.utils.signature import verify_wallet_signature, compute_payload_hash, construct_signed_message
-from gateway.utils.registry import is_registered_hotkey
-from gateway.utils.storage import generate_presigned_put_urls
+from gateway.models.responses import HealthResponse
 
 # Import API routers
-# NOTE: reveal router REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE means validators
-# submit hash+values in one request to /validate. No separate reveal phase needed.
-from gateway.api import epoch, attest, attestation
+from gateway.api import epoch, attestation
 from gateway.api.arena_proxy import router as arena_proxy_router
 from gateway.api.arena_proxy import testnet_router as arena_testnet_proxy_router
 from gateway.api import metrics as metrics_api
 
-# Research Lab is an authoritative V2 service. Import failures must abort
-# startup instead of silently launching a gateway without its protected path.
-
 # Import background tasks
-# NOTE: reveal_collector_task REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE means
-# validators submit hash+values in one request. No separate reveal phase to monitor.
-from gateway.tasks.hourly_batch import start_hourly_batch_task
 from gateway.tasks.icp_generator import icp_rotation_task, ensure_icp_set_exists
 
 # ============================================================
@@ -108,21 +94,19 @@ async def lifespan(app: FastAPI):
     """
     
     # ════════════════════════════════════════════════════════════════
-    # COORDINATOR-ENCLAVE EVENT SIGNER INITIALIZATION
+    # COORDINATOR-ENCLAVE IDENTITY INITIALIZATION
     # ════════════════════════════════════════════════════════════════
     print("="*80)
-    print("🔐 INITIALIZING COORDINATOR-ENCLAVE EVENT SIGNER")
+    print("INITIALIZING COORDINATOR-ENCLAVE IDENTITY")
     print("="*80)
     try:
-        from gateway.utils.logger import initialize_enclave_event_signing
+        from gateway.utils.logger import initialize_enclave_identity
 
-        event_signing_identity = await initialize_enclave_event_signing()
-        enclave_pubkey = str(event_signing_identity["enclave_pubkey"])
-        print("✅ Coordinator-enclave event signer initialized")
+        enclave_identity = await initialize_enclave_identity()
+        enclave_pubkey = str(enclave_identity["enclave_pubkey"])
+        print("Coordinator-enclave identity initialized")
         print(f"   Pubkey: {enclave_pubkey[:32]}...")
-        print("✅ Event signing ENABLED (Nitro-held key + enclave hash chain)")
-        print("✅ Receipt integrity ENABLED (canonical hashes + TEE-signed audit events)")
-        print("   No event-signing private key exists in the parent process")
+        print("Nitro attestation is available for runtime identity verification")
     except Exception as e:
         _capture_sentry_failure(
             "runtime.enclave_relay_unavailable",
@@ -137,9 +121,9 @@ async def lifespan(app: FastAPI):
                 "LEADPOET_RESTART_INVOCATION_ID"
             ),
         )
-        print(f"❌ CRITICAL ERROR initializing coordinator event signer: {e}")
-        print("   Refusing gateway startup without Nitro-backed event authority")
-        raise RuntimeError("coordinator-enclave event signer initialization failed") from e
+        print(f"CRITICAL ERROR initializing coordinator identity: {e}")
+        print("   Refusing gateway startup without Nitro-backed identity")
+        raise RuntimeError("coordinator-enclave identity initialization failed") from e
     print("="*80 + "\n")
     
     # Start the event-loop stall watchdog first, so even a hang later in
@@ -267,9 +251,6 @@ async def lifespan(app: FastAPI):
         raise
 
     # Initialize all task handles before try block to prevent NameError in finally
-    reveal_task = None
-    hourly_batch_task_handle = None
-    rate_limiter_task = None
     icp_task = None
 
     # Now use async_subtensor in a try/finally to ensure cleanup
@@ -310,66 +291,27 @@ async def lifespan(app: FastAPI):
         print("🚀 STARTING BACKGROUND TASKS")
         print("="*80)
         
-        # TODO: REMOVE THIS BEFORE PUSHING TO GITHUB/PRODUCTION
-        # This is for LOCAL TESTNET TESTING ONLY - allows qualification flow testing
-        # without needing the service_role_key for background tasks
-        skip_bg_tasks = os.getenv("DISABLE_BACKGROUND_TASKS", "false").lower() == "true"
-        
         # ════════════════════════════════════════════════════════════════
-        # ICP SET INITIALIZATION (ALWAYS runs, even with DISABLE_BACKGROUND_TASKS)
-        # This is required for qualification model evaluation to work
+        # ARENA ICP SET INITIALIZATION
+        # This private daily set is the current Arena benchmark input.
         # TESTNET GUARD: Skip on testnet to prevent writing to production
         # qualification_private_icp_sets (testnet and mainnet share same Supabase)
         # ════════════════════════════════════════════════════════════════
         from gateway.config import BITTENSOR_NETWORK
         if BITTENSOR_NETWORK == "test":
             print("⚠️  TESTNET MODE: Skipping ICP set initialization (protect production qualification_private_icp_sets)")
+            print("⚠️  TESTNET MODE: Skipping ICP rotation task")
         else:
             try:
                 await ensure_icp_set_exists()
                 print("✅ ICP set initialized (benchmark ICPs ready)")
             except Exception as e:
                 print(f"⚠️  Failed to initialize ICP set: {e}")
-                print("   Qualification model evaluation may not work!")
-        
-        if skip_bg_tasks:
-            print("⚠️  DISABLE_BACKGROUND_TASKS=true - Skipping background tasks")
-            print("   This is for LOCAL TESTING ONLY!")
-
-            # Keep the immutable audit path alive during local/testnet Research
-            # Lab testing. This does not re-enable legacy epoch, checkpoint, or ICP
-            # loops; it only drains the TEE buffer
-            # into the existing batched Arweave checkpoint flow.
-            hourly_batch_task_handle = asyncio.create_task(start_hourly_batch_task())
-            print("✅ Hourly Arweave batch task started (EXCEPTION: runs even with DISABLE_BACKGROUND_TASKS)")
-            print("   → Only drains signed TEE buffer events to Arweave checkpoints")
-
-            # ICP rotation task ALWAYS runs (even with DISABLE_BACKGROUND_TASKS)
-            # TESTNET GUARD: Skip on testnet to prevent writing to production DB
-            if BITTENSOR_NETWORK == "test":
-                print("⚠️  TESTNET MODE: Skipping ICP rotation task (protect production qualification_private_icp_sets)")
-            else:
-                icp_task = asyncio.create_task(icp_rotation_task())
-                print("✅ ICP rotation task started (EXCEPTION: runs even with DISABLE_BACKGROUND_TASKS)")
-                print("   → Only writes to: qualification_private_icp_sets")
-
-        else:
-            # Start other background tasks
-            # NOTE: reveal_collector_task REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE
-            
-            hourly_batch_task_handle = asyncio.create_task(start_hourly_batch_task())
-            print("✅ Hourly Arweave batch task started")
-            
-            from gateway.utils.rate_limiter import rate_limiter_cleanup_task
-            rate_limiter_task = asyncio.create_task(rate_limiter_cleanup_task())
-            print("✅ Rate limiter cleanup task started")
-
-            # ICP rotation task (resets daily at 12 AM ET)
-            # Note: Initial ICP set already created above (outside skip_bg_tasks check)
+                print("   Arena benchmark creation may not work!")
             icp_task = asyncio.create_task(icp_rotation_task())
-            print("✅ ICP rotation task started (resets 12 AM ET daily)")
+            print("✅ Arena ICP rotation task started")
 
-        app.state.event_signing_identity = dict(event_signing_identity)
+        app.state.enclave_identity = dict(enclave_identity)
         
         print("")
         print("🎯 ARCHITECTURE SUMMARY:")
@@ -392,14 +334,9 @@ async def lifespan(app: FastAPI):
         
         # Cancel all background tasks
         print("   🛑 Cancelling background tasks...")
-        tasks = [
-            reveal_task,
-            hourly_batch_task_handle,
-            rate_limiter_task,
-            icp_task,
-        ]
+        tasks = [icp_task]
         
-        # Filter out None tasks (when DISABLE_BACKGROUND_TASKS=true)
+        # The task is absent on testnet.
         active_tasks = [t for t in tasks if t is not None]
         
         for task in active_tasks:
@@ -439,8 +376,8 @@ async def lifespan(app: FastAPI):
 # ============================================================
 
 app = FastAPI(
-    title="LeadPoet Trustless Gateway",
-    description="Open-source, reproducible gateway for lead validation",
+    title="LeadPoet Arena Gateway",
+    description="Gateway for Arena proxying, epoch reads, and runtime identity",
     version="1.0.0",
     lifespan=lifespan,  # Use lifespan context manager
     redirect_slashes=False,  # Prevent 307 redirects from consuming semaphore slots
@@ -467,10 +404,9 @@ from gateway.middleware.body_size import BodySizeLimitMiddleware
 app.add_middleware(BodySizeLimitMiddleware)
 
 # ============================================================
-# Request Priority Middleware (Validator > Miner)
+# Request Priority Middleware
 # ============================================================
-# Prioritize validator requests (/epoch/, /validate) over miner requests (/presign, /submit)
-# This prevents validators from timing out during high miner submission traffic.
+# Prioritize epoch and Arena result traffic during concurrent Arena submissions.
 # 
 # Configuration:
 # - max_concurrent_miners: Max concurrent miner requests (default: 20)
@@ -515,7 +451,6 @@ configure_gateway_otel(app)
 app.include_router(epoch.router)
 # NOTE: reveal.router REMOVED (Jan 2026) - IMMEDIATE REVEAL MODE
 # Legacy lead intake and validation are retired. Arena owns current work.
-app.include_router(attest.router)  # TEE attestation endpoint (legacy /attest)
 app.include_router(attestation.router)  # TEE attestation endpoint (/attestation/document, /attestation/pubkey)
 app.include_router(metrics_api.router)
 
@@ -569,11 +504,11 @@ async def health():
 async def v2_authority_health():
     """Fail-closed readiness for the retained live V2 enclave authority."""
     try:
-        from gateway.api.attestation import _event_signing_identity
+        from gateway.api.attestation import _runtime_identity
         from gateway.tee.verify_v2_runtime_ready import verify_v2_runtime_ready
 
         event_identity, enclave_health = await asyncio.gather(
-            _event_signing_identity(),
+            _runtime_identity(),
             verify_v2_runtime_ready(),
         )
     except Exception as exc:
@@ -604,271 +539,6 @@ async def v2_authority_health():
         },
         "enclaves": enclave_health,
     }
-
-
-# ============================================================
-# Miner Submission Flow
-# ============================================================
-
-# ============================================================
-# Open-pool sourcing is DISABLED.
-#
-# As of May 2026 miners no longer submit leads for the open marketplace.
-# POST /presign was the entry point of the sourcing flow (presign → S3
-# upload → POST /submit/).  We now return 410 Gone immediately so miner
-# clients fail loudly and operators can see the deprecation in logs.
-#
-# To re-enable later: delete the early `raise HTTPException(410, ...)`
-# below.  The full historical implementation is preserved underneath.
-# ============================================================
-
-_SOURCING_DISABLED_MESSAGE = (
-    "Open-pool lead submission is disabled. Miners can no longer submit "
-    "leads via /presign + /submit/."
-)
-
-
-@app.post("/presign", response_model=PresignedURLResponse)
-async def presign_urls(event: SubmissionRequestEvent):
-    """
-    DISABLED.  Open-pool sourcing has been turned off.  Returns 410 Gone.
-    """
-    raise HTTPException(status_code=410, detail=_SOURCING_DISABLED_MESSAGE)
-
-
-async def _presign_urls_disabled_legacy(event: SubmissionRequestEvent):
-    """
-    Legacy implementation preserved for reference only.  No route points here.
-
-    Generate presigned PUT URL for miner submission to S3.
-
-    Flow:
-    1. Verify wallet signature (MUST be first to prove identity)
-    2. Check rate limits (uses verified hotkey, blocks before expensive ops)
-    3. Verify payload hash (skip for rate-limited requests)
-    4. Check actor is registered miner
-    5. Verify nonce is fresh
-    6. Verify timestamp within tolerance
-    7. Generate presigned URL for S3
-    8. Log SUBMISSION_REQUEST to transparency log
-    9. Return S3 URL
-    
-    Args:
-        event: SubmissionRequestEvent with signature
-    
-    Returns:
-        PresignedURLResponse with S3 URL
-    
-    Raises:
-        HTTPException: 400 (bad request), 403 (forbidden), 429 (rate limited)
-    """
-    print("🔍 /presign called - START")
-    
-    # ========================================
-    # Step 1: Verify wallet signature (REQUIRED to verify identity)
-    # ========================================
-    print("🔍 Step 1: Verifying signature...")
-    message = construct_signed_message(event)
-    print(f"🔍 Message constructed for verification: {message[:150]}...")
-    print(f"🔍 Signature received: {event.signature[:64]}...")
-    print(f"🔍 Actor hotkey: {event.actor_hotkey}")
-    
-    is_valid = verify_wallet_signature(message, event.signature, event.actor_hotkey)
-    print(f"🔍 Signature valid: {is_valid}")
-    
-    if not is_valid:
-        raise HTTPException(
-            status_code=403,
-            detail="Invalid signature"
-        )
-    print("🔍 Step 1 complete: Signature verified")
-    
-    # ========================================
-    # Step 2: Check rate limits (NOW we have verified identity)
-    # ========================================
-    print("🔍 Step 2: Checking rate limits...")
-    from gateway.utils.rate_limiter import check_rate_limit
-    
-    allowed, rate_limit_message, _ = check_rate_limit(event.actor_hotkey)
-    if not allowed:
-        print(f"⚠️  Rate limit exceeded for {event.actor_hotkey[:20]}...")
-        print(f"   {rate_limit_message}")
-        raise HTTPException(
-            status_code=429,
-            detail=rate_limit_message
-        )
-    print("🔍 Step 2 complete: Rate limit OK")
-    
-    # ========================================
-    # Step 3: Verify payload hash
-    # ========================================
-    print("🔍 Step 3: Computing payload hash...")
-    computed_hash = compute_payload_hash(event.payload.model_dump())
-    if computed_hash != event.payload_hash:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Payload hash mismatch: expected {event.payload_hash[:16]}..., got {computed_hash[:16]}..."
-        )
-    print("🔍 Step 3 complete: Payload hash verified")
-    
-    # ========================================
-    # Step 4: Check actor is registered miner
-    # ========================================
-    # Run blocking Bittensor call in thread to avoid blocking event loop
-    print("🔍 Step 4: Checking registration (in thread)...")
-    try:
-        is_registered, role = await asyncio.wait_for(
-            asyncio.to_thread(is_registered_hotkey, event.actor_hotkey),
-            timeout=45.0  # 45 second timeout for metagraph query (cache refresh can be slow under load)
-        )
-        print(f"🔍 Step 4 complete: is_registered={is_registered}, role={role}")
-    except asyncio.TimeoutError:
-        print(f"❌ Metagraph query timed out after 45s for {event.actor_hotkey[:20]}...")
-        raise HTTPException(
-            status_code=504,
-            detail="Metagraph query timeout - please retry in a moment (cache warming)"
-        )
-    
-    if not is_registered:
-        raise HTTPException(
-            status_code=403,
-            detail="Hotkey not registered on subnet"
-        )
-    
-    if role != "miner":
-        raise HTTPException(
-            status_code=403,
-            detail="Only miners can submit leads"
-        )
-    
-    # ========================================
-    # Step 5: Verify nonce format and freshness
-    # ========================================
-    from gateway.utils.nonce import check_and_store_nonce_async, validate_nonce_format
-
-    print("🔍 Step 5: Verifying nonce...")
-    if not validate_nonce_format(event.nonce):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid nonce format (must be UUID v4)"
-        )
-    
-    if not await check_and_store_nonce_async(event.nonce, event.actor_hotkey):
-        raise HTTPException(
-            status_code=400,
-            detail="Nonce already used (replay attack detected)"
-        )
-    print("🔍 Step 5 complete: Nonce valid")
-    
-    # ========================================
-    # Step 6: Verify timestamp
-    # ========================================
-    print("🔍 Step 6: Verifying timestamp...")
-    try:
-        # Use timezone-aware datetime for comparison
-        from datetime import timezone as tz
-        now = datetime.now(tz.utc)
-        
-        # Make event.ts timezone-aware if it's naive
-        event_ts = event.ts if event.ts.tzinfo else event.ts.replace(tzinfo=tz.utc)
-        
-        time_diff = abs((now - event_ts).total_seconds())
-        print(f"🔍 Timestamp check: now={now.isoformat()}, event={event_ts.isoformat()}, diff={time_diff:.2f}s")
-        
-        if time_diff > TIMESTAMP_TOLERANCE_SECONDS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Timestamp out of range: {time_diff:.0f}s (max: {TIMESTAMP_TOLERANCE_SECONDS}s)"
-            )
-        print(f"🔍 Step 6 complete: Timestamp valid (diff={time_diff:.2f}s)")
-    except Exception as e:
-        print(f"❌ Timestamp verification error: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=500,
-            detail=f"Timestamp verification failed: {str(e)}"
-        )
-    
-    # ========================================
-    # Step 7: Generate presigned URLs
-    # ========================================
-    print(f"🔍 Step 7: Generating presigned URLs for lead_id={event.payload.lead_id}...")
-    print(f"   Using lead_blob_hash as S3 key: {event.payload.lead_blob_hash[:16]}...")
-    try:
-        # Use lead_blob_hash as the S3 object key (content-addressed storage)
-        urls = generate_presigned_put_urls(event.payload.lead_blob_hash)
-    except Exception as e:
-        print(f"❌ Error generating presigned URLs: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to generate presigned URLs"
-        )
-    print(f"🔍 Step 7 complete: URLs generated")
-    
-    # ========================================
-    # Step 8: Log SUBMISSION_REQUEST to TEE Buffer (CRITICAL: Hardware-Protected)
-    # ========================================
-    print("🔍 Step 8: Logging SUBMISSION_REQUEST to TEE buffer...")
-    arweave_tx_id = None  # Will be available after hourly Arweave batch
-    tee_sequence = None
-    
-    try:
-        from gateway.utils.logger import log_event
-        
-        log_entry = {
-            "event_type": event.event_type.value,  # Convert enum to string
-            "actor_hotkey": event.actor_hotkey,
-            "nonce": event.nonce,
-            "ts": event.ts.isoformat(),
-            "payload_hash": event.payload_hash,
-            "build_id": event.build_id,
-            "signature": event.signature,
-            "payload": event.payload.model_dump()
-        }
-        
-        # Write to TEE buffer (authoritative, hardware-protected)
-        # TEE will batch to Arweave hourly
-        result = await log_event(log_entry)
-        
-        tee_sequence = result.get("sequence")
-        buffer_size = result.get("buffer_size", 0)
-        
-        print(f"✅ Step 7 complete: SUBMISSION_REQUEST buffered in TEE")
-        print(f"   TEE sequence: {tee_sequence}")
-        print(f"   Buffer size: {buffer_size} events")
-        print(f"   ⏰ Will batch to Arweave in next hourly checkpoint")
-    
-    except Exception as e:
-        # CRITICAL: If TEE buffer write fails, request MUST fail
-        # This prevents censorship (cannot accept event and then drop it)
-        print(f"❌ Error logging to TEE buffer: {e}")
-        import traceback
-        traceback.print_exc()
-        print(f"🚨 CRITICAL: TEE buffer unavailable - failing request")
-        print(f"   Operator: Check TEE enclave health: sudo nitro-cli describe-enclaves")
-        raise HTTPException(
-            status_code=503,
-            detail=f"TEE buffer unavailable: {str(e)}. Gateway cannot accept events."
-        )
-    
-    # ========================================
-    # Step 9: Return presigned URL + Acknowledgment
-    # ========================================
-    # NOTE (Phase 4): TEE-based trust model
-    # - Event is buffered in TEE (hardware-protected, sequence={tee_sequence})
-    # - Will be included in next hourly Arweave checkpoint (signed by TEE)
-    # - Verify gateway code integrity: GET /attest
-    request_timestamp = datetime.now(tz.utc).isoformat()
-    
-    print("✅ /presign SUCCESS - returning S3 presigned URL")
-    return PresignedURLResponse(
-        lead_id=event.payload.lead_id,
-        presigned_url=urls["s3_url"],  # Miner uploads to S3
-        s3_url=urls["s3_url"],  # Alias for backward compatibility
-        expires_in=urls["expires_in"],
-        timestamp=request_timestamp  # ISO 8601 timestamp
-    )
 
 
 # ============================================================

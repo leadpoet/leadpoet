@@ -349,10 +349,6 @@ then `scripts/205-lab-arena-optional-scrapingdog-credential.sql` and
 `scripts/206-lab-arena-combined-provider-budget.sql`
 before service startup. Then check the service wiring:
 
-`scripts/191-lab-arena-upload-recovery.sql` remains byte-identical only because
-an earlier production snapshot records that applied path. Do not apply it to a
-new database. Migration 193 is the current forward upload-recovery migration.
-
 ```bash
 python3 scripts/run_lab_arena_service.py --check-only
 ```
@@ -458,7 +454,7 @@ python3 scripts/run_lab_arena_runner.py
 
 ## Miner flow
 
-Choose **Submit Model** in `neurons/miner.py`. It reads the local source
+Run `python scripts/lab_arena_miner.py interactive`. It reads the local source
 directory and the miner's OpenRouter API key, OpenRouter management key, and
 Deepline API key from environment variables or masked prompts. It also accepts
 an optional Scrapingdog key from `SCRAPINGDOG_API_KEY` or a masked prompt. It

@@ -45,14 +45,10 @@ def build_parser() -> argparse.ArgumentParser:
 def load_scoped_environment(path: Path) -> None:
     """Load only Arena-owned values without restoring gateway provider aliases."""
 
-    from gateway.tee.prepare_gateway_envelopes_v2 import (
-        GatewayEnvelopePreparationV2Error,
-    )
-
     try:
         raw = Path(path).read_text(encoding="utf-8")
     except OSError as exc:
-        raise GatewayEnvelopePreparationV2Error(
+        raise ValueError(
             "gateway source environment is unavailable"
         ) from exc
     try:
@@ -61,7 +57,7 @@ def load_scoped_environment(path: Path) -> None:
         parsed = None
     if parsed is not None:
         if not isinstance(parsed, dict):
-            raise GatewayEnvelopePreparationV2Error(
+            raise ValueError(
                 "gateway source environment JSON must be an object"
             )
         scoped = {
@@ -82,22 +78,22 @@ def load_scoped_environment(path: Path) -> None:
             if not separator or not name.startswith("LAB_ARENA_"):
                 continue
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
-                raise GatewayEnvelopePreparationV2Error(
+                raise ValueError(
                     "gateway Arena environment key is malformed"
                 )
             try:
                 parts = shlex.split("VALUE=" + raw_value, comments=True, posix=True)
             except ValueError as exc:
-                raise GatewayEnvelopePreparationV2Error(
+                raise ValueError(
                     "gateway Arena environment value is malformed"
                 ) from exc
             if len(parts) != 1 or not parts[0].startswith("VALUE="):
-                raise GatewayEnvelopePreparationV2Error(
+                raise ValueError(
                     "gateway Arena environment value is malformed"
                 )
             value = parts[0].split("=", 1)[1]
             if name in scoped and scoped[name] != value:
-                raise GatewayEnvelopePreparationV2Error(
+                raise ValueError(
                     "gateway Arena environment key is duplicated"
                 )
             scoped[name] = value

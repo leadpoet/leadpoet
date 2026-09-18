@@ -60,6 +60,10 @@ def test_gateway_cannot_start_or_register_the_retired_lead_pipeline():
     assert "submit.router" not in routers
     assert "manifest.router" not in routers
     assert not any(isinstance(node, ast.Name) and node.id == "EpochMonitor" for node in ast.walk(tree))
+    source = (ROOT / "gateway/main.py").read_text()
+    assert '"/presign"' not in source
+    assert "attest.router" not in source
+    assert "attestation.router" in source
 
 
 def test_gateway_does_not_start_retired_relational_audit_jobs():

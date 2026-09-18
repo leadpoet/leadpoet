@@ -44,9 +44,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Every production runtime (gateway host, validator host, containers)
-        # now runs Python 3.11; the sealed validator enclave stays on its
-        # measured 3.7 image and is guarded by the AST annotation test.
         python-version: ["3.11"]
 
     steps:
@@ -81,13 +78,9 @@ jobs:
           python -m compileall -q \
             Leadpoet \
             gateway \
-            leadpoet_audit \
             leadpoet_canonical \
             leadpoet_verifier \
-            miner_models \
-            qualification \
-            research_lab \
-            validator_models
+            qualification
 
       - name: Verify native Codex protocol and broker boundaries
         run: |
@@ -97,30 +90,6 @@ jobs:
               tests/lab_arena/codex_runtime_test.py \
               tests/lab_arena/codex_protocol_validation_test.py \
               tests/lab_arena/codex_runtime_limits_test.py
-
-      - name: Exercise Arena signer under Python 3.7
-        run: |
-          python validator_tee/scripts/stage_runtime_artifacts_v2.py \
-            --lock tests/validator_enclave_python37_artifacts.lock.json \
-            --output-dir "$RUNNER_TEMP/validator-runtime-artifacts" \
-            --allow-download
-          docker run --rm \
-            --platform linux/amd64 \
-            --network none \
-            --cpus 1 \
-            --memory 512m \
-            --pids-limit 128 \
-            --security-opt no-new-privileges \
-            --mount "type=bind,src=$PWD,dst=/source,readonly" \
-            --mount "type=bind,src=$RUNNER_TEMP/validator-runtime-artifacts,dst=/runtime-artifacts,readonly" \
-            --env PYTHONPATH=/source \
-            --workdir /source \
-            python@sha256:b53f496ca43e5af6994f8e316cf03af31050bf7944e0e4a308ad86c001cf028b \
-            sh -eu -c 'python -m pip install --no-index --no-deps \
-              /runtime-artifacts/pycparser-2.21-py2.py3-none-any.whl \
-              /runtime-artifacts/cffi-1.15.1-cp37-cp37m-manylinux_2_17_x86_64.manylinux2014_x86_64.whl \
-              /runtime-artifacts/cryptography-45.0.7-cp37-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl \
-              >/dev/null && python tests/validator_enclave_python37_runtime_probe.py'
 
       - name: Ensure PostgreSQL server binaries (migration integration test)
         run: |
@@ -143,8 +112,6 @@ jobs:
             --cov=leadpoet_canonical \
             --cov=leadpoet_verifier \
             --cov=qualification \
-            --cov=research_lab \
-            --cov=validator_models \
             --cov-report=term-missing \
             --cov-report=xml
 

@@ -17,19 +17,8 @@ class TopologyHealthError(RuntimeError):
     """A role is unavailable or reports an unexpected measured identity."""
 
 
-_REQUIRED_TRANSPORT_HEALTH_SCHEMAS_BY_ROLE = {
-    role: {
-        "parent_rpc_transport": (
-            "leadpoet.gateway_vsock_rpc_transport_health.v2"
-        ),
-        "inter_enclave_transport": (
-            "leadpoet.inter_enclave_role_transport_health.v2"
-        ),
-    }
-    for role in ROLE_SPECS
-}
-_INTER_ENCLAVE_CHILD_TRANSPORT_HEALTH_SCHEMA = (
-    "leadpoet.inter_enclave_transport_health.v2"
+_PARENT_RPC_TRANSPORT_HEALTH_SCHEMA = (
+    "leadpoet.gateway_vsock_rpc_transport_health.v2"
 )
 _V2_RUNTIME_CONFIG_SCHEMA = "leadpoet.enclave_runtime_config.v2"
 
@@ -50,13 +39,6 @@ async def verify_roles(
         if role not in ROLE_SPECS:
             raise TopologyHealthError("unknown topology role %s" % role)
         spec = ROLE_SPECS[role]
-        required_transport_health = (
-            _REQUIRED_TRANSPORT_HEALTH_SCHEMAS_BY_ROLE.get(role)
-        )
-        if not required_transport_health:
-            raise TopologyHealthError(
-                "%s transport health applicability is undefined" % role
-            )
         health = await TEEClient(cid=int(spec["cid"])).role_health()
         if not isinstance(health, dict) or health.get("status") != "healthy":
             raise TopologyHealthError("%s role health failed" % role)
@@ -71,51 +53,16 @@ async def verify_roles(
                 raise TopologyHealthError(
                     "%s pre-bootstrap V2 runtime state is not pristine" % role
                 )
-        for transport_name, expected_schema in (
-            required_transport_health.items()
+        transport_health = health.get("parent_rpc_transport")
+        if (
+            not isinstance(transport_health, dict)
+            or transport_health.get("schema_version")
+            != _PARENT_RPC_TRANSPORT_HEALTH_SCHEMA
+            or transport_health.get("status") != "healthy"
         ):
-            transport_health = health.get(transport_name)
-            if (
-                prebootstrap_launch_readiness
-                and transport_name == "inter_enclave_transport"
-            ):
-                # Before the parent relay and V2 bootstrap exist, the enclave
-                # projects the two absent TLS endpoints through the aggregate
-                # error status.  Accept only that exact pristine shape: any
-                # initialized, failed, or retained-cleanup state remains fatal.
-                expected_transport = {
-                    "schema_version": expected_schema,
-                    "status": "error",
-                    "server": {"status": "unavailable"},
-                    "client": {"status": "unavailable"},
-                }
-                if transport_health != expected_transport:
-                    raise TopologyHealthError(
-                        "%s pre-bootstrap inter_enclave_transport state is not pristine"
-                        % role
-                    )
-                continue
-            if (
-                not isinstance(transport_health, dict)
-                or transport_health.get("schema_version") != expected_schema
-                or transport_health.get("status") != "healthy"
-            ):
-                raise TopologyHealthError(
-                    "%s %s health failed" % (role, transport_name)
-                )
-            if transport_name == "inter_enclave_transport":
-                for child_name in ("server", "client"):
-                    child_health = transport_health.get(child_name)
-                    if (
-                        not isinstance(child_health, dict)
-                        or child_health.get("schema_version")
-                        != _INTER_ENCLAVE_CHILD_TRANSPORT_HEALTH_SCHEMA
-                        or child_health.get("status") != "healthy"
-                    ):
-                        raise TopologyHealthError(
-                            "%s inter_enclave_transport %s health failed"
-                            % (role, child_name)
-                        )
+            raise TopologyHealthError(
+                "%s parent_rpc_transport health failed" % role
+            )
         if health.get("role") != role:
             raise TopologyHealthError("%s reported role %s" % (role, health.get("role")))
         if health.get("service_role") != spec["service_role"]:
@@ -152,8 +99,6 @@ async def verify_roles(
     commits = {item["commit_sha"] for item in results}
     if len(commits) != 1:
         raise TopologyHealthError("gateway enclave roles run different commits")
-    if len({item["build_identity_hash"] for item in results}) != len(results):
-        raise TopologyHealthError("physical role build identities are not unique")
     return results
 
 
@@ -165,8 +110,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--prebootstrap-launch-readiness",
         action="store_true",
         help=(
-            "verify measured role identity before the V2 runtime and "
-            "inter-enclave transport are configured"
+            "verify measured role identity before the V2 runtime is configured"
         ),
     )
     args = parser.parse_args(argv)

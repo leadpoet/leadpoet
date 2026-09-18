@@ -9,7 +9,7 @@ full contract.
 | attribute | example |
 |---|---|
 | `http.request.method` | `GET` |
-| `http.route` | `/research-lab/allocations/attested/{epoch}` (route *template* — never the concrete path) |
+| `http.route` | `/arena/v1/chain-outcomes/{epoch}` (route *template* — never the concrete path) |
 | `http.response.status_code` | `200` |
 | `duration_ms` | `12.4` |
 

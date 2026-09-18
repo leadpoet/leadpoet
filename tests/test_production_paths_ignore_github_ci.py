@@ -42,7 +42,6 @@ def test_gateway_current_release_path_does_not_consult_github_ci() -> None:
             "gw_restart.sh",
             "scripts/gateway_git_deploy.py",
             "gateway/tee/build_local_release_v2.sh",
-            "gateway/tee/prepare_offline_artifacts_v2.sh",
             "gateway/tee/local_release_v2.py",
             "gateway/tee/release_channel_v2.py",
             "gateway/tee/restart_preflight_v2.py",
@@ -89,7 +88,7 @@ def test_normal_validator_restart_does_not_consult_github_ci() -> None:
         (
             "validator_restart.sh",
             "scripts/run_arena_validator.py",
-            "neurons/validator.py",
+            "lab_arena/validator.py",
         )
     )
 
@@ -100,8 +99,6 @@ def test_rebenchmark_runtime_does_not_consult_github_ci() -> None:
     _assert_no_github_ci_gate(
         (
             "scripts/run_lab_arena_service.py",
-            "scripts/arena_sep17_baseline_recovery.py",
-            "scripts/arena_sep17_baseline_recovery283.py",
             "lab_arena",
         )
     )

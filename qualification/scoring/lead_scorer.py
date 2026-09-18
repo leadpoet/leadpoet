@@ -5401,13 +5401,11 @@ def detect_structural_similarity(leads: List[LeadOutput], threshold: float = 0.7
 # Batch Scoring + Summary  (lead-mode only — REMOVED May 2026)
 # =============================================================================
 #
-# ``score_leads_batch`` (which orchestrated DB row equality verification
-# via ``verify_leads_batch`` from ``qualification/scoring/db_verification.py``
-# and then per-lead ``score_lead`` calls) and ``summarize_scores`` were
-# part of the old leads-with-contacts pipeline.  Both have been removed
+# ``score_leads_batch`` and ``summarize_scores`` were part of the old
+# leads-with-contacts pipeline. Both have been removed
 # in the company-mode cutover; the validator now loops over
 # ``CompanyOutput`` instances directly and calls ``score_company`` per
-# row (see ``neurons/validator.py::process_qualification_models``).
+# row.
 # Per-batch structural-similarity detection still lives in
 # ``detect_structural_similarity`` above and is invoked by the
 # validator before per-row scoring.

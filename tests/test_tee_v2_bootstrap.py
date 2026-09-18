@@ -2,19 +2,13 @@ import base64
 
 import pytest
 
-from gateway.tee.provider_broker_v2 import (
-    measured_retry_policy_hashes,
-    provider_registry_hash,
-)
 from gateway.tee.release_manifest_v2 import (
     BUILD_EVIDENCE_SCHEMA_VERSION,
     build_release_manifest,
 )
 from gateway.tee.topology import ROLE_SPECS, topology_hash
-from gateway.tee.research_lab_runtime_config_v2 import (
-    build_research_lab_execution_config,
-)
 from gateway.utils.tee_v2_bootstrap import (
+    COORDINATOR_ROLE,
     TEEV2BootstrapError,
     bootstrap_gateway_enclaves_v2,
     runtime_configuration_documents,
@@ -24,7 +18,6 @@ from leadpoet_canonical.attested_v2 import (
     create_boot_identity,
     sha256_json,
 )
-from tests.v2_epoch_test_utils import epoch_test_environment
 
 
 def _hash(character):
@@ -95,7 +88,6 @@ class _Client:
         self.role = role
         self.release = release
         self.config_hash = None
-        self.registered = []
 
     async def v2_configure_runtime(self, *, configuration, configuration_hash):
         self.config_hash = configuration_hash
@@ -123,56 +115,19 @@ class _Client:
             attestation_document_b64=base64.b64encode(b"attestation").decode(),
         )
 
-    async def v2_get_transport_certificate(self):
-        return ("certificate-" + self.role).encode()
-
-    async def v2_register_peer(self, *, boot_identity, certificate_pem):
-        self.registered.append(boot_identity["physical_role"])
-        return {"physical_role": boot_identity["physical_role"]}
-
-    async def v2_start_tls_service(self):
-        return {"status": "running"}
-
-    async def v2_call_peer_health(self, role):
-        return {"status": "healthy", "role": role}
-
-
 def _documents(release):
     protected_hash = _hash("5")
     return runtime_configuration_documents(
         release_manifest=release,
         gateway_release_lineage=_lineage(release),
-        provider_ref_hashes={
-            "openrouter": _hash("1"),
-            "exa": _hash("2"),
-            "scrapingdog": _hash("3"),
-            "deepline": _hash("4"),
-            "supabase_service_role": _hash("7"),
-            "truelist": _hash("8"),
-        },
-        provider_retry_policy_hashes=measured_retry_policy_hashes(protected_hash),
-        provider_registry_hash=provider_registry_hash(),
         protected_workflow_manifest_hash=protected_hash,
-        encrypted_artifact_policy={
-            "schema_version": "leadpoet.encrypted_artifact_policy.v2",
-            "bucket_host": "immutable.example.s3.us-east-1.amazonaws.com",
-            "key_prefix": "/attested-v2/artifacts/",
-            "minimum_retention_days": 365,
-        },
-        artifact_master_key_ref_hash=_hash("6"),
-        research_lab_execution_config=build_research_lab_execution_config(
-            environment=epoch_test_environment()
-        ),
-        configured_worker_counts={
-            "gateway_scoring": 25,
-        },
     )
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_configures_and_checks_all_tls_directions():
+async def test_bootstrap_configures_and_checks_coordinator_identity():
     release = _release()
-    clients = {role: _Client(role, release) for role in ROLE_SPECS}
+    clients = {COORDINATOR_ROLE: _Client(COORDINATOR_ROLE, release)}
     result = await bootstrap_gateway_enclaves_v2(
         release_manifest=release,
         runtime_documents=_documents(release),
@@ -181,56 +136,48 @@ async def test_bootstrap_configures_and_checks_all_tls_directions():
     )
     assert result["status"] == "ready"
     assert result["release_hash"] == release["release_hash"]
-    assert len(result["channels"]) == 2
-    assert sorted(clients["gateway_coordinator"].registered) == sorted(
-        role for role in ROLE_SPECS if role != "gateway_coordinator"
-    )
-    for role in ROLE_SPECS:
-        if role != "gateway_coordinator":
-            assert clients[role].registered == ["gateway_coordinator"]
+    assert set(result["boot_identity_hashes"]) == {COORDINATOR_ROLE}
 
 
-def test_runtime_documents_bind_release_and_preserve_scoring_pool():
+def test_runtime_documents_contain_only_measured_identity_configuration():
     release = _release()
     documents = _documents(release)
-    assert documents["gateway_scoring"]["configuration"]["execution_worker_count"] == 10
-    assert documents["gateway_scoring"]["configuration"]["configured_worker_count"] == 25
-    if "gateway_autoresearch" in ROLE_SPECS:
-        assert documents["gateway_autoresearch"]["configuration"][
-            "execution_worker_count"
-        ] == 0
-        assert documents["gateway_autoresearch"]["configuration"][
-            "configured_worker_count"
-        ] == 0
-    assert documents["gateway_coordinator"]["configuration"]["execution_worker_count"] == 0
-    assert documents["gateway_coordinator"]["configuration"]["configured_worker_count"] == 0
+    expected_fields = {
+        "bootstrap_schema_version",
+        "release_hash",
+        "release_commit_sha",
+        "own_build_identity_hash",
+        "release_roles",
+        "peer_releases",
+        "gateway_release_lineage",
+        "protected_workflow_manifest_hash",
+    }
+    assert all(
+        set(document["configuration"]) == expected_fields
+        for document in documents.values()
+    )
     assert all(
         document["configuration"]["release_hash"] == release["release_hash"]
         for document in documents.values()
     )
-    assert all(
-        set(document["configuration"]["release_roles"]) == set(ROLE_SPECS)
-        for document in documents.values()
-    )
-    config_hashes = {
-        document["configuration"]["research_lab_execution_config_hash"]
-        for document in documents.values()
-    }
-    assert len(config_hashes) == 1
+    assert set(documents) == {COORDINATOR_ROLE}
+    configuration = documents[COORDINATOR_ROLE]["configuration"]
+    assert set(configuration["release_roles"]) == {COORDINATOR_ROLE}
+    assert configuration["peer_releases"] == {}
 
 
 @pytest.mark.asyncio
 async def test_bootstrap_rejects_boot_commit_not_in_release():
     release = _release()
-    clients = {role: _Client(role, release) for role in ROLE_SPECS}
-    original = clients["gateway_scoring"].v2_get_boot_identity
+    clients = {COORDINATOR_ROLE: _Client(COORDINATOR_ROLE, release)}
+    original = clients[COORDINATOR_ROLE].v2_get_boot_identity
 
     async def wrong_boot():
         value = await original()
         value["commit_sha"] = "f" * 40
         return value
 
-    clients["gateway_scoring"].v2_get_boot_identity = wrong_boot
+    clients[COORDINATOR_ROLE].v2_get_boot_identity = wrong_boot
     with pytest.raises(TEEV2BootstrapError, match="boot commit"):
         await bootstrap_gateway_enclaves_v2(
             release_manifest=release,

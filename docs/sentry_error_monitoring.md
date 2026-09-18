@@ -15,7 +15,7 @@ The validator restart controller prepares a hash-locked, host-only telemetry
 environment before production shutdown when its authoritative Python does not
 already contain the SDK. The environment is cached and used only to emit the
 bounded restart summary; it never replaces `VALIDATOR_PYTHON_BIN` or enters a
-validator, worker, auditor, relay, or enclave authority path. Preparation is
+validator, worker, or enclave authority path. Preparation is
 bounded and fail-open, so telemetry installation cannot block a restart.
 
 The restart and canonical-weight event matrix is in
@@ -28,17 +28,12 @@ The restart and canonical-weight event matrix is in
 | Component | Entry point |
 |---|---|
 | Gateway | `gateway/main.py` |
-| Primary validator | `neurons/validator.py` |
-| Auditor validator | `neurons/auditor_validator.py` |
-| Miner | `neurons/miner.py` |
-| Release/PCR0 host tools | `validator_tee/host/gateway_pcr0_builder.py`, `validator_tee/host/runtime_v2_bootstrap.py`, `validator_tee/host/verify_release_gate_v2.py` |
+| Gateway PCR0 builder | `validator_tee/host/gateway_pcr0_builder.py` |
 | Restart controllers | `gw_restart.sh`, `validator_restart.sh` through the bounded `sentry_cli` bridge |
-| Attested release | `.github/workflows/attested-v2-release.yml` through the same release-summary bridge |
 
-The host-side vsock and chain relay boundaries report sanitized state through
-the initialized parent process. `validator_tee/enclave/*` and the measured
-gateway enclave packages never import Sentry and never gain network egress.
-`tests/test_sentry_boundary_guard.py` enforces this boundary.
+Measured gateway code and the weight signer do not import Sentry. The host
+reports sanitized state. `tests/test_sentry_boundary_guard.py` checks this
+boundary.
 
 ## Configuration
 
@@ -61,17 +56,13 @@ all SDK options are explicit. Successful manual traces default to 1% and are
 clamped to 10%. Terminal errors are not sampled. The SDK shutdown flush is
 bounded to one second.
 
-GitHub release jobs use the same namespaced settings, with the DSN supplied by
-the `LEADPOET_SENTRY_DSN` Actions secret. Every reporting step uses
-`if: always()` and `continue-on-error: true`.
-
 ## Read-only Codex API access
 
 `LEADPOET_SENTRY_API_TOKEN` is an operator-only read credential stored in both
 `leadpoet/prod/gateway/env` and `leadpoet/prod/validator/env`. It is separate
 from the ingestion DSN. Restart hydration removes it from cached environment
-files and runtime exports, so it does not enter gateway, validator, auditor,
-worker, relay, container, enclave, attestation, or weight paths.
+files and runtime exports, so it does not enter gateway, validator,
+worker, container, enclave, attestation, or weight paths.
 
 The standard-library helper retrieves only the API token, DSN, and optional
 project identifiers over read-only SSH; the token remains in process memory.
@@ -150,7 +141,7 @@ field allowlist. It removes or redacts:
 5. Raw wallet/hotkey/coldkey identities; only non-reversible join hashes are
    accepted.
 
-Messages touching protected model, provider, Research Lab, qualification,
+Messages touching protected model, provider, Arena, qualification,
 lead-processing, or LLM-client surfaces are replaced wholesale by
 `[leadpoet-redacted:protected-surface]`. `redact-all` applies that policy to
 every message and drops breadcrumbs.

@@ -13,14 +13,14 @@ SUCCESSFUL_CALL_COST_MIGRATION = "scripts/230-lab-arena-successful-call-cost-per
 DEEPLINE_RECONCILIATION_MIGRATION = "scripts/243-lab-arena-deepline-delayed-cost-reconciliation.sql"
 DEEPLINE_INTERRUPTION_MIGRATION = "scripts/248-lab-arena-closed-scoring-reservation-admission.sql"
 SUBMISSION_REPLACEMENT_MIGRATION = "scripts/262-lab-arena-one-replacement-attempt.sql"
+STATEFUL_EPOCH_AUTHORITY = "current stateful subnet epoch authority"
 PRIVATE_ARENA_MIGRATIONS = frozenset({SUBMISSION_REPLACEMENT_MIGRATION, CODE_REVIEW_MIGRATION, PARTICIPATION_MIGRATION, ORIGINAL_JUDGMENTS_MIGRATION, SUCCESSFUL_CALL_COST_MIGRATION, DEEPLINE_RECONCILIATION_MIGRATION, DEEPLINE_INTERRUPTION_MIGRATION})
 REQUIRED_SUPABASE_V2_SCHEMA = (
     (SUBMISSION_REPLACEMENT_MIGRATION, "lab_arena_submissions", ("replaces_submission_id", "replaced_by_submission_id")),
     (PARTICIPATION_MIGRATION, "lab_arena_runs", ("runner_hotkey", "participation_accepted_at")),
     (CODE_REVIEW_MIGRATION, "lab_arena_submissions", ("submission_id", "code_review_status", "code_review_doc")),
-    ("scripts/125-research-lab-artifact-key-lineage.sql", "research_lab_provider_evidence_cache_v2", ("artifact_master_key_ref_hash",)),
-    ("scripts/101-stateful-subnet-epoch-authority.sql", "research_lab_stateful_subnet_epoch_cutovers_v1", ("mapping_hash", "network_genesis_hash", "netuid", "first_subnet_epoch_index", "first_settlement_epoch_id")),
-    ("scripts/101-stateful-subnet-epoch-authority.sql", "research_lab_stateful_subnet_epoch_cutover_state_v1", ("lifecycle_state", "mapping_hash", "network_genesis_hash", "netuid", "updated_at")),
+    (STATEFUL_EPOCH_AUTHORITY, "research_lab_stateful_subnet_epoch_cutovers_v1", ("mapping_hash", "network_genesis_hash", "netuid", "first_subnet_epoch_index", "first_settlement_epoch_id")),
+    (STATEFUL_EPOCH_AUTHORITY, "research_lab_stateful_subnet_epoch_cutover_state_v1", ("lifecycle_state", "mapping_hash", "network_genesis_hash", "netuid", "updated_at")),
     ("scripts/197-lab-arena-reward-chain-scope.sql", "lab_arena_reward_basis_v1", ("round_id", "effective_reward_epoch", "reward_basis_hash", "reward_basis_doc", "signing_key_doc", "king_outcome", "king_hotkey", "king_start_epoch", "published_at", "arena_network_name", "arena_netuid")),
     ("scripts/202-arena-accepted-weight-state.sql", "lab_arena_accepted_weight_states", ("network", "netuid", "epoch", "state_hash", "state_doc", "created_at")),
     ("scripts/202-arena-accepted-weight-state.sql", "lab_arena_chain_outcomes", ("network", "netuid", "epoch", "validator_hotkey", "request_id", "extrinsic_hash", "outcome_doc", "created_at")),
@@ -36,8 +36,7 @@ REQUIRED_SUPABASE_V2_RPCS = (
     (DEEPLINE_RECONCILIATION_MIGRATION, "lab_arena_list_deepline_cost_reconciliations_v1"),
     (DEEPLINE_RECONCILIATION_MIGRATION, "lab_arena_reconcile_deepline_cost_v1"),
     (DEEPLINE_INTERRUPTION_MIGRATION, "lab_arena_deepline_cost_reconciliation_schema_v1"),
-    ("scripts/144-research-lab-provider-persistence-batches.sql", "put_research_lab_provider_evidence_cache_v2"),
-    ("scripts/101-stateful-subnet-epoch-authority.sql", "research_lab_stateful_subnet_epoch_cutover_public_state_v1"),
+    (STATEFUL_EPOCH_AUTHORITY, "research_lab_stateful_subnet_epoch_cutover_public_state_v1"),
     ("scripts/197-lab-arena-reward-chain-scope.sql", "lab_arena_schema_version_v1"),
     ("scripts/202-arena-accepted-weight-state.sql", "lab_arena_publish_weight_state_v1"),
     ("scripts/202-arena-accepted-weight-state.sql", "lab_arena_record_chain_outcome_v1"),

@@ -20,6 +20,34 @@ def script():
     return module
 
 
+@pytest.mark.parametrize("raw", [
+    '{"LAB_ARENA_MODE":"live","LAB_ARENA_PORT":"8792","OPENROUTER_API_KEY":"not-imported"}',
+    "export LAB_ARENA_MODE=live\nLAB_ARENA_PORT=8792\nOPENROUTER_API_KEY=not-imported\n",
+])
+def test_scoped_environment_keeps_arena_settings_without_provider_aliases(script, tmp_path, monkeypatch, raw):
+    path = tmp_path / "gateway.env"
+    path.write_text(raw)
+    monkeypatch.setenv("LAB_ARENA_MODE", "shadow")
+    monkeypatch.delenv("LAB_ARENA_PORT", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    script.load_scoped_environment(path)
+    assert script.os.environ["LAB_ARENA_MODE"] == "shadow"
+    assert script.os.environ["LAB_ARENA_PORT"] == "8792"
+    assert "OPENROUTER_API_KEY" not in script.os.environ
+
+
+@pytest.mark.parametrize("raw", [
+    "[]",
+    "LAB_ARENA_MODE='unterminated",
+    "LAB_ARENA_MODE=live\nLAB_ARENA_MODE=shadow",
+])
+def test_scoped_environment_rejects_invalid_configuration(script, tmp_path, raw):
+    path = tmp_path / "gateway.env"
+    path.write_text(raw)
+    with pytest.raises(ValueError):
+        script.load_scoped_environment(path)
+
+
 class FakeService:
     def __init__(self, *, current=None, active=None, current_error=None, advance_error=None, ensure=None, ensure_error=None, reward_error=None, activated=0):
         # ``current``: one running round (no status: not open); ``active``: the full active list.

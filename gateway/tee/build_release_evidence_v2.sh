@@ -1,5 +1,5 @@
 #!/bin/bash
-# Produce the twelve gateway-role build records for one independent parent.
+# Produce the current gateway-role build records for one independent parent.
 
 set -euo pipefail
 

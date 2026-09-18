@@ -1,4 +1,3 @@
-import ast
 import base64
 import getpass
 import hashlib
@@ -25,21 +24,6 @@ CREDENTIALS = {
     "deepline_api_key": "deepline-execution-secret",
     "scrapingdog_api_key": "scrapingdog-execution-secret",
 }
-
-
-def _load_neuron_function(name: str):
-    source_path = Path(__file__).resolve().parents[2] / "neurons" / "miner.py"
-    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
-    node = next(
-        item
-        for item in tree.body
-        if isinstance(item, ast.FunctionDef) and item.name == name
-    )
-    module = ast.Module(body=[node], type_ignores=[])
-    ast.fix_missing_locations(module)
-    namespace = {}
-    exec(compile(module, str(source_path), "exec"), namespace)
-    return namespace[name]
 
 
 class _Response:
@@ -504,26 +488,3 @@ def test_retry_can_finalize_when_the_write_once_upload_already_exists(tmp_path):
     )
     assert result["status"] == "accepted"
     assert len(session.posts) == 2
-
-
-def test_miner_menu_has_only_model_submission():
-    miner = (Path(__file__).resolve().parents[2] / "neurons" / "miner.py").read_text(
-        encoding="utf-8"
-    )
-    menu = miner.split("def _choose_primary_miner_mode", 1)[1].split(
-        "def main", 1
-    )[0]
-    assert "SOURCE_ADD" not in menu
-    assert "Submit Model" in menu
-    assert "Fulfillment —" not in menu
-    assert "Check my submissions" not in menu
-    assert "Auto Research" not in menu
-
-
-def test_miner_menu_routes_directly_to_model_submission():
-    choose = _load_neuron_function("_choose_primary_miner_mode")
-    output = []
-    def unexpected_prompt(_prompt):
-        raise AssertionError("There is only one submission action")
-    assert choose(unexpected_prompt, output.append) == "agent_competition"
-    assert " Submit Model — Submit model source and run credentials" in output

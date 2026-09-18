@@ -3,7 +3,7 @@ TEE Attestation Endpoints (Canonical)
 =====================================
 
 These endpoints provide the gateway's TEE attestation document and public key
-for auditors and validators to verify the gateway's identity and code integrity.
+for auditors to verify the gateway's identity and code integrity.
 
 ENDPOINTS:
 - GET /attestation/document - Full attestation document + pubkey + code_hash
@@ -11,7 +11,7 @@ ENDPOINTS:
 
 NO AUTHENTICATION REQUIRED:
 Anyone can request the attestation - this is by design for transparency.
-Auditors need to fetch the attestation to verify event signatures.
+Auditors fetch the attestation to verify the measured runtime identity.
 
 CANONICAL RESPONSE FORMAT:
 {
@@ -27,10 +27,7 @@ SECURITY NOTES:
 - The returned code_hash is informational; trust comes from PCR0 in attestation
 """
 
-import asyncio
-from typing import Optional
-
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from gateway.utils.tee_client import coordinator_tee_client
@@ -71,12 +68,14 @@ class PubkeyResponse(BaseModel):
     enclave_pubkey: str  # Hex-encoded Ed25519 public key
 
 
-async def _event_signing_identity() -> dict:
+async def _runtime_identity() -> dict:
+    """Read the measured identity through the retained client RPC alias."""
+
     identity = await coordinator_tee_client.get_event_signing_identity()
     if identity.get("purpose") != "gateway_event_signing":
         raise RuntimeError("coordinator enclave returned the wrong signing purpose")
     if not identity.get("enclave_pubkey") or not identity.get("code_hash"):
-        raise RuntimeError("coordinator enclave event identity is incomplete")
+        raise RuntimeError("coordinator enclave runtime identity is incomplete")
     return identity
 
 
@@ -87,7 +86,7 @@ async def get_attestation_document_endpoint():
     
     This endpoint returns:
     - attestation_document: COSE_Sign1 document from AWS Nitro (base64)
-    - enclave_pubkey: The gateway's Ed25519 public key used for event signing
+    - enclave_pubkey: The gateway's attested Ed25519 public key
     - code_hash: SHA256 hash of the gateway code
     - trust_level: Whether full Nitro verification is available
     
@@ -102,24 +101,23 @@ async def get_attestation_document_endpoint():
        - purpose == "gateway_event_signing"
        - enclave_pubkey matches response
        - code_hash matches response
-    6. If all pass: use enclave_pubkey to verify event signatures
+    6. If all pass: trust the returned key as the measured runtime identity
     
     **Trust levels:**
     - "full_nitro": Attestation document is from real AWS Nitro hardware
     - "signature_only": No attestation (dev mode) - can only verify signatures
     
     **In signature-only mode:**
-    - Event signatures are still valid and verifiable
-    - But there's no hardware proof that the gateway code is authentic
+    - The public key is available without hardware proof of the gateway code
     - Auditors should report this limitation in their output
     """
     try:
-        identity = await _event_signing_identity()
+        identity = await _runtime_identity()
         attestation_b64 = str(identity.get("attestation_document_b64") or "")
         if not attestation_b64:
             raise HTTPException(
                 status_code=503,
-                detail="Coordinator event signer has no Nitro attestation.",
+                detail="Coordinator runtime identity has no Nitro attestation.",
             )
         trust_level = "full_nitro"
         
@@ -154,7 +152,7 @@ async def get_pubkey_endpoint():
         enclave_pubkey: Hex-encoded Ed25519 public key (64 hex chars)
     """
     try:
-        identity = await _event_signing_identity()
+        identity = await _runtime_identity()
         return PubkeyResponse(enclave_pubkey=str(identity["enclave_pubkey"]))
         
     except HTTPException:
@@ -180,7 +178,7 @@ async def attestation_health():
     - pubkey_prefix: First 16 chars of public key (for identification)
     """
     try:
-        identity = await _event_signing_identity()
+        identity = await _runtime_identity()
         pubkey = str(identity["enclave_pubkey"])
         pubkey_prefix = pubkey[:16] if pubkey else None
         attestation_available = bool(identity.get("attestation_document_b64"))

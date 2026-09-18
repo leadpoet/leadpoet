@@ -2,7 +2,7 @@
 
 1. The runtime import closure of every Arena module and entrypoint, in a
    fresh interpreter, contains no ``gateway.tee`` and no ``gateway.db``.
-2. Gateway enclave staging excludes Arena; the Arena signer stages only its small request contract.
+2. Gateway enclave staging excludes Arena.
 3. Measured code cannot import the Arena service or scoring runtime.
 """
 
@@ -26,7 +26,6 @@ MEASURED_PACKAGES = (
     "leadpoet_verifier",
     "research_lab",
     "qualification",
-    "validator_models",
     "schemas",
     "Leadpoet",
 )
@@ -109,9 +108,6 @@ def test_enclave_staging_allowlists_exclude_lab_arena():
     assert "lab_arena" not in staging
     code_hash = (ROOT / "gateway/tee/code_hash.py").read_text(encoding="utf-8")
     assert "lab_arena" not in code_hash
-    dockerfile = (ROOT / "validator_tee/Dockerfile.arena-signer").read_text(encoding="utf-8")
-    arena_copies = [line for line in dockerfile.splitlines() if line.startswith("COPY ") and "lab_arena/" in line]
-    assert arena_copies == ["COPY lab_arena/__init__.py lab_arena/contracts.py /app/lab_arena/"]
     gateway_dockerfile = (ROOT / "gateway/tee/Dockerfile.enclave").read_text(encoding="utf-8")
     assert "lab_arena" not in gateway_dockerfile
     closure = (ROOT / "gateway/tee/scoring_import_closure.py").read_text(encoding="utf-8")

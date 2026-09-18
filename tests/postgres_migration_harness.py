@@ -10,29 +10,6 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 DOCKER = shutil.which("docker")
-HISTORICAL_SOURCE_ADD_UPGRADE_MIGRATIONS = (
-    "72-research-lab-source-experiments.sql",
-    "74-research-lab-source-add-provenance-precheck.sql",
-    "78-research-lab-source-add-catalog-provisioning.sql",
-    "79-research-lab-source-add-llm-leg2-evidence.sql",
-    "82-research-lab-source-add-llm-only-leg2.sql",
-    "84-expand-source-add-source-kinds.sql",
-    "86-research-lab-attested-v2-authority.sql",
-    "104-research-lab-attested-result-replay-v2.sql",
-    "96-research-lab-source-add-functional-workflow.sql",
-    "145-research-lab-source-add-admission-control.sql",
-    "169-research-lab-source-add-post-accept-leg1.sql",
-    "170-research-lab-source-add-provider-origin-uniqueness.sql",
-    "171-research-lab-source-add-duplicate-privacy.sql",
-    "172-research-lab-source-add-claim-control.sql",
-    "173-research-lab-source-add-leg1-release-policy.sql",
-    "174-research-lab-source-add-restart-state-restore.sql",
-    "175-research-lab-source-add-provenance-leg1.sql",
-    "176-research-lab-source-add-provenance-origin-repair.sql",
-    "177-research-lab-source-add-provenance-authority-acl.sql",
-    "178-research-lab-source-add-miner-status.sql",
-    "186-research-lab-source-add-provisioned-status.sql",
-)
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
@@ -108,12 +85,6 @@ def _database_with_migrations(migrations, *, setup_sql=""):
                 CREATE ROLE anon NOLOGIN;
                 CREATE ROLE authenticated NOLOGIN;
                 CREATE ROLE service_role NOLOGIN;
-                CREATE TABLE public.research_lab_auto_research_loop_events (
-                    event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    event_type TEXT NOT NULL,
-                    CONSTRAINT research_lab_auto_research_loop_events_event_type_check
-                        CHECK (event_type = 'loop_started')
-                );
                 """
             )
             if setup_sql:

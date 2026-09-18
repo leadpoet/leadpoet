@@ -15,20 +15,13 @@ from typing import Iterable
 
 ATTESTED_RUNTIME_DIR = "_attested_runtime"
 ATTESTED_RUNTIME_PACKAGES = (
-    "Leadpoet",
-    "research_lab",
-    "leadpoet_verifier",
-    "schemas",
     "leadpoet_canonical",
-    "qualification",
-    "validator_models",
 )
 ATTESTED_RUNTIME_FILES = (
     "validator_tee/host/docker_operation_guard_v2.py",
 )
 ATTESTED_RUNTIME_GENERATED_FILES = (
     "gateway_enclave_build_identities/gateway_coordinator.json",
-    "gateway_enclave_build_identities/gateway_scoring.json",
     "gateway_enclave_build_identity.json",
     "protected_workflows.json",
     "scoring_import_closure.json",
@@ -36,7 +29,6 @@ ATTESTED_RUNTIME_GENERATED_FILES = (
 )
 _ATTESTED_RUNTIME_ROLES = (
     "gateway_coordinator",
-    "gateway_scoring",
 )
 _FULL_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _FALLBACK_COMMAND_TIMEOUT_SECONDS = 30
@@ -49,11 +41,7 @@ INCLUDE_DIRS = (
     "models",
     "tee",
     "middleware",
-    "research_lab",
-    "qualification",
     "leadpoet_canonical",
-    "validator_models",
-    "miner_models",
     ATTESTED_RUNTIME_DIR,
 )
 HASH_SUFFIXES = (".py", ".json", ".txt", ".dat", ".sh")
@@ -78,8 +66,6 @@ EXCLUDED_NAMES = {
     ".DS_Store",
     ".dockerignore",
     "gateway.log",
-    "provision_pcrs.py",
-    "verify_code_hash.py",
 }
 
 
@@ -234,7 +220,7 @@ def materialize_gateway_code_hash_runtime(
 
     commit = _fallback_commit(source_root)
     identities_root = destination_root / "gateway_enclave_build_identities"
-    dependency_lock = gateway_root / "tee/requirements-scoring-py39.lock"
+    dependency_lock = gateway_root / "tee/requirements-enclave-py39.lock"
     for role in _ATTESTED_RUNTIME_ROLES:
         _run_fallback_command(
             (

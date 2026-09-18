@@ -8,8 +8,6 @@ from gateway.tee import release_lineage_v2
 from gateway.tee.release_lineage_v2 import (
     ReleaseLineageV2Error,
     build_compact_release_lineage_boot_verifier_v2,
-    build_release_lineage_boot_verifier_v2,
-    load_approved_release_lineage_v2,
     validate_compact_release_lineage_v2,
     validate_prior_compact_release_lineage_v2,
 )
@@ -79,7 +77,7 @@ def _release(commit_character):
     )
 
 
-def _identity(release, role="gateway_scoring"):
+def _identity(release, role="gateway_coordinator"):
     expectation = release["roles"][role]
     return {
         "physical_role": role,
@@ -87,24 +85,6 @@ def _identity(release, role="gateway_scoring"):
         "pcr0": expectation["pcr0"],
         "build_manifest_hash": expectation["execution_manifest_hash"],
         "dependency_lock_hash": expectation["dependency_lock_hash"],
-    }
-
-
-def _checkpoint_proof(issuer_boot_identity):
-    return {
-        "certificate": {
-            "issuer_boot_identity": issuer_boot_identity,
-        },
-    }
-
-
-def _checkpoint_graph(release, issuer_boot_identity):
-    return {
-        "schema_version": (
-            release_lineage_v2.CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
-        ),
-        "boot_identities": [_identity(release)],
-        "ancestry_proof": _checkpoint_proof(issuer_boot_identity),
     }
 
 
@@ -153,7 +133,52 @@ def test_compact_lineage_verifies_historical_gateway_boots():
     )
     gateway_boot = _identity(historical)
     assert verifier(gateway_boot) == gateway_boot
-    assert observed == [("gateway_scoring", gateway_boot["pcr0"])]
+    assert observed == [("gateway_coordinator", gateway_boot["pcr0"])]
+
+
+def test_compact_lineage_accepts_installed_two_role_release_only_as_history():
+    current = _release("1")
+    historical = _release("2")
+    lineage = _compact_lineage(current, historical)
+    historical_entry = lineage["releases"][historical["commit_sha"]]
+    historical_entry["roles"]["gateway_scoring"] = {
+        **historical_entry["roles"]["gateway_coordinator"],
+        "pcr0": "e" * 96,
+        "build_manifest_hash": _hash("e"),
+    }
+    body = {key: value for key, value in lineage.items() if key != "lineage_hash"}
+    lineage["lineage_hash"] = release_lineage_v2.sha256_json(body)
+
+    validated = validate_compact_release_lineage_v2(
+        lineage,
+        expected_current_commit=current["commit_sha"],
+        expected_current_gateway_release_hash=current["release_hash"],
+    )
+    verifier = build_compact_release_lineage_boot_verifier_v2(
+        validated,
+        boot_verifier=lambda identity, **_: identity,
+    )
+    old_scoring_boot = {
+        "physical_role": "gateway_scoring",
+        "commit_sha": historical["commit_sha"],
+        "pcr0": "e" * 96,
+        "build_manifest_hash": _hash("e"),
+        "dependency_lock_hash": _hash("3"),
+    }
+    assert verifier(old_scoring_boot) == old_scoring_boot
+
+    invalid_current = _compact_lineage(current)
+    current_entry = invalid_current["releases"][current["commit_sha"]]
+    current_entry["roles"]["gateway_scoring"] = {
+        **current_entry["roles"]["gateway_coordinator"],
+        "pcr0": "e" * 96,
+    }
+    body = {
+        key: value for key, value in invalid_current.items() if key != "lineage_hash"
+    }
+    invalid_current["lineage_hash"] = release_lineage_v2.sha256_json(body)
+    with pytest.raises(ReleaseLineageV2Error, match="roles are incomplete"):
+        validate_compact_release_lineage_v2(invalid_current)
 
 
 
@@ -200,125 +225,4 @@ def test_compact_lineage_rejects_more_than_512_attested_releases():
     with pytest.raises(ReleaseLineageV2Error, match="lineage is invalid"):
         validate_compact_release_lineage_v2(
             {**body, "lineage_hash": release_lineage_v2.sha256_json(body)}
-        )
-
-
-def test_lineage_loads_missing_commit_from_exact_release_channel():
-    current = _release("1")
-    historical = _release("2")
-    calls = []
-
-    def load(commit):
-        calls.append(commit)
-        return {"gateway_release_manifest": historical}
-
-    releases = load_approved_release_lineage_v2(
-        current_release=current,
-        parent_graphs=({"boot_identities": [_identity(historical)]},),
-        release_channel_loader=load,
-    )
-    assert set(releases) == {"1" * 40, "2" * 40}
-    assert calls == ["2" * 40]
-
-
-def test_lineage_rejects_channel_for_another_commit():
-    current = _release("1")
-    historical = _release("2")
-    with pytest.raises(
-        ReleaseLineageV2Error,
-        match="channel commit differs",
-    ):
-        load_approved_release_lineage_v2(
-            current_release=current,
-            parent_graphs=({"boot_identities": [_identity(historical)]},),
-            release_channel_loader=lambda _commit: {
-                "gateway_release_manifest": _release("3")
-            },
-        )
-
-
-def test_lineage_verifier_accepts_historical_release_and_rejects_drift(
-    monkeypatch,
-):
-    current = _release("1")
-    historical = _release("2")
-    observed = []
-    monkeypatch.setattr(
-        release_lineage_v2,
-        "verify_boot_identity_nitro",
-        lambda identity, *, expected_pcr0,
-        certificate_validity_at_attestation_time: observed.append(
-            (
-                identity["commit_sha"],
-                expected_pcr0,
-                certificate_validity_at_attestation_time,
-            )
-        )
-        or identity,
-    )
-    verifier = build_release_lineage_boot_verifier_v2(
-        {
-            current["commit_sha"]: current,
-            historical["commit_sha"]: historical,
-        }
-    )
-    identity = _identity(historical)
-    assert verifier(identity) == identity
-    assert observed == [
-        (historical["commit_sha"], identity["pcr0"], True)
-    ]
-
-    with pytest.raises(ReleaseLineageV2Error, match="dependency_lock_hash"):
-        verifier({**identity, "dependency_lock_hash": _hash("9")})
-
-
-
-
-
-
-def test_required_commits_includes_historical_checkpoint_issuer():
-    current = _release("1")
-    historical = _release("2")
-    commits = release_lineage_v2._required_commits(
-        (_checkpoint_graph(current, _identity(historical)),)
-    )
-    assert commits == {"1" * 40, "2" * 40}
-
-
-def test_load_lineage_fetches_explicit_checkpoint_issuer_release():
-    current = _release("1")
-    historical = _release("2")
-    calls = []
-
-    releases = load_approved_release_lineage_v2(
-        current_release=current,
-        parent_graphs=({"boot_identities": [_identity(current)]},),
-        parent_ancestry_proofs=(
-            _checkpoint_proof(_identity(historical)),
-        ),
-        release_channel_loader=lambda commit: calls.append(commit)
-        or {"gateway_release_manifest": historical},
-    )
-
-    assert set(releases) == {"1" * 40, "2" * 40}
-    assert calls == ["2" * 40]
-
-
-def test_lineage_rejects_checkpoint_without_issuer_boot_identity():
-    current = _release("1")
-    with pytest.raises(
-        ReleaseLineageV2Error,
-        match="checkpoint ancestry issuer boot identity is unavailable",
-    ):
-        load_approved_release_lineage_v2(
-            current_release=current,
-            parent_graphs=(
-                {
-                    "schema_version": (
-                        release_lineage_v2.CHECKPOINTED_RECEIPT_GRAPH_SCHEMA_VERSION
-                    ),
-                    "boot_identities": [_identity(current)],
-                    "ancestry_proof": {"certificate": {}},
-                },
-            ),
         )

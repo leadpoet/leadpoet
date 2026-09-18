@@ -1,44 +1,19 @@
-# Use a fresh Python 3.11 environment for normal Arena validators and gateway
-# hosts. Bittensor 10 supports Finney's stateful epoch metadata. The older
-# Python markers below are retained only for legacy image builds, not validators.
-bittensor>=9.10,<10.0.0; python_version < "3.10"
-bittensor==10.5.0; python_version >= "3.10"
-async-substrate-interface>=1.6.1,<1.7; python_version < "3.10"
-async-substrate-interface==2.2.1; python_version >= "3.10"
-# The Python 3.9 gateway performs synchronous historical-block inspection.
-# py-scale-codec conflicts with the cyscale namespace required by Bittensor 10.
-substrate-interface==1.7.11; python_version < "3.10"
-# The V2 validator hotkey tools import sr25519 directly
-# (validator_tee/host/prepare_hotkey_assets_v2.py, enclave
-# hotkey_authority_v2.py). It arrived transitively via substrate-interface,
-# which the Bittensor 10 line no longer installs on Python >= 3.10.
-py-sr25519-bindings>=0.2.0; python_version >= "3.10"
+# Arena validators and gateway hosts use Python 3.11.
+bittensor==10.5.0
+async-substrate-interface==2.2.1
+py-sr25519-bindings>=0.2.0
 
 # HTTP and networking
 requests>=2.31.0
 aiohttp>=3.9.5
-aiodns>=3.5.0
-pysocks>=1.7.1  # SOCKS5 proxy support for DNS queries
 
 # Data processing and ML
 numpy>=1.24.0
-pandas>=2.0.0
-# torch[cpu]>=2.0.0  # DEPRECATED: Only needed for unused collusion detection
-# torch_geometric>=2.4.0  # DEPRECATED: Only needed for unused collusion detection
-# pygod>=1.1.0  # DEPRECATED: Only needed for unused collusion detection
-
-# DNS
-dnspython>=2.6.1
 
 # Caching and storage
-redis>=5.0.0
-pickle-mixin>=1.0.2
 boto3>=1.40.0
-arweave-python-client>=1.0.19
 
 # Monitoring and metrics
-prometheus_client>=0.19.0
-structlog>=23.2.0
 # Error monitoring for HOST processes only — never enclave images (the
 # sentry boundary guard test fails CI if it enters an enclave requirements
 # file). Optional at runtime and inert without the LEADPOET_SENTRY_* env
@@ -50,24 +25,14 @@ opentelemetry-api==1.27.0
 opentelemetry-sdk==1.27.0
 opentelemetry-exporter-otlp-proto-http==1.27.0
 
-# Retry and resilience
-tenacity>=8.2.0
-
 # Environment and configuration
 python-dotenv>=1.0.0
-pyyaml>=6.0.1
 
 # Web framework
 starlette>=0.30.0
 pydantic>=2.0.0
 fastapi>=0.110.0
 uvicorn[standard]>=0.38.0
-python-multipart>=0.0.6
-
-# Utilities
-rich>=13.0.0
-argparse>=1.4.0
-click>=8.1.0
 
 # Testing
 pytest>=8.0.0
@@ -77,11 +42,6 @@ pytest-asyncio>=0.21.0
 
 # Setuptools
 setuptools>=68.0.0
-
-# Google Cloud
-google-cloud-firestore==2.11.1
-google-auth==2.17.3
-firebase-admin>=6.2.0
 
 # Bittensor operator CLI (the unrelated PyPI package "bt" is not needed)
 bittensor-cli>=1.0.0
@@ -94,50 +54,15 @@ isort>=5.12.0
 # Code coverage
 coverage>=7.3.0
 
-# Additional utilities
-typing-extensions>=4.7.0
-python-Levenshtein>=0.23.0
-
-
-# Enhanced validation dependencies
-python-whois>=0.9.5
-fuzzywuzzy>=0.18.0
-
 # Core dependencies
 httpx>=0.28.1
-openrouter>=0.0.16
-firecrawl>=4.3.6
-openai>=2.1.0
 
-phonenumbers>=8.13.0
-portalocker>=2.7.0
-publicsuffix2>=2.20191221
-
-# Schema validation and configuration
-jsonschema>=4.25.1
-
-# throwaway email blocklist
-disposable-email-domains>=0.0.138
-
-# JWT Token Management
-pyjwt>=2.8.0
-
-# TEE Attestation Verification (for miners/validators)
+# Attestation and signing verification
 cbor2>=5.4.6
 cryptography>=41.0.7
 
 # Supabase (for future migration)
 supabase>=2.0.0
-
-# Lead Sorcerer additional dependencies (if not already listed above)
-# Note: Most Lead Sorcerer dependencies are already included above
-# These are additional ones that might be needed:
-nest-asyncio>=1.6.0
-websockets>=15.0.1
-
-# gRPC communication (for miner/validator nodes)
-grpcio>=1.60.0
-# ddgs>=6.0.0  # REMOVED - using ScrapingDog API instead
 
 # Geographic normalization (city/state/country standardization)
 us>=3.0.0  # US state lookup (offline, no rate limits)

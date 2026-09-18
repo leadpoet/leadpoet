@@ -279,15 +279,14 @@ def test_validator_uid_reports_stable_ineligibility_codes():
         ("test", ["below", "boundary", "above", "no-permit"]),
     ],
 )
-def test_registry_counts_and_assignment_set_match_shared_policy(
+def test_registry_counts_match_shared_policy(
     monkeypatch, network, expected
 ):
     from gateway import config
-    from gateway.utils import assignment, registry
+    from gateway.utils import registry
 
     metagraph = _metagraph()
     monkeypatch.setattr(config, "BITTENSOR_NETWORK", network)
-    monkeypatch.setattr(assignment, "BITTENSOR_NETWORK", network)
     monkeypatch.setattr(registry, "get_metagraph", lambda: metagraph)
 
     async def get_metagraph_async(*, cache_epoch_id=None):
@@ -301,6 +300,3 @@ def test_registry_counts_and_assignment_set_match_shared_policy(
     assert asyncio.run(registry.get_miner_count_async()) == (
         len(metagraph.hotkeys) - len(expected)
     )
-    assert asyncio.run(
-        assignment.get_validator_set(1, fail_closed=True)
-    ) == expected

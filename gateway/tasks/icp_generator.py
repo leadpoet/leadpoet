@@ -8,14 +8,14 @@ CRITICAL DESIGN:
 1. ICPs are generated RANDOMLY but held CONSTANT until next reset
 2. ICPs are stored PRIVATELY in qualification_private_icp_sets
 3. Miners NEVER see the ICPs until evaluation time
-4. ICP hash is included in the signed Arweave audit stream
+4. The canonical ICP payload is hashed before persistence
 
 GENERATION PROCESS:
 1. Generate 20 ICPs — one per industry across 20 distinct industries
 2. Use LLM to create realistic, varied prompts
 3. Compute ICP set hash
 4. Store in database
-5. Buffer a signed audit event for Arweave
+5. Persist the validated daily set for Arena consumption
 6. Activate the new set
 
 COMPANY-MODE ONLY (May 2026+):
@@ -40,7 +40,7 @@ import httpx
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 
-from research_lab.employee_buckets import (
+from qualification.employee_buckets import (
     DEFAULT_EMPLOYEE_BUCKET_RADIUS,
     GENERATED_EMPLOYEE_BUCKETS,
     LINKEDIN_EMPLOYEE_BUCKETS,
@@ -577,18 +577,18 @@ def _required_attribute_for_icp(icp: Dict[str, Any], *, industry: str, sub_indus
 
 def _configured_employee_bucket_radius() -> int:
     try:
-        return max(0, int(os.getenv("RESEARCH_LAB_ICP_EMPLOYEE_BUCKET_RADIUS", str(DEFAULT_EMPLOYEE_BUCKET_RADIUS))))
+        return max(0, int(os.getenv("LAB_ARENA_ICP_EMPLOYEE_BUCKET_RADIUS", str(DEFAULT_EMPLOYEE_BUCKET_RADIUS))))
     except ValueError:
         logger.warning(
-            "invalid RESEARCH_LAB_ICP_EMPLOYEE_BUCKET_RADIUS=%r; using default radius %s",
-            os.getenv("RESEARCH_LAB_ICP_EMPLOYEE_BUCKET_RADIUS"),
+            "invalid LAB_ARENA_ICP_EMPLOYEE_BUCKET_RADIUS=%r; using default radius %s",
+            os.getenv("LAB_ARENA_ICP_EMPLOYEE_BUCKET_RADIUS"),
             DEFAULT_EMPLOYEE_BUCKET_RADIUS,
         )
         return DEFAULT_EMPLOYEE_BUCKET_RADIUS
 
 
 def _configured_employee_all_buckets() -> bool:
-    return os.getenv("RESEARCH_LAB_ICP_EMPLOYEE_ALL_BUCKETS", "").strip().lower() in {"1", "true", "yes", "on"}
+    return os.getenv("LAB_ARENA_ICP_EMPLOYEE_ALL_BUCKETS", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _employee_count_display(value: Any) -> str:
@@ -944,7 +944,7 @@ funding round, new product / major capability launch, expansion into a new marke
 acquisition, leadership change, regulatory clearance or certification, strategic
 partnership, hiring for specific roles, or a new facility / office / store opening.
 
-Fulfillment-style examples (write yours the same way — specific wording, still broad enough
+Good examples (write yours the same way — specific wording, still broad enough
 that MANY real companies match):
 - "Launched a new product or major platform capability in the last 12 months, per a press
    release, product page, or changelog"
@@ -1477,8 +1477,8 @@ COMPANY_GOAL_AVERAGE = 5
 # NOT return, so the benchmark exercises exclusion honoring end to end (the
 # scorer zeroes any returned excluded company). Kept small by default so an
 # ICP with thin supply is not starved into a zero by its own exclusion.
-_EXCLUSIONS_ENABLED_ENV = "RESEARCH_LAB_ICP_EXCLUSIONS_ENABLED"
-_EXCLUSIONS_COUNT_ENV = "RESEARCH_LAB_ICP_EXCLUSIONS_COUNT"
+_EXCLUSIONS_ENABLED_ENV = "LAB_ARENA_ICP_EXCLUSIONS_ENABLED"
+_EXCLUSIONS_COUNT_ENV = "LAB_ARENA_ICP_EXCLUSIONS_COUNT"
 _EXCLUSIONS_DEFAULT_COUNT = 1
 _EXCLUSIONS_MAX_COUNT = 3
 _EXCLUSION_DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$")
@@ -2007,31 +2007,6 @@ async def generate_and_activate_icp_set(
     if not activated:
         return None
     
-    # Preserve the existing testnet guard. Production buffers the activation
-    # evidence in the enclave for the retained Arweave audit task.
-    bittensor_network = os.environ.get("BITTENSOR_NETWORK", "finney")
-    if bittensor_network == "test":
-        logger.info("TESTNET: Skipping ICP_SET_ACTIVATED audit event")
-    else:
-        try:
-            from gateway.utils.logger import log_event
-
-            await log_event(
-                "ICP_SET_ACTIVATED",
-                {
-                    "actor_hotkey": "system",
-                    "set_id": set_id,
-                    "icp_count": len(icps),
-                    "icp_set_hash": icp_hash,
-                    "industry_distribution": distribution,
-                    "active_from": active_from.isoformat(),
-                    "active_until": active_until.isoformat(),
-                },
-            )
-            logger.info("Buffered signed ICP_SET_ACTIVATED event")
-        except Exception as e:
-            logger.warning(f"Failed to buffer ICP_SET_ACTIVATED: {e}")
-
     return set_id
 
 

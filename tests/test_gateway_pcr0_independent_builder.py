@@ -8,6 +8,13 @@ import pytest
 from validator_tee.host import gateway_pcr0_builder
 
 
+def test_gateway_roles_follow_current_topology():
+    assert gateway_pcr0_builder.GATEWAY_ROLES == tuple(
+        sorted(gateway_pcr0_builder.ROLE_SPECS)
+    )
+    assert gateway_pcr0_builder.GATEWAY_ROLES == ("gateway_coordinator",)
+
+
 def _result(
     commit,
     *,
@@ -390,25 +397,6 @@ def test_cache_retains_twenty_commits_per_physical_role(tmp_path):
         assert len([row for row in document["entries"] if row["role"] == role]) == 20
 
 
-def test_same_commit_requires_explicit_role_when_cache_has_multiple_eifs(tmp_path):
-    cache = tmp_path / "cache.json"
-    commit = "9" * 40
-    for role in ("gateway_coordinator", "gateway_scoring"):
-        gateway_pcr0_builder.write_cache_entry(
-            cache_path=cache,
-            entry={
-                **_result(commit, role=role, pcr0=("a" if role.endswith("a") else "b") * 96),
-                "verified_build_count": 3,
-            },
-        )
-    assert gateway_pcr0_builder.load_cached_gateway_identity(cache, commit) is None
-    assert gateway_pcr0_builder.load_cached_gateway_identity(
-        cache,
-        commit,
-        role="gateway_scoring",
-    )["role"] == "gateway_scoring"
-
-
 def test_git_archive_rejects_symlinks(tmp_path):
     archive_path = tmp_path / "source.tar"
     with tarfile.open(archive_path, "w") as archive:
@@ -474,11 +462,7 @@ def test_machine_result_file_is_isolated_from_stdout_diagnostics(
     ) == 0
 
     captured = capsys.readouterr()
-    assert captured.out.count("optional dependency diagnostic") == len(
-        gateway_pcr0_builder.GATEWAY_ROLES
-    )
+    assert captured.out.count("optional dependency diagnostic") == 1
     records = json.loads(output.read_text(encoding="utf-8"))
-    assert [record["role"] for record in records] == list(
-        gateway_pcr0_builder.GATEWAY_ROLES
-    )
+    assert [record["role"] for record in records] == ["gateway_coordinator"]
     assert output.stat().st_mode & 0o777 == 0o600

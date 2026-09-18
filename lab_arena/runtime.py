@@ -7,8 +7,7 @@ interface (``runsc --network=none``), a bounded writable ``/output`` backed
 by a size-bound host tmpfs, and one paid-provider Unix socket at
 ``/run/lab_arena/worker.sock``. New parallel execution rounds also mount a
 separate attempt-owned web socket and a credential-free private-loopback
-bridge. The OCI document mirrors the enclave's proven
-shape in ``gateway/tee/model_sandbox_v2.py`` without importing it.
+bridge. The OCI document defines this isolation boundary directly.
 
 Differences from the enclave, on purpose: the platform is ``systrap`` (the
 enclave pins ``ptrace``; systrap is gVisor's current default and needs no

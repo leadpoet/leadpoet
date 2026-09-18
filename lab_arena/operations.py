@@ -71,8 +71,7 @@ OPENROUTER_MAX_MESSAGES = 128
 # bound the request.
 OPENROUTER_RESPONSES_MAX_INPUT_ITEMS = 768
 OPENROUTER_MAX_CONTENT_CHARS = 32_000
-# Copied from gateway/research_lab/key_vault.py (section 3.1): the broker
-# injects this policy into every chat body; it is table data so its hash is
+# The broker injects this policy into every chat body; it is table data so its hash is
 # bound into the round configuration.
 # Zero data retention is the judge's own request for the page content it
 # sends to a model; the Arena pins it for every OpenRouter call.

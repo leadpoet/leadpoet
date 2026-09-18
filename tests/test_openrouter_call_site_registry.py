@@ -25,24 +25,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #                              tooling that mentions the URL without producing
 #                              production training data.
 CALL_SITE_REGISTRY = {
-    # -- captured -----------------------------------------------------------
-    "research_lab/openrouter_telemetry.py": "captured",
     # Source-grounded semantic gates ported from the site verifier
     # (2026-07-23): DISABLED by default (VERIFIER_SEMANTIC_GATES_MODE), so no
     # production OpenRouter traffic exists today. Classified uncaptured by
     # decision until the observability-capture reconciliation follow-up wires
     # it through the shared telemetry layer alongside enabling it.
     "leadpoet_verifier/semantic_gates.py": "uncaptured_by_decision",
-    "validator_models/stage5_verification.py": "captured",
-    "gateway/tee/provider_semantics_v2.py": "captured_v2_receipt",
     # -- uncaptured by dated owner decision ---------------------------------
     "gateway/tasks/icp_generator.py": "uncaptured_by_decision",
-    "miner_models/intent_model.py": "uncaptured_by_decision",
-    "miner_models/lead_sorcerer_main/src/domain.py": "uncaptured_by_decision",
-    "neurons/validator.py": "uncaptured_by_decision",
-    "validator_models/checks_icp.py": "uncaptured_by_decision",
-    "validator_models/stage4_helpers.py": "uncaptured_by_decision",
-    "validator_models/stage4_person_verification.py": "uncaptured_by_decision",
     # The closed-lab training-trace sink was retired on 2026-09-04. Arena
     # calls are costed and bounded by the host broker; these shared scorers do
     # not write a second S3 trace or receipt stream.
@@ -52,7 +42,6 @@ CALL_SITE_REGISTRY = {
     "qualification/scoring/role_batch_check.py": "uncaptured_by_decision",
     "qualification/scoring/verification_helpers.py": "uncaptured_by_decision",
     "qualification/scoring/lead_scorer.py": "uncaptured_by_decision",
-    "gateway/qualification/utils/helpers.py": "uncaptured_by_decision",
 }
 
 
@@ -68,9 +57,6 @@ def _files_mentioning_openrouter() -> set[str]:
         "gateway",
         "qualification",
         "research_lab",
-        "validator_models",
-        "miner_models",
-        "neurons",
         "leadpoet_verifier",
     }
     return {

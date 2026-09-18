@@ -30,17 +30,14 @@ SCRUBBING = "leadpoet_observability/sentry_scrubbing.py"
 THIS_GUARD = "tests/test_sentry_boundary_guard.py"
 
 ENCLAVE_REQUIREMENT_FILES = (
-    "validator_tee/enclave/requirements.txt",
-    "gateway/tee/requirements.txt",
-    "gateway/tee/requirements-scoring-py39.in",
-    "gateway/tee/requirements-scoring-py39.lock",
+    "gateway/tee/requirements-enclave-py39.in",
+    "gateway/tee/requirements-enclave-py39.lock",
 )
 
 ENCLAVE_SURFACE_PREFIXES = ("validator_tee/enclave/", "gateway/tee/")
 
 WIRED_ENTRY_POINTS = (
     "gateway/main.py",
-    "neurons/miner.py",
     "validator_tee/host/gateway_pcr0_builder.py",
 )
 

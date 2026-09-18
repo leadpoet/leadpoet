@@ -1,4 +1,4 @@
-"""Canonical two-enclave topology for the two-host V2 gateway deployment."""
+"""Canonical coordinator-enclave topology for the gateway deployment."""
 
 from __future__ import annotations
 
@@ -9,42 +9,28 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 
-TOPOLOGY_SCHEMA_VERSION = "leadpoet.gateway_enclave_topology.v2"
+TOPOLOGY_SCHEMA_VERSION = "leadpoet.gateway_enclave_topology.v3"
 PRODUCTION_INSTANCE_TYPE = "r7i.4xlarge"
 PRODUCTION_PARENT_VCPUS = 16
 PRODUCTION_PARENT_MEMORY_MIB = 128 * 1024
 
 COORDINATOR_ROLE = "gateway_coordinator"
-SCORING_ROLE = "gateway_scoring"
 
 ROLE_SPECS = {
     COORDINATOR_ROLE: {
         "cid": 16,
         "vcpus": 2,
         "memory_mib": 8 * 1024,
-        "worker_assignment": "none",
-        "service_role": "gateway_coordinator",
-    },
-    SCORING_ROLE: {
-        "cid": 17,
-        "vcpus": 6,
-        "memory_mib": 56 * 1024,
-        "worker_assignment": "all_configured",
-        "configured_worker_source": "encrypted_proxy_profiles",
-        "service_role": "gateway_scoring",
+        "service_role": COORDINATOR_ROLE,
     },
 }
 
-HOST_RESERVED_VCPUS = PRODUCTION_PARENT_VCPUS - sum(
-    int(spec["vcpus"]) for spec in ROLE_SPECS.values()
-)
-HOST_RESERVED_MEMORY_MIB = PRODUCTION_PARENT_MEMORY_MIB - sum(
-    int(spec["memory_mib"]) for spec in ROLE_SPECS.values()
-)
+HOST_RESERVED_VCPUS = PRODUCTION_PARENT_VCPUS - 2
+HOST_RESERVED_MEMORY_MIB = PRODUCTION_PARENT_MEMORY_MIB - 8 * 1024
 
 
 class TopologyError(ValueError):
-    """The selected parent cannot safely host the authoritative topology."""
+    """The selected parent cannot safely host the measured coordinator."""
 
 
 def topology_document() -> Dict[str, Any]:
@@ -55,9 +41,6 @@ def topology_document() -> Dict[str, Any]:
         "production_parent_memory_mib": PRODUCTION_PARENT_MEMORY_MIB,
         "host_reserved_vcpus": HOST_RESERVED_VCPUS,
         "host_reserved_memory_mib": HOST_RESERVED_MEMORY_MIB,
-        "global_scoring_pool_size": 10,
-        "candidate_concurrency": 5,
-        "benchmark_concurrency": 5,
         "roles": {
             role: dict(spec) for role, spec in sorted(ROLE_SPECS.items())
         },
@@ -91,44 +74,43 @@ def role_spec(role: str) -> Dict[str, Any]:
     return dict(ROLE_SPECS[role])
 
 
-def validate_production_capacity(*, parent_vcpus: int, parent_memory_mib: int) -> Dict[str, int]:
+def validate_production_capacity(
+    *, parent_vcpus: int, parent_memory_mib: int
+) -> Dict[str, int]:
     if int(parent_vcpus) < PRODUCTION_PARENT_VCPUS:
         raise TopologyError(
-            "full V2 topology requires %s with at least %s vCPUs"
+            "full gateway topology requires %s with at least %s vCPUs"
             % (PRODUCTION_INSTANCE_TYPE, PRODUCTION_PARENT_VCPUS)
         )
     if int(parent_memory_mib) < PRODUCTION_PARENT_MEMORY_MIB:
         raise TopologyError(
-            "full V2 topology requires %s with at least %s MiB"
+            "full gateway topology requires %s with at least %s MiB"
             % (PRODUCTION_INSTANCE_TYPE, PRODUCTION_PARENT_MEMORY_MIB)
         )
     return {
         "parent_vcpus": int(parent_vcpus),
         "parent_memory_mib": int(parent_memory_mib),
-        "enclave_vcpus": sum(int(spec["vcpus"]) for spec in ROLE_SPECS.values()),
-        "enclave_memory_mib": sum(
-            int(spec["memory_mib"]) for spec in ROLE_SPECS.values()
-        ),
-        "host_vcpus": int(parent_vcpus)
-        - sum(int(spec["vcpus"]) for spec in ROLE_SPECS.values()),
-        "host_memory_mib": int(parent_memory_mib)
-        - sum(int(spec["memory_mib"]) for spec in ROLE_SPECS.values()),
+        "enclave_vcpus": 2,
+        "enclave_memory_mib": 8 * 1024,
+        "host_vcpus": int(parent_vcpus) - 2,
+        "host_memory_mib": int(parent_memory_mib) - 8 * 1024,
     }
 
 
 def validate_topology() -> None:
-    if ROLE_SPECS[SCORING_ROLE].get("worker_assignment") != "all_configured":
-        raise TopologyError("scoring enclave must own all configured workers")
-    cids = [int(spec["cid"]) for spec in ROLE_SPECS.values()]
-    if len(cids) != 2 or len(set(cids)) != 2:
-        raise TopologyError("gateway topology must use two unique enclave CIDs")
-    if HOST_RESERVED_VCPUS != 8 or HOST_RESERVED_MEMORY_MIB != 64 * 1024:
-        raise TopologyError("gateway host reservation differs from approved topology")
+    spec = ROLE_SPECS.get(COORDINATOR_ROLE)
+    if (
+        set(ROLE_SPECS) != {COORDINATOR_ROLE}
+        or spec is None
+        or spec.get("cid") != 16
+        or spec.get("service_role") != COORDINATOR_ROLE
+        or HOST_RESERVED_VCPUS != 14
+        or HOST_RESERVED_MEMORY_MIB != 120 * 1024
+    ):
+        raise TopologyError("gateway coordinator topology differs from policy")
 
 
 def validate_worker_partition() -> None:
-    """Backward-compatible entry point for callers validating the topology."""
-
     validate_topology()
 
 

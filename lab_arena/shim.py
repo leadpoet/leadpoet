@@ -422,7 +422,7 @@ def _trusted_page_fetch_timeout_ms() -> int:
 def _trusted_page_fetch(method: str, url: str, body: bytes) -> Optional[Tuple[str, Dict[str, Any]]]:
     """The judge sees the web only through Scrapingdog.
 
-    The Research Lab judge reads company homepages and evidence pages with a
+    The Arena judge reads company homepages and evidence pages with a
     direct GET. Inside the Arena's judge sandbox no provider host is reachable
     but the broker, so in trusted-scorer mode a plain HTTPS GET to a host that
     is not a provider becomes the closed ``scrapingdog.scrape`` operation on

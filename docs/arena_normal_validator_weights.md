@@ -1,7 +1,7 @@
 # Normal Arena validators
 
 The primary, Yuma, Rizzo, and other subnet validators use the same
-`neurons/validator.py` process with their own local Bittensor hotkey.
+`lab_arena.validator` process with their own local Bittensor hotkey.
 Nitro, an enclave, KMS key unwrapping, and the retired auditor client are not
 needed to run this process.
 
@@ -160,7 +160,7 @@ export LAB_ARENA_VALIDATOR_STATE_DIR="$PWD/validator-state"
 export LAB_ARENA_RUNNER_WORK_DIR="$PWD/arena-runner"
 export LAB_ARENA_RUNSC_PATH=/usr/local/bin/runsc
 
-python neurons/validator.py \
+python -m lab_arena.validator \
   --netuid 71 --subtensor.network finney \
   --wallet.name YOUR_WALLET --wallet.hotkey YOUR_HOTKEY \
   --wallet.path /absolute/path/to/YOUR_WALLETS_DIRECTORY
@@ -205,7 +205,7 @@ The validator does not create or replace wallets.
 
 `scripts/run_arena_validator.py --environment-file ...` loads
 `LAB_ARENA_ARCHIVE_ENDPOINT` from its protected environment file. The direct
-`neurons/validator.py` entry point reads the current process environment but
+`python -m lab_arena.validator` entry point reads the current process environment but
 does not load a `.env` file by itself.
 
 For example, add the selected origin to the existing private service file:
@@ -224,7 +224,7 @@ sudo /absolute/path/to/.venv-arena/bin/python \
   --check-only
 ```
 
-For the direct `neurons/validator.py` command, pass
+For the direct `python -m lab_arena.validator` command, pass
 `--arena-archive-endpoint wss://archive.operator.example:443` instead.
 
 For a service, the equivalent wallet settings are `LAB_ARENA_WALLET_NAME`,

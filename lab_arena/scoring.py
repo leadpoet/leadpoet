@@ -19,7 +19,7 @@ from lab_arena import contracts, verify
 from lab_arena.contracts import ArenaContractError
 
 SCORING_ADAPTER_VERSION_V1 = "qualification_style_v1"
-# Every OpenRouter model the Research Lab judge calls, by the judge's own role
+# Every OpenRouter model the Arena judge calls, by the judge's own role
 # for it. The broker refuses any other model on a scoring run, so this mapping
 # must cover the judge image exactly; ``test_lab_arena_judge_routes`` scans
 # the judge's source for model literals against it.

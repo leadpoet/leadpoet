@@ -1,15 +1,10 @@
 import asyncio
-import ast
-import inspect
 import json
-import os
 import socket
 import threading
-import zlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sys
-import textwrap
 
 import pytest
 
@@ -17,8 +12,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gateway" / "tee"))
 
 from gateway.tee import tee_service as gateway_service
 from gateway.utils import tee_client as gateway_client
-from validator_tee.enclave import tee_service as validator_service
-from validator_tee.host import vsock_client as validator_client
 
 
 class _FragmentSocket:
@@ -58,388 +51,38 @@ def test_gateway_exact_reader_handles_fragmented_prefix_and_body():
     assert gateway_client._recv_exact(_FragmentSocket(b"abcdefgh", 3), 8) == b"abcdefgh"
 
 
-def test_validator_receives_length_prefixed_request():
-    body = json.dumps({"command": "health"}).encode()
-    request, framed = validator_service._receive_request(
-        _FragmentSocket(len(body).to_bytes(4, "big") + body, 1)
-    )
-    assert request == {"command": "health"}
-    assert framed is True
-
-
-def test_validator_envelope_matches_gateway_receipt_graph_transport():
-    # Gateway jobs upload their large inputs in bounded chunks. The validator
-    # authoritative-weight RPC transports one complete authenticated graph.
-    assert gateway_client.MAX_RPC_REQUEST_BYTES == 64 * 1024 * 1024
-    assert gateway_service.MAX_RPC_REQUEST_BYTES == 64 * 1024 * 1024
-    assert (
-        validator_client.MAX_RPC_REQUEST_BYTES
-        == validator_service.MAX_RPC_REQUEST_BYTES
-        == 128 * 1024 * 1024
-    )
-    assert (
-        validator_client.MAX_RPC_REQUEST_FRAME_BYTES
-        == validator_service.MAX_RPC_REQUEST_FRAME_BYTES
-        == 16 * 1024 * 1024
-    )
-    assert (
-        validator_client.MAX_RPC_RESPONSE_FRAME_BYTES
-        == validator_service.MAX_RPC_RESPONSE_FRAME_BYTES
-        == 16 * 1024 * 1024
-    )
-    assert (
-        validator_client.MAX_RPC_RESPONSE_BYTES
-        == validator_service.MAX_RPC_RESPONSE_BYTES
-        == 128 * 1024 * 1024
-    )
-
-
-def test_validator_receives_production_sized_receipt_graph_request():
-    frame_limit = 16 * 1024 * 1024
-    request = {
-        "command": "compute_authoritative_weights_v2",
-        "weight_request": {
-            "upstream_receipt_set": {
-                "transport_attempts": ["x" * (64 * 1024 * 1024 + 1)],
-            },
-        },
-    }
-    body = json.dumps(request).encode()
-    assert frame_limit < len(body) < validator_service.MAX_RPC_REQUEST_BYTES
-    frame = validator_client._encode_rpc_payload(
-        body,
-        logical_limit=validator_client.MAX_RPC_REQUEST_BYTES,
-        frame_limit=validator_client.MAX_RPC_REQUEST_FRAME_BYTES,
-    )
-    assert frame.startswith(b"LPZ2")
-    assert len(frame) < validator_service.MAX_RPC_REQUEST_FRAME_BYTES
-
-    observed, framed = validator_service._receive_request(
-        _FragmentSocket(len(frame).to_bytes(4, "big") + frame, 64 * 1024)
-    )
-
-    assert observed == request
-    assert framed is True
 
 
 
 
-def test_validator_large_response_uses_same_bounded_compressed_frame():
-    body = json.dumps(
-        {"status": "ok", "receipt_graph": "x" * (64 * 1024 * 1024 + 1)}
-    ).encode()
-    frame = validator_service._encode_rpc_payload(
-        body,
-        logical_limit=validator_service.MAX_RPC_RESPONSE_BYTES,
-        frame_limit=validator_service.MAX_RPC_RESPONSE_FRAME_BYTES,
-    )
-
-    assert frame.startswith(b"LPZ2")
-    assert len(frame) < validator_client.MAX_RPC_RESPONSE_FRAME_BYTES
-    assert validator_client._decode_rpc_payload(
-        frame,
-        logical_limit=validator_client.MAX_RPC_RESPONSE_BYTES,
-    ) == body
 
 
-def test_validator_client_sends_large_request_as_compressed_frame(monkeypatch):
-    response = json.dumps({"status": "ok", "accepted": True}).encode()
-    rpc_socket = _RPCSocket(
-        len(response).to_bytes(4, "big") + response,
-        fragment_size=3,
-    )
-    monkeypatch.setattr(
-        validator_client.socket,
-        "socket",
-        lambda *_args, **_kwargs: rpc_socket,
-    )
-    request = {
-        "command": "compute_authoritative_weights_v2",
-        "weight_request": {"receipt_graph": "x" * (17 * 1024 * 1024)},
-    }
-
-    observed = validator_client.ValidatorEnclaveClient(
-        enclave_cid=16
-    )._send_request(request)
-
-    frame_size = int.from_bytes(rpc_socket.request[:4], "big")
-    frame = rpc_socket.request[4:]
-    assert rpc_socket.address == (16, validator_client.RPC_PORT)
-    assert len(frame) == frame_size
-    assert frame.startswith(b"LPZ2")
-    assert json.loads(
-        validator_service._decode_rpc_payload(
-            frame,
-            logical_limit=validator_service.MAX_RPC_REQUEST_BYTES,
-        )
-    ) == request
-    assert observed["accepted"] is True
-    assert rpc_socket.closed is True
 
 
-def test_validator_client_decodes_large_compressed_response(monkeypatch):
-    response = json.dumps(
-        {"status": "ok", "receipt_graph": "x" * (17 * 1024 * 1024)}
-    ).encode()
-    response_frame = validator_service._encode_rpc_payload(
-        response,
-        logical_limit=validator_service.MAX_RPC_RESPONSE_BYTES,
-        frame_limit=validator_service.MAX_RPC_RESPONSE_FRAME_BYTES,
-    )
-    rpc_socket = _RPCSocket(
-        len(response_frame).to_bytes(4, "big") + response_frame,
-        fragment_size=64 * 1024,
-    )
-    monkeypatch.setattr(
-        validator_client.socket,
-        "socket",
-        lambda *_args, **_kwargs: rpc_socket,
-    )
-
-    observed = validator_client.ValidatorEnclaveClient(
-        enclave_cid=16
-    )._send_request({"command": "health"})
-
-    assert len(observed["receipt_graph"]) == 17 * 1024 * 1024
-    assert rpc_socket.closed is True
 
 
-def test_validator_client_closes_socket_when_timeout_setup_fails(monkeypatch):
-    class _TimeoutFailureSocket(_RPCSocket):
-        def settimeout(self, _timeout):
-            raise ValueError("invalid timeout")
-
-    rpc_socket = _TimeoutFailureSocket(b"")
-    monkeypatch.setattr(
-        validator_client.socket,
-        "socket",
-        lambda *_args, **_kwargs: rpc_socket,
-    )
-
-    with pytest.raises(ValueError, match="invalid timeout"):
-        validator_client.ValidatorEnclaveClient(
-            enclave_cid=16
-        )._send_request({"command": "health"})
-
-    assert rpc_socket.closed is True
 
 
-def test_validator_client_retains_valid_response_until_close_succeeds(monkeypatch):
-    response = json.dumps({"status": "ok", "accepted": True}).encode()
-
-    class CloseFailureSocket(_RPCSocket):
-        def __init__(self, data):
-            super().__init__(data)
-            self.allow_close = False
-
-        def close(self):
-            self.closed = self.allow_close
-            return self.allow_close
-
-    rpc_socket = CloseFailureSocket(len(response).to_bytes(4, "big") + response)
-    recovered_socket = _RPCSocket(
-        len(response).to_bytes(4, "big") + response
-    )
-    sockets = iter((rpc_socket, recovered_socket))
-    monkeypatch.setattr(
-        validator_client.socket,
-        "socket",
-        lambda *_args, **_kwargs: next(sockets),
-    )
-    client = validator_client.ValidatorEnclaveClient(enclave_cid=16)
-
-    with pytest.raises(
-        validator_client.ValidatorEnclaveTransportCleanupError
-    ) as raised:
-        client._send_request({"command": "health"})
-
-    assert raised.value._resource is rpc_socket
-    assert raised.value._response == {"status": "ok", "accepted": True}
-    assert raised.value.primary_error is raised.value.__cause__
-    assert validator_client._RETIRED_CLEANUP[id(rpc_socket)][0] is rpc_socket
-    rpc_socket.allow_close = True
-    observed = validator_client.ValidatorEnclaveClient(
-        enclave_cid=16
-    )._send_request({"command": "health"})
-    assert observed == {"status": "ok", "accepted": True}
-    assert recovered_socket.closed is True
-    assert validator_client._RETIRED_CLEANUP == {}
 
 
-def test_validator_client_cleanup_preserves_original_rpc_error(monkeypatch):
-    primary = ValueError("invalid timeout")
-
-    class TimeoutAndCloseFailureSocket(_RPCSocket):
-        def __init__(self):
-            super().__init__(b"")
-            self.allow_close = False
-
-        def settimeout(self, _timeout):
-            raise primary
-
-        def close(self):
-            self.closed = self.allow_close
-            return self.allow_close
-
-    rpc_socket = TimeoutAndCloseFailureSocket()
-    monkeypatch.setattr(
-        validator_client.socket,
-        "socket",
-        lambda *_args, **_kwargs: rpc_socket,
-    )
-    client = validator_client.ValidatorEnclaveClient(enclave_cid=16)
-
-    with pytest.raises(
-        validator_client.ValidatorEnclaveTransportCleanupError
-    ) as raised:
-        client._send_request({"command": "health"})
-
-    assert raised.value.primary_error is primary
-    assert raised.value.__cause__ is primary
-    assert raised.value._response is None
-    rpc_socket.allow_close = True
-    validator_client.ValidatorEnclaveClient(
-        enclave_cid=16
-    )._require_retired_cleanup()
 
 
-def test_validator_client_cleanup_retry_preserves_concurrent_owner(monkeypatch):
-    close_started = threading.Event()
-    release_close = threading.Event()
-    retain_done = threading.Event()
-
-    class Resource:
-        def __init__(self, *, blocking, allow_close):
-            self.blocking = blocking
-            self.allow_close = allow_close
-
-        def shutdown(self, _how):
-            return None
-
-        def close(self):
-            if self.blocking:
-                close_started.set()
-                assert release_close.wait(timeout=2)
-            return self.allow_close
-
-    monkeypatch.setattr(validator_client, "_RETIRED_CLEANUP", {})
-    monkeypatch.setattr(
-        validator_client,
-        "_RETIRED_CLEANUP_RECOVERY_LOCK",
-        threading.Lock(),
-    )
-    client = validator_client.ValidatorEnclaveClient(enclave_cid=16)
-    first = Resource(blocking=True, allow_close=True)
-    concurrent = Resource(blocking=False, allow_close=False)
-    primary = OSError("cleanup failed")
-    client._retain_cleanup_failure(
-        first,
-        primary_error=primary,
-        response={"status": "first"},
-    )
-    recovery_errors = []
-
-    def recover():
-        try:
-            client._require_retired_cleanup()
-        except validator_client.ValidatorEnclaveTransportCleanupError as exc:
-            recovery_errors.append(exc)
-
-    def retain():
-        client._retain_cleanup_failure(
-            concurrent,
-            primary_error=primary,
-            response={"status": "concurrent"},
-        )
-        retain_done.set()
-
-    recovery = threading.Thread(target=recover)
-    recovery.start()
-    assert close_started.wait(timeout=2)
-    retention = threading.Thread(target=retain)
-    retention.start()
-    assert retain_done.wait(timeout=1)
-    with validator_client._RETIRED_CLEANUP_LOCK:
-        assert len(validator_client._RETIRED_CLEANUP) == 2
-    release_close.set()
-    recovery.join(timeout=2)
-    retention.join(timeout=2)
-
-    assert not recovery.is_alive()
-    assert not retention.is_alive()
-    assert len(recovery_errors) == 1
-    assert recovery_errors[0]._resource is concurrent
-    assert id(first) not in validator_client._RETIRED_CLEANUP
-    assert validator_client._RETIRED_CLEANUP[id(concurrent)][0] is concurrent
-    concurrent.allow_close = True
-    client._require_retired_cleanup()
-    assert validator_client._RETIRED_CLEANUP == {}
 
 
-def test_validator_rejects_incompressible_frame_above_wire_limit():
-    payload = os.urandom(validator_client.MAX_RPC_REQUEST_FRAME_BYTES + 1)
-    with pytest.raises(RuntimeError, match="compressed frame exceeds"):
-        validator_client._encode_rpc_payload(
-            payload,
-            logical_limit=validator_client.MAX_RPC_REQUEST_BYTES,
-            frame_limit=validator_client.MAX_RPC_REQUEST_FRAME_BYTES,
-        )
 
 
-@pytest.mark.parametrize(
-    "mutate",
-    (
-        lambda frame: frame[:-1],
-        lambda frame: frame + b"trailing",
-        lambda frame: frame + zlib.compress(b"{}"),
-        lambda frame: frame[:4]
-        + (int.from_bytes(frame[4:8], "big") + 1).to_bytes(4, "big")
-        + frame[8:],
-    ),
-)
-def test_validator_rejects_invalid_compressed_frames(mutate):
-    body = json.dumps({"payload": "x" * (17 * 1024 * 1024)}).encode()
-    frame = validator_client._encode_rpc_payload(
-        body,
-        logical_limit=validator_client.MAX_RPC_REQUEST_BYTES,
-        frame_limit=validator_client.MAX_RPC_REQUEST_FRAME_BYTES,
-    )
-
-    with pytest.raises(ValueError, match="compressed frame"):
-        validator_service._decode_rpc_payload(
-            mutate(frame),
-            logical_limit=validator_service.MAX_RPC_REQUEST_BYTES,
-        )
 
 
-def test_validator_rejects_compressed_frame_claiming_oversized_output():
-    frame = (
-        b"LPZ2"
-        + (validator_service.MAX_RPC_REQUEST_BYTES + 1).to_bytes(4, "big")
-        + zlib.compress(b"{}")
-    )
-    with pytest.raises(ValueError, match="decoded message size"):
-        validator_service._decode_rpc_payload(
-            frame,
-            logical_limit=validator_service.MAX_RPC_REQUEST_BYTES,
-        )
 
 
-def test_validator_still_accepts_legacy_eof_request():
-    body = json.dumps({"command": "health"}).encode()
-    request, framed = validator_service._receive_request(_FragmentSocket(body, 3))
-    assert request == {"command": "health"}
-    assert framed is False
 
 
-def test_validator_rejects_oversized_frame_before_reading_body():
-    prefix = (validator_service.MAX_RPC_REQUEST_FRAME_BYTES + 1).to_bytes(4, "big")
-    with pytest.raises(ValueError, match="outside"):
-        validator_service._receive_request(_FragmentSocket(prefix, 4))
 
 
-def test_validator_client_exact_reader_handles_fragments():
-    assert validator_client._recv_exact(_FragmentSocket(b"response", 1), 8) == b"response"
+
+
+
+
 
 
 def test_gateway_client_can_be_constructed_in_rpc_worker_without_event_loop():
@@ -646,8 +289,6 @@ def test_gateway_vsock_server_does_not_serialize_behind_blocked_rpc(
         listener.close()
         server.join(timeout=2.0)
     assert server.is_alive() is False
-
-
 def test_gateway_vsock_incomplete_frame_expires(monkeypatch):
     server_socket, client_socket = socket.socketpair()
     monkeypatch.setattr(
@@ -732,31 +373,3 @@ def test_gateway_vsock_survives_abandoned_peer_across_worker_rounds(
         listener.close()
         server.join(timeout=2.0)
     assert server.is_alive() is False
-
-
-def test_validator_vsock_connection_sets_anti_wedge_deadline(monkeypatch):
-    body = json.dumps({"command": "health"}).encode()
-    rpc_socket = _RPCSocket(len(body).to_bytes(4, "big") + body)
-    observed = []
-
-    def settimeout(value):
-        observed.append(value)
-
-    rpc_socket.settimeout = settimeout
-    monkeypatch.setattr(
-        validator_service,
-        "handle_request",
-        lambda request: {"status": "ok", "command": request["command"]},
-    )
-
-    validator_service._handle_vsock_client(rpc_socket, (3, 1234))
-
-    assert observed == [
-        validator_service.VSOCK_RPC_RECEIVE_TIMEOUT_SECONDS,
-        validator_service.VSOCK_RPC_RESPONSE_TIMEOUT_SECONDS,
-    ]
-    assert rpc_socket.closed is True
-    response_length = int.from_bytes(rpc_socket.request[:4], "big")
-    response = json.loads(rpc_socket.request[4:].decode())
-    assert response_length == len(rpc_socket.request[4:])
-    assert response == {"status": "ok", "command": "health"}

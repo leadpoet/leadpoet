@@ -1,5 +1,5 @@
 #!/bin/bash
-# Start the approved two-role Nitro topology, or one role for component tests.
+# Start the approved coordinator Nitro topology.
 
 set -euo pipefail
 
@@ -8,27 +8,12 @@ GATEWAY_ROOT="${GATEWAY_ROOT:-/home/ec2-user/gateway}"
 EIF_ROOT="${GATEWAY_TEE_EIF_ROOT:-/home/ec2-user/tee}"
 TOPOLOGY_MODE="${GATEWAY_TEE_TOPOLOGY_MODE:-full}"
 RELEASE_MANIFEST="${GATEWAY_V2_RELEASE_MANIFEST:-$EIF_ROOT/gateway-v2-release-manifest.json}"
-TEE_PROTOCOL="$(
-  printf '%s' "${RESEARCH_LAB_TEE_PROTOCOL:-v2}" \
-    | tr '[:upper:]' '[:lower:]'
-)"
 ROLE_READY_TIMEOUT_SECONDS="${GATEWAY_TEE_ROLE_READY_TIMEOUT_SECONDS:-180}"
 ROLE_READY_RETRY_SECONDS="${GATEWAY_TEE_ROLE_READY_RETRY_SECONDS:-5}"
-case "$TEE_PROTOCOL" in
-  v2|authoritative_v2) TEE_PROTOCOL="v2" ;;
-  *)
-    echo "ERROR: RESEARCH_LAB_TEE_PROTOCOL must be v2; V1 authority is retired" >&2
-    exit 1
-    ;;
-esac
 ALL_ROLES=(
   gateway_coordinator
-  gateway_scoring
 )
-# Nitro limits the number of discontiguous memory regions backing one enclave.
-# Allocate the largest EIFs first so smaller roles cannot fragment that pool.
 FULL_LAUNCH_ORDER=(
-  gateway_scoring
   gateway_coordinator
 )
 
@@ -62,7 +47,7 @@ if [ "$TOPOLOGY_MODE" = "full" ]; then
 elif [ "$TOPOLOGY_MODE" = "component" ]; then
   COMPONENT_ROLE="${GATEWAY_TEE_COMPONENT_ROLE:-gateway_coordinator}"
   case "$COMPONENT_ROLE" in
-    gateway_coordinator|gateway_scoring) ;;
+    gateway_coordinator) ;;
     *) echo "ERROR: invalid GATEWAY_TEE_COMPONENT_ROLE" >&2; exit 1 ;;
   esac
   ROLES=("$COMPONENT_ROLE")

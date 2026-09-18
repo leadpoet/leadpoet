@@ -52,11 +52,10 @@ def _verified_inventory(count: int = 2):
     )
 
 
-def test_inventory_accepts_all_aliases_and_compacts_gapped_indices():
+def test_inventory_accepts_live_alias_and_compacts_gapped_indices():
     environment = {
         "QUALIFICATION_WEBSHARE_PROXY_2": _proxy(2),
-        "WEBSHARE_PROXY_7": _proxy(7),
-        "RESEARCH_LAB_V2_SCORING_HTTPS_PROXY_10001": _proxy(11),
+        "LAB_ARENA_WEBSHARE_PROXY_7": _proxy(7),
         "LAB_ARENA_WEBSHARE_PROXY_10001": _proxy(11),
         "UNRELATED_SECRET": "ignore-me",
     }
@@ -66,7 +65,7 @@ def test_inventory_accepts_all_aliases_and_compacts_gapped_indices():
     assert [worker.slot_index for worker in inventory.workers] == [1, 2, 3]
     assert [worker.source_name for worker in inventory.workers] == [
         "QUALIFICATION_WEBSHARE_PROXY_2",
-        "WEBSHARE_PROXY_7",
+        "LAB_ARENA_WEBSHARE_PROXY_7",
         "LAB_ARENA_WEBSHARE_PROXY_10001",
     ]
     assert [worker.proxy_url for worker in inventory.workers] == [

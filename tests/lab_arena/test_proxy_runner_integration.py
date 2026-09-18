@@ -193,7 +193,7 @@ def test_proxy_file_imports_only_proxy_data_and_never_provider_secrets(tmp_path)
 
 def test_proxy_file_rejects_symlinks_and_duplicate_values(tmp_path):
     path = tmp_path / "validator.env"
-    path.write_text("WEBSHARE_PROXY_1=one\nWEBSHARE_PROXY_1=two\n")
+    path.write_text("QUALIFICATION_WEBSHARE_PROXY_1=one\nQUALIFICATION_WEBSHARE_PROXY_1=two\n")
     path.chmod(0o600)
     with pytest.raises(ValueError, match="duplicate"):
         validator_proxy_environment({"LAB_ARENA_PROXY_ENV_FILE": str(path)})

@@ -194,3 +194,144 @@ def test_per_icp_overshoot_preserves_output_other_icps_restart_and_rewards(datab
     assert harness.service.activate_reward(harness.round_id)["status"] == "activated"
     assert harness.service.activate_reward(harness.round_id)["status"] == "existing"
     fixtures.assert_canary_absent(harness, connect)
+
+
+def test_per_icp_money_cap_after_provider_failure_does_not_cancel_round(database, tmp_path):
+    psycopg2, dsn = database
+    connect = lambda: psycopg2.connect(**dsn)
+    harness = PerIcpHarness(connect, tmp_path, challengers=[], runners=["alpha"])
+    original = harness.sandbox.run_icp
+    observed = []
+
+    def run_icp(spec, **kwargs):
+        document = json.loads((spec.input_dir / runtime.INPUT_FILE_NAME).read_text())
+        if document.get("schema_version") == scoring.SCORING_INPUT_SCHEMA_VERSION:
+            def judge(companies, buyer, _reference):
+                company = companies[0]
+                name = company["company_name"]
+                raw = _positive_breakdown(
+                    name,
+                    urlsplit(company["company_website"]).hostname,
+                    name.lower().replace(" ", "-"),
+                )
+                raw.update(
+                    final_score=30,
+                    intent_signal_raw=30,
+                    intent_signal_final=30,
+                )
+                raw["intent_signals_detail"][0].update(raw=30, after_decay=30)
+                evidence = document["contact_source_evidence"][source_key(company)]
+                _merge_contact_breakdown(
+                    raw,
+                    asyncio.run(_contact_result(company, buyer, evidence)),
+                )
+                return apply_company_judgment_context(
+                    companies, [raw], contacts_required=True
+                )
+
+            judge.company_quality = judge.integrity_policy = judge.contacts_required = True
+            full, new = scoring.score_quality_work_item(
+                {"scored_run_id": document["scored_run_id"]},
+                icp=document["icp"],
+                companies=document["companies"],
+                scorer=judge,
+                cache_context=document["company_judgment_cache"],
+            )
+            return runtime.fake_result(
+                exit_code=0,
+                output_bytes=json.dumps(
+                    scoring.build_scoring_output(
+                        document["scored_run_id"], full, company_judgments=new
+                    )
+                ).encode(),
+            )
+
+        submission_id = spec.source_dir.parent.name.removeprefix("submission-")
+        position = int(document["icp"]["icp_id"].rsplit("_", 1)[-1]) - 1
+        if harness.flavors[submission_id] == "PublicBaseline" and position == 0:
+            calls = (("1.00", "failed"), ("3.10", "ok"), ("0.01", "refused"))
+            with harness.sandbox.lock:
+                os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
+                try:
+                    for cost, outcome in calls:
+                        status, _, _ = shim.dispatch(
+                            "openrouter.chat",
+                            {
+                                "model": "openai/gpt-4o-mini",
+                                "messages": [{
+                                    "role": "user",
+                                    "content": cost + "|" + (
+                                        "failed" if outcome == "failed" else "ok"
+                                    ),
+                                }],
+                                "max_tokens": 100,
+                            },
+                            5000,
+                        )
+                        assert status == {
+                            "ok": 200,
+                            "failed": 502,
+                            "refused": 402,
+                        }[outcome]
+                        observed.append((outcome, status))
+                finally:
+                    os.environ.pop(shim.WORKER_SOCKET_ENV, None)
+            return runtime.fake_result(
+                exit_code=1,
+                output_bytes=None,
+                stderr=b"controlled no output after budget stop",
+            )
+
+        base = original(spec, **kwargs)
+        assert base.output_bytes
+        rows = json.loads(base.output_bytes)["companies"]
+        for company in rows:
+            company.update(
+                company_linkedin=(
+                    "https://linkedin.com/company/"
+                    + company["company_name"].lower().replace(" ", "-")
+                ),
+                state="CA",
+            )
+            company["contact"] = _claim(company, valid_role=True)
+        return runtime.fake_result(
+            exit_code=0,
+            output_bytes=json.dumps({"companies": rows}).encode(),
+        )
+
+    harness.sandbox.run_icp = run_icp
+    participants = fixtures._start_round(harness, day=29, epoch=31801)
+    assert participants == 1
+    harness.clock.advance_to(harness.schedule()["stage_1_start"])
+    assert harness.service.advance_round(harness.round_id)["assignments"] == 10
+    harness.run_stage_with_runners(1)
+    assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+    scoring_opened = harness.service.advance_round(harness.round_id)
+    assert scoring_opened["assignments"] == 9
+    assert harness.status() == "stage1_scoring"
+    harness.advance_until("published", runners=1)
+
+    saved = harness.service.store.get_round(harness.round_id)
+    assert saved["status"] == "published"
+    baseline_id = next(iter(harness.flavors))
+    runs = harness.service.store.list_runs(
+        harness.round_id, submission_id=baseline_id, kind="execute"
+    )
+    accepted = [run for run in runs if run["status"] == "accepted"]
+    budget_stops = [
+        run for run in runs if run["terminal_cause"] == "budget_exhausted"
+    ]
+    assert len(accepted) == 19
+    assert len(budget_stops) == 1
+    assert budget_stops[0]["icp_position"] == 0
+    assert observed == [("failed", 502), ("ok", 200), ("refused", 402)]
+    assert "0.01|ok" not in harness.provider.dispatched
+
+    result = saved["publication_doc"]["final_ranking"][0]
+    assert result["submission_id"] == baseline_id
+    assert result["eligible"] is True
+    assert result["final_score"] > 0
+    per_icp = {item["icp_position"]: item for item in result["cost_summary"]["per_icp"]}
+    assert per_icp[0]["eligible"] is False
+    assert all(per_icp[position]["eligible"] for position in range(1, 20))
+    fixtures.assert_canary_absent(harness, connect)

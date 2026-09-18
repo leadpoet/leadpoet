@@ -137,3 +137,47 @@ def test_new_policy_projection_rejects_incomplete_successful_call_counters():
 
     assert "cost_summary" not in baseline
     assert "eligible" not in baseline
+
+
+def test_per_icp_policy_projects_its_cap_and_omits_legacy_aggregate_cap():
+    row = _published_row(policy=True)
+    row["configuration_doc"]["sourcing_cost_eligibility_policy"] = (
+        contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+    )
+    ranking = row["publication_doc"]["final_ranking"][0]
+    ranking["eligible"] = True
+    ranking["eligibility_reason"] = "eligible"
+    ranking["cost_summary"] = {
+        "returned_company_count": 100,
+        "qualified_company_count": 40,
+        "eligible_icp_count": 19,
+        "competition_sourcing_microusd": 9_000_000,
+        "execution_icp_cap_microusd": 4_000_000,
+        "cost_per_company_cap_microusd": 800_000,
+        "execution_cap_microusd": 80_000_000,
+        "per_icp": [
+            {
+                "icp_position": position,
+                "returned_company_count": 5,
+                "qualified_company_count": 2,
+                "competition_sourcing_microusd": 1_600_000 + (position == 2),
+                "eligibility_cap_microusd": 1_600_000,
+                "eligible": position != 2,
+                "eligibility_reason": (
+                    "cost_per_company_exceeded" if position == 2 else "eligible"
+                ),
+            }
+            for position in range(20)
+        ],
+        "execution": _bucket(successful=True),
+        "judge": _bucket(successful=True),
+    }
+
+    cost = public_dashboard.round_summary(row)["baseline"]["cost_summary"]
+
+    assert cost["sourcing_cost_eligibility_policy"] == (
+        "successful_calls_per_icp_v1"
+    )
+    assert cost["execution_icp_cap_microusd"] == 4_000_000
+    assert cost["per_icp"][2]["eligible"] is False
+    assert "execution_cap_microusd" not in cost

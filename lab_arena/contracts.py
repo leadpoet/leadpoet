@@ -107,6 +107,9 @@ SUBMISSION_SCHEMA_VERSION = "leadpoet.lab_arena.submission.v1"
 PROVIDER_CALL_SCHEMA_VERSION = "leadpoet.lab_arena.provider_call.v1"
 SUBMISSION_COSTS_SCHEMA_VERSION = "leadpoet.lab_arena.submission_costs.v1"
 SUCCESSFUL_CALLS_COST_POLICY = "successful_calls_v1"
+PER_ICP_SUCCESSFUL_CALLS_COST_POLICY = "successful_calls_per_icp_v1"
+PER_ICP_EXECUTION_CAP_MICROUSD = 4_000_000
+PER_ICP_QUALIFIED_PAIR_CAP_MICROUSD = 800_000
 SIGNING_KEY_DOCUMENT_SCHEMA_VERSION = "leadpoet.lab_arena.signing_key.v1"
 JSON_SAFE_INTEGER_MAX = 9_007_199_254_740_991
 
@@ -747,7 +750,14 @@ ROUND_CONFIGURATION_FIELDS = (
         "sourcing_cost_eligibility_policy",
         "str",
         required=False,
-        choices=(SUCCESSFUL_CALLS_COST_POLICY,),
+        choices=(SUCCESSFUL_CALLS_COST_POLICY, PER_ICP_SUCCESSFUL_CALLS_COST_POLICY),
+    ),
+    F(
+        "execution_icp_cap_microusd",
+        "int",
+        required=False,
+        minimum=1,
+        maximum=JSON_SAFE_INTEGER_MAX,
     ),
     F("scoring_cap_microusd", "int", minimum=1),
     F("scorer_image_digest", "sha256"),
@@ -794,6 +804,19 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
         raise ArenaContractError("integrity scorer adapter requires matching round policy")
     if "cost_per_company_microusd" in config and config["cost_per_company_microusd"] is None:
         raise ArenaContractError("round cost-per-company cap cannot be null")
+    if (
+        config.get("sourcing_cost_eligibility_policy")
+        == PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+    ):
+        if not is_integrity:
+            raise ArenaContractError("per-ICP cost policy requires integrity receipts")
+        if (
+            config.get("execution_icp_cap_microusd")
+            != PER_ICP_EXECUTION_CAP_MICROUSD
+            or config.get("cost_per_company_microusd")
+            != PER_ICP_QUALIFIED_PAIR_CAP_MICROUSD
+        ):
+            raise ArenaContractError("per-ICP cost policy requires fixed cost limits")
     if (
         "benchmark_disclosure_policy" in config
         and config["benchmark_disclosure_policy"] is None

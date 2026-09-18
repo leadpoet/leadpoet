@@ -42,7 +42,8 @@ ACTIVE_ROUND_STATUSES = tuple(
 SOURCE_UPLOAD_EXPIRES_SECONDS = 900
 DEFAULT_BASELINE_SOURCE_URL = "https://github.com/leadpoet/leadpoet-sales-agent/archive/refs/heads/lab.tar.gz"
 DEFAULT_EXECUTION_CAP_MICROUSD = 80_000_000
-DEFAULT_COST_PER_COMPANY_MICROUSD = 800_000
+DEFAULT_COST_PER_COMPANY_MICROUSD = contracts.PER_ICP_QUALIFIED_PAIR_CAP_MICROUSD
+DEFAULT_EXECUTION_ICP_CAP_MICROUSD = contracts.PER_ICP_EXECUTION_CAP_MICROUSD
 DEFAULT_STAGE_MINUTES = {
     "benchmark": 30,
     "stage_1": 240,
@@ -285,6 +286,8 @@ class ChainReads(Protocol):
 class RoundDefaults:
     execution_cap_microusd: int = DEFAULT_EXECUTION_CAP_MICROUSD
     cost_per_company_microusd: int = DEFAULT_COST_PER_COMPANY_MICROUSD
+    execution_icp_cap_microusd: int = DEFAULT_EXECUTION_ICP_CAP_MICROUSD
+    per_icp_cost_policy: bool = False
     scoring_cap_microusd: int = 50_000_000
     runner_hotkeys: Tuple[str, ...] = ()
     # The service freezes its public execution ceiling into each new round.
@@ -684,6 +687,11 @@ class ArenaService:
             raise ServiceError(
                 "successful_call_cost_schema_unavailable", 500
             ) from exc
+        if getattr(self._config.defaults, "per_icp_cost_policy", False):
+            try:
+                self._store.per_icp_cost_schema()
+            except ArenaStoreError as exc:
+                raise ServiceError("per_icp_cost_schema_unavailable", 500) from exc
         try:
             self._store.submission_replacement_schema()
         except ArenaStoreError as exc:
@@ -872,7 +880,9 @@ class ArenaService:
             "execution_cap_microusd": defaults.execution_cap_microusd,
             "cost_per_company_microusd": defaults.cost_per_company_microusd,
             "sourcing_cost_eligibility_policy": (
-                contracts.SUCCESSFUL_CALLS_COST_POLICY
+                contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+                if defaults.per_icp_cost_policy
+                else contracts.SUCCESSFUL_CALLS_COST_POLICY
             ),
             "scoring_cap_microusd": defaults.scoring_cap_microusd,
             "scorer_image_digest": defaults.scorer_image_digest,
@@ -885,6 +895,10 @@ class ArenaService:
         }
         if defaults.parallel_twenty_icp_execution:
             document["parallel_twenty_icp_execution"] = True
+        if defaults.per_icp_cost_policy:
+            document["execution_icp_cap_microusd"] = (
+                defaults.execution_icp_cap_microusd
+            )
         if defaults.checkpoint_deadline_enabled:
             document["checkpoint_deadline_policy"] = contracts.CHECKPOINT_DEADLINE_POLICY
         if defaults.integrity_from is not None and cutoff >= datetime.fromisoformat(defaults.integrity_from.replace("Z", "+00:00")):
@@ -2566,8 +2580,9 @@ class ArenaService:
         """Derive one score per participant from write-once run scores."""
 
         wanted = set(int(position) for position in positions)
+        all_runs = self._store.list_runs(str(round_row["round_id"]), kind="execute")
         selected: Dict[Tuple[str, int], Mapping[str, Any]] = {}
-        for run in self._store.list_runs(str(round_row["round_id"]), kind="execute"):
+        for run in all_runs:
             position = int(run["icp_position"])
             if position not in wanted or run.get("per_icp_score") is None:
                 continue
@@ -2582,6 +2597,26 @@ class ArenaService:
             if any(row is None for row in rows):
                 continue
             values = [float(row["per_icp_score"]) for row in rows if row is not None]
+            if (
+                round_row.get("configuration_doc", {}).get(
+                    "sourcing_cost_eligibility_policy"
+                )
+                == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+            ):
+                qualified_by_position = self._qualified_company_counts(
+                    round_row, submission_id, all_runs, positions=sorted(wanted)
+                )
+                adjusted = []
+                for position, value in zip(sorted(wanted), values):
+                    cost = self._per_icp_cost_eligibility(
+                        round_row, submission_id, position, all_runs,
+                        qualified=qualified_by_position[position],
+                    )
+                    reason = cost["eligibility_reason"]
+                    if reason == "provider_calls_inflight" or reason == "provider_cost_uncertain":
+                        raise ServiceError("per_icp_cost_unresolved", 409)
+                    adjusted.append(value if cost["eligible"] else 0.0)
+                values = adjusted
             entry = {
                 "submission_id": submission_id,
                 score_key: verify.stage_score(values, len(wanted)),
@@ -2619,12 +2654,22 @@ class ArenaService:
         self,
         submission_id: str,
         runs: Sequence[Mapping[str, Any]],
+        *, positions: Optional[Sequence[int]] = None,
     ) -> int:
         """Count unique validated company domains within each of the 20 ICPs."""
 
+        return sum(self._returned_company_counts(
+            submission_id, runs, positions=positions
+        ).values())
+
+    def _returned_company_counts(
+        self, submission_id: str, runs: Sequence[Mapping[str, Any]],
+        *, positions: Optional[Sequence[int]] = None,
+    ) -> Dict[int, int]:
         selected = self._selected_accepted_execution_runs(runs, submission_id)
-        total = 0
-        for position in sorted(selected):
+        counts: Dict[int, int] = {}
+        wanted = set(selected if positions is None else positions)
+        for position in sorted(wanted):
             run = selected.get(position)
             if run is None:
                 continue
@@ -2644,14 +2689,110 @@ class ArenaService:
                     .domain.registrable_domain
                 )
             # The same company in different ICPs is a different returned slot.
-            total += len(domains)
-        return total
+            counts[position] = len(domains)
+        return counts
+
+    def _per_icp_cost_eligibility(
+        self,
+        round_row: Mapping[str, Any],
+        submission_id: str,
+        position: int,
+        runs: Sequence[Mapping[str, Any]],
+        qualified: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        if qualified is None:
+            qualified = self._qualified_company_count(
+                round_row, submission_id, runs, positions=(position,)
+            )
+        result = self._store.icp_cost_eligibility(
+            round_id=str(round_row["round_id"]),
+            submission_id=submission_id,
+            icp_position=position,
+            qualified_company_count=qualified,
+        )
+        result["qualified_company_count"] = qualified
+        return result
+
+    def _submission_per_icp_cost_eligibility(
+        self,
+        round_row: Mapping[str, Any],
+        submission_id: str,
+        runs: Sequence[Mapping[str, Any]],
+        positions: Sequence[int],
+    ) -> Dict[str, Any]:
+        wanted = sorted(set(int(value) for value in positions))
+        qualified = self._qualified_company_counts(
+            round_row, submission_id, runs, positions=wanted
+        )
+        returned = self._returned_company_counts(
+            submission_id, runs, positions=wanted
+        )
+        rows = []
+        for position in wanted:
+            row = self._per_icp_cost_eligibility(
+                round_row, submission_id, position, runs,
+                qualified=qualified[position],
+            )
+            row["returned_company_count"] = returned.get(position, 0)
+            rows.append(row)
+        hard_reason = next(
+            (
+                str(row["eligibility_reason"])
+                for row in rows
+                if row["eligibility_reason"]
+                in ("provider_calls_inflight", "provider_cost_uncertain")
+            ),
+            None,
+        )
+        costs = self._store.submission_costs(submission_id)
+        execution = self._cost_kind_summary(costs, "execute", include_successful=True)
+        judge = self._cost_kind_summary(costs, "score", include_successful=True)
+        if judge["inflight_calls"]:
+            hard_reason = "provider_calls_inflight"
+        summary = {
+            "sourcing_cost_eligibility_policy": (
+                contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+            ),
+            "execution_icp_cap_microusd": int(
+                round_row["configuration_doc"]["execution_icp_cap_microusd"]
+            ),
+            "cost_per_company_cap_microusd": int(
+                round_row["configuration_doc"]["cost_per_company_microusd"]
+            ),
+            "returned_company_count": sum(
+                int(row["returned_company_count"]) for row in rows
+            ),
+            "qualified_company_count": sum(
+                int(row["qualified_company_count"]) for row in rows
+            ),
+            "eligible_icp_count": sum(bool(row["eligible"]) for row in rows),
+            "competition_sourcing_microusd": sum(
+                int(row["competition_sourcing_microusd"]) for row in rows
+            ),
+            "per_icp": rows,
+            "execution": execution,
+            "judge": judge,
+        }
+        return {
+            "cost_summary": summary,
+            "eligible": hard_reason is None,
+            "eligibility_reason": hard_reason or "eligible",
+        }
 
     def _qualified_company_count(
         self, round_row: Mapping[str, Any], submission_id: str,
         runs: Sequence[Mapping[str, Any]], *, positions: Optional[Sequence[int]] = None,
     ) -> int:
         """Count unique qualified entities from accepted, output-bound judgments."""
+        return sum(self._qualified_company_counts(
+            round_row, submission_id, runs, positions=positions
+        ).values())
+
+    def _qualified_company_counts(
+        self, round_row: Mapping[str, Any], submission_id: str,
+        runs: Sequence[Mapping[str, Any]], *, positions: Optional[Sequence[int]] = None,
+    ) -> Dict[int, int]:
+        """Count qualified entities per ICP in one judgment/object pass."""
         policy = round_row["configuration_doc"]["scorer_policy"]
         round_id = str(round_row["round_id"])
         icps = self.evaluation_icps(round_id)
@@ -2661,7 +2802,7 @@ class ArenaService:
         for stage in (1, 2):
             if wanted.intersection(contracts.stage_positions(stage)):
                 judges.update(self._scoring_outputs(round_id, stage))
-        total = 0
+        counts: Dict[int, int] = {}
         for position in sorted(wanted):
             execution = selected.get(position)
             if execution is None:
@@ -2687,8 +2828,8 @@ class ArenaService:
                     if float(breakdown.get("final_score") or 0) <= 0:
                         raise scoring.ScoringError("qualified company cannot carry zero score")
                     identities.add(key)
-            total += len(identities)
-        return total
+            counts[position] = len(identities)
+        return counts
 
     @staticmethod
     def _cost_kind_summary(
@@ -2753,6 +2894,19 @@ class ArenaService:
         """Build final cost reporting without changing the quality score."""
 
         configuration = round_row.get("configuration_doc") or {}
+        if (
+            configuration.get("sourcing_cost_eligibility_policy")
+            == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+        ):
+            return self._submission_per_icp_cost_eligibility(
+                round_row,
+                submission_id,
+                runs,
+                tuple(
+                    range(contracts.BENCHMARK_ICP_COUNT)
+                    if positions is None else positions
+                ),
+            )
         if "cost_per_company_microusd" not in configuration:
             return {
                 "cost_summary": None,

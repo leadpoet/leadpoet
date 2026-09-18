@@ -432,6 +432,7 @@ def build_service_from_environment(mode: str):
         # inventory. The gateway publishes one common maximum for all of them.
         runner_slot_ceiling=contracts.RUNNER_SLOT_CEILING,
         parallel_twenty_icp_execution=True,
+        per_icp_cost_policy=True,
         baseline_hotkey=_required("LAB_ARENA_BASELINE_HOTKEY"),
         baseline_source_url=_baseline_source_url_from_environment(mode),
         max_challengers=_max_challengers_from_environment(),

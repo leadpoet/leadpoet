@@ -158,6 +158,73 @@ def _cost_projection(
         }
     if not isinstance(summary, Mapping):
         return {}
+    per_icp_policy = (
+        sourcing_cost_eligibility_policy
+        == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+    )
+    if per_icp_policy:
+        scalar_keys = (
+            "returned_company_count",
+            "qualified_company_count",
+            "eligible_icp_count",
+            "competition_sourcing_microusd",
+            "execution_icp_cap_microusd",
+            "cost_per_company_cap_microusd",
+        )
+        projected_summary = {
+            key: _safe_integer(summary.get(key)) for key in scalar_keys
+        }
+        raw_rows = summary.get("per_icp")
+        execution = _cost_bucket(summary.get("execution"), successful_call_policy=True)
+        judge = _cost_bucket(summary.get("judge"), successful_call_policy=True)
+        if (
+            any(item is None for item in projected_summary.values())
+            or not isinstance(raw_rows, list)
+            or len(raw_rows) != contracts.BENCHMARK_ICP_COUNT
+            or execution is None
+            or judge is None
+        ):
+            return {}
+        rows = []
+        for raw in raw_rows:
+            if not isinstance(raw, Mapping):
+                return {}
+            row_reason = raw.get("eligibility_reason")
+            row = {
+                key: _safe_integer(raw.get(key))
+                for key in (
+                    "icp_position", "returned_company_count",
+                    "qualified_company_count", "competition_sourcing_microusd",
+                    "eligibility_cap_microusd",
+                )
+            }
+            row["eligible"] = raw.get("eligible")
+            row["eligibility_reason"] = row_reason
+            if (
+                any(value is None for key, value in row.items()
+                    if key not in ("eligible", "eligibility_reason"))
+                or not isinstance(row["eligible"], bool)
+                or row_reason not in _COST_REASONS
+            ):
+                return {}
+            rows.append(row)
+        if {row["icp_position"] for row in rows} != set(
+            range(contracts.BENCHMARK_ICP_COUNT)
+        ):
+            return {}
+        projected_summary.update({
+            "sourcing_cost_eligibility_policy": (
+                contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+            ),
+            "per_icp": sorted(rows, key=lambda row: row["icp_position"]),
+            "execution": execution,
+            "judge": judge,
+        })
+        return {
+            "cost_summary": projected_summary,
+            "eligible": eligible,
+            "eligibility_reason": str(reason),
+        }
     scalar_keys = (
         "returned_company_count",
         "execution_cap_microusd",

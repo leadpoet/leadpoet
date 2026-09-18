@@ -42,6 +42,7 @@ COMPANY_QUALITY_SCHEMA_VERSION = "leadpoet.lab_arena.company_quality_schema.v1"
 SUCCESSFUL_CALL_COST_SCHEMA_VERSION = (
     "leadpoet.lab_arena.successful_call_cost_schema.v1"
 )
+PER_ICP_COST_SCHEMA_VERSION = "leadpoet.lab_arena.per_icp_cost_schema.v1"
 PARALLEL_EXECUTION_SCHEMA_VERSION = (
     "leadpoet.lab_arena.parallel_execution_schema.v1"
 )
@@ -54,6 +55,7 @@ SERVICE_ROLE_NAME = "lab_arena_service"
 SCORE_BATCH_SIZE = 500
 
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
+    "lab_arena_per_icp_cost_schema_v1": (),
     "lab_arena_prepare_sep17_published_rerun286_v1": (
         ("p_source_size_bytes", "bigint"), ("p_source_sha256", "text"),
         ("p_source_commit", "text"), ("p_bank_sha256", "text"),
@@ -163,6 +165,12 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_weight_state_schema_v1": (),
     "lab_arena_current_daily_icp_set": (("p_set_id", "bigint"),),
     "lab_arena_submission_costs": (("p_submission_id", "text"),),
+    "lab_arena_icp_cost_eligibility": (
+        ("p_round_id", "text"),
+        ("p_submission_id", "text"),
+        ("p_icp_position", "integer"),
+        ("p_qualified_company_count", "integer"),
+    ),
     "lab_arena_commit_round_v2": (
         ("p_round_id", "text"),
         ("p_participants", "jsonb"),
@@ -909,6 +917,19 @@ class ArenaStore:
             raise ArenaStoreError("successful-call cost schema mismatch")
         return result
 
+    def per_icp_cost_schema(self) -> Dict[str, Any]:
+        result = _require_mapping(
+            self._transport.rpc("lab_arena_per_icp_cost_schema_v1", {}),
+            "per_icp_cost_schema",
+        )
+        if result != {
+            "schema_version": PER_ICP_COST_SCHEMA_VERSION,
+            "version": 289,
+            "policy": "successful_calls_per_icp_v1",
+        }:
+            raise ArenaStoreError("per-ICP cost schema mismatch")
+        return result
+
     def parallel_execution_schema(self) -> Dict[str, Any]:
         """Require the migration-255 parallel execution RPC and SQL guards."""
 
@@ -1464,6 +1485,23 @@ class ArenaStore:
                 },
             ),
             "reserve_call",
+        )
+
+    def icp_cost_eligibility(
+        self, *, round_id: str, submission_id: str, icp_position: int,
+        qualified_company_count: int,
+    ) -> Dict[str, Any]:
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_icp_cost_eligibility",
+                {
+                    "p_round_id": round_id,
+                    "p_submission_id": submission_id,
+                    "p_icp_position": int(icp_position),
+                    "p_qualified_company_count": int(qualified_company_count),
+                },
+            ),
+            "icp_cost_eligibility",
         )
 
     def mark_dispatched(self, *, run_id: str, lease_token_hash: str, call_identity: str) -> Dict[str, Any]:

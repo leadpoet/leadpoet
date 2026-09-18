@@ -3315,7 +3315,11 @@ async def _llm_reverify_company(
         employee_size_conflict=employee_size_conflict,
         company_quality=company_quality,
     )
-    if not investigation_targets and evidence_investigator:
+    if (
+        require_company_fit_dimensions
+        and not investigation_targets
+        and evidence_investigator
+    ):
         post_repair_investigation_targets = (
             _targeted_company_investigation_dimensions(
                 repaired_result,

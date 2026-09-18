@@ -255,6 +255,46 @@ def test_schema_repair_does_not_get_a_second_targeted_investigation(monkeypatch)
     assert result.decision == COMPANY_FIT_UNAVAILABLE
 
 
+def test_non_fit_reverification_never_starts_targeted_investigation(monkeypatch):
+    weak_stage = _complete_verdict(
+        observed_company_stage="",
+        stage_matches=None,
+        stage_evidence_url="",
+        stage_evidence_quote="",
+    )
+    calls = {"broad": 0, "investigator": 0}
+
+    async def provider(**_kwargs):
+        calls["broad"] += 1
+        return weak_stage, ""
+
+    async def must_not_investigate(**_kwargs):
+        calls["investigator"] += 1
+        raise AssertionError("non-fit re-verification cannot use the investigator")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer, "investigate_company_evidence", must_not_investigate
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "_incomplete_company_reverify_dimensions",
+        lambda *_args, **_kwargs: ("stage",),
+    )
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _company().model_copy(update={"company_stage": "Public"}),
+            _icp(company_stage="Public"),
+            require_company_fit_dimensions=False,
+            evidence_investigator=True,
+        )
+    )
+
+    assert calls == {"broad": 2, "investigator": 0}
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+
+
 def _complete_verdict(**overrides):
     verdict = {
         "observed_company_name": "Acme",

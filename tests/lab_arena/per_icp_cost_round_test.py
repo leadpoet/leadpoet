@@ -106,7 +106,7 @@ def test_per_icp_overshoot_preserves_output_other_icps_restart_and_rewards(datab
             company["contact"] = _claim(company, valid_role=True)
         calls = {0: [("3.90", "ok"), ("0.25", "ok"), ("0.01", "refused")],
                  1: [("1.60", "ok")], 2: [("1.600001", "ok")],
-                 3: [("10.00", "failed"), ("0.20", "ok")]}.get(position, [("0.10", "ok")])
+                 3: [("1.00", "failed"), ("0.20", "ok")]}.get(position, [("0.10", "ok")])
         with harness.sandbox.lock:
             os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
             try:
@@ -146,7 +146,7 @@ def test_per_icp_overshoot_preserves_output_other_icps_restart_and_rewards(datab
         assert 0 < result["final_score"] < sum(raw) / 20
         summary = result["cost_summary"]
         assert summary["competition_sourcing_microusd"] == 9_150_001
-        assert summary["execution"]["settled_microusd"] == 19_150_001
+        assert summary["execution"]["settled_microusd"] == 10_150_001
         per_icp = {item["icp_position"]: item for item in summary["per_icp"]}
         assert set(per_icp) == set(range(20))
         assert {pos for pos, item in per_icp.items() if not item["eligible"]} == {0, 2}

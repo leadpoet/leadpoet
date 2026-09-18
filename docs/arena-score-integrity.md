@@ -44,30 +44,35 @@ Accepted judgments carry original company indexes, canonical identity keys,
 duplicate flags, and qualification flags. The persisted qualification receipt
 is immutable with its per-ICP score.
 
-Baseline and miner submissions share the same $80 total sourcing budget during
-execution. The provider reservation path checks this budget across all ICPs,
-providers, and attempts. Retries do not reset spending. There is no separate
-per-ICP or per-company runtime spending cap. Provider charges above an estimate
-remain recorded in full; the budget guard refuses further paid calls when the
-remaining allowance is exhausted.
+For rounds using `successful_calls_per_icp_v1`, baseline and miner models use
+the same $4 sourcing admission limit for each ICP. The existing provider ledger
+combines all providers and execution attempts for that ICP. Retries do not reset
+spending. An admitted call can finish above $4; its full charge and response are
+retained. No further paid sourcing calls start for that ICP after the limit is
+reached. Other ICPs continue, and valid saved outputs remain available for scoring.
 
-Under the frozen `successful_calls_v1` policy, promotion cost eligibility is
-checked after scoring: successful sourcing spend must be at most the smaller
-of $80 and $0.80 multiplied by all verified, qualified company/contact pairs
-across the submission. Qualification is counted within each ICP and then
-summed. Ignored, duplicate, irrelevant, excess, or failed companies add no
-allowance. Historical rounds retain their frozen qualification and cost rules.
+Runtime admission retains the existing billing rules: actual charges, including
+charged failed calls, consume the sourcing budget; reservations and unresolved
+charges retain their existing safeguards. They are not treated as confirmed spend.
+Judge budgets remain separate.
 
-Successful paid calls count even when they return no useful leads, including
-calls from failed execution attempts. Charged failed provider calls remain in
-actual spending and runtime budget accounting but do not enter this final
-successful-call allowance. Judge spend is reported separately. Calls still in
-flight, or unresolved charges for successful sourcing calls, prevent cost
-eligibility. An ineligible challenger keeps its quality score but cannot be
-promoted. If the baseline exceeds the final successful-sourcing allowance, its
-effective score is zero for that round. Its accepted per-ICP scores remain in
-the run ledger. Other unresolved or invalid baseline cost states do not invent
-a zero score.
+After normal quality scoring, each ICP has a successful-sourcing cost allowance
+of $0.80 multiplied by its verified qualified company/contact pairs. Five pairs
+allow $4; two allow $1.60. Ignored, duplicate, irrelevant, excess, or failed pairs
+add no allowance. A cost-ineligible ICP contributes zero to the competition
+aggregate; its raw quality score and costs remain recorded. It does not remove
+scores from other ICPs or disqualify the whole submission.
+
+Successful paid calls count even when empty or followed by a model failure.
+Failed provider calls do not enter final cost eligibility, even if the provider
+billed them. In-flight calls and unresolved successful sourcing costs keep their
+existing fail-closed treatment. Actual billing and competition costs are reported
+separately; judge costs do not enter sourcing eligibility.
+
+Historical rounds retain their frozen rules. Under `successful_calls_v1`, the
+runtime admission limit was $80 for the submission, and final successful sourcing
+spend was compared with $0.80 times all qualified pairs across its ICPs. Published
+historical results are not rewritten.
 
 ## Inputs, admission, and repeated judgments
 
@@ -99,9 +104,10 @@ allows the next identical output to obtain a judgment with its own credentials.
 After all twenty ICPs have complete valid results, rank the baseline and
 eligible challengers by their twenty-ICP scores. The best eligible challenger
 becomes king only when its score is at least one point above the baseline's
-effective score. An inefficient baseline therefore sets a zero threshold, but
-the normal one-point promotion margin still applies. If no eligible challenger
-reaches one point, no new king is selected and the existing champion remains.
+effective score. Under the per-ICP policy, that score includes the zero contribution
+from each cost-ineligible ICP. The normal one-point promotion margin still applies.
+If no eligible challenger reaches the required margin, no new king is selected
+and the existing champion remains.
 Qualification receipts, cost eligibility, deterministic tie ordering, and all
 other publication guards continue to apply. No extra ICP set or finalist-only
 stage can change or veto this result.

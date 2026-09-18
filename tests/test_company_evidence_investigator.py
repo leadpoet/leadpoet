@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from gateway.qualification.models import CompanyOutput, ICPPrompt
 from lab_arena import scoring as arena_scoring
+from lab_arena import operations as arena_operations
 from qualification.scoring.competition import CompetitionCompanyScorer
 from qualification.scoring import company_evidence_investigator as investigator
 from qualification.scoring import lead_scorer
@@ -821,6 +822,7 @@ def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatc
 
     async def fake_post_json(_session, _url, *, headers, payload):
         del headers
+        arena_operations.validate_operation_request("openrouter.chat", payload)
         reasoning_requests.append(payload)
         turn = len(reasoning_requests)
         if turn == 1:
@@ -834,6 +836,7 @@ def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatc
         return 200, {
             "choices": [{"message": {"tool_calls": [{
                 "id": f"call-{turn}",
+                "index": 0,
                 "type": "function",
                 "function": {"name": name, "arguments": json.dumps(arguments)},
             }]}}]
@@ -873,6 +876,9 @@ def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatc
         request["model"] == investigator.INVESTIGATOR_MODEL
         for request in reasoning_requests
     )
+    replayed_call = reasoning_requests[1]["messages"][-2]["tool_calls"][0]
+    assert set(replayed_call) == {"id", "type", "function"}
+    assert set(replayed_call["function"]) == {"name", "arguments"}
     assert reasoning_requests[-1]["tool_choice"] == "auto"
 
 

@@ -637,9 +637,21 @@ async def investigate_company_evidence(
                 function = call.get("function")
                 if not isinstance(function, Mapping):
                     raise ValueError("reasoning_tool_call_malformed")
+                call_id = call.get("id")
+                call_type = call.get("type")
                 name = function.get("name")
+                raw_arguments = function.get("arguments")
+                if (
+                    not isinstance(call_id, str)
+                    or not call_id
+                    or call_type != "function"
+                    or not isinstance(name, str)
+                    or not name
+                    or not isinstance(raw_arguments, str)
+                ):
+                    raise ValueError("reasoning_tool_call_malformed")
                 try:
-                    arguments = json.loads(function.get("arguments") or "{}")
+                    arguments = json.loads(raw_arguments or "{}")
                 except (TypeError, ValueError):
                     raise ValueError("reasoning_tool_arguments_malformed") from None
                 if name == "submit_findings":
@@ -704,7 +716,16 @@ async def investigate_company_evidence(
                     raise ValueError("reasoning_tool_unknown")
                 assistant_message: dict[str, Any] = {
                     "role": "assistant",
-                    "tool_calls": [dict(call)],
+                    # Provider replies can include response-only metadata such
+                    # as ``index``. Replay only the closed chat protocol.
+                    "tool_calls": [{
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": raw_arguments,
+                        },
+                    }],
                 }
                 if isinstance(message.get("content"), str):
                     assistant_message["content"] = message["content"]
@@ -712,7 +733,7 @@ async def investigate_company_evidence(
                     assistant_message,
                     {
                         "role": "tool",
-                        "tool_call_id": str(call.get("id") or ""),
+                        "tool_call_id": call_id,
                         "name": str(name or ""),
                         "content": json.dumps(
                             tool_result, sort_keys=True, separators=(",", ":")

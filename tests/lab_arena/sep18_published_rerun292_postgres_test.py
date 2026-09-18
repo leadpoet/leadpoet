@@ -16,6 +16,10 @@ from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
 )
+from tests.lab_arena.per_icp_cost_admission_postgres_test import (
+    _reserve as _reserve_cost_call,
+    _settle as _settle_cost_call,
+)
 from tests.lab_arena.sep16_native_baseline_rerun_postgres_test import (
     _proof_breakdown,
     _proof_company,
@@ -249,7 +253,8 @@ def _seed_published_terminal(connection, harness: Harness):
                         stage, position, f"arena/terminal/{run_id}-score.json", run_id,
                     ),
                 )
-        # Paid baseline evidence across two attempts on ICP 0. IDs and payloads
+        # This direct insert represents sealed historical terminal evidence; it
+        # is not the active-cycle cost-path proof. IDs, amounts, and payloads
         # must survive the archive; routing IDs are the only allowed rewrite.
         first_run = f"{ROUND}:{BASELINE}:1:0:terminal:1"
         cursor.execute(
@@ -371,12 +376,21 @@ def _drive_cycle(service, objects, icps, runner_hotkey):
         lease_token_hash=hash_lease_token(token),
     )
     assert first["status"] == "leased" and first["kind"] == "execute"
+    assert (first["icp_position"], first["attempt"]) == (0, 1)
+    first_identity, first_reserved = _reserve_cost_call(
+        service.store, first, token, "rerun292-icp0-attempt1", 300_000
+    )
+    assert first_reserved["status"] == "reserved"
+    _settle_cost_call(
+        service.store, first, token, first_identity, 300_000, succeeded=True
+    )
     assert service.store.complete_attempt(
         run_id=first["run_id"], lease_token_hash=hash_lease_token(token),
         result={"terminal_status": "provider_error"},
         terminal_cause="provider_error", output_ref="",
     )["confirmation_attempt"] == 2
     accepted_positions = set()
+    retry_cost_settled = False
     while len(accepted_positions) < 20:
         token = new_lease_token()
         request_id = contracts.new_request_id()
@@ -389,6 +403,17 @@ def _drive_cycle(service, objects, icps, runner_hotkey):
         )
         assert claim["status"] == "leased" and claim["kind"] == "execute"
         position = int(claim["icp_position"])
+        if position == 0:
+            assert claim["attempt"] == 2
+            retry_identity, retry_reserved = _reserve_cost_call(
+                service.store, claim, token, "rerun292-icp0-attempt2", 400_000
+            )
+            assert retry_reserved["status"] == "reserved"
+            _settle_cost_call(
+                service.store, claim, token, retry_identity, 400_000,
+                succeeded=True,
+            )
+            retry_cost_settled = True
         _proof_execution(objects, icps[position], 9, position, claim["run_id"])
         assert service.store.complete_attempt(
             run_id=claim["run_id"], lease_token_hash=hash_lease_token(token),
@@ -396,6 +421,7 @@ def _drive_cycle(service, objects, icps, runner_hotkey):
             output_ref="arena/output/%s.json" % claim["run_id"],
         )["status"] == "accepted"
         accepted_positions.add(position)
+    assert retry_cost_settled
     assert service.close_stage(ROUND, 1)["status"] == "ok"
     for stage in (1, 2):
         assert service.open_scoring(ROUND, stage)["assignments"] == 50
@@ -517,7 +543,6 @@ def test_rerun292_full_published_transition_and_fail_closed_winner_guard(
         with connection.cursor() as cursor:
             # Two paid calls for separate attempts on the same ICP aggregate;
             # another ICP retains an independent fresh cap.
-            cursor.execute("SET LOCAL session_replication_role=replica")
             cursor.execute(
                 "SELECT run_id,attempt FROM public.lab_arena_runs WHERE round_id=%s "
                 "AND submission_id=%s AND kind='execute' AND icp_position=0 "
@@ -525,22 +550,15 @@ def test_rerun292_full_published_transition_and_fail_closed_winner_guard(
             )
             attempt_runs = cursor.fetchall()
             assert [row[1] for row in attempt_runs] == [1, 2]
-            for index, (run_id, _attempt) in enumerate(attempt_runs):
-                cursor.execute(
-                    "INSERT INTO public.lab_arena_ledger("
-                    "entry_kind,miner_hotkey,round_id,submission_id,run_id,stage,"
-                    "call_identity,provider,operation_id,funding_source,amount_microusd,"
-                    "entry_doc,terminal_response) VALUES ('settlement',%s,%s,%s,%s,1,%s,"
-                    "'openrouter','openrouter.responses','host',%s,%s::jsonb,%s::jsonb)",
-                    (
-                        harness.baseline_hotkey, ROUND, BASELINE, run_id,
-                        "sha256:" + hashlib.sha256(f"new-{index}".encode()).hexdigest(),
-                        300_000 if index == 0 else 400_000,
-                        json.dumps({"attempt": index + 1, "new_cycle": True}),
-                        json.dumps({"call_succeeded": True}),
-                    ),
-                )
-            cursor.execute("SET LOCAL session_replication_role=origin")
+            cursor.execute(
+                "SELECT amount_microusd,terminal_response FROM public.lab_arena_ledger "
+                "WHERE round_id=%s AND submission_id=%s AND entry_kind='settlement' "
+                "ORDER BY amount_microusd", (ROUND, BASELINE),
+            )
+            active_settlements = cursor.fetchall()
+            assert [row[0] for row in active_settlements] == [300_000, 400_000]
+            assert all(row[1] == {"status": 200, "call_succeeded": True}
+                       for row in active_settlements)
             cursor.execute(
                 "SELECT public.lab_arena__successful_icp_cost_state(%s,%s,0),"
                 "public.lab_arena__successful_icp_cost_state(%s,%s,1)",

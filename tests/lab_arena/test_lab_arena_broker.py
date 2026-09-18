@@ -1872,7 +1872,10 @@ def test_openrouter_reserves_maximum_cost_and_settles_reported_actual():
     assert store.openrouter_capacity == 10_000_000 - expected_actual
 
 
-def test_luna_responses_uses_exact_regional_fallback_and_reserves_its_price_ceiling():
+@pytest.mark.parametrize("funding_source", ("host", "miner_key"))
+def test_luna_responses_uses_bounded_zdr_fallback_and_reserves_its_price_ceiling(
+    funding_source,
+):
     payload = {
         "id": "gen-luna-regional",
         "model": br.OPENROUTER_LUNA_RESPONSES_MODEL,
@@ -1880,7 +1883,10 @@ def test_luna_responses_uses_exact_regional_fallback_and_reserves_its_price_ceil
         "usage": {"cost": "0.00025"},
     }
     broker, store, transport = make_broker(
-        transport=FakeTransport([(200, payload)])
+        transport=FakeTransport([(200, payload)]),
+        provider_funding_source_for=lambda _context, provider: (
+            funding_source if provider == "openrouter" else "host"
+        ),
     )
     broker._price_table = luna_price_table()
 
@@ -1900,9 +1906,10 @@ def test_luna_responses_uses_exact_regional_fallback_and_reserves_its_price_ceil
         "data_collection": "deny",
         "zdr": True,
         "order": ["azure/eu", "azure/us"],
-        "only": ["azure/eu", "azure/us"],
         "max_price": {"prompt": 0.275, "completion": 1.32, "request": 0},
     }
+    assert "only" not in body["provider"]
+    assert result.call["funding_source"] == funding_source
     assert body["store"] is False and body["stream"] is False
     base_reserve = br.max_openrouter_cost_microusd(
         luna_price_table(),

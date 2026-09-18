@@ -199,7 +199,6 @@ def test_host_openrouter_route_override_must_retain_fixed_privacy_policy():
         "zdr": True,
         "allow_fallbacks": True,
         "order": ["azure/eu", "azure/us"],
-        "only": ["azure/eu", "azure/us"],
         "max_price": {"prompt": 0.275, "completion": 1.32, "request": 0},
     }
     outbound = ops.build_outbound_request(
@@ -213,10 +212,11 @@ def test_host_openrouter_route_override_must_retain_fixed_privacy_policy():
         {**route, "zdr": False},
         {**route, "data_collection": "allow"},
         {**route, "allow_fallbacks": "true"},
-        {key: value for key, value in route.items() if key != "only"},
+        {**route, "require_parameters": True},
+        {key: value for key, value in route.items() if key != "order"},
         {**route, "extra": True},
         {**route, "order": "azure/eu"},
-        {**route, "only": ["azure/us", "azure/eu"]},
+        {**route, "only": ["azure/eu", "azure/us"]},
         {**route, "max_price": {"prompt": -1, "completion": 1.32, "request": 0}},
     ):
         with pytest.raises(ops.OperationRequestError) as excinfo:

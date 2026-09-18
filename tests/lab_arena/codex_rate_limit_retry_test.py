@@ -516,7 +516,8 @@ def test_worker_retries_luna_throttle_through_broker_with_same_regional_route(
     for request in transport.sent:
         body = json.loads(request["body"])
         assert body["provider"]["order"] == ["azure/eu", "azure/us"]
-        assert body["provider"]["only"] == ["azure/eu", "azure/us"]
+        assert "only" not in body["provider"]
+        assert "require_parameters" not in body["provider"]
         assert body["provider"]["max_price"] == {
             "prompt": 0.275,
             "completion": 1.32,

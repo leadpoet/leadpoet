@@ -1825,7 +1825,6 @@ def build_outbound_request(
             ):
                 raise OperationRequestError("invalid_request")
             policy = _deep_copy_json(openrouter_provider_policy)
-            route_fields = ("order", "only")
             price_fields = {"prompt", "completion", "request"}
             if (
                 not isinstance(policy, dict)
@@ -1833,23 +1832,19 @@ def build_outbound_request(
                     "data_collection",
                     "zdr",
                     "allow_fallbacks",
-                    *route_fields,
+                    "order",
                     "max_price",
                 }
                 or policy.get("data_collection") != "deny"
                 or policy.get("zdr") is not True
                 or type(policy.get("allow_fallbacks")) is not bool
+                or not isinstance(policy.get("order"), list)
+                or not 1 <= len(policy["order"]) <= 16
                 or any(
-                    not isinstance(policy.get(field), list)
-                    or not 1 <= len(policy[field]) <= 16
-                    or any(
-                        not isinstance(value, str) or not 1 <= len(value) <= 128
-                        for value in policy[field]
-                    )
-                    or len(set(policy[field])) != len(policy[field])
-                    for field in route_fields
+                    not isinstance(value, str) or not 1 <= len(value) <= 128
+                    for value in policy["order"]
                 )
-                or policy.get("order") != policy.get("only")
+                or len(set(policy["order"])) != len(policy["order"])
                 or not isinstance(policy.get("max_price"), dict)
                 or set(policy["max_price"]) != price_fields
                 or any(

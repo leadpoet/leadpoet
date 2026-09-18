@@ -243,6 +243,10 @@ loops; scoring failures do not stop weight submission.
 Already-signed transaction recovery and pending reveals continue. Chain outcomes are recorded separately. No Nitro enclave or KMS
 provisioning is required for validators, and there is no audit-validator role.
 
+Run `python neurons/validator.py` with your existing wallet flags. The same
+validator handles scoring startup through existing non-interactive sudo
+permission while preserving your wallet and state paths. It does not grant
+host permissions or stop weights when scoring cannot start.
 Follow [the normal Arena validator setup](docs/arena_normal_validator_weights.md)
 for local wallet configuration, sandbox setup, restart, and verification.
 Use `--check-scoring-only` to diagnose local scoring setup without accessing

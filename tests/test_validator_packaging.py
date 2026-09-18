@@ -117,12 +117,16 @@ from leadpoet_canonical.subtensor_events_v2 import (
     load_subtensor_events_profile_v2,
 )
 from lab_arena.validator import main
+from neurons.validator import main as standard_main
+from lab_arena.validator_startup import maybe_reexec_rootful
 from lab_arena.local_weight_signer import load_public_chain_signing_profile
 from Leadpoet.utils.subnet_epoch import (
     CUTOVER_JSON_ENV, CUTOVER_PATH_ENV, DEFAULT_SN71_CUTOVER_MANIFEST_PATH,
     ensure_cutover_manifest_configured, load_subnet_epoch_cutover,
 )
 assert callable(main)
+assert standard_main is main
+assert callable(maybe_reexec_rootful)
 assert sorted(DEFAULT_PROFILE_PATHS) == [455, 456, 457, 458, 459, 464, 466, 467]
 for spec_version in sorted(DEFAULT_PROFILE_PATHS):
     assert load_subtensor_events_profile_v2(

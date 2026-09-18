@@ -795,6 +795,32 @@ def test_benchmark_commit_rejects_an_invalid_current_scorer_before_freeze(connec
     assert harness.service.store.list_runs(harness.round_id) == []
 
 
+@pytest.mark.parametrize(
+    "missing_key", ["execution_cap_microusd", "cost_per_company_microusd"]
+)
+def test_benchmark_commit_rejects_missing_live_cost_policy_without_mutation(
+    connect, tmp_path, missing_key
+):
+    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    cutoff = datetime.now(timezone.utc) + timedelta(hours=12)
+    template = harness.service.create_round(
+        cutoff, round_id="arena-2026-09-26-costtemplate"
+    )
+    suffix = "execution" if missing_key == "execution_cap_microusd" else "company"
+    round_id = "arena-2026-09-26-missing" + suffix
+    malformed = {**template, "round_id": round_id}
+    malformed.pop(missing_key)
+    assert harness.service.store.create_round(round_id, malformed)["status"] == "created"
+    before = harness.service.store.get_round(round_id)
+
+    with pytest.raises(svc.ServiceError, match="round_cost_policy_missing"):
+        harness.service.commit_benchmark(round_id)
+
+    assert harness.service.store.get_round(round_id) == before
+    assert harness.service.store.list_submissions(round_id) == []
+    assert harness.service.store.list_runs(round_id) == []
+
+
 def test_round_advances_from_cutoff_on_readiness_without_nominal_idle_gaps(
     connect, tmp_path
 ):

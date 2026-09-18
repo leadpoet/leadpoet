@@ -491,6 +491,20 @@ def test_headcount_finding_binds_value_and_rejects_scoped_counts():
     )
     assert accepted["headcount"]["status"] == "VERIFIED"
 
+    linkedin_band = dict(
+        finding,
+        observed_value="11-50",
+        evidence_quote="Acme Company size 11-50 employees.",
+    )
+    accepted_band = _validated_findings(
+        {"findings": [linkedin_band]},
+        targets=("headcount",),
+        fetched_pages={url: linkedin_band["evidence_quote"]},
+        first_party_domains={"acme.example"},
+        identity_names={"acme"},
+    )
+    assert accepted_band["headcount"]["status"] == "VERIFIED"
+
     mismatched_value = dict(finding, observed_value=99)
     rejected_value = _validated_findings(
         {"findings": [mismatched_value]},
@@ -526,6 +540,24 @@ def test_headcount_finding_binds_value_and_rejects_scoped_counts():
         identity_names={"acme"},
     )
     assert rejected_members["headcount"]["status"] == "UNPROVEN"
+
+    for non_headcount_quote in (
+        "Acme was founded in 2020.",
+        "Acme reported 27 million dollars in annual revenue.",
+    ):
+        unrelated_number = dict(
+            finding,
+            observed_value=2020 if "2020" in non_headcount_quote else 27,
+            evidence_quote=non_headcount_quote,
+        )
+        rejected_number = _validated_findings(
+            {"findings": [unrelated_number]},
+            targets=("headcount",),
+            fetched_pages={url: non_headcount_quote},
+            first_party_domains={"acme.example"},
+            identity_names={"acme"},
+        )
+        assert rejected_number["headcount"]["status"] == "UNPROVEN"
 
 
 def test_unproven_rebrand_conflict_is_not_turned_into_a_false_mismatch():

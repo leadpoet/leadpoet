@@ -258,7 +258,7 @@ def _quote_supports_headcount(quote: str, observed_value: Any) -> bool:
         r"\b(?:associated members?|followers?|alumni|former employees?)\b",
         normalized,
     ) or re.search(
-        r"\b(?:team|department|division|office|location)\b.{0,40}"
+        r"\b(?:department|division|office|location)\b.{0,40}"
         r"\b(?:has|had|employs?|employees?|headcount)\b",
         normalized,
     ):
@@ -268,13 +268,24 @@ def _quote_supports_headcount(quote: str, observed_value: Any) -> bool:
     token = str(observed_value).strip().replace("\u2013", "-").replace("\u2014", "-")
     if not token:
         return False
-    compact_quote = re.sub(r"\s+", "", normalized).replace(",", "")
+    normalized_quote = normalized.replace(",", "")
     compact_token = re.sub(r"\s+", "", token.casefold()).replace(",", "")
     if re.fullmatch(r"\d+", compact_token):
-        return re.search(
-            rf"(?<!\d){re.escape(compact_token)}(?!\d)", compact_quote
-        ) is not None
-    return compact_token in compact_quote
+        token_pattern = rf"(?<!\d){re.escape(compact_token)}(?!\d)"
+    else:
+        token_pattern = re.escape(compact_token)
+    count_noun = r"(?:employees?|workers?|people)"
+    return bool(
+        re.search(
+            rf"{token_pattern}(?:\s+[a-z-]+){{0,3}}\s+{count_noun}\b",
+            normalized_quote,
+        )
+        or re.search(
+            rf"\b(?:headcount|workforce|company size|employee count|employs?)\b"
+            rf"[^.;:]{{0,32}}{token_pattern}",
+            normalized_quote,
+        )
+    )
 
 
 async def _post_json(

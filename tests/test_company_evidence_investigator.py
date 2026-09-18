@@ -155,6 +155,21 @@ def test_decisive_quote_must_occur_in_fetched_page():
     )
     assert locator_snippet_only["stage"]["status"] == "UNPROVEN"
 
+    weak_listing_quote = "CoStar Group, Inc. Common Stock (CSGP)"
+    weak_listing = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            evidence_url=url,
+            evidence_quote=weak_listing_quote,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: weak_listing_quote},
+        first_party_domains={"acme.example"},
+        identity_names={"costargroup"},
+    )
+    assert weak_listing["stage"]["status"] == "UNPROVEN"
+    assert "Public requires current exchange/ticker" in weak_listing["stage"]["reason"]
+
 
 def test_submit_schema_advertises_only_requested_targets_and_count():
     tools = investigator._tools(("headcount",))
@@ -987,6 +1002,143 @@ def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatc
         request["tool_choice"] == "required"
         for request in reasoning_requests
     )
+
+
+def test_harness_retries_deterministically_rejected_stage_quote(monkeypatch):
+    url = "https://costar.example/investors"
+    weak_quote = "CoStar Group, Inc. Common Stock (CSGP)"
+    strong_quote = (
+        "CoStar Group common stock is listed on NASDAQ under ticker CSGP."
+    )
+    reasoning_requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        arena_operations.validate_operation_request("openrouter.chat", payload)
+        reasoning_requests.append(payload)
+        turn = len(reasoning_requests)
+        if turn == 1:
+            name, arguments = "fetch_page", {"url": url}
+        elif turn == 2:
+            name, arguments = "submit_findings", {
+                "findings": [_finding(
+                    "stage",
+                    evidence_url=url,
+                    evidence_quote=weak_quote,
+                )]
+            }
+        else:
+            feedback = json.loads(payload["messages"][-1]["content"])
+            assert feedback["error"] == "deterministic_evidence_validation_failed"
+            assert feedback["rejected_findings"] == [{
+                "target": "stage",
+                "reason": (
+                    "stage quote must prove the completed/current stage; "
+                    "Public requires current exchange/ticker or "
+                    "listed/traded-share proof"
+                ),
+            }]
+            name, arguments = "submit_findings", {
+                "findings": [_finding(
+                    "stage",
+                    evidence_url=url,
+                    evidence_quote=strong_quote,
+                )]
+            }
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{turn}",
+            "index": 0,
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_fetch(_session, requested_url):
+        assert requested_url == url
+        return {
+            "ok": True,
+            "url": requested_url,
+            "text": f"{weak_quote}\n{strong_quote}",
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "CoStar Group",
+            "website": "https://costar.example",
+        },
+        targets=("stage",),
+        requested_stage="Public",
+    ))
+
+    assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["claims"]["stage"]["evidence_quote"] == strong_quote
+    assert result["usage"] == {
+        "reasoning_turns": 3,
+        "search_calls": 0,
+        "fetch_calls": 1,
+    }
+    assert len(reasoning_requests) == 3
+    assert all(
+        request["tool_choice"] == "required"
+        for request in reasoning_requests
+    )
+
+
+def test_final_forced_submission_returns_rejected_quote_as_unproven(monkeypatch):
+    url = "https://costar.example/investors"
+    weak_quote = "CoStar Group, Inc. Common Stock (CSGP)"
+    reasoning_requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        arena_operations.validate_operation_request("openrouter.chat", payload)
+        reasoning_requests.append(payload)
+        turn = len(reasoning_requests)
+        if turn == 1:
+            name, arguments = "fetch_page", {"url": url}
+        else:
+            name, arguments = "submit_findings", {
+                "findings": [_finding(
+                    "stage",
+                    evidence_url=url,
+                    evidence_quote=weak_quote,
+                )]
+            }
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{turn}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_fetch(_session, requested_url):
+        return {"ok": True, "url": requested_url, "text": weak_quote}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 2)
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "CoStar Group",
+            "website": "https://costar.example",
+        },
+        targets=("stage",),
+        requested_stage="Public",
+    ))
+
+    assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["usage"]["reasoning_turns"] == 2
+    assert len(reasoning_requests) == 2
+    assert reasoning_requests[-1]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "submit_findings"},
+    }
 
 
 def test_required_tool_turn_does_not_interpret_provider_prose(monkeypatch):

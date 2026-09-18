@@ -420,6 +420,31 @@ def _validated_findings(
                     evidence_quote="",
                     reason="source quote did not identify the investigated company",
                 )
+            elif target == "stage":
+                # Imported at validation time because lead_scorer owns the
+                # production stage standard and imports this investigator.
+                from qualification.scoring.lead_scorer import (
+                    _normalize_company_stage,
+                    _stage_quote_supports_observation,
+                )
+
+                normalized_stage = _normalize_company_stage(
+                    finding["observed_value"]
+                )
+                if not normalized_stage or not _stage_quote_supports_observation(
+                    normalized_stage,
+                    finding["evidence_quote"],
+                ):
+                    finding.update(
+                        status="UNPROVEN",
+                        evidence_url="",
+                        evidence_quote="",
+                        reason=(
+                            "stage quote must prove the completed/current stage; "
+                            "Public requires current exchange/ticker or "
+                            "listed/traded-share proof"
+                        ),
+                    )
             elif target == "headcount" and not _quote_supports_headcount(
                 finding["evidence_quote"], finding["observed_value"]
             ):
@@ -658,6 +683,14 @@ async def investigate_company_evidence(
                     arguments = json.loads(raw_arguments or "{}")
                 except (TypeError, ValueError):
                     raise ValueError("reasoning_tool_arguments_malformed") from None
+                canonical_call = {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": raw_arguments,
+                    },
+                }
                 if name == "submit_findings":
                     claims = _validated_findings(
                         arguments,
@@ -668,16 +701,42 @@ async def investigate_company_evidence(
                     )
                     if claims is None:
                         raise ValueError("reasoning_findings_malformed")
-                    return {
-                        "claims": claims,
-                        "failure_reason": "",
-                        "usage": {
-                            "reasoning_turns": _turn + 1,
-                            "search_calls": search_calls,
-                            "fetch_calls": fetch_calls,
-                        },
+                    submitted_statuses = {
+                        item.get("target"): item.get("status")
+                        for item in arguments["findings"]
+                        if isinstance(item, Mapping)
                     }
-                if name == "search_web":
+                    rejected = [
+                        {
+                            "target": target,
+                            "reason": str(finding.get("reason") or "")[:300],
+                        }
+                        for target, finding in claims.items()
+                        if submitted_statuses.get(target)
+                        in {"VERIFIED", "CONTRADICTED"}
+                        and finding.get("status") == "UNPROVEN"
+                    ]
+                    if rejected and not force_submit:
+                        tool_result = {
+                            "ok": False,
+                            "error": "deterministic_evidence_validation_failed",
+                            "rejected_findings": rejected,
+                            "instruction": (
+                                "Use fetched source text and resubmit one complete "
+                                "finding for every requested target. Do not paraphrase."
+                            ),
+                        }
+                    else:
+                        return {
+                            "claims": claims,
+                            "failure_reason": "",
+                            "usage": {
+                                "reasoning_turns": _turn + 1,
+                                "search_calls": search_calls,
+                                "fetch_calls": fetch_calls,
+                            },
+                        }
+                elif name == "search_web":
                     if time.monotonic() - started >= ADMISSION_DEADLINE_SECONDS:
                         return {
                             "claims": _unproven_findings(
@@ -722,14 +781,7 @@ async def investigate_company_evidence(
                     "role": "assistant",
                     # Provider replies can include response-only metadata such
                     # as ``index``. Replay only the closed chat protocol.
-                    "tool_calls": [{
-                        "id": call_id,
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "arguments": raw_arguments,
-                        },
-                    }],
+                    "tool_calls": [canonical_call],
                 }
                 if isinstance(message.get("content"), str):
                     assistant_message["content"] = message["content"]

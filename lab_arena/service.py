@@ -3890,7 +3890,9 @@ class ArenaService:
             and not any(
                 entry.get("entry_kind") == "refusal"
                 and (entry.get("entry_doc") or {}).get("reason") == "money_cap"
-                for entry in self._store.list_ledger(run_id=run_id)
+                for entry in self._store.list_ledger(
+                    run_id=run_id, entry_kind="refusal"
+                )
             )
         ):
             raise ServiceError("run_result_budget_unproved", 400)

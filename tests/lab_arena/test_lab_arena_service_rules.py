@@ -728,12 +728,15 @@ def test_per_icp_budget_completion_requires_authoritative_money_cap(
     service._request_round = lambda *_args, **_kwargs: (validated, round_row)
     run = service._store.get_run("run-1")
     completed = []
-    service._store = SimpleNamespace(
-        get_run=lambda _run_id: run,
-        list_ledger=lambda **_kwargs: (
+    def ledger(**kwargs):
+        assert kwargs == {"run_id": "run-1", "entry_kind": "refusal"}
+        return (
             [{"entry_kind": "refusal", "entry_doc": {"reason": "money_cap"}}]
             if money_cap_proof else []
-        ),
+        )
+    service._store = SimpleNamespace(
+        get_run=lambda _run_id: run,
+        list_ledger=ledger,
         complete_attempt=lambda **kwargs: completed.append(kwargs)
         or {"status": "failed"},
     )

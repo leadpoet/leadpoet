@@ -716,7 +716,7 @@ def test_harness_closes_search_budget_and_admission_boundary(monkeypatch):
         del headers
         reasoning_turns.append(payload)
         turn = len(reasoning_turns)
-        if turn <= 3:
+        if turn <= 4:
             name, arguments = "search_web", {"query": f"Acme query {turn}"}
         else:
             name, arguments = "submit_findings", {
@@ -748,8 +748,13 @@ def test_harness_closes_search_budget_and_admission_boundary(monkeypatch):
         targets=("stage",),
     ))
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["usage"]["reasoning_turns"] == investigator.MAX_REASONING_TURNS
     assert result["usage"]["search_calls"] == investigator.MAX_SEARCH_CALLS
     assert len(provider_searches) == investigator.MAX_SEARCH_CALLS
+    assert reasoning_turns[-1]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "submit_findings"},
+    }
 
     monotonic_values = iter((0.0, investigator.ADMISSION_DEADLINE_SECONDS + 1.0))
     monkeypatch.setattr(

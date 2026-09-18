@@ -1350,14 +1350,17 @@ def _web_identity_receipt(
         shared_slug = str(rebrand.get("shared_linkedin_slug") or "").casefold()
         submitted_slug = str(receipt.get("submitted_linkedin_slug") or "").casefold()
         observed_slug = str(receipt.get("observed_linkedin_slug") or "").casefold()
+        def _name_binds_rebrand(value: str) -> bool:
+            return bool(
+                value in {old_name, new_name}
+                or (old_name in value and new_name in value)
+            )
+
         names_bind = bool(
             old_name
             and new_name
-            and observed_raw_name in {old_name, new_name}
-            and (
-                submitted_raw_name in {old_name, new_name}
-                or (old_name in submitted_raw_name and new_name in submitted_raw_name)
-            )
+            and _name_binds_rebrand(submitted_raw_name)
+            and _name_binds_rebrand(observed_raw_name)
         )
         domains_bind = bool(
             old_domain
@@ -1749,6 +1752,7 @@ async def _refresh_linkedin_employee_size_observation(
     *,
     verified_homepage_identity: Mapping[str, str],
     invocation_cache: dict[str, Any],
+    collect_structured_conflict: bool = False,
 ) -> dict[str, Any]:
     """Replace a LinkedIn size observation only after exact identity binding."""
 
@@ -1763,6 +1767,35 @@ async def _refresh_linkedin_employee_size_observation(
             # A fresh repair can replace an unusable LinkedIn citation with
             # complete direct evidence. Do not retain the earlier outcome.
             invocation_cache["refresh_outcome"] = "verified"
+            anchor_name = str(
+                verified_homepage_identity.get("normalized_name") or ""
+            ).strip()
+            anchor_domain = str(
+                verified_homepage_identity.get("registrable_dns_domain") or ""
+            ).strip()
+            anchor_slug = str(
+                verified_homepage_identity.get("linkedin_company_slug") or ""
+            ).strip().casefold()
+            if (
+                collect_structured_conflict
+                and not invocation_cache.get("structured_attempted")
+                and anchor_name
+                and anchor_domain
+                and anchor_slug
+            ):
+                invocation_cache["structured_attempted"] = True
+                structured_diagnostic: dict[str, str] = {}
+                invocation_cache["structured_evidence"] = (
+                    await fetch_structured_linkedin_company_size(
+                        anchor_domain,
+                        f"https://www.linkedin.com/company/{anchor_slug}",
+                        diagnostic=structured_diagnostic,
+                    )
+                )
+                # This is a secondary conflict check. Its failure cannot erase
+                # complete direct evidence or become a provider failure.
+                if structured_diagnostic.get(VERIFIER_FAILURE_REASON_KEY):
+                    invocation_cache["structured_failure"] = True
             return dict(verdict)
         anchor_fields = (
             "normalized_name",
@@ -2847,13 +2880,17 @@ async def _llm_reverify_company(
             icp,
             verified_homepage_identity=verified_identity,
             invocation_cache=current_profile_cache,
+            collect_structured_conflict=evidence_investigator,
         )
     structured_employee_size_evidence = current_profile_cache.get(
         "structured_evidence"
     )
-    employee_size_conflict = _employee_size_sources_conflict(
-        verdict,
-        structured_employee_size_evidence,
+    employee_size_conflict = bool(
+        evidence_investigator
+        and _employee_size_sources_conflict(
+            verdict,
+            structured_employee_size_evidence,
+        )
     )
     verified_rebrand_identity: Mapping[str, Any] = {}
     result = _reverify_decision(
@@ -3066,6 +3103,7 @@ async def _llm_reverify_company(
             icp,
             verified_homepage_identity=verified_identity,
             invocation_cache=current_profile_cache,
+            collect_structured_conflict=evidence_investigator,
         )
     repaired_verdict = _project_investigator_stage(
         repaired_verdict,

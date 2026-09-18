@@ -8,6 +8,7 @@ from gateway.qualification.models import CompanyOutput, ICPPrompt
 from lab_arena import scoring as arena_scoring
 from qualification.scoring.competition import CompetitionCompanyScorer
 from qualification.scoring import company_evidence_investigator as investigator
+from qualification.scoring import lead_scorer
 from qualification.scoring.company_evidence_investigator import (
     _validated_findings,
 )
@@ -23,6 +24,7 @@ from qualification.scoring.linkedin_company_size import (
 from qualification.scoring.lead_scorer import (
     _employee_size_sources_conflict,
     _project_investigator_headcount,
+    _refresh_linkedin_employee_size_observation,
     _reverify_decision,
     _stage_quote_supports_observation,
 )
@@ -282,6 +284,45 @@ def test_rebrand_proof_cannot_bind_an_unrelated_linkedin_company():
     ).decision == COMPANY_FIT_MISMATCH
 
 
+def test_rebrand_proof_binds_composite_observed_name_symmetrically():
+    company = _company(
+        name="Quizizz",
+        website="https://quizizz.com",
+        linkedin="https://www.linkedin.com/company/quizizz",
+    )
+    verdict = _complete_verdict(
+        observed_company_name="Wayground (formerly Quizizz)",
+        observed_company_website="https://wayground.com",
+        observed_company_linkedin="https://www.linkedin.com/company/quizizz",
+    )
+    proof = _finding(
+        "rebrand",
+        observed_value="Wayground",
+        evidence_url="https://help.wayground.com/rebrand",
+        evidence_quote="Quizizz is now Wayground following our rebrand.",
+        old_name="Quizizz",
+        new_name="Wayground",
+        old_domain="quizizz.com",
+        new_domain="wayground.com",
+        shared_linkedin_slug="quizizz",
+    )
+
+    result = _reverify_decision(
+        verdict,
+        "",
+        "",
+        icp=_icp(),
+        company=company,
+        verified_rebrand_identity=proof,
+        company_quality=True,
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert result.details["identity_receipt"]["reason_code"] == (
+        "verified_rebrand_continuity"
+    )
+
+
 def test_conflicting_current_headcount_is_unproven():
     verdict = _complete_verdict(
         observed_employee_count=7,
@@ -308,6 +349,56 @@ def test_conflicting_current_headcount_is_unproven():
     )
     assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert result.details["dimension_decisions"]["employee_size"] == COMPANY_FIT_UNAVAILABLE
+
+
+def test_arena_conflict_check_collects_structured_size_without_replacing_direct_proof(
+    monkeypatch,
+):
+    structured = {
+        "employee_count": "11-50",
+        "provider": "harvestapi_get_company",
+        "source_field": "employeeCountRange",
+        "url": "https://www.linkedin.com/company/acme",
+        "website": "https://acme.example",
+    }
+    calls = []
+
+    async def fake_fetch(domain, profile_url, *, diagnostic):
+        del diagnostic
+        calls.append((domain, profile_url))
+        return structured
+
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_structured_linkedin_company_size",
+        fake_fetch,
+    )
+    verdict = _complete_verdict(
+        observed_employee_count=7,
+        employee_size_matches=False,
+        employee_size_evidence_url="https://pitchbook.example/acme",
+        employee_size_evidence_quote="Acme has 7 employees.",
+    )
+    cache = {}
+    refreshed = asyncio.run(_refresh_linkedin_employee_size_observation(
+        verdict,
+        _company(),
+        _icp(),
+        verified_homepage_identity={
+            "normalized_name": "Acme",
+            "registrable_dns_domain": "acme.example",
+            "linkedin_company_slug": "acme",
+        },
+        invocation_cache=cache,
+        collect_structured_conflict=True,
+    ))
+
+    assert refreshed == verdict
+    assert cache["structured_evidence"] == structured
+    assert calls == [
+        ("acme.example", "https://www.linkedin.com/company/acme")
+    ]
+    assert _employee_size_sources_conflict(refreshed, structured) is True
 
 
 def test_fetched_current_headcount_repairs_a_nonconflicting_false_negative():

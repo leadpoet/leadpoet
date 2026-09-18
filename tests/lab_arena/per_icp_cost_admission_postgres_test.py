@@ -217,6 +217,74 @@ def test_zero_cost_calls_do_not_close_paid_admission(database, tmp_path):
     assert (refused["status"], refused["reason"]) == ("refused", "money_cap")
 
 
+def test_score_spend_does_not_enter_execute_admission_or_cost_eligibility(
+    database, tmp_path
+):
+    connect = lambda: database[0].connect(**database[1])
+    harness = Harness(connect, tmp_path, challengers=[], runners=["score-cost"])
+    harness.service.config.defaults = replace(
+        harness.service.config.defaults,
+        per_icp_cost_policy=True,
+        integrity_from="2000-01-01T00:00:00Z",
+    )
+    _start_parallel_round(harness, "arena-2099-02-01-c5", slot_ceiling=2)
+    store = harness.service.store
+    lease, token = claim(
+        store, harness.round_id, harness.runner_keys[0], parallelism=2, ceiling=2
+    )[:2]
+
+    first_id, first = _reserve(store, lease, token, "execute-700k", 700_000)
+    assert first["status"] == "reserved"
+    _settle(store, lease, token, first_id, 700_000)
+
+    score_run_id = harness.round_id + ":score-cost:1"
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO public.lab_arena_runs "
+            "(run_id, assignment_id, round_id, submission_id, miner_hotkey, "
+            "stage, icp_position, attempt, status, stage_generation, kind, "
+            "scored_run_id) VALUES (%s,%s,%s,%s,%s,1,%s,1,'accepted',1,'score',%s)",
+            (
+                score_run_id,
+                harness.round_id + ":score-cost",
+                harness.round_id,
+                lease["submission_id"],
+                lease["miner_hotkey"],
+                lease["icp_position"],
+                lease["run_id"],
+            ),
+        )
+        cursor.execute(
+            "INSERT INTO public.lab_arena_ledger "
+            "(entry_kind, miner_hotkey, round_id, submission_id, run_id, stage, "
+            "call_identity, provider, operation_id, funding_source, "
+            "amount_microusd, terminal_response, entry_doc) "
+            "VALUES ('settlement',%s,%s,%s,%s,1,%s,'openrouter',"
+            "'openrouter.responses','miner_key',50000000,"
+            "'{\"status\":200,\"call_succeeded\":true}'::jsonb,'{}'::jsonb)",
+            (
+                lease["miner_hotkey"],
+                harness.round_id,
+                lease["submission_id"],
+                score_run_id,
+                sha("score-cost-50m"),
+            ),
+        )
+
+    second_id, second = _reserve(store, lease, token, "execute-100k", 100_000)
+    assert second["status"] == "reserved"
+    _settle(store, lease, token, second_id, 100_000)
+    cost = store.icp_cost_eligibility(
+        round_id=harness.round_id,
+        submission_id=lease["submission_id"],
+        icp_position=lease["icp_position"],
+        qualified_company_count=1,
+    )
+    assert cost["competition_sourcing_microusd"] == 800_000
+    assert cost["eligibility_cap_microusd"] == 800_000
+    assert cost["eligible"] is True
+
+
 def test_marker_absent_round_keeps_legacy_aggregate_money_cap(database):
     connect = lambda: database[0].connect(**database[1])
     from lab_arena.store import ArenaStore, PsycopgTransport

@@ -136,14 +136,22 @@ def test_daily_baseline_execution_uses_retained_champion_owner_credentials():
     assert vault.calls == [("prior-winning-submission", "deepline")]
 
 
-def test_daily_baseline_score_keeps_host_funding_snapshot():
+def test_daily_baseline_score_uses_retained_champion_owner_credentials():
     keys, context, vault = resolver(baseline=True)
     context = replace(context, kind="score")
+    keys._store.funding = {
+        "status": "available",
+        "funding_source": "miner_key",
+        "champion_funding": True,
+        "credential_submission_id": "prior-winning-submission",
+        "credential_miner_hotkey": "5" + "c" * 47,
+        "restart_required": False,
+    }
 
-    assert keys.provider_funding_source_for(context, "scrapingdog") == "host"
+    assert keys.provider_funding_source_for(context, "scrapingdog") == "miner_key"
     assert keys.retry_miner_credential_for(context) is False
-    assert keys.credential_for(context, "scrapingdog") == "host-runtime-key"
-    assert not vault.calls
+    assert keys.credential_for(context, "scrapingdog") == "miner-runtime-key"
+    assert vault.calls == [("prior-winning-submission", "scrapingdog")]
 
 
 def test_optional_champion_provider_is_not_read_until_requested():

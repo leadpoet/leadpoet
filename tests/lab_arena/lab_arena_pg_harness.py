@@ -45,6 +45,7 @@ LAB_ARENA_CODE_REVIEW_MIGRATION = "207-lab-arena-code-review.sql"
 LAB_ARENA_VALIDATOR_SCORING_AUTHORITY_MIGRATION = "208-lab-arena-validator-scoring-authority.sql"
 LAB_ARENA_UNCERTAIN_COST_ELIGIBILITY_MIGRATION = "209-lab-arena-uncertain-cost-eligibility.sql"
 LAB_ARENA_COST_BACKFILL_RETIREMENT_MIGRATION = "294-lab-arena-retire-open-cost-backfill.sql"
+LAB_ARENA_SCORE_PAYER_MIGRATION = "301-lab-arena-score-payer-boundary.sql"
 DEFAULT_MIGRATIONS = (
     LAB_ARENA_MIGRATION,
     LAB_ARENA_DAILY_COMPETITION_MIGRATION,
@@ -108,6 +109,7 @@ CURRENT_SERVICE_MIGRATIONS = POSTGREST_MIGRATIONS + (
     "263-lab-arena-code-review-recovery.sql",
     "274-lab-arena-run-quota-snapshot.sql",
     LAB_ARENA_COST_BACKFILL_RETIREMENT_MIGRATION,
+    LAB_ARENA_SCORE_PAYER_MIGRATION,
 )
 
 

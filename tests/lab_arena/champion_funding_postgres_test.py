@@ -10,6 +10,7 @@ import pytest
 from lab_arena import contracts
 from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport, hash_lease_token
 from tests.lab_arena.lab_arena_pg_harness import (
+    LAB_ARENA_SCORE_PAYER_MIGRATION,
     POSTGREST_MIGRATIONS,
     database_with_lab_arena_migration,
 )
@@ -42,6 +43,13 @@ def database():
 def old_database():
     yield from database_with_lab_arena_migration(
         tuple(name for name in POSTGREST_MIGRATIONS if name != MIGRATION)
+    )
+
+
+@pytest.fixture()
+def score_payer_database():
+    yield from database_with_lab_arena_migration(
+        CURRENT_MIGRATIONS + (LAB_ARENA_SCORE_PAYER_MIGRATION,)
     )
 
 
@@ -258,6 +266,40 @@ def _account_call(
         "call_identity": identity,
         "request_hash": request_hash,
         "evidence": evidence,
+    }
+
+
+def test_promoted_champion_pays_for_scoring_without_a_run_fallback_snapshot(
+    score_payer_database,
+):
+    store, connect, round_id, champion, _runner, execution, _token = (
+        _seed_champion_run(score_payer_database, "scorepayer")
+    )
+    score_run_id = round_id + ":score-payer:1"
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO public.lab_arena_runs "
+            "(run_id, assignment_id, round_id, submission_id, miner_hotkey, "
+            "stage, icp_position, attempt, status, stage_generation, kind, "
+            "scored_run_id) VALUES (%s,%s,%s,%s,%s,1,0,1,'pending',1,'score',%s)",
+            (
+                score_run_id,
+                round_id + ":score-payer",
+                round_id,
+                execution["submission_id"],
+                execution["miner_hotkey"],
+                execution["run_id"],
+            ),
+        )
+
+    assert store.get_run(score_run_id)["champion_funding_sources"] is None
+    assert store.provider_funding(score_run_id, "openrouter") == {
+        "status": "available",
+        "funding_source": "miner_key",
+        "champion_funding": True,
+        "credential_submission_id": champion["submission_id"],
+        "credential_miner_hotkey": champion["miner_hotkey"],
+        "restart_required": False,
     }
 
 

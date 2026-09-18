@@ -78,7 +78,7 @@ def test_no_sep17_archive_chain_and_all_nonbaseline_evidence_remains_sealed():
     sql = TEMPLATE.read_text()
     assert "recovery284" not in sql
     assert "rerun284archive" not in sql
-    assert "arena-2026-09-17-rerun285archive" in sql  # scorer source text only
+    assert "arena-2026-09-17-rerun285archive" in sql
     assert "lab_arena_sep18_published_rerun292_nonbaseline_valid_v1()" in sql
     assert sql.count(
         "OR public.lab_arena_sep18_published_rerun292_nonbaseline_valid_v1()"
@@ -133,3 +133,16 @@ def test_unrelated_row_preservation_uses_compact_count_and_digest_summaries():
         "'count', pg_catalog.count(*), 'sha256', 'sha256:'"
     ) == 10
     assert "jsonb_agg" not in protected
+
+
+def test_ledger_preservation_scan_is_bounded_to_neighbor_rounds():
+    sql = TEMPLATE.read_text()
+    bounded = (
+        "WHERE round_id IN (v_round_id, 'arena-2026-09-19',\n"
+        "                         'arena-2026-09-17-rerun285archive')"
+    )
+    assert sql.count(bounded) == 2
+    start = sql.index("-- Preserve every unrelated round")
+    end = sql.index("  v_expected_round :=", start)
+    protected = sql[start:end]
+    assert "FROM public.lab_arena_ledger AS row_value\n      WHERE NOT (" not in protected

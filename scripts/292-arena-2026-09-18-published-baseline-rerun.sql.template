@@ -598,13 +598,17 @@ BEGIN
           'hex'), '' ORDER BY run_id), ''), 'sha256'), 'hex'))
       FROM public.lab_arena_runs AS row_value
       WHERE NOT (round_id = v_round_id AND submission_id = v_baseline_id)),
+    -- Bound billing preservation to rounds that the transition can affect or
+    -- race with. Older ledger rows cannot match its exact mutation predicate.
     'ledger', (SELECT pg_catalog.jsonb_build_object(
       'count', pg_catalog.count(*), 'sha256', 'sha256:' || pg_catalog.encode(
         extensions.digest(COALESCE(pg_catalog.string_agg(pg_catalog.encode(
           extensions.digest(pg_catalog.to_jsonb(row_value)::TEXT, 'sha256'),
           'hex'), '' ORDER BY entry_id), ''), 'sha256'), 'hex'))
       FROM public.lab_arena_ledger AS row_value
-      WHERE NOT (round_id = v_round_id AND submission_id = v_baseline_id)),
+      WHERE round_id IN (v_round_id, 'arena-2026-09-19',
+                         'arena-2026-09-17-rerun285archive')
+        AND NOT (round_id = v_round_id AND submission_id = v_baseline_id)),
     'weights', (SELECT pg_catalog.jsonb_build_object(
       'count', pg_catalog.count(*), 'sha256', 'sha256:' || pg_catalog.encode(
         extensions.digest(COALESCE(pg_catalog.string_agg(pg_catalog.encode(
@@ -729,7 +733,9 @@ BEGIN
           extensions.digest(pg_catalog.to_jsonb(row_value)::TEXT, 'sha256'),
           'hex'), '' ORDER BY entry_id), ''), 'sha256'), 'hex'))
       FROM public.lab_arena_ledger AS row_value
-      WHERE NOT ((round_id = v_round_id AND submission_id = v_baseline_id)
+      WHERE round_id IN (v_round_id, 'arena-2026-09-19',
+                         'arena-2026-09-17-rerun285archive')
+        AND NOT ((round_id = v_round_id AND submission_id = v_baseline_id)
         OR (round_id = v_archive_round_id
           AND submission_id = v_archive_submission_id))),
     'weights', (SELECT pg_catalog.jsonb_build_object(

@@ -41,6 +41,9 @@ OLD_SOURCE_COMMIT = "e5341f85829ad196b4a1cb58b38a34155697c8d4"
 NEW_SOURCE_SIZE = 610_292
 NEW_SOURCE_SHA = "d" * 64
 NEW_SOURCE_COMMIT = "008ce9b8b027d9808e7a2c70a47e43686e426e1e"
+HISTORICAL_CALL_IDENTITY = "sha256:" + hashlib.sha256(
+    b"rerun292-unrelated-historical-sentinel"
+).hexdigest()
 
 
 @pytest.fixture(scope="module")
@@ -285,6 +288,19 @@ def _seed_published_terminal(connection, harness: Harness):
                     json.dumps({"call_succeeded": True}),
                 ),
             )
+        cursor.execute(
+            "INSERT INTO public.lab_arena_ledger("
+            "entry_kind,miner_hotkey,round_id,submission_id,run_id,stage,"
+            "call_identity,provider,operation_id,funding_source,amount_microusd,"
+            "entry_doc,terminal_response) VALUES ('settlement',%s,"
+            "'arena-2026-08-01','historical-baseline','historical-run',1,%s,"
+            "'openrouter','openrouter.responses','host',12345,%s::jsonb,%s::jsonb)",
+            (
+                harness.baseline_hotkey, HISTORICAL_CALL_IDENTITY,
+                json.dumps({"sentinel": "unrelated-history"}),
+                json.dumps({"call_succeeded": True}),
+            ),
+        )
         cursor.execute("SET session_replication_role=origin")
     connection.commit()
     return participants, publication
@@ -363,6 +379,16 @@ def _prepare(cursor, schedule):
         (NEW_SOURCE_SIZE, NEW_SOURCE_SHA, NEW_SOURCE_COMMIT, BANK_SHA, json.dumps(schedule)),
     )
     return cursor.fetchone()[0]
+
+
+def _snapshot_historical_ledger(cursor):
+    cursor.execute(
+        "SELECT to_jsonb(row_value) FROM public.lab_arena_ledger AS row_value "
+        "WHERE call_identity=%s", (HISTORICAL_CALL_IDENTITY,),
+    )
+    row = cursor.fetchone()
+    assert row is not None
+    return row[0]
 
 
 def _drive_cycle(service, objects, icps, runner_hotkey):
@@ -497,6 +523,7 @@ def test_rerun292_full_published_transition_and_fail_closed_winner_guard(
                 (ROUND, BASELINE),
             )
             paid_before = cursor.fetchone()[0]
+            historical_ledger_before = _snapshot_historical_ledger(cursor)
             authority_before = {
                 key: round_doc.get(key) for key in (
                     "reward_basis_hash", "reward_basis_doc", "signing_key_doc",
@@ -533,6 +560,7 @@ def test_rerun292_full_published_transition_and_fail_closed_winner_guard(
                 {k: v for k, v in row.items() if k not in ("round_id", "submission_id")}
                 for row in paid_before
             ]
+            assert _snapshot_historical_ledger(cursor) == historical_ledger_before
         connection.commit()
 
         bank = {"schema_version": "leadpoet.lab_arena.benchmark.v1", "round_id": ROUND, "icps": daily_icps()}

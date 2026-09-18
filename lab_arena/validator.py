@@ -1,8 +1,8 @@
 """One normal Arena validator: score leases and publish independently derived weights.
 
 It depends only on the Arena public API, finalized chain reads, and the
-validator's local Bittensor hotkey. Recent accepted work gates new weight state
-for high-stake validators; existing signed transactions recover independently.
+validator's local Bittensor hotkey. Permitted validators can retrieve weight
+state without recent scoring work; signed transactions recover independently.
 """
 
 from __future__ import annotations
@@ -246,6 +246,7 @@ class ArenaWeightOrchestrator:
         self.paths = paths
         self.extrinsic_period = int(extrinsic_period)
         self._last_confirmation = None
+        self._prior_poll_cursor = -1
         if self.extrinsic_period <= 0:
             raise ArenaValidatorError("protected Arena extrinsic period is invalid")
 
@@ -533,7 +534,7 @@ class ArenaWeightOrchestrator:
         return "broadcast"
 
     def poll_prior_outcomes(self, current_epoch: int) -> None:
-        """Advance every local unfinished journal without blocking a new epoch."""
+        """Advance one old journal per cycle, rotating past slow or failed work."""
 
         candidates = []
         for path in self.paths.root.glob("epoch-*-signed.json"):
@@ -547,30 +548,35 @@ class ArenaWeightOrchestrator:
             if epoch < int(current_epoch):
                 try:
                     outcome = _read_hashed_json(self.paths.outcome(epoch))
-                    if outcome is not None:
-                        self._report_outcome(outcome)
-                    else:
+                    if outcome is None or outcome.get("reported") is not True:
                         candidates.append(epoch)
                 except Exception as exc:
                     print(
                         "Arena validator prior outcome failed: epoch=%d type=%s"
                         % (epoch, type(exc).__name__), file=sys.stderr, flush=True,
                     )
-        if len(candidates) > 128:
-            candidates = sorted(candidates)[-128:]
-            print("Arena validator prior outcome polling limited to 128 epochs", file=sys.stderr, flush=True)
-        for epoch in sorted(candidates):
-            try:
+        if not candidates:
+            return
+        # Do not let one unavailable archive or report monopolize recovery.
+        # The cursor is only scheduling state; journals remain authoritative.
+        following = [epoch for epoch in candidates if epoch > self._prior_poll_cursor]
+        epoch = min(following or candidates)
+        self._prior_poll_cursor = epoch
+        try:
+            outcome = _read_hashed_json(self.paths.outcome(epoch))
+            if outcome is not None:
+                self._report_outcome(outcome)
+            else:
                 signed = _read_hashed_json(self.paths.signed(epoch))
                 if signed is None:
-                    continue
+                    return
                 self._recover_protected_state(signed)
                 self._confirm(signed)
-            except Exception as exc:
-                print(
-                    "Arena validator prior recovery failed: epoch=%d type=%s"
-                    % (epoch, type(exc).__name__), file=sys.stderr, flush=True,
-                )
+        except Exception as exc:
+            print(
+                "Arena validator prior recovery failed: epoch=%d type=%s"
+                % (epoch, type(exc).__name__), file=sys.stderr, flush=True,
+            )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -638,11 +644,6 @@ def run_validator_loops(*, orchestrator, runner_factory, epoch_supplier, stop,
         while not stop.is_set():
             try:
                 epoch = int(epoch_supplier())
-                try:
-                    orchestrator.poll_prior_outcomes(epoch)
-                except Exception as exc:
-                    print("Arena validator prior polling failed: type=%s" % type(exc).__name__,
-                          file=sys.stderr, flush=True)
                 status = orchestrator.run_once(epoch)
                 print("Arena validator weight status: %s" % status, flush=True)
             except Exception as exc:
@@ -650,6 +651,13 @@ def run_validator_loops(*, orchestrator, runner_factory, epoch_supplier, stop,
                       file=sys.stderr, flush=True)
             finally:
                 first_weight_cycle.set()
+            try:
+                # Refresh after the current operation; neither recovery nor
+                # its failures may prevent attempting the current epoch first.
+                orchestrator.poll_prior_outcomes(int(epoch_supplier()))
+            except Exception as exc:
+                print("Arena validator prior polling failed: type=%s" % type(exc).__name__,
+                      file=sys.stderr, flush=True)
             if once:
                 break
             stop.wait(interval)

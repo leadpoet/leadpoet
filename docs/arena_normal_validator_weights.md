@@ -98,8 +98,11 @@ submission. It never becomes an invented burn-only state.
 
 Signed bytes are persisted before broadcast. Restarts and uncertain results
 reuse those exact bytes. A fresh attempt requires proof of expiry, absence of
-inclusion, an unchanged nonce, and a successful authenticated state read. Earlier reveals and report retries do not
-block the current epoch. Success requires finalized commitment/reveal readback,
+inclusion, an unchanged nonce, and a successful authenticated state read. Each
+cycle attempts the current epoch first, then advances one prior reveal or report.
+Prior work rotates across unfinished journals, including after a failed read or
+report. A recovery backlog cannot consume the cycle before current signing.
+Each chain operation retains its existing timeout. Success requires finalized commitment/reveal readback,
 `LastUpdate`, the exact revealed vector, and unchanged rewarded UID ownership.
 Commitment inclusion alone is not success.
 

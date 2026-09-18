@@ -140,6 +140,15 @@ def test_decisive_quote_must_occur_in_fetched_page():
     )
     assert wrong_company["stage"]["status"] == "UNPROVEN"
 
+    locator_snippet_only = _validated_findings(
+        {"findings": [finding]},
+        targets=("stage",),
+        fetched_pages={},
+        first_party_domains={"acme.example"},
+        identity_names={"acme"},
+    )
+    assert locator_snippet_only["stage"]["status"] == "UNPROVEN"
+
 
 def test_rebrand_needs_first_party_explicit_old_and_new_name_continuity():
     url = "https://help.wayground.com/rebrand"
@@ -370,6 +379,19 @@ def test_headcount_finding_binds_value_and_rejects_scoped_counts():
         identity_names={"acme"},
     )
     assert rejected_scope["headcount"]["status"] == "UNPROVEN"
+
+    associated_members = dict(
+        finding,
+        evidence_quote="Acme has 27 associated members on LinkedIn.",
+    )
+    rejected_members = _validated_findings(
+        {"findings": [associated_members]},
+        targets=("headcount",),
+        fetched_pages={url: associated_members["evidence_quote"]},
+        first_party_domains={"acme.example"},
+        identity_names={"acme"},
+    )
+    assert rejected_members["headcount"]["status"] == "UNPROVEN"
 
 
 def test_unproven_rebrand_conflict_is_not_turned_into_a_false_mismatch():

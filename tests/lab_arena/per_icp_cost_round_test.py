@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 from dataclasses import replace
+from copy import deepcopy
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
@@ -65,7 +66,7 @@ class PerIcpHarness(QualityHarness):
 
 @pytest.fixture
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS + ("289-lab-arena-per-icp-cost-policy.sql",))
 
 
 def test_per_icp_overshoot_preserves_output_other_icps_restart_and_rewards(database, tmp_path):
@@ -156,6 +157,33 @@ def test_per_icp_overshoot_preserves_output_other_icps_restart_and_rewards(datab
         assert per_icp[2]["eligibility_cap_microusd"] == 1_600_000
         public = harness.service.public_results(harness.round_id, result["submission_id"])
         assert len(public["scores"]["stage_1"] + public["scores"]["stage_2"]) == 20
+    # The database independently rejects forged score or per-ICP eligibility.
+    genuine = saved["publication_doc"]["final_ranking"][0]
+    forged_documents = []
+    for key in ("competition_sourcing_microusd", "eligibility_cap_microusd", "qualified_company_count"):
+        forged = deepcopy(genuine)
+        forged["cost_summary"]["per_icp"][0][key] += 1
+        forged_documents.append(forged)
+    forged = deepcopy(genuine)
+    forged["cost_summary"]["per_icp"][0]["eligible"] = True
+    forged_documents.append(forged)
+    forged = deepcopy(genuine)
+    forged["cost_summary"]["per_icp"].pop()
+    forged_documents.append(forged)
+    forged = deepcopy(genuine)
+    forged["final_score"] += 1
+    forged_documents.append(forged)
+    for forged in forged_documents:
+        with connect() as connection:
+            with connection.cursor() as cursor, pytest.raises(psycopg2.Error) as rejected:
+                cursor.execute("SELECT public.lab_arena__per_icp_publication_valid(%s,%s::jsonb)",
+                               (harness.round_id, json.dumps(forged)))
+            assert rejected.value.pgcode == "22023"
+            connection.rollback()
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT public.lab_arena__per_icp_publication_valid(%s,%s::jsonb)",
+                       (harness.round_id, json.dumps(genuine)))
+        assert cursor.fetchone()[0] is True
     assert saved["king_outcome"] == "crowned"
     promotion = tmp_path / "promotion"; promotion.mkdir()
     remote = fixtures.promotion_repository(promotion)

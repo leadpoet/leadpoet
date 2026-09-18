@@ -98,6 +98,19 @@ def _competition_company() -> dict:
     }
 
 
+def _competition_company_v5() -> dict:
+    row = _competition_company()
+    row.pop("fit_summary")
+    row.pop("fit_evidence_urls")
+    row["intent_details"] = (
+        "Acme announced a completed funding event that matches the requested signal."
+    )
+    row["contact"] = None
+    row["intent_signals"][0].pop("why_now")
+    row["intent_signals"][0].pop("snippet")
+    return row
+
+
 def _complete_verdict(**overrides):
     verdict = {
         "observed_company_name": "Acme",
@@ -1417,8 +1430,9 @@ def test_only_the_lab_scorer_activates_the_investigator_by_default():
     "investigation_failure",
     [None, PROVIDER_ERROR_FAILURE_REASON, MALFORMED_RESPONSE_FAILURE_REASON],
 )
+@pytest.mark.parametrize("current_output_contract", [False, True])
 def test_targeted_stage_classification_through_lab_scorer(
-    monkeypatch, investigation_failure
+    monkeypatch, investigation_failure, current_output_contract
 ):
     verdict = _complete_verdict(
         observed_company_stage="Public",
@@ -1470,12 +1484,21 @@ def test_targeted_stage_classification_through_lab_scorer(
     monkeypatch.setattr(
         lead_scorer, "investigate_company_evidence", bounded_investigation
     )
-    scorer = arena_scoring.lab_scorer(
-        arena_scoring.build_scorer_policy(
-            scoring_adapter_version="qualification_contacts_v3"
-        )
+    policy = arena_scoring.build_scorer_policy(
+        scoring_adapter_version="qualification_contacts_v3",
+        intent_details=current_output_contract,
     )
-    company = _competition_company()
+    scorer = arena_scoring.lab_scorer(policy)
+    company = (
+        _competition_company_v5()
+        if current_output_contract
+        else _competition_company()
+    )
+    if current_output_contract:
+        assert policy["intent_details_policy"] == "intent_details_v1"
+        assert scorer.contacts_required is True
+        assert "fit_summary" not in company
+        assert "intent_details" in company
     icp = _icp(
         company_stage="Public",
         intent_signals=["Announced a completed funding event"],

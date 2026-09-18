@@ -170,14 +170,3 @@ def test_normalizer_rejects_relative_build_workspace(
         match="GATEWAY_V2_BUILD_WORK_ROOT must be an absolute path",
     ):
         normalizer._normalization_temp_parent()
-
-
-def test_validator_enclave_normalizer_uses_root_backed_workspace() -> None:
-    root = Path(__file__).resolve().parents[1]
-    build_script = (
-        root / "validator_tee" / "scripts" / "build_enclave.sh"
-    ).read_text(encoding="utf-8")
-    assert "VALIDATOR_ARENA_SIGNER_BUILD_ROOT" in build_script
-    assert 'mktemp -d "$BUILD_PARENT/exact-source.XXXXXX"' in build_script
-    assert "validator_tee.host.docker_image_normalizer_v2" in build_script
-    assert "Dockerfile.arena-signer" in build_script

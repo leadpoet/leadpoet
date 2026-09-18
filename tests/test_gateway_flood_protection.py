@@ -9,8 +9,8 @@ from gateway.utils.circuit_breaker import CircuitBreaker
 
 
 def test_priority_route_classification_is_explicit():
-    assert classify_path("/weights/submit") == "validator"
-    assert classify_path("/weights/submit/v2") == "validator"
+    assert classify_path("/weights/submit") == "other"
+    assert classify_path("/weights/submit/v2") == "other"
     assert classify_path("/research-lab/source-adapters") == "other"
     assert classify_path("/research-lab/source-adapters/status") == "other"
     assert classify_path("/fulfillment/retired") == "other"

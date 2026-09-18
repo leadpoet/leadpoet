@@ -2438,8 +2438,6 @@ GATEWAY_DEPLOY_STAGE="attested_runtime_and_enclave_build"
 export GATEWAY_DEPLOY_STAGE
 cd "$GATEWAY_ROOT/tee"
 sudo mkdir -p "$GATEWAY_TEE_EIF_ROOT"
-rm -f "$GATEWAY_ROOT/tee/tee-enclave.eif"
-sudo docker rmi tee-enclave:latest 2>/dev/null || true
 bash "$GATEWAY_ROOT/tee/stage_attested_runtime.sh"
 record_gateway_restart_timing "attested_runtime_staged"
 

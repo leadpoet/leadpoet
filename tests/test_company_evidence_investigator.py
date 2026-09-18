@@ -270,6 +270,83 @@ def test_rebrand_needs_first_party_explicit_old_and_new_name_continuity():
     assert prospective_result["rebrand"]["status"] == "UNPROVEN"
 
 
+def test_verified_rebrand_binds_completed_stage_under_old_name_only():
+    rebrand_url = "https://wayground.com/home/from-quizizz-to-wayground"
+    stage_url = "https://news.example/quizizz-series-b"
+    rebrand = _finding(
+        "rebrand",
+        observed_value="Wayground",
+        evidence_url=rebrand_url,
+        evidence_quote="Quizizz is now Wayground following our rebrand.",
+        old_name="Quizizz",
+        new_name="Wayground",
+        old_domain="quizizz.com",
+        new_domain="wayground.com",
+        shared_linkedin_slug="quizizz",
+    )
+    stage = _finding(
+        "stage",
+        observed_value="Series B",
+        evidence_url=stage_url,
+        evidence_quote="Quizizz completed its Series B funding round in 2022.",
+    )
+    fetched_pages = {
+        rebrand_url: (
+            "Quizizz is now Wayground following our rebrand. "
+            "The domain changed from quizizz.com to wayground.com."
+        ),
+        stage_url: stage["evidence_quote"],
+    }
+
+    accepted = _validated_findings(
+        # Stage is intentionally first to prove validation is order-independent.
+        {"findings": [stage, rebrand]},
+        targets=("stage", "rebrand"),
+        fetched_pages=fetched_pages,
+        first_party_domains={"quizizz.com", "wayground.com"},
+        identity_names={"waygroundformerlyquizizz"},
+    )
+    assert accepted["rebrand"]["status"] == "VERIFIED"
+    assert accepted["stage"]["status"] == "VERIFIED"
+
+    wrong_entity_stage = dict(
+        stage,
+        evidence_quote="Otherco completed its Series B funding round in 2022.",
+    )
+    rejected = _validated_findings(
+        {"findings": [wrong_entity_stage, rebrand]},
+        targets=("stage", "rebrand"),
+        fetched_pages={
+            **fetched_pages,
+            stage_url: wrong_entity_stage["evidence_quote"],
+        },
+        first_party_domains={"quizizz.com", "wayground.com"},
+        identity_names={"waygroundformerlyquizizz"},
+    )
+    assert rejected["rebrand"]["status"] == "VERIFIED"
+    assert rejected["stage"]["status"] == "UNPROVEN"
+
+    prospective_rebrand = dict(
+        rebrand,
+        evidence_quote="Quizizz plans to rebrand as Wayground.",
+    )
+    unproven_alias = _validated_findings(
+        {"findings": [stage, prospective_rebrand]},
+        targets=("stage", "rebrand"),
+        fetched_pages={
+            **fetched_pages,
+            rebrand_url: (
+                "Quizizz plans to rebrand as Wayground. "
+                "quizizz.com wayground.com"
+            ),
+        },
+        first_party_domains={"quizizz.com", "wayground.com"},
+        identity_names={"waygroundformerlyquizizz"},
+    )
+    assert unproven_alias["rebrand"]["status"] == "UNPROVEN"
+    assert unproven_alias["stage"]["status"] == "UNPROVEN"
+
+
 def test_verified_rebrand_is_a_separate_identity_proof_not_a_domain_rewrite():
     company = _company(
         name="Wayground formerly Quizizz",

@@ -64,7 +64,10 @@ listed/traded-share proof. A 'Public Company' label, planned IPO, old listing,
 product launch, or funding total is insufficient. Compare dated rounds,
 acquisitions, and IPO/listing events; use the latest completed event rather
 than the highest label found. Conflicting labels without chronology are
-UNPROVEN. Rebrand VERIFIED needs an
+UNPROVEN. Once first-party continuity proves that old and new names are the
+same entity, evaluate completed stage events under either verified name. Do
+not discard an earlier completed round solely because it uses the old name;
+still check for a later completed stage event. Rebrand VERIFIED needs an
 explicit first-party statement that the old and new names are the same entity,
 and must identify both names and both domains. A redirect or shared LinkedIn
 slug alone is insufficient. Headcount must be current company-wide headcount;
@@ -386,7 +389,19 @@ def _validated_findings(
     if not isinstance(raw_findings, list) or len(raw_findings) != len(targets):
         return None
     findings: dict[str, dict[str, Any]] = {}
-    for raw in raw_findings:
+    attribution_names = set(identity_names or set())
+    stage_attribution_names = set(attribution_names)
+    # Validate rebrand continuity first so only a proven old/new identity can
+    # bind stage evidence under the former name, regardless of submitted order.
+    ordered_findings = sorted(
+        raw_findings,
+        key=lambda item: (
+            0
+            if isinstance(item, Mapping) and item.get("target") == "rebrand"
+            else 1
+        ),
+    )
+    for raw in ordered_findings:
         if not isinstance(raw, Mapping):
             return None
         target = raw.get("target")
@@ -421,7 +436,8 @@ def _validated_findings(
                     reason="submitted quote was not present in fetched source",
                 )
             elif target in {"stage", "headcount"} and not _quote_names_company(
-                finding["evidence_quote"], identity_names or set()
+                finding["evidence_quote"],
+                stage_attribution_names if target == "stage" else attribution_names,
             ):
                 finding.update(
                     status="UNPROVEN",
@@ -487,6 +503,16 @@ def _validated_findings(
                     reason="first-party old/new identity continuity was not complete",
                 )
         findings[target] = finding
+        if target == "rebrand" and finding["status"] == "VERIFIED":
+            stage_attribution_names.update(
+                normalized_name
+                for name in (finding["old_name"], finding["new_name"])
+                if (
+                    normalized_name := re.sub(
+                        r"[^a-z0-9]+", "", _normalized_span(name)
+                    )
+                )
+            )
     return findings if set(findings) == set(targets) else None
 
 

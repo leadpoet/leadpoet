@@ -106,10 +106,19 @@ BEGIN
        WHERE round_id = v_round.round_id
          AND submission_id = 'baseline-2026-09-18' AND is_king
          AND source_size_bytes = 604847
-         AND submission_doc ->> 'source_sha256' =
-           '7e1bb0747014a57bc50f48f9f822d1a7c936682d63f06564e978d23f54eb7fc1'
-         AND submission_doc ->> 'source_commit' =
-           'e5341f85829ad196b4a1cb58b38a34155697c8d4'
+         AND source_ref =
+           'arena/arena-2026-09-18/sources/baseline-2026-09-18.tar.gz'
+         AND (NOT submission_doc ? 'source_ref'
+              OR submission_doc ->> 'source_ref' = source_ref)
+         AND (NOT submission_doc ? 'source_size_bytes'
+              OR (submission_doc ->> 'source_size_bytes')::BIGINT
+                   = source_size_bytes)
+         AND (NOT submission_doc ? 'source_sha256'
+              OR submission_doc ->> 'source_sha256' =
+                '7e1bb0747014a57bc50f48f9f822d1a7c936682d63f06564e978d23f54eb7fc1')
+         AND (NOT submission_doc ? 'source_commit'
+              OR submission_doc ->> 'source_commit' =
+                'e5341f85829ad196b4a1cb58b38a34155697c8d4')
      )
      OR EXISTS (
        SELECT 1 FROM pg_catalog.jsonb_array_elements(v_round.participants) AS participant

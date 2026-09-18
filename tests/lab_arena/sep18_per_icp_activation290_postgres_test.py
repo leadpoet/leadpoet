@@ -18,10 +18,6 @@ ROOT = Path(__file__).parents[2]
 MIGRATION = ROOT / "scripts/290-arena-2026-09-18-per-icp-cost-activation.sql"
 ROUND = "arena-2026-09-18"
 NEXT = "arena-2026-09-19"
-ARCHIVE_SHA = "7e1bb0747014a57bc50f48f9f822d1a7c936682d63f06564e978d23f54eb7fc1"
-SOURCE_COMMIT = "e5341f85829ad196b4a1cb58b38a34155697c8d4"
-
-
 @pytest.fixture(scope="module")
 def database():
     yield from database_with_lab_arena_migration(
@@ -70,8 +66,11 @@ def _seed(connection) -> None:
         for participant in participants:
             is_baseline = participant["is_king"]
             document = {
-                "source_sha256": ARCHIVE_SHA if is_baseline else ("a" * 64),
-                "source_commit": SOURCE_COMMIT if is_baseline else ("b" * 40),
+                "source_ref": "arena/%s/sources/%s.tar.gz" % (
+                    ROUND, participant["submission_id"]
+                ),
+                "source_size_bytes": 604847 if is_baseline else 1000,
+                "consent": {"public_rerun": True},
             }
             cursor.execute(
                 "INSERT INTO public.lab_arena_submissions("
@@ -216,6 +215,12 @@ def test_activation_preserves_work_and_replays(database):
         ),
         (
             "UPDATE public.lab_arena_submissions SET source_size_bytes=604846 "
+            "WHERE submission_id='baseline-2026-09-18'",
+            "frozen participant snapshot differs",
+        ),
+        (
+            "UPDATE public.lab_arena_submissions SET submission_doc="
+            "submission_doc||'{\"source_commit\":\"0000000000000000000000000000000000000000\"}'::jsonb "
             "WHERE submission_id='baseline-2026-09-18'",
             "frozen participant snapshot differs",
         ),

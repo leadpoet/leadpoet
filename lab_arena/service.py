@@ -2610,7 +2610,7 @@ class ArenaService:
                 for position, value in zip(sorted(wanted), values):
                     cost = self._per_icp_cost_eligibility(
                         round_row, submission_id, position, all_runs,
-                        qualified=qualified_by_position[position],
+                        qualified=qualified_by_position.get(position, 0),
                     )
                     reason = cost["eligibility_reason"]
                     if reason == "provider_calls_inflight" or reason == "provider_cost_uncertain":
@@ -2731,7 +2731,7 @@ class ArenaService:
         for position in wanted:
             row = self._per_icp_cost_eligibility(
                 round_row, submission_id, position, runs,
-                qualified=qualified[position],
+                qualified=qualified.get(position, 0),
             )
             row["returned_company_count"] = returned.get(position, 0)
             rows.append(row)

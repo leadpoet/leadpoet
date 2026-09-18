@@ -353,6 +353,7 @@ DECLARE
   v_eligible_icps BIGINT := 0;
   v_expected_execution JSONB;
   v_expected_judge JSONB;
+  v_score_count BIGINT;
 BEGIN
   IF v_cost ->> 'sourcing_cost_eligibility_policy'
        IS DISTINCT FROM 'successful_calls_per_icp_v1'
@@ -369,6 +370,10 @@ BEGIN
     v_summary := public.lab_arena__integrity_submission_summary(
       p_round_id, v_submission_id, ARRAY[v_position]
     );
+    IF NOT COALESCE((v_summary ->> 'valid')::BOOLEAN, FALSE) THEN
+      RAISE EXCEPTION 'lab_arena_publication_scoring_incomplete'
+        USING ERRCODE = '22023';
+    END IF;
     v_expected := public.lab_arena_icp_cost_eligibility(
       p_round_id, v_submission_id, v_position,
       (v_summary ->> 'qualified_company_count')::INTEGER
@@ -413,7 +418,7 @@ BEGIN
   v_expected_judge := public.lab_arena__cost_kind_summary_v1(
     v_submission_id, 'score'
   );
-  SELECT pg_catalog.avg(CASE WHEN
+  SELECT pg_catalog.count(*), pg_catalog.avg(CASE WHEN
       (public.lab_arena_icp_cost_eligibility(
         p_round_id, v_submission_id, runs.icp_position,
         (public.lab_arena__integrity_submission_summary(
@@ -421,7 +426,7 @@ BEGIN
         ) ->> 'qualified_company_count')::INTEGER
       ) ->> 'eligible')::BOOLEAN
     THEN runs.per_icp_score ELSE 0 END)
-  INTO v_expected_score
+  INTO v_score_count, v_expected_score
   FROM (
     SELECT DISTINCT ON (icp_position) icp_position, per_icp_score
     FROM public.lab_arena_runs
@@ -429,7 +434,8 @@ BEGIN
       AND kind = 'execute' AND per_icp_score IS NOT NULL
     ORDER BY icp_position, attempt DESC
   ) AS runs;
-  IF (p_ranking ->> 'final_score')::NUMERIC IS DISTINCT FROM v_expected_score
+  IF v_score_count <> 20
+     OR (p_ranking ->> 'final_score')::NUMERIC IS DISTINCT FROM v_expected_score
      OR (p_ranking ->> 'eligible')::BOOLEAN IS DISTINCT FROM (v_hard_reason IS NULL)
      OR p_ranking ->> 'eligibility_reason' IS DISTINCT FROM COALESCE(v_hard_reason,'eligible')
      OR (v_cost ->> 'competition_sourcing_microusd')::BIGINT IS DISTINCT FROM v_total_spend

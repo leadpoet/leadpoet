@@ -2612,9 +2612,6 @@ class ArenaService:
                         round_row, submission_id, position, all_runs,
                         qualified=qualified_by_position.get(position, 0),
                     )
-                    reason = cost["eligibility_reason"]
-                    if reason == "provider_calls_inflight" or reason == "provider_cost_uncertain":
-                        raise ServiceError("per_icp_cost_unresolved", 409)
                     adjusted.append(value if cost["eligible"] else 0.0)
                 values = adjusted
             entry = {

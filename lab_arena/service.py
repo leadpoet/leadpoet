@@ -3602,6 +3602,13 @@ class ArenaService:
         )
         if configuration.get("parallel_twenty_icp_execution") is True:
             lease["parallel_twenty_icp_execution"] = True
+        if (
+            configuration.get("sourcing_cost_eligibility_policy")
+            == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+        ):
+            lease["sourcing_cost_eligibility_policy"] = (
+                contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+            )
         return lease
 
     def _run_context(self, run_id: str, lease_token: str) -> Tuple[Dict[str, Any], broker_module.RunContext]:
@@ -3873,6 +3880,20 @@ class ArenaService:
             raise ServiceError("run_runner_mismatch", 403)
         kind = str(run.get("kind") or "execute")
         terminal_status = run_result["terminal_status"]
+        if (
+            kind == "execute"
+            and terminal_status == "budget_exhausted"
+            and (round_row.get("configuration_doc") or {}).get(
+                "sourcing_cost_eligibility_policy"
+            )
+            == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+            and not any(
+                entry.get("entry_kind") == "refusal"
+                and (entry.get("entry_doc") or {}).get("reason") == "money_cap"
+                for entry in self._store.list_ledger(run_id=run_id)
+            )
+        ):
+            raise ServiceError("run_result_budget_unproved", 400)
         champion_restart_required = (
             kind == "execute" and run.get("champion_restart_required") is True
         )

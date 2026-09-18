@@ -2239,23 +2239,24 @@ class AssignmentExecutor:
             # A shared host key or account failure is infrastructure when it
             # prevents an output. An agent that handles the failure and still
             # returns a valid output has completed the assignment.
+            with state.lock:
+                completed_calls = tuple(state.calls)
+                recovered_responses_retries = frozenset(
+                    state.recovered_responses_retry_call_identities
+                )
             miner_credentials_failed = any(
                 call.get("funding_source") == "miner_key"
                 and call.get("error_code") == "miner_credentials_unavailable"
-                for call in state.calls
+                for call in completed_calls
             )
             miner_scoring_funding_failed = scoring_run and any(
                 call.get("funding_source") == "miner_key"
                 and call.get("error_code") in ("budget_refused", "budget_exhausted")
-                for call in state.calls
+                for call in completed_calls
             )
-            with state.lock:
-                recovered_responses_retries = frozenset(
-                    state.recovered_responses_retry_call_identities
-                )
-            provider_infrastructure_failed = any(
-                call.get("call_identity")
-                not in recovered_responses_retries
+            infrastructure_failures = tuple(
+                call for call in completed_calls
+                if call.get("call_identity") not in recovered_responses_retries
                 and (
                     call.get("error_code") in (
                         "broker_unavailable",
@@ -2272,7 +2273,27 @@ class AssignmentExecutor:
                         )
                     )
                 )
-                for call in state.calls
+            )
+            provider_infrastructure_failed = bool(infrastructure_failures)
+            money_cap_sequences = [
+                call.get("action_sequence")
+                for call in completed_calls
+                if call.get("error_code") == "budget_refused"
+                and call.get("outcome") == "refused"
+                and call.get("reason") == "money_cap"
+                and type(call.get("action_sequence")) is int
+            ]
+            infrastructure_sequences = [
+                call.get("action_sequence") for call in infrastructure_failures
+                if type(call.get("action_sequence")) is int
+            ]
+            per_icp_money_cap_ended_attempt = (
+                not scoring_run
+                and lease.get("sourcing_cost_eligibility_policy")
+                == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+                and bool(money_cap_sequences)
+                and len(infrastructure_sequences) == len(infrastructure_failures)
+                and max(money_cap_sequences) > max(infrastructure_sequences, default=-1)
             )
             with state.quota_condition:
                 trusted_quota_failure = state.trusted_quota_failure
@@ -2281,10 +2302,13 @@ class AssignmentExecutor:
             ) and terminal != "accepted":
                 terminal = "credential_error"
                 output_document = None
-            elif (
-                provider_infrastructure_failed
-                or (not scoring_run and trusted_quota_failure)
-            ) and terminal != "accepted":
+            elif not scoring_run and trusted_quota_failure and terminal != "accepted":
+                terminal = "provider_error"
+                output_document = None
+            elif per_icp_money_cap_ended_attempt and terminal != "accepted":
+                terminal = "budget_exhausted"
+                output_document = None
+            elif provider_infrastructure_failed and terminal != "accepted":
                 terminal = "judge_error" if scoring_run else "provider_error"
                 output_document = None
                 if scoring_run and failure_diagnostic is None:

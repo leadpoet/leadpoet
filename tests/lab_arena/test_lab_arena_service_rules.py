@@ -710,6 +710,44 @@ def test_completion_requires_lease_owner_and_accepts_authorized_owner():
     assert _completion_service().handle_complete({}) == {"status": "failed"}
 
 
+@pytest.mark.parametrize("money_cap_proof", [False, True])
+def test_per_icp_budget_completion_requires_authoritative_money_cap(
+    money_cap_proof,
+):
+    service = _completion_service()
+    validated, round_row = service._request_round()
+    validated["body"]["result"] = {
+        **validated["body"]["result"],
+        "terminal_status": "budget_exhausted",
+    }
+    round_row["configuration_doc"] = {
+        "sourcing_cost_eligibility_policy": (
+            contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+        ),
+    }
+    service._request_round = lambda *_args, **_kwargs: (validated, round_row)
+    run = service._store.get_run("run-1")
+    completed = []
+    service._store = SimpleNamespace(
+        get_run=lambda _run_id: run,
+        list_ledger=lambda **_kwargs: (
+            [{"entry_kind": "refusal", "entry_doc": {"reason": "money_cap"}}]
+            if money_cap_proof else []
+        ),
+        complete_attempt=lambda **kwargs: completed.append(kwargs)
+        or {"status": "failed"},
+    )
+
+    if not money_cap_proof:
+        with pytest.raises(ServiceError, match="run_result_budget_unproved"):
+            service.handle_complete({})
+        assert completed == []
+        return
+
+    assert service.handle_complete({}) == {"status": "failed"}
+    assert completed[0]["terminal_cause"] == "budget_exhausted"
+
+
 def test_champion_restart_completion_does_not_wait_for_delayed_openrouter_cost():
     service = _completion_service()
     validated, round_row = service._request_round()
@@ -2296,6 +2334,9 @@ def test_execute_lease_uses_private_source_and_the_common_trusted_python_image(c
                 "lease_ttl_seconds": 420,
                 "scorer_image_digest": digest,
                 "scorer_image_reference": reference,
+                "sourcing_cost_eligibility_policy": (
+                    contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+                ),
             },
         },
     )
@@ -2306,6 +2347,9 @@ def test_execute_lease_uses_private_source_and_the_common_trusted_python_image(c
     assert lease["scrapingdog_configured"] is (configured or is_baseline)
     assert "private-ciphertext" not in repr(lease)
     assert (lease["image_digest"], lease["image_reference"]) == (digest, reference)
+    assert lease["sourcing_cost_eligibility_policy"] == (
+        contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+    )
     assert {
         key: lease[key]
         for key in ("source_ref", "source_size_bytes")

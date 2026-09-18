@@ -1932,6 +1932,78 @@ def test_valid_fallback_output_survives_a_refused_provider_call(tmp_path):
     assert [item["company_name"] for item in completion["output"]["companies"]] == ["Co 1"]
 
 
+@pytest.mark.parametrize(
+    ("ordered_errors", "per_icp_policy", "valid_output", "expected"),
+    [
+        (("money_cap",), True, False, "budget_exhausted"),
+        (("provider_unavailable", "money_cap"), True, False, "budget_exhausted"),
+        (("money_cap", "provider_unavailable"), True, False, "provider_error"),
+        (("provider_unavailable", "money_cap"), False, False, "provider_error"),
+        (("provider_unavailable", "money_cap"), True, True, "accepted"),
+    ],
+)
+def test_per_icp_money_cap_only_replaces_earlier_provider_failure(
+    tmp_path, ordered_errors, per_icp_policy, valid_output, expected
+):
+    documents = []
+    for sequence, error in enumerate(ordered_errors):
+        money_cap = error == "money_cap"
+        status = 402 if money_cap else 502
+        body = b'{"error":{"code":"budget_refused"}}' if money_cap else b'{"error":{"code":"provider_unavailable"}}'
+        call = {
+            "call_identity": contracts.document_hash(["mixed-call", sequence]),
+            "operation_id": "deepline.execute",
+            "action_sequence": sequence,
+            "reserved_microusd": 0,
+            "actual_microusd": 0,
+            "outcome": "refused" if money_cap else "settled",
+            "error_code": "budget_refused" if money_cap else error,
+            "provider_status": None if money_cap else 503,
+        }
+        if money_cap:
+            call["reason"] = "money_cap"
+        documents.append({
+            "status": status,
+            "headers": {"content-type": "application/json", "content-length": str(len(body))},
+            "body_b64": base64.b64encode(body).decode(),
+            "call": call,
+        })
+
+    class MixedFailureRuntime(BridgingRuntime):
+        def run_icp(self, spec, **_):
+            self.specs.append(spec)
+            os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
+            try:
+                for _error in ordered_errors:
+                    shim.dispatch(
+                        "deepline.execute",
+                        {"tool": "exa_search", "payload": {"query": "fintech"}},
+                        5000,
+                    )
+            finally:
+                os.environ.pop(shim.WORKER_SOCKET_ENV, None)
+            output = None
+            if valid_output:
+                output = json.dumps({"companies": [valid_company(1)]}).encode()
+            return runtime.fake_result(
+                exit_code=0 if valid_output else 1,
+                output_bytes=output,
+            )
+
+    leased = lease()
+    if per_icp_policy:
+        leased["sourcing_cost_eligibility_policy"] = (
+            contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+        )
+    api = FakeApi([leased], broker_documents=documents)
+    (tmp_path / "work").mkdir()
+
+    assert rn.Runner(make_config(tmp_path, api, MixedFailureRuntime())).run_once() == 1
+    completion = api.completions[0]["body"]
+    assert completion["result"]["terminal_status"] == expected
+    assert (completion.get("output") is not None) is valid_output
+
+
 class RefusedJudgeRuntime(BridgingRuntime):
     """The real judge folds a refused provider call into its own failure document."""
 

@@ -1648,6 +1648,41 @@ async def _fetch_structured_linkedin_profile_once(
         invocation_cache["structured_failure_reason"] = failure_reason
 
 
+def _is_bound_structured_linkedin_public_company_evidence(
+    evidence: Any,
+    verified_homepage_identity: Optional[Mapping[str, str]],
+) -> bool:
+    """Validate the exact structured Public receipt against the homepage."""
+
+    if not isinstance(evidence, Mapping) or set(evidence) != {
+        "company_type",
+        "provider",
+        "source_field",
+        "url",
+        "website",
+    }:
+        return False
+    anchor = (
+        verified_homepage_identity
+        if isinstance(verified_homepage_identity, Mapping)
+        else {}
+    )
+    anchor_domain = str(anchor.get("registrable_dns_domain") or "").strip()
+    anchor_slug = str(anchor.get("linkedin_company_slug") or "").strip().casefold()
+    evidence_domain = _registrable_domain(str(evidence.get("website") or ""))
+    evidence_slug = linkedin_company_page_slug(evidence.get("url"))
+    return bool(
+        evidence.get("company_type") == STRUCTURED_PROFILE_PUBLIC_COMPANY_TYPE
+        and evidence.get("provider") == STRUCTURED_PROFILE_PROVIDER
+        and evidence.get("source_field")
+        == STRUCTURED_PROFILE_COMPANY_TYPE_SOURCE_FIELD
+        and anchor_domain
+        and anchor_slug
+        and evidence_domain == anchor_domain
+        and evidence_slug == anchor_slug
+    )
+
+
 def _structured_linkedin_public_stage_matches(
     evidence: Any,
     *,
@@ -1663,34 +1698,10 @@ def _structured_linkedin_public_stage_matches(
         _normalize_company_stage(icp_stage) != "public"
         or identity_decision != COMPANY_FIT_MATCH
         or stage_decision != COMPANY_FIT_UNAVAILABLE
-        or not isinstance(evidence, Mapping)
-        or set(evidence) != {
-            "company_type",
-            "provider",
-            "source_field",
-            "url",
-            "website",
-        }
-    ):
-        return False
-    anchor = (
-        verified_homepage_identity
-        if isinstance(verified_homepage_identity, Mapping)
-        else {}
-    )
-    anchor_domain = str(anchor.get("registrable_dns_domain") or "").strip()
-    anchor_slug = str(anchor.get("linkedin_company_slug") or "").strip().casefold()
-    evidence_domain = _registrable_domain(str(evidence.get("website") or ""))
-    evidence_slug = linkedin_company_page_slug(evidence.get("url"))
-    if not (
-        evidence.get("company_type") == STRUCTURED_PROFILE_PUBLIC_COMPANY_TYPE
-        and evidence.get("provider") == STRUCTURED_PROFILE_PROVIDER
-        and evidence.get("source_field")
-        == STRUCTURED_PROFILE_COMPANY_TYPE_SOURCE_FIELD
-        and anchor_domain
-        and anchor_slug
-        and evidence_domain == anchor_domain
-        and evidence_slug == anchor_slug
+        or not _is_bound_structured_linkedin_public_company_evidence(
+            evidence,
+            verified_homepage_identity,
+        )
     ):
         return False
     quote = str(stage_evidence.get("quote") or "")
@@ -3791,8 +3802,19 @@ async def _verify_company_fit(
             == observed_decision
             and observed_decision in {COMPANY_FIT_MATCH, COMPANY_FIT_MISMATCH}
         )
+        structured_public_stage_proof = (
+            dimension == "stage"
+            and observed_decision == COMPANY_FIT_MATCH
+            and _normalize_company_stage(icp.company_stage) == "public"
+            and web_identity_decision == COMPANY_FIT_MATCH
+            and _is_bound_structured_linkedin_public_company_evidence(
+                web_evidence,
+                _verified_homepage_identity_anchor(identity),
+            )
+        )
         if dimension in active_web_dimensions and (
             not structured_employee_proof
+            and not structured_public_stage_proof
             and (
                 not _valid_web_evidence_url(web_evidence.get("url"))
                 or not str(web_evidence.get("quote") or "").strip()

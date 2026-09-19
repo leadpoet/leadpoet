@@ -492,7 +492,7 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
             'echo "Activating prepared gateway Git commit after process shutdown"',
             'GATEWAY_RESTART_PHASE=post_activate',
             'echo "Clearing Python caches"',
-            'echo "Preflight disk cleanup for Docker/PCR0/Research Lab builds"',
+            'echo "Preflight disk cleanup for Docker/PCR0/Arena builds"',
             'echo "Loading gateway runtime env for AWS/ECR checks"',
             'echo "Building/restarting TEE enclave"',
             'bash "$GATEWAY_ROOT/tee/stage_attested_runtime.sh"',
@@ -508,76 +508,80 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
     )
 
 
-def test_gateway_restart_preserves_only_bounded_legacy_release_state_across_reexec() -> None:
+def test_gateway_restart_preserves_manifest_only_release_state_across_reexec() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    reexec_start = script.index("exec env ", script.index("GATEWAY_DEPLOY_STAGE=\"restart_reexec\""))
+    reexec_start = script.index(
+        "exec env ", script.index('GATEWAY_DEPLOY_STAGE="restart_reexec"')
+    )
     reexec = script[reexec_start : script.index("\nfi", reexec_start)]
 
-    assert 'GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE=' in reexec
-    assert 'GATEWAY_V2_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE"' in reexec
+    assert 'GATEWAY_V2_RELEASE_MANIFEST="$GATEWAY_V2_RELEASE_MANIFEST"' in reexec
+    assert 'GATEWAY_PREPARED_V2_RELEASE_MANIFEST=' in reexec
     assert 'GATEWAY_V2_RELEASE_BUCKET="$GATEWAY_V2_RELEASE_BUCKET"' in reexec
     assert 'GATEWAY_V2_RELEASE_PREFIX="$GATEWAY_V2_RELEASE_PREFIX"' in reexec
+    for retired in (
+        "GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE",
+        "GATEWAY_V2_RELEASE_LINEAGE",
+        "GATEWAY_PREPARED_V2_RELEASE_LINEAGE",
+        "LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE",
+    ):
+        assert retired not in script
 
 
-def test_gateway_restart_selects_current_and_lineage_era_target_interfaces(
-    tmp_path: Path,
-) -> None:
+def test_gateway_restart_uses_manifest_only_release_interface() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    selector = _shell_function_source(
-        script, "select_gateway_target_release_interface"
-    )
-
-    current = tmp_path / "current"
-    legacy = tmp_path / "legacy"
-    linked = tmp_path / "linked"
-    for root in (current, legacy, linked):
-        (root / "gateway" / "tee").mkdir(parents=True)
-    (legacy / "gateway" / "tee" / "release_lineage_v2.py").write_text("# old\n")
-    (linked / "target.py").write_text("# unsafe\n")
-    (linked / "gateway" / "tee" / "release_lineage_v2.py").symlink_to(
-        linked / "target.py"
-    )
-
-    def selected(root: Path) -> str:
-        probe = subprocess.run(
-            [
-                "bash",
-                "-c",
-                selector
-                + '\nGATEWAY_PREFLIGHT_TREE="$1"\n'
-                + "select_gateway_target_release_interface\n"
-                + "printf '%s' \"$GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE\"\n",
-                "release-interface-probe",
-                str(root),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        return probe.stdout
-
-    assert selected(current) == "0"
-    assert selected(legacy) == "1"
-    assert selected(linked) == "0"
-
     acquisition = script[
-        script.index("# The lineage-era compatibility branch") :
+        script.index('export LEADPOET_LOCAL_RELEASE_COMMIT_SHA=') :
         script.index('record_gateway_restart_timing "local_release_ready"')
     ]
-    assert acquisition.count("--lineage-output") == 1
-    assert "unset LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE" in acquisition
+    assert acquisition.count("gateway.tee.release_channel_v2") == 1
+    assert acquisition.count("--gateway-output") == 1
+    assert "lineage" not in acquisition
     installer = script[
         script.index('echo "Installing the preflighted gateway manifest"') :
         script.index('echo "Verifying prepared and activated gateway trees')
     ]
-    assert installer.count("--prepared-lineage") == 1
-    assert installer.count("--prepared-manifest") == 2
+    assert installer.count("--prepared-manifest") == 1
+    assert installer.count("--active-manifest") == 1
+    assert "lineage" not in installer
     bootstrap = script[
         script.index('echo "Bootstrapping measured coordinator enclave runtime"') :
         script.index('echo "Verifying measured V2 runtime identity readiness"')
     ]
-    assert bootstrap.count("--gateway-release-lineage") == 1
-    assert bootstrap.count("--release-manifest") == 2
+    assert bootstrap.count("--release-manifest") == 1
+    assert "lineage" not in bootstrap
+
+
+def test_manifest_only_candidate_rotates_archive_before_controller_install() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    builder = (ROOT / "gateway" / "tee" / "build_role_enclaves.sh").read_text(
+        encoding="utf-8"
+    )
+
+    activation = script.index(
+        'echo "Activating prepared gateway Git commit after process shutdown"'
+    )
+    archive_rotation = script.index(
+        'bash "$GATEWAY_ROOT/tee/build_role_enclaves.sh"', activation
+    )
+    runtime_bootstrap = script.index(
+        'echo "Bootstrapping measured coordinator enclave runtime"', archive_rotation
+    )
+    attestation = script.index(
+        'echo "Verifying gateway attestation status"', runtime_bootstrap
+    )
+    controller_install = script.index(
+        "\ninstall_successful_restart_script\n", attestation
+    )
+    assert (
+        activation
+        < archive_rotation
+        < runtime_bootstrap
+        < attestation
+        < controller_install
+    )
+    assert "--last-good-manifest \"$LAST_GOOD_MANIFEST\"" in builder
+    assert "--retain 3" in builder
 
 
 def test_gateway_restart_fails_closed_on_all_authoritative_readiness_routes() -> None:

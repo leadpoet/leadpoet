@@ -386,17 +386,10 @@ GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS="${GATEWAY_RESTART_EMERGENCY_BA
 GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES="${GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES:-64}"
 GATEWAY_V2_CONFIG_DIR="${GATEWAY_V2_CONFIG_DIR:-/home/ec2-user/.config/leadpoet/v2}"
 GATEWAY_V2_RELEASE_MANIFEST="${GATEWAY_V2_RELEASE_MANIFEST:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-manifest.json}"
-GATEWAY_V2_RELEASE_LINEAGE="${GATEWAY_V2_RELEASE_LINEAGE:-$GATEWAY_TEE_EIF_ROOT/gateway-v2-release-lineage.json}"
 # Release acquisition happens while the existing gateway is still serving.
 # Keep candidate evidence restart-scoped so its fail-closed verifier remains
 # bound to the release that actually booted it until destructive cutover.
 GATEWAY_PREPARED_V2_RELEASE_MANIFEST="${GATEWAY_PREPARED_V2_RELEASE_MANIFEST:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.candidate-release.json}"
-# Bounded rollback compatibility: retained lineage-era releases still expose
-# the old release installer/bootstrap CLI. The prepared target selects this
-# branch; remove it after all three retained rollback archives use the
-# manifest-only interface.
-GATEWAY_PREPARED_V2_RELEASE_LINEAGE="${GATEWAY_PREPARED_V2_RELEASE_LINEAGE:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.candidate-release-lineage.json}"
-GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE="${GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE:-0}"
 GATEWAY_V2_RELEASE_BUCKET="${GATEWAY_V2_RELEASE_BUCKET:-leadpoet-attested-v2-artifacts-493765492819}"
 GATEWAY_V2_RELEASE_PREFIX="${GATEWAY_V2_RELEASE_PREFIX:-attested-v2/releases}"
 export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="${GATEWAY_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts}"
@@ -426,10 +419,7 @@ GATEWAY_RESTART_PATH_AUTHORITY_KEYS=(
   LEADPOET_DOCKER_OPERATION_LOCK_FILE
   GATEWAY_V2_CONFIG_DIR
   GATEWAY_V2_RELEASE_MANIFEST
-  GATEWAY_V2_RELEASE_LINEAGE
   GATEWAY_PREPARED_V2_RELEASE_MANIFEST
-  GATEWAY_PREPARED_V2_RELEASE_LINEAGE
-  GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE
   GATEWAY_V2_OFFLINE_ARTIFACT_ROOT
   GATEWAY_V2_RELEASE_PREFIX
   GATEWAY_V2_RELEASE_BUCKET
@@ -504,11 +494,6 @@ fi
 if ! [[ "$GATEWAY_RELEASE_SUPERSESSION_COUNT" =~ ^[0-9]+$ ]] \
     || ! [[ "$GATEWAY_RELEASE_SUPERSESSION_MAX" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: gateway release supersession counters are invalid" >&2
-  exit 2
-fi
-if [ "$GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE" != "0" ] \
-    && [ "$GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE" != "1" ]; then
-  echo "ERROR: gateway target release interface selection is invalid" >&2
   exit 2
 fi
 GATEWAY_HOST_EXTRA_PYTHON_PACKAGES=(
@@ -826,10 +811,7 @@ follow_superseding_gateway_release() {
     GATEWAY_V2_RELEASE_ARCHIVE_ROOT="$GATEWAY_V2_RELEASE_ARCHIVE_ROOT" \
     GATEWAY_V2_CONFIG_DIR="$GATEWAY_V2_CONFIG_DIR" \
     GATEWAY_V2_RELEASE_MANIFEST="$GATEWAY_V2_RELEASE_MANIFEST" \
-    GATEWAY_V2_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE" \
     GATEWAY_PREPARED_V2_RELEASE_MANIFEST="$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-    GATEWAY_PREPARED_V2_RELEASE_LINEAGE="$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
-    GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE="$GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE" \
     GATEWAY_V2_RELEASE_BUCKET="$GATEWAY_V2_RELEASE_BUCKET" \
     GATEWAY_V2_RELEASE_PREFIX="$GATEWAY_V2_RELEASE_PREFIX" \
     GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
@@ -1053,16 +1035,6 @@ run_prepared_gateway_module() {
   )
 }
 
-select_gateway_target_release_interface() {
-  if [ -f "$GATEWAY_PREFLIGHT_TREE/gateway/tee/release_lineage_v2.py" ] \
-      && [ ! -L "$GATEWAY_PREFLIGHT_TREE/gateway/tee/release_lineage_v2.py" ]; then
-    GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE=1
-  else
-    GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE=0
-  fi
-  export GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE
-}
-
 on_gateway_restart_exit() {
   local status="$?"
   if [ "$status" -ne 0 ]; then
@@ -1072,10 +1044,7 @@ on_gateway_restart_exit() {
   fi
   emit_gateway_restart_sentry_summary "$status"
   cancel_gateway_offline_artifact_prepare
-  rm -f -- \
-    "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-    "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
-    2>/dev/null || true
+  rm -f -- "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" 2>/dev/null || true
   if [ -n "${GATEWAY_PREFLIGHT_TREE:-}" ]; then
     rm -rf "$GATEWAY_PREFLIGHT_TREE"
   fi
@@ -1193,11 +1162,6 @@ enforce_deployment_environment() {
   export GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS
   export GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES
   export GATEWAY_V2_CONFIG_DIR GATEWAY_V2_RELEASE_MANIFEST
-  if [ "$GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE" = "1" ]; then
-    export GATEWAY_V2_RELEASE_LINEAGE
-  else
-    unset GATEWAY_V2_RELEASE_LINEAGE LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
-  fi
   export LEADPOET_LOCAL_RELEASE_COMMIT_SHA LEADPOET_LOCAL_GATEWAY_RELEASE
   export GATEWAY_TEE_FALLBACK_LOG_DIR="$GATEWAY_LOG_ROOT/gateway/logs/tee_fallback"
   export PYTHONPATH="$LEADPOET_REPO_ROOT"
@@ -1663,11 +1627,8 @@ restart_only_keys = {
     "GATEWAY_V2_OFFLINE_ARTIFACT_ROOT",
     "GATEWAY_V2_RELEASE_BUCKET",
     "GATEWAY_V2_RELEASE_ARCHIVE_ROOT",
-    "GATEWAY_V2_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_MANIFEST",
     "GATEWAY_PREPARED_V2_RELEASE_MANIFEST",
-    "GATEWAY_PREPARED_V2_RELEASE_LINEAGE",
-    "GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_PREFIX",
     "GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
     "GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS",
@@ -1782,11 +1743,8 @@ skip_keys = {
     "GATEWAY_V2_OFFLINE_ARTIFACT_ROOT",
     "GATEWAY_V2_RELEASE_BUCKET",
     "GATEWAY_V2_RELEASE_ARCHIVE_ROOT",
-    "GATEWAY_V2_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_MANIFEST",
     "GATEWAY_PREPARED_V2_RELEASE_MANIFEST",
-    "GATEWAY_PREPARED_V2_RELEASE_LINEAGE",
-    "GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_PREFIX",
     "GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
     "GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS",
@@ -1928,11 +1886,8 @@ skip_keys = {
     "GATEWAY_V2_OFFLINE_ARTIFACT_ROOT",
     "GATEWAY_V2_RELEASE_BUCKET",
     "GATEWAY_V2_RELEASE_ARCHIVE_ROOT",
-    "GATEWAY_V2_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_MANIFEST",
     "GATEWAY_PREPARED_V2_RELEASE_MANIFEST",
-    "GATEWAY_PREPARED_V2_RELEASE_LINEAGE",
-    "GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_PREFIX",
     "GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
     "GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS",
@@ -2072,7 +2027,6 @@ if ! git -C "$LEADPOET_REPO_ROOT" archive "$PREPARED_GATEWAY_SHA" \
   echo "ERROR: unable to materialize the prepared commit for V2 preflight" >&2
   exit 1
 fi
-select_gateway_target_release_interface
 echo "Verifying the prepared gateway tree with the preserved restart controller"
 GATEWAY_DEPLOY_STAGE="git_prepared_tree_verification"
 export GATEWAY_DEPLOY_STAGE
@@ -2142,31 +2096,13 @@ if [ -f "$GATEWAY_LOCAL_RELEASE_SCRIPT" ] \
   fi
   export LEADPOET_LOCAL_RELEASE_COMMIT_SHA="$PREPARED_GATEWAY_SHA"
   export LEADPOET_LOCAL_GATEWAY_RELEASE="$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"
-  # The lineage-era compatibility branch creates only the target singleton.
-  # Never merge a newer installed graph into an explicit rollback target.
-  unset LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
-  if [ "$GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE" = "1" ]; then
-    if ! run_prepared_gateway_module gateway.tee.release_channel_v2 \
-          --ensure \
-          --expected-commit "$PREPARED_GATEWAY_SHA" \
-          --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-          --lineage-output "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
-          --lineage-repository "$LEADPOET_REPO_ROOT" \
-          --lineage-authority-commit "$PREPARED_GATEWAY_SHA" \
-          --lineage-required-commit "$PREPARED_GATEWAY_SHA"; then
-      echo "ERROR: legacy rollback release identity is invalid" >&2
-      echo "Gateway remains running; production shutdown has not started." >&2
-      exit 75
-    fi
-  else
-    if ! run_prepared_gateway_module gateway.tee.release_channel_v2 \
-          --ensure \
-          --expected-commit "$PREPARED_GATEWAY_SHA" \
-          --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"; then
-      echo "ERROR: exact local gateway release identity is invalid" >&2
-      echo "Gateway remains running; production shutdown has not started." >&2
-      exit 75
-    fi
+  if ! run_prepared_gateway_module gateway.tee.release_channel_v2 \
+        --ensure \
+        --expected-commit "$PREPARED_GATEWAY_SHA" \
+        --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"; then
+    echo "ERROR: exact local gateway release identity is invalid" >&2
+    echo "Gateway remains running; production shutdown has not started." >&2
+    exit 75
   fi
   record_gateway_restart_timing "local_release_ready"
 else
@@ -2340,10 +2276,7 @@ exec env \
   GATEWAY_RELEASE_SUPERSESSION_MAX="$GATEWAY_RELEASE_SUPERSESSION_MAX" \
   GATEWAY_V2_CONFIG_DIR="$GATEWAY_V2_CONFIG_DIR" \
   GATEWAY_V2_RELEASE_MANIFEST="$GATEWAY_V2_RELEASE_MANIFEST" \
-  GATEWAY_V2_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE" \
   GATEWAY_PREPARED_V2_RELEASE_MANIFEST="$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-  GATEWAY_PREPARED_V2_RELEASE_LINEAGE="$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
-  GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE="$GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE" \
   GATEWAY_V2_RELEASE_BUCKET="$GATEWAY_V2_RELEASE_BUCKET" \
   GATEWAY_V2_RELEASE_PREFIX="$GATEWAY_V2_RELEASE_PREFIX" \
   GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
@@ -2354,21 +2287,11 @@ fi
 bind_activated_gateway_guard_candidate || exit 1
 record_gateway_restart_timing "candidate_activated"
 echo "Installing the preflighted gateway manifest"
-if [ "$GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE" = "1" ]; then
-  PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
-    -m gateway.tee.install_gateway_release_state_v2 \
-    --prepared-manifest "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-    --prepared-lineage "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
-    --active-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
-    --active-lineage "$GATEWAY_V2_RELEASE_LINEAGE" \
-    --expected-commit "$GATEWAY_DEPLOY_SHA"
-else
-  PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
-    -m gateway.tee.install_gateway_release_state_v2 \
-    --prepared-manifest "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-    --active-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
-    --expected-commit "$GATEWAY_DEPLOY_SHA"
-fi
+PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
+  -m gateway.tee.install_gateway_release_state_v2 \
+  --prepared-manifest "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
+  --active-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
+  --expected-commit "$GATEWAY_DEPLOY_SHA"
 "$GATEWAY_PYTHON_BIN" \
   "$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py" \
   --minimum-available-mib 1024
@@ -2403,7 +2326,7 @@ find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 rm -rf ~/.cache/Python* 2>/dev/null || true
 find ~/.local/lib/python3.9/site-packages -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 
-echo "Preflight disk cleanup for Docker/PCR0/Research Lab builds"
+echo "Preflight disk cleanup for Docker/PCR0/Arena builds"
 GATEWAY_DEPLOY_STAGE="docker_disk_cleanup"
 export GATEWAY_DEPLOY_STAGE
 ensure_docker_ready
@@ -2425,7 +2348,7 @@ sudo docker system df 2>/dev/null || true
 FREE_KB="$(df --output=avail / | tail -1 | tr -d ' ')"
 if [ "${FREE_KB:-0}" -lt "$MIN_FREE_KB" ]; then
   echo "ERROR: insufficient free disk after cleanup: $(df -h / | tail -1)"
-  echo "Need at least 10GiB free before starting gateway Research Lab Docker workloads."
+  echo "Need at least 10GiB free before starting gateway Arena Docker workloads."
   exit 1
 fi
 
@@ -2545,20 +2468,9 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     echo "ERROR: local V2 build identity is missing" >&2
     exit 1
   }
-  if [ "$GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE" = "1" ]; then
-    test -s "$GATEWAY_V2_RELEASE_LINEAGE" || {
-      echo "ERROR: legacy rollback release identity is missing" >&2
-      exit 1
-    }
-    PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_v2_bootstrap \
-      --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
-      --gateway-release-lineage "$GATEWAY_V2_RELEASE_LINEAGE" \
-      --protected-workflow-manifest "$GATEWAY_ROOT/_attested_runtime/protected_workflows.json"
-  else
-    PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_v2_bootstrap \
-      --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
-      --protected-workflow-manifest "$GATEWAY_ROOT/_attested_runtime/protected_workflows.json"
-  fi
+  PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_v2_bootstrap \
+    --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
+    --protected-workflow-manifest "$GATEWAY_ROOT/_attested_runtime/protected_workflows.json"
   record_gateway_restart_timing "v2_runtime_bootstrapped"
 
 echo "Verifying measured V2 runtime identity readiness"

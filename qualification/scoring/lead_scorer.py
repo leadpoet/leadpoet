@@ -410,6 +410,20 @@ _PUBLIC_STAGE_SUPERSESSION_PATTERNS = (
     re.compile(r"\b(?:taken|went|became)\s+private\b", re.I),
     re.compile(r"\b(?:ceased|stopped)\s+trading\b", re.I),
 )
+_CURRENT_NONPUBLIC_STAGE_PROOF_PATTERNS = (
+    re.compile(
+        r"\b(?:is|remains)\s+(?:currently\s+)?(?:an?\s+)?privately\s+held\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:is|remains)\s+(?:currently\s+)?(?:an?\s+)?private\s+company\b",
+        re.I,
+    ),
+)
+_CURRENT_NOT_PUBLICLY_TRADED_RE = re.compile(
+    r"\b(?:is|remains)\s+(?:not|no\s+longer)\s+publicly\s+traded\b",
+    re.I,
+)
 _PRIVATE_EQUITY_STAGE_SUPERSESSION_PATTERNS = (
     re.compile(
         r"\b(?:was|were|has\s+been)\s+"
@@ -1684,7 +1698,11 @@ def _structured_linkedin_public_stage_matches(
         quote,
         _PUBLIC_STAGE_SUPERSESSION_PATTERNS,
         reject_future_will=True,
-    ):
+    ) or _has_affirmed_stage_proof(
+        quote,
+        _CURRENT_NONPUBLIC_STAGE_PROOF_PATTERNS,
+        reject_historical=True,
+    ) or _CURRENT_NOT_PUBLICLY_TRADED_RE.search(quote):
         return False
     if any(
         _stage_quote_supports_observation(nonpublic_stage, quote)

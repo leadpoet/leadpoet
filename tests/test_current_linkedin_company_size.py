@@ -2562,6 +2562,12 @@ def test_structured_profile_cache_reuses_one_response_for_stage_and_size(
             "stage_evidence_url": "https://acme.example.com/news",
             "stage_evidence_quote": "Acme was taken private by a private equity firm.",
         },
+        {
+            "observed_company_stage": "",
+            "stage_matches": None,
+            "stage_evidence_url": "https://acme.example.com/about",
+            "stage_evidence_quote": "Acme remains not publicly traded.",
+        },
     ],
 )
 def test_structured_public_profile_never_overrides_proven_nonpublic_stage(

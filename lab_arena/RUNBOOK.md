@@ -81,8 +81,11 @@ capability as well as the existing review schema.
 No Dockerfile, public registry, image tag, commit identity, receipt, source
 digest, or release manifest is part of miner admission. The service validates
 the declared archive size and safe source structure, then uses its own
-submission ID for execution and recovery. The private source reference is
-write-once. A miner can use any harness, model, prompts, packages, routing, or
+submission ID for execution and recovery. The private source reference for
+each submission is write-once. The service allows one current-submission
+replacement before the one-hour replacement freeze; it supersedes the prior
+submission and uses a new source reference. After the freeze, replacement is
+closed. A miner can use any harness, model, prompts, packages, routing, or
 orchestration behind the one callable.
 
 The source contract is `harness.run_icp(icp) -> list[dict]`. `harness.py` can
@@ -206,8 +209,11 @@ unfinished jobs or backfill historical failures.
 
 ### Provider costs
 
-The model's twenty-ICP sourcing allowance is $50 across all three providers,
-including failed attempts and retries. OpenRouter uses the provider's
+The current sourcing policy gives each ICP a $4.00 sourcing admission limit.
+Final cost eligibility allows $0.80 per verified qualified company/contact
+pair for that ICP. New rounds freeze
+`successful_calls_per_icp_v1`; existing rounds retain their stored policy.
+OpenRouter uses the provider's
 `usage.cost`, not the admission-only management key. Scrapingdog uses the
 existing endpoint credit map at $0.00005 per credit; approved routes absent
 from that map use five credits, and a company profile uses ten. Deepline uses
@@ -237,25 +243,25 @@ reserved. Missing evidence, a general rate limit, and a
 provider outage do not gain that exception. The gateway release preflight
 requires migration 246's private schema capability.
 
-Reservations and settlement share the existing submission lock. Concurrent
-ICPs cannot each claim a fresh budget. Dynamically priced Deepline calls
-reserve the remaining allowance and run one at a time per submission. Their
-upstream API has no per-call dollar cap: one completed call can exceed its
-reservation. Record the full actual charge, block further paid calls, and
-exclude over-budget challengers from promotion. Do not describe this as an
-absolute upstream charge ceiling.
+Sourcing reservations are serialized per ICP across its attempts. Different
+ICPs have separate budgets and can run in parallel. Admission counts settled
+spend and unresolved reservations. Only one paid sourcing call can be in flight
+for an ICP. A call admitted below $4 may finish above $4; record its full charge
+and retain its result, then refuse further paid calls for that ICP. Valid
+output is still scored, and the other ICPs continue. The admission limit is
+not an absolute upstream charge ceiling.
 
-At publication, the gateway reports provider totals and compares sourcing
-cost with the smaller of $50 and $0.50 times returned companies. It counts
-one accepted output per ICP and unique company domains within that output.
-All retry costs still count. Quality scores remain unchanged; a cost-ineligible
-challenger cannot win. Independent judge cost has its own existing $50 cap
-and is reported separately. Credentials and provider payloads are not part of
-the public cost summary.
-
-Migration 206 changes accounting functions, not historical rows. A legacy live
-round that is still open adopts the new limits atomically when its benchmark
-commits. Already committed rounds and explicit shadow-test limits do not change.
+At publication, the gateway reports provider totals and evaluates each ICP
+under its frozen per-ICP policy. Successful paid calls count, including retry
+calls and calls whose result the model does not use. Failed calls do not enter
+competition sourcing cost; their actual billing and unresolved reservations
+remain recorded separately. A successful call with an unknown charge blocks
+cost eligibility until resolved. An ICP above $0.80 times its qualified-pair
+count contributes zero to the final average; its original quality score stays
+in the run ledger. The other ICPs retain their own eligibility. These rules
+apply equally to baseline and miner models. Independent judge cost has its
+existing $50 cap and is reported separately. Credentials and provider payloads
+are not part of the public cost summary.
 
 ## Required service configuration
 
@@ -297,9 +303,10 @@ Common optional values are `AWS_REGION`, `LAB_ARENA_NETUID`,
 `false` and is frozen into each new round. `LAB_ARENA_SIGNING_KEY_ID` is
 needed only when a live, reward-enabled published round is activated.
 
-The challenger limit excludes the baseline. Each hotkey can have one accepted
-model per daily round, without replacement; different hotkeys can share a
-coldkey. The configured admission limit is not reduced by the conservative
+The challenger limit excludes the baseline. Each hotkey can have one current
+accepted model per daily round; one source replacement is allowed before the
+replacement freeze. Different hotkeys can share a coldkey. The configured
+admission limit is not reduced by the conservative
 runner workload estimate. Worker concurrency, stage deadlines, and spending
 limits remain enforced; a full round can require more runner capacity.
 
@@ -313,39 +320,9 @@ public routes or create rounds. Do not roll back to a version that ignores the
 marker while a marked round still needs privacy. No database migration is
 required because the existing immutable `configuration_doc` stores the policy.
 
-For the September 13 rollout, the already-created September 12 round remains
-on its stored legacy policy. The intended activation marks only a newly created
-round with a cutoff on or after `2026-09-13T00:00:00Z`. Check the narrow update
-before its authorized apply:
-
-```bash
-python3 scripts/configure_lab_arena_production.py \
-  --benchmark-disclosure-from '2026-09-13T00:00:00Z' \
-  --ssh-key /protected/path/to/key --allowed-account ACCOUNT_ID --check
-
-LEADPOET_LAB_ARENA_PRODUCTION_APPLY=1 \
-python3 scripts/configure_lab_arena_production.py \
-  --benchmark-disclosure-from '2026-09-13T00:00:00Z' \
-  --ssh-key /protected/path/to/key --allowed-account ACCOUNT_ID --apply
-```
-
-Apply `scripts/179-lab-arena-v1.sql` and
-`scripts/180-lab-arena-daily-competition.sql`, then
-`scripts/181-lab-arena-source-submissions.sql` and
-`scripts/182-lab-arena-source-execution.sql`,
-`scripts/183-lab-arena-miner-reward-basis.sql`, and
-`scripts/184-lab-arena-scoring-failure-isolation.sql`,
-`scripts/185-lab-arena-miner-credentials.sql`,
-`scripts/187-lab-arena-promotion-threshold.sql`, and
-`scripts/188-lab-arena-baseline-promotion.sql`,
-`scripts/189-lab-arena-round-network-scope.sql`,
-`scripts/190-lab-arena-restart-claim-drain.sql`, and
-`scripts/193-lab-arena-upload-recovery.sql`,
-`scripts/194-lab-arena-open-scorer-refresh.sql`, then
-`scripts/197-lab-arena-reward-chain-scope.sql` with the database owner
-then `scripts/205-lab-arena-optional-scrapingdog-credential.sql` and
-`scripts/206-lab-arena-combined-provider-budget.sql`
-before service startup. Then check the service wiring:
+For a release upgrade, apply only the required committed migrations through
+the configured repository migration helper before service startup. Then check
+the service wiring:
 
 ```bash
 python3 scripts/run_lab_arena_service.py --check-only
@@ -369,22 +346,6 @@ python3 scripts/run_lab_arena_service.py --host 127.0.0.1 --port 8792
 ```
 
 ## Canonical restart claim drain
-
-Migration 190 installs the durable claim gate used by the canonical gateway
-and validator restart. Its first installation takes the rounds and runs table
-locks with `NOWAIT`. If live Arena work holds either table, the complete
-migration transaction fails without cancelling that work. Retry the same
-idempotent migration through the repository migration helper after the writer
-finishes.
-
-An already-running schema-189 Arena service can finish its current work while
-migration 190 is applied. A runner can continue against the replacement
-service, but canonical paired authority still requires both components at the
-exact release. After the database reports schema 190, an older schema-189 Arena
-service cannot newly start because its startup schema check rejects the
-mismatch. Therefore, schema 190 and the matching candidate runtime form one
-cutover dependency. Do not use an older Arena service as a claim-capable
-rollback after this migration.
 
 The canonical gateway restart pauses new claims after its release,
 attestation, and maintenance preflight. It then waits for every captured lease
@@ -438,10 +399,11 @@ executable gVisor `runsc`. It also needs:
 - `LAB_ARENA_RUNNER_WORK_DIR`
 - `LAB_ARENA_RUNSC_PATH`
 
-`LAB_ARENA_MAX_PARALLEL_RUNS` (default `8`, maximum `8`) and
-`LAB_ARENA_ROUND_ID` are optional. Provider
-keys, database access, source upload access, and the signing key stay on the
-service host. The runner needs read access to the organizer's common trusted
+`LAB_ARENA_ROUND_ID` is optional. Runner parallelism comes from verified
+Webshare proxies plus the native route, and is bounded
+by the round's frozen `runner_slot_ceiling`. Provider keys, database access,
+source upload access, and the signing key stay on the service host. The runner
+needs read access to the organizer's common trusted
 Python/scorer image. It downloads source only through the active run lease,
 then mounts source, installed wheels, and the host-owned entrypoint read-only
 inside gVisor. Start the runner with:
@@ -479,7 +441,7 @@ recovery. A later `lab` promotion affects the next round snapshot only. The
 operator log reports the archive's ordinary Git commit comment when GitHub
 provides it. A live round created before this policy can still show its old
 creation-time URL, but an unfrozen download uses `lab`; an already stored or
-registered bundle is not replaced. A model must score at least **1.0 point**
+registered baseline bundle is not replaced. A model must score at least **1.0 point**
 above the daily baseline mean on the existing 0–100 scale. A tie or a smaller
 gain does not crown a new miner. The highest qualifying model wins.
 

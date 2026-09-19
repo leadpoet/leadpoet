@@ -146,10 +146,10 @@ BEGIN
   AND EXISTS(SELECT 1 FROM public.lab_arena_submissions baseline
     WHERE baseline.round_id='arena-2026-09-19'
      AND baseline.submission_id='baseline-2026-09-19'
-     AND baseline.source_ref='arena/arena-2026-09-19/sources/baseline-2026-09-19-rerun320-d889df3c.tar.gz'
-     AND baseline.source_size_bytes=797578
-     AND baseline.submission_doc->>'source_sha256'='8275438983ce9de05dd8cf8791eb9b91fe853e9bbcfc749f48603cd9d8e42d8c'
-     AND baseline.submission_doc->>'source_commit'='d889df3cef3c984252b2edaa4cb7fc81edbe998e')
+     AND baseline.source_ref='arena/arena-2026-09-19/sources/baseline-2026-09-19-rerun320-66b79ab0.tar.gz'
+     AND baseline.source_size_bytes=803257
+     AND baseline.submission_doc->>'source_sha256'='26d80f338ba4aa91172255fbaac61199992d903e90833e6edff1044284ae4653'
+     AND baseline.submission_doc->>'source_commit'='66b79ab07b8c3b6b4a06cbb8ef18a8ae2b2a575b')
   AND (SELECT pg_catalog.count(*) FROM public.lab_arena_runs
     WHERE round_id='arena-2026-09-19' AND kind='execute'
      AND submission_id<>'baseline-2026-09-19' AND status='accepted'
@@ -245,9 +245,9 @@ DECLARE
 BEGIN
  PERFORM pg_catalog.set_config('lock_timeout','5s',TRUE);
  PERFORM pg_catalog.set_config('statement_timeout','120s',TRUE);
- IF p_source_size_bytes<>797578
-  OR p_source_sha256<>'8275438983ce9de05dd8cf8791eb9b91fe853e9bbcfc749f48603cd9d8e42d8c'
-  OR p_source_commit<>'d889df3cef3c984252b2edaa4cb7fc81edbe998e'
+ IF p_source_size_bytes<>803257
+  OR p_source_sha256<>'26d80f338ba4aa91172255fbaac61199992d903e90833e6edff1044284ae4653'
+  OR p_source_commit<>'66b79ab07b8c3b6b4a06cbb8ef18a8ae2b2a575b'
   OR p_schedule IS DISTINCT FROM '{"submission_open":"2026-09-18T00:00:00Z","submission_cutoff":"2026-09-19T00:00:00Z","benchmark_deadline":"2026-09-19T17:00:00Z","stage_1_start":"2026-09-19T17:00:01Z","stage_1_close":"2026-09-19T20:00:00Z","stage_1_scoring_close":"2026-09-19T23:00:00Z","stage_2_start":"2026-09-19T23:00:01Z","stage_2_close":"2026-09-20T02:00:00Z","final_scoring_close":"2026-09-20T05:00:00Z","publication_deadline":"2026-09-20T05:00:01Z"}'::JSONB
   OR p_scorer_digest<>'sha256:e2fa040d8b1398fad2a802c7dd80a1c709fe68efc485115aae45211b8c489889'
   OR p_scorer_reference<>'493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:e2fa040d8b1398fad2a802c7dd80a1c709fe68efc485115aae45211b8c489889' THEN
@@ -373,11 +373,11 @@ BEGIN
  IF pg_catalog.jsonb_array_length(derived)<>116 THEN
   RAISE EXCEPTION 'Sep19 rerun320 derived judgment count differs'; END IF;
  expected_submission:=active_baseline.submission_doc||pg_catalog.jsonb_build_object(
-  'source_ref','arena/arena-2026-09-19/sources/baseline-2026-09-19-rerun320-d889df3c.tar.gz','source_size_bytes',797578,
-  'source_sha256','8275438983ce9de05dd8cf8791eb9b91fe853e9bbcfc749f48603cd9d8e42d8c','source_commit','d889df3cef3c984252b2edaa4cb7fc81edbe998e');
+  'source_ref','arena/arena-2026-09-19/sources/baseline-2026-09-19-rerun320-66b79ab0.tar.gz','source_size_bytes',803257,
+  'source_sha256','26d80f338ba4aa91172255fbaac61199992d903e90833e6edff1044284ae4653','source_commit','66b79ab07b8c3b6b4a06cbb8ef18a8ae2b2a575b');
  SELECT pg_catalog.jsonb_agg(CASE WHEN item->>'submission_id'='baseline-2026-09-19'
-   THEN item||pg_catalog.jsonb_build_object('source_ref','arena/arena-2026-09-19/sources/baseline-2026-09-19-rerun320-d889df3c.tar.gz',
-    'source_size_bytes',797578) ELSE item END ORDER BY ordinal)
+   THEN item||pg_catalog.jsonb_build_object('source_ref','arena/arena-2026-09-19/sources/baseline-2026-09-19-rerun320-66b79ab0.tar.gz',
+    'source_size_bytes',803257) ELSE item END ORDER BY ordinal)
   INTO new_participants FROM pg_catalog.jsonb_array_elements(active_round.participants)
    WITH ORDINALITY entries(item,ordinal);
  archive_participants:=(SELECT pg_catalog.jsonb_agg(
@@ -496,8 +496,8 @@ BEGIN
  UPDATE public.lab_arena_runs SET per_icp_score=NULL,qualification_doc=NULL
   WHERE round_id='arena-2026-09-19' AND kind='execute'
    AND submission_id<>'baseline-2026-09-19';
- UPDATE public.lab_arena_submissions SET source_ref='arena/arena-2026-09-19/sources/baseline-2026-09-19-rerun320-d889df3c.tar.gz',
-  source_size_bytes=797578,submission_doc=expected_submission,
+ UPDATE public.lab_arena_submissions SET source_ref='arena/arena-2026-09-19/sources/baseline-2026-09-19-rerun320-66b79ab0.tar.gz',
+  source_size_bytes=803257,submission_doc=expected_submission,
   updated_at=pg_catalog.clock_timestamp()
   WHERE round_id='arena-2026-09-19' AND submission_id='baseline-2026-09-19';
  IF NOT FOUND THEN RAISE EXCEPTION 'Sep19 rerun320 baseline update missing'; END IF;
@@ -611,7 +611,7 @@ CREATE TRIGGER lab_arena_sep19_rerun320_score_namespace_guard
  EXECUTE FUNCTION public.lab_arena_sep19_rerun320_score_namespace_guard_v1();
 
 SELECT public.lab_arena_prepare_sep19_rerun320_v1(
- 797578,'8275438983ce9de05dd8cf8791eb9b91fe853e9bbcfc749f48603cd9d8e42d8c','d889df3cef3c984252b2edaa4cb7fc81edbe998e',
+ 803257,'26d80f338ba4aa91172255fbaac61199992d903e90833e6edff1044284ae4653','66b79ab07b8c3b6b4a06cbb8ef18a8ae2b2a575b',
  '{"submission_open":"2026-09-18T00:00:00Z","submission_cutoff":"2026-09-19T00:00:00Z","benchmark_deadline":"2026-09-19T17:00:00Z","stage_1_start":"2026-09-19T17:00:01Z","stage_1_close":"2026-09-19T20:00:00Z","stage_1_scoring_close":"2026-09-19T23:00:00Z","stage_2_start":"2026-09-19T23:00:01Z","stage_2_close":"2026-09-20T02:00:00Z","final_scoring_close":"2026-09-20T05:00:00Z","publication_deadline":"2026-09-20T05:00:01Z"}'::JSONB,
  'sha256:e2fa040d8b1398fad2a802c7dd80a1c709fe68efc485115aae45211b8c489889','493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:e2fa040d8b1398fad2a802c7dd80a1c709fe68efc485115aae45211b8c489889');
 

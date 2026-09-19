@@ -20,19 +20,20 @@ TEMPLATE = Path(__file__).resolve().parents[2] / "scripts" / (
     "320-arena-2026-09-19-terminal318-fixed-baseline-rerun.sql.template"
 )
 RENDERED = TEMPLATE.with_suffix("")
-RENDERED_SHA256 = "a2d0d9776a5dd6745a6fbf8542aff5a800432ed735df99a9ec099862520c695f"
+RENDERED_SHA256 = "d1dc484a613cfb438daf135fec4d73e0a78b64646792e3d574b7909dffd6cdb3"
 rerun310 = prior.rerun310
 ROUND = prior.ROUND
 BASELINE = prior.BASELINE
-# Candidate identity comes from source-d889df3c-preparation.json. Terminal
-# counts and hashes remain fixture-derived; the SQL template stays unresolved.
+# Candidate identity is the verified public lab archive at 66b79ab0.
+# Migration 320 was still unapplied when only this source binding was updated.
+# The terminal seals, schedule, frozen bank, and scoring contract are unchanged.
 NEW_SOURCE_REF = (
     "arena/arena-2026-09-19/sources/"
-    "baseline-2026-09-19-rerun320-d889df3c.tar.gz"
+    "baseline-2026-09-19-rerun320-66b79ab0.tar.gz"
 )
-NEW_SOURCE_SIZE = 797_578
-NEW_SOURCE_SHA = "8275438983ce9de05dd8cf8791eb9b91fe853e9bbcfc749f48603cd9d8e42d8c"
-NEW_SOURCE_COMMIT = "d889df3cef3c984252b2edaa4cb7fc81edbe998e"
+NEW_SOURCE_SIZE = 803_257
+NEW_SOURCE_SHA = "26d80f338ba4aa91172255fbaac61199992d903e90833e6edff1044284ae4653"
+NEW_SOURCE_COMMIT = "66b79ab07b8c3b6b4a06cbb8ef18a8ae2b2a575b"
 NEW_SCORER_DIGEST = (
     "sha256:e2fa040d8b1398fad2a802c7dd80a1c709fe68efc485115aae45211b8c489889"
 )
@@ -1250,7 +1251,7 @@ def test_exact_render_has_terminal_seals_and_rejects_wrong_preimage_atomically(
     assert NEW_SOURCE_COMMIT in body
     assert NEW_SOURCE_SHA in body
     assert NEW_SOURCE_REF in body
-    assert "source_size_bytes=797578" in body
+    assert "source_size_bytes=803257" in body
     assert NEW_SCORER_DIGEST in body
     assert '"benchmark_deadline":"2026-09-19T17:00:00Z"' in body
     assert "active_round.status IS DISTINCT FROM 'cancelled'" in body

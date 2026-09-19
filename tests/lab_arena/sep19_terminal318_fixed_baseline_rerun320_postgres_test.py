@@ -58,7 +58,7 @@ class Rerun320Harness(lifecycle.Harness):
 
 
 def _test_migrations() -> tuple[str, ...]:
-    return prior._test_migrations()
+    return (*prior._test_migrations(), "319-lab-arena-quota-sourcing-cost.sql")
 
 
 @pytest.fixture(scope="module")
@@ -1192,7 +1192,7 @@ def test_rerun320_requires_exact_terminal318_shape_validity_and_settlement(
 def test_rerun320_template_is_unrendered_and_sealed_to_terminal318():
     body = TEMPLATE.read_text()
     assert _test_migrations()[-1] == (
-        "314-lab-arena-openrouter-web-search-reservation.sql"
+        "319-lab-arena-quota-sourcing-cost.sql"
     )
     assert not TEMPLATE.with_suffix("").exists()
     assert TEMPLATE.name not in _test_migrations()

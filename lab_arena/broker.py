@@ -715,9 +715,9 @@ def _openrouter_host_route(
     provider_policy = {
         "data_collection": "deny",
         "zdr": True,
-        # The generic Azure route can fail inside a 200 Responses envelope.
-        # Prefer the verified regional route while retaining bounded fallbacks.
-        "order": ["azure/us"],
+        # Exclude the generic Azure route while allowing OpenRouter to select
+        # and fail over between the two independently verified regional routes.
+        "only": ["azure/us", "azure/eu"],
         "allow_fallbacks": True,
         "max_price": {
             "prompt": _json_decimal_number(

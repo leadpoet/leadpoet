@@ -2034,7 +2034,7 @@ def test_native_web_search_reserves_every_bounded_search_and_settles_usage_cost_
 
 
 @pytest.mark.parametrize("funding_source", ("host", "miner_key"))
-def test_luna_responses_uses_bounded_zdr_fallback_and_reserves_its_price_ceiling(
+def test_luna_responses_uses_two_region_zdr_fallback_and_reserves_its_price_ceiling(
     funding_source,
 ):
     payload = {
@@ -2066,10 +2066,10 @@ def test_luna_responses_uses_bounded_zdr_fallback_and_reserves_its_price_ceiling
         "allow_fallbacks": True,
         "data_collection": "deny",
         "zdr": True,
-        "order": ["azure/us"],
+        "only": ["azure/us", "azure/eu"],
         "max_price": {"prompt": 0.275, "completion": 1.32, "request": 0},
     }
-    assert "only" not in body["provider"]
+    assert "order" not in body["provider"]
     assert result.call["funding_source"] == funding_source
     assert body["store"] is False and body["stream"] is False
     base_reserve = br.max_openrouter_cost_microusd(

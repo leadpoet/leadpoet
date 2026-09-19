@@ -5,6 +5,8 @@ import asyncio
 import pytest
 
 from gateway.qualification.models import CompanyOutput, ICPPrompt
+from lab_arena import scorer_entrypoint
+from lab_arena import scoring as arena_scoring
 from qualification.scoring import lead_scorer
 from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
@@ -42,6 +44,29 @@ def _company(*, linkedin: str = "https://linkedin.com/company/acme") -> CompanyO
             }
         ],
     )
+
+
+def _competition_company() -> dict:
+    return {
+        "company_name": "Acme",
+        "company_website": "https://example.com",
+        "company_linkedin": "https://www.linkedin.com/company/acme",
+        "industry": "Software",
+        "employee_count": "11-50",
+        "company_stage": "Public",
+        "country": "United States",
+        "state": "",
+        "fit_summary": "Acme supplies workflow software.",
+        "fit_evidence_urls": ["https://example.com/product"],
+        "intent_signals": [{
+            "matched_icp_signal": 0,
+            "description": "Acme launched a product.",
+            "date": "2026-08-01",
+            "why_now": "The launch is a current buying signal.",
+            "url": "https://example.com/news",
+            "snippet": "Acme launched a product.",
+        }],
+    }
 
 
 def _icp() -> ICPPrompt:
@@ -96,6 +121,21 @@ def _homepage_anchor():
                 "evidence_source": "company_homepage",
                 "observed_name": "acme",
                 "observed_domain": "acme.example.com",
+                "observed_linkedin_slug": "acme",
+            }
+        },
+    )
+
+
+def _public_homepage_anchor():
+    return company_fit_match(
+        "homepage identity verified",
+        details={
+            "identity": {
+                "decision": COMPANY_FIT_MATCH,
+                "evidence_source": "company_homepage",
+                "observed_name": "acme",
+                "observed_domain": "example.com",
                 "observed_linkedin_slug": "acme",
             }
         },
@@ -2584,6 +2624,109 @@ def test_structured_public_profile_repairs_unavailable_stage_with_one_fetch(
         "url": "https://www.linkedin.com/company/acme",
         "website": "https://example.com/",
     }
+
+
+@pytest.mark.parametrize("provider_failure", [False, True])
+def test_structured_public_stage_scorer_entrypoint_transition(
+    monkeypatch,
+    provider_failure,
+):
+    calls = 0
+    structured_stage_evidence = {
+        "company_type": "Public Company",
+        "provider": "harvestapi_get_company",
+        "source_field": "companyType",
+        "url": "https://www.linkedin.com/company/acme",
+        "website": "https://example.com/",
+    }
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return _public_homepage_anchor()
+
+    async def web_verification(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if provider_failure:
+            return company_fit_unavailable(
+                "company verification provider unavailable",
+                details={"failure_reason_code": "provider_error"},
+            )
+        web_evidence = {
+            dimension: {
+                "url": f"https://example.com/{dimension}",
+                "quote": f"Acme {dimension} evidence.",
+            }
+            for dimension in ("employee_size", "industry", "geography")
+        }
+        web_evidence["stage"] = structured_stage_evidence
+        return company_fit_match(
+            "company fit verified",
+            details={
+                "dimension_decisions": {
+                    dimension: COMPANY_FIT_MATCH
+                    for dimension in (
+                        "employee_size",
+                        "industry",
+                        "geography",
+                        "stage",
+                    )
+                },
+                "dimension_evidence": web_evidence,
+                "identity_decision": COMPANY_FIT_MATCH,
+                "identity_receipt": {
+                    "decision": COMPANY_FIT_MATCH,
+                    "evidence_source": "company_web_reverification",
+                    "submitted_name": "acme",
+                    "submitted_domain": "example.com",
+                    "submitted_linkedin_slug": "acme",
+                    "observed_name": "acme",
+                    "observed_domain": "example.com",
+                    "observed_linkedin_slug": "acme",
+                },
+                "required_attribute_decision": COMPANY_FIT_MATCH,
+            },
+        )
+
+    async def intent_score(*_args, **_kwargs):
+        return 60.0, 100, "verified", "2026-08-01", 0
+
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(
+        lead_scorer, "_llm_reverify_company", web_verification
+    )
+    monkeypatch.setattr(
+        lead_scorer, "_score_single_intent_signal", intent_score
+    )
+    icp = _icp().model_copy(update={
+        "company_stage": "Public",
+        "intent_signals": ["Launched a product"],
+    })
+    document = arena_scoring.build_scoring_input(
+        scored_run_id="structured-public-stage",
+        icp=icp.model_dump(mode="json"),
+        companies=[_competition_company()],
+        policy=arena_scoring.build_scorer_policy(),
+        evaluation_date="2026-09-19",
+    )
+
+    output = scorer_entrypoint.score_input(document)
+
+    if provider_failure:
+        assert calls == 3
+        assert output["failure"] == "judge_error"
+        assert output["reason"] == "provider_error"
+        return
+    assert calls == 1
+    receipt = output["breakdowns"][0]["verifier_gate_receipts"][0]
+    assert receipt["decision"] == COMPANY_FIT_MATCH
+    assert receipt["company_fit_dimensions"]["stage"] == COMPANY_FIT_MATCH
+    assert receipt["dimension_evidence"]["stage"]["web_evidence"] == (
+        structured_stage_evidence
+    )
 
 
 def test_structured_profile_cache_reuses_one_response_for_stage_and_size(

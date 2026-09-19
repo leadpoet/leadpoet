@@ -2,7 +2,7 @@
 -- has been captured from the protected database. This file is not an active
 -- migration while it retains the .template suffix.
 -- Intended source: leadpoet-sales-agent commit
--- 8996c719c8504ab4a3bac0502ae4d23e63abf6f7 on
+-- d4005afc7d78457895099943e804cd6ac9071907 on
 -- codex/arena-finish-cost-release-20260919. Verify the sealed archive bytes
 -- before replacing the source placeholders.
 BEGIN;

@@ -1113,6 +1113,105 @@ def test_structured_company_projects_exact_identity_public_company_metadata():
     }
 
 
+def test_structured_company_accepts_child_host_of_requested_registrable_root():
+    payload = _structured_company_payload(
+        website="https://news.microsoft.com/",
+        linkedinUrl="https://www.linkedin.com/company/microsoft/",
+        employeeCountRange={"start": 10_001, "end": None},
+        companyType="Public Company",
+    )
+
+    assert linkedin_company_size.project_structured_linkedin_company_size(
+        "microsoft.com",
+        "https://www.linkedin.com/company/microsoft",
+        payload,
+    ) == {
+        "employee_count": "10,001+",
+        "provider": "harvestapi_get_company",
+        "source_field": "employeeCountRange",
+        "url": "https://www.linkedin.com/company/microsoft",
+        "website": "https://microsoft.com/",
+    }
+    assert linkedin_company_size.project_structured_linkedin_public_company(
+        "microsoft.com",
+        "https://www.linkedin.com/company/microsoft",
+        payload,
+    ) == {
+        "company_type": "Public Company",
+        "provider": "harvestapi_get_company",
+        "source_field": "companyType",
+        "url": "https://www.linkedin.com/company/microsoft",
+        "website": "https://microsoft.com/",
+    }
+
+
+@pytest.mark.parametrize(
+    ("requested_domain", "observed_website"),
+    [
+        ("microsoft.com", "https://micros0ft.com/"),
+        ("microsoft.com", "https://microsoft.com.example.net/"),
+        ("careers.microsoft.com", "https://news.microsoft.com/"),
+        ("alpha.github.io", "https://beta.github.io/"),
+    ],
+)
+def test_structured_company_rejects_lookalikes_suffixes_and_sibling_hosts(
+    requested_domain,
+    observed_website,
+):
+    payload = _structured_company_payload(
+        website=observed_website,
+        companyType="Public Company",
+    )
+
+    assert linkedin_company_size.project_structured_linkedin_company_size(
+        requested_domain,
+        "https://www.linkedin.com/company/acme",
+        payload,
+    ) is None
+    assert linkedin_company_size.project_structured_linkedin_public_company(
+        requested_domain,
+        "https://www.linkedin.com/company/acme",
+        payload,
+    ) is None
+
+
+def test_structured_company_keeps_private_suffix_tenant_boundary():
+    payload = _structured_company_payload(
+        website="https://news.alpha.github.io/",
+        companyType="Public Company",
+    )
+
+    assert linkedin_company_size.project_structured_linkedin_company_size(
+        "alpha.github.io",
+        "https://www.linkedin.com/company/acme",
+        payload,
+    ) is not None
+    assert linkedin_company_size.project_structured_linkedin_public_company(
+        "alpha.github.io",
+        "https://www.linkedin.com/company/acme",
+        payload,
+    ) is not None
+
+
+def test_structured_company_child_host_still_requires_exact_linkedin_slug():
+    payload = _structured_company_payload(
+        website="https://news.microsoft.com/",
+        linkedinUrl="https://www.linkedin.com/company/not-microsoft/",
+        companyType="Public Company",
+    )
+
+    assert linkedin_company_size.project_structured_linkedin_company_size(
+        "microsoft.com",
+        "https://www.linkedin.com/company/microsoft",
+        payload,
+    ) is None
+    assert linkedin_company_size.project_structured_linkedin_public_company(
+        "microsoft.com",
+        "https://www.linkedin.com/company/microsoft",
+        payload,
+    ) is None
+
+
 @pytest.mark.parametrize(
     "payload",
     [

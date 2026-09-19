@@ -12,6 +12,10 @@ from urllib.parse import urlsplit
 import aiohttp
 
 from gateway.qualification.models import candidate_linkedin_prompt_slug
+from leadpoet_verifier.identity.normalization import (
+    NormalizationError,
+    normalize_host,
+)
 from qualification.employee_buckets import LINKEDIN_EMPLOYEE_BUCKETS
 
 
@@ -223,6 +227,33 @@ def _canonical_company_domain(value: Any) -> str:
     return host
 
 
+def _structured_company_domain_matches(
+    requested_domain: Any,
+    observed_website: Any,
+) -> bool:
+    """Match an exact host or a child of a requested registrable root."""
+
+    requested = _canonical_company_domain(requested_domain)
+    observed = _canonical_company_domain(observed_website)
+    if not requested or not observed:
+        return False
+    if observed == requested:
+        return True
+    try:
+        requested_parts = normalize_host(requested)
+        observed_parts = normalize_host(observed)
+    except NormalizationError:
+        return False
+    return (
+        requested_parts.ascii_host == requested_parts.registrable_domain
+        and observed_parts.registrable_domain
+        == requested_parts.registrable_domain
+        and observed_parts.ascii_host.endswith(
+            "." + requested_parts.registrable_domain
+        )
+    )
+
+
 def _strict_linkedin_company_profile_url(value: Any) -> str:
     """Return one canonical HTTPS LinkedIn company URL, or an empty string."""
 
@@ -333,7 +364,10 @@ def project_structured_linkedin_company_size(
     if not domain or not requested_slug or _structured_provider_reported_error(payload):
         return None
     for element in _structured_company_elements(payload):
-        if _canonical_company_domain(element.get("website")) != domain:
+        if not _structured_company_domain_matches(
+            domain,
+            element.get("website"),
+        ):
             continue
         returned_profile = _strict_linkedin_company_profile_url(
             element.get("linkedinUrl") or element.get("linkedin_url")
@@ -366,7 +400,10 @@ def project_structured_linkedin_public_company(
     if not domain or not requested_slug or _structured_provider_reported_error(payload):
         return None
     for element in _structured_company_elements(payload):
-        if _canonical_company_domain(element.get("website")) != domain:
+        if not _structured_company_domain_matches(
+            domain,
+            element.get("website"),
+        ):
             continue
         returned_profile = _strict_linkedin_company_profile_url(
             element.get("linkedinUrl") or element.get("linkedin_url")

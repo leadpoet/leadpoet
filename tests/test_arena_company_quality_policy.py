@@ -14,7 +14,11 @@ from gateway.qualification.models import CompanyOutput
 from lab_arena import contracts, contact_policy, intent_details_policy, quality_policy, scoring, verify
 from lab_arena.output import OutputInvalid, validate_output_document
 from qualification.company_quality import canonical_company_linkedin, normalize_company_claim
-from qualification.competition_models import CompetitionCompanyV3, CompetitionCompanyV4
+from qualification.competition_models import (
+    CompetitionCompanyV3,
+    CompetitionCompanyV4,
+    CompetitionCompanyV5,
+)
 from qualification.scoring import lead_scorer
 from qualification.scoring.competition import (
     CompetitionCompanyScorer, apply_company_judgment_context,
@@ -112,6 +116,45 @@ def test_v5_effective_input_uses_empty_legacy_evidence_and_hashes_narrative():
     assert effective_competition_input([changed], _icp()) != (
         effective_competition_input([row], _icp())
     )
+
+
+def test_v5_invalid_calendar_date_stays_rejected_by_typed_intent_gate():
+    row = company()
+    row.pop("fit_summary")
+    row.pop("fit_evidence_urls")
+    row["intent_details"] = "Acme announced a product launch for its platform."
+    row["contact"] = None
+    row["intent_signals"][0].pop("why_now")
+    row["intent_signals"][0].pop("snippet")
+    row["intent_signals"][0]["date"] = "2026-02-30"
+
+    with pytest.raises(ValidationError):
+        CompetitionCompanyV5.model_validate(row)
+
+
+@pytest.mark.parametrize(
+    "stage_evidence",
+    [
+        [
+            {"url": f"https://evidence.example/{index}", "quote": "Supported."}
+            for index in range(4)
+        ],
+        [{"url": "https://evidence.example/stage", "quote": "x" * 2_001}],
+        [{"url": "file:///private/stage.txt", "quote": "Supported."}],
+    ],
+)
+def test_v5_stage_evidence_enforces_public_bounded_packet(stage_evidence):
+    row = company()
+    row.pop("fit_summary")
+    row.pop("fit_evidence_urls")
+    row["intent_details"] = "Acme announced a product launch for its platform."
+    row["contact"] = None
+    row["intent_signals"][0].pop("why_now")
+    row["intent_signals"][0].pop("snippet")
+    row["company_stage_evidence"] = stage_evidence
+
+    with pytest.raises(ValidationError):
+        CompetitionCompanyV5.model_validate(row)
 
 
 def _v5_company_with_description(description: str) -> dict:

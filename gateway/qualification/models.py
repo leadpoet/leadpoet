@@ -481,6 +481,20 @@ class RequiredAttributeClaim(BaseModel):
         return value
 
 
+class CompanyStageEvidence(BaseModel):
+    """Untrusted saved source passage used only to guide stage verification."""
+
+    model_config = {"extra": "forbid"}
+
+    url: str = Field(..., min_length=1, max_length=2048)
+    quote: str = Field(..., min_length=1, max_length=2000)
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, value: str) -> str:
+        return canonical_candidate_prompt_url(value, "company_stage_evidence.url")
+
+
 class CompanyOutput(BaseModel):
     """Internal company evidence passed to the Arena company verifier.
 
@@ -519,6 +533,13 @@ class CompanyOutput(BaseModel):
     fit_evidence_urls: List[str] = Field(
         default_factory=list,
         description="Untrusted public URLs that may help independent company-fit discovery",
+    )
+    company_stage_evidence: List[CompanyStageEvidence] = Field(
+        default_factory=list,
+        max_length=3,
+        description=(
+            "Untrusted saved source passages that may guide independent company-stage research"
+        ),
     )
 
     # Intent signals — at least one. This is

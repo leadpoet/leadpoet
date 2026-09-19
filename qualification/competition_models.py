@@ -177,6 +177,20 @@ class CompetitionIntentSignalV5(BaseModel):
         return public_http_url(value)
 
 
+class CompetitionCompanyStageEvidence(BaseModel):
+    """One bounded source passage that may help independent stage research."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    url: str = Field(max_length=2_048)
+    quote: str = Field(min_length=1, max_length=2_000)
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        return public_http_url(value)
+
+
 class CompetitionCompanyV5(BaseModel):
     """Simplified company result for intent-details policy rounds."""
 
@@ -196,6 +210,10 @@ class CompetitionCompanyV5(BaseModel):
         min_length=1, max_length=INTENT_DETAILS_MAX_LENGTH
     )
     intent_signals: list[CompetitionIntentSignalV5] = Field(min_length=1)
+    company_stage_evidence: list[CompetitionCompanyStageEvidence] = Field(
+        default_factory=list,
+        max_length=3,
+    )
     required_attribute: Optional[CompetitionRequiredAttribute] = None
     contact: Any = None
 

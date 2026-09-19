@@ -306,6 +306,8 @@ def _normalized_company(
         }
         for signal in row["intent_signals"]
     ]
+    stage_evidence = row.get("company_stage_evidence", [])
+    stage_evidence_urls = [item["url"] for item in stage_evidence]
     if integrity_policy:
         signals = [signal for group in bounded_criterion_evidence(signals) for signal in group]
     return {
@@ -320,7 +322,7 @@ def _normalized_company(
         "state": row["state"],
         "description": "" if simplified_intent else row["fit_summary"][:500],
         "fit_evidence_urls": (
-            []
+            fit_evidence_url_hints(stage_evidence_urls)
             if simplified_intent
             else (
                 fit_evidence_url_hints(row["fit_evidence_urls"])
@@ -328,6 +330,7 @@ def _normalized_company(
                 else row["fit_evidence_urls"]
             )
         ),
+        "company_stage_evidence": stage_evidence,
         **(
             {"intent_details": row["intent_details"]}
             if simplified_intent
@@ -393,6 +396,10 @@ def effective_competition_input(
             # The optional internal bridge must not change historical cache
             # identities for v1-v4 outputs.
             effective.pop("intent_details", None)
+        if not effective.get("company_stage_evidence"):
+            # The additive V5 evidence packet must not change cache identities
+            # for old checkpoints or V1-V4 rows.
+            effective.pop("company_stage_evidence", None)
         # The binary Arena fit verifier independently resolves these facts.
         # These fields are validated above but never read during its judging.
         for ignored in (("description", "required_attribute") if company_quality else ("state", "description", "required_attribute")):

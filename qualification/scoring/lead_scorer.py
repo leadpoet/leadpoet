@@ -2733,6 +2733,11 @@ async def _run_targeted_company_evidence_investigation(
         _normalize_icp_employee_buckets(icp.employee_count)
     )
     investigation_diagnostic: dict[str, str] = {}
+    stage_evidence = (
+        [item.model_dump(mode="json") for item in company.company_stage_evidence]
+        if "stage" in investigation_targets
+        else []
+    )
     investigation = await investigate_company_evidence(
         company_locator={
             "name": company.company_name,
@@ -2743,18 +2748,25 @@ async def _run_targeted_company_evidence_investigation(
         requested_stage=icp_stage,
         requested_employee_buckets=sorted(employee_targets),
         prior_observations={
-            key: verdict.get(key)
-            for key in (
-                "observed_company_name",
-                "observed_company_website",
-                "observed_company_linkedin",
-                "observed_company_stage",
-                "stage_evidence_url",
-                "stage_evidence_quote",
-                "observed_employee_count",
-                "employee_size_evidence_url",
-                "employee_size_evidence_quote",
-            )
+            **{
+                key: verdict.get(key)
+                for key in (
+                    "observed_company_name",
+                    "observed_company_website",
+                    "observed_company_linkedin",
+                    "observed_company_stage",
+                    "stage_evidence_url",
+                    "stage_evidence_quote",
+                    "observed_employee_count",
+                    "employee_size_evidence_url",
+                    "employee_size_evidence_quote",
+                )
+            },
+            **(
+                {"untrusted_company_stage_evidence": stage_evidence}
+                if stage_evidence
+                else {}
+            ),
         },
         verified_homepage_identity=verified_identity,
         diagnostic=investigation_diagnostic,

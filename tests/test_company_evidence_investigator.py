@@ -10,7 +10,10 @@ import pytest
 from gateway.qualification.models import CompanyOutput, ICPPrompt
 from lab_arena import scoring as arena_scoring
 from lab_arena import operations as arena_operations
-from qualification.scoring.competition import CompetitionCompanyScorer
+from qualification.scoring.competition import (
+    CompetitionCompanyScorer,
+    _normalized_company,
+)
 from qualification.scoring import company_evidence_investigator as investigator
 from qualification.scoring import lead_scorer
 from qualification.scoring.company_evidence_investigator import (
@@ -127,6 +130,69 @@ def test_investigator_prompt_preserves_equity_stage_across_later_debt():
         "an earlier Series B"
     ) in prompt
     assert "later debt alone cannot" in prompt
+
+
+def test_v5_stage_evidence_reaches_only_untrusted_investigator_observations(
+    monkeypatch,
+):
+    public = _competition_company_v5()
+    public.update({
+        "company_stage": "Series B",
+        "company_stage_evidence": [
+            {
+                "url": "https://acme.example/news/series-b",
+                "quote": "Acme completed a Series B financing round.",
+            },
+            {
+                "url": "https://news.example/acme-financing",
+                "quote": "The financing supports Acme's expansion.",
+            },
+        ],
+    })
+    mapped = _normalized_company(public, integrity_policy=True)
+    company = CompanyOutput.model_validate(mapped)
+    company = CompanyOutput.model_validate_json(company.model_dump_json())
+    captured = {}
+
+    async def no_unfetched_proof(**kwargs):
+        captured.update(kwargs)
+        return {"claims": {}, "failure_reason": ""}
+
+    monkeypatch.setattr(
+        lead_scorer, "investigate_company_evidence", no_unfetched_proof
+    )
+    asyncio.run(lead_scorer._run_targeted_company_evidence_investigation(
+        company=company,
+        icp=_icp(company_stage="Series B"),
+        verdict=_complete_verdict(
+            observed_company_stage="",
+            stage_matches=None,
+            stage_evidence_url="",
+            stage_evidence_quote="",
+        ),
+        investigation_targets=("stage",),
+        icp_attribute="",
+        icp_stage="Series B",
+        verified_identity={},
+        verified_transport_domain="acme.example",
+        structured_employee_size_evidence=None,
+        structured_public_company_evidence=None,
+        employee_size_conflict=False,
+        company_quality=True,
+    ))
+
+    assert mapped["fit_evidence_urls"] == [
+        "https://acme.example/news/series-b",
+        "https://news.example/acme-financing",
+    ]
+    assert [item.model_dump(mode="json") for item in company.company_stage_evidence] == (
+        public["company_stage_evidence"]
+    )
+    assert captured["prior_observations"]["untrusted_company_stage_evidence"] == (
+        public["company_stage_evidence"]
+    )
+    assert "company_stage_evidence" not in captured["company_locator"]
+    assert "Fetch a relevant saved URL before using it" in investigator._SYSTEM_PROMPT
 
 
 def test_repaired_stage_gap_gets_one_targeted_investigation(monkeypatch):

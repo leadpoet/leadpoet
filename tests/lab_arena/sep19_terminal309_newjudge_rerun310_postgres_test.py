@@ -22,6 +22,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
 
 ROOT = Path(__file__).parents[2]
 TEMPLATE = ROOT / "scripts/310-arena-2026-09-19-terminal309-newjudge-rerun.sql.template"
+RENDERED = ROOT / "scripts/310-arena-2026-09-19-terminal309-newjudge-rerun.sql"
 ROUND = "arena-2026-09-19"
 BASELINE = "baseline-2026-09-19"
 NEW_SOURCE_REF = "arena/arena-2026-09-19/sources/baseline-2026-09-19-rerun310.tar.gz"
@@ -716,3 +717,15 @@ def test_template_is_terminal_only_and_has_no_release_values():
     assert "__TERMINAL_REWARD_AUTHORITY_SHA256__" in body
     assert "active_round.configuration_doc ? 'company_quality_policy'" in body
     assert "__NEW_SOURCE_COMMIT__" in body and "__NEW_SCORER_DIGEST__" in body
+
+
+def test_rendered_migration_has_exact_reviewed_identity():
+    raw = RENDERED.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == (
+        "11409c124ce89b685d9105894903fd33f8dcf8b7d1ce6fa37b6727fddecd4d6b"
+    )
+    body = raw.decode()
+    assert re.search(r"__[A-Z0-9_]+__", body) is None
+    assert "sha256:19eae396b4168866a573122fce175316596e394049b51b544f5ee4262eaf5ec8" in body
+    assert "5e6d881882a2dae2be3ca783060f33e0380dd0de" in body
+    assert '"benchmark_deadline":"2026-09-19T07:45:00Z"' in body

@@ -18,6 +18,8 @@ from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migrati
 
 ROOT = Path(__file__).parents[2]
 TEMPLATE = ROOT / "scripts/317-arena-2026-09-19-terminal316-fixed-baseline-rerun.sql.template"
+RENDERED = ROOT / "scripts/317-arena-2026-09-19-terminal316-fixed-baseline-rerun.sql"
+RENDERED_SHA256 = "443b92e4e2f96d7899865fa4a4b1d74d6ffa45e18fbe6762832f2d1a1d704874"
 rerun310 = prior.rerun310
 ROUND = prior.ROUND
 BASELINE = prior.BASELINE
@@ -70,6 +72,11 @@ def terminal_failure_database():
 
 @pytest.fixture(scope="module")
 def uncertain_archive_database():
+    yield from database_with_lab_arena_migration(_test_migrations())
+
+
+@pytest.fixture(scope="module")
+def exact_render_database():
     yield from database_with_lab_arena_migration(_test_migrations())
 
 
@@ -1193,7 +1200,8 @@ def test_template_is_sealed_terminal316_only():
     assert _test_migrations()[-1] == (
         "314-lab-arena-openrouter-web-search-reservation.sql"
     )
-    assert not TEMPLATE.with_suffix("").exists()
+    assert RENDERED == TEMPLATE.with_suffix("")
+    assert RENDERED.exists()
     assert TEMPLATE.name not in _test_migrations()
     assert "after the Sep19 rerun316 round is terminal" in body
     assert "assignment_id LIKE '%:rerun316'" in body
@@ -1225,3 +1233,83 @@ def test_template_is_sealed_terminal316_only():
     assert "DELETE FROM" not in body and "TRUNCATE " not in body
     assert "lab_arena_accepted_weight_states" in body
     assert "company_quality_policy" in body
+
+
+def test_exact_render_has_terminal_seals_and_rejects_wrong_preimage_atomically(
+    exact_render_database,
+):
+    raw = RENDERED.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == RENDERED_SHA256
+    body = raw.decode()
+    assert re.search(r"__[A-Z0-9_]+__", body) is None
+    assert "6d6cd05979153e09d7d00d3b2bf04990fb023d3b" in body
+    assert "5da106d1f3b5078460aa43297ead185f1a1257b75c6c30a1effd3b6464cdf5ff" in body
+    assert "baseline-2026-09-19-rerun317-6d6cd059.tar.gz" in body
+    assert "source_size_bytes=793558" in body
+    assert "sha256:e2fa040d8b1398fad2a802c7dd80a1c709fe68efc485115aae45211b8c489889" in body
+    assert '"benchmark_deadline":"2026-09-19T14:00:00Z"' in body
+    assert "active_round.status IS DISTINCT FROM 'cancelled'" in body
+    assert "active_round.cancel_reason IS DISTINCT FROM 'operator'" in body
+    assert "kind='execute')<>110" in body
+    assert "kind='score')<>0" in body
+    assert "moved_baseline_runs<>30" in body
+    assert "moved_baseline_ledger<>6579" in body
+    for terminal_seal in (
+        "edd40e5004b4b654febc4733f94e62b5e82d9b7f69720035f3ce20a7c6fcad2e",
+        "adee534ed61bb1ea0761142d66d22d2edef6de2b89cd73d1b03a5f5a1e675f9f",
+        "781027021d3cadc5f2c0540d9f24a67f65cb25126912ef3544867d5a70153297",
+        "a40087077d409c804d044bdbfaa04b93bbc72f6dc93ccf61c76dca85ffc478f1",
+        "3bc4b1624c68abc3c10cfbea4ddb296969e3c04d6ade07a6b96976f0660c4129",
+        "1af19ff80c88e0fa121d57fa11ea6af14b35220017b0d11a099c70f6b60b314f",
+        "22a411e2edcd506ab991f1e65db14f92dd83bfbfeedf7c95b4d478b2d880de2b",
+        "1bf82d9e27e385424ad96d0552573d63ecc84e55ea04ec81bcd8d74e07c07991",
+        "937c57a010c01a3336165f052a65295fe4fef0fab887ce3babba1c82480d95d7",
+    ):
+        assert terminal_seal in body
+
+    psycopg2, dsn = exact_render_database
+    conn = psycopg2.connect(**dsn)
+    try:
+        _seed_terminal_rerun316(conn)
+        with conn.cursor() as cursor:
+            before = _round_history(cursor, ROUND)
+            previous_archive_before = _round_history(cursor, ROUND + "-r316archive")
+            scorer_hash_before = _sha(
+                cursor,
+                "SELECT encode(extensions.digest(pg_get_functiondef("
+                "'public.lab_arena_open_scoring_v2(text,smallint,jsonb)'::regprocedure),"
+                "'sha256'),'hex')",
+            )
+        with pytest.raises(
+            psycopg2.Error,
+            match=(
+                "Sep19 rerun317 (scorer definition differs|terminal preimage differs|"
+                "admission window closed)"
+            ),
+        ):
+            with conn.cursor() as cursor:
+                cursor.execute(body)
+        conn.rollback()
+        with conn.cursor() as cursor:
+            assert _round_history(cursor, ROUND) == before
+            assert _round_history(cursor, ROUND + "-r316archive") == (
+                previous_archive_before
+            )
+            cursor.execute(
+                "SELECT count(*) FROM public.lab_arena_rounds WHERE round_id=%s",
+                (ROUND + "-r317archive",),
+            )
+            assert cursor.fetchone()[0] == 0
+            cursor.execute(
+                "SELECT to_regprocedure("
+                "'public.lab_arena_prepare_sep19_rerun317_v1(bigint,text,text,jsonb,text,text)')"
+            )
+            assert cursor.fetchone()[0] is None
+            assert _sha(
+                cursor,
+                "SELECT encode(extensions.digest(pg_get_functiondef("
+                "'public.lab_arena_open_scoring_v2(text,smallint,jsonb)'::regprocedure),"
+                "'sha256'),'hex')",
+            ) == scorer_hash_before
+    finally:
+        conn.close()

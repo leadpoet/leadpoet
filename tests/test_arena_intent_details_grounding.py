@@ -34,7 +34,7 @@ FISERV_PARAGRAPH = (
 )
 FISERV_REVIEW = {
     "facts_supported": True,
-    "final_sentence_connects_icp": True,
+    "connects_icp": True,
     "natural_paragraph": True,
     "relevance_grounded": True,
     "signal_coverage": [{
@@ -48,6 +48,17 @@ FISERV_REVIEW = {
     }],
     "verified_signals_covered": True,
 }
+
+INTEGRATED_CONNECTION_PARAGRAPH = (
+    "Relevant to the ICP's focus on reporting software expansion, Acme launched "
+    "a reporting platform on September 1, 2026, which could expand the workflows "
+    "its customers manage. It also opened a Berlin office on September 3, which "
+    "may support regional delivery."
+)
+NO_CONNECTION_PARAGRAPH = (
+    "Acme launched a reporting platform on September 1, 2026. It also opened a "
+    "Berlin office on September 3, 2026."
+)
 
 
 def inputs():
@@ -191,6 +202,89 @@ def test_saved_fiserv_review_accepts_ascii_apostrophe_in_exact_quote(monkeypatch
     assert receipt["input_hash"] == (
         "sha256:" + hashlib.sha256(prompts[0].encode("utf-8")).hexdigest()
     )
+
+
+def test_grounded_icp_connection_does_not_require_a_separate_final_sentence(
+    monkeypatch,
+):
+    company, icp, results, fit = inputs()
+    company.intent_details = INTEGRATED_CONNECTION_PARAGRAPH
+
+    async def judge(*_args, **_kwargs):
+        return json.dumps({
+            **{name: True for name in intent_details._CHECKS},
+            "signal_coverage": [
+                {
+                    "matched_icp_signal": 0,
+                    "paragraph_quote": (
+                        "Acme launched a reporting platform on September 1, 2026"
+                    ),
+                },
+                {
+                    "matched_icp_signal": 1,
+                    "paragraph_quote": "It also opened a Berlin office on September 3",
+                },
+            ],
+        })
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(
+        company, icp, results, fit
+    ))
+
+    assert receipt["decision"] == "match"
+    assert receipt["contract_id"] == "intent-details:v2"
+    assert receipt["checks"]["connects_icp"] is True
+
+
+@pytest.mark.parametrize(
+    ("paragraph", "failed_check", "expected_true"),
+    [
+        (
+            PARAGRAPH,
+            "facts_supported",
+            {
+                "verified_signals_covered", "relevance_grounded",
+                "connects_icp", "natural_paragraph",
+            },
+        ),
+        (
+            NO_CONNECTION_PARAGRAPH,
+            "connects_icp",
+            {
+                "facts_supported", "verified_signals_covered",
+                "relevance_grounded", "natural_paragraph",
+            },
+        ),
+    ],
+)
+def test_review_projects_factual_and_icp_connection_checks_independently(
+    monkeypatch, paragraph, failed_check, expected_true
+):
+    company, icp, results, fit = inputs()
+    company.intent_details = paragraph
+    checks = {name: name != failed_check for name in intent_details._CHECKS}
+
+    async def judge(*_args, **_kwargs):
+        return json.dumps({
+            **checks,
+            "signal_coverage": [
+                {"matched_icp_signal": index, "paragraph_quote": quote}
+                for index, quote in enumerate((
+                    "Acme launched a reporting platform on September 1, 2026",
+                    "opened a Berlin office on September 3",
+                ))
+            ],
+        })
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(
+        company, icp, results, fit
+    ))
+
+    assert receipt["decision"] == "mismatch"
+    assert receipt["checks"][failed_check] is False
+    assert {name for name, passed in receipt["checks"].items() if passed} == expected_true
 
 
 @pytest.mark.parametrize(("quote", "paragraph"), [

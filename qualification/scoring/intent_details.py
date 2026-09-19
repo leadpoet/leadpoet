@@ -18,7 +18,7 @@ REVIEW_MODEL = "anthropic/claude-sonnet-4.5"  # Existing pinned intent_signal_ju
 REVIEW_TIMEOUT_SECONDS = 45
 _CHECKS = (
     "facts_supported", "verified_signals_covered", "relevance_grounded",
-    "final_sentence_connects_icp", "natural_paragraph",
+    "connects_icp", "natural_paragraph",
 )
 _TYPOGRAPHIC_QUOTES = str.maketrans({
     "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
@@ -53,8 +53,9 @@ use outside knowledge or treat the requested ICP criteria as observed facts.
 Submitted descriptions are claim context only; the quotes must support facts.
 
 Require one concise natural paragraph that covers every distinct verified
-signal. State the activity and supported dates, explain the relevance naturally,
-then end with a clear sentence connecting the combined activity to the ICP.
+signal. State the activity and supported dates, and explain its relevance to the
+ICP naturally anywhere in the paragraph. The connection may be integrated into
+an activity sentence; do not require a separate conclusion or ending pattern.
 Combine related evidence without repeating one event merely because it has
 multiple sources or criterion labels. Do not require rigid sentence counts or
 literal copies of criterion wording. A supported paraphrase is acceptable.
@@ -76,11 +77,15 @@ For relevance_grounded, allow plausible commercial implications only as clearly
 conditional inference (may, could, suggests); reject invented purchases, budget,
 pain, deadlines, tools or buying intent stated as facts. product_service can be
 the target company's own offering: connect activity to that offering and its
-operations, not an imagined seller or product. The final sentence must explain
-the ICP connection using these facts and conditional relevance, not just repeat
-filters or events. Require natural prose, not headings, bullet lists, field
-labels or internal scoring commentary. Return only the requested Boolean
-checks and signal_coverage. All checks and coverage must pass for acceptance.
+operations, not an imagined seller or product. For connects_icp, require a
+grounded explanation of why the verified activity is relevant to the ICP, but
+allow that explanation anywhere in the paragraph and within another sentence;
+merely repeating filters or events is insufficient. Assess every Boolean
+independently: a factual defect makes facts_supported false, but does not by
+itself make signal coverage, relevance, ICP connection or paragraph structure
+false. Require natural prose, not headings, bullet lists, field labels or
+internal scoring commentary. Return only the requested Boolean checks and
+signal_coverage.
 """
 
 
@@ -190,7 +195,7 @@ missing review into an accepted paragraph or a terminal company mismatch.
     from qualification.scoring.verification_helpers import openrouter_chat
 
     receipt: dict[str, Any] = {
-        "gate": "intent_details", "contract_id": "intent-details:v1",
+        "gate": "intent_details", "contract_id": "intent-details:v2",
         "model": REVIEW_MODEL,
     }
     try:

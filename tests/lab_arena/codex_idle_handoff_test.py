@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -261,6 +262,297 @@ def test_session_rejects_noncallable_guard_before_listener(monkeypatch, guard):
     assert listeners == []
 
 
+@pytest.mark.parametrize("gate", [False, object(), SimpleNamespace(acquire=lambda: True)])
+def test_session_rejects_invalid_shared_request_gate_before_listener(
+    monkeypatch, gate,
+):
+    listeners = []
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", "/unused-worker.sock")
+    monkeypatch.setenv("LAB_ARENA_WEB_EGRESS_SOCKET", "/unused-egress.sock")
+    monkeypatch.setattr(
+        codex, "ThreadingHTTPServer",
+        lambda *_args, **_kwargs: listeners.append(True),
+    )
+    with pytest.raises(codex.CodexRuntimeError, match="request gate"):
+        with codex.session(
+                model="openai/gpt-4o-mini", request_gate=gate):
+            pass
+    assert listeners == []
+
+
+@pytest.mark.parametrize(
+    "gate_factory",
+    [threading.Lock, lambda: threading.BoundedSemaphore(1)],
+    ids=("lock", "semaphore"),
+)
+def test_two_sessions_share_request_gate_and_recheck_guards_after_wait(
+    monkeypatch, gate_factory,
+):
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", "/fixture-worker.sock")
+    monkeypatch.setenv("LAB_ARENA_WEB_EGRESS_SOCKET", "/fixture-egress.sock")
+    gate = gate_factory()
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+    state_lock = threading.Lock()
+    dispatches = []
+    guard_calls = []
+
+    def dispatch(_socket_path, parameters, **kwargs):
+        assert callable(kwargs["cancel_requested"])
+        assert kwargs["response_deadline"] > time.monotonic()
+        with state_lock:
+            dispatches.append(parameters["input"])
+            call_number = len(dispatches)
+        if call_number == 1:
+            first_entered.set()
+            assert release_first.wait(2)
+        else:
+            second_entered.set()
+        return 200, json.dumps(response(), separators=(",", ":")).encode()
+
+    monkeypatch.setattr(codex, "_dispatch", dispatch)
+    with codex.session(
+            model="openai/gpt-4o-mini", request_gate=gate,
+            request_guard=lambda: guard_calls.append("first") or True,
+    ) as first, codex.session(
+            model="openai/gpt-4o-mini", request_gate=gate,
+            request_guard=lambda: guard_calls.append("second") or True,
+    ) as second:
+        replies = {}
+
+        def send(name, environment):
+            replies[name] = _post(environment, input=name)
+
+        first_thread = threading.Thread(target=send, args=("first", first))
+        second_thread = threading.Thread(target=send, args=("second", second))
+        first_thread.start()
+        assert first_entered.wait(2)
+        second_thread.start()
+        assert not second_entered.wait(0.1)
+        assert guard_calls == ["first"]
+        release_first.set()
+        first_thread.join(timeout=2)
+        second_thread.join(timeout=2)
+
+    assert not first_thread.is_alive() and not second_thread.is_alive()
+    assert [replies[name].status_code for name in ("first", "second")] == [200, 200]
+    assert dispatches == ["first", "second"]
+    assert guard_calls == ["first", "second"]
+
+
+def test_shared_request_gate_timeout_refuses_without_dispatch(monkeypatch):
+    gate = threading.BoundedSemaphore(1)
+    assert gate.acquire(blocking=False)
+    dispatches = []
+    monkeypatch.setattr(
+        codex, "_dispatch",
+        lambda *_args, **_kwargs: dispatches.append(True),
+    )
+
+    try:
+        with codex.ResponsesBridge(
+                "/fixture-worker.sock", request_gate=gate,
+                response_deadline=time.monotonic() + 0.05) as bridge:
+            reply = _post({
+                "LAB_ARENA_CODEX_BASE_URL": bridge.base_url,
+                "LAB_ARENA_CODEX_TOKEN": bridge.token,
+            })
+    finally:
+        gate.release()
+
+    assert reply.status_code == 429
+    assert reply.json() == {"error": {"message": "request unavailable"}}
+    assert dispatches == []
+
+
+def test_bridge_close_cancels_shared_gate_wait_without_dispatch(monkeypatch):
+    wait_started = threading.Event()
+
+    class ObservedSemaphore(threading.Semaphore):
+        def acquire(self, *args, **kwargs):
+            wait_started.set()
+            return super().acquire(*args, **kwargs)
+
+    gate = ObservedSemaphore(0)
+    dispatches = []
+    monkeypatch.setattr(
+        codex, "_dispatch",
+        lambda *_args, **_kwargs: dispatches.append(True),
+    )
+    bridge = codex.ResponsesBridge(
+        "/fixture-worker.sock", request_gate=gate,
+    )
+    bridge.__enter__()
+    replies = []
+
+    def send():
+        replies.append(_post({
+            "LAB_ARENA_CODEX_BASE_URL": bridge.base_url,
+            "LAB_ARENA_CODEX_TOKEN": bridge.token,
+        }))
+
+    request = threading.Thread(target=send)
+    request.start()
+    assert wait_started.wait(2)
+    bridge.__exit__(None, None, None)
+    request.join(timeout=2)
+
+    assert not request.is_alive()
+    assert replies[0].status_code == 429
+    assert dispatches == []
+
+
+def test_client_disconnect_cancels_shared_gate_wait_without_releasing_owner(monkeypatch):
+    wait_started = threading.Event()
+
+    class ObservedSemaphore(threading.BoundedSemaphore):
+        def acquire(self, *args, **kwargs):
+            wait_started.set()
+            return super().acquire(*args, **kwargs)
+
+    gate = ObservedSemaphore(1)
+    assert gate.acquire(blocking=False)
+    wait_started.clear()
+    dispatches = []
+    monkeypatch.setattr(
+        codex, "_dispatch", lambda *_args, **_kwargs: dispatches.append(True),
+    )
+    try:
+        with codex.ResponsesBridge(
+                "/fixture-worker.sock", request_gate=gate,
+                response_deadline=time.monotonic() + 5) as bridge:
+            client = _abandoned_post(bridge.base_url, bridge.token)
+            assert wait_started.wait(2)
+            client.close()
+            assert bridge.wait_idle(1)
+            assert not gate.acquire(blocking=False)
+    finally:
+        gate.release()
+    assert dispatches == []
+
+
+def test_shared_request_gate_releases_after_dispatch_failure(monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", "/fixture-worker.sock")
+    monkeypatch.setenv("LAB_ARENA_WEB_EGRESS_SOCKET", "/fixture-egress.sock")
+    gate = threading.BoundedSemaphore(1)
+    dispatches = []
+
+    def dispatch(_socket_path, _parameters, **kwargs):
+        assert callable(kwargs["cancel_requested"])
+        dispatches.append("called")
+        if len(dispatches) == 1:
+            raise codex.CodexRuntimeError("fixture failure")
+        return 200, json.dumps(response(), separators=(",", ":")).encode()
+
+    monkeypatch.setattr(codex, "_dispatch", dispatch)
+    with codex.session(
+            model="openai/gpt-4o-mini", request_gate=gate) as first, codex.session(
+            model="openai/gpt-4o-mini", request_gate=gate) as second:
+        first_reply = _post(first)
+        second_reply = _post(second)
+
+    assert first_reply.status_code == 502
+    assert second_reply.status_code == 200
+    assert dispatches == ["called", "called"]
+    assert gate.acquire(blocking=False)
+    gate.release()
+
+
+def test_shared_request_gate_releases_after_guard_refusal(monkeypatch):
+    gate = threading.BoundedSemaphore(1)
+    dispatches = []
+    monkeypatch.setattr(
+        codex, "_dispatch",
+        lambda *_args, **_kwargs: dispatches.append(True),
+    )
+
+    with codex.ResponsesBridge(
+            "/fixture-worker.sock", request_gate=gate,
+            request_guard=lambda: False) as bridge:
+        reply = _post({
+            "LAB_ARENA_CODEX_BASE_URL": bridge.base_url,
+            "LAB_ARENA_CODEX_TOKEN": bridge.token,
+        })
+
+    assert reply.status_code == 429
+    assert dispatches == []
+    assert gate.acquire(blocking=False)
+    gate.release()
+
+
+def test_client_disconnect_during_guard_releases_gate_without_dispatch(monkeypatch):
+    gate = threading.BoundedSemaphore(1)
+    guard_started = threading.Event()
+    release_guard = threading.Event()
+    dispatches = []
+
+    def guard():
+        guard_started.set()
+        assert release_guard.wait(2)
+        return True
+
+    monkeypatch.setattr(
+        codex, "_dispatch",
+        lambda *_args, **_kwargs: dispatches.append(True),
+    )
+    with codex.ResponsesBridge(
+            "/fixture-worker.sock", request_gate=gate,
+            request_guard=guard) as bridge:
+        abandoned = _abandoned_post(bridge.base_url, bridge.token)
+        assert guard_started.wait(2)
+        abandoned.shutdown(socket.SHUT_RDWR)
+        abandoned.close()
+        release_guard.set()
+        assert bridge.wait_idle(2) is True
+
+    assert dispatches == []
+    assert gate.acquire(blocking=False)
+    gate.release()
+
+
+def test_bridge_close_during_guard_releases_gate_without_dispatch(monkeypatch):
+    gate = threading.BoundedSemaphore(1)
+    guard_started = threading.Event()
+    release_guard = threading.Event()
+    dispatches = []
+    replies = []
+
+    def guard():
+        guard_started.set()
+        assert release_guard.wait(2)
+        return True
+
+    monkeypatch.setattr(
+        codex, "_dispatch",
+        lambda *_args, **_kwargs: dispatches.append(True),
+    )
+    bridge = codex.ResponsesBridge(
+        "/fixture-worker.sock", request_gate=gate,
+        request_guard=guard,
+    )
+    bridge.__enter__()
+
+    request = threading.Thread(target=lambda: replies.append(_post({
+        "LAB_ARENA_CODEX_BASE_URL": bridge.base_url,
+        "LAB_ARENA_CODEX_TOKEN": bridge.token,
+    })))
+    request.start()
+    assert guard_started.wait(2)
+    close = threading.Thread(target=bridge.__exit__, args=(None, None, None))
+    close.start()
+    assert bridge._closed.wait(2)
+    release_guard.set()
+    request.join(timeout=2)
+    close.join(timeout=2)
+
+    assert not request.is_alive() and not close.is_alive()
+    assert replies[0].status_code == 429
+    assert dispatches == []
+    assert gate.acquire(blocking=False)
+    gate.release()
+
+
 @pytest.mark.parametrize("outcome", [False, None, 0, "allow", "exception", "base-exception"])
 def test_request_guard_refusal_is_generic_and_never_dispatches(monkeypatch, outcome):
     calls = []
@@ -280,7 +572,9 @@ def test_request_guard_refusal_is_generic_and_never_dispatches(monkeypatch, outc
             "LAB_ARENA_CODEX_TOKEN": bridge.token,
         }
         reply = _post(environment)
-        assert bridge.wait_idle(0) is True
+        # The client can receive the refusal before the handler's finally
+        # releases its active slot. Wait for that cleanup, not scheduler timing.
+        assert bridge.wait_idle(1) is True
 
     assert reply.status_code == 429
     assert reply.json() == {"error": {"message": "request unavailable"}}

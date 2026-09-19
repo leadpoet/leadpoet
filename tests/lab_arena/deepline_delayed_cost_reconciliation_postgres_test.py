@@ -118,6 +118,7 @@ def _uncertain_call(
     call_succeeded: bool = False,
     credential_failure_status: int | None = None,
     evidence_overrides: dict | None = None,
+    funding_source: str = "miner_key",
 ):
     fingerprint = fingerprint or "sha256:" + "a" * 64
     identity = contracts.provider_call_identity(
@@ -146,7 +147,7 @@ def _uncertain_call(
         call_identity=identity,
         operation_id="scrapingdog.scrape",
         provider="deepline",
-        funding_source="miner_key",
+        funding_source=funding_source,
         amount_microusd=amount,
         call_doc={
             "request_hash": sha(label),

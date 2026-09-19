@@ -14,15 +14,17 @@ from tests.lab_arena.lab_arena_pg_harness import (
 )
 from tests.lab_arena.test_lab_arena_migration_postgres import claim, complete, sha
 
-MIGRATION = Path(__file__).resolve().parents[2] / "scripts/250-lab-arena-closed-scoring-billing-reconciliation.sql"
+MIGRATION = Path(__file__).resolve().parents[2] / "scripts/311-lab-arena-per-icp-closed-billing-reconciliation.sql"
 
 
 @pytest.fixture(scope="module")
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from database_with_lab_arena_migration(
+        CURRENT_SERVICE_MIGRATIONS + (MIGRATION.name,)
+    )
 
 
-def _closed_call(database, label, *, dynamic=True):
+def _closed_call(database, label, *, dynamic=True, policy="successful_calls_v1"):
     psycopg2, dsn = database
     store = _store(database)
     round_id = "arena-2026-09-14-cb" + label
@@ -58,9 +60,9 @@ def _closed_call(database, label, *, dynamic=True):
         cursor.execute("SET LOCAL session_replication_role=replica")
         cursor.execute(
             "UPDATE public.lab_arena_rounds SET configuration_doc=configuration_doc || "
-            "'{\"mode\":\"live\",\"network_name\":\"finney\",\"netuid\":71,"
-            "\"sourcing_cost_eligibility_policy\":\"successful_calls_v1\"}'::jsonb "
-            "WHERE round_id=%s", (round_id,),
+            "jsonb_build_object('mode','live','network_name','finney','netuid',71,"
+            "'sourcing_cost_eligibility_policy',%s::text) "
+            "WHERE round_id=%s", (policy, round_id),
         )
     candidate = store.list_deepline_cost_reconciliations(round_id)[0]
     return store, round_id, candidate
@@ -73,9 +75,10 @@ def _next(store, round_id, **kwargs):
     )
 
 
-def test_published_late_bill_is_exact_idempotent_and_does_not_rewrite_result(database):
+@pytest.mark.parametrize("policy", ["successful_calls_v1", "successful_calls_per_icp_v1"])
+def test_published_late_bill_is_exact_idempotent_and_does_not_rewrite_result(database, policy):
     psycopg2, dsn = database
-    store, round_id, candidate = _closed_call(database, "positive")
+    store, round_id, candidate = _closed_call(database, "positive" + str("per_icp" in policy).lower(), policy=policy)
     try:
         first = _next(store, round_id)
         assert first["uncertain_entry_id"] == candidate["uncertain_entry_id"]
@@ -112,9 +115,10 @@ def test_published_late_bill_is_exact_idempotent_and_does_not_rewrite_result(dat
         store.close()
 
 
-def test_fixed_unknown_is_not_admitted_to_published_mutation_path(database):
+@pytest.mark.parametrize("policy", ["successful_calls_v1", "successful_calls_per_icp_v1"])
+def test_fixed_unknown_is_not_admitted_to_published_mutation_path(database, policy):
     psycopg2, dsn = database
-    store, round_id, candidate = _closed_call(database, "fixed", dynamic=False)
+    store, round_id, candidate = _closed_call(database, "fixed" + str("per_icp" in policy).lower(), dynamic=False, policy=policy)
     try:
         assert _next(store, round_id) == {"status": "none"}
         with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:

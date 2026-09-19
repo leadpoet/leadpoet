@@ -25,7 +25,10 @@ from tests.lab_arena.test_lab_arena_service_round import Harness
 @pytest.fixture
 def database():
     yield from database_with_lab_arena_migration(
-        CURRENT_SERVICE_MIGRATIONS + ("289-lab-arena-per-icp-cost-policy.sql",)
+        CURRENT_SERVICE_MIGRATIONS + (
+            "289-lab-arena-per-icp-cost-policy.sql",
+            "312-lab-arena-temporary-hold-admission.sql",
+        )
     )
 
 
@@ -214,7 +217,7 @@ def test_zero_cost_calls_do_not_close_paid_admission(database, tmp_path):
     assert large["status"] == "reserved"
     _uncertain(store, lease, token, large_id, succeeded=False)
     _, refused = _reserve(store, lease, token, "after-large-uncertain", 1)
-    assert (refused["status"], refused["reason"]) == ("refused", "money_cap")
+    assert (refused["status"], refused["reason"]) == ("budget_busy", "provider_cost_uncertain")
 
 
 def test_score_spend_does_not_enter_execute_admission_or_cost_eligibility(
@@ -282,6 +285,46 @@ def test_score_spend_does_not_enter_execute_admission_or_cost_eligibility(
     )
     assert cost["competition_sourcing_microusd"] == 800_000
     assert cost["eligibility_cap_microusd"] == 800_000
+    assert cost["eligible"] is True
+
+
+def test_temporary_hold_settles_and_same_call_resumes_without_refusal(database, tmp_path):
+    from tests.lab_arena.deepline_delayed_cost_reconciliation_postgres_test import _uncertain_call
+    from tests.lab_arena.deepline_interrupted_cost_reconciliation_postgres_test import _settle as reconcile
+
+    connect = lambda: database[0].connect(**database[1])
+    harness = Harness(connect, tmp_path, challengers=[], runners=["hold"])
+    harness.service.config.defaults = replace(
+        harness.service.config.defaults, per_icp_cost_policy=True,
+        integrity_from="2000-01-01T00:00:00Z",
+    )
+    _start_parallel_round(harness, "arena-2099-02-05-c6", slot_ceiling=2)
+    store = harness.service.store
+    lease, token = claim(store, harness.round_id, harness.runner_keys[0], parallelism=2, ceiling=2)[:2]
+    identity, _ = _reserve(store, lease, token, "settled-three", 3_000_000)
+    _settle(store, lease, token, identity, 3_000_000)
+    hold_identity, *_ = _uncertain_call(
+        store, lease, token, label="one-dollar-hold", amount=1_000_000,
+        call_succeeded=True, reason="missing_provider_cost",
+        funding_source=store.provider_funding(lease["run_id"], "deepline")["funding_source"],
+    )
+    next_identity, busy = _reserve(store, lease, token, "resume-same", 50_000)
+    assert (busy["status"], busy["reason"]) == ("budget_busy", "provider_cost_uncertain")
+    assert store.list_ledger(call_identity=next_identity) == []
+    candidate = store.list_deepline_cost_reconciliations(harness.round_id)[0]
+    assert candidate["call_identity"] == hold_identity
+    assert reconcile(store, candidate, amount=60_000, units="0.6")["status"] == "settled"
+    assert reconcile(store, candidate, amount=60_000, units="0.6")["idempotent"] is True
+    resumed_identity, resumed = _reserve(store, lease, token, "resume-same", 50_000)
+    assert resumed_identity == next_identity and resumed["status"] == "reserved"
+    _settle(store, lease, token, resumed_identity, 50_000)
+    cost = store.icp_cost_eligibility(
+        round_id=harness.round_id, submission_id=lease["submission_id"],
+        icp_position=lease["icp_position"], qualified_company_count=5,
+    )
+    assert cost["execution"]["settled_microusd"] == 3_110_000
+    assert cost["execution"]["reserved_or_uncertain_microusd"] == 0
+    assert cost["execution"]["refused_calls"] == 0
     assert cost["eligible"] is True
 
 

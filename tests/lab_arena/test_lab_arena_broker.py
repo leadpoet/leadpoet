@@ -2313,7 +2313,8 @@ def test_canonical_failed_responses_retain_only_billing_structure_and_stay_uncer
         {"usage": {"cost": None}},
         {"status": "completed"},
         {"error_type": "server_error"},
-        {"openrouter_metadata": None},
+        {"openrouter_metadata": "malformed"},
+        {"openrouter_metadata": {}},
         {
             "openrouter_metadata": {
                 "requested": "wrong-model",
@@ -2358,6 +2359,68 @@ def test_completed_failed_429_retry_marker_rejects_partial_or_ambiguous_shape(
         generation_id="gen-failed-429",
         credential_fingerprint="sha256:" + "a" * 64,
     ) is False
+
+
+@pytest.mark.parametrize("include_metadata", [False, True])
+def test_completed_failed_429_retry_marker_accepts_absent_or_null_metadata(
+    include_metadata,
+):
+    document = {
+        "status": "failed",
+        "error_type": "rate_limit_exceeded",
+        "error": {"code": "rate_limit_exceeded", "message": "limited"},
+        "output": [],
+        "usage": None,
+    }
+    if include_metadata:
+        document["openrouter_metadata"] = None
+
+    assert br._openrouter_completed_rate_limit_retryable(
+        document,
+        model=br.OPENROUTER_LUNA_RESPONSES_MODEL,
+        generation_id="gen-failed-429",
+        credential_fingerprint="sha256:" + "a" * 64,
+    ) is True
+
+
+def test_null_metadata_failed_429_stays_uncertain_and_gets_retry_marker(
+    monkeypatch,
+):
+    payload = {
+        "id": "gen-null-metadata-failed-429",
+        "object": "response",
+        "status": "failed",
+        "error_type": "rate_limit_exceeded",
+        "error": {"code": "rate_limit_exceeded", "message": "limited"},
+        "output": [],
+        "usage": None,
+        "openrouter_metadata": None,
+    }
+    monkeypatch.setattr(br, "_openrouter_generation_readback", lambda **_kwargs: None)
+    store = ZeroReservationLedgerStore()
+    broker, _store, _transport = make_broker(
+        store=store, transport=FakeTransport([(200, payload)])
+    )
+    broker._price_table = luna_price_table()
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.responses",
+        parameters=LUNA_RESPONSES,
+        action_sequence=0,
+        timeout_ms=300_000,
+    )
+
+    assert result.status == 502
+    assert result.call["completed_rate_limit_retryable"] is True
+    assert result.call["idempotent"] is False
+    assert "actual_microusd" not in result.call
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+    original = store.calls[result.call["call_identity"]]
+    assert original["kind"] == "uncertain" and "actual" not in original
+    assert original["uncertain_doc"]["openrouter_failed_response_structure"][
+        "metadata_kind"
+    ] == "null"
 
 
 def test_completed_failed_429_retry_marker_requires_reconciliation_binding():

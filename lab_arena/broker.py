@@ -881,12 +881,9 @@ def _openrouter_completed_rate_limit_retryable(
     except operations.OperationResponseError:
         return False
     structure = _openrouter_failed_cost_structure(document, model)
-    return (
-        structure.get("usage_kind") == "null"
-        and structure.get("metadata_kind") == "object"
-        and structure.get("output_kind") == "array"
-        and structure.get("output_count") == 0
-        and structure.get("rate_limit_error") is True
+    metadata_kind = structure.get("metadata_kind")
+    metadata_valid = metadata_kind == "null" or (
+        metadata_kind == "object"
         and structure.get("requested_model_matches") is True
         and structure.get("is_byok") is False
         and type(structure.get("attempt")) is int
@@ -898,6 +895,13 @@ def _openrouter_completed_rate_limit_retryable(
         and type(structure.get("attempts_count")) is int
         and 0 < structure["attempts_count"] <= 128
         and structure.get("all_attempts_failed_http") is True
+    )
+    return (
+        structure.get("usage_kind") == "null"
+        and structure.get("output_kind") == "array"
+        and structure.get("output_count") == 0
+        and structure.get("rate_limit_error") is True
+        and metadata_valid
     )
 
 

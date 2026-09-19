@@ -1527,6 +1527,8 @@ class WorkerSocketServer:
                 if (
                     state.quota_snapshot_generation != generation
                     and cached_view() is not None
+                    and started_at - state.quota_snapshot_at
+                    < QUOTA_SNAPSHOT_CACHE_SECONDS
                 ):
                     return cached_view()
                 return None
@@ -1558,9 +1560,24 @@ class WorkerSocketServer:
             state.quota_snapshot_inflight = False
             state.quota_snapshot_generation += 1
             if snapshot is None:
-                state.quota_snapshot = None
-                state.quota_snapshot_at = 0.0
-                state.trusted_quota_failure = True
+                if include_sourcing_cost:
+                    # Cost visibility is optional. Drop a prior cost view so
+                    # this request cannot reuse it, but preserve validated v1
+                    # counters and their health classification.
+                    if (
+                        state.quota_snapshot is not None
+                        and "sourcing_cost" in state.quota_snapshot
+                    ):
+                        state.quota_snapshot = {
+                            "schema_version": (
+                                lab_arena_checkpoint.QUOTA_SNAPSHOT_SCHEMA_VERSION
+                            ),
+                            "providers": state.quota_snapshot["providers"],
+                        }
+                else:
+                    state.quota_snapshot = None
+                    state.quota_snapshot_at = 0.0
+                    state.trusted_quota_failure = True
             else:
                 state.quota_snapshot = dict(snapshot)
                 state.quota_snapshot_at = self._monotonic()

@@ -115,10 +115,65 @@ def test_cache_upgrades_to_costs_and_drops_stale_costs_on_failure():
     now[0] += runner.QUOTA_SNAPSHOT_CACHE_SECONDS + 1
     api.quota_usage = lambda *args, **kwargs: {"invalid": True}
     assert server._quota_snapshot(include_sourcing_cost=True) is None
-    assert state.trusted_quota_failure
-    assert state.quota_snapshot is None
+    assert not state.trusted_quota_failure
+    assert state.quota_snapshot == snapshot()
     assert state.action_sequence == state.refusals == 0
     assert state.calls == []
+    # The preserved counter projection is also expired. A v1 caller performs
+    # its normal authoritative refresh and retains the existing failure path.
+    assert server._quota_snapshot() is None
+    assert state.trusted_quota_failure
+    assert state.quota_snapshot is None
+
+
+def test_failed_cost_upgrade_preserves_fresh_v1_cache_and_health():
+    api = CostApi()
+    state = runner.RunState(
+        lease={"run_id": "run-1"}, lease_token=LEASE_TOKEN
+    )
+    now = [10.0]
+    server = runner.WorkerSocketServer(
+        Path("/tmp/not-opened-quota-cost-v1.sock"),
+        api,
+        state,
+        monotonic=lambda: now[0],
+    )
+    assert server._quota_snapshot() == snapshot()
+    api.quota_usage = lambda *args, **kwargs: {"invalid": True}
+    assert server._quota_snapshot(include_sourcing_cost=True) is None
+    assert not state.trusted_quota_failure
+    assert state.quota_snapshot == snapshot()
+    assert state.quota_snapshot_at == 10.0
+    assert server._quota_snapshot() == snapshot()
+
+
+def test_valid_v2_repairs_v1_failure_but_failed_v2_does_not():
+    api = CostApi()
+    calls = []
+
+    def staged_read(*args, **kwargs):
+        calls.append(bool(kwargs.get("include_sourcing_cost")))
+        if len(calls) == 1:
+            raise RuntimeError("counter read failed")
+        if len(calls) == 2:
+            return {"invalid": True}
+        return cost_snapshot()
+
+    api.quota_usage = staged_read
+    state = runner.RunState(
+        lease={"run_id": "run-1"}, lease_token=LEASE_TOKEN
+    )
+    server = runner.WorkerSocketServer(
+        Path("/tmp/not-opened-quota-cost-recovery.sock"), api, state
+    )
+    assert server._quota_snapshot() is None
+    assert state.trusted_quota_failure
+    assert server._quota_snapshot(include_sourcing_cost=True) is None
+    assert state.trusted_quota_failure
+    assert server._quota_snapshot(include_sourcing_cost=True) == cost_snapshot()
+    assert not state.trusted_quota_failure
+    assert server._quota_snapshot() == snapshot()
+    assert calls == [False, True, True]
 
 
 @pytest.mark.parametrize(

@@ -2547,6 +2547,96 @@ def test_structured_profile_cache_reuses_one_response_for_stage_and_size(
     )
 
 
+@pytest.mark.parametrize("direct_conflict", [False, True])
+def test_size_refresh_reuses_profile_fetched_first_for_public_stage(
+    monkeypatch,
+    direct_conflict,
+):
+    structured_calls = []
+    exa_calls = []
+
+    async def structured_fetch(
+        domain, url, *, diagnostic, public_company_evidence
+    ):
+        del diagnostic
+        structured_calls.append((domain, url))
+        public_company_evidence.update({
+            "company_type": "Public Company",
+            "provider": "harvestapi_get_company",
+            "source_field": "companyType",
+            "url": url,
+            "website": f"https://{domain}/",
+        })
+        return {
+            "employee_count": "11-50",
+            "provider": "harvestapi_get_company",
+            "source_field": "employeeCountRange",
+            "url": url,
+            "website": f"https://{domain}/",
+        }
+
+    async def exa_fetch(url, **_kwargs):
+        exa_calls.append(url)
+        return {"outcome": "insufficient_evidence", "url": url}
+
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_structured_linkedin_company_size",
+        structured_fetch,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_current_linkedin_company_size",
+        exa_fetch,
+    )
+    cache = {}
+    identity = {
+        "normalized_name": "acme",
+        "registrable_dns_domain": "acme.example.com",
+        "linkedin_company_slug": "acme",
+    }
+    asyncio.run(
+        lead_scorer._fetch_structured_linkedin_profile_once(
+            identity,
+            cache,
+            collect_employee_size=False,
+        )
+    )
+    verdict = (
+        _verdict(
+            observed_size=7,
+            size_matches=False,
+            employee_url="https://evidence.example/headcount",
+        )
+        if direct_conflict
+        else _verdict(
+            observed_size=None,
+            size_matches=None,
+            employee_url="",
+        )
+    )
+    if not direct_conflict:
+        verdict["employee_size_evidence_quote"] = ""
+
+    asyncio.run(
+        lead_scorer._refresh_linkedin_employee_size_observation(
+            verdict,
+            _company(),
+            _icp(),
+            verified_homepage_identity=identity,
+            invocation_cache=cache,
+            collect_structured_conflict=True,
+        )
+    )
+
+    assert structured_calls == [
+        ("acme.example.com", "https://www.linkedin.com/company/acme")
+    ]
+    assert cache["structured_employee_size_applicable"] is True
+    assert cache["structured_evidence"]["employee_count"] == "11-50"
+    assert len(exa_calls) == (0 if direct_conflict else 1)
+
+
 @pytest.mark.parametrize(
     "stage_updates",
     [

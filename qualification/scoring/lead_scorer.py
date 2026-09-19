@@ -1752,7 +1752,6 @@ async def _refresh_linkedin_employee_size_observation(
             if (
                 collect_structured_conflict
                 and direct_decision == COMPANY_FIT_MISMATCH
-                and not invocation_cache.get("structured_attempted")
                 and anchor_name
                 and anchor_domain
                 and anchor_slug
@@ -1879,7 +1878,6 @@ async def _refresh_linkedin_employee_size_observation(
     ).strip().casefold()
     if (
         not current_web_evidence_usable
-        and not invocation_cache.get("structured_attempted")
         and anchor_name
         and anchor_domain
         and anchor_slug == evidence_slug

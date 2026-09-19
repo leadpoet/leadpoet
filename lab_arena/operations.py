@@ -1987,14 +1987,23 @@ def build_outbound_request(
             policy = _deep_copy_json(openrouter_provider_policy)
             price_fields = {"prompt", "completion", "request"}
             policy_fields = {"data_collection", "zdr", "allow_fallbacks", "max_price"}
+            policy_shapes = (
+                policy_fields,
+                policy_fields | {"order"},
+                policy_fields | {"only"},
+            )
             if (
                 not isinstance(policy, dict)
-                or set(policy) not in (policy_fields, policy_fields | {"order"})
+                or set(policy) not in policy_shapes
                 or (
-                    "order" in policy
+                    set(policy) != policy_fields
                     and (
                         normalized.get("model") != "openai/gpt-5.6-luna"
-                        or policy["order"] != ["azure/us"]
+                        or (
+                            policy.get("order") != ["azure/us"]
+                            and policy.get("only")
+                            != ["azure/us", "azure/eu"]
+                        )
                     )
                 )
                 or policy.get("data_collection") != "deny"

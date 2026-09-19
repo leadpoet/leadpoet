@@ -181,8 +181,8 @@ def test_recorded_native_wire_crosses_bridge_worker_broker_and_bills(monkeypatch
     assert all(body["max_output_tokens"] == 16384 for body in outbound)
     if model == br.OPENROUTER_LUNA_RESPONSES_MODEL:
         assert all(
-            body["provider"]["order"] == ["azure/us"]
-            and "only" not in body["provider"]
+            body["provider"]["only"] == ["azure/us", "azure/eu"]
+            and "order" not in body["provider"]
             and "require_parameters" not in body["provider"]
             and body["provider"]["allow_fallbacks"] is True
             and body["provider"]["data_collection"] == "deny"

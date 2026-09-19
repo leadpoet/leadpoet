@@ -201,6 +201,19 @@ SALES-OPS / REV-OPS family (treat as one):
   Sales Operations, Revenue Operations, RevOps, GTM Operations, GTM Ops,
   Sales Strategy & Operations, Revenue Strategy.
 
+ENGINEERING / R&D family (when the target is engineering or R&D):
+  Engineering, Software Engineering, Research and Development, R&D, and
+  Product Development describe building products. At the same seniority,
+  "Vice President of Product Development" can match "VP Engineering";
+  a different noun order or lack of the literal word "engineering" is not
+  itself a function mismatch. Do not extend this to Product Management,
+  Product Marketing, Product Design, or a generic "VP Product" title:
+  those alone do not establish engineering responsibility. An explicit
+  non-engineering qualifier still rejects. This does not equate engineering
+  with IT operations, information security, sales engineering, or sales.
+  Seniority still applies: a VP does not match a C-level-only target, and
+  a Product Development Manager does not match a VP target.
+
 DIFFERENT FUNCTIONS — do NOT match a Sales/RevOps target:
   Engineering, Software Engineering, R&D, DevOps, Site Reliability,
   Product Management, Product Design, Design, Research, Data Science,

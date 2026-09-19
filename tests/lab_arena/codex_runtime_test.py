@@ -17,7 +17,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from lab_arena import broker as br, operations as ops, runner, runtime, shim
+from lab_arena import broker as br, operations as ops, runner, runtime, shim, web_egress
 from lab_arena import lab_arena_codex as codex
 from tests.lab_arena.test_lab_arena_broker import CONTEXT, FakeTransport, FakeLedgerStore, make_broker, price_table
 from tests.lab_arena.test_lab_arena_runner import lease
@@ -55,15 +55,30 @@ def broker_socket(monkeypatch, transport=None, store=None, *, priced_models=()):
 
     with tempfile.TemporaryDirectory(prefix="codex-test-", dir="/tmp") as directory:
         path = Path(directory) / "worker.sock"
+        web_path = Path(directory) / runtime.SANDBOX_WEB_SOCKET_NAME
         state = runner.RunState(lease=lease("r1"), lease_token="tok-r1")
         server = runner.WorkerSocketServer(path, Api(), state)
         server.start()
-        monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(path))
-        monkeypatch.setenv("LAB_ARENA_WEB_EGRESS_SOCKET", str(Path(directory) / "web.sock"))
+        web_server = web_egress.WebEgressServer(web_path)
         try:
+            web_server.start()
+            monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(path))
+            monkeypatch.setenv("LAB_ARENA_WEB_EGRESS_SOCKET", str(web_path))
             yield store, transport, path
         finally:
-            server.stop()
+            try:
+                web_server.stop()
+            finally:
+                server.stop()
+
+
+def test_broker_socket_starts_required_web_egress(monkeypatch):
+    with broker_socket(monkeypatch) as (_store, _transport, worker_path):
+        web_path = Path(os.environ["LAB_ARENA_WEB_EGRESS_SOCKET"])
+        assert worker_path.is_socket()
+        assert web_path == worker_path.parent / runtime.SANDBOX_WEB_SOCKET_NAME
+        assert web_path.is_socket()
+    assert not web_path.exists()
 
 
 @pytest.mark.parametrize("extra", [

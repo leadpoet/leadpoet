@@ -6,6 +6,7 @@ document validated by the service; bodies are size-bounded here.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Optional
 
 import anyio
@@ -16,9 +17,11 @@ from starlette.concurrency import run_in_threadpool
 from lab_arena import contracts, source_bundle
 from lab_arena.contracts import ArenaContractError
 from lab_arena.service import ArenaService, ServiceError
-from lab_arena.store import ArenaStoreUnavailable
+from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable
 
 MAX_JSON_BODY_BYTES = 1_048_576
+
+_LOGGER = logging.getLogger("lab_arena.api")
 
 
 def _refuse_declared_oversize(request: Request, limit: int) -> None:
@@ -133,6 +136,29 @@ def create_app(service: ArenaService) -> FastAPI:
                 "Cache-Control": "no-store",
                 "X-Content-Type-Options": "nosniff",
                 "Retry-After": "1",
+            },
+        )
+
+    @app.exception_handler(ArenaStoreError)
+    async def _store_error(request: Request, exc: ArenaStoreError) -> JSONResponse:
+        # A durable-state *rejection* (as opposed to the transport failure handled
+        # above): PostgREST or Postgres refused the statement. Without this handler
+        # the exception escapes and Starlette answers a bare 500 whose body says
+        # nothing, so neither the caller nor an operator can tell one of these apart
+        # from any other internal error. Store messages never carry credentials
+        # (``ArenaStoreError``), so the reason is safe to log verbatim.
+        _LOGGER.error(
+            "arena store rejected %s %s: %s",
+            request.method,
+            request.url.path,
+            str(exc)[:500],
+        )
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "code": "arena_store_error"},
+            headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
             },
         )
 

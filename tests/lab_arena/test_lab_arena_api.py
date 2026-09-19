@@ -191,6 +191,47 @@ def test_provider_rpc_transport_timeout_is_sanitized_and_next_request_is_healthy
     assert len(requests) == 2
 
 
+def test_database_rejection_is_a_named_error_and_is_logged(caplog):
+    """A database *rejection* must not escape as a bare, unexplained 500."""
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(400, json={"code": "23505", "message": "duplicate key value violates unique constraint"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as database:
+        transport = PostgrestTransport("https://project.example", service_key="sb_secret_test", http_client=database)
+        store = ArenaStore(transport)
+
+        class RpcService(StubService):
+            def handle_provider(
+                self, run_id, lease_token, frame, cancel_requested=None
+            ):
+                return store.reserve_call(
+                    run_id=run_id, lease_token_hash="sha256:" + "a" * 64,
+                    call_identity="sha256:" + "b" * 64,
+                    operation_id="scrapingdog.google", provider="scrapingdog",
+                    funding_source="miner_key", amount_microusd=0,
+                    call_doc={}, lease_ttl_seconds=3600,
+                )
+
+        with TestClient(create_app(RpcService()), raise_server_exceptions=False) as api:
+            with caplog.at_level("ERROR", logger="lab_arena.api"):
+                response = api.post(
+                    "/arena/v1/runs/run-1/provider",
+                    headers={"x-lab-arena-lease": "a" * 64},
+                    json={"operation_id": "scrapingdog.google"},
+                )
+
+    assert response.status_code == 500
+    assert response.json() == {"status": "error", "code": "arena_store_error"}
+    assert response.headers["cache-control"] == "no-store"
+    # The operator needs the database's own reason; it carries no credentials.
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "/arena/v1/runs/run-1/provider" in logged
+    assert "23505" in logged
+
+
 @pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError])
 @pytest.mark.parametrize("recovers", [True, False])
 def test_current_handles_failed_reward_basis_read(error_type, recovers):

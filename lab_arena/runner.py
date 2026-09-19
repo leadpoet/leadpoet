@@ -485,7 +485,13 @@ class ArenaApiClient(Protocol):
 
     def provider(self, run_id: str, lease_token: str, frame: Mapping[str, Any]) -> Dict[str, Any]: ...
 
-    def quota_usage(self, run_id: str, lease_token: str) -> Dict[str, Any]: ...
+    def quota_usage(
+        self,
+        run_id: str,
+        lease_token: str,
+        *,
+        include_sourcing_cost: bool = False,
+    ) -> Dict[str, Any]: ...
 
     def complete(self, envelope: Mapping[str, Any]) -> Dict[str, Any]: ...
 
@@ -620,7 +626,13 @@ class HttpArenaApiClient:
             timeout_seconds=timeout_seconds,
         )
 
-    def quota_usage(self, run_id: str, lease_token: str) -> Dict[str, Any]:
+    def quota_usage(
+        self,
+        run_id: str,
+        lease_token: str,
+        *,
+        include_sourcing_cost: bool = False,
+    ) -> Dict[str, Any]:
         """Read one bounded active-lease quota snapshot."""
 
         if not isinstance(run_id, str) or not re.fullmatch(
@@ -630,7 +642,13 @@ class HttpArenaApiClient:
         try:
             with self._client.stream(
                 "GET",
-                self._base_url + "/arena/v1/runs/%s/quota" % run_id,
+                self._base_url
+                + "/arena/v1/runs/%s/quota" % run_id
+                + (
+                    "?include_sourcing_cost=true"
+                    if include_sourcing_cost
+                    else ""
+                ),
                 headers={"x-lab-arena-lease": lease_token},
                 timeout=httpx.Timeout(API_TIMEOUT_SECONDS),
             ) as response:
@@ -654,7 +672,11 @@ class HttpArenaApiClient:
             raise RunnerError("run quota is unavailable") from None
         try:
             document = json.loads(b"".join(chunks).decode("utf-8"))
-            return lab_arena_checkpoint.validate_quota_snapshot(document)
+            return (
+                lab_arena_checkpoint.validate_quota_cost_snapshot(document)
+                if include_sourcing_cost
+                else lab_arena_checkpoint.validate_quota_snapshot(document)
+            )
         except (UnicodeDecodeError, ValueError, lab_arena_checkpoint.QuotaUnavailable):
             raise RunnerError("run quota is unavailable") from None
 
@@ -1461,22 +1483,38 @@ class WorkerSocketServer:
         self._thread: Optional[threading.Thread] = None
         self._stopping = threading.Event()
 
-    def _quota_snapshot(self) -> Optional[Dict[str, Any]]:
+    def _quota_snapshot(
+        self, *, include_sourcing_cost: bool = False
+    ) -> Optional[Dict[str, Any]]:
         """Cache and single-flight passive reads without touching call counters."""
 
         state = self._state
         condition = state.quota_condition
         started_at = self._monotonic()
+
+        def cached_view() -> Optional[Dict[str, Any]]:
+            snapshot = state.quota_snapshot
+            if snapshot is None:
+                return None
+            if include_sourcing_cost:
+                return dict(snapshot) if "sourcing_cost" in snapshot else None
+            return {
+                "schema_version": (
+                    lab_arena_checkpoint.QUOTA_SNAPSHOT_SCHEMA_VERSION
+                ),
+                "providers": snapshot["providers"],
+            }
+
         with condition:
             if state.quota_request_count >= MAX_QUOTA_SNAPSHOT_REQUESTS:
                 return None
             state.quota_request_count += 1
             if (
-                state.quota_snapshot is not None
+                cached_view() is not None
                 and started_at - state.quota_snapshot_at
                 < QUOTA_SNAPSHOT_CACHE_SECONDS
             ):
-                return dict(state.quota_snapshot)
+                return cached_view()
             generation = state.quota_snapshot_generation
             if state.quota_snapshot_inflight:
                 condition.wait_for(
@@ -1488,9 +1526,9 @@ class WorkerSocketServer:
                 )
                 if (
                     state.quota_snapshot_generation != generation
-                    and state.quota_snapshot is not None
+                    and cached_view() is not None
                 ):
-                    return dict(state.quota_snapshot)
+                    return cached_view()
                 return None
             state.quota_snapshot_inflight = True
 
@@ -1498,12 +1536,21 @@ class WorkerSocketServer:
         run_id = state.lease["run_id"]
         lease_token = state.lease_token
         try:
-            document = self._api.quota_usage(run_id, lease_token)
+            if include_sourcing_cost:
+                document = self._api.quota_usage(
+                    run_id, lease_token, include_sourcing_cost=True
+                )
+            else:
+                document = self._api.quota_usage(run_id, lease_token)
         except Exception:
             pass
         else:
             try:
-                snapshot = lab_arena_checkpoint.validate_quota_snapshot(document)
+                snapshot = (
+                    lab_arena_checkpoint.validate_quota_cost_snapshot(document)
+                    if include_sourcing_cost
+                    else lab_arena_checkpoint.validate_quota_snapshot(document)
+                )
             except lab_arena_checkpoint.QuotaUnavailable:
                 pass
 
@@ -1519,7 +1566,7 @@ class WorkerSocketServer:
                 state.quota_snapshot_at = self._monotonic()
                 state.trusted_quota_failure = False
             condition.notify_all()
-            return dict(snapshot) if snapshot is not None else None
+            return cached_view()
 
     def _handle_quota_control(self, raw: bytes) -> Optional[bytes]:
         """Handle the exact non-provider control frame, if one was supplied."""
@@ -1532,9 +1579,15 @@ class WorkerSocketServer:
             "schema_version"
         ) != lab_arena_checkpoint.QUOTA_CONTROL_SCHEMA_VERSION:
             return None
-        if dict(frame) != lab_arena_checkpoint.QUOTA_CONTROL_FRAME:
+        include_cost = (
+            dict(frame) == lab_arena_checkpoint.QUOTA_COST_CONTROL_FRAME
+        )
+        if (
+            not include_cost
+            and dict(frame) != lab_arena_checkpoint.QUOTA_CONTROL_FRAME
+        ):
             return shim.encode_worker_error("invalid_frame")
-        snapshot = self._quota_snapshot()
+        snapshot = self._quota_snapshot(include_sourcing_cost=include_cost)
         if snapshot is None:
             return shim.encode_worker_error("quota_unavailable")
         return contracts.canonical_json(snapshot).encode("utf-8")

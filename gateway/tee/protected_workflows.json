@@ -2,7 +2,7 @@
   "baseline_commit": "19ed47a0da71aeffa38664e65df52c0e73c5202c",
   "entries": [
     {
-      "ast_sha256": "sha256:24289959f5304328c68b1cff177d9b88c03a819baf93642a664e709ddc8c9ee2",
+      "ast_sha256": "sha256:300649bdb87975ab8a636768c5d8232daf36c5beac42a710294b15c3e6987b09",
       "path": "gateway/main.py",
       "symbol": "lifespan"
     },
@@ -162,7 +162,7 @@
       "symbol": "stage_external_protected_sources"
     },
     {
-      "ast_sha256": "sha256:eb4ab1e6475917432146e2b9b03b03a57438c563af1ef99a5a832a6bb486621e",
+      "ast_sha256": "sha256:97770470bc9f561338bbb5447de4b465a6d490f240110a4e7a188d9a223d8ad1",
       "path": "gateway/tee/release_archive_v2.py",
       "symbol": "_archived_role_pcr0s"
     },
@@ -212,7 +212,7 @@
       "symbol": "_measurement_pcr0"
     },
     {
-      "ast_sha256": "sha256:1df0cda316a4288742621721634929ae307cc061e6b07fd1aae4458d5898054a",
+      "ast_sha256": "sha256:1c70b37b37171630846a7f633c6bd16e27483bba058c444bf59fc657fe5413de",
       "path": "gateway/tee/release_archive_v2.py",
       "symbol": "_normalize_role_pcr0s"
     },
@@ -282,7 +282,7 @@
       "symbol": "select_release_manifest"
     },
     {
-      "ast_sha256": "sha256:ce5d665be49f6607c6a2c01cdd2e324107fd2a6cd3c41ce7f66a102c6ef9bb03",
+      "ast_sha256": "sha256:a05794092f35f4d88b6cfb3f9f0a97363a5af854a66b37fa2e54bf6a99ab0099",
       "path": "gateway/tee/release_archive_v2.py",
       "symbol": "verify_archive_directory"
     },
@@ -292,7 +292,7 @@
       "symbol": "verify_archive_index"
     },
     {
-      "ast_sha256": "sha256:c3c315da16f6813bc2af622062112cbe037e7cf75bc6dfc2ee3c949ace7e58b5",
+      "ast_sha256": "sha256:ae2c7b06f4fb7c16a012e195d64c7f7d7b38a624f449569f07173c50cbf1854f",
       "path": "gateway/tee/release_channel_v2.py",
       "symbol": "__module__"
     },
@@ -302,54 +302,14 @@
       "symbol": "build_release_channel_v2"
     },
     {
-      "ast_sha256": "sha256:f2218c7601f4887e05b98af571a4576ffabe483da885874e8dbf218cbc5647bf",
-      "path": "gateway/tee/release_channel_v2.py",
-      "symbol": "build_release_lineage_v2"
-    },
-    {
       "ast_sha256": "sha256:fd6c3368586087c4963112971f9aa79bcb0a1fe56321682279919f1ae062b392",
       "path": "gateway/tee/release_channel_v2.py",
       "symbol": "fetch_release_channel_v2"
     },
     {
-      "ast_sha256": "sha256:4a4c0eb81e159128889a679ca9805426c139aaf7c94c1cf2f8d5dc6978404725",
-      "path": "gateway/tee/release_channel_v2.py",
-      "symbol": "fetch_release_lineage_v2"
-    },
-    {
-      "ast_sha256": "sha256:f66d43c86519cbfce4de9393b07afab080c498f6e096f11af72175fc4aa7c223",
-      "path": "gateway/tee/release_channel_v2.py",
-      "symbol": "git_ancestor_commits_v2"
-    },
-    {
       "ast_sha256": "sha256:81fc872068dcca052ef065201426b7b0de9b0d3055a3af721f5336980de380aa",
       "path": "gateway/tee/release_channel_v2.py",
       "symbol": "validate_release_channel_v2"
-    },
-    {
-      "ast_sha256": "sha256:954dd2591a7079195cdfd596455baf5aa93d53daf5a98d255fc83cafc8db910d",
-      "path": "gateway/tee/release_lineage_v2.py",
-      "symbol": "__module__"
-    },
-    {
-      "ast_sha256": "sha256:08867dcd38a411bac357081289331fe04388dec8f302989b766205c9f89b5a86",
-      "path": "gateway/tee/release_lineage_v2.py",
-      "symbol": "build_compact_release_lineage_boot_verifier_v2"
-    },
-    {
-      "ast_sha256": "sha256:1323271ccd10e5cc2cdf42c73a29259b16d9860524fd51563b6a2ce7e08faedf",
-      "path": "gateway/tee/release_lineage_v2.py",
-      "symbol": "validate_compact_release_lineage_v2"
-    },
-    {
-      "ast_sha256": "sha256:152ca65af80fc5c2bbfe6e20703c8a9dc9808d755394075b85972ce64959d1d6",
-      "path": "gateway/tee/release_manifest_v2.py",
-      "symbol": "historical_two_role_specs"
-    },
-    {
-      "ast_sha256": "sha256:700724176e68a421d5b1e2b25fb82f0af5e79b3d90abae79699e01162b780aa6",
-      "path": "gateway/tee/release_manifest_v2.py",
-      "symbol": "validate_prior_release_manifest"
     },
     {
       "ast_sha256": "sha256:0531466d51e4236f9bc789d0142cb68bab528c09919d7edac1aa9020cb51d821",
@@ -427,7 +387,7 @@
       "symbol": "rpc_method_allowed"
     },
     {
-      "ast_sha256": "sha256:6f9ed2b353cb2ad2634d682ed3d3a10fba9e6f16593bc40fcbff833dcbad5032",
+      "ast_sha256": "sha256:df9b955c4328d0b2b0922545e6299ce940742a9f06df9a885f4e2c705b9194ea",
       "path": "gateway/tee/runtime_identity_v2.py",
       "symbol": "RuntimeIdentityV2"
     },
@@ -437,14 +397,9 @@
       "symbol": "_validate_public_configuration"
     },
     {
-      "ast_sha256": "sha256:c37372943d51080df0d52c60ee4357a8f821f457fb35c87760653c947b2955f4",
+      "ast_sha256": "sha256:a04eb5cbcc1beca4d9aa9e6aa81bb6ed4d1ef7041925063ca3f8de0736a3d88f",
       "path": "gateway/tee/runtime_identity_v2.py",
       "symbol": "_validate_release_configuration"
-    },
-    {
-      "ast_sha256": "sha256:1cef096546acb077325d949b70b6f82a33f34b32507f4c7aa7c8a2c33bf68ebd",
-      "path": "gateway/tee/supabase_schema_preflight_v2.py",
-      "symbol": "verify_required_supabase_v2_schema"
     },
     {
       "ast_sha256": "sha256:ee8696fcac31f265c9f0c26af6a3e19f602ca5dd9c4d0bb1c8042cd3d74f5e26",
@@ -565,16 +520,6 @@
       "ast_sha256": "sha256:9b6065349bbca6a219f23da8083fb926105743d350b65cccef4fd0b000006c6b",
       "path": "leadpoet_canonical/attested_v2.py",
       "symbol": "build_boot_identity_body"
-    },
-    {
-      "ast_sha256": "sha256:36c7aa95e767444019aa2754c0ca1c36bbe14660b754970cfc7ab6d49fe07158",
-      "path": "leadpoet_canonical/attested_v2.py",
-      "symbol": "build_transport_attempt"
-    },
-    {
-      "ast_sha256": "sha256:8278f37a8606f9b8bd4b5ae4378d0c6325dcd03fd316894df5fa11c44576b801",
-      "path": "leadpoet_canonical/attested_v2.py",
-      "symbol": "validate_transport_attempt"
     },
     {
       "ast_sha256": "sha256:7c8b58f3e7f28f6648088c26f7f97c925c9505341e3512aa835b288460df9f95",
@@ -842,126 +787,6 @@
       "symbol": "_run_targeted_company_evidence_investigation"
     },
     {
-      "ast_sha256": "sha256:0bc3d24a15a2cae09e9d5c9f244c877b33d8d73039fbce70985cfe1f72cc9057",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "CONTROLLER_FILES"
-    },
-    {
-      "ast_sha256": "sha256:62cb36b6f517bf426b248add81c203a091c94af42661a57a6d2e6741d2bc6252",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "InstalledGatewayControllerError"
-    },
-    {
-      "ast_sha256": "sha256:cfae1016011688de72ed89ca04e54bbebff92d47d4d94d2935ca5c91a01e05f4",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "LEGACY_FOUR_FILE_CONTROLLER_BOUNDARY"
-    },
-    {
-      "ast_sha256": "sha256:238586abf827a6d97d1aa9e6900b2bd084344ac22ea7f964760112a800b8d21a",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "LEGACY_FOUR_FILE_CONTROLLER_COMMITS"
-    },
-    {
-      "ast_sha256": "sha256:7b698421d863993cce11096d27024a501cfb505bbc77040b0bcca809f2c98fbc",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "OPTIONAL_CONTROLLER_FILES"
-    },
-    {
-      "ast_sha256": "sha256:09c055342871911d83bbe42aa6a03ef6abada7d6df05de089b5d1e7d9a402ce2",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "RECOVERY_HOST_CONTROLLER_COMMITS"
-    },
-    {
-      "ast_sha256": "sha256:ca8bfc472ee408c49bd6c3e640958748417b338f8e403718fbb16dd7909752d0",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "SUPPORTED_CONTROLLER_COMMITS"
-    },
-    {
-      "ast_sha256": "sha256:37600db1c186a637df01b42c9d647713e5fba2ec68db6bd81ca2944031735885",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "_COMMIT_RE"
-    },
-    {
-      "ast_sha256": "sha256:c53cdcd135e0fe0729a4e392aef9bbc2af6f873f964e4df310dff7066de152dd",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "_UNSAFE_GIT_ENV_NAMES"
-    },
-    {
-      "ast_sha256": "sha256:848c6bdfa8840ee254116c55217914dbb6b3f853f5d88102e34288c985a4c910",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "__module__"
-    },
-    {
-      "ast_sha256": "sha256:7ca86036e3b7a260b6ff91a0889220d3034e851457437c736f9e4d605961da05",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "_exec_verified_helper"
-    },
-    {
-      "ast_sha256": "sha256:ae33f4527d105eb13cdfa0ff358c50abb61997033dd54f0969db6811946d46b9",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "_git"
-    },
-    {
-      "ast_sha256": "sha256:55371958cd570a1e15f63a1596d7810780906558efa0dacbb07ec2d5031cbfaf",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "_git_commit_exists"
-    },
-    {
-      "ast_sha256": "sha256:9cb3d30f6e9bddb970480ba0cd7499323c7767f794b603ac1b19109b22ad171c",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "_git_is_ancestor"
-    },
-    {
-      "ast_sha256": "sha256:14feaeb3206782cfc95150d77e677fb0f13feda19bb32b84befd8ccffa4d0e12",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "_open_parent_fd"
-    },
-    {
-      "ast_sha256": "sha256:85771bbf2435c6cc96d45e4a69172aae5b42a4f3483e365c4cd630d124191f90",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "_read_exact_file"
-    },
-    {
-      "ast_sha256": "sha256:f9b5cbc7401857bfa69a03c41d3d29e7ab4f601e0aaccee3d1d12223bb397e6f",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "_recover_exact_controller_checkout_drift"
-    },
-    {
-      "ast_sha256": "sha256:d812aad78661dba107b4b3949c2488da7be56b5a2fcf1b183b503d9e40de70ff",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "_require_unmodified_git_authority"
-    },
-    {
-      "ast_sha256": "sha256:4f3a43aa029e7886ddb9e24a93725df872749c27c963ecabce98ba23fbe5edff",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "_reviewed_controller_parent_paths"
-    },
-    {
-      "ast_sha256": "sha256:655483b7974fe42e14eac1165db11e1256908756aec04e3a41975eb46a06514d",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "_safe_git_environment"
-    },
-    {
-      "ast_sha256": "sha256:add1d1e7bc998e6bc2e3a054f079c819acafe3a193c9da46482d5bc0dc270259",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "_verify_directory"
-    },
-    {
-      "ast_sha256": "sha256:c84006ef01e2e1437841f260dc9b90a160ffbfb2b09c3d9f69a595af9c53127d",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "main"
-    },
-    {
-      "ast_sha256": "sha256:c539845462bc579c0a170097bb3dde9dcb9f810231b7b31c82ea1f9d285e69c6",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "verify_candidate_bound_controller_lineage"
-    },
-    {
-      "ast_sha256": "sha256:62989978aad78cfea424598dcfd3a109dce75a4c1c53b0e71062d34097a6d167",
-      "path": "scripts/verify_installed_gateway_controller_v1.py",
-      "symbol": "verify_installed_controller_bundle"
-    },
-    {
       "ast_sha256": "sha256:fe6e11699b3f43121cbf0153a9ccdecaad6e02f7320e9fbc700d1cd3f90cd7cd",
       "path": "validator_tee/host/docker_operation_guard_v2.py",
       "symbol": "_EXACT_HOST_GATEWAY_ARGS"
@@ -982,7 +807,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:88b5ca90eba10cfe2da68a39be82fbf33579dd262259c9b7c65e7dbfff7758d5",
-  "protected_source_commit": "3d846346d9c76e211a78dfb93f1999fb6e33c886",
+  "manifest_hash": "sha256:85759900fc28b59a7896919cdb7dbaacf3517fa5e7c0c3164c31a5296b20fb5b",
+  "protected_source_commit": "06bb53182ccac93b6552a9aa439834710b09812b",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

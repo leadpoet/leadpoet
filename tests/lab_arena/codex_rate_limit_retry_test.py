@@ -674,9 +674,37 @@ def test_worker_retries_luna_throttle_with_same_bounded_host_policy(
         assert body["provider"]["data_collection"] == "deny"
 
 
-@pytest.mark.parametrize("funding_source", ["host", "miner_key"])
+@pytest.mark.parametrize(
+    ("funding_source", "champion_credential_retry", "metadata"),
+    [
+        (
+            "host",
+            False,
+            {
+                "requested": br.OPENROUTER_LUNA_RESPONSES_MODEL,
+                "is_byok": False,
+                "attempt": 1,
+                "pipeline": [],
+                "attempts": [{"status": 429}],
+            },
+        ),
+        (
+            "miner_key",
+            False,
+            {
+                "requested": br.OPENROUTER_LUNA_RESPONSES_MODEL,
+                "is_byok": False,
+                "attempt": 1,
+                "pipeline": [],
+                "attempts": [{"status": 429}],
+            },
+        ),
+        ("miner_key", True, None),
+    ],
+    ids=("host", "miner", "promoted-champion-null-metadata"),
+)
 def test_completed_luna_throttle_has_same_recovery_and_late_cost_for_each_funder(
-    monkeypatch, tmp_path, funding_source
+    monkeypatch, tmp_path, funding_source, champion_credential_retry, metadata
 ):
     failed = {
         "id": "gen-failed-429-parity",
@@ -686,13 +714,7 @@ def test_completed_luna_throttle_has_same_recovery_and_late_cost_for_each_funder
         "error": {"code": "rate_limit_exceeded", "message": "limited"},
         "output": [],
         "usage": None,
-        "openrouter_metadata": {
-            "requested": br.OPENROUTER_LUNA_RESPONSES_MODEL,
-            "is_byok": False,
-            "attempt": 1,
-            "pipeline": [],
-            "attempts": [{"status": 429}],
-        },
+        "openrouter_metadata": metadata,
     }
     completed = {
         "id": "gen-completed-parity",
@@ -705,12 +727,19 @@ def test_completed_luna_throttle_has_same_recovery_and_late_cost_for_each_funder
     }
     monkeypatch.setattr(br, "_openrouter_generation_readback", lambda **_kwargs: None)
     store = ZeroReservationLedgerStore()
+    marked = []
     broker, _store, transport = make_broker(
         store=store,
         transport=FakeTransport([(200, failed), (200, completed)]),
         credential_for=lambda _context, provider: HOST_KEYS[provider],
         provider_funding_source_for=(
             lambda _context, _provider: funding_source
+        ),
+        retry_miner_credential_for=(
+            lambda _context: champion_credential_retry
+        ),
+        mark_provider_fallback=lambda context, provider, evidence: (
+            marked.append((context, provider, evidence)) or {"status": "marked"}
         ),
     )
     broker._price_table = luna_price_table()
@@ -739,6 +768,7 @@ def test_completed_luna_throttle_has_same_recovery_and_late_cost_for_each_funder
     assert len(set(identities)) == 2
     assert {call["funding_source"] for call in calls} == {funding_source}
     assert calls[0]["completed_rate_limit_retryable"] is True
+    assert calls[0]["error_code"] == "provider_unavailable"
     assert calls[0]["outcome"] == "uncertain"
     assert "actual_microusd" not in calls[0]
     assert calls[1]["outcome"] == "settled"
@@ -763,6 +793,7 @@ def test_completed_luna_throttle_has_same_recovery_and_late_cost_for_each_funder
         if call["kind"] == "settlement"
     ) == [125, 250]
     assert len(transport.sent) == 2
+    assert marked == []
     assert all(
         json.loads(request["body"])["provider"]["only"]
         == ["azure/us", "azure/eu"]
@@ -770,9 +801,13 @@ def test_completed_luna_throttle_has_same_recovery_and_late_cost_for_each_funder
     )
 
 
-@pytest.mark.parametrize("funding_source", ["host", "miner_key"])
+@pytest.mark.parametrize(
+    ("funding_source", "champion_credential_retry"),
+    [("host", False), ("miner_key", False), ("miner_key", True)],
+    ids=("host", "miner", "promoted-champion"),
+)
 def test_unknown_lost_luna_response_is_not_retried(
-    monkeypatch, tmp_path, funding_source
+    monkeypatch, tmp_path, funding_source, champion_credential_retry
 ):
     store = ZeroReservationLedgerStore()
     broker, _store, transport = make_broker(
@@ -781,6 +816,9 @@ def test_unknown_lost_luna_response_is_not_retried(
         credential_for=lambda _context, provider: HOST_KEYS[provider],
         provider_funding_source_for=(
             lambda _context, _provider: funding_source
+        ),
+        retry_miner_credential_for=(
+            lambda _context: champion_credential_retry
         ),
     )
     broker._price_table = luna_price_table()

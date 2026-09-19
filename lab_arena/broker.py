@@ -3164,6 +3164,7 @@ class Broker:
         openrouter_generation_present = False
         openrouter_generation_id: Optional[str] = None
         openrouter_canonical_response_error = False
+        openrouter_completed_rate_limit_proven = False
         openrouter_retry_after_seconds: object = _RETRY_AFTER_ABSENT
         scrapingdog_observed_success_status: Optional[int] = None
         try:
@@ -3244,6 +3245,26 @@ class Broker:
                         openrouter_generation_id,
                     ) = _openrouter_generation_identity(
                         raw_document, response.headers
+                    )
+                    # This proof distinguishes a complete upstream throttle
+                    # from an unqualified account-level 429. It does not prove
+                    # zero cost; retry authority is added only after the exact
+                    # call identity is durably marked uncertain below.
+                    openrouter_completed_rate_limit_proven = (
+                        getattr(context, "kind", "execute") == "execute"
+                        and effective_operation_id == "openrouter.responses"
+                        and funding_source in ("host", "miner_key")
+                        and effective_normalized.get("model")
+                        == OPENROUTER_LUNA_RESPONSES_MODEL
+                        and openrouter_host_route is not None
+                        and amount == 0
+                        and openrouter_canonical_response_error
+                        and _openrouter_completed_rate_limit_retryable(
+                            raw_document,
+                            model=OPENROUTER_LUNA_RESPONSES_MODEL,
+                            generation_id=openrouter_generation_id,
+                            credential_fingerprint=provider_credential_fingerprint,
+                        )
                     )
                     if (
                         openrouter_native_cost is None
@@ -3538,6 +3559,7 @@ class Broker:
             miner_credential_failure = (
                 funding_source == "miner_key"
                 and not request_refused
+                and not openrouter_completed_rate_limit_proven
                 and _miner_credential_failure(
                     effective_operation.provider,
                     response,
@@ -3642,23 +3664,10 @@ class Broker:
                     }
                 )
                 completed_rate_limit_retryable = (
-                    getattr(context, "kind", "execute") == "execute"
-                    and effective_operation_id == "openrouter.responses"
-                    and funding_source in ("host", "miner_key")
-                    and effective_normalized.get("model")
-                    == OPENROUTER_LUNA_RESPONSES_MODEL
-                    and openrouter_host_route is not None
-                    and amount == 0
-                    and openrouter_canonical_response_error
+                    openrouter_completed_rate_limit_proven
                     and call_succeeded is False
                     and uncertain_state.get("status") == "uncertain"
                     and uncertain_state.get("idempotent") is False
-                    and _openrouter_completed_rate_limit_retryable(
-                        raw_document,
-                        model=OPENROUTER_LUNA_RESPONSES_MODEL,
-                        generation_id=openrouter_generation_id,
-                        credential_fingerprint=provider_credential_fingerprint,
-                    )
                 )
                 if completed_rate_limit_retryable:
                     # Internal worker control only. The generic response and

@@ -36,6 +36,7 @@ def _shell_function_source(script: str, name: str) -> str:
 
 def test_gateway_restart_drains_arena_claims_before_shutdown() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    drain_function = _shell_function_source(script, "drain_lab_arena_for_restart")
     drain = script.index('drain_lab_arena_for_restart "$GATEWAY_PREFLIGHT_TREE"')
     authorize = script.index("--phase gateway_destructive", drain)
     destructive = script.index("GATEWAY_DESTRUCTIVE_PHASE_STARTED=1", authorize)
@@ -49,10 +50,46 @@ def test_gateway_restart_drains_arena_claims_before_shutdown() -> None:
     completed = script.index('GATEWAY_DEPLOY_STAGE="completed"', release)
 
     assert drain < authorize < destructive < ready < attestation < release < completed
+    assert "--timeout-seconds 3900" in drain_function
+    assert ')" || return 1' in drain_function
     assert "abort_lab_arena_restart_guard_before_destructive" in _shell_function_source(
         script, "on_gateway_restart_exit"
     )
     assert "-u GATEWAY_ACTIVE_RELEASE_COMPONENT" in script
+
+
+def test_gateway_arena_drain_timeout_fails_before_recording_guard(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    drain_function = _shell_function_source(script, "drain_lab_arena_for_restart")
+    capture = tmp_path / "guard-argv"
+    harness = tmp_path / "drain-timeout.sh"
+    harness.write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        f"CAPTURE={shlex.quote(str(capture))}\n"
+        "GATEWAY_ACTIVE_RELEASE_COMPONENT=all\n"
+        "LAB_ARENA_RESTART_GUARD_GENERATION=\n"
+        "run_lab_arena_restart_guard() {\n"
+        "  printf '%s\\n' \"$@\" > \"$CAPTURE\"\n"
+        "  return 1\n"
+        "}\n"
+        + drain_function
+        + "\nif drain_lab_arena_for_restart /prepared; then exit 9; fi\n"
+        "test -z \"$LAB_ARENA_RESTART_GUARD_GENERATION\"\n",
+        encoding="utf-8",
+    )
+    harness.chmod(0o755)
+
+    completed = subprocess.run(
+        ["bash", str(harness)], check=False, capture_output=True, text=True,
+        timeout=5,
+    )
+
+    assert completed.returncode == 0
+    assert capture.read_text(encoding="utf-8").splitlines() == [
+        "/prepared", "drain", "--scope", "all", "--timeout-seconds", "3900",
+    ]
 
 
 @pytest.mark.parametrize("release_status", [0, 1])

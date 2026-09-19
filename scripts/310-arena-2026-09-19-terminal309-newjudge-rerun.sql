@@ -327,7 +327,15 @@ BEGIN
   'runs',(SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(r) ORDER BY run_id)
     FROM public.lab_arena_runs r WHERE round_id NOT IN(
      'arena-2026-09-19','arena-2026-09-19-r310archive')),
-  'ledger',(SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(l) ORDER BY entry_id)
+  -- The ACCESS EXCLUSIVE lock makes this a transaction-local physical tuple
+  -- identity check: any concurrent or same-transaction UPDATE changes xmin/ctid.
+  -- It is not a durable content authority outside this transaction.
+  'ledger',(SELECT pg_catalog.jsonb_build_object(
+    'count',pg_catalog.count(*),
+    'transaction_tuple_sha256',pg_catalog.encode(extensions.digest(
+     COALESCE(pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+      pg_catalog.jsonb_build_array(entry_id,xmin::TEXT,ctid::TEXT)::TEXT,
+      'sha256'),'hex'),'' ORDER BY entry_id),''),'sha256'),'hex'))
     FROM public.lab_arena_ledger l WHERE round_id NOT IN(
      'arena-2026-09-19','arena-2026-09-19-r310archive')),
   'weights',(SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(w)
@@ -448,7 +456,12 @@ BEGIN
   'runs',(SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(r) ORDER BY run_id)
     FROM public.lab_arena_runs r WHERE round_id NOT IN(
      'arena-2026-09-19','arena-2026-09-19-r310archive')),
-  'ledger',(SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(l) ORDER BY entry_id)
+  'ledger',(SELECT pg_catalog.jsonb_build_object(
+    'count',pg_catalog.count(*),
+    'transaction_tuple_sha256',pg_catalog.encode(extensions.digest(
+     COALESCE(pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+      pg_catalog.jsonb_build_array(entry_id,xmin::TEXT,ctid::TEXT)::TEXT,
+      'sha256'),'hex'),'' ORDER BY entry_id),''),'sha256'),'hex'))
     FROM public.lab_arena_ledger l WHERE round_id NOT IN(
      'arena-2026-09-19','arena-2026-09-19-r310archive')),
   'weights',(SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(w)

@@ -40,19 +40,32 @@ BENCHMARK_BYTES = json.dumps(BENCHMARK).encode()
 BANK_SHA = "sha256:" + hashlib.sha256(BENCHMARK_BYTES).hexdigest()
 
 
-@pytest.fixture(scope="module")
-def database():
+def _test_migrations() -> tuple[str, ...]:
     assert CURRENT_SERVICE_MIGRATIONS[-2:] == (
         "294-lab-arena-retire-open-cost-backfill.sql",
         "301-lab-arena-score-payer-boundary.sql",
     )
-    yield from database_with_lab_arena_migration(
+    return (
         CURRENT_SERVICE_MIGRATIONS[:-2]
         + (
             "289-lab-arena-per-icp-cost-policy.sql",
             "292-lab-arena-null-final-score-publication.sql",
         )
         + CURRENT_SERVICE_MIGRATIONS[-2:]
+    )
+
+
+@pytest.fixture(scope="module")
+def database():
+    yield from database_with_lab_arena_migration(
+        _test_migrations()
+    )
+
+
+@pytest.fixture
+def negative_database():
+    yield from database_with_lab_arena_migration(
+        _test_migrations()
     )
 
 
@@ -470,6 +483,13 @@ def test_terminal_recovery_archives_judgments_and_retains_miner_sources(
             )
             recovery309_archive_before = cursor.fetchone()[0]
             cursor.execute(
+                "SELECT jsonb_agg(to_jsonb(l) ORDER BY entry_id) "
+                "FROM public.lab_arena_ledger l WHERE round_id NOT IN(%s,%s)",
+                (ROUND, ROUND + "-r310archive"),
+            )
+            prior_ledger_before = cursor.fetchone()[0]
+            assert prior_ledger_before
+            cursor.execute(
                 "SELECT rewards_enabled,effective_reward_epoch,reward_basis_hash,"
                 "reward_basis_doc,signing_key_doc,reward_activated_at,king_outcome,"
                 "king_hotkey,king_start_epoch,promotion_required,promotion_doc,"
@@ -525,6 +545,12 @@ def test_terminal_recovery_archives_judgments_and_retains_miner_sources(
                 "WHERE round_id='arena-2026-09-19-r309archive'"
             )
             assert cursor.fetchone()[0] == recovery309_archive_before
+            cursor.execute(
+                "SELECT jsonb_agg(to_jsonb(l) ORDER BY entry_id) "
+                "FROM public.lab_arena_ledger l WHERE round_id NOT IN(%s,%s)",
+                (ROUND, ROUND + "-r310archive"),
+            )
+            assert cursor.fetchone()[0] == prior_ledger_before
             cursor.execute(
                 "SELECT rewards_enabled,effective_reward_epoch,reward_basis_hash,"
                 "reward_basis_doc,signing_key_doc,reward_activated_at,king_outcome,"
@@ -717,12 +743,59 @@ def test_template_is_terminal_only_and_has_no_release_values():
     assert "__TERMINAL_REWARD_AUTHORITY_SHA256__" in body
     assert "active_round.configuration_doc ? 'company_quality_policy'" in body
     assert "__NEW_SOURCE_COMMIT__" in body and "__NEW_SCORER_DIGEST__" in body
+    assert body.count("jsonb_build_array(entry_id,xmin::TEXT,ctid::TEXT)") == 2
+    assert "transaction-local physical tuple" in body
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        """
+        UPDATE public.lab_arena_ledger SET amount_microusd=amount_microusd
+        WHERE entry_id=(SELECT min(entry_id) FROM public.lab_arena_ledger
+          WHERE round_id NOT IN('arena-2026-09-19','arena-2026-09-19-r310archive'));
+        """,
+        """
+        WITH moved AS (
+          DELETE FROM public.lab_arena_ledger
+          WHERE entry_id=(SELECT min(entry_id) FROM public.lab_arena_ledger
+            WHERE round_id NOT IN('arena-2026-09-19','arena-2026-09-19-r310archive'))
+          RETURNING *
+        ) INSERT INTO public.lab_arena_ledger SELECT * FROM moved;
+        """,
+    ),
+    ids=("same-value-update", "balanced-delete-insert"),
+)
+def test_transaction_tuple_fingerprint_rejects_non_target_rewrite(
+    negative_database, mutation
+):
+    psycopg2, dsn = negative_database
+    conn = psycopg2.connect(**dsn)
+    try:
+        _seed_published_recovery309(conn)
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FROM public.lab_arena_ledger WHERE round_id NOT IN(%s,%s)",
+                (ROUND, ROUND + "-r310archive"),
+            )
+            assert cursor.fetchone()[0] > 0
+            rendered = _render(cursor, _schedule())
+            seam = " ALTER TABLE public.lab_arena_ledger ENABLE TRIGGER USER;"
+            assert rendered.count(seam) == 1
+            attacked = rendered.replace(seam, mutation + seam, 1)
+            with pytest.raises(
+                psycopg2.Error, match="Sep19 rerun310 atomic preservation differs"
+            ):
+                cursor.execute(attacked)
+        conn.rollback()
+    finally:
+        conn.close()
 
 
 def test_rendered_migration_has_exact_reviewed_identity():
     raw = RENDERED.read_bytes()
     assert hashlib.sha256(raw).hexdigest() == (
-        "11409c124ce89b685d9105894903fd33f8dcf8b7d1ce6fa37b6727fddecd4d6b"
+        "fad535e80727e70a0b21eb86cb459a30e229da0c933eb628dbd3e647077ff8a6"
     )
     body = raw.decode()
     assert re.search(r"__[A-Z0-9_]+__", body) is None

@@ -447,6 +447,10 @@ def test_deepline_history_direct_singleton_group_counts_once():
     ("tool", "basis"),
     [
         (
+            "contextdev_get_web_scrape_markdown",
+            "deepline_contextdev_web_scrape_markdown_completed_zero",
+        ),
+        (
             "free_simple_company_search",
             "deepline_free_simple_company_search_completed_zero",
         ),
@@ -533,6 +537,33 @@ def test_deepline_generic_http_completed_zero_rejects_present_billing(billing):
                 "result": {},
                 "billing": billing,
             },
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("response_status", "response"),
+    [
+        (502, {"error": {"code": "upstream_error"}}),
+        (200, {"job_id": "wrapper-job", "status": "failed", "result": {}}),
+        (
+            200,
+            {
+                "job_id": "wrapper-job",
+                "status": "completed",
+                "result": {},
+                "billing": {"credits_charged": "invalid"},
+            },
+        ),
+    ],
+)
+def test_deepline_contextdev_zero_proof_fails_closed(response_status, response):
+    assert (
+        deepline_free_completed_cost(
+            {"tool": "contextdev_get_web_scrape_markdown"},
+            response_status,
+            response,
         )
         is None
     )

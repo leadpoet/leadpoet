@@ -3675,6 +3675,42 @@ def test_real_deepline_generic_http_without_billing_settles_verified_zero():
     assert len(transport.sent) == 1
 
 
+def test_real_deepline_contextdev_scrape_without_billing_settles_verified_zero():
+    envelope = {
+        "job_id": "iad1::contextdev-scrape",
+        "result": {"data": {
+            "success": True,
+            "url": "https://example.com/about",
+            "markdown": "# Example",
+            "contentLength": 9,
+            "metadata": {
+                "sourceUrl": "https://example.com/about",
+                "finalUrl": "https://example.com/about",
+            },
+        }},
+        "status": "completed",
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, json.dumps(envelope).encode("utf-8"))])
+    )
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={
+            "tool": "contextdev_get_web_scrape_markdown",
+            "payload": {"url": "https://example.com/about"},
+        },
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+    assert result.status == 200 and json.loads(result.body) == envelope
+    assert result.call["outcome"] == "settled"
+    assert result.call["reserved_microusd"] == result.call["actual_microusd"] == 0
+    assert result.call["cost_basis"] == "deepline_contextdev_web_scrape_markdown_completed_zero"
+    assert store.log == ["reserve", "dispatch", "settle"]
+    assert len(transport.sent) == 1
+
+
 def test_real_deepline_free_company_search_keeps_reported_billing():
     envelope = {
         "job_id": "iad1::free-company-search",

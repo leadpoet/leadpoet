@@ -40,6 +40,7 @@ _DEEPLINE_BILLING_CURSOR_MAX_LENGTH = 4_096
 # per call, at zero credits and zero USD on 2026-09-16.  Earlier descriptions
 # reported billingMode=no_bill for the other entries below.
 _DEEPLINE_COMPLETED_NO_BILL_BASIS = {
+    "contextdev_get_web_scrape_markdown": "deepline_contextdev_web_scrape_markdown_completed_zero",
     "free_simple_company_search": "deepline_free_simple_company_search_completed_zero",
     "generic_http_request": "deepline_generic_http_request_completed_zero",
     "hunter_discover": "deepline_hunter_discover_completed_zero",
@@ -56,6 +57,7 @@ _DEEPLINE_ERROR_NO_BILL_BASIS = {
 # never final charges. Tools with dynamic prices reserve the remaining budget
 # in the database instead of treating an unknown price as zero.
 _DEEPLINE_FIXED_CREDITS = {
+    "contextdev_get_web_scrape_markdown": Decimal("0"),
     "exa_answer": Decimal("0.07"),
     "free_simple_company_search": Decimal("0"),
     "generic_http_request": Decimal("0"),

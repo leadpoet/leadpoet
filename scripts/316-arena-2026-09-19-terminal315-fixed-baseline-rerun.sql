@@ -141,8 +141,8 @@ BEGIN
       ='22a411e2edcd506ab991f1e65db14f92dd83bfbfeedf7c95b4d478b2d880de2b'
   AND EXISTS(SELECT 1 FROM public.lab_arena_rounds round
     WHERE round.round_id='arena-2026-09-19'
-     AND round.configuration_doc->>'scorer_image_digest'='sha256:2df1280d2b5110cad323a8cdf32b5be96b5a7a1e1ac9edfc57dd48fc385b968e'
-     AND round.configuration_doc->>'scorer_image_reference'='493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:2df1280d2b5110cad323a8cdf32b5be96b5a7a1e1ac9edfc57dd48fc385b968e')
+     AND round.configuration_doc->>'scorer_image_digest'='sha256:785038d69128436e4aabfa113acad69afb4fdcfe389ab63cae6e3dff3dd7de40'
+     AND round.configuration_doc->>'scorer_image_reference'='493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:785038d69128436e4aabfa113acad69afb4fdcfe389ab63cae6e3dff3dd7de40')
   AND EXISTS(SELECT 1 FROM public.lab_arena_submissions baseline
     WHERE baseline.round_id='arena-2026-09-19'
      AND baseline.submission_id='baseline-2026-09-19'
@@ -249,8 +249,8 @@ BEGIN
   OR p_source_sha256<>'8f64bcf9cd10acd198ca9ede9a2a2b1da1445f747a5afb0d1de887575ea477b8'
   OR p_source_commit<>'a9aab3dac66661b9d727109ba7eab59f2159aa2f'
   OR p_schedule IS DISTINCT FROM '{"benchmark_deadline":"2026-09-19T13:45:00Z","final_scoring_close":"2026-09-20T01:45:00Z","publication_deadline":"2026-09-20T01:45:01Z","stage_1_close":"2026-09-19T16:45:01Z","stage_1_scoring_close":"2026-09-19T19:45:00Z","stage_1_start":"2026-09-19T13:45:01Z","stage_2_close":"2026-09-19T22:45:01Z","stage_2_start":"2026-09-19T19:45:01Z","submission_cutoff":"2026-09-19T00:00:00Z","submission_open":"2026-09-18T00:00:00Z"}'::JSONB
-  OR p_scorer_digest<>'sha256:2df1280d2b5110cad323a8cdf32b5be96b5a7a1e1ac9edfc57dd48fc385b968e'
-  OR p_scorer_reference<>'493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:2df1280d2b5110cad323a8cdf32b5be96b5a7a1e1ac9edfc57dd48fc385b968e' THEN
+  OR p_scorer_digest<>'sha256:785038d69128436e4aabfa113acad69afb4fdcfe389ab63cae6e3dff3dd7de40'
+  OR p_scorer_reference<>'493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:785038d69128436e4aabfa113acad69afb4fdcfe389ab63cae6e3dff3dd7de40' THEN
   RAISE EXCEPTION 'Sep19 rerun316 source, judge, bank, or schedule differs'
    USING ERRCODE='22023';
  END IF;
@@ -613,7 +613,7 @@ CREATE TRIGGER lab_arena_sep19_rerun316_score_namespace_guard
 SELECT public.lab_arena_prepare_sep19_rerun316_v1(
  790572,'8f64bcf9cd10acd198ca9ede9a2a2b1da1445f747a5afb0d1de887575ea477b8','a9aab3dac66661b9d727109ba7eab59f2159aa2f',
  '{"benchmark_deadline":"2026-09-19T13:45:00Z","final_scoring_close":"2026-09-20T01:45:00Z","publication_deadline":"2026-09-20T01:45:01Z","stage_1_close":"2026-09-19T16:45:01Z","stage_1_scoring_close":"2026-09-19T19:45:00Z","stage_1_start":"2026-09-19T13:45:01Z","stage_2_close":"2026-09-19T22:45:01Z","stage_2_start":"2026-09-19T19:45:01Z","submission_cutoff":"2026-09-19T00:00:00Z","submission_open":"2026-09-18T00:00:00Z"}'::JSONB,
- 'sha256:2df1280d2b5110cad323a8cdf32b5be96b5a7a1e1ac9edfc57dd48fc385b968e','493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:2df1280d2b5110cad323a8cdf32b5be96b5a7a1e1ac9edfc57dd48fc385b968e');
+ 'sha256:785038d69128436e4aabfa113acad69afb4fdcfe389ab63cae6e3dff3dd7de40','493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:785038d69128436e4aabfa113acad69afb4fdcfe389ab63cae6e3dff3dd7de40');
 
 REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
 NOTIFY pgrst,'reload schema';

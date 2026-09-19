@@ -19,7 +19,7 @@ from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migrati
 ROOT = Path(__file__).parents[2]
 TEMPLATE = ROOT / "scripts/316-arena-2026-09-19-terminal315-fixed-baseline-rerun.sql.template"
 RENDERED = ROOT / "scripts/316-arena-2026-09-19-terminal315-fixed-baseline-rerun.sql"
-RENDERED_SHA256 = "bd2f7980090bcef35aba3dcffe2c27bfe8042d6a3769ff6c02774b3d0c5f13be"
+RENDERED_SHA256 = "f2bd819bf1af4a2fb068c278279cfbee32c24fe19b27f10c2acbf2bd8cec2182"
 rerun310 = prior.prior.rerun310
 ROUND = prior.ROUND
 BASELINE = prior.BASELINE
@@ -966,6 +966,8 @@ def test_exact_render_has_terminal_seals_and_rejects_wrong_preimage_atomically(
     assert "a9aab3dac66661b9d727109ba7eab59f2159aa2f" in body
     assert "8f64bcf9cd10acd198ca9ede9a2a2b1da1445f747a5afb0d1de887575ea477b8" in body
     assert "baseline-2026-09-19-rerun316-a9aab3da.tar.gz" in body
+    assert "sha256:785038d69128436e4aabfa113acad69afb4fdcfe389ab63cae6e3dff3dd7de40" in body
+    assert "sha256:2df1280d2b5110cad323a8cdf32b5be96b5a7a1e1ac9edfc57dd48fc385b968e" not in body
     assert '"benchmark_deadline":"2026-09-19T13:45:00Z"' in body
     assert "active_round.status IS DISTINCT FROM 'cancelled'" in body
     assert "active_round.cancel_reason IS DISTINCT FROM 'scoring_incomplete'" in body

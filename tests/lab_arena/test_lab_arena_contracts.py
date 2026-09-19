@@ -61,9 +61,9 @@ def test_public_constants_are_the_plan_values():
         "openrouter": 120,
     }
     assert (c.ICP_WALL_CLOCK_SECONDS, c.SCORING_WALL_CLOCK_SECONDS, c.LEASE_TTL_SECONDS) == (300, 900, 1200)
-    from leadpoet_canonical.constants import EPOCH_LENGTH
+    from leadpoet_canonical.chain_source_v2 import CHAIN_FINALIZATION_EPOCH_BLOCKS
 
-    assert EPOCH_LENGTH * 12 * c.EPOCHS_PER_REWARD_WEEK == 7 * 24 * 3600
+    assert CHAIN_FINALIZATION_EPOCH_BLOCKS * 12 * c.EPOCHS_PER_REWARD_WEEK == 7 * 24 * 3600
 
 
 def test_strict_document_limits_reject_every_hostile_shape():

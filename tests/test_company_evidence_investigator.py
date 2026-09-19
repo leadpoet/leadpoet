@@ -1194,8 +1194,10 @@ def test_arena_conflict_check_collects_structured_size_without_replacing_direct_
     }
     calls = []
 
-    async def fake_fetch(domain, profile_url, *, diagnostic):
-        del diagnostic
+    async def fake_fetch(
+        domain, profile_url, *, diagnostic, public_company_evidence
+    ):
+        del diagnostic, public_company_evidence
         calls.append((domain, profile_url))
         return structured
 

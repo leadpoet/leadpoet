@@ -94,7 +94,9 @@ from qualification.scoring.linkedin_company_size import (
     fetch_structured_linkedin_company_size,
     is_linkedin_evidence_url,
     linkedin_company_page_slug,
+    STRUCTURED_PROFILE_COMPANY_TYPE_SOURCE_FIELD,
     STRUCTURED_PROFILE_PROVIDER,
+    STRUCTURED_PROFILE_PUBLIC_COMPANY_TYPE,
     STRUCTURED_PROFILE_SOURCE_FIELD,
 )
 
@@ -1585,6 +1587,119 @@ def _structured_linkedin_resolves_exact_estimate_conflict(
     )
 
 
+async def _fetch_structured_linkedin_profile_once(
+    verified_homepage_identity: Mapping[str, str],
+    invocation_cache: dict[str, Any],
+    *,
+    collect_employee_size: bool = True,
+) -> None:
+    """Fetch one structured profile and cache both bounded projections."""
+
+    if collect_employee_size:
+        invocation_cache["structured_employee_size_applicable"] = True
+    if invocation_cache.get("structured_attempted"):
+        return
+    anchor_name = str(
+        verified_homepage_identity.get("normalized_name") or ""
+    ).strip()
+    anchor_domain = str(
+        verified_homepage_identity.get("registrable_dns_domain") or ""
+    ).strip()
+    anchor_slug = str(
+        verified_homepage_identity.get("linkedin_company_slug") or ""
+    ).strip().casefold()
+    if not anchor_name or not anchor_domain or not anchor_slug:
+        return
+    invocation_cache["structured_attempted"] = True
+    structured_diagnostic: dict[str, str] = {}
+    public_company_evidence: dict[str, str] = {}
+    structured_employee_size_evidence = (
+        await fetch_structured_linkedin_company_size(
+            anchor_domain,
+            f"https://www.linkedin.com/company/{anchor_slug}",
+            diagnostic=structured_diagnostic,
+            public_company_evidence=public_company_evidence,
+        )
+    )
+    invocation_cache["structured_evidence"] = (
+        structured_employee_size_evidence
+    )
+    if public_company_evidence:
+        invocation_cache["structured_public_company_evidence"] = (
+            public_company_evidence
+        )
+    failure_reason = structured_diagnostic.get(VERIFIER_FAILURE_REASON_KEY)
+    if failure_reason:
+        invocation_cache["structured_failure"] = True
+        invocation_cache["structured_failure_reason"] = failure_reason
+
+
+def _structured_linkedin_public_stage_matches(
+    evidence: Any,
+    *,
+    icp_stage: str,
+    identity_decision: str,
+    stage_decision: str,
+    stage_evidence: Mapping[str, str],
+    verified_homepage_identity: Optional[Mapping[str, str]],
+) -> bool:
+    """Accept exact current Public metadata only for the bound company."""
+
+    if (
+        _normalize_company_stage(icp_stage) != "public"
+        or identity_decision != COMPANY_FIT_MATCH
+        or stage_decision != COMPANY_FIT_UNAVAILABLE
+        or not isinstance(evidence, Mapping)
+        or set(evidence) != {
+            "company_type",
+            "provider",
+            "source_field",
+            "url",
+            "website",
+        }
+    ):
+        return False
+    anchor = (
+        verified_homepage_identity
+        if isinstance(verified_homepage_identity, Mapping)
+        else {}
+    )
+    anchor_domain = str(anchor.get("registrable_dns_domain") or "").strip()
+    anchor_slug = str(anchor.get("linkedin_company_slug") or "").strip().casefold()
+    evidence_domain = _registrable_domain(str(evidence.get("website") or ""))
+    evidence_slug = linkedin_company_page_slug(evidence.get("url"))
+    if not (
+        evidence.get("company_type") == STRUCTURED_PROFILE_PUBLIC_COMPANY_TYPE
+        and evidence.get("provider") == STRUCTURED_PROFILE_PROVIDER
+        and evidence.get("source_field")
+        == STRUCTURED_PROFILE_COMPANY_TYPE_SOURCE_FIELD
+        and anchor_domain
+        and anchor_slug
+        and evidence_domain == anchor_domain
+        and evidence_slug == anchor_slug
+    ):
+        return False
+    quote = str(stage_evidence.get("quote") or "")
+    if _has_affirmed_stage_proof(
+        quote,
+        _PUBLIC_STAGE_SUPERSESSION_PATTERNS,
+        reject_future_will=True,
+    ):
+        return False
+    if any(
+        _stage_quote_supports_observation(nonpublic_stage, quote)
+        for nonpublic_stage in (
+            "seed",
+            "series a",
+            "series b",
+            "series c+",
+            "private equity",
+        )
+    ):
+        return False
+    return True
+
+
 async def _refresh_linkedin_employee_size_observation(
     verdict: Mapping[str, Any],
     company: CompanyOutput,
@@ -1624,19 +1739,12 @@ async def _refresh_linkedin_employee_size_observation(
                 and anchor_domain
                 and anchor_slug
             ):
-                invocation_cache["structured_attempted"] = True
-                structured_diagnostic: dict[str, str] = {}
-                invocation_cache["structured_evidence"] = (
-                    await fetch_structured_linkedin_company_size(
-                        anchor_domain,
-                        f"https://www.linkedin.com/company/{anchor_slug}",
-                        diagnostic=structured_diagnostic,
-                    )
+                await _fetch_structured_linkedin_profile_once(
+                    verified_homepage_identity,
+                    invocation_cache,
                 )
                 # This is a secondary conflict check. Its failure cannot erase
                 # complete direct evidence or become a provider failure.
-                if structured_diagnostic.get(VERIFIER_FAILURE_REASON_KEY):
-                    invocation_cache["structured_failure"] = True
             return dict(verdict)
         anchor_fields = (
             "normalized_name",
@@ -1758,23 +1866,21 @@ async def _refresh_linkedin_employee_size_observation(
         and anchor_domain
         and anchor_slug == evidence_slug
     ):
-        invocation_cache["structured_attempted"] = True
-        structured_diagnostic: dict[str, str] = {}
-        invocation_cache["structured_evidence"] = (
-            await fetch_structured_linkedin_company_size(
-                anchor_domain,
-                profile_url,
-                diagnostic=structured_diagnostic,
-            )
+        await _fetch_structured_linkedin_profile_once(
+            verified_homepage_identity,
+            invocation_cache,
         )
-        if structured_diagnostic.get(VERIFIER_FAILURE_REASON_KEY):
-            invocation_cache["structured_failure"] = True
+        if invocation_cache.get("structured_failure"):
             invocation_cache["refresh_outcome"] = "retryable_failure"
             invocation_cache[VERIFIER_FAILURE_DETAIL_KEY] = (
-                structured_diagnostic[VERIFIER_FAILURE_REASON_KEY]
+                invocation_cache.get("structured_failure_reason")
             )
     if _structured_employee_size_decision(
-        invocation_cache.get("structured_evidence"),
+        (
+            invocation_cache.get("structured_evidence")
+            if invocation_cache.get("structured_employee_size_applicable")
+            else None
+        ),
         icp,
     ) in {COMPANY_FIT_MATCH, COMPANY_FIT_MISMATCH}:
         invocation_cache["refresh_outcome"] = "verified"
@@ -1832,6 +1938,7 @@ def _reverify_decision(
     verified_rebrand_identity: Optional[Mapping[str, Any]] = None,
     validated_stage_finding: Optional[Mapping[str, Any]] = None,
     structured_employee_size_evidence: Optional[Mapping[str, Any]] = None,
+    structured_public_company_evidence: Optional[Mapping[str, Any]] = None,
     employee_size_conflict: bool = False,
     company_quality: bool = False,
 ) -> CompanyFitDecisionResult:
@@ -1913,6 +2020,20 @@ def _reverify_decision(
             verified_homepage_identity,
         )
     )
+    stage_evidence = _dimension_web_evidence(verdict, "stage")
+    observed_stage_decision = _decision_from_observed_stage(
+        verdict,
+        icp_stage,
+        validated_stage_finding=validated_stage_finding,
+    )
+    structured_public_stage = _structured_linkedin_public_stage_matches(
+        structured_public_company_evidence,
+        icp_stage=icp_stage,
+        identity_decision=identity_decision,
+        stage_decision=observed_stage_decision,
+        stage_evidence=stage_evidence,
+        verified_homepage_identity=verified_homepage_identity,
+    )
     dimensions = {
         "employee_size": (
             COMPANY_FIT_UNAVAILABLE
@@ -1937,10 +2058,10 @@ def _reverify_decision(
             company=company,
             company_quality=company_quality,
         ),
-        "stage": _decision_from_observed_stage(
-            verdict,
-            icp_stage,
-            validated_stage_finding=validated_stage_finding,
+        "stage": (
+            COMPANY_FIT_MATCH
+            if structured_public_stage
+            else observed_stage_decision
         ),
     }
     active_dimensions = {"employee_size", "industry", "geography"}
@@ -1953,12 +2074,16 @@ def _reverify_decision(
     evidence["industry"] = industry_evidence
     if structured_employee_size_decision != COMPANY_FIT_UNAVAILABLE:
         evidence["employee_size"] = dict(structured_employee_size_evidence or {})
+    if structured_public_stage:
+        evidence["stage"] = dict(structured_public_company_evidence or {})
     if strict_web_proof:
         for dimension in active_dimensions:
             if (
                 dimension == "employee_size"
                 and structured_employee_size_decision != COMPANY_FIT_UNAVAILABLE
             ):
+                continue
+            if dimension == "stage" and structured_public_stage:
                 continue
             dimensions[dimension] = _decision_with_web_evidence(
                 dimensions[dimension], evidence[dimension]
@@ -2576,6 +2701,7 @@ async def _run_targeted_company_evidence_investigation(
     verified_identity: Mapping[str, Any],
     verified_transport_domain: str,
     structured_employee_size_evidence: Optional[Mapping[str, Any]],
+    structured_public_company_evidence: Optional[Mapping[str, Any]],
     employee_size_conflict: bool,
     company_quality: bool,
 ) -> Tuple[
@@ -2664,6 +2790,9 @@ async def _run_targeted_company_evidence_investigation(
         verified_rebrand_identity=verified_rebrand_identity,
         validated_stage_finding=validated_stage_finding,
         structured_employee_size_evidence=structured_employee_size_evidence,
+        structured_public_company_evidence=(
+            structured_public_company_evidence
+        ),
         employee_size_conflict=employee_size_conflict,
         company_quality=company_quality,
     )
@@ -2905,8 +3034,13 @@ async def _llm_reverify_company(
             invocation_cache=current_profile_cache,
             collect_structured_conflict=evidence_investigator,
         )
-    structured_employee_size_evidence = current_profile_cache.get(
-        "structured_evidence"
+    structured_employee_size_evidence = (
+        current_profile_cache.get("structured_evidence")
+        if current_profile_cache.get("structured_employee_size_applicable")
+        else None
+    )
+    structured_public_company_evidence = current_profile_cache.get(
+        "structured_public_company_evidence"
     )
     employee_size_conflict = bool(
         evidence_investigator
@@ -2926,9 +3060,50 @@ async def _llm_reverify_company(
         verified_homepage_identity=verified_identity,
         verified_homepage_transport_domain=verified_transport_domain,
         structured_employee_size_evidence=structured_employee_size_evidence,
+        structured_public_company_evidence=(
+            structured_public_company_evidence
+        ),
         employee_size_conflict=employee_size_conflict,
         company_quality=company_quality,
     )
+    result_dimensions = (
+        result.details.get("dimension_decisions")
+        if isinstance(result.details, Mapping)
+        else None
+    )
+    if (
+        _normalize_company_stage(icp_stage) == "public"
+        and isinstance(result_dimensions, Mapping)
+        and result_dimensions.get("stage") == COMPANY_FIT_UNAVAILABLE
+        and result.details.get("identity_decision") == COMPANY_FIT_MATCH
+        and not current_profile_cache.get("structured_attempted")
+    ):
+        await _fetch_structured_linkedin_profile_once(
+            verified_identity,
+            current_profile_cache,
+            collect_employee_size=False,
+        )
+        structured_public_company_evidence = current_profile_cache.get(
+            "structured_public_company_evidence"
+        )
+        if structured_public_company_evidence:
+            result = _reverify_decision(
+                verdict,
+                icp_attribute,
+                icp_stage,
+                icp=icp,
+                company=company,
+                verified_homepage_identity=verified_identity,
+                verified_homepage_transport_domain=verified_transport_domain,
+                structured_employee_size_evidence=(
+                    structured_employee_size_evidence
+                ),
+                structured_public_company_evidence=(
+                    structured_public_company_evidence
+                ),
+                employee_size_conflict=employee_size_conflict,
+                company_quality=company_quality,
+            )
     investigation_targets = (
         _targeted_company_investigation_dimensions(
             result,
@@ -2956,6 +3131,9 @@ async def _llm_reverify_company(
             verified_identity=verified_identity,
             verified_transport_domain=verified_transport_domain,
             structured_employee_size_evidence=structured_employee_size_evidence,
+            structured_public_company_evidence=(
+                structured_public_company_evidence
+            ),
             employee_size_conflict=employee_size_conflict,
             company_quality=company_quality,
         )
@@ -3102,6 +3280,14 @@ async def _llm_reverify_company(
             invocation_cache=current_profile_cache,
             collect_structured_conflict=evidence_investigator,
         )
+    structured_employee_size_evidence = (
+        current_profile_cache.get("structured_evidence")
+        if current_profile_cache.get("structured_employee_size_applicable")
+        else None
+    )
+    structured_public_company_evidence = current_profile_cache.get(
+        "structured_public_company_evidence"
+    )
     repaired_verdict = _project_investigator_stage(
         repaired_verdict,
         (
@@ -3135,9 +3321,8 @@ async def _llm_reverify_company(
         verified_homepage_transport_domain=verified_transport_domain,
         verified_rebrand_identity=verified_rebrand_identity,
         validated_stage_finding=validated_stage_finding,
-        structured_employee_size_evidence=current_profile_cache.get(
-            "structured_evidence"
-        ),
+        structured_employee_size_evidence=structured_employee_size_evidence,
+        structured_public_company_evidence=structured_public_company_evidence,
         employee_size_conflict=employee_size_conflict,
         company_quality=company_quality,
     )
@@ -3169,8 +3354,11 @@ async def _llm_reverify_company(
                 icp_stage=icp_stage,
                 verified_identity=verified_identity,
                 verified_transport_domain=verified_transport_domain,
-                structured_employee_size_evidence=current_profile_cache.get(
-                    "structured_evidence"
+                structured_employee_size_evidence=(
+                    structured_employee_size_evidence
+                ),
+                structured_public_company_evidence=(
+                    structured_public_company_evidence
                 ),
                 employee_size_conflict=employee_size_conflict,
                 company_quality=company_quality,

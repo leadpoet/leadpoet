@@ -477,6 +477,8 @@ _DEEPLINE_CREDENTIAL = CredentialPlacement("header", "authorization", scheme="Be
 # owns each tool's payload schema.
 DEEPLINE_TOOLS = (
     "contextdev_get_web_scrape_markdown",
+    "contextdev_post_news_search",
+    "contextdev_post_web_search",
     "exa_answer",
     "exa_company_search",
     "exa_contents",
@@ -503,6 +505,8 @@ DEEPLINE_TOOLS = (
 # from the official client (deepline_core 0.3.20) and the tool contracts.
 DEEPLINE_TOOL_PROVIDERS: Mapping[str, str] = MappingProxyType({
     "contextdev_get_web_scrape_markdown": "contextdev",
+    "contextdev_post_news_search": "contextdev",
+    "contextdev_post_web_search": "contextdev",
     "exa_answer": "exa",
     "exa_company_search": "exa",
     "exa_contents": "exa",

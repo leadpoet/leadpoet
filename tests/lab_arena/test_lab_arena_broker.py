@@ -1456,6 +1456,98 @@ def test_deepline_call_uses_the_host_key_and_settles():
     assert store.calls[call["call_identity"]]["provider"] == "deepline"
 
 
+@pytest.mark.parametrize(
+    ("tool", "payload", "result_data", "basis"),
+    [
+        (
+            "contextdev_post_web_search",
+            {"query": "regional banks"},
+            {"results": [{"title": "Result", "url": "https://example.com/"}]},
+            "deepline_contextdev_web_search_completed_zero",
+        ),
+        (
+            "contextdev_post_news_search",
+            {
+                "searchBy": {
+                    "type": "entity",
+                    "entity": {"type": "domain", "domain": "example.com"},
+                }
+            },
+            [{"title": "Result", "url": "https://example.com/news"}],
+            "deepline_contextdev_news_search_completed_zero",
+        ),
+    ],
+)
+def test_contextdev_search_authorization_transport_and_completed_zero_cost(
+    tool, payload, result_data, basis
+):
+    envelope = {
+        "job_id": "iad1::contextdev-search",
+        "status": "completed",
+        "result": {"data": result_data},
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, json.dumps(envelope).encode("utf-8"))])
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": tool, "payload": payload},
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+
+    assert result.status == 200 and json.loads(result.body) == envelope
+    assert result.call["outcome"] == "settled"
+    assert result.call["reserved_microusd"] == result.call["actual_microusd"] == 0
+    assert result.call["cost_basis"] == basis
+    assert store.log == ["reserve", "dispatch", "settle"]
+    assert len(transport.sent) == 1
+    sent = transport.sent[0]
+    assert sent["method"] == "POST"
+    assert sent["url"] == f"https://code.deepline.com/api/v2/integrations/{tool}/execute"
+    assert sent["headers"]["authorization"] == "Bearer " + DL_KEY
+    assert json.loads(sent["body"]) == {
+        "provider": "contextdev", "operation": tool, "payload": payload,
+    }
+
+
+@pytest.mark.parametrize(
+    ("tool", "payload"),
+    [
+        ("contextdev_post_web_search", {"query": "regional banks"}),
+        (
+            "contextdev_post_news_search",
+            {
+                "searchBy": {
+                    "type": "entity",
+                    "entity": {"type": "domain", "domain": "example.com"},
+                }
+            },
+        ),
+    ],
+)
+def test_contextdev_search_error_without_billing_stays_uncertain(tool, payload):
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(502, {"error": {"code": "upstream_error"}})])
+    )
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": tool, "payload": payload},
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+
+    assert result.status == 502
+    assert result.call["error_code"] == "provider_unavailable"
+    assert result.call["outcome"] == "uncertain"
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+    assert len(transport.sent) == 1
+
+
 def test_deepline_per_call_billing_settles_and_person_entities_are_dropped():
     envelope = {
         "job_id": "iad1::x", "status": "completed",

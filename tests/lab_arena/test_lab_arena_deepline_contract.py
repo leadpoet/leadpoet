@@ -44,6 +44,24 @@ def test_outbound_request_matches_the_official_client():
         "operation": "contextdev_get_web_scrape_markdown",
         "payload": {"url": "https://example.com/about"},
     }
+    for tool, payload in (
+        ("contextdev_post_web_search", {"query": "regional banks"}),
+        (
+            "contextdev_post_news_search",
+            {
+                "searchBy": {
+                    "type": "entity",
+                    "entity": {"type": "domain", "domain": "example.com"},
+                }
+            },
+        ),
+    ):
+        body = json.loads(ops.build_outbound_request("deepline.execute", {
+            "tool": tool, "payload": payload,
+        }).body)
+        assert body == {
+            "provider": "contextdev", "operation": tool, "payload": payload,
+        }
     assert set(ops.DEEPLINE_TOOL_PROVIDERS) == set(ops.DEEPLINE_TOOLS)
 
 

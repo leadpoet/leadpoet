@@ -451,6 +451,14 @@ def test_deepline_history_direct_singleton_group_counts_once():
             "deepline_contextdev_web_scrape_markdown_completed_zero",
         ),
         (
+            "contextdev_post_news_search",
+            "deepline_contextdev_news_search_completed_zero",
+        ),
+        (
+            "contextdev_post_web_search",
+            "deepline_contextdev_web_search_completed_zero",
+        ),
+        (
             "free_simple_company_search",
             "deepline_free_simple_company_search_completed_zero",
         ),
@@ -558,10 +566,18 @@ def test_deepline_generic_http_completed_zero_rejects_present_billing(billing):
         ),
     ],
 )
-def test_deepline_contextdev_zero_proof_fails_closed(response_status, response):
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "contextdev_get_web_scrape_markdown",
+        "contextdev_post_news_search",
+        "contextdev_post_web_search",
+    ],
+)
+def test_deepline_contextdev_zero_proof_fails_closed(tool, response_status, response):
     assert (
         deepline_free_completed_cost(
-            {"tool": "contextdev_get_web_scrape_markdown"},
+            {"tool": tool},
             response_status,
             response,
         )
@@ -633,6 +649,8 @@ def test_deepline_primary_field_takes_precedence_and_zero_is_valid():
         ("exa_answer", "0.07", 7_000),
         ("hunter_discover", "0", 0),
         ("generic_http_request", "0", 0),
+        ("contextdev_post_news_search", "0", 0),
+        ("contextdev_post_web_search", "0", 0),
     ],
 )
 def test_deepline_fixed_and_free_reservations(tool, credits, microusd):

@@ -12,7 +12,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
 )
 
 ROOT = Path(__file__).parents[2]
-MIGRATION = ROOT / "scripts/307-arena-2026-09-19-preexecution-source-activation.sql"
+MIGRATION = ROOT / "scripts/308-arena-2026-09-19-preexecution-source-activation.sql"
 ROUND19 = migration306.ROUND19
 ROUND20 = migration306.ROUND20
 BASELINE = migration306.BASELINE

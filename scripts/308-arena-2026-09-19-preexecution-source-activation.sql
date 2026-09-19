@@ -1,6 +1,6 @@
--- 307: Activate the reviewed Sep19 baseline archive before execution.
--- This source-only transition is valid only while every Sep19 execution run
--- remains pending and the ledger contains only the completed code reviews.
+-- 308: Activate the reviewed Sep19 baseline archive before execution.
+-- This source-only transition requires all 20 baseline runs to remain pending.
+-- Six completed miner runs and the completed code-review ledger are preserved.
 -- It preserves both round configurations, the frozen bank, all miner sources,
 -- all 100 run rows, all 12 ledger rows, and all Sep20 state.
 --
@@ -72,7 +72,7 @@ DECLARE
     'f3fd3acc10bc58a95c0728c61fe0fc044cf57303';
   v_new_override CONSTANT JSONB := pg_catalog.jsonb_build_object(
     'schema_version', 'leadpoet.lab_arena.preexecution_source_override.v1',
-    'migration', '307-arena-2026-09-19-preexecution-source-activation',
+    'migration', '308-arena-2026-09-19-preexecution-source-activation',
     'previous_source_ref', v_old_source_ref,
     'previous_source_size_bytes', v_old_source_size,
     'previous_source_sha256', v_old_source_sha,

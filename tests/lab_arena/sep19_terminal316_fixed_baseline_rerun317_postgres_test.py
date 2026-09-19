@@ -29,10 +29,33 @@ NEW_SOURCE_SHA = "a" * 64
 NEW_SOURCE_COMMIT = "b" * 40
 NEW_SCORER_DIGEST = "sha256:" + "c" * 64
 NEW_SCORER_REFERENCE = "registry.test/judge@" + NEW_SCORER_DIGEST
+FAILED_RESPONSE_HOLDS = (
+    {
+        "icp_position": 5,
+        "attempt": 2,
+        "call_identity": "sha256:" + "1" * 64,
+        "generation_id": "gen-rerun316-web-429-a",
+        "credential_fingerprint": "sha256:" + "d" * 64,
+        "held_microusd": 3_219_310,
+    },
+    {
+        "icp_position": 1,
+        "attempt": 1,
+        "call_identity": "sha256:" + "2" * 64,
+        "generation_id": "gen-rerun316-web-429-b",
+        "credential_fingerprint": "sha256:" + "e" * 64,
+        "held_microusd": 2_720_364,
+    },
+)
 
 
 def _test_migrations() -> tuple[str, ...]:
-    return prior._test_migrations()
+    migrations = list(prior._test_migrations())
+    migrations.insert(
+        migrations.index("263-lab-arena-code-review-recovery.sql") + 1,
+        "264-lab-arena-codex-cost-reconciliation.sql",
+    )
+    return tuple(migrations)
 
 
 @pytest.fixture(scope="module")
@@ -42,6 +65,11 @@ def database():
 
 @pytest.fixture(scope="module")
 def terminal_failure_database():
+    yield from database_with_lab_arena_migration(_test_migrations())
+
+
+@pytest.fixture(scope="module")
+def uncertain_archive_database():
     yield from database_with_lab_arena_migration(_test_migrations())
 
 
@@ -276,6 +304,67 @@ def _seed_terminal_rerun316(conn, *, terminal_status: str = "cancelled") -> None
             (ROUND, BASELINE),
         )
         assert cursor.fetchone()[0] == 9
+    conn.commit()
+
+
+def _seed_failed_responses_holds(conn) -> None:
+    with conn.cursor() as cursor:
+        cursor.execute("SET session_replication_role=replica")
+        for call in FAILED_RESPONSE_HOLDS:
+            cursor.execute(
+                """
+                WITH run AS (
+                  SELECT run_id,miner_hotkey,stage
+                  FROM public.lab_arena_runs
+                  WHERE round_id=%s AND submission_id=%s AND kind='execute'
+                    AND icp_position=%s AND attempt=%s AND status='failed'
+                ), entries(entry_kind,ordinality) AS (
+                  VALUES ('reservation',1),('dispatch',2),('uncertain',3)
+                )
+                INSERT INTO public.lab_arena_ledger(
+                  entry_kind,miner_hotkey,round_id,submission_id,run_id,stage,
+                  call_identity,provider,operation_id,funding_source,
+                  amount_microusd,entry_doc,terminal_response)
+                SELECT entries.entry_kind,run.miner_hotkey,%s,%s,run.run_id,run.stage,
+                       %s,'openrouter','openrouter.responses','host',
+                       CASE WHEN entries.entry_kind IN('reservation','uncertain')
+                         THEN %s ELSE 0 END,
+                       CASE WHEN entries.entry_kind='uncertain' THEN
+                         jsonb_build_object(
+                           'reason','worker_reported',
+                           'call',jsonb_build_object(
+                             'reason','missing_provider_cost',
+                             'call_succeeded',FALSE,
+                             'openrouter_generation_id',%s,
+                             'credential_fingerprint',%s))
+                       ELSE jsonb_build_object(
+                         'fixture','failed_responses_429',
+                         'sequence',entries.ordinality)
+                       END,
+                       CASE WHEN entries.entry_kind='uncertain' THEN
+                         jsonb_build_object(
+                           'status',429,
+                           'call_succeeded',FALSE,
+                           'body_b64','eyJlcnJvciI6InJhdGVfbGltaXRlZCJ9')
+                       ELSE NULL END
+                FROM run CROSS JOIN entries
+                ORDER BY entries.ordinality
+                """,
+                (
+                    ROUND,
+                    BASELINE,
+                    call["icp_position"],
+                    call["attempt"],
+                    ROUND,
+                    BASELINE,
+                    call["call_identity"],
+                    call["held_microusd"],
+                    call["generation_id"],
+                    call["credential_fingerprint"],
+                ),
+            )
+            assert cursor.rowcount == 3
+        cursor.execute("SET session_replication_role=origin")
     conn.commit()
 
 
@@ -837,6 +926,177 @@ def test_terminal316_rerun_executes_scores_and_publishes_with_preservation(
             assert _round_history(cursor, ROUND) == published_before
             assert _round_history(cursor, ROUND + "-r317archive") == archive317_before
             assert _round_history(cursor, ROUND + "-r316archive") == rerun316_history_before
+    finally:
+        conn.close()
+
+
+def test_failed_responses_unknown_costs_archive_with_full_holds_and_no_fee_assumption(
+    uncertain_archive_database,
+):
+    psycopg2, dsn = uncertain_archive_database
+    conn = psycopg2.connect(**dsn)
+    identities = [call["call_identity"] for call in FAILED_RESPONSE_HOLDS]
+    expected_hold = sum(call["held_microusd"] for call in FAILED_RESPONSE_HOLDS)
+
+    def ledger_rows(cursor, round_id, submission_id):
+        cursor.execute(
+            "SELECT jsonb_agg(to_jsonb(l) ORDER BY entry_id) "
+            "FROM public.lab_arena_ledger l WHERE round_id=%s AND submission_id=%s "
+            "AND call_identity IN(%s,%s)",
+            (round_id, submission_id, *identities),
+        )
+        return cursor.fetchone()[0]
+
+    def assert_reconciliation_is_closed(cursor, round_id, calls):
+        cursor.execute(
+            "SELECT public.lab_arena_list_openrouter_cost_reconciliations_v1("
+            "%s,NULL,0,20)",
+            (round_id,),
+        )
+        assert cursor.fetchone()[0] == {"status": "ok", "items": []}
+        for call in calls:
+            cursor.execute(
+                "SELECT public.lab_arena_reconcile_openrouter_cost_v1("
+                "%s,%s,%s,%s,%s,%s,0,'0')",
+                (
+                    round_id,
+                    call["run_id"],
+                    call["call_identity"],
+                    call["uncertain_entry_id"],
+                    call["generation_id"],
+                    call["credential_fingerprint"],
+                ),
+            )
+            assert cursor.fetchone()[0] == {"status": "stale"}
+
+    try:
+        _seed_terminal_rerun316(conn)
+        _seed_failed_responses_holds(conn)
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT public.lab_arena__successful_call_cost_state(%s,'execute',"
+                "'openrouter')",
+                (BASELINE,),
+            )
+            before_cost = cursor.fetchone()[0]
+            assert before_cost["inflight_calls"] == 0
+            assert before_cost["success_unresolved_calls"] == 0
+            assert before_cost["uncertain_calls"] == 2
+            assert before_cost["reserved_or_uncertain_microusd"] == expected_hold
+            cursor.execute(
+                "SELECT call_identity,run_id,entry_id,"
+                "entry_doc#>>'{call,openrouter_generation_id}',"
+                "entry_doc#>>'{call,credential_fingerprint}' "
+                "FROM public.lab_arena_ledger WHERE round_id=%s "
+                "AND submission_id=%s AND entry_kind='uncertain' "
+                "AND call_identity IN(%s,%s) ORDER BY call_identity",
+                (ROUND, BASELINE, *identities),
+            )
+            uncertain_calls = [
+                {
+                    "call_identity": row[0],
+                    "run_id": row[1],
+                    "uncertain_entry_id": row[2],
+                    "generation_id": row[3],
+                    "credential_fingerprint": row[4],
+                }
+                for row in cursor.fetchall()
+            ]
+            assert len(uncertain_calls) == 2
+            before_rows = ledger_rows(cursor, ROUND, BASELINE)
+            assert len(before_rows) == 6
+            assert [row["entry_kind"] for row in before_rows].count("settlement") == 0
+            assert_reconciliation_is_closed(cursor, ROUND, uncertain_calls)
+            rendered, _, _ = _render(cursor, _schedule())
+            cursor.execute(rendered)
+
+            archive_round = ROUND + "-r317archive"
+            archive_submission = BASELINE + ":r317archive"
+            cursor.execute(
+                "SELECT public.lab_arena__successful_call_cost_state(%s,'execute',"
+                "'openrouter')",
+                (archive_submission,),
+            )
+            archive_cost = cursor.fetchone()[0]
+            assert archive_cost["inflight_calls"] == 0
+            assert archive_cost["success_unresolved_calls"] == 0
+            assert archive_cost["uncertain_calls"] == 2
+            assert archive_cost["reserved_or_uncertain_microusd"] == expected_hold
+            after_rows = ledger_rows(cursor, archive_round, archive_submission)
+            assert len(after_rows) == 6
+            for before, after in zip(before_rows, after_rows):
+                assert after.pop("round_id") == archive_round
+                assert after.pop("submission_id") == archive_submission
+                assert before.pop("round_id") == ROUND
+                assert before.pop("submission_id") == BASELINE
+                assert after == before
+            cursor.execute(
+                "SELECT call_identity,entry_kind,amount_microusd,"
+                "terminal_response ? 'provider_cost',terminal_response ? 'billing' "
+                "FROM public.lab_arena_ledger WHERE round_id=%s "
+                "AND submission_id=%s AND call_identity IN(%s,%s) "
+                "AND entry_id IN(SELECT max(entry_id) FROM public.lab_arena_ledger "
+                "WHERE call_identity IN(%s,%s) GROUP BY call_identity) "
+                "ORDER BY call_identity",
+                (
+                    archive_round,
+                    archive_submission,
+                    *identities,
+                    *identities,
+                ),
+            )
+            assert cursor.fetchall() == [
+                (identities[0], "uncertain", 3_219_310, False, False),
+                (identities[1], "uncertain", 2_720_364, False, False),
+            ]
+            cursor.execute(
+                "SELECT public.lab_arena_sep19_rerun317_archive_valid_v1(),"
+                "public.lab_arena_sep19_rerun317_active_valid_v1()"
+            )
+            assert cursor.fetchone() == (True, True)
+            assert_reconciliation_is_closed(cursor, archive_round, uncertain_calls)
+            assert_reconciliation_is_closed(cursor, ROUND, uncertain_calls)
+
+            archive_before_reapply = ledger_rows(
+                cursor, archive_round, archive_submission
+            )
+            cursor.execute(rendered)
+            assert ledger_rows(cursor, archive_round, archive_submission) == (
+                archive_before_reapply
+            )
+        conn.commit()
+
+        with conn.cursor() as cursor:
+            cursor.execute("SET session_replication_role=replica")
+            cursor.execute(
+                "INSERT INTO public.lab_arena_ledger("
+                "entry_kind,miner_hotkey,round_id,submission_id,run_id,stage,"
+                "call_identity,provider,operation_id,funding_source,amount_microusd,"
+                "entry_doc,terminal_response) SELECT 'settlement',miner_hotkey,"
+                "round_id,submission_id,run_id,stage,call_identity,provider,operation_id,"
+                "funding_source,0,jsonb_build_object('tampered_append',true),"
+                "jsonb_build_object('call_succeeded',false) "
+                "FROM public.lab_arena_ledger WHERE round_id=%s AND call_identity=%s "
+                "AND entry_kind='uncertain'",
+                (ROUND + "-r317archive", identities[0]),
+            )
+            assert cursor.rowcount == 1
+            cursor.execute("SET session_replication_role=origin")
+            cursor.execute(
+                "SELECT public.lab_arena_sep19_rerun317_archive_valid_v1(),"
+                "public.lab_arena_sep19_rerun317_active_valid_v1()"
+            )
+            assert cursor.fetchone() == (False, False)
+        with pytest.raises(psycopg2.Error, match="existing Sep19 rerun317 differs"):
+            with conn.cursor() as cursor:
+                cursor.execute(rendered)
+        conn.rollback()
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT public.lab_arena_sep19_rerun317_archive_valid_v1(),"
+                "public.lab_arena_sep19_rerun317_active_valid_v1()"
+            )
+            assert cursor.fetchone() == (True, True)
     finally:
         conn.close()
 

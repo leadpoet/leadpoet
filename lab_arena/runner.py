@@ -104,6 +104,7 @@ DEPENDENCY_MOUNT_TIMEOUT_SECONDS = 30
 MAX_WORKER_CONNECTIONS = 8
 WORKER_SOCKET_READ_TIMEOUT_SECONDS = 10.0
 TEMPORARY_HOLD_RETRY_SECONDS = 1.0
+SETTLED_MICROUSD_HEADER = "x-leadpoet-settled-microusd"
 MAX_JUDGE_DIAGNOSTIC_CHARS = scoring.MAX_FAILURE_DETAIL_CHARS
 _DIAGNOSTIC_URL_QUERY_RE = re.compile(
     r"(?i)\b([a-z][a-z0-9+.-]*://[^\s?#]+)\?[^\s#]*"
@@ -1669,6 +1670,12 @@ class WorkerSocketServer:
             state.calls.append(call)
             if call.get("error_code") in ("budget_refused", "budget_exhausted", "miner_credentials_unavailable", "miner_provider_not_configured") or call.get("outcome") == "refused":
                 state.refusals += 1
+        document = {
+            **document,
+            "headers": self._socket_response_headers(
+                document, operation_id, sequence
+            ),
+        }
         return None, document
 
     @staticmethod
@@ -1810,6 +1817,52 @@ class WorkerSocketServer:
             )
         raise AssertionError("unreachable Responses retry loop")
 
+    @staticmethod
+    def _socket_response_headers(
+        document: Mapping[str, Any], operation_id: str, action_sequence: int
+    ) -> Dict[str, Any]:
+        """Add one internal settlement proof after removing untrusted copies."""
+
+        headers = {
+            name: value
+            for name, value in dict(document["headers"]).items()
+            if not (
+                isinstance(name, str)
+                and name.lower() == SETTLED_MICROUSD_HEADER
+            )
+        }
+        if operation_id != "deepline.execute":
+            return headers
+        try:
+            body = json.loads(
+                base64.b64decode(str(document["body_b64"]), validate=True)
+            )
+        except (TypeError, ValueError, UnicodeDecodeError):
+            return headers
+        if not isinstance(body, Mapping):
+            return headers
+        billing = body.get("billing")
+        if "billing" in body and not (
+            billing is None or isinstance(billing, Mapping) and not billing
+        ):
+            return headers
+        call = document.get("call")
+        if not (
+            isinstance(call, Mapping)
+            and call.get("operation_id") == operation_id
+            and call.get("provider") == "deepline"
+            and type(call.get("action_sequence")) is int
+            and call.get("action_sequence") == action_sequence
+            and call.get("outcome") == "settled"
+            and type(call.get("actual_microusd")) is int
+            and call.get("actual_microusd") >= 0
+            and isinstance(call.get("call_identity"), str)
+            and contracts.SHA256_RE.fullmatch(call["call_identity"]) is not None
+        ):
+            return headers
+        headers[SETTLED_MICROUSD_HEADER] = str(call["actual_microusd"])
+        return headers
+
     def handle_frame(
         self,
         raw: bytes,
@@ -1867,7 +1920,8 @@ class WorkerSocketServer:
         response_headers = {
             str(name): str(value)
             for name, value in dict(document.get("headers") or {}).items()
-            if str(name).lower() != operations.TRUSTED_RESPONSE_URL_HEADER
+            if str(name).lower()
+            not in (operations.TRUSTED_RESPONSE_URL_HEADER, SETTLED_MICROUSD_HEADER)
         }
         try:
             payload = base64.b64decode(str(document["body_b64"]), validate=True)

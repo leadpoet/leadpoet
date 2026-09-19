@@ -377,20 +377,181 @@ def test_decisive_quote_must_occur_in_fetched_page():
     )
     assert locator_snippet_only["stage"]["status"] == "UNPROVEN"
 
-    weak_listing_quote = "CoStar Group, Inc. Common Stock (CSGP)"
-    weak_listing = _validated_findings(
+
+
+def test_semantic_stage_proof_is_bound_to_the_validated_investigator_finding():
+    url = "https://acme.example/investors"
+    quote = (
+        "Acme is listed on the main board of the Example Exchange under "
+        "the stock code 1828."
+    )
+    assert not _stage_quote_supports_observation("public", quote)
+    proof = _validated_findings(
         {"findings": [_finding(
             "stage",
+            observed_value="Public",
             evidence_url=url,
-            evidence_quote=weak_listing_quote,
+            evidence_quote=quote,
         )]},
         targets=("stage",),
-        fetched_pages={url: weak_listing_quote},
+        fetched_pages={url: quote},
         first_party_domains={"acme.example"},
-        identity_names={"costargroup"},
+        identity_names={"acme"},
+    )["stage"]
+    assert proof["status"] == "VERIFIED"
+
+    projected = lead_scorer._project_investigator_stage(
+        _complete_verdict(),
+        proof,
+        icp_stage="public",
     )
-    assert weak_listing["stage"]["status"] == "UNPROVEN"
-    assert "Public requires current exchange/ticker" in weak_listing["stage"]["reason"]
+    plain = _reverify_decision(
+        projected,
+        "",
+        "public",
+        icp=_icp(company_stage="Public"),
+        company=_company(),
+        company_quality=True,
+    )
+    assert plain.details["dimension_decisions"]["stage"] == COMPANY_FIT_UNAVAILABLE
+
+    verified = _reverify_decision(
+        projected,
+        "",
+        "public",
+        icp=_icp(company_stage="Public"),
+        company=_company(),
+        validated_stage_finding=proof,
+        company_quality=True,
+    )
+    assert verified.decision == COMPANY_FIT_MATCH
+
+    null_flag = _reverify_decision(
+        {**projected, "stage_matches": None},
+        "",
+        "public",
+        icp=_icp(company_stage="Public"),
+        company=_company(),
+        validated_stage_finding=proof,
+        company_quality=True,
+    )
+    assert null_flag.details["dimension_decisions"]["stage"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+
+    contradicted_proof = {**proof, "status": "CONTRADICTED"}
+    contradicted = _reverify_decision(
+        lead_scorer._project_investigator_stage(
+            _complete_verdict(),
+            contradicted_proof,
+            icp_stage="series b",
+        ),
+        "",
+        "series b",
+        icp=_icp(company_stage="Series B"),
+        company=_company(),
+        validated_stage_finding=contradicted_proof,
+        company_quality=True,
+    )
+    assert contradicted.decision == COMPANY_FIT_MISMATCH
+
+
+@pytest.mark.parametrize(
+    ("observed", "company_name", "quote"),
+    [
+        (
+            "Public",
+            "Example Company 2",
+            "Example Company 2 is listed on the main board of the Example "
+            "Exchange under the stock code 1828.",
+        ),
+        (
+            "Public",
+            "Example Company 3",
+            "Example Company 3 is listed on the Example Stock Exchange of "
+            "Example Jurisdiction under the stock code 1828.",
+        ),
+    ],
+)
+def test_investigator_accepts_semantic_stage_wording_outside_fixed_regex(
+    observed,
+    company_name,
+    quote,
+):
+    normalized = lead_scorer._normalize_company_stage(observed)
+    assert not _stage_quote_supports_observation(normalized, quote)
+    url = "https://example.test/investors"
+    result = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            observed_value=observed,
+            evidence_url=url,
+            evidence_quote=quote,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: quote},
+        first_party_domains={"example.test"},
+        identity_names={"".join(company_name.casefold().split())},
+    )
+    assert result["stage"]["status"] == "VERIFIED"
+
+
+@pytest.mark.parametrize(
+    "invalid_receipt",
+    [
+        None,
+        {},
+        {"target": "stage", "status": None},
+        {"target": "industry", "status": "VERIFIED"},
+        _finding("stage", evidence_quote="different quote"),
+    ],
+)
+def test_malformed_stage_receipts_and_verdict_flags_cannot_bypass_regex(
+    invalid_receipt,
+):
+    quote = "Acme common shares are quoted on Nasdaq under the symbol ACME."
+    verdict = _complete_verdict(
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url="https://acme.example/investors",
+        stage_evidence_quote=quote,
+        _validated_stage_finding=_finding("stage"),
+    )
+    result = _reverify_decision(
+        verdict,
+        "",
+        "public",
+        icp=_icp(company_stage="Public"),
+        company=_company(),
+        validated_stage_finding=invalid_receipt,
+        company_quality=True,
+    )
+    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_UNAVAILABLE
+
+
+def test_unknown_and_unproven_investigator_stages_cannot_project():
+    url = "https://acme.example/investors"
+    quote = "Acme describes itself as a growth-stage company."
+    unknown = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            observed_value="growth stage",
+            evidence_url=url,
+            evidence_quote=quote,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: quote},
+        first_party_domains={"acme.example"},
+        identity_names={"acme"},
+    )["stage"]
+    assert unknown["status"] == "UNPROVEN"
+
+    unchanged = lead_scorer._project_investigator_stage(
+        _complete_verdict(observed_company_stage=""),
+        {**_finding("stage"), "status": "UNPROVEN"},
+        icp_stage="Public",
+    )
+    assert unchanged["observed_company_stage"] == ""
 
 
 def test_submit_schema_advertises_only_requested_targets_and_count():
@@ -1480,11 +1641,11 @@ def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatc
     )
 
 
-def test_harness_retries_deterministically_rejected_stage_quote(monkeypatch):
+def test_harness_accepts_semantic_stage_finding_after_source_checks(monkeypatch):
     url = "https://costar.example/investors"
-    weak_quote = "CoStar Group, Inc. Common Stock (CSGP)"
-    strong_quote = (
-        "CoStar Group common stock is listed on NASDAQ under ticker CSGP."
+    quote = (
+        "CoStar Group is listed on the Example Stock Exchange of Example "
+        "Jurisdiction under the stock code 1828."
     )
     reasoning_requests = []
 
@@ -1495,32 +1656,12 @@ def test_harness_retries_deterministically_rejected_stage_quote(monkeypatch):
         turn = len(reasoning_requests)
         if turn == 1:
             name, arguments = "fetch_page", {"url": url}
-        elif turn == 2:
-            name, arguments = "submit_findings", {
-                "findings": [_finding(
-                    "stage",
-                    evidence_url=url,
-                    evidence_quote=weak_quote,
-                )]
-            }
         else:
-            feedback = json.loads(payload["messages"][-1]["content"])
-            assert feedback["error"] == "deterministic_evidence_validation_failed"
-            assert "Never repeat a rejected quote" in feedback["instruction"]
-            assert "Fetch another useful source" in feedback["instruction"]
-            assert feedback["rejected_findings"] == [{
-                "target": "stage",
-                "reason": (
-                    "stage quote must prove the completed/current stage; "
-                    "Public requires current exchange/ticker or "
-                    "listed/traded-share proof"
-                ),
-            }]
             name, arguments = "submit_findings", {
                 "findings": [_finding(
                     "stage",
                     evidence_url=url,
-                    evidence_quote=strong_quote,
+                    evidence_quote=quote,
                 )]
             }
         return 200, {"choices": [{"message": {"tool_calls": [{
@@ -1535,7 +1676,7 @@ def test_harness_retries_deterministically_rejected_stage_quote(monkeypatch):
         return {
             "ok": True,
             "url": requested_url,
-            "text": f"{weak_quote}\n{strong_quote}",
+            "text": quote,
         }
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
@@ -1553,22 +1694,23 @@ def test_harness_retries_deterministically_rejected_stage_quote(monkeypatch):
     ))
 
     assert result["claims"]["stage"]["status"] == "VERIFIED"
-    assert result["claims"]["stage"]["evidence_quote"] == strong_quote
+    assert result["claims"]["stage"]["evidence_quote"] == quote
+    assert result["_validated_stage_finding"] == result["claims"]["stage"]
     assert result["usage"] == {
-        "reasoning_turns": 3,
+        "reasoning_turns": 2,
         "search_calls": 0,
         "fetch_calls": 1,
     }
-    assert len(reasoning_requests) == 3
+    assert len(reasoning_requests) == 2
     assert all(
         request["tool_choice"] == "required"
         for request in reasoning_requests
     )
 
 
-def test_final_forced_submission_returns_rejected_quote_as_unproven(monkeypatch):
+def test_agent_unproven_historical_listing_remains_unproven(monkeypatch):
     url = "https://costar.example/investors"
-    weak_quote = "CoStar Group, Inc. Common Stock (CSGP)"
+    weak_quote = "CoStar Group was listed on 20 May 1970 on the Example Exchange."
     reasoning_requests = []
 
     async def fake_post_json(_session, _url, *, headers, payload):
@@ -1582,8 +1724,11 @@ def test_final_forced_submission_returns_rejected_quote_as_unproven(monkeypatch)
             name, arguments = "submit_findings", {
                 "findings": [_finding(
                     "stage",
-                    evidence_url=url,
-                    evidence_quote=weak_quote,
+                    status="UNPROVEN",
+                    observed_value=None,
+                    evidence_url="",
+                    evidence_quote="",
+                    reason="A historic listing event does not prove current listing.",
                 )]
             }
         return 200, {"choices": [{"message": {"tool_calls": [{
@@ -1611,6 +1756,7 @@ def test_final_forced_submission_returns_rejected_quote_as_unproven(monkeypatch)
     ))
 
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["_validated_stage_finding"] == {}
     assert result["usage"]["reasoning_turns"] == 2
     assert len(reasoning_requests) == 2
     assert reasoning_requests[-1]["tool_choice"] == {

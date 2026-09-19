@@ -203,6 +203,9 @@ _STAGE_PROOF_COMPLETED_EVENT_RE = re.compile(
     r"\b(?:raised|closed|secured|completed|received)\b",
     re.I,
 )
+_CANONICAL_COMPANY_STAGES = frozenset(
+    {"seed", "series a", "series b", "series c+", "private equity", "public"}
+)
 _CALENDAR_MAY_LEFT_RE = re.compile(r"\b(?:in|on|since|during|of)\s*$", re.I)
 _CALENDAR_MAY_RIGHT_RE = re.compile(
     r"^\W*(?:\d{1,2}(?:st|nd|rd|th)?(?:\W+\d{4})?|\d{4})\b",
@@ -876,7 +879,35 @@ def _decision_from_observed_geography(
     return COMPANY_FIT_MATCH if canonical_match else COMPANY_FIT_MISMATCH
 
 
-def _decision_from_observed_stage(verdict: dict, icp_stage: str) -> str:
+def _validated_investigator_stage_matches_verdict(
+    verdict: Mapping[str, Any],
+    observed: str,
+    finding: Optional[Mapping[str, Any]],
+) -> bool:
+    """Bind an internally validated semantic stage finding to its projection."""
+
+    value = finding or {}
+    evidence = _dimension_web_evidence(verdict, "stage")
+    finding_url = _valid_web_evidence_url(value.get("evidence_url"))
+    finding_quote = str(value.get("evidence_quote") or "").strip()[:2000]
+    return bool(
+        value.get("target") == "stage"
+        and value.get("status") in {"VERIFIED", "CONTRADICTED"}
+        and _normalize_company_stage(value.get("observed_value")) == observed
+        and observed in _CANONICAL_COMPANY_STAGES
+        and finding_url
+        and finding_url == evidence["url"]
+        and finding_quote
+        and finding_quote == evidence["quote"]
+    )
+
+
+def _decision_from_observed_stage(
+    verdict: dict,
+    icp_stage: str,
+    *,
+    validated_stage_finding: Optional[Mapping[str, Any]] = None,
+) -> str:
     if not icp_stage:
         return COMPANY_FIT_MATCH
     observed_value = verdict.get("observed_company_stage")
@@ -885,8 +916,13 @@ def _decision_from_observed_stage(verdict: dict, icp_stage: str) -> str:
     observed = _normalize_company_stage(observed_value)
     flag = strict_company_fit_boolean(verdict.get("stage_matches"))
     stage_evidence = _dimension_web_evidence(verdict, "stage")
-    if not observed or not _stage_quote_supports_observation(
-        observed, stage_evidence["quote"]
+    if not observed or not (
+        _validated_investigator_stage_matches_verdict(
+            verdict,
+            observed,
+            validated_stage_finding,
+        )
+        or _stage_quote_supports_observation(observed, stage_evidence["quote"])
     ):
         return COMPANY_FIT_UNAVAILABLE
     canonical_match = _company_stage_matches(observed, icp_stage)
@@ -1794,6 +1830,7 @@ def _reverify_decision(
     verified_homepage_identity: Optional[Mapping[str, str]] = None,
     verified_homepage_transport_domain: str = "",
     verified_rebrand_identity: Optional[Mapping[str, Any]] = None,
+    validated_stage_finding: Optional[Mapping[str, Any]] = None,
     structured_employee_size_evidence: Optional[Mapping[str, Any]] = None,
     employee_size_conflict: bool = False,
     company_quality: bool = False,
@@ -1900,7 +1937,11 @@ def _reverify_decision(
             company=company,
             company_quality=company_quality,
         ),
-        "stage": _decision_from_observed_stage(verdict, icp_stage),
+        "stage": _decision_from_observed_stage(
+            verdict,
+            icp_stage,
+            validated_stage_finding=validated_stage_finding,
+        ),
     }
     active_dimensions = {"employee_size", "industry", "geography"}
     if icp_stage:
@@ -2362,7 +2403,7 @@ def _project_investigator_stage(
     observed = _normalize_company_stage(value.get("observed_value"))
     url = _valid_web_evidence_url(value.get("evidence_url"))
     quote = str(value.get("evidence_quote") or "").strip()[:2000]
-    if not observed or not url or not quote:
+    if observed not in _CANONICAL_COMPANY_STAGES or not url or not quote:
         return projected
     projected.update(
         observed_company_stage=observed,
@@ -2542,6 +2583,7 @@ async def _run_targeted_company_evidence_investigation(
     CompanyFitDecisionResult,
     Mapping[str, Any],
     Mapping[str, Any],
+    Mapping[str, Any],
 ]:
     """Run and project one bounded targeted investigation."""
 
@@ -2588,7 +2630,10 @@ async def _run_targeted_company_evidence_investigation(
             ),
             investigation_diagnostic.get(VERIFIER_FAILURE_REASON_KEY),
         )
-        return dict(verdict), unavailable, {}, {}
+        return dict(verdict), unavailable, {}, {}, {}
+    validated_stage_finding = investigation.get("_validated_stage_finding")
+    if not isinstance(validated_stage_finding, Mapping):
+        validated_stage_finding = {}
     projected = _project_investigator_stage(
         verdict,
         claims.get("stage") if isinstance(claims.get("stage"), Mapping) else None,
@@ -2617,11 +2662,18 @@ async def _run_targeted_company_evidence_investigation(
         verified_homepage_identity=verified_identity,
         verified_homepage_transport_domain=verified_transport_domain,
         verified_rebrand_identity=verified_rebrand_identity,
+        validated_stage_finding=validated_stage_finding,
         structured_employee_size_evidence=structured_employee_size_evidence,
         employee_size_conflict=employee_size_conflict,
         company_quality=company_quality,
     )
-    return projected, projected_result, claims, verified_rebrand_identity
+    return (
+        projected,
+        projected_result,
+        claims,
+        verified_rebrand_identity,
+        validated_stage_finding,
+    )
 
 
 async def _llm_reverify_company(
@@ -2864,6 +2916,7 @@ async def _llm_reverify_company(
         )
     )
     verified_rebrand_identity: Mapping[str, Any] = {}
+    validated_stage_finding: Mapping[str, Any] = {}
     result = _reverify_decision(
         verdict,
         icp_attribute,
@@ -2892,6 +2945,7 @@ async def _llm_reverify_company(
             result,
             claims,
             verified_rebrand_identity,
+            validated_stage_finding,
         ) = await _run_targeted_company_evidence_investigation(
             company=company,
             icp=icp,
@@ -3080,6 +3134,7 @@ async def _llm_reverify_company(
         verified_homepage_identity=verified_identity,
         verified_homepage_transport_domain=verified_transport_domain,
         verified_rebrand_identity=verified_rebrand_identity,
+        validated_stage_finding=validated_stage_finding,
         structured_employee_size_evidence=current_profile_cache.get(
             "structured_evidence"
         ),
@@ -3104,6 +3159,7 @@ async def _llm_reverify_company(
                 repaired_result,
                 post_repair_claims,
                 verified_rebrand_identity,
+                validated_stage_finding,
             ) = await _run_targeted_company_evidence_investigation(
                 company=company,
                 icp=icp,

@@ -480,28 +480,21 @@ def _validated_findings(
                 )
             elif target == "stage":
                 # Imported at validation time because lead_scorer owns the
-                # production stage standard and imports this investigator.
+                # canonical stage vocabulary and imports this investigator.
                 from qualification.scoring.lead_scorer import (
+                    _CANONICAL_COMPANY_STAGES,
                     _normalize_company_stage,
-                    _stage_quote_supports_observation,
                 )
 
                 normalized_stage = _normalize_company_stage(
                     finding["observed_value"]
                 )
-                if not normalized_stage or not _stage_quote_supports_observation(
-                    normalized_stage,
-                    finding["evidence_quote"],
-                ):
+                if normalized_stage not in _CANONICAL_COMPANY_STAGES:
                     finding.update(
                         status="UNPROVEN",
                         evidence_url="",
                         evidence_quote="",
-                        reason=(
-                            "stage quote must prove the completed/current stage; "
-                            "Public requires current exchange/ticker or "
-                            "listed/traded-share proof"
-                        ),
+                        reason="observed company stage was not canonical",
                     )
             elif target == "headcount" and not _quote_supports_headcount(
                 finding["evidence_quote"], finding["observed_value"]
@@ -845,8 +838,18 @@ async def investigate_company_evidence(
                             ),
                         }
                     else:
+                        stage_finding = claims.get("stage") or {}
                         return {
                             "claims": claims,
+                            # This receipt is constructed only after fetched-page,
+                            # exact-quote, company-attribution, URL, and canonical
+                            # stage validation. It is never read from model JSON.
+                            "_validated_stage_finding": (
+                                dict(stage_finding)
+                                if stage_finding.get("status")
+                                in {"VERIFIED", "CONTRADICTED"}
+                                else {}
+                            ),
                             "failure_reason": "",
                             "usage": {
                                 "reasoning_turns": _turn + 1,

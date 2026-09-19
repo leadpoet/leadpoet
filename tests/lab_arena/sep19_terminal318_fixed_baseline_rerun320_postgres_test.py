@@ -18,6 +18,11 @@ from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migrati
 
 ROOT = Path(__file__).parents[2]
 TEMPLATE = ROOT / "scripts/320-arena-2026-09-19-terminal318-fixed-baseline-rerun.sql.template"
+RENDERED = TEMPLATE.with_suffix("")
+# Set this exact manifest in the same commit that adds RENDERED. Until then,
+# the release-state test requires the numbered migration to remain absent.
+# terminal_cancel_reason_sql is the rendered SQL literal: NULL or a quoted value.
+RENDERED_RELEASE: dict[str, object] | None = None
 rerun310 = prior.rerun310
 ROUND = prior.ROUND
 BASELINE = prior.BASELINE
@@ -73,6 +78,11 @@ def terminal_failure_database():
 
 @pytest.fixture(scope="module")
 def uncertain_archive_database():
+    yield from database_with_lab_arena_migration(_test_migrations())
+
+
+@pytest.fixture(scope="module")
+def exact_render_database():
     yield from database_with_lab_arena_migration(_test_migrations())
 
 
@@ -1194,7 +1204,7 @@ def test_rerun320_template_is_unrendered_and_sealed_to_terminal318():
     assert _test_migrations()[-1] == (
         "319-lab-arena-quota-sourcing-cost.sql"
     )
-    assert not TEMPLATE.with_suffix("").exists()
+    assert RENDERED.exists() is (RENDERED_RELEASE is not None)
     assert TEMPLATE.name not in _test_migrations()
     assert "after the Sep19 rerun318 round is terminal" in body
     assert "assignment_id LIKE '%:rerun318'" in body
@@ -1228,3 +1238,168 @@ def test_rerun320_template_is_unrendered_and_sealed_to_terminal318():
     assert "DELETE FROM" not in body and "TRUNCATE " not in body
     assert "lab_arena_accepted_weight_states" in body
     assert "company_quality_policy" in body
+
+
+def test_rerun320_release_artifact_state_and_exact_render_is_fail_closed(
+    exact_render_database,
+):
+    """Require an exact manifest and atomic wrong-preimage proof after render."""
+
+    placeholders = set(re.findall(r"__[A-Z0-9_]+__", TEMPLATE.read_text()))
+    assert placeholders == {
+        "__NEW_SCORER_DIGEST__",
+        "__NEW_SCORER_REFERENCE__",
+        "__NEW_SOURCE_COMMIT__",
+        "__NEW_SOURCE_REF__",
+        "__NEW_SOURCE_SHA256__",
+        "__NEW_SOURCE_SIZE_BYTES__",
+        "__PATCHED_SCORING_DEFINITION_SHA256__",
+        "__RERUN_SCHEDULE_JSON__",
+        "__SCORING_DEFINITION_SHA256__",
+        "__TERMINAL_ACCEPTED_EXECUTE_RUN_COUNT__",
+        "__TERMINAL_BANK_STATE_SHA256__",
+        "__TERMINAL_BASELINE_ACCEPTED_RUN_COUNT__",
+        "__TERMINAL_BASELINE_EXECUTE_LEDGER_COUNT__",
+        "__TERMINAL_BASELINE_FAILED_RUN_COUNT__",
+        "__TERMINAL_BASELINE_LEDGER_COUNT__",
+        "__TERMINAL_BASELINE_RUN_COUNT__",
+        "__TERMINAL_BASELINE_SHA256__",
+        "__TERMINAL_CANCEL_REASON_SQL__",
+        "__TERMINAL_EXECUTE_RUN_COUNT__",
+        "__TERMINAL_LEDGER_SHA256__",
+        "__TERMINAL_MINER_SUBMISSIONS_SHA256__",
+        "__TERMINAL_REWARD_AUTHORITY_SHA256__",
+        "__TERMINAL_ROUND_SHA256__",
+        "__TERMINAL_RUNS_SHA256__",
+        "__TERMINAL_SCORE_LEDGER_COUNT__",
+        "__TERMINAL_SCORE_RUN_COUNT__",
+        "__TERMINAL_STATUS__",
+    }
+    if RENDERED_RELEASE is None:
+        assert not RENDERED.exists()
+    else:
+        required = {
+            "artifact_sha256",
+            "source_ref",
+            "source_size_bytes",
+            "source_sha256",
+            "scorer_digest",
+            "scorer_reference",
+            "benchmark_deadline",
+            "terminal_status",
+            "terminal_cancel_reason_sql",
+            "terminal_execute_run_count",
+            "terminal_accepted_execute_run_count",
+            "terminal_score_run_count",
+            "terminal_baseline_run_count",
+            "terminal_baseline_accepted_run_count",
+            "terminal_baseline_failed_run_count",
+            "terminal_baseline_ledger_count",
+            "terminal_baseline_execute_ledger_count",
+            "terminal_score_ledger_count",
+            "terminal_seals",
+        }
+        assert set(RENDERED_RELEASE) == required
+        assert RENDERED.exists()
+        raw = RENDERED.read_bytes()
+        body = raw.decode("utf-8")
+        assert re.fullmatch(r"[0-9a-f]{64}", str(RENDERED_RELEASE["artifact_sha256"]))
+        assert hashlib.sha256(raw).hexdigest() == RENDERED_RELEASE["artifact_sha256"]
+        assert re.search(r"__[A-Z0-9_]+__", body) is None
+        assert NEW_SOURCE_COMMIT in body
+        assert NEW_SOURCE_BRANCH in body
+        assert str(RENDERED_RELEASE["source_ref"]) in body
+        assert re.fullmatch(r"arena/arena-2026-09-19/sources/[A-Za-z0-9._-]+\.tar\.gz",
+                            str(RENDERED_RELEASE["source_ref"]))
+        assert f"source_size_bytes={int(RENDERED_RELEASE['source_size_bytes'])}" in body
+        assert re.fullmatch(r"[0-9a-f]{64}", str(RENDERED_RELEASE["source_sha256"]))
+        assert str(RENDERED_RELEASE["source_sha256"]) in body
+        assert re.fullmatch(r"sha256:[0-9a-f]{64}", str(RENDERED_RELEASE["scorer_digest"]))
+        assert str(RENDERED_RELEASE["scorer_digest"]) in body
+        assert str(RENDERED_RELEASE["scorer_reference"]).endswith(
+            "@" + str(RENDERED_RELEASE["scorer_digest"])
+        )
+        assert str(RENDERED_RELEASE["scorer_reference"]) in body
+        assert (f'"benchmark_deadline":"{RENDERED_RELEASE["benchmark_deadline"]}"'
+                in body)
+        assert (f"active_round.status IS DISTINCT FROM "
+                f"'{RENDERED_RELEASE['terminal_status']}'" in body)
+        assert ("active_round.cancel_reason IS DISTINCT FROM "
+                + str(RENDERED_RELEASE["terminal_cancel_reason_sql"]) in body)
+        flat = " ".join(body.split())
+        count_checks = (
+            f"kind='execute')<>{int(RENDERED_RELEASE['terminal_execute_run_count'])}",
+            "status='accepted' AND terminal_cause='accepted' AND output_ref IS NOT NULL) <>"
+            + str(int(RENDERED_RELEASE["terminal_accepted_execute_run_count"])),
+            f"kind='score')<>{int(RENDERED_RELEASE['terminal_score_run_count'])}",
+            f"moved_baseline_runs<>{int(RENDERED_RELEASE['terminal_baseline_run_count'])}",
+            "submission_id='baseline-2026-09-19' AND status='accepted') <>"
+            + str(int(RENDERED_RELEASE["terminal_baseline_accepted_run_count"])),
+            "submission_id='baseline-2026-09-19' AND status='failed')<>"
+            + str(int(RENDERED_RELEASE["terminal_baseline_failed_run_count"])),
+            "l.submission_id='baseline-2026-09-19')<> "
+            + str(int(RENDERED_RELEASE["terminal_baseline_ledger_count"])),
+            "moved_baseline_ledger<>"
+            + str(int(RENDERED_RELEASE["terminal_baseline_execute_ledger_count"])),
+            "moved_score_ledger<>"
+            + str(int(RENDERED_RELEASE["terminal_score_ledger_count"])),
+        )
+        assert all(check in flat for check in count_checks)
+        seals = RENDERED_RELEASE["terminal_seals"]
+        assert isinstance(seals, tuple) and len(seals) == 9
+        assert all(re.fullmatch(r"[0-9a-f]{64}", str(seal)) for seal in seals)
+        assert all(str(seal) in body for seal in seals)
+
+        psycopg2, dsn = exact_render_database
+        conn = psycopg2.connect(**dsn)
+        try:
+            _seed_terminal_rerun318(conn)
+            with conn.cursor() as cursor:
+                before = _round_history(cursor, ROUND)
+                previous_archive_before = _round_history(
+                    cursor, ROUND + "-r318archive"
+                )
+                scorer_hash_before = _sha(
+                    cursor,
+                    "SELECT encode(extensions.digest(pg_get_functiondef("
+                    "'public.lab_arena_open_scoring_v2(text,smallint,jsonb)'::regprocedure),"
+                    "'sha256'),'hex')",
+                )
+            with pytest.raises(
+                psycopg2.Error,
+                match=(
+                    "Sep19 rerun320 (scorer definition differs|terminal preimage differs|"
+                    "admission window closed)"
+                ),
+            ):
+                with conn.cursor() as cursor:
+                    cursor.execute(body)
+            conn.rollback()
+            with conn.cursor() as cursor:
+                assert _round_history(cursor, ROUND) == before
+                assert _round_history(cursor, ROUND + "-r318archive") == (
+                    previous_archive_before
+                )
+                cursor.execute(
+                    "SELECT count(*) FROM public.lab_arena_rounds WHERE round_id=%s",
+                    (ROUND + "-r320archive",),
+                )
+                assert cursor.fetchone()[0] == 0
+                cursor.execute(
+                    "SELECT to_regprocedure("
+                    "'public.lab_arena_prepare_sep19_rerun320_v1(bigint,text,text,jsonb,text,text)')"
+                )
+                assert cursor.fetchone()[0] is None
+                cursor.execute(
+                    "SELECT count(*) FROM pg_trigger WHERE tgname="
+                    "'lab_arena_sep19_rerun320_score_namespace_guard'"
+                )
+                assert cursor.fetchone()[0] == 0
+                assert _sha(
+                    cursor,
+                    "SELECT encode(extensions.digest(pg_get_functiondef("
+                    "'public.lab_arena_open_scoring_v2(text,smallint,jsonb)'::regprocedure),"
+                    "'sha256'),'hex')",
+                ) == scorer_hash_before
+        finally:
+            conn.close()

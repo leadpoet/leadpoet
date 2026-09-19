@@ -1,7 +1,7 @@
 """Three-state company-fit decision contract.
 
-The stable ``(passed, reason)`` API prevents non-empty decision strings from
-becoming accidental truthy passes across qualification consumers.
+The stable named result prevents non-empty decision strings from becoming
+accidental truthy passes across qualification consumers.
 """
 
 from __future__ import annotations
@@ -394,70 +394,37 @@ def company_quality_receipt_matches_claim(
     )
 
 
-class CompanyFitDecisionResult(tuple):
-    """One decision with a real historical ``(passed, reason)`` tuple API.
+class CompanyFitDecisionResult:
+    """One company-fit decision with named state and evidence."""
 
-    The decision and evidence stay available as named attributes.  This avoids
-    a compatibility trap where an object only *looks* iterable but fails tuple
-    checks in older validator code.
-    """
-
-    def __new__(
-        cls,
+    def __init__(
+        self,
         decision: CompanyFitDecision,
         reason: Optional[str] = None,
         *,
         details: Optional[Mapping[str, Any]] = None,
-    ) -> "CompanyFitDecisionResult":
+    ) -> None:
         if decision not in {
             COMPANY_FIT_MATCH,
             COMPANY_FIT_MISMATCH,
             COMPANY_FIT_UNAVAILABLE,
         }:
             raise ValueError(f"invalid company fit decision: {decision!r}")
-        instance = super().__new__(cls, (decision == COMPANY_FIT_MATCH, reason))
-        instance.decision = decision
-        instance.details = copy.deepcopy(dict(details or {}))
-        return instance
+        self.decision = decision
+        self._passed = decision == COMPANY_FIT_MATCH
+        self._reason = reason
+        self.details = copy.deepcopy(dict(details or {}))
 
     @property
     def passed(self) -> bool:
-        return bool(tuple.__getitem__(self, 0))
+        return self._passed
 
     @property
     def reason(self) -> Optional[str]:
-        return tuple.__getitem__(self, 1)
+        return self._reason
 
     def __bool__(self) -> bool:
         return self.passed
-
-    def __copy__(self) -> "CompanyFitDecisionResult":
-        """Return an independent decision object for legacy copy callers."""
-
-        return type(self)(
-            self.decision,
-            self.reason,
-            details=copy.deepcopy(self.details),
-        )
-
-    def __deepcopy__(self, memo: dict[int, Any]) -> "CompanyFitDecisionResult":
-        """Preserve named decision state when copying this tuple subclass."""
-
-        cloned = type(self)(
-            self.decision,
-            self.reason,
-            details=copy.deepcopy(self.details, memo),
-        )
-        memo[id(self)] = cloned
-        return cloned
-
-    def __reduce_ex__(self, protocol: int):
-        """Pickle the decision, rather than this class's legacy tuple payload."""
-
-        return (
-            _restore_company_fit_decision_result,
-            (self.decision, self.reason, copy.deepcopy(self.details)),
-        )
 
     def receipt(self, gate: str) -> dict:
         receipt = {
@@ -469,16 +436,6 @@ class CompanyFitDecisionResult(tuple):
         }
         receipt.update(self.details)
         return receipt
-
-
-def _restore_company_fit_decision_result(
-    decision: CompanyFitDecision,
-    reason: Optional[str],
-    details: Mapping[str, Any],
-) -> CompanyFitDecisionResult:
-    """Unpickle a result without replaying the historical Boolean tuple."""
-
-    return CompanyFitDecisionResult(decision, reason, details=details)
 
 
 def company_fit_match(

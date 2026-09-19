@@ -2,8 +2,8 @@
 
 import asyncio
 import copy
+import json
 import os
-import pickle
 from unittest import mock
 
 import pytest
@@ -299,26 +299,81 @@ def test_company_fit_contract_matches_model_owned_v1():
     ) == COMPANY_FIT_MISMATCH
 
 
-def test_company_fit_result_truthiness_is_match_only():
-    assert isinstance(company_fit_match("verified"), tuple)
-    assert company_fit_match("verified") == (True, "verified")
-    assert bool(company_fit_match("verified")) is True
-    assert bool(company_fit_mismatch("conflict")) is False
-    assert bool(company_fit_unavailable("provider outage")) is False
+@pytest.mark.parametrize(
+    ("factory", "reason", "decision", "passed", "expected_receipt"),
+    (
+        (
+            company_fit_match,
+            "verified",
+            COMPANY_FIT_MATCH,
+            True,
+            (
+                b'{"contract_id":"company-fit-decision:v1","contract_version":'
+                b'"company-fit-decision:v1","decision":"match","gate":'
+                b'"company_fit","nested":{"value":1},"reason":"verified"}'
+            ),
+        ),
+        (
+            company_fit_mismatch,
+            "conflict",
+            COMPANY_FIT_MISMATCH,
+            False,
+            (
+                b'{"contract_id":"company-fit-decision:v1","contract_version":'
+                b'"company-fit-decision:v1","decision":"mismatch","gate":'
+                b'"company_fit","nested":{"value":1},"reason":"conflict"}'
+            ),
+        ),
+        (
+            company_fit_unavailable,
+            "provider outage",
+            COMPANY_FIT_UNAVAILABLE,
+            False,
+            (
+                b'{"contract_id":"company-fit-decision:v1","contract_version":'
+                b'"company-fit-decision:v1","decision":"unavailable","gate":'
+                b'"company_fit","nested":{"value":1},"reason":"provider outage"}'
+            ),
+        ),
+    ),
+)
+def test_company_fit_result_named_state_and_receipt_are_stable(
+    factory, reason, decision, passed, expected_receipt
+):
+    details = {"nested": {"value": 1}}
+    result = factory(reason, details=details)
+
+    assert result.decision == decision
+    assert result.reason == reason
+    assert result.passed is passed
+    assert bool(result) is passed
+    assert result.details == {"nested": {"value": 1}}
+    assert json.dumps(
+        result.receipt("company_fit"), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8") == expected_receipt
+
+    details["nested"]["value"] = 2
+    assert result.details == {"nested": {"value": 1}}
 
 
-def test_company_fit_result_copy_deepcopy_and_pickle_preserve_named_state():
-    result = company_fit_match("verified", details={"nested": {"value": 1}})
-    cloned = copy.copy(result)
-    deep_cloned = copy.deepcopy(result)
-    restored = pickle.loads(pickle.dumps(result))
+def test_company_fit_receipt_preserves_detail_override_order():
+    result = company_fit_match(
+        "verified",
+        details={
+            "decision": "detail_override",
+            "gate": "detail_gate",
+            "nested": {"value": 1},
+        },
+    )
 
-    for candidate in (cloned, deep_cloned, restored):
-        assert candidate == (True, "verified")
-        assert candidate.decision == COMPANY_FIT_MATCH
-        assert candidate.details == {"nested": {"value": 1}}
-        candidate.details["nested"]["value"] = 2
-        assert result.details["nested"]["value"] == 1
+    assert result.receipt("company_fit") == {
+        "gate": "detail_gate",
+        "contract_id": "company-fit-decision:v1",
+        "contract_version": "company-fit-decision:v1",
+        "decision": "detail_override",
+        "reason": "verified",
+        "nested": {"value": 1},
+    }
 
 
 def test_company_identity_receipt_matches_model_contract_shape():
@@ -422,8 +477,8 @@ def test_reverify_early_exits_without_network():
             return await _llm_reverify_company(_company(), _icp())
     # no attribute and no stage pinned -> no call, pass; when either IS
     # pinned the LLM check is mandatory (no kill-switch exists).
-    ok, _ = asyncio.run(run())
-    assert ok
+    result = asyncio.run(run())
+    assert result.passed is True
     from qualification.scoring import lead_scorer as _ls
     assert not hasattr(_ls, "_scorer_reverify_enabled")
 

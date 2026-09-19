@@ -27,7 +27,7 @@ Design constraints:
 
 Public API:
     verify_company_exists(company_name, company_website, timeout_secs=5,
-                          company_linkedin=...) -> (passed, reason)
+                          company_linkedin=...) -> CompanyFitDecisionResult
 """
 
 from __future__ import annotations
@@ -673,8 +673,7 @@ async def verify_company_exists(
 ) -> CompanyFitDecisionResult:
     """Verify that ``company_website`` is a real page for ``company_name``.
 
-    Returns a ``company-fit-decision:v1`` result.  Historical callers may
-    still unpack it as ``(passed, reason)``.
+    Returns a ``company-fit-decision:v1`` result with named decision state.
 
       * ``"verified: name 'ExampleCo' found in homepage"`` (best case)
       * ``"homepage identity evidence unavailable: ..."``

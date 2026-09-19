@@ -1,15 +1,12 @@
-"""Arena durable-state access (labarena.md sections 11 and 15.1).
+"""Arena durable-state access through the restricted PostgREST service role.
 
-The service reaches the four ``lab_arena_*`` tables only through the
-dedicated ``lab_arena_service`` role over PostgREST: every write is one of
-the SECURITY DEFINER functions in ``scripts/179-lab-arena-v1.sql`` and reads
-are plain selects. The HTTP/1.1-pinned client construction is copied from
-``gateway/db/client.py`` (never imported: the validator enclave image copies
-that file). The scoped ``sb_secret_`` API key is sent only as ``apikey``.
+Writes use the SECURITY DEFINER RPCs declared by the numbered SQL migrations;
+reads use bounded table selects. The HTTP/1.1 client sends the scoped
+``sb_secret_`` API key only as ``apikey``.
 
-``PsycopgTransport`` exists for tests and local tooling only: it calls the
-same SQL functions through a PostgreSQL driver so disposable-PostgreSQL
-coverage exercises the exact production function contract.
+``PsycopgTransport`` supports tests and local tooling. It calls the same SQL
+functions through a PostgreSQL driver so disposable-PostgreSQL coverage
+exercises the production function contract.
 """
 
 from __future__ import annotations

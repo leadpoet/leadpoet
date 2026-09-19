@@ -716,7 +716,7 @@ def build_parser() -> argparse.ArgumentParser:
     scope.add_argument("--intent-details-from", default=None, metavar="TIMESTAMP", help="set or clear intent details activation for future submission periods")
     scope.add_argument("--contacts-generation", choices=("enabled", "disabled"), default=None, help="enable or disable contact ICP generation")
     parser.add_argument("--miner-credential-kms-key-id", default=None, help="override the miner KMS key; an empty value disables admission during staged deployment")
-    parser.add_argument("--service-key-fd", "--service-jwt-fd", dest="service_key_fd", type=int, help="inherited descriptor containing only the scoped service key")
+    parser.add_argument("--service-key-fd", type=int, help="inherited descriptor containing only the scoped service key")
     parser.add_argument("--ssh-key", type=Path, default=Path(os.getenv("LEADPOET_LAB_ARENA_SSH_KEY") or DEFAULT_SSH_KEY))
     parser.add_argument("--gateway-host", default=GATEWAY_HOST)
     parser.add_argument("--validator-host", default=VALIDATOR_HOST)

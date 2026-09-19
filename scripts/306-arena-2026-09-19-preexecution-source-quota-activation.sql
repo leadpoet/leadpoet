@@ -112,23 +112,23 @@ BEGIN
     RETURN;
   END IF;
 
-  IF v_round19.status <> 'stage1'
+  IF v_round19.status IS DISTINCT FROM 'stage1'
      OR v_round19.configuration_doc ->> 'schema_version'
-          <> 'leadpoet.lab_arena.round_configuration.v1'
-     OR v_round19.configuration_doc ->> 'round_id' <> 'arena-2026-09-19'
-     OR v_round19.configuration_doc ->> 'mode' <> 'live'
+          IS DISTINCT FROM 'leadpoet.lab_arena.round_configuration.v1'
+     OR v_round19.configuration_doc ->> 'round_id' IS DISTINCT FROM 'arena-2026-09-19'
+     OR v_round19.configuration_doc ->> 'mode' IS DISTINCT FROM 'live'
      OR v_round19.configuration_doc -> 'call_quotas' IS DISTINCT FROM v_old_quotas
      OR v_round19.configuration_doc -> 'scoring_call_quotas'
           IS DISTINCT FROM v_scoring_quotas
      OR v_round19.configuration_doc ->> 'sourcing_cost_eligibility_policy'
-          <> 'successful_calls_per_icp_v1'
+          IS DISTINCT FROM 'successful_calls_per_icp_v1'
      OR (v_round19.configuration_doc ->> 'execution_icp_cap_microusd')::BIGINT
-          <> 4000000
+          IS DISTINCT FROM 4000000
      OR (v_round19.configuration_doc ->> 'cost_per_company_microusd')::BIGINT
-          <> 800000
-     OR v_round19.benchmark_ref <> 'arena/arena-2026-09-19/benchmark.json'
-     OR v_round19.evaluation_date <> '2026-09-19'
-     OR v_round19.icp_set_date <> DATE '2026-09-18'
+          IS DISTINCT FROM 800000
+     OR v_round19.benchmark_ref IS DISTINCT FROM 'arena/arena-2026-09-19/benchmark.json'
+     OR v_round19.evaluation_date IS DISTINCT FROM '2026-09-19'
+     OR v_round19.icp_set_date IS DISTINCT FROM DATE '2026-09-18'
      OR v_round19.stage1_scoring_plan_doc IS NOT NULL
      OR v_round19.stage2_scoring_plan_doc IS NOT NULL
      OR v_round19.stage3_scoring_plan_doc IS NOT NULL
@@ -136,13 +136,15 @@ BEGIN
      OR v_round19.publication_doc IS NOT NULL
      OR v_round19.published_at IS NOT NULL
      OR v_round19.cancel_reason IS NOT NULL
-     OR pg_catalog.jsonb_typeof(v_round19.participants) <> 'array'
-     OR pg_catalog.jsonb_array_length(v_round19.participants) <> 5
-     OR v_baseline.status <> 'frozen' OR v_baseline.is_king IS NOT TRUE
-     OR v_baseline.source_ref <> v_old_source_ref
-     OR v_baseline.source_size_bytes <> v_old_source_size
-     OR v_baseline.submission_doc ->> 'source_ref' <> v_old_source_ref
-     OR (v_baseline.submission_doc ->> 'source_size_bytes')::BIGINT <> v_old_source_size
+     OR pg_catalog.jsonb_typeof(v_round19.participants) IS DISTINCT FROM 'array'
+     OR pg_catalog.jsonb_array_length(v_round19.participants) IS DISTINCT FROM 5
+     OR v_baseline.status IS DISTINCT FROM 'frozen' OR v_baseline.is_king IS NOT TRUE
+     OR v_baseline.source_ref IS DISTINCT FROM v_old_source_ref
+     OR v_baseline.source_size_bytes IS DISTINCT FROM v_old_source_size
+     OR v_baseline.submission_doc ->> 'source_ref' IS DISTINCT FROM v_old_source_ref
+     OR (v_baseline.submission_doc ->> 'source_size_bytes')::BIGINT IS DISTINCT FROM v_old_source_size
+     OR v_baseline.submission_doc ? 'source_sha256'
+     OR v_baseline.submission_doc ? 'source_commit'
      OR v_baseline.submission_doc ? 'preexecution_source_override' THEN
     RAISE EXCEPTION 'Sep19 preexecution source state differs'
       USING ERRCODE = '55000';
@@ -159,9 +161,9 @@ BEGIN
          ON submission.round_id = 'arena-2026-09-19'
         AND submission.submission_id = item ->> 'submission_id'
        WHERE submission.submission_id IS NULL
-          OR submission.miner_hotkey <> item ->> 'miner_hotkey'
-          OR submission.source_ref <> item ->> 'source_ref'
-          OR submission.source_size_bytes <>
+          OR submission.miner_hotkey IS DISTINCT FROM item ->> 'miner_hotkey'
+          OR submission.source_ref IS DISTINCT FROM item ->> 'source_ref'
+          OR submission.source_size_bytes IS DISTINCT FROM
              (item ->> 'source_size_bytes')::BIGINT
      ) THEN
     RAISE EXCEPTION 'Sep19 frozen participant state differs'
@@ -177,8 +179,12 @@ BEGIN
      OR EXISTS (
        SELECT 1 FROM public.lab_arena_runs
        WHERE round_id = 'arena-2026-09-19'
-         AND (kind <> 'execute' OR status <> 'pending' OR attempt <> 1
-           OR lease_generation <> 0 OR stage_generation <> v_round19.stage_generation
+         AND (kind IS DISTINCT FROM 'execute' OR status IS DISTINCT FROM 'pending'
+           OR attempt IS DISTINCT FROM 1
+           OR icp_position NOT BETWEEN 0 AND 19
+           OR stage IS DISTINCT FROM CASE WHEN icp_position < 10 THEN 1 ELSE 2 END
+           OR lease_generation IS DISTINCT FROM 0
+           OR stage_generation IS DISTINCT FROM v_round19.stage_generation
            OR runner_hotkey IS NOT NULL OR lease_token_hash IS NOT NULL
            OR lease_expires_at IS NOT NULL OR claim_request_id IS NOT NULL
            OR claim_request_hash IS NOT NULL OR claim_response IS NOT NULL
@@ -210,7 +216,7 @@ BEGIN
      OR EXISTS (
        SELECT 1 FROM public.lab_arena_ledger
        WHERE round_id = 'arena-2026-09-19'
-         AND (run_id IS NOT NULL OR operation_id <> 'openrouter.code_review')
+         AND (run_id IS NOT NULL OR operation_id IS DISTINCT FROM 'openrouter.code_review')
      ) OR (SELECT pg_catalog.count(*) FROM public.lab_arena_ledger
            WHERE round_id = 'arena-2026-09-19' AND entry_kind = 'reservation') <> 4
      OR (SELECT pg_catalog.count(*) FROM public.lab_arena_ledger
@@ -221,18 +227,20 @@ BEGIN
       USING ERRCODE = '55000';
   END IF;
 
-  IF v_round20.status <> 'open'
+  IF v_round20.status IS DISTINCT FROM 'open'
      OR v_round20.configuration_doc ->> 'schema_version'
-          <> 'leadpoet.lab_arena.round_configuration.v1'
-     OR v_round20.configuration_doc ->> 'round_id' <> 'arena-2026-09-20'
-     OR v_round20.configuration_doc ->> 'mode' <> 'live'
+          IS DISTINCT FROM 'leadpoet.lab_arena.round_configuration.v1'
+     OR v_round20.configuration_doc ->> 'round_id' IS DISTINCT FROM 'arena-2026-09-20'
+     OR v_round20.configuration_doc ->> 'mode' IS DISTINCT FROM 'live'
      OR v_round20.configuration_doc -> 'call_quotas' IS DISTINCT FROM v_old_quotas
      OR v_round20.configuration_doc -> 'scoring_call_quotas'
           IS DISTINCT FROM v_scoring_quotas
+     OR v_round20.configuration_doc ->> 'sourcing_cost_eligibility_policy'
+          IS DISTINCT FROM 'successful_calls_per_icp_v1'
      OR (v_round20.configuration_doc ->> 'execution_icp_cap_microusd')::BIGINT
-          <> 4000000
+          IS DISTINCT FROM 4000000
      OR (v_round20.configuration_doc ->> 'cost_per_company_microusd')::BIGINT
-          <> 800000
+          IS DISTINCT FROM 800000
      OR v_round20.participants IS NOT NULL OR v_round20.benchmark_ref IS NOT NULL
      OR EXISTS (SELECT 1 FROM public.lab_arena_runs
                 WHERE round_id = 'arena-2026-09-20') THEN
@@ -368,8 +376,8 @@ BEGIN
        IS DISTINCT FROM
        (pg_catalog.to_jsonb(v_baseline)
          - 'source_ref' - 'source_size_bytes' - 'submission_doc' - 'updated_at')
-     OR v_baseline_after.source_ref <> v_new_source_ref
-     OR v_baseline_after.source_size_bytes <> v_new_source_size
+     OR v_baseline_after.source_ref IS DISTINCT FROM v_new_source_ref
+     OR v_baseline_after.source_size_bytes IS DISTINCT FROM v_new_source_size
      OR v_baseline_after.submission_doc IS DISTINCT FROM v_expected_submission_doc
      OR v_runs_after IS DISTINCT FROM v_runs_before
      OR v_ledger_after IS DISTINCT FROM v_ledger_before

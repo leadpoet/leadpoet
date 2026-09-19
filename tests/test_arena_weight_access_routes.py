@@ -11,5 +11,5 @@ def test_legacy_fulfillment_gateway_runtime_is_absent():
     assert "gateway.fulfillment" not in source
     assert "ENABLE_FULFILLMENT" not in source
     assert '"/fulfillment' not in source
-    assert "/fulfillment/" not in (ROOT / "gateway/edge/nginx.conf").read_text()
+    assert not (ROOT / "gateway/edge/nginx.conf").exists()
     assert "/fulfillment/" not in (ROOT / "gateway/middleware/priority.py").read_text()

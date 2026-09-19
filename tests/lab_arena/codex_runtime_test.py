@@ -238,6 +238,177 @@ def test_bridge_auth_and_stateful_requests_never_dispatch(monkeypatch):
         assert not store.calls and not transport.sent
 
 
+def test_live_web_search_is_injected_as_one_bounded_native_server_tool(monkeypatch):
+    payload = response(
+        id="gen-live-search",
+        output=[
+            {
+                "id": "ws-1", "type": "web_search_call",
+                "status": "completed",
+                "action": {"type": "search", "query": "current example"},
+            },
+            {
+                "id": "msg-search", "type": "message", "role": "assistant",
+                "status": "completed", "content": [{
+                    "type": "output_text", "text": "Current result",
+                    "annotations": [{
+                        "type": "url_citation", "url": "https://example.com/source",
+                        "title": "Example source", "start_index": 0,
+                        "end_index": 14,
+                    }],
+                }],
+            },
+        ],
+        usage={
+            "input_tokens": 10, "output_tokens": 10, "total_tokens": 20,
+            "cost": 0.000012,
+            "server_tool_use": {"web_search_requests": 1},
+        },
+    )
+    posts = []
+
+    def dispatch(_socket_path, parameters):
+        posts.append(parameters)
+        return 200, json.dumps(payload, separators=(",", ":")).encode()
+
+    monkeypatch.setattr(codex, "_dispatch", dispatch)
+    with codex.ResponsesBridge(
+            "/fixture-worker.sock", web_search="live") as bridge:
+        with httpx.Client(trust_env=False) as client:
+            result = client.post(
+                bridge.base_url + "/responses",
+                headers={"Authorization": "Bearer " + bridge.token},
+                json={
+                    "model": "openai/gpt-4o-mini", "input": "Search now",
+                    "tools": None, "stream": True,
+                },
+            )
+
+    assert result.status_code == 200
+    assert len(posts) == 1
+    sent = posts[0]
+    assert sent["tools"] == [{
+        "type": "openrouter:web_search",
+        "parameters": {
+            "engine": "native",
+            "max_uses": codex.WEB_SEARCH_MAX_TOOL_CALLS,
+            "max_total_results": codex.WEB_SEARCH_MAX_TOTAL_RESULTS,
+        },
+    }]
+    assert sent["max_tool_calls"] == codex.WEB_SEARCH_MAX_TOOL_CALLS
+    assert codex.WEB_SEARCH_MAX_TOOL_CALLS == ops.OPENROUTER_WEB_SEARCH_MAX_TOOL_CALLS
+    assert codex.WEB_SEARCH_MAX_TOTAL_RESULTS == ops.OPENROUTER_WEB_SEARCH_MAX_TOTAL_RESULTS
+    assert b'"type":"web_search_call"' in result.content
+    assert b'"type":"url_citation"' in result.content
+
+
+@pytest.mark.parametrize("mode", ["disabled", "live"])
+def test_caller_cannot_supply_an_openrouter_hosted_tool(monkeypatch, mode):
+    monkeypatch.setattr(
+        codex, "_dispatch",
+        lambda *_args: pytest.fail("caller-supplied hosted tool was dispatched"),
+    )
+    with codex.ResponsesBridge(
+            "/fixture-worker.sock", web_search=mode) as bridge:
+        with httpx.Client(trust_env=False) as client:
+            result = client.post(
+                bridge.base_url + "/responses",
+                headers={"Authorization": "Bearer " + bridge.token},
+                json={
+                    "model": "openai/gpt-5.6-luna", "input": "Search",
+                    "tools": [{"type": "openrouter:web_search"}],
+                },
+            )
+    assert result.status_code == 400
+
+
+@pytest.mark.skipif(
+    not os.environ.get("ARENA_TEST_CODEX_BINARY"),
+    reason="set ARENA_TEST_CODEX_BINARY for the real CLI web-search proof",
+)
+def test_real_codex_live_web_search_crosses_bridge_with_history_and_citation(
+    monkeypatch, tmp_path,
+):
+    _pin_real_codex(monkeypatch)
+    posts = []
+
+    def dispatch(_socket_path, parameters):
+        ops.validate_operation_request("openrouter.responses", parameters)
+        posts.append(parameters)
+        if len(posts) == 1:
+            assert any(
+                item.get("type") == "additional_tools"
+                for item in parameters["input"]
+            )
+            document = response(output=[
+                {
+                    "id": "ws-real", "type": "web_search_call",
+                    "status": "completed",
+                    "action": {"type": "search", "query": "current fixture"},
+                },
+                {
+                    "id": "msg-search", "type": "message", "role": "assistant",
+                    "phase": "commentary", "status": "completed", "content": [{
+                        "type": "output_text", "text": "Found a source.",
+                        "annotations": [{
+                            "type": "url_citation",
+                            "url": "https://example.com/source",
+                            "title": "Example source", "start_index": 8,
+                            "end_index": 14,
+                        }],
+                    }],
+                },
+                {
+                    "id": "ct-search", "type": "custom_tool_call",
+                    "call_id": "call-search", "name": "exec",
+                    "namespace": "functions",
+                    "input": 'text("ARENA_LOCAL_OK")', "status": "completed",
+                },
+            ])
+        else:
+            assert any(
+                item.get("type") == "web_search_call"
+                and item.get("action", {}).get("query") == "current fixture"
+                for item in parameters["input"]
+            )
+            assert any(
+                item.get("type") == "custom_tool_call_output"
+                and "ARENA_LOCAL_OK" in json.dumps(item.get("output"))
+                for item in parameters["input"]
+            )
+            document = response(
+                id="gen-search-final",
+                output=[{
+                    "id": "msg-real", "type": "message", "role": "assistant",
+                    "status": "completed", "content": [{
+                        "type": "output_text",
+                        "text": "ARENA_WEB_SEARCH_OK https://example.com/source",
+                        "annotations": [{
+                            "type": "url_citation",
+                            "url": "https://example.com/source",
+                            "title": "Example source", "start_index": 20,
+                            "end_index": 46,
+                        }],
+                    }],
+                }],
+            )
+        return 200, json.dumps(document, separators=(",", ":")).encode()
+
+    monkeypatch.setattr(codex, "_dispatch", dispatch)
+    result = codex.run(
+        "Search the web and report the fixture result.",
+        model="openai/gpt-5.6-luna", cwd=tmp_path,
+        timeout_seconds=60, web_search="live",
+    )
+
+    assert "ARENA_WEB_SEARCH_OK" in result
+    assert len(posts) == 2
+    for post in posts:
+        assert post["tools"][-1]["type"] == "openrouter:web_search"
+        assert post["tools"][-1]["parameters"]["engine"] == "native"
+        assert post["max_tool_calls"] == codex.WEB_SEARCH_MAX_TOOL_CALLS
+
+
 def test_responses_budget_refusal_and_incomplete_billing(monkeypatch):
     with broker_socket(monkeypatch, store=FakeLedgerStore(openrouter_capacity=0)) as (store, transport, path):
         status, _ = codex._dispatch(str(path), {"model": "openai/gpt-4o-mini", "input": "hi"})

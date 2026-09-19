@@ -547,6 +547,29 @@ PY
   return 0
 }
 
+emit_gateway_restart_marker() {
+  # Publish one restart boundary to the gateway's own telemetry destination, so
+  # a gap in gateway traffic can be told apart from an unplanned process death.
+  # The host ledger and the Sentry summary are not visible there.  Best effort:
+  # bounded, output discarded, and never able to fail or delay the restart.
+  local event="$1" status="${2:-}" now elapsed
+  command -v timeout >/dev/null 2>&1 || return 0
+  [ -x "$GATEWAY_PYTHON_BIN" ] || return 0
+  [ -r "$LEADPOET_REPO_ROOT/gateway/observability/emit_restart_marker.py" ] || return 0
+  now="$(date -u +%s)"
+  elapsed="$((now - GATEWAY_RESTART_STARTED_EPOCH))"
+  timeout 3 "$GATEWAY_PYTHON_BIN" \
+    "$LEADPOET_REPO_ROOT/gateway/observability/emit_restart_marker.py" \
+    --event "$event" \
+    --status "$status" \
+    --stage "${GATEWAY_DEPLOY_STAGE:-unknown}" \
+    --invocation-id "$GATEWAY_RESTART_INVOCATION_ID" \
+    --candidate-sha "${GATEWAY_DEPLOY_SHA:-${PREPARED_GATEWAY_SHA:-}}" \
+    --elapsed-seconds "$elapsed" \
+    --env-file "$GATEWAY_ENV_FILE" >/dev/null 2>&1 || true
+  return 0
+}
+
 emit_gateway_restart_sentry_summary() {
   local status="$1" candidate_sha summary_status shutdown_flag=()
   command -v timeout >/dev/null 2>&1 || return 0
@@ -1985,6 +2008,7 @@ if ! select_gateway_python_runtime; then
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 1
 fi
+emit_gateway_restart_marker "started"
 
 echo "Validating absolute gateway secret paths for canonical Git checkout"
 (
@@ -2609,4 +2633,5 @@ finalize_deployment_record succeeded "$GATEWAY_DEPLOY_STAGE" >/dev/null
 GATEWAY_DEPLOY_COMPLETED=1
 rm -f "$GATEWAY_DEPLOY_PLAN_FILE" || true
 record_gateway_restart_timing "completed" "passed"
+emit_gateway_restart_marker "finished" "passed"
 echo "Gateway restart command completed; tail logs with: tail -f $GATEWAY_LOG_FILE"

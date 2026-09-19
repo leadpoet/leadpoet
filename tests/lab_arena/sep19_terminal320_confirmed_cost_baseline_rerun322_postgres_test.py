@@ -21,7 +21,7 @@ TEMPLATE = Path(__file__).resolve().parents[2] / "scripts" / (
 )
 RENDERED = TEMPLATE.with_suffix("")
 RENDERED_SHA256 = (
-    "4a51fd658899427eb402f2c3ea34d20551964dcaef908f9fe9943c0c2e33d741"
+    "017f72faeef2a2ebe796080742d9245c903d184edc22562333f95f4c54f80dd9"
 )
 TERMINAL_CAPTURE_SHA256 = (
     "42380610359ebe172f17f49b5ac45318609c0c1630b1e3225ecd074e37653f05"
@@ -68,13 +68,13 @@ TERMINAL_MARKERS = {
 }
 EXACT_SOURCE_REF = (
     "arena/arena-2026-09-19/sources/"
-    "baseline-2026-09-19-rerun322-18d38d3b.tar.gz"
+    "baseline-2026-09-19-rerun322-d1b794d5.tar.gz"
 )
-EXACT_SOURCE_SIZE = 834_499
+EXACT_SOURCE_SIZE = 837_124
 EXACT_SOURCE_SHA = (
-    "2f272dfbb1f214102d68dd566aec1f729f850035ced615f9ff8cbc6db1048aaa"
+    "187a0813a4b026020c195f20cfbac9cc6653b8ff3dab6111082a84410bcc6697"
 )
-EXACT_SOURCE_COMMIT = "18d38d3bcb8c8d8770138d1ff65a5db7251e3f3e"
+EXACT_SOURCE_COMMIT = "d1b794d56fa54b860d44ac86d2e29972cbb3ed48"
 EXACT_SCHEDULE = {
     "submission_open": "2026-09-18T00:00:00Z",
     "submission_cutoff": "2026-09-19T00:00:00Z",

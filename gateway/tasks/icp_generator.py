@@ -18,12 +18,8 @@ GENERATION PROCESS:
 5. Persist the validated daily set for Arena consumption
 6. Activate the new set
 
-COMPANY-MODE ONLY (May 2026+):
-The qualification model competition is single-path company-mode. Models
-return a CompanyOutput keyed off industry / sub-industry / size / geography
-/ stage / intent_signals. ICP prompts no longer carry target_roles or
-target_seniority — anything role-shaped is legacy from the contact-mode
-era and is intentionally absent from generated sets.
+Each ICP defines company filters and intent requirements. When the Arena
+contact policy is enabled, generation also includes contact role requirements.
 """
 
 from __future__ import annotations
@@ -67,7 +63,7 @@ def _rebenchmark_now() -> datetime:
 # =============================================================================
 # OpenRouter Configuration for LLM-Based ICP Generation
 # =============================================================================
-# We use OpenRouter with o3-mini to generate varied, human-like ICP prompts
+# We use OpenRouter with Sonar Pro to generate varied, human-like ICP prompts
 # This prevents miners from overfitting to hardcoded templates
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
@@ -848,16 +844,13 @@ async def generate_icps_with_openrouter(
     contacts_required: bool = False,
 ) -> tuple:
     """
-    Generate ICP prompts using OpenRouter LLM (o3-mini).
+    Generate ICP prompts using OpenRouter Sonar Pro.
 
     This creates varied, human-like prompts that read as if typed by
     real sales/marketing professionals looking for companies to sell into.
 
-    COMPANY-MODE ONLY: Each ICP describes a company profile (industry,
-    size, geography, stage, intent signals, product context). Prompts
-    MUST NOT specify job titles, seniority, or any contact-level role.
-    The model competition no longer scores contact-level data — anything
-    role-shaped is legacy and intentionally absent.
+    Each ICP describes company filters, intent signals, and product context.
+    When contacts_required is true, include the configured contact requirements.
 
     Args:
         set_id: Set identifier (YYYYMMDD format) for ICP naming

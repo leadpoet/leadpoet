@@ -61,7 +61,7 @@ httpx>=0.28.1
 cbor2>=5.4.6
 cryptography>=41.0.7
 
-# Supabase (for future migration)
+# Supabase persistence and recovery
 supabase>=2.0.0
 
 # Geographic normalization (city/state/country standardization)

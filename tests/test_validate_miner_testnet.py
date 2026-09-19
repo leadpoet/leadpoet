@@ -21,20 +21,17 @@ SPEC.loader.exec_module(SCRIPT)
 
 
 @pytest.mark.parametrize("active,permit", [(True, False), (False, True)])
-def test_testnet_authorization_is_independent_of_mainnet_process_registry(active, permit):
+def test_testnet_authorization_is_independent_of_mainnet_process_configuration(active, permit):
     source = """
 import json
 from types import SimpleNamespace
-from gateway.utils import registry
+from gateway import config
 from lab_arena.service import _gateway_validator_authorizer
-def unexpected_global_registry(_hotkey):
-    raise AssertionError('standalone Arena must use its own finalized snapshot')
-registry.is_registered_hotkey = unexpected_global_registry
 snapshot = SimpleNamespace(netuid=401, hotkeys=('test-validator',),
                            active=(ACTIVE,), validator_permit=(PERMIT,), stake=(0.018,))
 result = _gateway_validator_authorizer('test-validator', network_name='test', netuid=401,
                                       metagraph=snapshot)
-print(json.dumps({'result':result,'network':registry.BITTENSOR_NETWORK,'netuid':registry.BITTENSOR_NETUID}))
+print(json.dumps({'result':result,'network':config.BITTENSOR_NETWORK,'netuid':config.BITTENSOR_NETUID}))
 """.replace("ACTIVE", repr(active)).replace("PERMIT", repr(permit))
     env = dict(os.environ, BITTENSOR_NETWORK="finney", BITTENSOR_NETUID="71", PYTHONDONTWRITEBYTECODE="1")
     result = subprocess.run([sys.executable, "-c", source], cwd=ROOT, env=env,

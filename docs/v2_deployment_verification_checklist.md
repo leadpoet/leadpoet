@@ -35,7 +35,6 @@ python3.11 -m pytest -q \
   tests/lab_arena/test_validator_participation_postgres.py \
   tests/lab_arena/participation_original_judgments_postgres_test.py \
   tests/lab_arena/judgment_cache_postgres_test.py \
-  tests/test_supabase_schema_preflight_v2.py \
   tests/lab_arena/test_lab_arena_store.py \
   tests/lab_arena/test_scorer_image_access.py \
   tests/lab_arena/test_leased_images.py \

@@ -36,14 +36,14 @@ from leadpoet_canonical.hotkey_authority_v2 import (
     validate_chain_signing_profile,
 )
 from leadpoet_canonical.lab_arena_rewards import signing_key_from_document
-from validator_tee.enclave.arena_weight_signer import ArenaWeightSigner
-from validator_tee.enclave.chain_source_v2 import (
+from lab_arena.chain_source import (
     ValidatorChainSourceV2,
     ValidatorChainSourceV2Error,
 )
+from lab_arena.weight_signer import ArenaWeightSigner
 
 
-_PROFILE_ROOT = Path(__file__).resolve().parents[1] / "validator_tee" / "enclave"
+_PROFILE_ROOT = Path(__file__).resolve().parent
 _PUBLIC_PROFILES = {
     "finney": _PROFILE_ROOT / "chain_signing_profile_v2.json",
     "test": _PROFILE_ROOT / "chain_signing_profile_test_v2.json",
@@ -136,7 +136,6 @@ class HttpsJsonRpcTransport:
         method: str,
         params: Sequence[Any],
         request_id: int,
-        **_context: Any,
     ) -> Any:
         try:
             body = json_rpc_request(method, params, int(request_id))
@@ -221,7 +220,7 @@ class HttpsJsonRpcTransport:
 
 
 class HostValidatorChainSource(ValidatorChainSourceV2):
-    """Reuse finalized chain proofs with ordinary host HTTPS transports."""
+    """Bind finalized chain proofs to ordinary host HTTPS transports."""
 
     def __init__(
         self,
@@ -243,19 +242,6 @@ class HostValidatorChainSource(ValidatorChainSourceV2):
             finalization_sleep=finalization_sleep,
             epoch_authority_supplier=lambda: authority,
         )
-
-    @staticmethod
-    def _result(value: Any) -> Dict[str, Any]:
-        # The shared proof code consumes these two collections only for the
-        # old measured transport receipt graph.  Host validation has no such
-        # receipt boundary, so the collections are intentionally empty.
-        return {"result": value, "attempts": [], "artifacts": []}
-
-    def _call(self, **kwargs: Any) -> Dict[str, Any]:
-        return self._result(self._live_transport.call(**kwargs))
-
-    def _archive_call(self, **kwargs: Any) -> Dict[str, Any]:
-        return self._result(self._host_archive_transport.call(**kwargs))
 
     def close(self) -> None:
         transports = (self._live_transport, self._host_archive_transport)

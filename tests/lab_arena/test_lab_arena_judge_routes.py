@@ -128,10 +128,8 @@ JUDGE_SOURCE_FILES = (
     "qualification/scoring/intent_signal_gate.py",
     "qualification/scoring/verification_helpers.py",
     "qualification/scoring/role_batch_check.py",
-    "qualification/scoring/intent_precheck.py",
     "qualification/scoring/company_verification.py",
     "qualification/scoring/intent_verification_three_stage.py",
-    "qualification/scoring/deepline_evidence_repair.py",
     "gateway/qualification/utils/helpers.py",
 )
 # Bare OpenAI names passed to ``openrouter_chat`` and any vendor-prefixed id, including

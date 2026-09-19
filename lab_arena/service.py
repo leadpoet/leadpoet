@@ -4112,34 +4112,6 @@ class ArenaService:
             raise ServiceError("lease_token_invalid", 403)
         return token
 
-    def _ledger_calls(self, run_id: str) -> List[Dict[str, Any]]:
-        heads: Dict[str, Dict[str, Any]] = {}
-        reservations: Dict[str, Dict[str, Any]] = {}
-        for entry in self._store.list_ledger(run_id=run_id):
-            identity = entry.get("call_identity")
-            if not identity:
-                continue
-            heads[identity] = entry
-            if entry["entry_kind"] == "reservation":
-                reservations[identity] = entry
-        calls = []
-        for identity, head in heads.items():
-            reservation = reservations.get(identity, head)
-            doc = reservation.get("entry_doc") or {}
-            outcome = {"settlement": "settled", "uncertain": "uncertain", "refusal": "refused", "recovery": "recovered", "reservation": "reserved", "dispatch": "dispatched"}[head["entry_kind"]]
-            terminal = head.get("terminal_response") or {}
-            status = terminal.get("status") if head["entry_kind"] == "settlement" else None
-            response_hash = None
-            if head["entry_kind"] == "settlement" and terminal.get("body_b64") is not None:
-                import base64
-
-                response_hash = contracts.hash_bytes(base64.b64decode(terminal["body_b64"]))
-            calls.append({
-                "call_identity": identity, "operation_id": reservation.get("operation_id"), "request_hash": doc.get("request_hash"), "outcome": outcome, "status": status, "response_hash": response_hash,
-                "reserved_microusd": int(reservation.get("amount_microusd") or 0) if head["entry_kind"] != "refusal" else 0, "actual_microusd": int(head.get("amount_microusd") or 0) if head["entry_kind"] in ("settlement", "uncertain") else (0 if head["entry_kind"] in ("refusal", "recovery") else int(reservation.get("amount_microusd") or 0)),
-            })
-        return calls
-
     # -- daily driver (section 14.4) -------------------------------------------
 
     def advance_round(self, round_id: str) -> Dict[str, Any]:

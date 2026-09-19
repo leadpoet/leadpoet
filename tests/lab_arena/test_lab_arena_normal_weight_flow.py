@@ -42,7 +42,7 @@ from tests.lab_arena.test_lab_arena_service_round import (
     assert_canary_absent,
 )
 from tests.postgres_migration_harness import SCRIPTS
-from validator_tee.enclave.arena_weight_signer import ArenaWeightSigner
+from lab_arena.weight_signer import ArenaWeightSigner
 
 RETIRED_INCENTIVE_TABLES = (
     "research_reimbursement_awards",
@@ -325,7 +325,7 @@ class _ExternalSource:
     def read_finalized_head(self): return {"block": 110, "block_hash": "0x" + "8" * 64}
     def find_finalized_extrinsic_inclusion(self, **_):
         if not self.included:
-            from validator_tee.enclave.chain_source_v2 import ValidatorChainSourceV2Error
+            from lab_arena.chain_source import ValidatorChainSourceV2Error
             raise ValidatorChainSourceV2Error("authorized extrinsic range is not finalized")
         return {"finalized_block": 110, "finalized_block_hash": "0x" + "8" * 64,
             "state_transition_hash": "sha256:" + "9" * 64}
@@ -563,7 +563,7 @@ def test_scoring_reward_normal_validators_restart_and_chain_readback(
 
     profile = load_public_chain_signing_profile(
         "finney",
-        path=Path("validator_tee/enclave/chain_signing_profile_v2.json"),
+        path=Path("lab_arena/chain_signing_profile_v2.json"),
     )
     outcomes, vectors = [], []
     miner = Keypair.create_from_uri("//ArenaWeightMiner")

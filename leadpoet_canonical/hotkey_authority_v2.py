@@ -355,45 +355,6 @@ def select_chain_signing_profile(
     return selected
 
 
-def resolve_chain_signing_profile_hash(
-    value: Mapping[str, Any],
-    profile_hash: Any,
-    *,
-    runtime_spec_version: Any = None,
-) -> Dict[str, Any]:
-    """Resolve an authorization to one exact member of a measured manifest."""
-
-    expected_hash = _hash(profile_hash, "chain_signing_profile_hash")
-    candidates = list(chain_signing_profiles(value))
-    if runtime_spec_version is not None:
-        manifest = validate_chain_signing_profile(value)
-        candidates.append(
-            select_chain_signing_profile(
-                manifest,
-                runtime_version={
-                    "specVersion": runtime_spec_version,
-                    "transactionVersion": manifest["transaction_version"],
-                },
-                genesis_hash=manifest["genesis_hash"],
-            )
-        )
-    matches_by_hash = {
-        sha256_json(profile): profile for profile in candidates
-    }
-    matches = [
-        profile
-        for digest, profile in matches_by_hash.items()
-        if digest == expected_hash
-    ]
-    _require(
-        len(matches) == 1,
-        "chain signing profile hash is not explicitly supported",
-    )
-    return matches[0]
-
-
-def chain_signing_profile_hash(value: Mapping[str, Any]) -> str:
-    return sha256_json(validate_chain_signing_profile(value))
 
 
 def encode_commit_timelocked_call(

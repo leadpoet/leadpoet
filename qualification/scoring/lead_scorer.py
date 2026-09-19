@@ -1,34 +1,7 @@
-"""
-Qualification System: Model Competition Scoring
+"""Arena company-fit verification and intent scoring.
 
-This module implements the validator-side scoring for the Lead
-Qualification Agent competition (a.k.a. the model competition).
-
-As of May 2026 the competition surfaces COMPANIES from the open web
-that match an ICP and carry verifiable intent signals — NOT contacts.
-The historical lead-mode pipeline (DB row equality, role / seniority /
-decision-maker LLM, email validation) has been removed in favor of a
-single-path company-mode pipeline.  Rationale: cleanly finding
-contacts requires Apify / LinkedIn scraping, which we do not want
-baked into the base miner model.
-
-Scoring flow:
-  1. ``run_company_zero_checks`` — deterministic gates (industry +
-     sub-industry + country match, dup-company tracking, hard time
-     limit).  No role / seniority / email checks.
-  2. ``verify_company_exists`` — HTTP fetch of the company website;
-     fail → score 0.  Plays the anti-fabrication role that DB row
-     equality used to play in the old lead-mode pipeline.
-  3. ``score_company_icp_fit`` — single LLM call, 0-40 (industry,
-     product fit, structural fit, intent-class fit; no role).
-  4. ``score_company_intent_signal`` — per-signal verification via
-     ``verify_intent_signal`` + URL dedup + time decay, 0-60.
-  5. Cost variability penalty.
-  6. Final score = max(0, icp_fit + intent_final - cost_penalty).
-
-Max Score: MAX_COMPANY_TOTAL_SCORE = 100.
-
-This module is the validator-side model-competition scorer.
+Companies pass deterministic fit and identity gates before intent evidence is
+verified. The competition adapter adds contact checks and score aggregation.
 """
 
 import os
@@ -39,12 +12,10 @@ import logging
 import unicodedata
 from datetime import date, datetime
 from typing import Any, Set, Optional, Tuple, List, Mapping, Sequence
-from collections import Counter
 from urllib.parse import unquote, urlparse, urlsplit
 
 from gateway.qualification.config import CONFIG
 from gateway.qualification.models import (
-    LeadOutput,
     ICPPrompt,
     LeadScoreBreakdown,
     CompanyOutput,
@@ -68,7 +39,6 @@ from qualification.scoring.country_data import US_STATES
 from qualification.scoring.verification_helpers import (
     is_generic_intent_description,
     check_future_date,
-    openrouter_chat,
 )
 from qualification.scoring.intent_signal_gate import (
     _claim_max_age_days,
@@ -127,16 +97,6 @@ from qualification.scoring.linkedin_company_size import (
     STRUCTURED_PROFILE_SOURCE_FIELD,
 )
 
-# Feature flag for the strict LLM judge (Layer 4 of intent_signal_gate).
-# On by default.  Set INTENT_GATE_STRICT_JUDGE_ENABLED=false to disable
-# the Layer 4 LLM judge; Layers 1-3 (anti-bot, structural URL/category,
-# freshness window, self-published bias) still run inside
-# verify_intent_signal regardless.
-INTENT_GATE_STRICT_JUDGE_ENABLED = (
-    os.getenv("INTENT_GATE_STRICT_JUDGE_ENABLED", "true").strip().lower()
-    in ("true", "1", "yes", "on")
-)
-
 logger = logging.getLogger(__name__)
 
 
@@ -144,14 +104,6 @@ logger = logging.getLogger(__name__)
 # Configuration
 # =============================================================================
 
-# Score component maximums
-# No decision-maker / role / contact dimension: there is no contact
-# in the model competition.  The 40-point ICP-fit budget covers
-# industry + product + structural + intent-class fit; intent signals
-# carry the other 60.
-MAX_COMPANY_ICP_FIT_SCORE = 40
-MAX_COMPANY_INTENT_SIGNAL_SCORE = 60
-MAX_COMPANY_TOTAL_SCORE = MAX_COMPANY_ICP_FIT_SCORE + MAX_COMPANY_INTENT_SIGNAL_SCORE  # = 100
 MAX_COMPETITION_INTENT_SCORE = 100
 COMPETITION_INTENT_CAP_BY_SIGNAL_COUNT = {
     1: 60.0,
@@ -161,13 +113,6 @@ COMPETITION_INTENT_CAP_BY_SIGNAL_COUNT = {
     5: 96.0,
     6: 100.0,
 }
-
-# Per-signal LLM score cap (each individual intent signal scores 0-60
-# inside ``_score_single_intent_signal``).
-MAX_INTENT_SIGNAL_SCORE = MAX_COMPANY_INTENT_SIGNAL_SCORE
-
-# LLM temperature for scoring (slightly higher for nuanced scoring)
-SCORING_TEMPERATURE = 0.4
 
 
 def _company_fit_failure_reason(
@@ -182,207 +127,6 @@ def _company_fit_failure_reason(
             detail = "independent employee-size verification failed; " + detail
         return f"{gate} unavailable: {detail}"
     return f"{gate} failed: {detail}"
-
-
-# =============================================================================
-# Main Scoring Function — Company-Mode Model Competition
-# =============================================================================
-#
-# Single-path scorer.  Lead-mode (DB-row equality + role / seniority /
-# decision-maker LLM + email validation) was removed when the model
-# competition was retargeted to surface high-intent COMPANIES from the
-# open web (see module docstring).  The historical lead-mode helpers
-# (_score_single_intent_signal, _apply_signal_time_decay,
-# _extract_domain, detect_structural_similarity, time-bound ICP
-# regex, etc.) remain in this module because company-mode scoring uses them.
-#
-# Total max score = MAX_COMPANY_TOTAL_SCORE = 100 (40 ICP + 60 intent),
-# so the existing champion thresholds in CONFIG
-# (MINIMUM_CHAMPION_SCORE, CHAMPION_DETHRONING_THRESHOLD_POINTS) carry
-# over unchanged.
-
-
-async def score_company(
-    company: CompanyOutput,
-    icp: ICPPrompt,
-    run_cost_usd: float,
-    run_time_seconds: float,
-    seen_companies: Set[str],
-    force_fail_reason: Optional[str] = None,
-    is_reference_model: bool = False,
-) -> LeadScoreBreakdown:
-    """Score a CompanyOutput against an ICP.
-
-    Returns a ``LeadScoreBreakdown`` with the historical four-field
-    shape (``icp_fit``, ``decision_maker``, ``intent_signal_*``,
-    penalties, ``final_score``) so the validator's aggregation,
-    transparency logging, and champion-status reporting can stay
-    unchanged.  ``decision_maker`` is always 0 (there is no contact
-    in this model competition); the 40-point ICP-fit budget covers
-    industry + product + structural + intent-class fit.
-
-    Pipeline:
-
-      0. Forced-fail short-circuit (e.g. structural-templating
-         detection from the caller's per-batch dedup pass).
-      1. ``run_company_zero_checks`` — country/geo match, duplicate
-         company tracking, cost / time hard limits.  Skips role /
-         seniority / DB-row checks.
-      2. ``_run_company_binary_fit_checks`` — exact employee-size,
-         exclusion, required-attribute, and conditional stage gates.
-      3. ``verify_company_exists`` — first-party homepage binding of
-         the name, website, and submitted LinkedIn company identity.
-      4. ``score_company_icp_fit`` — single LLM call, 0-40 score
-         (richer prompt than lead-mode ICP fit).
-      5. ``score_company_intent_signal`` — per-signal verification +
-         time decay, identical algorithm to lead-mode.  Fabrication
-         detection: if all signals are fabricated, zero entire score.
-      6. Cost variability penalty (same rules as lead-mode).
-      7. ``final_score = max(0, icp_fit + intent_final - cost_penalty)``.
-    """
-    if force_fail_reason:
-        logger.info(
-            f"Company forced to fail (company-mode): {force_fail_reason}"
-        )
-        return LeadScoreBreakdown(
-            icp_fit=0,
-            decision_maker=0,
-            intent_signal_raw=0,
-            time_decay_multiplier=1.0,
-            intent_signal_final=0,
-            cost_penalty=0,
-            time_penalty=0,
-            final_score=0,
-            failure_reason=force_fail_reason,
-        )
-
-    company_fit = await _verify_company_fit(
-        company,
-        icp,
-        run_cost_usd,
-        run_time_seconds,
-        seen_companies,
-        require_https_transport=True,
-    )
-    gate_receipts = [company_fit.receipt("company_fit")]
-    if company_fit.decision != COMPANY_FIT_MATCH:
-        failure_reason = _company_fit_failure_reason("Company fit", company_fit)
-        logger.info("Company failed shared fit verifier: %s", failure_reason)
-        return _zero_company_breakdown(
-            failure_reason,
-            verifier_gate_receipts=gate_receipts,
-        )
-
-    # -----------------------------------------------------------------
-    # STEP 3: Mark company as seen (first lead per company wins)
-    # -----------------------------------------------------------------
-    if company.company_name:
-        seen_companies.add(company.company_name.lower().strip())
-
-    # -----------------------------------------------------------------
-    # STEP 4: LLM-based scoring
-    # -----------------------------------------------------------------
-    try:
-        icp_fit = await score_company_icp_fit(company, icp)
-        logger.debug(f"Company ICP fit score: {icp_fit}")
-
-        intent_raw, intent_final, decay_multiplier, _max_confidence, all_fabricated = (
-            await score_company_intent_signal(company, icp)
-        )
-        logger.debug(
-            f"Company intent signal avg_raw={intent_raw:.1f}, "
-            f"avg_final={intent_final:.1f}, decay={decay_multiplier:.2f}"
-        )
-
-        # Fabrication zeroing — same rule as lead-mode.
-        if all_fabricated:
-            logger.warning(
-                f"❌ ALL INTENT SIGNALS FABRICATED for company "
-                f"{company.company_name!r} — zeroing entire score"
-            )
-            return _zero_company_breakdown(
-                "Intent fabrication detected (hardcoded date or generic claim)",
-                verifier_gate_receipts=gate_receipts,
-            )
-    except Exception as e:
-        logger.error(f"Company-mode LLM scoring failed: {e}")
-        return _zero_company_breakdown(
-            f"LLM scoring error: {str(e)[:100]}",
-            verifier_gate_receipts=gate_receipts,
-        )
-
-    # -----------------------------------------------------------------
-    # STEP 5: Cost variability penalty (same rules as lead-mode)
-    # -----------------------------------------------------------------
-    # The reference / baseline model that the validator runs daily to set
-    # the per-day champion floor is exempt from the cost variability
-    # penalty — its purpose is to set a fair ceiling on what's achievable,
-    # not to compete on cost.  Miner submissions remain subject to the
-    # penalty as before.  The actual cost / time are logged in either
-    # case so the value is fully traceable independent of the penalty.
-    cost_penalty = 0.0
-    time_penalty = 0.0
-    cost_penalty_threshold = CONFIG.get_cost_penalty_threshold()
-    cost_over = run_cost_usd > cost_penalty_threshold
-    if is_reference_model:
-        # Trace: the cost still must be visible even though no penalty applies.
-        logger.info(
-            f"[reference_model] cost_recorded=${run_cost_usd:.4f} "
-            f"time_recorded={run_time_seconds:.1f}s  "
-            f"threshold=${cost_penalty_threshold:.4f}  "
-            f"would_have_penalized={cost_over}  "
-            f"penalty_applied=False (exempt)"
-        )
-    else:
-        if cost_over:
-            cost_penalty = float(CONFIG.VARIABILITY_PENALTY_POINTS)
-            logger.info(
-                f"[miner] cost variability penalty applied: "
-                f"${run_cost_usd:.4f} > ${cost_penalty_threshold:.4f}  "
-                f"penalty=-{cost_penalty:.0f} pts"
-            )
-        else:
-            logger.debug(
-                f"[miner] cost ${run_cost_usd:.4f} within threshold "
-                f"${cost_penalty_threshold:.4f}, no penalty"
-            )
-
-    # -----------------------------------------------------------------
-    # STEP 6: Final score (floor at 0, ceiling at MAX_COMPANY_TOTAL_SCORE)
-    # -----------------------------------------------------------------
-    total_raw = icp_fit + intent_final
-    final_score = max(0.0, total_raw - cost_penalty - time_penalty)
-    final_score = min(final_score, float(MAX_COMPANY_TOTAL_SCORE))
-
-    total_penalty = cost_penalty + time_penalty
-    role_tag = "reference" if is_reference_model else "miner"
-    if total_penalty > 0:
-        logger.info(
-            f"Company scored [{role_tag}]: {final_score:.2f} "
-            f"(ICP: {icp_fit}, Intent: {intent_final:.2f}, "
-            f"cost=${run_cost_usd:.4f}, time={run_time_seconds:.1f}s, "
-            f"Variability penalty: -{total_penalty:.0f} pts)"
-        )
-    else:
-        logger.info(
-            f"Company scored [{role_tag}]: {final_score:.2f} "
-            f"(ICP: {icp_fit}, Intent: {intent_final:.2f}, "
-            f"cost=${run_cost_usd:.4f}, time={run_time_seconds:.1f}s, "
-            f"No variability penalty)"
-        )
-
-    return LeadScoreBreakdown(
-        icp_fit=icp_fit,
-        decision_maker=0,
-        intent_signal_raw=intent_raw,
-        time_decay_multiplier=decay_multiplier,
-        intent_signal_final=intent_final,
-        cost_penalty=cost_penalty,
-        time_penalty=time_penalty,
-        final_score=final_score,
-        failure_reason=None,
-        verifier_gate_receipts=gate_receipts,
-    )
 
 
 _SCORER_REVERIFY_MODEL = "perplexity/sonar"
@@ -3560,12 +3304,9 @@ async def _verify_company_fit(
         )
     precheck = await run_company_zero_checks(
         company,
-        icp,
-        run_cost_usd,
         run_time_seconds,
         seen_companies,
         gate_receipts=supporting_receipts,
-        defer_fit_dimensions=True,
     )
     if precheck.decision != COMPANY_FIT_MATCH:
         return _complete_company_fit_result(
@@ -3895,8 +3636,7 @@ async def score_company_competition_intent(
 ) -> LeadScoreBreakdown:
     """Score one Arena company with binary fit gates and 0-100 intent score.
 
-    This keeps Research Lab intent-only scoring separate from the public score
-    shape. Both paths use the same deterministic company-fit hard gates.
+    Company-fit gates run before intent evidence verification.
     """
     if force_fail_reason:
         logger.info(
@@ -3948,37 +3688,6 @@ async def score_company_competition_intent(
                 verifier_gate_receipts=gate_receipts or None,
             )
         if all_signals_unverified:
-            # A real company whose submitted evidence URL was weak dies here
-            # as a false negative. Before finalizing the zero, ask for
-            # replacement evidence sources for the same claim and re-verify
-            # them through this same scorer — repair supplies candidates,
-            # never verdicts.
-            repaired = await _attempt_competition_evidence_repair(
-                company,
-                icp,
-                integrity_policy=integrity_policy,
-                company_quality=company_quality,
-                verified_company_identity=verified_identity_receipt(gate_receipts),
-                original_signal_results=signal_results,
-            )
-            if repaired is not None:
-                (
-                    intent_raw,
-                    intent_final,
-                    decay_multiplier,
-                    _max_confidence,
-                    all_signals_unverified,
-                    signal_results,
-                ) = repaired
-                if _intent_verifier_unavailable(
-                    signal_results, integrity_policy=integrity_policy
-                ):
-                    return _zero_company_breakdown(
-                        "Intent verification unavailable: verifier provider error",
-                        intent_signals_detail=signal_results,
-                        verifier_gate_receipts=gate_receipts or None,
-                    )
-        if all_signals_unverified:
             logger.warning(
                 f"All competition intent signals failed for company "
                 f"{company.company_name!r} — zeroing entire score"
@@ -4029,123 +3738,6 @@ async def score_company_competition_intent(
         intent_signals_detail=signal_results,
         verifier_gate_receipts=gate_receipts or None,
     )
-
-
-async def _attempt_competition_evidence_repair(
-    company: CompanyOutput,
-    icp: ICPPrompt,
-    *,
-    integrity_policy: bool = False,
-    company_quality: bool = False,
-    verified_company_identity: Optional[Mapping[str, Any]] = None,
-    original_signal_results: Optional[List[dict]] = None,
-) -> Optional[Tuple[float, float, float, int, bool, List[dict]]]:
-    """Try to rescue an all-zero intent verdict with repaired evidence URLs.
-
-    Returns the re-scored tuple when a repaired source verifies, else None so
-    the original zero stands. Never raises; bounded to one repair run and at
-    most two re-verified sources per company.
-    """
-    if integrity_policy:
-        # A rejected integrity bundle is terminal. Optional post-verdict
-        # repair cannot turn it into another draw of the same criterion.
-        return None
-    if company_quality and any(
-        isinstance(result, Mapping)
-        and isinstance(result.get("judge_verdict"), Mapping)
-        and isinstance(
-            result["judge_verdict"].get("verification_trace"), Mapping
-        )
-        and isinstance(
-            result["judge_verdict"]["verification_trace"].get(
-                "identity_clarification"
-            ),
-            Mapping,
-        )
-        and result["judge_verdict"]["verification_trace"][
-            "identity_clarification"
-        ].get("attempted")
-        for result in (original_signal_results or [])
-    ):
-        # This evidence already received its one targeted identity
-        # clarification. Do not turn an unresolved subject into another
-        # evidence-source lottery.
-        return None
-    try:
-        from qualification.scoring import deepline_evidence_repair as _repair
-
-        if not _repair.enabled():
-            return None
-        signals = list(company.intent_signals or [])
-        if not signals:
-            return None
-        primary = next(
-            (
-                signal
-                for signal in signals
-                if getattr(signal, "matched_icp_signal", -1) == 0
-            ),
-            None,
-        )
-        if primary is None:
-            return None
-        criterion = ""
-        icp_signals = getattr(icp, "intent_signals", None) or []
-        if icp_signals:
-            criterion = str(icp_signals[0])
-        if not criterion:
-            return None
-        sources = await _repair.repair_sources(
-            company_name=company.company_name or "",
-            company_domain=company.company_website or "",
-            requested_criterion=criterion,
-            evidence_kind="intent",
-            existing_url=getattr(primary, "url", None),
-        )
-        if not sources:
-            return None
-        replacement_signals = []
-        for source in sources[: _repair.MAX_SOURCES]:
-            url = str(source.get("url") or "").strip()
-            if not url.startswith(("http://", "https://")):
-                continue
-            update: dict = {"url": url}
-            excerpt = str(source.get("excerpt") or "").strip()
-            if excerpt:
-                update["snippet"] = excerpt[:600]
-            published = str(source.get("published_date") or "").strip()
-            if published:
-                update["date"] = published
-            replacement_signals.append(primary.model_copy(update=update))
-        if not replacement_signals:
-            return None
-        candidate = company.model_copy(update={"intent_signals": replacement_signals})
-        result = await score_company_competition_intent_signal(
-            candidate,
-            icp,
-            integrity_policy=integrity_policy,
-            **({"company_quality": True} if company_quality else {}),
-            **(
-                {"verified_company_identity": verified_company_identity}
-                if verified_company_identity is not None
-                else {}
-            ),
-        )
-        if result[4]:  # still all fabricated — repair found nothing verifiable
-            return None
-        logger.info(
-            "✅ deepline_evidence_repair_rescued company=%r repaired_sources=%d",
-            company.company_name,
-            len(replacement_signals),
-        )
-        return result
-    except Exception as exc:  # noqa: BLE001 — repair must never break scoring
-        logger.warning(
-            "deepline_evidence_repair_hook_error company=%r error=%s",
-            getattr(company, "company_name", ""),
-            str(exc)[:160],
-        )
-        return None
 
 
 def _zero_company_breakdown(
@@ -4228,14 +3820,6 @@ def _run_company_binary_fit_checks(
                 f"Company stage mismatch: '{company.company_stage}' vs '{icp.company_stage}'",
             )
     return True, None
-
-
-def _run_competition_binary_fit_checks(
-    company: CompanyOutput, icp: ICPPrompt
-) -> Tuple[bool, Optional[str]]:
-    """Backward-compatible name for the shared public/Research Lab gate."""
-
-    return _run_company_binary_fit_checks(company, icp)
 
 
 def _normalize_linkedin_employee_bucket(value) -> str:
@@ -4412,180 +3996,6 @@ def _company_stage_matches(observed: str, requested: str) -> bool:
         requested == "series c+"
         and observed in _SERIES_C_PLUS_MATCHING_STAGES
     )
-
-
-async def score_company_icp_fit(
-    company: CompanyOutput, icp: ICPPrompt, api_key: str = ""
-) -> float:
-    """Company-mode ICP-fit scorer (0-40).
-
-    Replaces the lead-mode trio of ``score_icp_fit`` (industry +
-    product + structural fit, max 20) + ``score_decision_maker``
-    (role + authority, max 20).  In company-mode there is no
-    contact, so the decision-maker dimension is removed and the
-    ICP-fit budget is widened to 40 with four sub-scores:
-
-      1. Industry / sub-industry fit            (0-10)
-      2. Product / service buying fit           (0-10)
-      3. Structural fit (size, geo, stage)      (0-10)
-      4. ICP intent-class alignment             (0-10)
-         (Does this company plausibly carry the
-          *kind* of intent the buyer asked for?
-          Verifying individual signals is the
-          job of score_company_intent_signal —
-          here we just check fit.)
-    """
-    icp_product = icp.product_service or ""
-    icp_prompt_text = icp.prompt or ""
-    icp_signals_str = (
-        "; ".join(icp.intent_signals)
-        if icp.intent_signals
-        else "Any verifiable buying intent"
-    )
-
-    prompt = f"""You are scoring how well a company matches a buyer's Ideal Customer Profile on a 0-40 scale.
-
-ICP CRITERIA:
-- Industry: {icp.industry}
-- Sub-industry: {icp.sub_industry}
-- Employee count: {icp.employee_count}
-- Company stage: {icp.company_stage}
-- Geography: {icp.geography}
-- Product/service the buyer is selling: {icp_product}
-- Intent signals the buyer wants the company to be showing: {icp_signals_str}
-- Full buyer request: "{icp_prompt_text}"
-
-COMPANY DATA:
-- Company: {company.company_name}
-- Website: {company.company_website}
-- Industry: {company.industry}
-- Sub-industry: {company.sub_industry}
-- Employee count: {company.employee_count}
-- Company stage: {company.company_stage}
-- Location: {company.country} ({company.state or 'state unspecified'})
-- Description: {company.description or '(none provided)'}
-
-SCORING — give a sub-score for EACH dimension then sum.  All dimensions are 0-10.
-
-1. INDUSTRY FIT (0-10):
-   - Exact industry + sub-industry match: 9-10
-   - Same industry, different sub-industry: 6-8
-   - Adjacent/related industry: 3-5
-   - Unrelated: 0-2
-
-2. PRODUCT-FIT (0-10):
-   - Company is clearly a likely buyer of "{icp_product}" given its
-     business model: 8-10
-   - Company plausibly uses this kind of product: 5-7
-   - Weak product fit: 2-4
-   - No connection: 0-1
-
-3. STRUCTURAL FIT (0-10):
-   - Employee count, company stage, AND geography all match the ICP: 9-10
-   - 2 of 3 structural criteria match: 6-8
-   - 1 of 3 structural criteria match: 3-5
-   - None match: 0-2
-
-4. INTENT-CLASS FIT (0-10):
-   This is about whether the *type* of company is consistent with the
-   buyer's intent class, not whether individual intent signals are
-   verified (that's done separately).
-   - The company is the kind of company that would plausibly show
-     the buyer's expected intent signals AND its description /
-     industry is consistent with those signals: 8-10
-   - Plausible match but mixed signals: 5-7
-   - Tenuous: 2-4
-   - Clearly inconsistent: 0-1
-
-Sum the four sub-scores.  Final score is in [0, 40].
-
-CRITICAL: Be conservative.  If the company's industry / sub-industry
-does NOT match the ICP, even high product-fit and structural-fit
-shouldn't push the total above 20.  The buyer told us their industry.
-
-Respond with ONLY a single integer 0-40."""
-
-    response = await openrouter_chat(prompt, model="gpt-4o-mini", api_key=api_key)
-    score = extract_score(response, max_score=MAX_COMPANY_ICP_FIT_SCORE)
-    return score
-
-
-async def score_company_intent_signal(
-    company: CompanyOutput, icp: ICPPrompt, api_key: str = ""
-) -> Tuple[float, float, float, int, bool]:
-    """Score ALL intent signals on a CompanyOutput.
-
-    Identical algorithm to ``score_intent_signal`` (lead-mode) but
-    parameterized over CompanyOutput fields.  Reuses
-    ``_score_single_intent_signal`` so every per-signal rule
-    (verification via ``verify_intent_signal``, source multipliers,
-    time decay, dedup, fabrication marker) is shared.
-
-    Returns ``(avg_raw, avg_final, avg_decay, max_confidence, all_fabricated)``
-    — same tuple shape as ``score_intent_signal``.
-    """
-    icp_criteria = None  # Same as score_intent_signal — built inside _score_single
-    seen_domains: set = set()
-    signal_results = []
-
-    for signal in company.intent_signals:
-        domain = _extract_domain(signal.url)
-        if domain in seen_domains:
-            logger.warning(
-                f"  ⚠ Duplicate domain {domain!r} on company "
-                f"{company.company_name!r} — signal scores 0 (URL dedup)"
-            )
-            signal_results.append({
-                "raw": 0.0,
-                "after_decay": 0.0,
-                "decay": 0.0,
-                "confidence": 0,
-                "date_status": "fabricated",
-            })
-            continue
-        seen_domains.add(domain)
-
-        score, confidence, date_status, content_found_date, _matched_idx = (
-            await _score_single_intent_signal(
-                signal,
-                icp,
-                icp_criteria,
-                company.company_name,
-                company.company_website,
-                api_key=api_key,
-            )
-        )
-
-        after_decay, decay = _apply_signal_time_decay(
-            score, signal.date, date_status,
-            signal.source.value if hasattr(signal.source, 'value') else str(signal.source),
-            content_found_date=content_found_date,
-        )
-        signal_results.append({
-            "raw": score,
-            "after_decay": after_decay,
-            "decay": decay,
-            "confidence": confidence,
-            "date_status": date_status,
-        })
-
-    if not signal_results:
-        return 0.0, 0.0, 0.0, 0, True
-
-    raw_scores = [r["raw"] for r in signal_results]
-    decayed_scores = [r["after_decay"] for r in signal_results]
-    decays = [r["decay"] for r in signal_results if r["decay"] > 0]
-    confidences = [r["confidence"] for r in signal_results]
-
-    avg_raw = sum(raw_scores) / len(raw_scores)
-    avg_final = sum(decayed_scores) / len(decayed_scores)
-    avg_decay = sum(decays) / len(decays) if decays else 0.0
-    max_confidence = max(confidences) if confidences else 0
-    # Fabrication marker: every signal was either fabricated, a domain
-    # dup, or otherwise scored 0.  Matches lead-mode semantics.
-    all_fabricated = all(r["raw"] == 0.0 for r in signal_results)
-
-    return avg_raw, avg_final, avg_decay, max_confidence, all_fabricated
 
 
 async def score_company_competition_intent_signal(
@@ -4968,25 +4378,6 @@ def aggregate_competition_intent_scores(signal_scores: List[float]) -> float:
 
 
 # =============================================================================
-# Lead-mode ICP-fit / decision-maker / intent scorers REMOVED (May 2026)
-# =============================================================================
-# When the model competition was retargeted from leads-with-contacts to
-# companies-from-the-open-web, three lead-mode entry points
-# (``score_icp_fit(lead, icp)``, ``score_decision_maker(lead, icp)``,
-# and the lead-mode ``score_intent_signal(lead, icp)``) became dead
-# code and were deleted.  Their company-mode equivalents are
-# ``score_company_icp_fit(company, icp)`` and
-# ``score_company_intent_signal(company, icp)`` defined above.  There
-# is no decision-maker dimension in company-mode (there's no contact).
-#
-# The lead-mode helpers ``_score_single_intent_signal``,
-# ``_apply_signal_time_decay``, ``_extract_domain``,
-# ``_parse_intent_score_response``, ``SOURCE_TYPE_MULTIPLIERS``,
-# ``SOURCES_DATE_*``, ``_TIME_BOUND_ICP_PHRASES`` /
-# ``_icp_signal_is_time_bound`` are used by company-mode intent scoring.
-# =============================================================================
-
-# =============================================================================
 # Intent Signal Scoring
 # =============================================================================
 
@@ -5200,44 +4591,6 @@ def _icp_signal_is_time_bound(icp_signal_text: str) -> bool:
         return False
     return bool(_TIME_BOUND_ICP_PHRASES.search(icp_signal_text))
 
-def _parse_intent_score_response(
-    response: str,
-    max_score: int,
-    num_icp_signals: int,
-) -> Tuple[float, int]:
-    """Parse the LLM response into ``(raw_score, matched_icp_signal_idx)``.
-
-    Prefers strict JSON (``{"score": N, "matched_icp_signal_idx": I}``) but
-    falls back to regex number extraction for score if JSON parsing fails.
-    ``matched_icp_signal_idx`` is clamped to ``[-1, num_icp_signals - 1]``
-    and defaults to ``-1`` (no match) on any parse failure.
-    """
-    import json as _json
-    import re as _re
-
-    if not response:
-        return 0.0, -1
-
-    text = response.strip()
-    if text.startswith("```"):
-        text = _re.sub(r"^```(?:json)?\s*", "", text)
-        text = _re.sub(r"\s*```$", "", text)
-    match = _re.search(r"\{[^{}]*\}", text, _re.DOTALL)
-    json_str = match.group(0) if match else text
-
-    try:
-        obj = _json.loads(json_str)
-        score = float(obj.get("score", 0))
-        idx = int(obj.get("matched_icp_signal_idx", -1))
-    except Exception:
-        score = float(extract_score(response, max_score=max_score))
-        idx = -1
-
-    score = max(0.0, min(score, float(max_score)))
-    if num_icp_signals <= 0 or idx < 0 or idx >= num_icp_signals:
-        idx = -1
-    return score, idx
-
 
 async def _score_single_intent_signal(
     signal: "IntentSignal",
@@ -5314,7 +4667,6 @@ async def _score_single_intent_signal(
             "scrape_result_count": scrape.get("result_count"),
             "stage1": result.get("stage1"),
             "stage3": result.get("stage3"),
-            "corroboration": result.get("corroboration"),
             "identity_clarification": result.get("identity_clarification"),
             "intent_verdict": intent_verdict,
             "final_disposition": result.get("decision"),
@@ -5864,161 +5216,3 @@ def calculate_time_decay_multiplier(age_months: float) -> float:
         return 0.5
     else:
         return 0.25
-
-
-# =============================================================================
-# Helper Functions
-# =============================================================================
-
-def extract_score(response: str, max_score: int) -> float:
-    """
-    Extract numeric score from LLM response.
-    
-    Handles various response formats:
-    - Just a number: "15"
-    - With text: "Score: 15"
-    - With decimal: "15.5"
-    
-    Args:
-        response: The LLM response text
-        max_score: Maximum allowed score
-    
-    Returns:
-        Extracted score (capped at max_score), or 0.0 if not found
-    """
-    response = response.strip()
-    
-    # Try to find a number in the response
-    # Look for patterns like "15", "15.5", "Score: 15", etc.
-    patterns = [
-        r'^(\d+(?:\.\d+)?)\s*$',  # Just a number
-        r'(?:score|rating)[:=\s]+(\d+(?:\.\d+)?)',  # "Score: 15"
-        r'(\d+(?:\.\d+)?)\s*(?:out of|\/)',  # "15 out of" or "15/"
-        r'(\d+(?:\.\d+)?)',  # Any number (fallback)
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, response, re.IGNORECASE)
-        if match:
-            try:
-                score = float(match.group(1))
-                # Cap at max score
-                return min(score, float(max_score))
-            except ValueError:
-                continue
-    
-    logger.warning(f"Could not extract score from response: {response[:100]}")
-    return 0.0
-
-
-# =============================================================================
-# Structural Similarity Detection
-# =============================================================================
-
-def _normalize_for_similarity(text: str) -> str:
-    """Normalize text for similarity comparison - remove company-specific details."""
-    if not text:
-        return ""
-    # Lowercase and remove extra whitespace
-    text = " ".join(text.lower().split())
-    # Remove common variable parts (company names, dates, numbers)
-    text = re.sub(r'\b\d{4}[-/]\d{2}[-/]\d{2}\b', '[DATE]', text)  # ISO dates
-    text = re.sub(r'\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b', '[DATE]', text)  # Other dates
-    text = re.sub(r'\b\d+\s*(employees?|people|staff|workers)\b', '[EMPLOYEE_COUNT]', text)
-    text = re.sub(r'\$\d+[\d,]*\.?\d*\s*(million|m|billion|b|k)?\b', '[MONEY]', text)
-    text = re.sub(r'\b\d{3,}\b', '[NUMBER]', text)  # Large numbers
-    return text
-
-
-def detect_structural_similarity(leads: List[LeadOutput], threshold: float = 0.7) -> List[int]:
-    """
-    Detect leads with structurally similar intent signals.
-    
-    This catches gaming where models use templated responses with minor variations.
-    Gaming typically occurs in intent_signal.description and intent_signal.snippet.
-    
-    Args:
-        leads: List of leads to analyze
-        threshold: Similarity ratio threshold (0.7 = 70% similar)
-    
-    Returns:
-        List of indices of leads flagged for structural similarity
-    """
-    if len(leads) < 3:
-        return []  # Need at least 3 leads to detect patterns
-    
-    flagged_indices = []
-    
-    # Extract normalized intent descriptions and snippets (from first/primary signal)
-    # Gaming typically occurs here - models use templated intent signals
-    intent_descs = [
-        _normalize_for_similarity(lead.intent_signals[0].description if lead.intent_signals else "")
-        for lead in leads
-    ]
-    intent_snippets = [
-        _normalize_for_similarity(lead.intent_signals[0].snippet if lead.intent_signals else "")
-        for lead in leads
-    ]
-    
-    # Count similar patterns in intent descriptions
-    intent_desc_patterns = Counter()
-    for intent in intent_descs:
-        if len(intent) > 20:  # Only count substantial descriptions
-            # Create a simplified pattern (first 50 chars)
-            pattern = intent[:50]
-            intent_desc_patterns[pattern] += 1
-    
-    # Count similar patterns in intent snippets
-    intent_snippet_patterns = Counter()
-    for snippet in intent_snippets:
-        if len(snippet) > 20:
-            pattern = snippet[:50]
-            intent_snippet_patterns[pattern] += 1
-    
-    # Flag leads that match repeated patterns
-    for i, lead in enumerate(leads):
-        intent_desc_normalized = _normalize_for_similarity(
-            lead.intent_signals[0].description if lead.intent_signals else ""
-        )
-        intent_snippet_normalized = _normalize_for_similarity(
-            lead.intent_signals[0].snippet if lead.intent_signals else ""
-        )
-        
-        # Check if intent matches a repeated pattern
-        intent_desc_pattern = intent_desc_normalized[:50] if len(intent_desc_normalized) > 20 else ""
-        intent_snippet_pattern = intent_snippet_normalized[:50] if len(intent_snippet_normalized) > 20 else ""
-        
-        # If same pattern appears 3+ times, it's likely templated
-        intent_desc_repeated = intent_desc_patterns.get(intent_desc_pattern, 0) >= 3
-        intent_snippet_repeated = intent_snippet_patterns.get(intent_snippet_pattern, 0) >= 3
-        
-        if intent_desc_repeated or intent_snippet_repeated:
-            flagged_indices.append(i)
-            logger.warning(
-                f"Lead {i} flagged for structural similarity: "
-                f"intent_desc_repeated={intent_desc_repeated}, intent_snippet_repeated={intent_snippet_repeated}"
-            )
-    
-    # If more than 50% of leads are flagged, this is likely gaming
-    if len(flagged_indices) >= len(leads) * 0.5:
-        logger.error(
-            f"❌ STRUCTURAL GAMING DETECTED: {len(flagged_indices)}/{len(leads)} leads "
-            f"show templated patterns"
-        )
-    
-    return flagged_indices
-
-
-# =============================================================================
-# Batch Scoring + Summary  (lead-mode only — REMOVED May 2026)
-# =============================================================================
-#
-# ``score_leads_batch`` and ``summarize_scores`` were part of the old
-# leads-with-contacts pipeline. Both have been removed
-# in the company-mode cutover; the validator now loops over
-# ``CompanyOutput`` instances directly and calls ``score_company`` per
-# row.
-# Per-batch structural-similarity detection still lives in
-# ``detect_structural_similarity`` above and is invoked by the
-# validator before per-row scoring.
-# =============================================================================

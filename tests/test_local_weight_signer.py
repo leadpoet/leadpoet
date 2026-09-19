@@ -15,7 +15,7 @@ from lab_arena.local_weight_signer import (
     load_public_chain_signing_profile,
 )
 from lab_arena.signing import LocalSigner, signing_key_document
-from validator_tee.enclave.chain_source_v2 import ValidatorChainSourceV2Error
+from lab_arena.chain_source import ValidatorChainSourceV2Error
 
 
 class _Response:
@@ -390,7 +390,7 @@ def test_public_profile_selection_is_network_and_cutover_bound():
     )
     test_profile = (
         Path(__file__).resolve().parents[1]
-        / "validator_tee/enclave/chain_signing_profile_test_v2.json"
+            / "lab_arena/chain_signing_profile_test_v2.json"
     )
     with pytest.raises(LocalWeightSignerError, match="chain network"):
         build_local_weight_signer(

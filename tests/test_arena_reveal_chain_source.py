@@ -16,8 +16,8 @@ from leadpoet_canonical.chain_source_v2 import (
     weights_storage_key,
     ss58_encode_account_id,
 )
-from validator_tee.enclave import chain_source_v2 as module
-from validator_tee.enclave.chain_source_v2 import (
+from lab_arena import chain_source as module
+from lab_arena.chain_source import (
     ValidatorChainSourceV2,
     ValidatorChainSourceV2Error,
 )
@@ -284,18 +284,17 @@ def _source(monkeypatch, fixture: ArchiveFixture, *, finalized_head: int = 130):
         rpc_call=lambda **_: None, archive_rpc_call=lambda **_: None,
         epoch_authority_supplier=lambda: None,
     )
-    source._call = lambda **kwargs: {"result": (
+    source._call = lambda **kwargs: (
         "0x" + fixture.hashes[finalized_head]
         if kwargs["method"] == "chain_getFinalizedHead"
         else {"number": hex(finalized_head), "stateRoot": "0x" + "11" * 32,
               "extrinsicsRoot": "0x" + "22" * 32,
               "parentHash": "0x" + fixture.hashes[finalized_head - 1],
               "digest": {"logs": []}}
-    )}
-    source._archive_call = lambda **kwargs: {
-        "result": fixture.result(kwargs["method"], kwargs["params"]),
-        "attempts": [{}], "artifacts": [],
-    }
+    )
+    source._archive_call = lambda **kwargs: fixture.result(
+        kwargs["method"], kwargs["params"]
+    )
     # Metadata/profile decoding has its own production-fixture suite. These
     # tests retain the event-presence boundary while focusing on archive search.
     monkeypatch.setattr(module, "decode_runtime_metadata_commitment", lambda _: {})
@@ -339,7 +338,7 @@ def _measured_source(fixture: MeasuredArchiveFixture):
         archive_rpc_call=lambda **_: None,
         epoch_authority_supplier=lambda: None,
     )
-    source._call = lambda **kwargs: {"result": (
+    source._call = lambda **kwargs: (
         "0x" + fixture.hashes[fixture.reveal_block]
         if kwargs["method"] == "chain_getFinalizedHead"
         else {
@@ -349,12 +348,10 @@ def _measured_source(fixture: MeasuredArchiveFixture):
             "parentHash": "0x" + fixture.hashes[fixture.reveal_block - 1],
             "digest": {"logs": []},
         }
-    )}
-    source._archive_call = lambda **kwargs: {
-        "result": fixture.result(kwargs["method"], kwargs["params"]),
-        "attempts": [{}],
-        "artifacts": [],
-    }
+    )
+    source._archive_call = lambda **kwargs: fixture.result(
+        kwargs["method"], kwargs["params"]
+    )
     return source
 
 

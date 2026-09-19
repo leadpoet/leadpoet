@@ -15,7 +15,6 @@ from typing import Any, Mapping, Sequence
 
 GATEWAY_RESTART_TIMING_STAGES = frozenset(
     {
-        "active_release_lineage_selection",
         "ancestry_frontier_recovery",
         "ancestry_postcheckpoint",
         "ancestry_precheckpoint",
@@ -51,7 +50,6 @@ GATEWAY_RESTART_TIMING_STAGES = frozenset(
         "v2_kms_provision",
         "v2_offline_artifact_prepare",
         "v2_pre_shutdown_preflight",
-        "v2_release_lineage_revalidation",
         "v2_runtime_bootstrap",
         "v2_runtime_readiness",
         "validator_weight_input_http_check",

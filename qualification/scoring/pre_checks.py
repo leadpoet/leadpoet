@@ -1,64 +1,19 @@
-"""
-Qualification System: Pre-Score Validation (Automatic Zero Checks)
+"""Arena company prechecks and shared country matching.
 
-This module implements deterministic pre-checks that run BEFORE any
-LLM scoring for the company-mode model competition.  If a company
-output fails any of these checks, it automatically receives a score
-of 0 and the failure reason is recorded.
-
-These checks are designed to be:
-- Fast (no external API calls)
-- Deterministic (same input always produces same output)
-- Configurable (thresholds from CONFIG)
-
-Company-mode pre-checks (``run_company_zero_checks``):
-1. Per-lead HARD time limit (30 seconds) — instant fail safety net
-2. Industry sanity check — exact/fuzzy/broad-bucket matches pass;
-   plausible mismatches are deferred to the LLM ICP-fit scorer
-3. Sub-industry sanity check — exact/fuzzy matches pass; plausible
-   mismatches are deferred to the LLM ICP-fit scorer
-4. Country match
-5. Company-shaped data quality (placeholder text, suspicious chars)
-6. Duplicate company handling (first surface per company wins)
-
-NOTE: Cost and time VARIABILITY is handled via penalties in
-lead_scorer.py.  Role / seniority / email validation are intentionally
-ABSENT here — see module-level comment at the top of lead_scorer.py for
-the May 2026 company-mode cutover rationale.
-
-This is validator-side qualification logic.
+Company fit and contact verification run separately. Sourcing costs and
+execution deadlines are enforced by the Arena broker and runner.
 """
 
-import os
 import re
 import logging
 from typing import Any, Tuple, Optional, Set, NamedTuple, List, Dict
 
-try:
-    from rapidfuzz import fuzz
-except ImportError:
-    # Fallback to basic fuzzy matching if rapidfuzz not installed
-    import difflib
-    class FuzzFallback:
-        @staticmethod
-        def ratio(s1: str, s2: str) -> float:
-            return difflib.SequenceMatcher(None, s1, s2).ratio() * 100
-        @staticmethod
-        def partial_ratio(s1: str, s2: str) -> float:
-            # Simple partial match approximation
-            if len(s1) > len(s2):
-                s1, s2 = s2, s1
-            return difflib.SequenceMatcher(None, s1, s2).ratio() * 100
-    fuzz = FuzzFallback()
-
 from gateway.qualification.config import CONFIG
-from gateway.qualification.models import LeadOutput, ICPPrompt, CompanyOutput
+from gateway.qualification.models import CompanyOutput
 from qualification.scoring.company_fit_decision import (
-    COMPANY_FIT_DECISION_CONTRACT_ID,
     CompanyFitDecisionResult,
     company_fit_match,
     company_fit_mismatch,
-    company_fit_unavailable,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,105 +33,6 @@ class ValidationResult(NamedTuple):
 # Configuration Constants
 # =============================================================================
 
-# Fuzzy matching thresholds
-INDUSTRY_MATCH_THRESHOLD = 80  # 80% for industry
-SUB_INDUSTRY_MATCH_THRESHOLD = 70  # 70% for sub-industry
-
-
-def _norm_industry(label: str) -> str:
-    """Normalize LinkedIn/ICP industry labels for deterministic broad buckets."""
-    normalized = (label or "").lower().replace("&", " and ")
-    normalized = re.sub(r"[^a-z0-9 ]+", " ", normalized)
-    return re.sub(r"\s+", " ", normalized).strip()
-
-
-_INDUSTRY_BUCKETS: Dict[str, set[str]] = {
-    "software": {
-        "software", "information technology", "artificial intelligence",
-        "data and analytics", "privacy and security",
-        "software development", "computer software",
-        "it services and it consulting", "information technology and services",
-        "information services", "internet", "internet publishing",
-        "technology information and internet", "technology information and media",
-        "computer and network security", "network security",
-        "computer networking", "computer networking products", "computer games",
-        "cloud computing", "data infrastructure and analytics",
-        "mobile computing software products", "embedded software products",
-        "machine learning",
-    },
-    "finance": {
-        "financial services", "lending and investments", "payments",
-        "banking", "capital markets", "investment management",
-        "investment banking", "venture capital and private equity principals",
-        "insurance", "fintech",
-    },
-    "health_bio": {
-        "health care", "biotechnology",
-        "hospitals and health care", "biotechnology research",
-        "pharmaceutical manufacturing", "pharmaceuticals", "medical device",
-        "medical devices", "medical equipment manufacturing", "medical practices",
-        "mental health care", "wellness and fitness services",
-    },
-    "hardware_mfg": {
-        "hardware", "manufacturing",
-        "computer hardware", "computer hardware manufacturing",
-        "semiconductor manufacturing", "semiconductors",
-        "electrical and electronic manufacturing", "electronics",
-        "appliances electrical and electronics manufacturing",
-        "industrial machinery manufacturing", "machinery", "robotics",
-        "automation machinery manufacturing", "nanotechnology research",
-        "defense and space manufacturing",
-        "aviation and aerospace component manufacturing",
-        "computers and electronics manufacturing",
-    },
-    "commerce_retail": {
-        "commerce and shopping", "retail", "e-commerce",
-        "consumer goods", "wholesale", "retail apparel and fashion",
-        "food and beverage services", "consumer services",
-    },
-    "prof_services": {
-        "professional services", "business consulting and services",
-        "management consulting", "legal services", "accounting",
-        "staffing and recruiting", "outsourcing and offshoring consulting",
-    },
-    "marketing_ad": {
-        "advertising", "sales and marketing", "advertising services",
-        "marketing services", "marketing and advertising",
-        "public relations and communications services",
-    },
-    "real_estate": {
-        "real estate", "leasing real estate", "commercial real estate",
-        "real estate and equipment rental services",
-        "property management software", "proptech",
-    },
-    "energy": {
-        "energy", "oil and gas", "utilities", "renewables and environment",
-        "renewable energy semiconductor manufacturing",
-        "electric power generation", "services for renewable energy",
-    },
-    "transportation": {
-        "transportation", "transportation logistics supply chain and storage",
-        "truck transportation", "airlines and aviation", "freight and package transportation",
-        "logistics and supply chain",
-    },
-    "education": {
-        "education", "education administration programs", "higher education",
-        "primary and secondary education", "e-learning providers",
-        "e learning providers", "e-learning", "e learning", "edtech",
-        "educational technology",
-    },
-}
-
-_INDUSTRY_TO_BUCKET: Dict[str, str] = {
-    _norm_industry(name): bucket
-    for bucket, names in _INDUSTRY_BUCKETS.items()
-    for name in names
-}
-
-
-def _industry_bucket(label: str) -> Optional[str]:
-    return _INDUSTRY_TO_BUCKET.get(_norm_industry(label))
-
 # Placeholder text patterns that indicate fake/test data
 PLACEHOLDER_PATTERNS: List[str] = [
     "test", "asdf", "xxx", "sample", "example", "lorem", "ipsum",
@@ -193,344 +49,27 @@ SUSPICIOUS_CHAR_PATTERN = re.compile(r'[<>{}|\\\^~`\[\]]')
 # Main Validation Function — Company-Mode
 # =============================================================================
 
-def _taxonomy_industry_gate_mode() -> str:
-    """Resolve the taxonomy industry gate mode (disabled | shadow | enforce)."""
-    value = str(
-        os.environ.get("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE") or "shadow"
-    ).strip().lower()
-    if value not in {"disabled", "shadow", "enforce"}:
-        logger.warning(
-            "taxonomy_industry_gate_invalid_mode value=%r falling back to shadow",
-            value,
-        )
-        return "shadow"
-    return value
-
-
-def _resolved_semantic_mode() -> str:
-    """Resolve VERIFIER_SEMANTIC_GATES_MODE, defaulting to disabled on ANY error."""
-    try:
-        from leadpoet_verifier.semantic_gates import semantic_gate_mode
-
-        return semantic_gate_mode()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "semantic_gate_mode_unresolvable error=%s", str(exc)[:200]
-        )
-        return "disabled"
-
-
-async def _semantic_industry_rescue(
-    company: Any, icp: Any, detail: Dict[str, Any], semantic_mode: str
-) -> Tuple[Optional[bool], Optional[Dict[str, Any]]]:
-    """Optional source-grounded semantic judge for AMBIGUOUS industry labels.
-
-    Site-faithful composition: the semantic judge may only rescue labels the
-    canonical taxonomy is SILENT about — a canonical taxonomy conflict is
-    final and never consulted.  Enabled via VERIFIER_SEMANTIC_GATES_MODE
-    (disabled by default; a real OpenRouter + fetch pipeline when on).
-
-    Returns ``(verdict, semantic_mode, receipt)``:
-      * verdict — True (semantic match), False (semantic no-match), or None
-        when the judge is disabled, ineligible (canonical conflict), or
-        UNAVAILABLE.  Unavailability is never a verdict.
-      * semantic_mode — the resolved VERIFIER_SEMANTIC_GATES_MODE.
-      * receipt — durable audit document (mode, model, input hash, source
-        hashes, judgment, or the unavailability error class); None when the
-        judge was disabled or ineligible.
-    """
-    from leadpoet_verifier.semantic_gates import SemanticGateEvaluator
-
-    if semantic_mode == "disabled":
-        return None, None
-    taxonomy = detail.get("leadpoet_taxonomy") or {}
-    if taxonomy.get("decision") == "rejected":
-        # Canonical conflict: authoritative, never semantically rescued.
-        return None, None
-    try:
-        # DeepLine evidence repair is part of the ported gate: enable_repair
-        # is itself env-gated (VERIFIER_DEEPLINE_EVIDENCE_REPAIR_ENABLED +
-        # DEEPLINE_API_KEY), so from_env returns a repair-less evaluator when
-        # the operator has not opted in.
-        evaluator = SemanticGateEvaluator.from_env(enable_repair=True)
-        result = await evaluator.evaluate_industry(
-            company_name=str(getattr(company, "company_name", "") or ""),
-            company_website=str(getattr(company, "company_website", "") or ""),
-            requested_industry=str(getattr(icp, "industry", "") or ""),
-            candidate_industry=str(getattr(company, "industry", "") or ""),
-            candidate_subindustry=str(getattr(company, "sub_industry", "") or ""),
-        )
-    except Exception as exc:  # noqa: BLE001 — judge unavailability is not a verdict
-        logger.warning(
-            "semantic_industry_gate_unavailable error=%s", str(exc)[:200]
-        )
-        return None, {
-            "status": "unavailable",
-            "error_class": type(exc).__name__,
-        }
-    receipt: Optional[Dict[str, Any]] = None
-    receipt_fn = getattr(result, "receipt", None)
-    if callable(receipt_fn):
-        try:
-            receipt = receipt_fn()
-        except Exception:  # noqa: BLE001 — receipts must never break the gate
-            receipt = None
-    outcome = getattr(result, "outcome", None) or (
-        result.get("outcome") if isinstance(result, dict) else None
-    )
-    return outcome == "passed", receipt
-
-
-async def _taxonomy_industry_gate(
-    company: Any, icp: Any
-) -> Tuple[CompanyFitDecisionResult, Optional[Dict[str, Any]]]:
-    """Return canonical industry fit without converting absence into a match."""
-    mode = _taxonomy_industry_gate_mode()
-    if mode == "disabled":
-        return company_fit_match(), None
-    try:
-        from leadpoet_verifier.industry_fit import industry_fit
-
-        passed, detail = industry_fit(
-            getattr(icp, "industry", None),
-            getattr(company, "industry", None),
-            getattr(company, "sub_industry", None),
-            candidate_description=getattr(company, "description", None),
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "taxonomy_industry_gate_error mode=%s error=%s", mode, str(exc)[:200]
-        )
-        result = company_fit_unavailable(
-            f"taxonomy industry matcher unavailable: {type(exc).__name__}"
-        )
-        return result, result.receipt("taxonomy_industry")
-    deterministic_receipt = {
-        "passed": passed,
-        "match_strategy": detail.get("match_strategy"),
-        "candidate": detail.get("candidate"),
-        "requested": detail.get("requested"),
-        "requested_concepts": detail.get("requested_concepts"),
-        "candidate_concepts": detail.get("candidate_concepts"),
-        "matched_concepts": detail.get("matched_concepts"),
-        "leadpoet_taxonomy": detail.get("leadpoet_taxonomy"),
-    }
-
-    def _receipt(decision: str, final_effect: str, semantic_mode: str = "disabled",
-                 semantic_receipt: Optional[Dict[str, Any]] = None,
-                 semantic_verdict: Optional[bool] = None) -> Dict[str, Any]:
-        return {
-            "gate": "taxonomy_industry",
-            "contract_id": COMPANY_FIT_DECISION_CONTRACT_ID,
-            "contract_version": COMPANY_FIT_DECISION_CONTRACT_ID,
-            "decision": decision,
-            "taxonomy_mode": mode,
-            "semantic_mode": semantic_mode,
-            "deterministic": deterministic_receipt,
-            "semantic_verdict": semantic_verdict,
-            "semantic": semantic_receipt,
-            "final_effect": final_effect,
-        }
-
-    if passed:
-        # No receipt on a trivial deterministic pass: this would attach an
-        # audit doc to EVERY scored company and
-        # bloat every persisted breakdown for zero audit value. Receipts mark
-        # the non-trivial outcomes (shadow mismatch, rescue, unavailable, zero).
-        return company_fit_match(), None
-    taxonomy = detail.get("leadpoet_taxonomy") or {}
-    requested_concepts = set(detail.get("requested_concepts") or [])
-    candidate_concepts = set(detail.get("candidate_concepts") or [])
-    matched_concepts = set(detail.get("matched_concepts") or [])
-    explicit_conflict = taxonomy.get("decision") == "rejected" or bool(
-        requested_concepts and candidate_concepts and not matched_concepts
-    )
-    if explicit_conflict:
-        mismatch = company_fit_mismatch(
-            "Industry outside canonical taxonomy fit: "
-            f"'{getattr(company, 'industry', '')}' does not match ICP industry "
-            f"'{getattr(icp, 'industry', '')}'"
-        )
-        if mode == "shadow":
-            logger.warning(
-                "taxonomy_industry_gate_shadow_mismatch company=%r "
-                "icp_industry=%r strategy=%s detail=%s",
-                getattr(company, "company_name", None),
-                getattr(icp, "industry", None),
-                detail.get("match_strategy"),
-                {
-                    key: detail.get(key)
-                    for key in (
-                        "candidate",
-                        "requested",
-                        "candidate_concepts",
-                        "requested_concepts",
-                    )
-                },
-            )
-            return company_fit_match(), _receipt(
-                "match", "shadow_pass", "disabled", None, None
-            )
-        return mismatch, _receipt(
-            "mismatch", "zeroed", "disabled", None, None
-        )
-    semantic_verdict: Optional[bool] = None
-    semantic_mode = _resolved_semantic_mode()
-    semantic_receipt: Optional[Dict[str, Any]] = None
-    try:
-        semantic_verdict, semantic_receipt = await _semantic_industry_rescue(
-            company, icp, detail, semantic_mode
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "semantic_industry_gate_error error=%s", str(exc)[:200]
-        )
-        if semantic_mode == "enforce":
-            # A configured judge that cannot even start is UNAVAILABLE, not a
-            # verdict — receipt it so the unavailable branch below applies.
-            semantic_receipt = {
-                "status": "unavailable",
-                "error_class": type(exc).__name__,
-            }
-    if mode == "shadow":
-        logger.warning(
-            "taxonomy_industry_gate_shadow_mismatch company=%r icp_industry=%r "
-            "strategy=%s semantic_verdict=%s detail=%s",
-            getattr(company, "company_name", None),
-            getattr(icp, "industry", None),
-            detail.get("match_strategy"),
-            semantic_verdict,
-            {k: detail.get(k) for k in ("candidate", "requested", "matched_concepts")},
-        )
-        return company_fit_match(), _receipt(
-            "match", "shadow_pass", semantic_mode, semantic_receipt, semantic_verdict
-        )
-    # taxonomy enforce: only a semantic-ENFORCE judge may change the outcome.
-    if semantic_mode == "enforce":
-        if semantic_verdict is True:
-            logger.info(
-                "taxonomy_industry_gate_semantic_rescue company=%r icp_industry=%r",
-                getattr(company, "company_name", None),
-                getattr(icp, "industry", None),
-            )
-            return company_fit_match(), _receipt(
-                "match", "rescued_semantic_enforce", semantic_mode, semantic_receipt, True
-            )
-        if semantic_verdict is None and semantic_receipt is not None:
-            logger.warning(
-                "taxonomy_industry_gate_semantic_unavailable company=%r",
-                getattr(company, "company_name", None),
-            )
-            result = company_fit_unavailable(
-                "semantic industry verification unavailable"
-            )
-            return result, _receipt(
-                "unavailable",
-                "unavailable",
-                semantic_mode,
-                semantic_receipt,
-                None,
-            )
-    if semantic_verdict is False:
-        result = company_fit_mismatch(
-            "Industry outside canonical taxonomy fit: "
-            f"'{getattr(company, 'industry', '')}' does not match ICP industry "
-            f"'{getattr(icp, 'industry', '')}'"
-        )
-    else:
-        result = company_fit_unavailable(
-            "Industry fit could not be proven by deterministic or semantic evidence"
-        )
-    receipt = _receipt(
-        result.decision,
-        "zeroed" if result.decision == "mismatch" else "unavailable",
-        semantic_mode,
-        semantic_receipt,
-        semantic_verdict,
-    )
-    return result, receipt
-
 
 async def run_company_zero_checks(
     company: CompanyOutput,
-    icp: ICPPrompt,
-    run_cost_usd: float,
     run_time_seconds: float,
     seen_companies: Set[str],
     gate_receipts: Optional[List[Dict[str, Any]]] = None,
-    defer_fit_dimensions: bool = False,
 ) -> CompanyFitDecisionResult:
-    """Deterministic pre-checks that run BEFORE any LLM scoring in
-    the company-mode model competition.
-
-    Checks (in order):
-
-      * Hard time limit (30s safety net)
-      * Industry sanity check.  Exact/fuzzy/broad-bucket matches pass,
-        but semantic mismatches are not hard-zeroed here because the
-        downstream ICP-fit LLM scores industry/sub-industry nuance.
-      * Sub-industry sanity check.  Exact/fuzzy matches pass, but
-        mismatches are deferred to the downstream ICP-fit scorer.
-      * Country match
-      * Company-shaped data quality (placeholder text, suspicious
-        chars in company name / website)
-      * Duplicate company tracking, keyed off ``company.company_name``
-
-    There is intentionally no role / seniority / email / contact
-    check — the model competition surfaces companies, not contacts.
-
-    Returns a ``company-fit-decision:v1`` result. Historical callers can still
-    unpack it as ``(passed, failure_reason)``.
-    """
+    """Check company runtime, output quality, and duplicate identity."""
     def _mismatch(reason: Optional[str]) -> CompanyFitDecisionResult:
         decision = company_fit_mismatch(reason)
         if gate_receipts is not None:
             gate_receipts.append(decision.receipt("company_pre_checks"))
         return decision
 
-    # Check 1: HARD time limit (30s safety net) — unchanged from lead-mode.
+    # Retain the existing verifier runtime safety limit.
     result = check_hard_time_limit(run_time_seconds)
     if not result.passed:
         logger.info(f"Company failed hard time limit: {result.reason}")
         return _mismatch(result.reason)
 
-    if not defer_fit_dimensions:
-        # Direct legacy callers still receive the standalone taxonomy/country
-        # gates. Official public and Research Lab scoring defer these fields to
-        # the one shared verifier, which persists a complete dimension receipt.
-        result = check_industry_match(company.industry, icp.industry)
-        if not result.passed:
-            logger.info(f"Company failed industry check: {result.reason}")
-            return _mismatch(result.reason)
-
-        if (icp.sub_industry and icp.sub_industry.strip()
-                and company.sub_industry and company.sub_industry.strip()):
-            result = check_sub_industry_match(company.sub_industry, icp.sub_industry)
-            if not result.passed:
-                logger.info(f"Company failed sub-industry check: {result.reason}")
-                return _mismatch(result.reason)
-
-        taxonomy_result, taxonomy_receipt = (
-            await _taxonomy_industry_gate(company, icp)
-        )
-        if gate_receipts is not None and taxonomy_receipt is not None:
-            gate_receipts.append(taxonomy_receipt)
-        if not taxonomy_result.passed:
-            logger.info(
-                "Company did not pass taxonomy industry gate: %s",
-                taxonomy_result.reason,
-            )
-            return taxonomy_result
-
-        result = check_country_match(company.country, icp.country)
-        if not result.passed:
-            logger.info(f"Company failed country check: {result.reason}")
-            return _mismatch(result.reason)
-
-    # Check 5: Company-shaped data quality — light check for placeholder
-    # text in the company name and website fields.  We do NOT call
-    # check_data_quality(lead) here because that function reads
-    # role / seniority / etc. that don't exist on CompanyOutput.
+    # Reject placeholder company names and websites before evidence checks.
     quality_valid, quality_reason = _check_company_data_quality(company)
     if not quality_valid:
         logger.info(f"Company failed data quality check: {quality_reason}")
@@ -557,10 +96,8 @@ def _check_company_data_quality(
       * not match obvious placeholder text ('test', 'foo', etc.),
       * not contain suspicious characters that indicate templated junk.
 
-    Country is enforced by its own exact-match check elsewhere in
-    run_company_zero_checks.  Industry / sub-industry are sanity checks
-    and detailed fit is scored by the ICP-fit LLM, so
-    we don't re-validate them here.
+    Country, industry, and other company-fit requirements are checked by
+    the shared company verifier.
     """
     name = (company.company_name or "").strip()
     if not name:
@@ -592,137 +129,13 @@ def _check_company_data_quality(
 # =============================================================================
 
 def check_hard_time_limit(run_time_seconds: float) -> ValidationResult:
-    """
-    Check 1: Verify lead didn't exceed HARD time limit (30s safety net).
-    
-    This is the ONLY automatic-zero check for time. The 30-second limit
-    is a safety net to prevent runaway processes.
-    
-    Cost and time VARIABILITY penalties are handled separately in lead_scorer.py:
-    - NO penalty if within budget (cost ≤ $0.05, time ≤ 8s)
-    - 5-point penalty if cost > 2× budget or time > 2× budget
-    
-    Args:
-        run_time_seconds: Total processing time for this lead
-    
-    Returns:
-        ValidationResult with pass/fail and reason
-    """
+    """Apply the existing company verifier runtime safety limit."""
     if run_time_seconds > CONFIG.RUNNING_MODEL_TIMEOUT_SECONDS:
         return ValidationResult(
             passed=False,
             reason=f"Exceeded HARD time limit: {run_time_seconds:.1f}s > {CONFIG.RUNNING_MODEL_TIMEOUT_SECONDS}s (instant fail)"
         )
     return ValidationResult(passed=True)
-
-
-# DEPRECATED - kept for backwards compatibility
-def check_cost_limit(run_cost_usd: float) -> ValidationResult:
-    """
-    DEPRECATED: Cost limits are now handled via variability penalties in lead_scorer.py.
-    
-    This function always returns passed=True. Cost variability is penalized
-    with 5 points if cost > 2× MAX_COST_PER_LEAD_USD.
-    """
-    # No longer enforced as automatic zero - variability penalties handle this
-    return ValidationResult(passed=True)
-
-
-def check_time_limit(run_time_seconds: float) -> ValidationResult:
-    """
-    DEPRECATED: Soft time limits are now handled via variability penalties in lead_scorer.py.
-    
-    Use check_hard_time_limit() for the 30s instant-fail safety net.
-    Time variability is penalized with 5 points if time > 2× MAX_TIME_PER_LEAD_SECONDS.
-    """
-    # Delegate to hard time limit check
-    return check_hard_time_limit(run_time_seconds)
-
-
-def check_industry_match(lead_industry: str, icp_industry: str) -> ValidationResult:
-    """
-    Check 3: Verify lead's industry is present and not obviously impossible.
-
-    Exact/fuzzy/broad-bucket matches pass immediately.  If labels are
-    adjacent but not an exact deterministic match, defer to the ICP-fit
-    scorer instead of hard-zeroing the company.  This mirrors the private
-    model contract: deterministic industry logic may accept obvious
-    matches, but nuanced company/ICP fit belongs in the LLM scorer.
-    
-    Args:
-        lead_industry: Industry from the lead
-        icp_industry: Target industry from the ICP
-    
-    Returns:
-        ValidationResult with pass/fail and reason
-    """
-    if not lead_industry or not icp_industry:
-        return ValidationResult(
-            passed=False,
-            reason="Missing industry field"
-        )
-    
-    lead_bucket = _industry_bucket(lead_industry)
-    icp_bucket = _industry_bucket(icp_industry)
-    if lead_bucket is not None and lead_bucket == icp_bucket:
-        return ValidationResult(passed=True)
-
-    score = fuzz.ratio(lead_industry.lower().strip(), icp_industry.lower().strip())
-    
-    if score < INDUSTRY_MATCH_THRESHOLD:
-        logger.info(
-            "Company industry label deferred to ICP-fit scorer: "
-            "'%s' vs '%s' (score: %.0f%%, threshold: %s%%)",
-            lead_industry,
-            icp_industry,
-            score,
-            INDUSTRY_MATCH_THRESHOLD,
-        )
-    return ValidationResult(passed=True)
-
-
-def check_sub_industry_match(lead_sub_industry: str, icp_sub_industry: str) -> ValidationResult:
-    """
-    Check 4: Verify sub-industry is present and defer nuanced mismatch
-    handling to the ICP-fit scorer.
-    
-    More lenient than industry since sub-industry naming varies more.
-    
-    Args:
-        lead_sub_industry: Sub-industry from the lead
-        icp_sub_industry: Target sub-industry from the ICP
-    
-    Returns:
-        ValidationResult with pass/fail and reason
-    """
-    if not lead_sub_industry or not icp_sub_industry:
-        return ValidationResult(
-            passed=False,
-            reason="Missing sub-industry field"
-        )
-    
-    score = fuzz.ratio(lead_sub_industry.lower().strip(), icp_sub_industry.lower().strip())
-    
-    if score < SUB_INDUSTRY_MATCH_THRESHOLD:
-        logger.info(
-            "Company sub-industry label deferred to ICP-fit scorer: "
-            "'%s' vs '%s' (score: %.0f%%, threshold: %s%%)",
-            lead_sub_industry,
-            icp_sub_industry,
-            score,
-            SUB_INDUSTRY_MATCH_THRESHOLD,
-        )
-    return ValidationResult(passed=True)
-
-
-# --- Role / seniority / email checks REMOVED (May 2026 company-mode cutover) ---
-# ``check_role_match``, ``check_seniority_match``, ``validate_email``,
-# ``validate_email_sync``, ``check_data_quality`` (lead-shaped),
-# ``validate_lead_batch``, ``get_check_names`` and
-# ``summarize_validation_results`` have all been removed.  The
-# company-mode pipeline does not have contact-level fields to check.
-# Industry / sub-industry / country / duplicate-company checks below
-# are still used (by ``run_company_zero_checks``).
 
 
 # Colloquial spellings that the ISO country database does not carry. This is
@@ -959,21 +372,3 @@ def check_duplicate_company(company_name: str, seen_companies: Set[str]) -> Vali
         )
     
     return ValidationResult(passed=True)
-
-
-# =============================================================================
-# Email validation / lead-shaped data quality / batch validation REMOVED
-# =============================================================================
-# Removed in the May 2026 company-mode cutover:
-#   * ``validate_email`` / ``validate_email_sync`` (no email on CompanyOutput)
-#   * ``check_data_quality(lead)``                (lead-shaped, replaced by
-#                                                  ``_check_company_data_quality``
-#                                                  above)
-#   * ``validate_lead_batch``                     (no per-lead pre-check
-#                                                  batch — the scorer loops
-#                                                  CompanyOutput rows directly)
-#   * ``get_check_names`` / ``summarize_validation_results``
-#                                                 (only callers were
-#                                                  validate_lead_batch /
-#                                                  ad-hoc test harnesses)
-# =============================================================================

@@ -282,15 +282,9 @@ def test_arena_scorer_does_not_turn_ambiguous_identity_into_fabrication(
     async def score(*_args, **_kwargs):
         return 0.0, 0.0, 0.0, 0, True, details
 
-    async def no_repair(*_args, **_kwargs):
-        return None
-
     monkeypatch.setattr(lead_scorer, "_verify_company_fit", fit)
     monkeypatch.setattr(
         lead_scorer, "score_company_competition_intent_signal", score
-    )
-    monkeypatch.setattr(
-        lead_scorer, "_attempt_competition_evidence_repair", no_repair
     )
 
     result = asyncio.run(
@@ -322,15 +316,9 @@ def test_confirmed_missing_evidence_is_a_nonretryable_zero(monkeypatch):
     async def score(*_args, **_kwargs):
         return 0.0, 0.0, 0.0, 0, True, details
 
-    async def no_repair(*_args, **_kwargs):
-        return None
-
     monkeypatch.setattr(lead_scorer, "_verify_company_fit", fit)
     monkeypatch.setattr(
         lead_scorer, "score_company_competition_intent_signal", score
-    )
-    monkeypatch.setattr(
-        lead_scorer, "_attempt_competition_evidence_repair", no_repair
     )
 
     result = asyncio.run(

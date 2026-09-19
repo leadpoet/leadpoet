@@ -9,9 +9,8 @@ from leadpoet_canonical import arena_weights
 from leadpoet_canonical.lab_arena_rewards import public_key_hash, sha256_json
 from lab_arena.rewards import reward_basis_document, reward_constants_document
 from lab_arena import contracts
-from leadpoet_canonical.weights import normalize_to_u16_with_uids
 from leadpoet_canonical.hotkey_authority_v2 import CHAIN_SIGNING_PROFILE_SCHEMA_VERSION
-from validator_tee.enclave.arena_weight_signer import ArenaWeightSigner, ArenaWeightSignerError
+from lab_arena.weight_signer import ArenaWeightSigner, ArenaWeightSignerError
 
 
 HOTKEYS = ["5" + ("A" * 47), "5" + ("B" * 47), "5" + ("C" * 47)]
@@ -69,9 +68,13 @@ def test_signed_state_derives_exact_finalized_uid_vector():
     assert result["burned_residual_ppb"] == 950_000_000
     assert result["sparse_uids"] == [0, 2]
     assert result["sparse_weights_u16"] == [65535, 3449]
-    # The dependency-free enclave kernel must quantize exactly like Bittensor.
-    float_weights = [0.95, 0.05]
-    assert normalize_to_u16_with_uids([0, 2], float_weights) == (
+    # The dependency-free weight kernel must quantize exactly like Bittensor.
+    import numpy as np
+    from bittensor.utils.weight_utils import convert_weights_and_uids_for_emit
+
+    assert convert_weights_and_uids_for_emit(
+        np.array([0, 2], dtype=np.int64), np.array([0.95, 0.05], dtype=np.float32)
+    ) == (
         result["sparse_uids"], result["sparse_weights_u16"]
     )
 
@@ -396,7 +399,7 @@ def test_signed_authorization_binds_rewarded_uids_to_finalized_hotkeys():
 
 
 def test_reveal_proof_rejects_rewarded_uid_recycling():
-    from validator_tee.enclave.chain_source_v2 import (
+    from lab_arena.chain_source import (
         ValidatorChainSourceV2Error, validate_rewarded_uid_ownership,
     )
     bindings = [{"uid": 0, "hotkey": HOTKEYS[0]},

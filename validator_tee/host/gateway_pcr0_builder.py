@@ -242,7 +242,7 @@ def _build_once(
     env.update(
         {
             "GATEWAY_ROOT": str(gateway_root),
-            "RESEARCH_LAB_RUNTIME_SOURCE_ROOT": str(source_root),
+            "GATEWAY_RUNTIME_SOURCE_ROOT": str(source_root),
             "ATTESTED_RUNTIME_COMMIT_SHA": commit,
             "ATTESTED_RUNTIME_SOURCE_IS_CLEAN_GIT_ARCHIVE": "1",
         }

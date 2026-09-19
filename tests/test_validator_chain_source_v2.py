@@ -1,16 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-import json
-import threading
 
 import pytest
 
-from leadpoet_canonical.attested_v2 import build_transport_attempt, sha256_bytes, sha256_json
+from leadpoet_canonical.attested_v2 import sha256_json
 from leadpoet_canonical.chain_source_v2 import (
-    CHAIN_ARCHIVE_ENDPOINT_HOST,
-    CHAIN_ENDPOINT_HOST,
-    chain_source_policy_hash,
     decode_subnet_epoch_storage,
     decode_timestamp_now_storage,
     timestamp_now_storage_key,
@@ -18,13 +12,10 @@ from leadpoet_canonical.chain_source_v2 import (
     timelocked_weight_commits_storage_key,
 )
 from leadpoet_canonical.hotkey_authority_v2 import signed_extrinsic_hash_v2
-from validator_tee.enclave import chain_source_v2
-from validator_tee.enclave.chain_source_v2 import (
-    EnclaveChainRpcTransportV2,
+from lab_arena.chain_source import (
     FINALIZATION_RPC_PACING_SECONDS,
     ValidatorChainSourceV2,
     ValidatorChainSourceV2Error,
-    ValidatorChainTransportCleanupError,
 )
 
 
@@ -144,98 +135,16 @@ def _stateful_rpc(
             result = _selective_result(finalized_block)
         else:
             raise AssertionError(method)
-        attempt = _attempt(
-            job_id=kwargs["job_id"],
-            purpose=kwargs["purpose"],
-            operation=kwargs["logical_operation_id"].removeprefix(
-                kwargs["job_id"] + ":"
-            ),
-            request_id=("%032x" % kwargs["request_id"]),
-        )
-        return {"result": result, "attempts": [attempt], "artifacts": []}
+        return result
 
     return calls, rpc_call
 
 
-def _attempt(
-    *,
-    job_id: str,
-    purpose: str,
-    operation: str,
-    request_id: str,
-    provider_id: str = "bittensor_chain",
-    destination_host: str = CHAIN_ENDPOINT_HOST,
-):
-    body = json.dumps({"operation": operation}, sort_keys=True).encode()
-    return build_transport_attempt(
-        request_id=request_id,
-        logical_operation_id=job_id + ":" + operation,
-        job_id=job_id,
-        purpose=purpose,
-        provider_id=provider_id,
-        attempt_number=0,
-        method="POST",
-        destination_host=destination_host,
-        destination_port=443,
-        path_hash=sha256_json({"path": "/"}),
-        nonsecret_headers_hash=sha256_json({"content-type": "application/json"}),
-        body_hash=sha256_bytes(body),
-        credential_ref_hash=sha256_json({"credential": "none"}),
-        retry_policy_hash=chain_source_policy_hash(),
-        timeout_ms=30_000,
-        started_at="2026-07-10T00:00:00Z",
-        terminal_status="authenticated_response",
-        http_status=200,
-        response_hash=sha256_bytes(body),
-        request_artifact_hash=sha256_bytes(body),
-        response_artifact_hash=sha256_bytes(body),
-        tls_peer_chain_hash=sha256_json([sha256_bytes(b"cert")]),
-        tls_protocol="TLSv1.3",
-        failure_code=None,
-        completed_at="2026-07-10T00:00:00Z",
-    )
-
-
 def _archive_adapter(rpc_call):
-    def archive_attempt(attempt):
-        return build_transport_attempt(
-            request_id=attempt["request_id"],
-            logical_operation_id=attempt["logical_operation_id"],
-            job_id=attempt["job_id"],
-            purpose=attempt["purpose"],
-            provider_id="bittensor_archive",
-            attempt_number=attempt["attempt_number"],
-            method=attempt["method"],
-            destination_host=CHAIN_ARCHIVE_ENDPOINT_HOST,
-            destination_port=attempt["destination_port"],
-            path_hash=attempt["path_hash"],
-            nonsecret_headers_hash=attempt["nonsecret_headers_hash"],
-            body_hash=attempt["body_hash"],
-            credential_ref_hash=attempt["credential_ref_hash"],
-            egress_proxy_ref_hash=attempt["egress_proxy_ref_hash"],
-            retry_policy_hash=attempt["retry_policy_hash"],
-            timeout_ms=attempt["timeout_ms"],
-            started_at=attempt["started_at"],
-            terminal_status=attempt["terminal_status"],
-            http_status=attempt["http_status"],
-            response_hash=attempt["response_hash"],
-            request_artifact_hash=attempt["request_artifact_hash"],
-            response_artifact_hash=attempt["response_artifact_hash"],
-            tls_peer_chain_hash=attempt["tls_peer_chain_hash"],
-            tls_protocol=attempt["tls_protocol"],
-            failure_code=attempt["failure_code"],
-            completed_at=attempt["completed_at"],
-        )
-
     def archive_rpc_call(**kwargs):
-        result = rpc_call(**kwargs)
-        return {
-            **result,
-            "attempts": [archive_attempt(attempt) for attempt in result["attempts"]],
-        }
+        return rpc_call(**kwargs)
 
     return archive_rpc_call
-
 
 def _runtime_rpc(
     *,
@@ -282,13 +191,7 @@ def _runtime_rpc(
             result = version
         else:
             raise AssertionError(method)
-        attempt = _attempt(
-            job_id=kwargs["job_id"],
-            purpose=kwargs["purpose"],
-            operation=kwargs["logical_operation_id"].split(":")[-1],
-            request_id="%032x" % kwargs["request_id"],
-        )
-        return {"result": result, "attempts": [attempt], "artifacts": []}
+        return result
 
     return calls, requested_hash, rpc_call
 
@@ -316,7 +219,6 @@ def test_chain_signing_runtime_is_exact_canonical_and_finalized():
         "state_getRuntimeVersion",
         "chain_getBlockHash",
     ]
-    assert {item["purpose"] for item in calls} == {"validator.chain_state.v2"}
     assert calls[4]["params"] == [requested_hash]
 
 
@@ -389,44 +291,6 @@ def test_finalized_source_uses_one_block_for_header_and_metagraph():
     assert metagraph_call["params"][2] == FINALIZED_HASH
 
 
-def test_fresh_same_epoch_snapshots_use_disjoint_evidence_namespaces(monkeypatch):
-    scopes = iter((bytes.fromhex("01" * 16), bytes.fromhex("02" * 16)))
-    monkeypatch.setattr(chain_source_v2.os, "urandom", lambda _size: next(scopes))
-    _calls, rpc_call = _stateful_rpc()
-    source = ValidatorChainSourceV2(
-        rpc_call=rpc_call,
-        archive_rpc_call=_archive_adapter(rpc_call),
-        epoch_authority_supplier=lambda: {
-            "mode": "stateful_v1",
-            "cutover_manifest": _stateful_cutover(),
-        },
-    )
-
-    first = source.read_finalized_snapshot(
-        netuid=71,
-        epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
-    )
-    second = source.read_finalized_snapshot(
-        netuid=71,
-        epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
-    )
-
-    assert first["observation_scope"] == "01" * 16
-    assert second["observation_scope"] == "02" * 16
-    assert first["header"] == second["header"]
-    assert first["metagraph"] == second["metagraph"]
-    assert set(first["jobs"].values()).isdisjoint(second["jobs"].values())
-    first_operations = {
-        (item["logical_operation_id"], item["attempt_number"])
-        for item in first["attempts"]
-    }
-    second_operations = {
-        (item["logical_operation_id"], item["attempt_number"])
-        for item in second["attempts"]
-    }
-    assert first_operations.isdisjoint(second_operations)
-
-
 def test_stateful_storage_keys_and_fixed_width_decoding_match_sn71_vector():
     assert subnet_epoch_storage_key(storage_name="Tempo", netuid=71) == (
         "0x658faa385070e074c85bf6b568cf0555"
@@ -493,40 +357,6 @@ def test_stateful_finalized_source_binds_official_epoch_and_chain_anchors():
     }
     assert authority["observed_at"] == "2025-07-17T00:00:00Z"
     assert result["epoch_boundary"]["observed_at"] == authority["observed_at"]
-    archive_attempts = [
-        attempt
-        for attempt in result["attempts"]
-        if attempt["provider_id"] == "bittensor_archive"
-    ]
-    live_attempts = [
-        attempt
-        for attempt in result["attempts"]
-        if attempt["provider_id"] == "bittensor_chain"
-    ]
-    assert archive_attempts
-    assert live_attempts
-    assert {
-        attempt["destination_host"] for attempt in archive_attempts
-    } == {CHAIN_ARCHIVE_ENDPOINT_HOST}
-    assert {
-        attempt["destination_host"] for attempt in live_attempts
-    } == {CHAIN_ENDPOINT_HOST}
-    assert any(
-        attempt["logical_operation_id"].endswith(":cutover-subnet-epoch-index")
-        for attempt in archive_attempts
-    )
-    assert any(
-        ":epoch-storage-subnetepochindex" in attempt["logical_operation_id"]
-        for attempt in live_attempts
-    )
-    assert any(
-        attempt["purpose"] == "validator.metagraph_state.v2"
-        for attempt in live_attempts
-    )
-    assert not any(
-        attempt["purpose"] == "validator.metagraph_state.v2"
-        for attempt in archive_attempts
-    )
 
 
 def test_stateful_source_fails_closed_without_a_separate_archive_adapter():
@@ -549,118 +379,6 @@ def test_stateful_source_fails_closed_without_a_separate_archive_adapter():
         "chain_getFinalizedHead",
         "chain_getHeader",
     ]
-
-
-def test_stateful_source_rejects_live_endpoint_evidence_for_archive_reads():
-    _calls, rpc_call = _stateful_rpc()
-    with pytest.raises(
-        ValidatorChainSourceV2Error,
-        match="wrong measured endpoint",
-    ):
-        ValidatorChainSourceV2(
-            rpc_call=rpc_call,
-            archive_rpc_call=rpc_call,
-            epoch_authority_supplier=lambda: {
-                "mode": "stateful_v1",
-                "cutover_manifest": _stateful_cutover(),
-            },
-        ).read_finalized_snapshot(
-            netuid=71,
-            epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
-        )
-
-
-def test_explicit_boundary_capture_proves_historical_cutover():
-    calls, rpc_call = _stateful_rpc()
-    cutover = _stateful_cutover()
-    source = ValidatorChainSourceV2(
-        rpc_call=rpc_call,
-        archive_rpc_call=_archive_adapter(rpc_call),
-        epoch_authority_supplier=lambda: {
-            "mode": "stateful_v1",
-            "cutover_manifest": cutover,
-        },
-    )
-    result = source.capture_stateful_epoch_boundary(
-        cutover_manifest=cutover,
-        settlement_epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
-        capture_scope="sha256:" + "9" * 64,
-    )
-
-    assert result["epoch_boundary"]["current_block"] == STATEFUL_LAST_EPOCH_BLOCK
-    assert result["epoch_boundary"]["block_hash"] == CUTOVER_HASH
-    assert result["epoch_authority"] == result["epoch_boundary"]
-    assert result["epoch_authority"]["settlement_epoch_id"] == (
-        STATEFUL_SETTLEMENT_EPOCH_ID
-    )
-    assert result["finalized_block_hash"] == FINALIZED_HASH.removeprefix("0x")
-    assert result["header"]["block"] == STATEFUL_BLOCK
-    assert result["jobs"]["subnet_epoch_snapshot"].startswith(
-        "subnet-epoch-capture-current:"
-    )
-    assert result["jobs"]["subnet_epoch_snapshot"].endswith("9" * 64)
-    assert all(
-        attempt["logical_operation_id"].startswith(
-            result["jobs"]["subnet_epoch_snapshot"] + ":"
-        )
-        for attempt in result["attempts"]
-    )
-    assert result["jobs"]["subnet_epoch_boundary"] == result["jobs"][
-        "subnet_epoch_snapshot"
-    ]
-    assert {
-        attempt["job_id"] for attempt in result["attempts"]
-    } == set(result["jobs"].values())
-    assert all(
-        attempt["purpose"] == "validator.subnet_epoch_snapshot.v2"
-        for attempt in result["attempts"]
-    )
-    assert any(
-        item["method"] == "state_getStorage"
-        and item["params"][1] == PREDECESSOR_HASH
-        for item in calls
-    )
-
-
-def test_explicit_boundary_capture_rejects_manifest_block_hash_mismatch():
-    _calls, rpc_call = _stateful_rpc(
-        finalized_hash=CUTOVER_HASH,
-        finalized_block=STATEFUL_LAST_EPOCH_BLOCK,
-    )
-    cutover = _stateful_cutover(cutover_block_hash="0x" + "99" * 32)
-    with pytest.raises(ValidatorChainSourceV2Error, match="not canonical"):
-        ValidatorChainSourceV2(
-            rpc_call=rpc_call,
-            archive_rpc_call=_archive_adapter(rpc_call),
-            epoch_authority_supplier=lambda: {
-                "mode": "stateful_v1",
-                "cutover_manifest": cutover,
-            },
-        ).capture_stateful_epoch_boundary(
-            cutover_manifest=cutover,
-            settlement_epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
-            capture_scope="sha256:" + "9" * 64,
-        )
-
-
-def test_explicit_boundary_capture_rejects_an_unfinalized_boundary():
-    _calls, rpc_call = _stateful_rpc(
-        finalized_hash=PREDECESSOR_HASH,
-        finalized_block=STATEFUL_LAST_EPOCH_BLOCK - 1,
-    )
-    with pytest.raises(ValidatorChainSourceV2Error, match="not finalized"):
-        ValidatorChainSourceV2(
-            rpc_call=rpc_call,
-            archive_rpc_call=_archive_adapter(rpc_call),
-            epoch_authority_supplier=lambda: {
-                "mode": "stateful_v1",
-                "cutover_manifest": _stateful_cutover(),
-            },
-        ).capture_stateful_epoch_boundary(
-            cutover_manifest=_stateful_cutover(),
-            settlement_epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
-            capture_scope="sha256:" + "9" * 64,
-        )
 
 
 def test_stateful_source_honors_pending_due_boundary_without_rollover():
@@ -868,13 +586,7 @@ def test_stateful_boundary_search_uses_index_transition_not_reset_anchor():
             result = _selective_result(finalized_block)
         else:
             raise AssertionError(method)
-        attempt = _attempt(
-            job_id=kwargs["job_id"],
-            purpose=kwargs["purpose"],
-            operation=method + ":" + str(kwargs["request_id"]),
-            request_id=("%032x" % kwargs["request_id"]),
-        )
-        return {"result": result, "attempts": [attempt], "artifacts": []}
+        return result
 
     result = ValidatorChainSourceV2(
         rpc_call=rpc_call,
@@ -889,21 +601,6 @@ def test_stateful_boundary_search_uses_index_transition_not_reset_anchor():
     assert result["epoch_boundary"]["current_block"] == boundary_block
     assert result["epoch_boundary"]["last_epoch_block"] == boundary_block
     assert result["epoch_boundary"]["subnet_epoch_index"] == current_index
-    selector_job = result["jobs"]["subnet_epoch_snapshot"]
-    assert selector_job.startswith(
-        "subnet-epoch-selector:%d:" % (first_settlement + 1)
-    )
-    epoch_jobs = {
-        result["jobs"]["subnet_epoch_snapshot"],
-        result["jobs"]["subnet_epoch_boundary"],
-    }
-    epoch_attempts = [
-        attempt
-        for attempt in result["attempts"]
-        if attempt["purpose"] == "validator.subnet_epoch_snapshot.v2"
-    ]
-    assert epoch_attempts
-    assert {attempt["job_id"] for attempt in epoch_attempts} <= epoch_jobs
     probed_blocks = {
         int(item["params"][1], 16)
         for item in calls
@@ -995,13 +692,7 @@ def test_stateful_boundary_search_rejects_a_skipped_epoch_index_transition():
             result = _selective_result(finalized_block)
         else:
             raise AssertionError(method)
-        attempt = _attempt(
-            job_id=kwargs["job_id"],
-            purpose=kwargs["purpose"],
-            operation=method + ":" + str(kwargs["request_id"]),
-            request_id=("%032x" % kwargs["request_id"]),
-        )
-        return {"result": result, "attempts": [attempt], "artifacts": []}
+        return result
 
     with pytest.raises(
         ValidatorChainSourceV2Error,
@@ -1080,15 +771,7 @@ def test_finalized_source_selects_just_finished_official_epoch():
             result = _selective_result(target_block)
         else:
             raise AssertionError(method)
-        attempt = _attempt(
-            job_id=kwargs["job_id"],
-            purpose=kwargs["purpose"],
-            operation=kwargs["logical_operation_id"].removeprefix(
-                kwargs["job_id"] + ":"
-            ),
-            request_id=("%032x" % kwargs["request_id"]),
-        )
-        return {"result": result, "attempts": [attempt], "artifacts": []}
+        return result
 
     source = ValidatorChainSourceV2(
         rpc_call=rpc_call,
@@ -1122,23 +805,6 @@ def test_finalized_source_selects_just_finished_official_epoch():
     assert result["metagraph"]["block"] == target_block
     assert observed["finalized_hash"] == target_hash.removeprefix("0x")
     assert observed["historical_snapshot"] is True
-    assert observed["snapshot_job_override"].startswith(
-        "subnet-epoch-selector:%d:" % STATEFUL_SETTLEMENT_EPOCH_ID
-    )
-    selector_attempts = [
-        attempt
-        for attempt in result["attempts"]
-        if attempt["purpose"] == "validator.subnet_epoch_snapshot.v2"
-    ]
-    assert selector_attempts
-    assert {
-        attempt["job_id"] for attempt in selector_attempts
-    } == {observed["snapshot_job_override"]}
-    metagraph_attempt = result["attempts"][-1]
-    assert metagraph_attempt["provider_id"] == "bittensor_archive"
-    assert metagraph_attempt["destination_host"] == CHAIN_ARCHIVE_ENDPOINT_HOST
-
-
 def test_finalized_source_rejects_more_than_one_epoch_of_drift():
     calls, rpc_call = _stateful_rpc(
         storage_updates={
@@ -1162,237 +828,6 @@ def test_finalized_source_rejects_more_than_one_epoch_of_drift():
             netuid=71,
             epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
         )
-
-
-def test_transport_retries_malformed_authenticated_reply_without_duplicate_terminal_record():
-    now = datetime(2026, 7, 10, tzinfo=timezone.utc)
-    transport = EnclaveChainRpcTransportV2(
-        clock=lambda: now,
-        sleep=lambda _seconds: None,
-    )
-    responses = [
-        b"not-json",
-        b'{"jsonrpc":"2.0","id":1,"result":"0x' + b"ab" * 32 + b'"}',
-    ]
-
-    def http_post(_body):
-        return {
-            "status": 200,
-            "body": responses.pop(0),
-            "tls_peer_chain_hash": sha256_json([sha256_bytes(b"cert")]),
-            "tls_protocol": "TLSv1.3",
-        }
-
-    transport._http_post = http_post
-    result = transport.call(
-        method="chain_getFinalizedHead",
-        params=[],
-        request_id=1,
-        job_id="chain-state:1",
-        purpose="validator.chain_state.v2",
-        logical_operation_id="chain-state:1:head",
-    )
-    assert result["result"] == "0x" + "ab" * 32
-    assert [attempt["attempt_number"] for attempt in result["attempts"]] == [0, 1]
-    assert all(
-        attempt["terminal_status"] == "authenticated_response"
-        for attempt in result["attempts"]
-    )
-
-
-def test_chain_parent_timeout_cleanup_retains_socket_and_primary_error():
-    primary = ValueError("timeout setup failed")
-
-    class Parent:
-        def __init__(self):
-            self.allow_close = False
-
-        def settimeout(self, _timeout):
-            raise primary
-
-        def close(self):
-            return self.allow_close
-
-    parent = Parent()
-    transport = EnclaveChainRpcTransportV2(
-        socket_factory=lambda *_args: parent,
-    )
-
-    with pytest.raises(ValidatorChainTransportCleanupError) as raised:
-        transport._tls_socket()
-
-    assert raised.value.stage == "parent_transport_cleanup"
-    assert raised.value.primary_error is primary
-    assert raised.value.__cause__ is primary
-    assert raised.value._resources == (parent,)
-    assert transport._retired_cleanup_resources[id(parent)][1] is parent
-    parent.allow_close = True
-    assert transport._retry_retired_cleanup() is True
-
-
-def test_chain_http_cleanup_retains_response_and_tls_transport(monkeypatch):
-    class TLSSocket:
-        def __init__(self):
-            self.allow_close = False
-
-        def sendall(self, _payload):
-            pass
-
-        def getpeercert(self, *, binary_form):
-            assert binary_form is True
-            return b"certificate"
-
-        def version(self):
-            return "TLSv1.3"
-
-        def close(self):
-            return self.allow_close
-
-    class Response:
-        status = 200
-
-        def __init__(self, tls_socket, *, allow_close):
-            self.tls_socket = tls_socket
-            self.allow_close = allow_close
-
-        def begin(self):
-            pass
-
-        def read(self, _size):
-            return b'{"jsonrpc":"2.0","id":1,"result":"0x01"}'
-
-        def close(self):
-            return self.allow_close
-
-    tls_socket = TLSSocket()
-    recovered_tls_socket = TLSSocket()
-    recovered_tls_socket.allow_close = True
-    tls_sockets = iter((tls_socket, recovered_tls_socket))
-    responses = []
-
-    def response_factory(candidate):
-        response = Response(candidate, allow_close=bool(responses))
-        responses.append(response)
-        return response
-
-    transport = EnclaveChainRpcTransportV2()
-
-    def tls_socket_factory():
-        transport._require_retired_cleanup()
-        return next(tls_sockets)
-
-    transport._tls_socket = tls_socket_factory
-    monkeypatch.setattr(chain_source_v2.http.client, "HTTPResponse", response_factory)
-
-    with pytest.raises(ValidatorChainTransportCleanupError) as raised:
-        transport._http_post(b"{}")
-
-    response = responses[0]
-    assert raised.value.stage == "http_response_transport_cleanup"
-    assert raised.value._resources == (response, tls_socket)
-    assert transport._retired_cleanup_resources[id(response)][1] is response
-    assert transport._retired_cleanup_resources[id(tls_socket)][1] is tls_socket
-    response.allow_close = True
-    tls_socket.allow_close = True
-    recovered = transport._http_post(b"{}")
-    assert recovered["status"] == 200
-    assert recovered["tls_protocol"] == "TLSv1.3"
-    assert transport._retired_cleanup_resources == {}
-
-
-def test_chain_cleanup_retry_cannot_drop_concurrent_retained_owner():
-    close_started = threading.Event()
-    release_close = threading.Event()
-    retain_done = threading.Event()
-
-    class Resource:
-        def __init__(self, *, blocking):
-            self.blocking = blocking
-            self.allow_close = False
-
-        def close(self):
-            if self.blocking:
-                close_started.set()
-                assert release_close.wait(timeout=2)
-            return self.allow_close
-
-    transport = EnclaveChainRpcTransportV2()
-    primary = OSError("cleanup failed")
-    first = Resource(blocking=True)
-    concurrent = Resource(blocking=False)
-    first.allow_close = True
-    transport._retain_cleanup_resource(
-        first,
-        kind="response",
-        primary_error=primary,
-    )
-    retry_errors = []
-
-    def retry_cleanup():
-        try:
-            transport._require_retired_cleanup()
-        except ValidatorChainTransportCleanupError as exc:
-            retry_errors.append(exc)
-
-    def retain_concurrent():
-        transport._retain_cleanup_resource(
-            concurrent,
-            kind="response",
-            primary_error=primary,
-        )
-        retain_done.set()
-
-    retry = threading.Thread(target=retry_cleanup)
-    retain = threading.Thread(target=retain_concurrent)
-
-    retry.start()
-    assert close_started.wait(timeout=2)
-    retain.start()
-    assert retain_done.wait(timeout=1)
-    with transport._cleanup_lock:
-        assert len(transport._retired_cleanup_resources) == 2
-    release_close.set()
-    retry.join(timeout=2)
-    retain.join(timeout=2)
-
-    assert not retry.is_alive()
-    assert not retain.is_alive()
-    assert len(retry_errors) == 1
-    assert retry_errors[0]._resources == (concurrent,)
-    assert id(first) not in transport._retired_cleanup_resources
-    assert transport._retired_cleanup_resources[id(concurrent)][1] is concurrent
-    concurrent.allow_close = True
-    transport._require_retired_cleanup()
-
-
-def test_archive_transport_records_only_the_exact_archive_destination():
-    now = datetime(2026, 7, 10, tzinfo=timezone.utc)
-    transport = EnclaveChainRpcTransportV2(
-        destination_host=CHAIN_ARCHIVE_ENDPOINT_HOST,
-        clock=lambda: now,
-        sleep=lambda _seconds: None,
-    )
-    body = b'{"jsonrpc":"2.0","id":1,"result":"0x' + b"ab" * 32 + b'"}'
-    transport._http_post = lambda _body: {
-        "status": 200,
-        "body": body,
-        "tls_peer_chain_hash": sha256_json([sha256_bytes(b"cert")]),
-        "tls_protocol": "TLSv1.3",
-    }
-    result = transport.call(
-        method="chain_getBlockHash",
-        params=[1],
-        request_id=1,
-        job_id="subnet-epoch-boundary:1",
-        purpose="validator.subnet_epoch_snapshot.v2",
-        logical_operation_id="subnet-epoch-boundary:1:block-hash",
-    )
-    assert {
-        (attempt["provider_id"], attempt["destination_host"])
-        for attempt in result["attempts"]
-    } == {("bittensor_archive", CHAIN_ARCHIVE_ENDPOINT_HOST)}
-    with pytest.raises(ValidatorChainSourceV2Error, match="outside measured policy"):
-        EnclaveChainRpcTransportV2(destination_host="archive.attacker.example")
 
 
 def test_finalized_extrinsic_requires_exact_bytes_and_committed_chain_state():
@@ -1445,13 +880,7 @@ def test_finalized_extrinsic_requires_exact_bytes_and_committed_chain_state():
             result = "0x" + storage.hex()
         else:
             raise AssertionError(method)
-        attempt = _attempt(
-            job_id=kwargs["job_id"],
-            purpose=kwargs["purpose"],
-            operation=method + ":" + str(kwargs["request_id"]),
-            request_id=("%032x" % kwargs["request_id"]),
-        )
-        return {"result": result, "attempts": [attempt], "artifacts": []}
+        return result
 
     pacing = []
     result = ValidatorChainSourceV2(
@@ -1475,19 +904,10 @@ def test_finalized_extrinsic_requires_exact_bytes_and_committed_chain_state():
         },
         minimum_block=BLOCK - 1,
         maximum_block=BLOCK,
-        epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
-        finalization_scan_id="sha256:" + "9" * 64,
     )
     assert result["extrinsic_hash"] == extrinsic_hash
     assert result["finalized_block"] == BLOCK
     assert result["state_transition_hash"].startswith("sha256:")
-    assert result["job_id"] == (
-        "weight-finalization:%d:%s"
-        % (STATEFUL_SETTLEMENT_EPOCH_ID, "9" * 64)
-    )
-    providers = [attempt["provider_id"] for attempt in result["attempts"]]
-    assert providers[-1] == "bittensor_archive"
-    assert set(providers[:-1]) == {"bittensor_chain"}
     assert pacing == [FINALIZATION_RPC_PACING_SECONDS] * 4
 
 
@@ -1516,15 +936,7 @@ def test_finalized_extrinsic_uses_archive_block_body_across_consecutive_epochs()
     archive_calls = []
 
     def response(kwargs, result):
-        attempt = _attempt(
-            job_id=kwargs["job_id"],
-            purpose=kwargs["purpose"],
-            operation=kwargs["logical_operation_id"].removeprefix(
-                kwargs["job_id"] + ":"
-            ),
-            request_id=("%032x" % kwargs["request_id"]),
-        )
-        return {"result": result, "attempts": [attempt], "artifacts": []}
+        return result
 
     def live_rpc(**kwargs):
         live_calls.append(kwargs)
@@ -1580,20 +992,12 @@ def test_finalized_extrinsic_uses_archive_block_body_across_consecutive_epochs()
             },
             minimum_block=BLOCK,
             maximum_block=BLOCK,
-            epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID + offset,
-            finalization_scan_id="sha256:" + str(9 - offset) * 64,
         )
         for offset in range(2)
     ]
 
     assert {result["extrinsic_hash"] for result in results} == {extrinsic_hash}
     assert {result["finalized_block"] for result in results} == {BLOCK}
-    assert results[0]["job_id"] != results[1]["job_id"]
-    assert {
-        attempt["logical_operation_id"] for attempt in results[0]["attempts"]
-    }.isdisjoint(
-        attempt["logical_operation_id"] for attempt in results[1]["attempts"]
-    )
     assert [call["method"] for call in archive_calls] == [
         "chain_getBlock",
         "state_getStorage",
@@ -1611,15 +1015,6 @@ def test_finalized_extrinsic_uses_archive_block_body_across_consecutive_epochs()
         "chain_getBlockHash",
         "chain_getBlock",
     ]
-    for result in results:
-        assert [attempt["provider_id"] for attempt in result["attempts"]] == [
-            "bittensor_chain",
-            "bittensor_chain",
-            "bittensor_chain",
-            "bittensor_chain",
-            "bittensor_archive",
-            "bittensor_archive",
-        ]
     assert pacing == [FINALIZATION_RPC_PACING_SECONDS] * 10
 
 
@@ -1635,15 +1030,7 @@ def test_finalized_extrinsic_archive_fallback_rejects_header_mismatch():
     archive_header = {**live_header, "stateRoot": "0x" + "99" * 32}
 
     def rpc_result(kwargs, result):
-        attempt = _attempt(
-            job_id=kwargs["job_id"],
-            purpose=kwargs["purpose"],
-            operation=kwargs["logical_operation_id"].removeprefix(
-                kwargs["job_id"] + ":"
-            ),
-            request_id=("%032x" % kwargs["request_id"]),
-        )
-        return {"result": result, "attempts": [attempt], "artifacts": []}
+        return result
 
     def live_rpc(**kwargs):
         values = {
@@ -1695,8 +1082,6 @@ def test_finalized_extrinsic_archive_fallback_rejects_header_mismatch():
             },
             minimum_block=BLOCK,
             maximum_block=BLOCK,
-            epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
-            finalization_scan_id="sha256:" + "9" * 64,
         )
 
 
@@ -1729,7 +1114,7 @@ def test_finalized_extrinsic_rejects_inclusion_without_expected_state_change():
             },
             "state_getStorage": "0x00",
         }
-        return {"result": values[method], "attempts": [], "artifacts": []}
+        return values[method]
 
     with pytest.raises(
         ValidatorChainSourceV2Error, match="expected chain state"
@@ -1754,6 +1139,4 @@ def test_finalized_extrinsic_rejects_inclusion_without_expected_state_change():
             },
             minimum_block=BLOCK,
             maximum_block=BLOCK,
-            epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID,
-            finalization_scan_id="sha256:" + "9" * 64,
         )

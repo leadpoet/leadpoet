@@ -24,9 +24,7 @@ MEASURED_PACKAGES = (
     "gateway",
     "leadpoet_canonical",
     "leadpoet_verifier",
-    "research_lab",
     "qualification",
-    "schemas",
     "Leadpoet",
 )
 ENTRYPOINT_SCRIPTS = (

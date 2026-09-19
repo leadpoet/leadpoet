@@ -2218,12 +2218,6 @@ def test_standalone_service_default_authority_uses_its_finalized_metagraph(
         chain=chain,
         validator_authorizer=None,
     )
-    monkeypatch.setattr("gateway.utils.registry._async_subtensor", None)
-    monkeypatch.setattr(
-        "gateway.utils.registry.is_registered_hotkey",
-        lambda _hotkey: pytest.fail("standalone service used gateway Subtensor"),
-    )
-
     assert service.handle_claim({}) == {"status": "empty"}
     assert observed == [True]
 

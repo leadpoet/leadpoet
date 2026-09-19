@@ -150,7 +150,7 @@ def bucket_skip(
 ) -> Tuple[List[int], List[int]]:
     """Reproduce the scorer's skip rule: ``(scored_indexes, skipped_indexes)``.
 
-    Mirrors ``QualificationStyleCompanyScorer._score_with_breakdowns_impl``: a
+    Applies the Arena company pre-slice rule: a
     company whose normalized bucket is empty or outside
     ``employee_count_buckets_for_icp(icp)`` is skipped without consuming a
     slot; scoring stops once the scored count reaches the ICP's company goal

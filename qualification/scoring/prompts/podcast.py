@@ -17,9 +17,7 @@ anti-FP rule: when entity OR topic confidence is low, return
 unable_to_verify rather than supported — wrong-entity attacks use
 similar-domain lookalikes, wrong-topic attacks use adjacent topics.
 
-URL precheck (intent_precheck.py:_check_intent_url_evidence_quality)
-already rejects non-YouTube URLs at zero cost; PART F handles the
-substance check for accepted YouTube URLs.
+PART F checks both source suitability and the substance of the podcast claim.
 """
 from typing import Any, Dict
 

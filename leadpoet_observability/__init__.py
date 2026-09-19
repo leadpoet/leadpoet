@@ -3,7 +3,7 @@
 Currently: opt-in, non-authoritative Sentry host observability. See
 ``docs/sentry_error_monitoring.md`` and ``sentry_bootstrap.py`` for the
 contract. This package must stay stdlib-only at import time so every entry
-point (gateway, validator, miner, auditor, Research Lab workers) can wire
+point (gateway, Arena service, and validator processes) can wire
 it unconditionally with zero side effects when disabled.
 """
 

@@ -17,7 +17,6 @@ from qualification.scoring.lead_scorer import (
     _matches_exclusion_list,
     _reverify_decision,
     _run_company_binary_fit_checks,
-    _run_competition_binary_fit_checks,
     _stage_quote_supports_observation,
     _verify_company_fit,
 )
@@ -103,7 +102,7 @@ def test_private_equity_stage_alias_rejects_other_stage_families(
 
     company = _company().model_copy(update={"company_stage": submitted_stage})
     icp = _icp(company_stage="Private Equity")
-    ok, reason = _run_competition_binary_fit_checks(
+    ok, reason = _run_company_binary_fit_checks(
         company, icp
     )
 
@@ -272,10 +271,10 @@ def test_fit_gate_zeroes_excluded_company(monkeypatch):
         "qualification.scoring.lead_scorer._registrable_domain",
         lambda url: "acme.com" if "acme" in url.lower() else "other.com",
     )
-    ok, reason = _run_competition_binary_fit_checks(
+    ok, reason = _run_company_binary_fit_checks(
         _company(), _icp(excluded_companies=["acme.com"]))
     assert not ok and "exclusion list" in reason
-    ok2, _ = _run_competition_binary_fit_checks(
+    ok2, _ = _run_company_binary_fit_checks(
         _company(), _icp(excluded_companies=["other.com"]))
     assert ok2
 
@@ -345,7 +344,7 @@ def test_company_identity_receipt_matches_model_contract_shape():
     }
 
 
-def test_public_scorer_uses_shared_employee_stage_and_exclusion_gates(monkeypatch):
+def test_arena_scorer_uses_shared_employee_stage_and_exclusion_gates(monkeypatch):
     import qualification.scoring.lead_scorer as scorer
 
     async def prechecks(*_args, **_kwargs):
@@ -372,14 +371,14 @@ def test_public_scorer_uses_shared_employee_stage_and_exclusion_gates(monkeypatc
         (_company(), _icp(excluded_companies=["acme.com"]), "exclusion list"),
     ]
     for company, icp, expected in cases:
-        result = asyncio.run(scorer.score_company(company, icp, 0.0, 1.0, set()))
+        result = asyncio.run(scorer.score_company_competition_intent(company, icp, 0.0, 1.0, set()))
         assert result.final_score == 0
         assert expected in (result.failure_reason or "")
 
     assert _run_company_binary_fit_checks is not None
 
 
-def test_public_scorer_passes_submitted_linkedin_to_identity_verifier(monkeypatch):
+def test_arena_scorer_passes_submitted_linkedin_to_identity_verifier(monkeypatch):
     import qualification.scoring.lead_scorer as scorer
 
     async def prechecks(*_args, **_kwargs):
@@ -392,7 +391,7 @@ def test_public_scorer_passes_submitted_linkedin_to_identity_verifier(monkeypatc
     monkeypatch.setattr(scorer, "run_company_zero_checks", prechecks)
     monkeypatch.setattr(scorer, "verify_company_exists", identity)
     result = asyncio.run(
-        scorer.score_company(
+        scorer.score_company_competition_intent(
             _company(linkedin="https://linkedin.com/company/acme"),
             _icp(),
             0.0,
@@ -2658,7 +2657,7 @@ def test_homepage_exception_reason_survives_only_an_unavailable_final_result(
     assert "private" not in result.details["failure_reason_code"]
 
 
-def test_public_and_research_lab_use_the_same_shared_verifier(monkeypatch):
+def test_arena_scorer_uses_company_fit_verifier_receipt(monkeypatch):
     import qualification.scoring.lead_scorer as scorer
 
     calls = []
@@ -2682,17 +2681,14 @@ def test_public_and_research_lab_use_the_same_shared_verifier(monkeypatch):
         )
 
     monkeypatch.setattr(scorer, "_verify_company_fit", shared)
-    public = asyncio.run(
-        scorer.score_company(_company(), _icp(), 0.0, 1.0, set())
-    )
-    research = asyncio.run(
+    result = asyncio.run(
         scorer.score_company_competition_intent(
             _company(), _icp(), 0.0, 1.0, set()
         )
     )
-    assert calls == [True, True]
-    assert public.final_score == research.final_score == 0
-    for breakdown in (public, research):
+    assert calls == [True]
+    assert result.final_score == 0
+    for breakdown in (result,):
         receipt = breakdown.verifier_gate_receipts[0]
         assert receipt["gate"] == "company_fit"
         assert set(receipt["company_fit_dimensions"]) == {
@@ -2706,8 +2702,6 @@ def test_public_and_research_lab_use_the_same_shared_verifier(monkeypatch):
 
 def test_official_fit_rejects_proven_industry_conflict_even_in_shadow(monkeypatch):
     import qualification.scoring.lead_scorer as scorer
-
-    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "shadow")
 
     async def prechecks(*_args, **_kwargs):
         return company_fit_match()

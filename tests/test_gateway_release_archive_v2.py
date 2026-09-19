@@ -24,8 +24,6 @@ from gateway.tee.release_archive_v2 import (
 )
 from gateway.tee.release_manifest_v2 import (
     BUILD_EVIDENCE_SCHEMA_VERSION,
-    HISTORICAL_TWO_ROLE_TOPOLOGY_HASH,
-    LOCAL_RELEASE_SCHEMA_VERSION,
     build_local_release_identity,
     build_release_manifest,
 )
@@ -146,24 +144,13 @@ def _release_fixture(root: Path, commit_character: str):
     return gateway_root, eif_root, release_path, release
 
 
-def _local_archive_fixture(root: Path, *, historical: bool):
+def _local_archive_fixture(root: Path):
     root.mkdir(parents=True)
-    commit = ("b" if historical else "a") * 40
-    role_specs = (
-        {
-            "gateway_coordinator": {"service_role": "gateway_coordinator"},
-            "gateway_scoring": {"service_role": "gateway_scoring"},
-        }
-        if historical
-        else ROLE_SPECS
-    )
-    expected_topology_hash = (
-        HISTORICAL_TWO_ROLE_TOPOLOGY_HASH if historical else topology_hash()
-    )
+    commit = "a" * 40
     build_results = []
     files = {}
     verification_roles = []
-    for index, (role, spec) in enumerate(sorted(role_specs.items()), start=1):
+    for index, role in enumerate(sorted(ROLE_SPECS), start=1):
         pcr0 = ("%x" % index) * 96
         eif_bytes = ("local-eif:" + role).encode("ascii")
         image_hash = _sha(("local-image:" + role).encode("ascii"))
@@ -179,7 +166,7 @@ def _local_archive_fixture(root: Path, *, historical: bool):
                 "execution_manifest_hash": _sha(("execution:" + role).encode("ascii")),
                 "dependency_lock_hash": _sha(("dependency:" + role).encode("ascii")),
                 "dockerfile_hash": _sha(("dockerfile:" + role).encode("ascii")),
-                "topology_hash": expected_topology_hash,
+                "topology_hash": topology_hash(),
             }
         )
         artifacts = {
@@ -201,34 +188,7 @@ def _local_archive_fixture(root: Path, *, historical: bool):
             {"physical_role": role, "eif_hash": _sha(eif_bytes), "pcr0": pcr0}
         )
 
-    if historical:
-        roles = {
-            result["role"]: {
-                "physical_role": result["role"],
-                "service_role": role_specs[result["role"]]["service_role"],
-                "commit_sha": result["commit_sha"],
-                "pcr0": result["pcr0"],
-                "normalized_image_hash": result["image_id"],
-                "source_manifest_hash": result["source_manifest_hash"],
-                "build_identity_hash": result["build_identity_hash"],
-                "execution_manifest_hash": result["execution_manifest_hash"],
-                "dependency_lock_hash": result["dependency_lock_hash"],
-                "dockerfile_hash": result["dockerfile_hash"],
-                "topology_hash": result["topology_hash"],
-                "verified_build_count": 1,
-            }
-            for result in build_results
-        }
-        release_body = {
-            "schema_version": LOCAL_RELEASE_SCHEMA_VERSION,
-            "commit_sha": commit,
-            "topology_hash": expected_topology_hash,
-            "roles": {role: roles[role] for role in sorted(roles)},
-            "verified_build_count": len(roles),
-        }
-        release = {**release_body, "release_hash": sha256_json(release_body)}
-    else:
-        release = build_local_release_identity(build_results)
+    release = build_local_release_identity(build_results)
 
     manifest_bytes = json.dumps(release, sort_keys=True).encode("utf-8")
     (root / "gateway-v2-release-manifest.json").write_bytes(manifest_bytes)
@@ -257,12 +217,9 @@ def _local_archive_fixture(root: Path, *, historical: bool):
     return release
 
 
-@pytest.mark.parametrize("historical", [False, True])
-def test_gateway_archive_reads_current_and_retained_local_release_topologies(
-    tmp_path, historical
-):
-    archive = tmp_path / ("historical" if historical else "current")
-    release = _local_archive_fixture(archive, historical=historical)
+def test_gateway_archive_reads_retained_local_release_topology(tmp_path):
+    archive = tmp_path / "current"
+    release = _local_archive_fixture(archive)
 
     verified = verify_archive_directory(archive)
 

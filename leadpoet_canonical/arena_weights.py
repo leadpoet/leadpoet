@@ -8,6 +8,7 @@ that is needed to derive the exact sparse vector which may be submitted.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import struct
@@ -23,7 +24,6 @@ from leadpoet_canonical.lab_arena_rewards import (
     validate_reward_basis,
     verify_reward_basis_signature,
 )
-from leadpoet_canonical.weights import compare_weights_hash
 
 
 ACCEPTED_WEIGHT_STATE_SCHEMA_VERSION = "leadpoet.arena.accepted_weight_state.v1"
@@ -42,6 +42,21 @@ _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(
 
 class ArenaWeightError(ValueError):
     """An accepted state or derived Arena vector is invalid."""
+
+
+def compare_weights_hash(netuid: int, epoch_id: int, weights: Sequence[tuple[int, int]]) -> str:
+    """Hash the exact sparse Arena vector for finalized-chain comparison."""
+    sorted_weights = sorted(weights, key=lambda x: x[0])
+
+    payload = {
+        "netuid": netuid,
+        "epoch_id": epoch_id,
+        "weights": [[uid, w_u16] for uid, w_u16 in sorted_weights]
+    }
+
+    # Canonical JSON: sorted keys, no whitespace
+    canonical_json = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(canonical_json.encode('utf-8')).hexdigest()
 
 
 def accepted_weight_state_body(value: Mapping[str, Any]) -> Dict[str, Any]:

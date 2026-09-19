@@ -18,7 +18,6 @@ import pytest
 import leadpoet_verifier.industry_taxonomy as taxonomy
 from leadpoet_verifier.industry_fit import b2b_saas_evidence, industry_fit
 import qualification.scoring.pre_checks as pre_checks
-from qualification.scoring.company_fit_decision import COMPANY_FIT_UNAVAILABLE
 from gateway.qualification.models import (
     CompanyOutput,
     ICPPrompt,
@@ -36,7 +35,6 @@ def test_new_verifier_runtime_annotations_evaluate_on_python39() -> None:
     modules = (
         "leadpoet_verifier.industry_fit",
         "leadpoet_verifier.industry_taxonomy",
-        "leadpoet_verifier.semantic_gates",
         "leadpoet_verifier.identity.normalization",
     )
 
@@ -152,11 +150,6 @@ def test_b2b_saas_service_only_rejected_without_owned_software() -> None:
     assert result["service_only_signals"]
 
 
-# ---------------------------------------------------------------------------
-# Shadow-mode invariance: the reward-preservation proof
-# ---------------------------------------------------------------------------
-
-
 def _company(industry: str = "Food & Beverages", sub: str = "") -> CompanyOutput:
     return CompanyOutput(
         company_name="Acme Corp",
@@ -193,125 +186,6 @@ def _icp(industry: str = "Software") -> ICPPrompt:
     )
 
 
-def _run_zero_checks(company: CompanyOutput, icp: ICPPrompt):
-    # asyncio.run creates a fresh loop each call, immune to loop teardown by
-    # earlier async tests in the module.
-    return asyncio.run(
-        pre_checks.run_company_zero_checks(
-            company, icp, run_cost_usd=0.0, run_time_seconds=1.0, seen_companies=set()
-        )
-    )
-
-
-def test_shadow_mode_is_output_neutral(monkeypatch) -> None:
-    # A canonical industry mismatch in explicitly selected SHADOW mode passes
-    # exactly as before the port and records a durable shadow-only receipt.
-    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "shadow")
-    company, icp = _company("Food & Beverages"), _icp("Software")
-    receipts = []
-    result = asyncio.run(
-        pre_checks.run_company_zero_checks(
-            company,
-            icp,
-            run_cost_usd=0.0,
-            run_time_seconds=1.0,
-            seen_companies=set(),
-            gate_receipts=receipts,
-        )
-    )
-    assert result.passed is True and result.reason is None  # outcome unchanged
-    assert any(
-        receipt.get("gate") == "taxonomy_industry"
-        and receipt.get("taxonomy_mode") == "shadow"
-        and receipt.get("final_effect") == "shadow_pass"
-        for receipt in receipts
-    )
-
-
-def test_disabled_mode_skips_and_is_output_neutral(monkeypatch, caplog) -> None:
-    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "disabled")
-    with caplog.at_level("WARNING"):
-        passed, reason = _run_zero_checks(_company("Food & Beverages"), _icp("Software"))
-    assert passed is True and reason is None
-    assert not any("taxonomy_industry_gate" in rec.message for rec in caplog.records)
-
-
-def test_default_mode_shadows_canonical_mismatch(monkeypatch) -> None:
-    monkeypatch.delenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", raising=False)
-    result = _run_zero_checks(_company("Food & Beverages"), _icp("Software"))
-    assert result.passed is True
-    assert result.decision == "match"
-
-
-def test_enforce_mode_zeroes_canonical_mismatch(monkeypatch) -> None:
-    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
-    passed, reason = _run_zero_checks(_company("Food & Beverages"), _icp("Software"))
-    assert passed is False
-    assert "canonical taxonomy" in (reason or "")
-
-
-def test_enforce_mode_passes_true_match(monkeypatch) -> None:
-    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
-    passed, reason = _run_zero_checks(_company("Software", "SaaS"), _icp("Software"))
-    assert passed is True and reason is None
-
-
-def test_gate_marks_internal_error_unavailable(monkeypatch) -> None:
-    # A broken matcher is retryable infrastructure, not an implicit match.
-    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
-
-    def _boom(*args, **kwargs):
-        raise RuntimeError("taxonomy unavailable")
-
-    import leadpoet_verifier.industry_fit as fit_mod
-
-    monkeypatch.setattr(fit_mod, "industry_fit", _boom)
-    result = _run_zero_checks(_company("Food & Beverages"), _icp("Software"))
-    assert result.decision == COMPANY_FIT_UNAVAILABLE
-    assert "matcher unavailable" in (result.reason or "")
-
-
-def test_invalid_mode_falls_back_to_shadow(monkeypatch) -> None:
-    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "banana")
-    assert pre_checks._taxonomy_industry_gate_mode() == "shadow"
-
-
-# ---------------------------------------------------------------------------
-# Semantic gates: default-off + SSRF guard + acronym safety (ported module)
-# ---------------------------------------------------------------------------
-
-
-def test_semantic_gates_default_disabled(monkeypatch) -> None:
-    import leadpoet_verifier.semantic_gates as sg
-
-    monkeypatch.delenv("VERIFIER_SEMANTIC_GATES_MODE", raising=False)
-    assert sg.semantic_gate_mode() == "disabled"
-
-
-def test_semantic_gates_ssrf_guard() -> None:
-    import leadpoet_verifier.semantic_gates as sg
-
-    assert sg.is_safe_public_url("https://example.com/about") is True
-    for bad in (
-        "http://169.254.169.254/latest/meta-data",
-        "http://127.0.0.1:8000/",
-        "http://10.0.0.5/",
-        "https://user:pass@example.com/",
-        "https://gateway.internal/",
-        "ftp://example.com/",
-    ):
-        assert sg.is_safe_public_url(bad) is False, bad
-
-
-def test_short_acronym_entity_matching() -> None:
-    # Commit 0197d5f6: <4-char acronyms match only as whole uppercase tokens.
-    import leadpoet_verifier.semantic_gates as sg
-
-    assert sg._short_external_entity_match("abc", "ABC announces a new product")
-    assert not sg._short_external_entity_match("abc", "abcdef industries update")
-    assert not sg._short_external_entity_match("abc", "the fabric company")
-
-
 # ---------------------------------------------------------------------------
 # Identity resolution (ported identity/ package) — pure policy basics
 # ---------------------------------------------------------------------------
@@ -337,89 +211,6 @@ def test_identity_linkedin_url_canonicalization() -> None:
     )
     b = normalize_linkedin_company_url("https://linkedin.com/company/acme-corp")
     assert a == b
-
-
-# ---------------------------------------------------------------------------
-# Bounded intent-corroboration rescue (ported into three-stage verification)
-# ---------------------------------------------------------------------------
-
-
-def test_corroboration_rescue_default_off(monkeypatch) -> None:
-    import qualification.scoring.intent_verification_three_stage as t3
-
-    monkeypatch.delenv("RESEARCH_LAB_INTENT_CORROBORATION_RESCUE", raising=False)
-    # Default OFF: the call site short-circuits before eligibility, so the
-    # three-stage pipeline behaves byte-for-byte as before the port.
-    assert t3._corroboration_rescue_enabled() is False
-    monkeypatch.setenv("RESEARCH_LAB_INTENT_CORROBORATION_RESCUE", "true")
-    assert t3._corroboration_rescue_enabled() is True
-
-
-def test_corroboration_eligibility_is_narrow() -> None:
-    import qualification.scoring.intent_verification_three_stage as t3
-
-    row = {"signal_date": "2026-07-01"}
-    good = {
-        "signal_status": "supported",
-        "confidence": "medium",
-        "same_entity_check": "pass",
-        "claim_matches_miner_date": "supported",
-    }
-    assert t3._medium_corroboration_eligible(row, good, "review") is True
-    # Every deviation disqualifies: wrong decision, low confidence, entity
-    # failure, contradicted date, or a dateless claim.
-    assert t3._medium_corroboration_eligible(row, good, "reject") is False
-    assert t3._medium_corroboration_eligible(row, {**good, "confidence": "low"}, "review") is False
-    assert t3._medium_corroboration_eligible(row, {**good, "same_entity_check": "fail"}, "review") is False
-    assert t3._medium_corroboration_eligible(
-        row, {**good, "claim_matches_miner_date": "contradicted"}, "review"
-    ) is False
-    assert t3._medium_corroboration_eligible({}, good, "review") is False
-
-
-def test_independent_corroboration_filters_dependent_sources() -> None:
-    import qualification.scoring.intent_verification_three_stage as t3
-
-    filler = " ".join(f"tok{i}" for i in range(120))
-    original_text = f"Acme announced its series B funding round {filler}"
-    original = {"results": [{"url": "https://news.acmewire.com/a", "text": original_text}]}
-    original_urls = [
-        "https://news.acmewire.com/a",
-        "https://www.globenewswire.com/release/acme",
-    ]
-    candidates = {
-        "results": [
-            {"url": "https://news.acmewire.com/b", "text": "same host different path"},
-            {"url": "https://globenewswire.com/other/acme", "text": "any"},
-            {"url": "https://independent-tech-daily.com/acme", "text": original_text},
-            {
-                "url": "https://reporter-desk.com/acme-analysis",
-                "text": "An independent analysis of the announcement with original reporting",
-            },
-        ]
-    }
-    out = t3._independent_corroboration(original, candidates, original_urls)
-    accepted_urls = [r["url"] for r in out["results"]]
-    reasons = {e["url"]: e["reason"] for e in out["excluded"]}
-    assert accepted_urls == ["https://reporter-desk.com/acme-analysis"]
-    assert reasons["https://news.acmewire.com/b"] == "same_domain"
-    # Canonical-host dedup catches the wire domain before family logic.
-    assert reasons["https://globenewswire.com/other/acme"] == "same_domain"
-    assert reasons["https://independent-tech-daily.com/acme"] == "near_duplicate"
-
-
-def test_wire_family_and_syndication_detection() -> None:
-    import qualification.scoring.intent_verification_three_stage as t3
-
-    assert t3._wire_family("https://www.globenewswire.com/x") == "globenewswire"
-    assert t3._wire_family("https://independent-tech-daily.com/x") is None
-    # Mirrors carry the wire distribution marker even on independent hosts.
-    assert t3._looks_like_wire_syndication(
-        "NEW YORK (GLOBE NEWSWIRE) -- Acme Corp today announced", "globenewswire"
-    ) is True
-    assert t3._looks_like_wire_syndication(
-        "An original analysis without wire markers", "globenewswire"
-    ) is False
 
 
 # ---------------------------------------------------------------------------
@@ -503,213 +294,6 @@ async def test_provider_outage_records_verifier_error_not_content_reject(
 
 
 # ---------------------------------------------------------------------------
-# Semantic-gate wiring: rescue ambiguity only, never canonical conflicts
-# ---------------------------------------------------------------------------
-
-
-class _FakeSemanticResult:
-    def __init__(self, outcome: str) -> None:
-        self.outcome = outcome
-
-
-class _FakeEvaluator:
-    def __init__(self, outcome: str, calls: list) -> None:
-        self._outcome = outcome
-        self._calls = calls
-
-    async def evaluate_industry(self, **kwargs):
-        self._calls.append(kwargs)
-        return _FakeSemanticResult(self._outcome)
-
-
-def _install_semantic(monkeypatch, mode: str, outcome: str):
-    import leadpoet_verifier.semantic_gates as sg
-
-    calls: list = []
-    monkeypatch.setattr(sg, "semantic_gate_mode", lambda value=None: mode)
-    monkeypatch.setattr(
-        sg.SemanticGateEvaluator,
-        "from_env",
-        classmethod(lambda cls, **kw: _FakeEvaluator(outcome, calls)),
-    )
-    return calls
-
-
-def test_semantic_disabled_never_constructs_evaluator(monkeypatch) -> None:
-    import leadpoet_verifier.semantic_gates as sg
-
-    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
-    monkeypatch.delenv("VERIFIER_SEMANTIC_GATES_MODE", raising=False)
-
-    def _boom(cls, **kw):
-        raise AssertionError("evaluator must not be constructed when disabled")
-
-    monkeypatch.setattr(sg.SemanticGateEvaluator, "from_env", classmethod(_boom))
-    # Ambiguous mismatch: unknown provider label, no concepts -> enforce zeroes
-    # WITHOUT ever touching the semantic evaluator.
-    result = _run_zero_checks(
-        _company("Bespoke Provider Label Xyz"), _icp("Software")
-    )
-    assert result.decision == COMPANY_FIT_UNAVAILABLE
-
-
-def test_semantic_enforce_rescues_ambiguous_label(monkeypatch) -> None:
-    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
-    calls = _install_semantic(monkeypatch, "enforce", "passed")
-    passed, reason = _run_zero_checks(
-        _company("Bespoke Provider Label Xyz"), _icp("Software")
-    )
-    assert passed is True and reason is None  # semantic match rescued it
-    assert len(calls) == 1
-    assert calls[0]["requested_industry"] == "Software"
-
-
-def test_semantic_never_rescues_canonical_conflict(monkeypatch) -> None:
-    # Site-faithful invariant: a canonical taxonomy REJECTION is final — the
-    # semantic judge is not even consulted, whatever it would say.
-    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
-    calls = _install_semantic(monkeypatch, "enforce", "passed")
-    passed, reason = _run_zero_checks(_company("Manufacturing"), _icp("Software"))
-    assert passed is False
-    assert calls == []  # judge never consulted for canonical conflicts
-
-
-def test_semantic_no_match_keeps_enforce_zero(monkeypatch) -> None:
-    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
-    calls = _install_semantic(monkeypatch, "enforce", "failed")
-    passed, reason = _run_zero_checks(
-        _company("Bespoke Provider Label Xyz"), _icp("Software")
-    )
-    assert passed is False
-    assert len(calls) == 1
-
-
-# ---------------------------------------------------------------------------
-# PR-28 audit fix: the FULL taxonomy x semantic x provider decision matrix.
-# Semantic shadow must NEVER change the outcome; semantic-enforce provider
-# unavailability must fail OPEN (never a verdict); canonical conflicts are
-# never rescued in any combination.
-# ---------------------------------------------------------------------------
-
-
-class _MatrixEvaluator:
-    def __init__(self, behavior: str, calls: list) -> None:
-        self._behavior = behavior
-        self._calls = calls
-
-    async def evaluate_industry(self, **kwargs):
-        self._calls.append(kwargs)
-        if self._behavior == "error":
-            raise RuntimeError("provider outage")
-        return _FakeSemanticResult("passed" if self._behavior == "match" else "failed")
-
-
-def _install_matrix(monkeypatch, semantic_mode: str, behavior: str):
-    import leadpoet_verifier.semantic_gates as sg
-
-    calls: list = []
-    monkeypatch.setattr(sg, "semantic_gate_mode", lambda value=None: semantic_mode)
-    if behavior == "construct_error":
-        def _boom(cls, **kw):
-            raise RuntimeError("no api key")
-        monkeypatch.setattr(sg.SemanticGateEvaluator, "from_env", classmethod(_boom))
-    else:
-        monkeypatch.setattr(
-            sg.SemanticGateEvaluator,
-            "from_env",
-            classmethod(lambda cls, **kw: _MatrixEvaluator(behavior, calls)),
-        )
-    return calls
-
-
-AMBIGUOUS = ("Bespoke Provider Label Xyz", "Software")   # taxonomy silent
-CONFLICT = ("Manufacturing", "Software")                  # canonical conflict
-
-
-def test_matrix_taxonomy_shadow_is_always_output_neutral(monkeypatch) -> None:
-    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "shadow")
-    for semantic_mode in ("disabled", "shadow", "enforce"):
-        for behavior in ("match", "no_match", "error", "construct_error"):
-            _install_matrix(monkeypatch, semantic_mode, behavior)
-            for cand, req in (AMBIGUOUS, CONFLICT):
-                passed, reason = _run_zero_checks(_company(cand), _icp(req))
-                assert passed is True and reason is None, (
-                    f"taxonomy shadow must pass: semantic={semantic_mode} "
-                    f"behavior={behavior} cand={cand}"
-                )
-
-
-def test_matrix_semantic_shadow_never_changes_enforce_outcome(monkeypatch) -> None:
-    # THE PR-28 AUDIT BUG: semantic shadow used to rescue under taxonomy
-    # enforce. It must behave exactly like semantic disabled.
-    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
-    for behavior in ("match", "no_match", "error", "construct_error"):
-        _install_matrix(monkeypatch, "shadow", behavior)
-        passed, reason = _run_zero_checks(_company(*AMBIGUOUS[:1]), _icp(AMBIGUOUS[1]))
-        assert passed is False, (
-            f"semantic SHADOW must not rescue (behavior={behavior})"
-        )
-        passed, _ = _run_zero_checks(_company(CONFLICT[0]), _icp(CONFLICT[1]))
-        assert passed is False
-
-
-def test_matrix_semantic_enforce_decides_ambiguous_only(monkeypatch) -> None:
-    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
-    # match -> rescued
-    _install_matrix(monkeypatch, "enforce", "match")
-    passed, _ = _run_zero_checks(_company(AMBIGUOUS[0]), _icp(AMBIGUOUS[1]))
-    assert passed is True
-    # no-match -> zero
-    _install_matrix(monkeypatch, "enforce", "no_match")
-    passed, _ = _run_zero_checks(_company(AMBIGUOUS[0]), _icp(AMBIGUOUS[1]))
-    assert passed is False
-    # canonical conflict -> zero even on match, judge never consulted
-    calls = _install_matrix(monkeypatch, "enforce", "match")
-    passed, _ = _run_zero_checks(_company(CONFLICT[0]), _icp(CONFLICT[1]))
-    assert passed is False
-    assert calls == []
-
-
-def test_matrix_semantic_enforce_unavailability_is_retryable(monkeypatch) -> None:
-    # Provider unavailability is not a verdict and must not become a match.
-    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
-    for behavior in ("error", "construct_error"):
-        _install_matrix(monkeypatch, "enforce", behavior)
-        result = _run_zero_checks(_company(AMBIGUOUS[0]), _icp(AMBIGUOUS[1]))
-        assert result.decision == COMPANY_FIT_UNAVAILABLE, behavior
-        # ...but canonical conflicts still zero (unavailability changes nothing).
-        passed, _ = _run_zero_checks(_company(CONFLICT[0]), _icp(CONFLICT[1]))
-        assert passed is False
-
-
-def test_gate_receipts_are_durable_and_complete(monkeypatch) -> None:
-    # Audit fix #4: durable receipts carry modes, deterministic detail,
-    # semantic judgment, and the final scoring effect.
-    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
-    _install_matrix(monkeypatch, "enforce", "match")
-    receipts: list = []
-    passed, reason = asyncio.run(
-        pre_checks.run_company_zero_checks(
-            _company(AMBIGUOUS[0]),
-            _icp(AMBIGUOUS[1]),
-            run_cost_usd=0.0,
-            run_time_seconds=1.0,
-            seen_companies=set(),
-            gate_receipts=receipts,
-        )
-    )
-    assert passed is True
-    assert len(receipts) == 1
-    r = receipts[0]
-    assert r["gate"] == "taxonomy_industry"
-    assert r["taxonomy_mode"] == "enforce"
-    assert r["semantic_mode"] == "enforce"
-    assert r["final_effect"] == "rescued_semantic_enforce"
-    assert r["deterministic"]["passed"] is False
-    assert r["semantic_verdict"] is True
-
-
-# ---------------------------------------------------------------------------
 # PR-28 audit fix: country alias + unknown-code handling
 # ---------------------------------------------------------------------------
 
@@ -750,9 +334,7 @@ async def test_gate_receipts_persist_into_breakdown_end_to_end(monkeypatch) -> N
         score_company_competition_intent,
     )
 
-    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "enforce")
-    monkeypatch.delenv("VERIFIER_SEMANTIC_GATES_MODE", raising=False)
-    # Canonical conflict zeroes deterministically at pre-checks: no network.
+    # Canonical conflict zeroes deterministically before provider calls.
     breakdown = await score_company_competition_intent(
         _company("Manufacturing"),
         _icp("Software"),
@@ -774,17 +356,14 @@ async def test_gate_receipts_persist_into_breakdown_end_to_end(monkeypatch) -> N
 @pytest.mark.asyncio
 async def test_clean_pass_carries_no_receipt(monkeypatch) -> None:
     # Payload discipline: a trivial deterministic pass must NOT attach an
-    # audit receipt — otherwise a shadow-mode run would bloat every
-    # persisted breakdown in every benchmark.
-    monkeypatch.setenv("RESEARCH_LAB_TAXONOMY_INDUSTRY_GATE", "shadow")
+    # audit receipt — otherwise every persisted breakdown would grow without
+    # audit value.
     receipts: list = []
-    passed, reason = await pre_checks.run_company_zero_checks(
+    result = await pre_checks.run_company_zero_checks(
         _company("Software", "SaaS"),
-        _icp("Software"),
-        run_cost_usd=0.0,
         run_time_seconds=1.0,
         seen_companies=set(),
         gate_receipts=receipts,
     )
-    assert passed is True and reason is None
+    assert result.passed is True and result.reason is None
     assert receipts == []  # nothing to audit on a clean deterministic pass

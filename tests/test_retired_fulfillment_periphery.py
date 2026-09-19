@@ -10,7 +10,7 @@ def test_legacy_fulfillment_periphery_is_absent() -> None:
     for relative_path in (
         "Leadpoet/utils/hashing.py",
         "miner_models",
-        "neurons",
+        "neurons/miner.py",
         "validator_models/checks_zerobounce.py",
         "validator_models/fulfillment_attribute_verification.py",
         "validator_models/fulfillment_company_verification.py",

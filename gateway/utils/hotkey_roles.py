@@ -8,8 +8,6 @@ from typing import Any, List, Optional, Tuple
 
 
 MIN_VALIDATOR_STAKE_WEIGHT = 75_000
-# Backward-compatible name for registry imports and external callers.
-STAKE_THRESHOLD = MIN_VALIDATOR_STAKE_WEIGHT
 
 
 class ValidatorIneligible(ValueError):
@@ -148,11 +146,11 @@ def classify_hotkey_role(
         return "miner", "permit=False"
 
     stake_weight = _require_stake(_scalar(stake))
-    if permit and stake_weight >= STAKE_THRESHOLD:
+    if permit and stake_weight >= MIN_VALIDATOR_STAKE_WEIGHT:
         return (
             "validator",
             "stake_weight=%.0f >= %d, permit=True"
-            % (stake_weight, STAKE_THRESHOLD),
+            % (stake_weight, MIN_VALIDATOR_STAKE_WEIGHT),
         )
     return "miner", "stake_weight=%.0f, permit=%s" % (stake_weight, permit)
 
@@ -273,7 +271,6 @@ def validator_hotkeys_from_metagraph(
 
 __all__ = [
     "MIN_VALIDATOR_STAKE_WEIGHT",
-    "STAKE_THRESHOLD",
     "ValidatorIneligible",
     "classify_hotkey_from_metagraph",
     "classify_hotkey_role",

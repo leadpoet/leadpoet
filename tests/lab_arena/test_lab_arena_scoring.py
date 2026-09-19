@@ -560,19 +560,39 @@ def test_scorer_linkedin_slug_still_rejects_unsafe_shapes(linkedin):
 def test_policy_is_plain_and_binds_environment_fail_closed():
     policy = scoring.build_scorer_policy()
     assert policy == scoring.build_scorer_policy()
-    assert policy["env_bindings"]["RESEARCH_LAB_EVAL_FP_PENALTY_POINTS"] == "10" and policy["max_scored_companies"] == 0
+    assert policy["env_bindings"] == {} and policy["max_scored_companies"] == 0
+    assert policy["fp_penalty_points"] == policy["fp_unverified_primary_penalty_points"] == 10.0
     environ = {}
     credentials = {name: "secret-" + name for name in scoring.CREDENTIAL_ENV_NAMES}
     applied = scoring.apply_policy_to_environment(
         policy, environ=environ, credentials=credentials
     )
     assert applied == policy["scoring_adapter_version"]
-    assert environ["RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE"] == "0" and environ["OPENROUTER_API_KEY"] == credentials["OPENROUTER_API_KEY"]
+    assert environ == credentials
     assert environ["DEEPLINE_API_KEY"] == credentials["DEEPLINE_API_KEY"]
     with pytest.raises(scoring.ScorerPolicyConflict):
-        scoring.apply_policy_to_environment(policy, environ={"RESEARCH_LAB_EVAL_FP_PENALTY_POINTS": "25"}, credentials=credentials)
+        scoring.apply_policy_to_environment(policy, environ={"OPENROUTER_API_KEY": "different-secret"}, credentials=credentials)
     with pytest.raises(scoring.ScorerPolicyConflict):
         scoring.apply_policy_to_environment(policy, environ={}, credentials=dict(credentials, EXA_API_KEY=""))
+
+
+def test_frozen_policy_bindings_still_apply_and_keep_identical_scores():
+    """Existing rounds retain their frozen policy while new rounds omit unused knobs."""
+
+    policy = scoring.build_scorer_policy()
+    frozen_policy = dict(policy, env_bindings={"RESEARCH_LAB_EVAL_FP_PENALTY_POINTS": "10"})
+    credentials = {name: "secret-" + name for name in scoring.CREDENTIAL_ENV_NAMES}
+    environ = {}
+    scoring.apply_policy_to_environment(frozen_policy, environ=environ, credentials=credentials)
+    assert environ["RESEARCH_LAB_EVAL_FP_PENALTY_POINTS"] == "10"
+    with pytest.raises(scoring.ScorerPolicyConflict):
+        scoring.apply_policy_to_environment(frozen_policy, environ={"RESEARCH_LAB_EVAL_FP_PENALTY_POINTS": "25"}, credentials=credentials)
+
+    plan = scoring.build_scoring_plan(round_id=ROUND, stage=1, runs=runs_for(["king", "c1"]))
+    outputs = {item["scored_run_id"]: [company(i) for i in range(3)] for item in plan["work_items"]}
+    breakdowns = {item["scored_run_id"]: [breakdown(60.0), breakdown(0.0, "false_positive"), breakdown(40.0)] for item in plan["work_items"]}
+    kwargs = dict(plan=plan, icps_by_position=_ICPS, outputs_by_run=outputs, breakdowns_by_item=breakdowns)
+    assert scoring.build_stage_scores(policy=policy, **kwargs) == scoring.build_stage_scores(policy=frozen_policy, **kwargs)
 
 
 def test_plan_makes_one_work_item_per_accepted_assignment_and_synthesizes_zero_rows():

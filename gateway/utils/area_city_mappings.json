@@ -1,6 +1,6 @@
 {
   "_description": "City to metropolitan area mappings for LinkedIn location validation.",
-  "_source": "Cities from geo_lookup_fast.json (validated spellings)",
+  "_source": "Curated LinkedIn location spellings retained with this mapping",
   "_format": "Each area has state (for US) or country (for international) plus cities list",
   "mappings": {
     "San Francisco Bay Area": {

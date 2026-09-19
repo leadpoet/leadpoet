@@ -1,4 +1,3 @@
-import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -270,33 +269,3 @@ def test_validator_uid_reports_stable_ineligibility_codes():
         validator_uid(
             metagraph, "no-permit", netuid=71, network_name="finney"
         )
-
-
-@pytest.mark.parametrize(
-    "network, expected",
-    [
-        ("finney", ["below", "boundary", "above"]),
-        ("test", ["below", "boundary", "above", "no-permit"]),
-    ],
-)
-def test_registry_counts_match_shared_policy(
-    monkeypatch, network, expected
-):
-    from gateway import config
-    from gateway.utils import registry
-
-    metagraph = _metagraph()
-    monkeypatch.setattr(config, "BITTENSOR_NETWORK", network)
-    monkeypatch.setattr(registry, "get_metagraph", lambda: metagraph)
-
-    async def get_metagraph_async(*, cache_epoch_id=None):
-        return metagraph
-
-    monkeypatch.setattr(registry, "get_metagraph_async", get_metagraph_async)
-
-    assert registry.get_validator_count() == len(expected)
-    assert registry.get_miner_count() == len(metagraph.hotkeys) - len(expected)
-    assert asyncio.run(registry.get_validator_count_async()) == len(expected)
-    assert asyncio.run(registry.get_miner_count_async()) == (
-        len(metagraph.hotkeys) - len(expected)
-    )

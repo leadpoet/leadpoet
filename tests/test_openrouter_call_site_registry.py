@@ -1,9 +1,8 @@
-"""P1 acceptance check (trajectoryimprovements.md): every production
-OpenRouter call site is either captured through the shared telemetry layer or
-explicitly classified as intentionally uncaptured.
+"""Acceptance check: every production OpenRouter call site is deliberately
+classified under the current broker-backed provider policy.
 
 A new file that starts talking to OpenRouter without a classification fails
-this test — capture coverage decisions must be deliberate, never silent.
+this test — provider policy decisions must be deliberate, never silent.
 """
 
 from __future__ import annotations
@@ -14,34 +13,20 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # file (repo-relative) → classification
-#   captured                 — routes through research_lab/openrouter_telemetry
-#                              (transport or record hook) or its own encrypted
-#                              raw-trace recorder (hosted worker).
-#   captured_v2_receipt      — enclave-originated TLS attempts and provider
-#                              outcomes are committed to signed V2 receipts.
-#   uncaptured_by_decision   — dated owner decision for production call sites
-#                              that do not write trajectory capture records.
-#   not_a_call_site          — proxy/key/url-pattern infrastructure or ops
-#                              tooling that mentions the URL without producing
-#                              production training data.
+#   uncaptured_by_decision   — provider calls are bounded and costed by the
+#                              active broker and do not produce training data.
 CALL_SITE_REGISTRY = {
-    # Source-grounded semantic gates ported from the site verifier
-    # (2026-07-23): DISABLED by default (VERIFIER_SEMANTIC_GATES_MODE), so no
-    # production OpenRouter traffic exists today. Classified uncaptured by
-    # decision until the observability-capture reconciliation follow-up wires
-    # it through the shared telemetry layer alongside enabling it.
-    "leadpoet_verifier/semantic_gates.py": "uncaptured_by_decision",
     # -- uncaptured by dated owner decision ---------------------------------
     "gateway/tasks/icp_generator.py": "uncaptured_by_decision",
     # The closed-lab training-trace sink was retired on 2026-09-04. Arena
     # calls are costed and bounded by the host broker; these shared scorers do
     # not write a second S3 trace or receipt stream.
-    "qualification/scoring/intent_precheck.py": "uncaptured_by_decision",
     "qualification/scoring/intent_signal_gate.py": "uncaptured_by_decision",
     "qualification/scoring/intent_verification_three_stage.py": "uncaptured_by_decision",
     "qualification/scoring/role_batch_check.py": "uncaptured_by_decision",
     "qualification/scoring/verification_helpers.py": "uncaptured_by_decision",
     "qualification/scoring/lead_scorer.py": "uncaptured_by_decision",
+    "qualification/scoring/company_evidence_investigator.py": "uncaptured_by_decision",
 }
 
 
@@ -56,7 +41,6 @@ def _files_mentioning_openrouter() -> set[str]:
     roots = {
         "gateway",
         "qualification",
-        "research_lab",
         "leadpoet_verifier",
     }
     return {
@@ -77,30 +61,6 @@ def test_every_openrouter_call_site_is_classified():
         "New OpenRouter call sites without a capture classification "
         f"(add them to CALL_SITE_REGISTRY with a deliberate decision): {unclassified}"
     )
-
-
-def test_captured_sites_actually_reference_the_telemetry_layer():
-    for rel_path, classification in CALL_SITE_REGISTRY.items():
-        if classification != "captured":
-            continue
-        path = REPO_ROOT / rel_path
-        if not path.exists():
-            continue
-        text = path.read_text(encoding="utf-8")
-        assert (
-            "openrouter_telemetry" in text
-            or "_OpenRouterRawTraceRecorder" in text
-            or rel_path == "research_lab/openrouter_telemetry.py"
-        ), f"{rel_path} is classified 'captured' but references no capture layer"
-
-
-def test_v2_receipt_sites_record_transport_and_provider_evidence():
-    for rel_path, classification in CALL_SITE_REGISTRY.items():
-        if classification != "captured_v2_receipt":
-            continue
-        text = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
-        assert "transport_attempt" in text
-        assert "evidence_artifact_hashes" in text
 
 
 def test_registry_entries_still_exist():

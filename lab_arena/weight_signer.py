@@ -1,4 +1,4 @@
-"""Protected signer for the small normal-validator Arena weight path."""
+"""Signer for the small normal-validator Arena weight path."""
 
 from __future__ import annotations
 
@@ -377,11 +377,9 @@ class ArenaWeightSigner:
                     "reveal_round": record["reveal_round"],
                 }},
                 minimum_block=record["minimum_block"], maximum_block=record["maximum_block"],
-                epoch_id=result["epoch"],
-                finalization_scan_id=sha256_json({"state_hash": result["state_hash"], "extrinsic_hash": result["extrinsic_hash"]}),
             )
         except Exception as scan_error:
-            from validator_tee.enclave.chain_source_v2 import ValidatorChainSourceV2Error
+            from lab_arena.chain_source import ValidatorChainSourceV2Error
             if not isinstance(scan_error, ValidatorChainSourceV2Error):
                 raise
             if str(scan_error) == "authorized extrinsic range is not finalized":

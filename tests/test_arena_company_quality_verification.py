@@ -127,7 +127,6 @@ def _run_quality_verifier(
     clarification: dict | None = None,
     url: str = "https://acme.com/news/product",
     text: str = "We launched a new workflow product.",
-    review_as_accept: bool = False,
 ) -> tuple[dict, AsyncMock]:
     replies = [_verdict(url), stage_three]
     if clarification is not None:
@@ -145,10 +144,6 @@ def _run_quality_verifier(
         "qualification.scoring.intent_verification_three_stage._fetch_sd_then_exa",
         fetch,
     )
-    if review_as_accept:
-        monkeypatch.setenv("INTENT_VERIFIER_REVIEW_AS_ACCEPT", "on")
-    else:
-        monkeypatch.delenv("INTENT_VERIFIER_REVIEW_AS_ACCEPT", raising=False)
     result = asyncio.run(verify_three_stage(
         object(),
         company_name="Acme",
@@ -425,14 +420,13 @@ def test_supported_high_with_unclear_identity_gets_one_clarification(monkeypatch
     assert call.await_args_list[-1].kwargs["max_attempts"] == 1
 
 
-def test_quality_identity_ambiguity_ignores_legacy_review_as_accept(monkeypatch):
+def test_quality_identity_ambiguity_is_rejected(monkeypatch):
     url = "https://acme.com/news/product"
     unclear = _verdict(url, entity="unclear")
     result, call = _run_quality_verifier(
         monkeypatch,
         unclear,
         clarification=_verdict(url, entity="unclear"),
-        review_as_accept=True,
     )
 
     assert result["client_ready"] is False

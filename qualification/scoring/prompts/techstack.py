@@ -5,13 +5,10 @@ PART 0/A/B + signal-status decision.  PART E enforces the eight
 production-audited anti-patterns and the four acceptance criteria
 for tool-usage claims of the shape "Company X uses Tool Y".
 
-The validator-side URL pre-check in ``intent_precheck.py`` already
-catches the deterministic anti-pattern URL shapes (vendor comparison
-pages, integration listings, data-broker profile pages, personal
-LinkedIn pages).  PART E covers the patterns that REQUIRE reading the
-page content: REPLACED, TANGENTIAL, WRONG_COMPANY, PREVIOUS_EMPLOYER,
-and the semantic-level VENDOR_MARKETING / PRODUCT_INTEGRATION checks
-that a URL-shape rule can't catch.
+PART E covers deterministic URL anti-patterns and the patterns that require
+reading page content: REPLACED, TANGENTIAL, WRONG_COMPANY,
+PREVIOUS_EMPLOYER, and the semantic-level VENDOR_MARKETING /
+PRODUCT_INTEGRATION checks.
 """
 from typing import Any, Dict
 

@@ -755,7 +755,7 @@ def _find_pcr0(value: Any) -> str | None:
 
 
 def _installed_release_role_pcr0s(eif_root: Path, target_sha: str) -> dict[str, str]:
-    from gateway.tee.release_manifest_v2 import validate_prior_release_manifest
+    from gateway.tee.release_manifest_v2 import validate_release_manifest
 
     path = eif_root / "gateway-v2-release-manifest.json"
     if not path.is_file() or path.is_symlink():
@@ -766,7 +766,7 @@ def _installed_release_role_pcr0s(eif_root: Path, target_sha: str) -> dict[str, 
         raise GatewayGitDeployError(
             "installed gateway release manifest is unreadable"
         ) from exc
-    release = validate_prior_release_manifest(document)
+    release = validate_release_manifest(document)
     if release["commit_sha"] != target_sha:
         raise GatewayGitDeployError("installed gateway release commit differs")
     return {role: str(summary["pcr0"]) for role, summary in release["roles"].items()}

@@ -1,12 +1,4 @@
-"""
-Qualification System Pydantic Models
-
-All data models for the Lead Qualification Agent competition.
-These models are specific to the qualification system and do NOT
-modify any existing models in gateway/models/.
-
-See business_files/tasks10.md Phase 1.2 for specification.
-"""
+"""Internal company, ICP, and score records used by the Arena verifier."""
 
 import re
 import unicodedata
@@ -35,7 +27,7 @@ class IntentSignalSource(str, Enum):
     @classmethod
     def _missing_(cls, value: str):
         """Case-insensitive + whitespace-tolerant enum lookup.
-        
+
         Miners may submit 'LinkedIn', 'Job Board', 'COMPANY_WEBSITE', etc.
         """
         if not isinstance(value, str):
@@ -45,79 +37,6 @@ class IntentSignalSource(str, Enum):
             if member.value == normalized:
                 return member
         return None
-
-
-class Seniority(str, Enum):
-    """Seniority levels for leads."""
-    C_SUITE = "C-Suite"
-    VP = "VP"
-    DIRECTOR = "Director"
-    MANAGER = "Manager"
-    INDIVIDUAL_CONTRIBUTOR = "Individual Contributor"
-
-    @classmethod
-    def _missing_(cls, value: str):
-        """Case-insensitive enum lookup for seniority.
-
-        Miners may submit 'c-suite', 'vp', 'individual contributor', etc.
-        """
-        if not isinstance(value, str):
-            return None
-        normalized = value.strip().lower()
-        lookup = {m.value.lower(): m for m in cls}
-        if normalized in lookup:
-            return lookup[normalized]
-        aliases = {
-            # C-Suite ----------------------------------------------------------
-            "c_suite": cls.C_SUITE, "csuite": cls.C_SUITE, "c suite": cls.C_SUITE,
-            "c-level": cls.C_SUITE, "c level": cls.C_SUITE, "clevel": cls.C_SUITE,
-            "c-level executive": cls.C_SUITE, "c_level": cls.C_SUITE,
-            "cxo": cls.C_SUITE, "chief": cls.C_SUITE,
-            "ceo": cls.C_SUITE, "cfo": cls.C_SUITE, "cto": cls.C_SUITE,
-            "coo": cls.C_SUITE, "cmo": cls.C_SUITE, "cro": cls.C_SUITE,
-            "chro": cls.C_SUITE, "cpo": cls.C_SUITE, "cso": cls.C_SUITE,
-            "ciso": cls.C_SUITE, "cdo": cls.C_SUITE,
-            "president": cls.C_SUITE, "vice chairman": cls.C_SUITE,
-            "exec": cls.C_SUITE, "executive": cls.C_SUITE,
-            "owner": cls.C_SUITE, "founder": cls.C_SUITE, "co-founder": cls.C_SUITE,
-            "co_founder": cls.C_SUITE, "cofounder": cls.C_SUITE,
-            "proprietor": cls.C_SUITE, "partner": cls.C_SUITE,
-            # VP ---------------------------------------------------------------
-            "vice president": cls.VP, "vice_president": cls.VP,
-            "svp": cls.VP, "evp": cls.VP, "avp": cls.VP,
-            # Director ---------------------------------------------------------
-            "dir": cls.DIRECTOR,
-            "senior director": cls.DIRECTOR, "senior_director": cls.DIRECTOR,
-            "sr director": cls.DIRECTOR, "sr_director": cls.DIRECTOR,
-            "sr. director": cls.DIRECTOR,
-            "head": cls.DIRECTOR, "head of": cls.DIRECTOR,
-            "principal": cls.DIRECTOR,  # Principal Engineer/Consultant ~ director-equivalent
-            # Manager ----------------------------------------------------------
-            "mgr": cls.MANAGER,
-            "senior": cls.MANAGER,  # legacy mapping preserved from to_lead_output
-            "senior manager": cls.MANAGER, "senior_manager": cls.MANAGER,
-            "sr manager": cls.MANAGER, "sr_manager": cls.MANAGER,
-            "sr. manager": cls.MANAGER,
-            "lead": cls.MANAGER,  # Team Lead / Engineering Lead — usually people-mgr
-            "team lead": cls.MANAGER, "team_lead": cls.MANAGER,
-            "supervisor": cls.MANAGER,
-            # Individual Contributor ------------------------------------------
-            "ic": cls.INDIVIDUAL_CONTRIBUTOR,
-            "individual_contributor": cls.INDIVIDUAL_CONTRIBUTOR,
-            "individual contributor": cls.INDIVIDUAL_CONTRIBUTOR,
-            "staff": cls.INDIVIDUAL_CONTRIBUTOR,  # Staff Engineer = high IC
-            "junior": cls.INDIVIDUAL_CONTRIBUTOR, "jr": cls.INDIVIDUAL_CONTRIBUTOR,
-            "associate": cls.INDIVIDUAL_CONTRIBUTOR,
-            "engineer": cls.INDIVIDUAL_CONTRIBUTOR,
-            "analyst": cls.INDIVIDUAL_CONTRIBUTOR,
-            "specialist": cls.INDIVIDUAL_CONTRIBUTOR,
-            "coordinator": cls.INDIVIDUAL_CONTRIBUTOR,
-            "contributor": cls.INDIVIDUAL_CONTRIBUTOR,
-            "entry": cls.INDIVIDUAL_CONTRIBUTOR,
-            "entry level": cls.INDIVIDUAL_CONTRIBUTOR,
-            "entry_level": cls.INDIVIDUAL_CONTRIBUTOR,
-        }
-        return aliases.get(normalized)
 
 
 # =============================================================================
@@ -497,7 +416,7 @@ class IntentSignal(BaseModel):
     @classmethod
     def validate_date_format(cls, v: Optional[str]) -> Optional[str]:
         """Normalize date to YYYY-MM-DD — handles miner variability.
-        
+
         Accepts common formats miners might use:
         - 2026-02-01 (correct ISO)
         - 2026/02/01 (slashes)
@@ -515,12 +434,12 @@ class IntentSignal(BaseModel):
             except ValueError:
                 continue
         raise ValueError("Date must be in YYYY-MM-DD format or null")
-    
+
     @field_validator('url')
     @classmethod
     def validate_url(cls, v: str) -> str:
         """Normalize and validate URL — handles miner variability.
-        
+
         Fixes common issues from miner models:
         - Missing scheme (techcrunch.com/article → https://techcrunch.com/article)
         - Wrong case (HTTP://WWW.TECHCRUNCH.COM → https://www.techcrunch.com)
@@ -530,88 +449,8 @@ class IntentSignal(BaseModel):
 
 
 # =============================================================================
-# Lead Models
+# Arena company evidence models
 # =============================================================================
-
-class LeadOutput(BaseModel):
-    """
-    Schema for leads returned by qualification models.
-    This is what the model's qualify() function must return.
-    
-    IMPORTANT: Models must ONLY return the required fields below.
-    Any extra fields (email, full_name, first_name, last_name, phone, etc.)
-    will cause validation to FAIL with score 0.
-    
-    This prevents models from fabricating person-level data.
-    """
-    # Pydantic config: FORBID extra fields - any extra field = validation error
-    model_config = {"extra": "forbid"}
-    
-    # =========================================================================
-    # LEAD ID - REQUIRED for DB field verification
-    # =========================================================================
-    # The `id` column from the leads table. Used to verify that
-    # the model hasn't tampered with lead fields (employee_count, role, etc.).
-    # Models must include this for every lead they return.
-    lead_id: int = Field(..., description="ID from the leads table (the 'id' column)")
-    
-    # =========================================================================
-    # REQUIRED FIELDS - All fields below must be provided
-    # =========================================================================
-    
-    # Company info (from the leads table)
-    business: str = Field(..., description="Company name")
-    company_linkedin: str = Field(..., description="Company LinkedIn URL")
-    company_website: str = Field(..., description="Company website URL")
-    employee_count: str = Field(..., description="Employee count range (e.g., '51-200', '1001-5000')")
-    
-    # Industry info
-    industry: str = Field(..., description="Company industry")
-    sub_industry: str = Field(..., description="Company sub-industry")
-    
-    # Location (separate fields, NOT a combined 'geography' field)
-    country: str = Field(..., description="Country (e.g., 'United States')")
-    city: str = Field(..., description="City (e.g., 'San Francisco')")
-    state: str = Field(..., description="State/region (e.g., 'California')")
-    
-    # Role info
-    role: str = Field(..., description="Job role/title to target (e.g., 'Software Engineer', 'VP of Sales')")
-    role_type: str = Field(..., description="Role category (e.g., 'Engineer/Technical', 'Sales', 'C-Level Executive')")
-    seniority: Seniority = Field(..., description="Seniority level")
-    
-    # Intent signals (evidence of buying intent — at least one required)
-    intent_signals: List[IntentSignal] = Field(..., min_length=1, description="Evidence of buying intent (one or more signals)")
-    
-    # =========================================================================
-    # NOT ALLOWED - Any of these fields will cause instant validation failure
-    # =========================================================================
-    # - email (PII - models cannot fabricate)
-    # - full_name (PII - models cannot fabricate)
-    # - first_name (PII - models cannot fabricate)
-    # - last_name (PII - models cannot fabricate)
-    # - phone (PII - models cannot fabricate)
-    # - linkedin_url (person-level PII)
-    # - geography (use country/city/state instead)
-    # - company_size (use employee_count instead)
-
-
-
-
-# =============================================================================
-# Company Models (company-mode model competition)
-# =============================================================================
-#
-# As of May 2026 the model competition is transitioning from "surface a
-# specific high-intent lead (company + contact) from the published leads
-# table" to "surface companies from the open web with verified intent
-# signals." Why the shift:
-#
-#   * Finding contacts requires Apify / LinkedIn scraping; baking that
-#     into the base miner model would force every miner who builds on it
-#     to take on those licensing risks.
-# This is THE output schema for the model competition (as of May 2026).
-# ``LeadOutput`` remains for stored-data compatibility, but the model
-# competition no longer produces or scores it.
 
 class RequiredAttributeClaim(BaseModel):
     """The model's required-attribute validation result for one company.
@@ -643,16 +482,10 @@ class RequiredAttributeClaim(BaseModel):
 
 
 class CompanyOutput(BaseModel):
-    """Schema returned by qualification models in the model competition.
+    """Internal company evidence passed to the Arena company verifier.
 
-    Models receive an ``ICPPrompt`` and must return ONE company that
-    matches the ICP criteria (industry / sub-industry / size / geography /
-    stage) AND has at least one verifiable intent signal.
-
-    No contact-level fields (no person name, no role, no email, no
-    person LinkedIn, no phone, no seniority).  Any extra field causes
-    immediate validation failure with score 0, same gaming-prevention
-    rule as LeadOutput.
+    The competition adapter separates contact claims for the contact verifier
+    before constructing this strict company record.
     """
     model_config = {"extra": "forbid"}
 
@@ -688,7 +521,7 @@ class CompanyOutput(BaseModel):
         description="Untrusted public URLs that may help independent company-fit discovery",
     )
 
-    # Intent signals — at least one, same schema as LeadOutput.  This is
+    # Intent signals — at least one. This is
     # the load-bearing field for company-mode scoring; the whole point
     # of the competition is verifiable intent.
     intent_signals: List[IntentSignal] = Field(..., min_length=1, description="Verifiable intent signals tied to this company")
@@ -746,30 +579,25 @@ class CompanyOutput(BaseModel):
 class ICPPrompt(BaseModel):
     """
     Schema for ICP (Ideal Customer Profile) prompts used in evaluation.
-    
+
     CRITICAL: The PRIMARY field is 'prompt' - a natural language description
     that models must INTERPRET to find matching leads.
-    
+
     Example prompt:
         "VP Sales and Heads of Revenue at Series A-C SaaS companies in the US.
-         Showing signals: researching outbound tools, hiring SDRs, or 
+         Showing signals: researching outbound tools, hiring SDRs, or
          evaluating competitors."
-    
+
     Models receive this and must:
     1. Parse/interpret the natural language prompt
-    2. Query the database intelligently  
+    2. Search public sources for evidence
     3. Return the best matching leads
     """
     icp_id: str = Field(..., description="Unique identifier for this ICP")
 
-    # NOTE: As of May 2026 the model competition is single-path company-mode
-    # (miners return a ``CompanyOutput``).  There is no ``mode`` field on
-    # this schema — it was briefly present during the transition but has
-    # been removed.
-
     # PRIMARY FIELD - Models should interpret this natural language prompt
     prompt: str = Field("", description="Natural language prompt describing the ideal customer (PRIMARY)")
-    
+
     # Structured fields for reference/validation
     industry: str = Field(..., description="Target industry category")
     sub_industry: str = Field(..., description="Target sub-industry")
@@ -785,19 +613,7 @@ class ICPPrompt(BaseModel):
     )
     employee_count: str = Field(..., description="Target employee count range (e.g., '50-200')")
     company_stage: str = Field(..., description="Target company stage (Seed, Series A, etc.)")
-    
-    @model_validator(mode='before')
-    @classmethod
-    def handle_legacy_company_size(cls, data: Any) -> Any:
-        """Map legacy 'company_size' field to 'employee_count' for backward compatibility."""
-        if isinstance(data, dict):
-            # If company_size exists but employee_count doesn't, use company_size
-            if 'company_size' in data and 'employee_count' not in data:
-                data['employee_count'] = data.pop('company_size')
-            elif 'company_size' in data and 'employee_count' in data:
-                # Both exist - prefer employee_count, remove company_size
-                data.pop('company_size')
-        return data
+
 
     @field_validator('contact_geography', mode='before')
     @classmethod
@@ -856,15 +672,8 @@ class ICPPrompt(BaseModel):
         description="Per-signal freshness cap aligned to intent_signals index",
     )
 
-    # Legacy fields for backward compatibility
-    target_role: Optional[str] = Field(None, description="DEPRECATED: Use target_roles list")
-    additional_context: Optional[str] = Field(None, description="DEPRECATED: Use intent_signals list")
-    buyer_description: Optional[str] = Field(None, description="DEPRECATED: Use prompt field")
-    
+
     created_at: Optional[datetime] = Field(None, description="When this ICP was created")
-
-
-
 
 
 # =============================================================================
@@ -872,60 +681,44 @@ class ICPPrompt(BaseModel):
 # =============================================================================
 
 class LeadScoreBreakdown(BaseModel):
-    """
-    Detailed score breakdown for a single company.
-    Used internally during scoring and included in transparency logs.
+    """Company scoring details carried into the current Arena result.
 
-    Score caps used by ``score_company`` and the Arena scorer:
-      * ``icp_fit``        ≤ 40
-      * ``decision_maker`` = 0   (no contact dimension in the model
-                                  competition; field kept on the
-                                  breakdown for backward compatibility
-                                  with downstream readers)
-      * ``intent_signal``  ≤ 100  (after time decay; the public scorer caps at
-                                   60 and the Arena scorer caps at 100)
-      * Total              ≤ 100
-
-    NOTE: The historical class name ``LeadScoreBreakdown`` is retained
-    rather than renamed, because the breakdown shape is also written to
-    Supabase (``qualification_leaderboard`` etc.) and consumed by the
-    admin dashboard; renaming would require a coordinated rollout that
-    isn't worth the churn for a cosmetic rename.
+    The company verifier sets ICP-fit, decision-maker, cost, and time penalty
+    fields to zero. Contact qualification and sourcing-cost eligibility are
+    applied separately by the competition adapter and Arena service.
     """
     # Component scores
     icp_fit: float = Field(..., ge=0, le=40, description="ICP fit score (0-40)")
     decision_maker: float = Field(..., ge=0, le=30, description="Always 0 in company-mode (no contact)")
     intent_signal_raw: float = Field(..., ge=0, le=100, description="Intent signal score before decay (0-100)")
-    
+
     # Time decay
     time_decay_multiplier: float = Field(..., ge=0, le=1, description="1.0, 0.5, or 0.25 based on signal age")
     intent_signal_final: float = Field(..., ge=0, le=100, description="Intent signal score after decay (0-100)")
-    
+
     # Penalties
     cost_penalty: float = Field(..., ge=0, description="Penalty for API costs")
     time_penalty: float = Field(..., ge=0, description="Penalty for execution time")
-    
+
     # Final
     final_score: float = Field(..., ge=0, description="Final score (floor at 0)")
-    
+
     # Failure tracking
     failure_reason: Optional[str] = Field(None, description="Set when pre-checks fail (score = 0)")
 
     # Per-signal detail for the Arena benchmark. One row
     # per company intent signal: {raw, after_decay, decay, confidence,
     # date_status, matched_icp_signal, evidence_type}.  Optional and defaults to
-    # None so legacy lead-mode callers and persisted breakdown readers are
-    # unaffected; consumed by the benchmark layer to build per-signal funnel /
-    # coverage stats without re-scoring.
+    # None when no signals were evaluated. The benchmark uses these details
+    # for coverage diagnostics without re-scoring.
     intent_signals_detail: Optional[List[Dict[str, Any]]] = Field(
         default=None,
-        description="Per-signal Arena scoring detail; None for lead-mode",
+        description="Per-signal Arena scoring detail; None when not evaluated",
     )
     # Durable verifier-gate receipts (PR-28 audit): audit documents from the
     # deterministic/semantic industry gate — modes, deterministic detail,
     # semantic model/input-hash/source-hashes/judgment, and the final scoring
-    # effect. Optional and None by default so legacy callers and persisted
-    # breakdown readers are unaffected.
+    # effect. Optional when the company fails before a gate is evaluated.
     verifier_gate_receipts: Optional[List[Dict[str, Any]]] = Field(
         default=None,
         description="Durable company-fit gate receipts; None when no gate receipt is needed",

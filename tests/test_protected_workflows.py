@@ -43,11 +43,9 @@ def test_current_release_and_runtime_identity_boundaries_remain_protected():
         "_validate_public_configuration",
         "_validate_release_configuration",
     } <= set(PROTECTED_SYMBOLS["gateway/tee/runtime_identity_v2.py"])
-    assert {
-        "validate_release_manifest",
-        "validate_prior_release_manifest",
-        "historical_two_role_specs",
-    } <= set(PROTECTED_SYMBOLS["gateway/tee/release_manifest_v2.py"])
+    assert {"validate_release_manifest"} <= set(
+        PROTECTED_SYMBOLS["gateway/tee/release_manifest_v2.py"]
+    )
     assert {
         "active_enclave_role",
         "allowed_exact_methods",
@@ -62,8 +60,6 @@ def test_current_release_and_runtime_identity_boundaries_remain_protected():
 
 def test_chain_and_normal_weight_signing_contracts_remain_protected():
     assert {
-        "build_transport_attempt",
-        "validate_transport_attempt",
         "build_boot_identity_body",
         "verify_boot_identity_nitro",
     } <= set(PROTECTED_SYMBOLS["leadpoet_canonical/attested_v2.py"])

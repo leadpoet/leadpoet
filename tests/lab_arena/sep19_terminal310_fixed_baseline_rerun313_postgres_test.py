@@ -38,6 +38,11 @@ def database():
     yield from database_with_lab_arena_migration(_test_migrations())
 
 
+@pytest.fixture(scope="module")
+def terminal_failure_database():
+    yield from database_with_lab_arena_migration(_test_migrations())
+
+
 def _schedule() -> dict:
     start = datetime.now(timezone.utc) + timedelta(seconds=5)
     stamp = lambda value: value.isoformat().replace("+00:00", "Z")
@@ -165,6 +170,79 @@ def _seed_terminal_rerun310(conn) -> None:
     conn.commit()
 
 
+def _replace_one_accepted_baseline_with_terminal_failure(conn) -> None:
+    """Model the live ICP2 history: infrastructure failure, then budget stop."""
+
+    with conn.cursor() as cursor:
+        cursor.execute("SET session_replication_role=replica")
+        cursor.execute(
+            "SELECT run_id,assignment_id,miner_hotkey,stage,stage_generation "
+            "FROM public.lab_arena_runs WHERE round_id=%s AND submission_id=%s "
+            "AND kind='execute' AND icp_position=2 AND status='accepted'",
+            (ROUND, BASELINE),
+        )
+        run_id, assignment_id, miner_hotkey, stage, generation = cursor.fetchone()
+        cursor.execute(
+            "DELETE FROM public.lab_arena_runs WHERE round_id=%s AND kind='score' "
+            "AND scored_run_id=%s",
+            (ROUND, run_id),
+        )
+        assert cursor.rowcount == 1
+        cursor.execute(
+            "UPDATE public.lab_arena_runs SET status='failed',terminal_cause='provider_error',"
+            "output_ref=NULL,result_doc=%s::jsonb,participation_accepted_at=NULL,"
+            "per_icp_score=NULL,qualification_doc=NULL WHERE run_id=%s",
+            (json.dumps({"terminal_status": "provider_error"}), run_id),
+        )
+        assert cursor.rowcount == 1
+        cursor.execute(
+            """
+            INSERT INTO public.lab_arena_runs(
+              run_id,assignment_id,round_id,submission_id,miner_hotkey,stage,
+              icp_position,attempt,kind,status,stage_generation,runner_hotkey,
+              previous_runner_hotkey,terminal_cause,result_doc,per_icp_score,
+              qualification_doc)
+            VALUES(%s,%s,%s,%s,%s,%s,2,2,'execute','failed',%s,%s,%s,
+              'budget_exhausted',%s::jsonb,0,%s::jsonb)
+            """,
+            (
+                assignment_id + ":2",
+                assignment_id,
+                ROUND,
+                BASELINE,
+                miner_hotkey,
+                stage,
+                generation,
+                miner_hotkey,
+                miner_hotkey,
+                json.dumps({"terminal_status": "budget_exhausted"}),
+                json.dumps({"companies": []}),
+            ),
+        )
+        cursor.execute(
+            """
+            UPDATE public.lab_arena_rounds round_row
+            SET stage1_scoring_plan_doc=jsonb_set(
+              jsonb_set(round_row.stage1_scoring_plan_doc,'{work_items}',
+                (SELECT coalesce(jsonb_agg(item ORDER BY ordinal),'[]'::jsonb)
+                 FROM jsonb_array_elements(
+                   round_row.stage1_scoring_plan_doc->'work_items'
+                 ) WITH ORDINALITY entries(item,ordinal)
+                 WHERE item->>'scored_run_id'<>%s),TRUE),
+              '{zero_rows}',coalesce(round_row.stage1_scoring_plan_doc->'zero_rows','[]'::jsonb)
+                || jsonb_build_array(jsonb_build_object(
+                  'submission_id',%s,'icp_position',2,'cause','budget_exhausted')),TRUE)
+            WHERE round_id=%s
+            """,
+            (run_id, BASELINE, ROUND),
+        )
+        assert cursor.rowcount == 1
+        cursor.execute("SET session_replication_role=origin")
+        cursor.execute("SELECT public.lab_arena_sep19_rerun310_active_valid_v1()")
+        assert cursor.fetchone()[0] is True
+    conn.commit()
+
+
 def _render(cursor, schedule: dict) -> tuple[str, str, str]:
     cursor.execute(
         "SELECT pg_get_functiondef("
@@ -184,9 +262,31 @@ def _render(cursor, schedule: dict) -> tuple[str, str, str]:
         "__PATCHED_SCORING_DEFINITION_SHA256__": hashlib.sha256(
             new_definition.encode()
         ).hexdigest(),
-        "__TERMINAL_EXECUTE_RUN_COUNT__": "100",
-        "__TERMINAL_BASELINE_RUN_COUNT__": "20",
-        "__TERMINAL_SCORE_RUN_COUNT__": "100",
+        "__TERMINAL_EXECUTE_RUN_COUNT__": str(_sha(
+            cursor,
+            "SELECT count(*) FROM public.lab_arena_runs "
+            "WHERE round_id=%s AND kind='execute'",
+            (ROUND,),
+        )),
+        "__TERMINAL_BASELINE_RUN_COUNT__": str(_sha(
+            cursor,
+            "SELECT count(*) FROM public.lab_arena_runs "
+            "WHERE round_id=%s AND kind='execute' AND submission_id=%s",
+            (ROUND, BASELINE),
+        )),
+        "__TERMINAL_SCORE_RUN_COUNT__": str(_sha(
+            cursor,
+            "SELECT count(*) FROM public.lab_arena_runs "
+            "WHERE round_id=%s AND kind='score'",
+            (ROUND,),
+        )),
+        "__TERMINAL_ACCEPTED_EXECUTE_RUN_COUNT__": str(_sha(
+            cursor,
+            "SELECT count(*) FROM public.lab_arena_runs "
+            "WHERE round_id=%s AND kind='execute' AND status='accepted' "
+            "AND terminal_cause='accepted' AND output_ref IS NOT NULL",
+            (ROUND,),
+        )),
         "__TERMINAL_ROUND_SHA256__": _sha(
             cursor,
             "SELECT encode(extensions.digest(to_jsonb(r)::text,'sha256'),'hex') "
@@ -493,6 +593,63 @@ def test_terminal310_rerun_executes_scores_and_publishes_with_preservation(
         conn.close()
 
 
+def test_terminal310_one_zero_row_uses_sealed_accepted_count_and_preserves_history(
+    terminal_failure_database,
+):
+    psycopg2, dsn = terminal_failure_database
+    conn = psycopg2.connect(**dsn)
+    try:
+        _seed_terminal_rerun310(conn)
+        _replace_one_accepted_baseline_with_terminal_failure(conn)
+        with conn.cursor() as cursor:
+            rendered, _, _ = _render(cursor, _schedule())
+            assert "<>99" in rendered
+            cursor.execute(rendered)
+            cursor.execute(
+                "SELECT count(*),count(*) FILTER(WHERE status='accepted'),"
+                "count(*) FILTER(WHERE status='failed') "
+                "FROM public.lab_arena_runs WHERE round_id=%s AND kind='execute'",
+                (ROUND + "-r313archive",),
+            )
+            # Only baseline execution rows move. The 80 accepted miner rows
+            # stay active and are sealed separately by the preservation check.
+            assert cursor.fetchone() == (21, 19, 2)
+            cursor.execute(
+                "SELECT count(*),count(*) FILTER(WHERE status='failed') "
+                "FROM public.lab_arena_runs WHERE round_id=%s AND kind='execute' "
+                "AND submission_id=%s",
+                (ROUND + "-r313archive", BASELINE + ":r313archive"),
+            )
+            assert cursor.fetchone() == (21, 2)
+            cursor.execute(
+                "SELECT count(*) FROM public.lab_arena_runs "
+                "WHERE round_id=%s AND kind='score'",
+                (ROUND + "-r313archive",),
+            )
+            assert cursor.fetchone()[0] == 99
+            cursor.execute(
+                "SELECT jsonb_array_length(configuration_doc->'archived_execution_judgments') "
+                "FROM public.lab_arena_rounds WHERE round_id=%s",
+                (ROUND + "-r313archive",),
+            )
+            assert cursor.fetchone()[0] == 101
+            cursor.execute(
+                "SELECT count(*),count(*) FILTER(WHERE status='pending') "
+                "FROM public.lab_arena_runs WHERE round_id=%s AND kind='execute' "
+                "AND submission_id=%s",
+                (ROUND, BASELINE),
+            )
+            assert cursor.fetchone() == (20, 20)
+            cursor.execute(
+                "SELECT public.lab_arena_sep19_rerun313_archive_valid_v1(),"
+                "public.lab_arena_sep19_rerun313_active_valid_v1()"
+            )
+            assert cursor.fetchone() == (True, True)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def test_template_is_sealed_terminal310_only():
     body = TEMPLATE.read_text()
     assert "after the Sep19 rerun310 round is terminal" in body
@@ -510,6 +667,7 @@ def test_template_is_sealed_terminal310_only():
     assert "__NEW_SOURCE_COMMIT__" in body
     assert "__NEW_SCORER_DIGEST__" in body
     assert "__RERUN_SCHEDULE_JSON__" in body
+    assert "__TERMINAL_ACCEPTED_EXECUTE_RUN_COUNT__" in body
     assert "DELETE FROM" not in body and "TRUNCATE " not in body
     assert "lab_arena_accepted_weight_states" in body
     assert "company_quality_policy" in body

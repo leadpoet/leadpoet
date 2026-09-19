@@ -261,7 +261,8 @@ BEGIN
        'sha256'),'hex')<>'__TERMINAL_BASELINE_SHA256__'
   OR (SELECT pg_catalog.count(*) FROM public.lab_arena_runs
       WHERE round_id='arena-2026-09-19' AND kind='execute'
-       AND status='accepted' AND terminal_cause='accepted' AND output_ref IS NOT NULL)<>100
+       AND status='accepted' AND terminal_cause='accepted' AND output_ref IS NOT NULL)
+      <>__TERMINAL_ACCEPTED_EXECUTE_RUN_COUNT__
   OR (SELECT pg_catalog.count(*) FROM public.lab_arena_runs
       WHERE round_id='arena-2026-09-19' AND kind='execute')<>__TERMINAL_EXECUTE_RUN_COUNT__
   OR (SELECT pg_catalog.count(*) FROM public.lab_arena_runs

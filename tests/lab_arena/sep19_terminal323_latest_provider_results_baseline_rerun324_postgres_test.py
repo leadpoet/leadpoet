@@ -23,30 +23,28 @@ RENDERED = TEMPLATE.with_suffix("")
 # These constants bind the rendered migration to the release owner's captured
 # terminal preimage and approved source identity. They remain unset until
 # rerun323 is terminal and the release owner performs the exact capture/render.
-RENDERED_SHA256: str | None = None
-TERMINAL_CAPTURE_SHA256: str | None = None
-TERMINAL_MARKERS: dict[str, str | None] = {
-    "__PATCHED_SCORING_DEFINITION_SHA256__": None,
-    "__SCORING_DEFINITION_SHA256__": None,
-    "__TERMINAL_ACCEPTED_EXECUTE_RUN_COUNT__": None,
-    "__TERMINAL_BANK_STATE_SHA256__": None,
-    "__TERMINAL_BASELINE_ACCEPTED_RUN_COUNT__": None,
-    "__TERMINAL_BASELINE_EXECUTE_LEDGER_COUNT__": None,
-    "__TERMINAL_BASELINE_FAILED_RUN_COUNT__": None,
-    "__TERMINAL_BASELINE_LEDGER_COUNT__": None,
-    "__TERMINAL_BASELINE_RUN_COUNT__": None,
-    "__TERMINAL_BASELINE_SHA256__": None,
-    "__TERMINAL_CANCEL_REASON_SQL__": None,
-    "__TERMINAL_EXECUTE_RUN_COUNT__": None,
-    "__TERMINAL_LEDGER_SHA256__": None,
-    "__TERMINAL_MINER_SUBMISSIONS_SHA256__": None,
-    "__TERMINAL_REWARD_AUTHORITY_SHA256__": None,
-    "__TERMINAL_ROUND_SHA256__": None,
-    "__TERMINAL_RUNS_SHA256__": None,
-    "__TERMINAL_SCORE_LEDGER_COUNT__": None,
-    "__TERMINAL_SCORE_RUN_COUNT__": None,
-    "__TERMINAL_STATUS__": None,
-}
+RENDERED_SHA256: str | None = "837e4dbc5b5f12fbd055578448056188d52d52176d7a7a92f86469a1cad1c8be"
+TERMINAL_CAPTURE_SHA256: str | None = "d729b51eca86b22fa426083560ca66c5418eabd72d733fe6529e5aaa7a992a44"
+TERMINAL_MARKERS: dict[str, str | None] = {'__PATCHED_SCORING_DEFINITION_SHA256__': '3223be439b7dde72298dcccfe0fc7150aefe50358da1ee7e46a2df5d62dda441',
+ '__SCORING_DEFINITION_SHA256__': 'bb3ba46e0d4412250eb43182995920e500616a5950c96fbf4b2809f6c077589e',
+ '__TERMINAL_ACCEPTED_EXECUTE_RUN_COUNT__': '92',
+ '__TERMINAL_BANK_STATE_SHA256__': '1af19ff80c88e0fa121d57fa11ea6af14b35220017b0d11a099c70f6b60b314f',
+ '__TERMINAL_BASELINE_ACCEPTED_RUN_COUNT__': '12',
+ '__TERMINAL_BASELINE_EXECUTE_LEDGER_COUNT__': '10278',
+ '__TERMINAL_BASELINE_FAILED_RUN_COUNT__': '17',
+ '__TERMINAL_BASELINE_LEDGER_COUNT__': '10278',
+ '__TERMINAL_BASELINE_RUN_COUNT__': '29',
+ '__TERMINAL_BASELINE_SHA256__': 'aa8d38dcaf010b3be1558cdf4a4d344524be7e45247617244c9d60c6e1f9f177',
+ '__TERMINAL_CANCEL_REASON_SQL__': "'execution_incomplete:stage1:6'",
+ '__TERMINAL_EXECUTE_RUN_COUNT__': '109',
+ '__TERMINAL_LEDGER_SHA256__': '077828ce1ab045490a27013c098114758224b2e200438538854869eb43fb7004',
+ '__TERMINAL_MINER_SUBMISSIONS_SHA256__': '781027021d3cadc5f2c0540d9f24a67f65cb25126912ef3544867d5a70153297',
+ '__TERMINAL_REWARD_AUTHORITY_SHA256__': '22a411e2edcd506ab991f1e65db14f92dd83bfbfeedf7c95b4d478b2d880de2b',
+ '__TERMINAL_ROUND_SHA256__': '4328ecf36bff1ca09c10fa0a655aa033347ff69b2748d67bed4fc7b4ed32c045',
+ '__TERMINAL_RUNS_SHA256__': 'dffe6616fa5c2733e32788d693d8bbb342b78319018cdef7aef90193e57fae3e',
+ '__TERMINAL_SCORE_LEDGER_COUNT__': '0',
+ '__TERMINAL_SCORE_RUN_COUNT__': '0',
+ '__TERMINAL_STATUS__': 'cancelled'}
 EXACT_SOURCE_REF = (
     "arena/arena-2026-09-19/sources/"
     "baseline-2026-09-19-rerun324-6ebb34ef.tar.gz"
@@ -57,7 +55,16 @@ EXACT_SOURCE_SHA = (
 )
 EXACT_SOURCE_COMMIT = "6ebb34efe7a1179de0b6f24cdd2c7e3c6962f470"
 # The release owner selects the future window during terminal render.
-EXACT_SCHEDULE: dict[str, str] | None = None
+EXACT_SCHEDULE: dict[str, str] | None = {'submission_open': '2026-09-18T00:00:00Z',
+ 'submission_cutoff': '2026-09-19T00:00:00Z',
+ 'benchmark_deadline': '2026-09-19T23:00:00Z',
+ 'stage_1_start': '2026-09-19T23:00:01Z',
+ 'stage_1_close': '2026-09-20T02:00:01Z',
+ 'stage_1_scoring_close': '2026-09-20T05:00:00Z',
+ 'stage_2_start': '2026-09-20T05:00:01Z',
+ 'stage_2_close': '2026-09-20T08:00:01Z',
+ 'final_scoring_close': '2026-09-20T11:00:00Z',
+ 'publication_deadline': '2026-09-20T11:00:01Z'}
 rerun310 = prior.rerun310
 ROUND = prior.ROUND
 BASELINE = prior.BASELINE

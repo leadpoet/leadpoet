@@ -239,7 +239,7 @@ class FakeLedgerStore:
 
 
 class ZeroReservationLedgerStore(FakeLedgerStore):
-    """Model the execute policy that retains identity without a money hold."""
+    """Model confirmed-cost admission retaining identity without a money hold."""
 
     def reserve_call(self, **kwargs):
         result = super().reserve_call(**kwargs)
@@ -3465,7 +3465,8 @@ def test_zero_reservation_unknown_call_replays_without_post_but_distinct_call_ru
     assert {call["kind"] for call in store.calls.values()} == {"uncertain"}
 
 
-def test_completed_missing_bill_requires_durable_uncertain_state():
+@pytest.mark.parametrize("kind", ("execute", "score"))
+def test_completed_missing_bill_requires_durable_uncertain_state(kind):
     class RejectUncertainStore(ZeroReservationLedgerStore):
         def mark_uncertain(self, **kwargs):
             self.log.append("uncertain_rejected")
@@ -3476,8 +3477,9 @@ def test_completed_missing_bill_requires_durable_uncertain_state():
     broker, _store, transport = make_broker(
         store=store, transport=FakeTransport([(200, body)])
     )
+    context = br.RunContext(**{**CONTEXT.__dict__, "kind": kind})
     result = broker.execute(
-        CONTEXT,
+        context,
         operation_id="deepline.execute",
         parameters={"tool": "exa_search", "payload": {"query": "x"}},
         action_sequence=0,
@@ -3492,11 +3494,65 @@ def test_completed_missing_bill_requires_durable_uncertain_state():
     assert [request["method"] for request in transport.sent] == ["POST", "GET"]
 
 
-def test_score_completed_reply_without_bill_remains_unavailable():
+def test_score_completed_reply_without_bill_returns_sanitized_result_once():
     body = b'{"job_id":"job-score","status":"completed","results":[]}'
     context = br.RunContext(**{**CONTEXT.__dict__, "kind": "score"})
+    store = ZeroReservationLedgerStore()
     broker, store, transport = make_broker(
+        store=store,
         transport=FakeTransport([(200, body)])
+    )
+    arguments = dict(
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+    result = broker.execute(context, **arguments)
+    replay = broker.execute(context, **arguments)
+
+    assert result.status == 200 and result.body == body
+    assert_unpriced_uncertain(result, reserved=0)
+    assert replay.status == 409
+    assert json.loads(replay.body) == {"error": {"code": "call_uncertain"}}
+    call = store.calls[result.call["call_identity"]]
+    assert call["kind"] == "uncertain"
+    assert call["uncertain_doc"] == {
+        "reason": "missing_provider_cost",
+        "credential_fingerprint": br._credential_fingerprint(DL_KEY),
+        "deepline_request_id": "ctx-tool-" + result.call["call_identity"][7:39],
+        "call_succeeded": True,
+        "provider_status": 200,
+        "body_bytes": len(body),
+        "body_is_mapping": True,
+        "usage_present": False,
+        "billing_present": False,
+        "top_level_job_status": "completed",
+        "deepline_job_id": "job-score",
+        "deepline_operation": "exa_search",
+    }
+    assert [request["method"] for request in transport.sent] == ["POST", "GET"]
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_methods"),
+    (
+        (b'{"status":"completed","results":[]}', ["POST"]),
+        (
+            b'{"job_id":"job-score-failed","status":"failed",'
+            b'"error":{"code":"PROVIDER_FAILURE"}}',
+            ["POST", "GET"],
+        ),
+    ),
+    ids=("invalid_without_job_identity", "failed"),
+)
+def test_score_missing_bill_does_not_return_invalid_or_failed_reply(
+    body, expected_methods
+):
+    context = br.RunContext(**{**CONTEXT.__dict__, "kind": "score"})
+    store = ZeroReservationLedgerStore()
+    broker, _store, transport = make_broker(
+        store=store, transport=FakeTransport([(200, body)])
     )
     result = broker.execute(
         context,
@@ -3508,9 +3564,11 @@ def test_score_completed_reply_without_bill_remains_unavailable():
 
     assert result.status == 502
     assert json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
-    assert_unpriced_uncertain(result)
-    assert store.calls[result.call["call_identity"]]["kind"] == "uncertain"
-    assert [request["method"] for request in transport.sent] == ["POST", "GET"]
+    assert_unpriced_uncertain(result, reserved=0)
+    call = store.calls[result.call["call_identity"]]
+    assert call["kind"] == "uncertain"
+    assert call["uncertain_doc"]["call_succeeded"] is False
+    assert [request["method"] for request in transport.sent] == expected_methods
 
 
 def test_deepline_422_recovers_exact_failed_zero_from_billing_history():
@@ -5232,10 +5290,8 @@ def test_reservation_transport_timeout_uses_exact_idempotent_readback_once(
     assert store.log.count("settle") == 2
 
 
-@pytest.mark.parametrize(("kind", "expected_status"), [("execute", 200), ("score", 503)])
-def test_zero_fixed_reservation_response_loss_matches_execute_only(
-    kind, expected_status
-):
+@pytest.mark.parametrize("kind", ("execute", "score"))
+def test_zero_fixed_reservation_response_loss_matches_execute_and_score(kind):
     class CommitThenLoseStore(ZeroReservationLedgerStore):
         def __init__(self):
             super().__init__()
@@ -5277,18 +5333,13 @@ def test_zero_fixed_reservation_response_loss_matches_execute_only(
         timeout_ms=1000,
     )
 
-    assert result.status == expected_status
+    assert result.status == 200
     call = next(iter(store.calls.values()))
     assert call["amount"] == 0
-    if kind == "execute":
-        assert result.call["reserved_microusd"] == 0
-        assert result.call["actual_microusd"] == 3_000
-        assert call["kind"] == "settlement"
-        assert [request["method"] for request in transport.sent] == ["POST"]
-    else:
-        assert json.loads(result.body) == {"error": {"code": "broker_unavailable"}}
-        assert call["kind"] == "reservation"
-        assert transport.sent == []
+    assert result.call["reserved_microusd"] == 0
+    assert result.call["actual_microusd"] == 3_000
+    assert call["kind"] == "settlement"
+    assert [request["method"] for request in transport.sent] == ["POST"]
 
 
 @pytest.mark.parametrize(
@@ -5303,8 +5354,9 @@ def test_zero_fixed_reservation_response_loss_matches_execute_only(
         ("entry_doc", {"request_hash": "wrong"}),
     ],
 )
+@pytest.mark.parametrize("kind", ("execute", "score"))
 def test_zero_fixed_reservation_readback_still_requires_exact_binding(
-    field, replacement
+    field, replacement, kind
 ):
     class CorruptCommitThenLoseStore(ZeroReservationLedgerStore):
         def __init__(self):
@@ -5325,8 +5377,9 @@ def test_zero_fixed_reservation_readback_still_requires_exact_binding(
 
     store = CorruptCommitThenLoseStore()
     broker, _store, transport = make_broker(store=store)
+    context = br.RunContext(**{**CONTEXT.__dict__, "kind": kind})
     result = broker.execute(
-        CONTEXT,
+        context,
         operation_id="deepline.execute",
         parameters={
             "tool": "harvestapi_get_company",

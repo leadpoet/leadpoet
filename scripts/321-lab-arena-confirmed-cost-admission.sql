@@ -1,7 +1,6 @@
--- Admit sourcing calls from confirmed settlement spend only. Reservations,
--- dispatches and uncertainties remain immutable lifecycle evidence, but new
--- execute-call reservations carry no monetary hold. Score admission is
--- deliberately unchanged.
+-- Admit current-policy execute and score calls from confirmed settlement
+-- spend only. Reservations, dispatches and uncertainties remain immutable
+-- lifecycle evidence, but new reservations carry no monetary hold.
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
@@ -111,6 +110,76 @@ BEGIN
 END;
 $confirmed_cost_admission$;
 
+DO $confirmed_score_admission$
+DECLARE
+  v_definition TEXT;
+  v_start TEXT := $old$      v_spent := public.lab_arena__submission_kind_admission_spend_v1(
+        v_run.submission_id, v_run.kind
+      );$old$;
+  v_start_new TEXT := $new$      IF v_run.kind = 'score'
+         AND v_round.configuration_doc ->> 'sourcing_cost_eligibility_policy'
+           = 'successful_calls_per_icp_v1' THEN
+        -- lab_arena_confirmed_score_admission: the existing judge cap remains
+        -- submission-wide, but only authoritative settlements consume it.
+        v_spent := (
+          public.lab_arena__successful_call_cost_state(
+            v_run.submission_id, 'score', NULL
+          ) ->> 'settled_microusd'
+        )::BIGINT;
+        IF (v_dynamic OR p_amount_microusd > 0)
+           AND v_spent >= v_money_cap THEN
+          v_reason := 'money_cap';
+        END IF;
+      ELSE
+        v_spent := public.lab_arena__submission_kind_admission_spend_v1(
+          v_run.submission_id, v_run.kind
+        );$new$;
+  v_end TEXT := $old$        v_reason := 'money_cap';
+      END IF;
+    END IF;
+  END IF;
+  v_expires := pg_catalog.clock_timestamp()$old$;
+  v_end_new TEXT := $new$        v_reason := 'money_cap';
+      END IF;
+      END IF; -- lab_arena_confirmed_score_admission
+    END IF;
+  END IF;
+  v_expires := pg_catalog.clock_timestamp()$new$;
+  v_zero TEXT := $old$  -- New execute calls retain their lifecycle row and caller-owned evidence,
+  -- but admission has no estimated or pending monetary hold.
+  IF v_per_icp_policy THEN
+    p_amount_microusd := 0;
+  END IF;$old$;
+  v_zero_new TEXT := $new$  -- Current-policy calls retain lifecycle rows and caller-owned evidence,
+  -- but neither execution nor scoring creates a monetary hold.
+  IF v_round.configuration_doc ->> 'sourcing_cost_eligibility_policy'
+       = 'successful_calls_per_icp_v1'
+     AND v_run.kind IN ('execute', 'score') THEN
+    p_amount_microusd := 0;
+  END IF;$new$;
+BEGIN
+  SELECT pg_catalog.pg_get_functiondef(
+    'public.lab_arena_reserve_call(text,text,text,text,text,text,bigint,jsonb,integer)'::pg_catalog.regprocedure
+  ) INTO v_definition;
+  IF pg_catalog.strpos(v_definition, 'lab_arena_confirmed_score_admission') = 0 THEN
+    IF (pg_catalog.length(v_definition)
+        - pg_catalog.length(pg_catalog.replace(v_definition, v_start, '')))
+       / pg_catalog.length(v_start) <> 1
+       OR (pg_catalog.length(v_definition)
+           - pg_catalog.length(pg_catalog.replace(v_definition, v_end, '')))
+          / pg_catalog.length(v_end) <> 1
+       OR (pg_catalog.length(v_definition)
+           - pg_catalog.length(pg_catalog.replace(v_definition, v_zero, '')))
+          / pg_catalog.length(v_zero) <> 1 THEN
+      RAISE EXCEPTION 'confirmed-score admission shape unexpected';
+    END IF;
+    v_definition := pg_catalog.replace(v_definition, v_start, v_start_new);
+    v_definition := pg_catalog.replace(v_definition, v_end, v_end_new);
+    EXECUTE pg_catalog.replace(v_definition, v_zero, v_zero_new);
+  END IF;
+END;
+$confirmed_score_admission$;
+
 DO $confirmed_cost_eligibility$
 DECLARE
   v_definition TEXT;
@@ -143,6 +212,13 @@ BEGIN
   ) INTO v_definition;
   IF pg_catalog.strpos(v_definition, 'lab_arena_confirmed_cost_admission') = 0 THEN
     RAISE EXCEPTION 'confirmed-cost admission marker missing';
+  END IF;
+  IF pg_catalog.strpos(v_definition, 'lab_arena_confirmed_score_admission') = 0
+     OR pg_catalog.strpos(
+       v_definition,
+       'v_run.kind IN (''execute'', ''score'')'
+     ) = 0 THEN
+    RAISE EXCEPTION 'confirmed-score admission marker missing';
   END IF;
   SELECT pg_catalog.pg_get_functiondef(
     'public.lab_arena_icp_cost_eligibility(text,text,integer,integer)'::pg_catalog.regprocedure

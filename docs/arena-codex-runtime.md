@@ -103,7 +103,8 @@ existing limits. Request bytes, text lengths and tool counts remain bounded.
 including reasoning. Callers can choose 1–32,768; the bridge refuses requests
 above the session allowance. With migration 321, sourcing admission counts only
 confirmed settlement costs; output estimates and pending bills do not reserve
-money or block another request. Judge budget handling is unchanged. Direct Responses
+money or block another request. Current-policy judge admission also uses confirmed
+charges, under its separate existing cap. Direct Responses
 calls still default to 4,096; Chat and judge caps remain 4,096. Raising the
 per-call allowance does not raise the round's budget or guarantee that a model
 can finish a turn within it.

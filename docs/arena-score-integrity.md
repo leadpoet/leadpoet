@@ -56,7 +56,9 @@ the sourcing admission budget. Pending bills and historical monetary holds do no
 block new research. New execute lifecycle reservations have amount zero; this
 means no hold, not a confirmed free call. Exact call identities remain tracked
 for later settlement and cannot be dispatched twice. Concurrent admitted calls
-can take confirmed spend above the cap. Judge budgets remain separate.
+can take confirmed spend above the cap. Current-policy judge admission also
+uses confirmed charges only, with its existing separate submission-wide cap.
+Judge charges never enter sourcing spend or qualification cost eligibility.
 
 After normal quality scoring, each ICP has a successful-sourcing cost allowance
 of $0.80 multiplied by its verified qualified company/contact pairs. Five pairs

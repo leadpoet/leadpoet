@@ -2894,7 +2894,7 @@ class Broker:
             )
             and not _reservation_readback_matches(
                 self._store, reservation_arguments, reserved,
-                confirmed_cost_admission=getattr(context, "kind", "execute") == "execute",
+                confirmed_cost_admission=getattr(context, "kind", "execute") in {"execute", "score"},
             )
         ):
             return _error_result("broker_unavailable", summary)
@@ -3036,14 +3036,14 @@ class Broker:
         if status != "reserved":
             return _error_result("broker_unavailable", summary)
 
-        # The database owns admission. Current sourcing calls retain a zero-
-        # amount lifecycle reservation; older and judge policies may hold money.
+        # The database owns admission. Current execute and score calls retain
+        # zero-amount lifecycle records; historical policies may hold money.
         reserved_amount = reserved.get("amount_microusd")
         if isinstance(reserved_amount, bool) or not isinstance(reserved_amount, int) or reserved_amount < 0:
             return _error_result("broker_unavailable", summary)
         amount = reserved_amount
         summary["reserved_microusd"] = amount
-        if amount == 0 and getattr(context, "kind", "execute") == "execute":
+        if amount == 0 and getattr(context, "kind", "execute") in {"execute", "score"}:
             summary["reservation_basis"] = "confirmed_cost_only"
         elif reserve_remaining_budget:
             summary["reservation_basis"] = (
@@ -3591,8 +3591,7 @@ class Broker:
                 if miner_credential_failure:
                     return _error_result("miner_credentials_unavailable", summary)
                 if (
-                    getattr(context, "kind", "execute") == "execute"
-                    and uncertain_state.get("status") == "uncertain"
+                    uncertain_state.get("status") == "uncertain"
                     and call_succeeded is True
                     and 200 <= sanitized_status < 300
                 ):

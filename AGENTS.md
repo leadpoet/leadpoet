@@ -1,11 +1,12 @@
 # Agent Instructions
 
-## Scoped production authorization: confirmed-cost-only sourcing admission
+## Scoped production authorization: confirmed-cost-only provider admission
 
-On 2026-09-19 the user explicitly authorized removing monetary holds from ICP
-sourcing admission after exact API-key and management-key checks both failed to
+On 2026-09-19 the user explicitly authorized removing monetary holds from current Arena
+provider admission after exact API-key and management-key checks both failed to
 recover seven missing OpenRouter bills. Pending or estimated charges must not
-count toward sourcing spend or block new research. Preserve each call identity,
+count toward spend or block new research or verification. Judge budgets remain
+separate and retain their existing cap. Preserve each call identity,
 unknown billing evidence, later actual settlement, and same-call replay protection.
 Count confirmed charges once, including billed failures for the $4 admission cap.
 Keep the $0.80 qualification limit, independent verification, separate judge costs,

@@ -83,6 +83,33 @@ def _harness(database, tmp_path, label):
     return harness, lease, token
 
 
+def _open_current_scoring(store, round_id):
+    create_round = store.create_round
+
+    def create_current(requested_round_id, configuration):
+        assert requested_round_id == round_id
+        current = dict(configuration)
+        current.update(
+            {
+                "sourcing_cost_eligibility_policy": (
+                    "successful_calls_per_icp_v1"
+                ),
+                "execution_icp_cap_microusd": 4_000_000,
+                "cost_per_company_microusd": 800_000,
+            }
+        )
+        return create_round(requested_round_id, current)
+
+    store.create_round = create_current
+    try:
+        runners, participants = _open_scoring(
+            store, round_id, participants=1, runners=2
+        )
+        return store, runners, participants
+    finally:
+        store.create_round = create_round
+
+
 def _reserve(store, lease, token, label, amount, *, dynamic=False):
     operation = "deepline.execute" if dynamic else "scrapingdog.scrape"
     provider = "deepline" if dynamic else "scrapingdog"
@@ -494,6 +521,130 @@ def test_score_admission_and_execute_score_cost_separation_are_unchanged(
     )
     assert second_reservation["status"] == "budget_busy"
 
+    current_round = "arena-2099-03-17"
+    current_store, current_runners, _current_participants = (
+        _open_current_scoring(store, current_round)
+    )
+    current, current_token = claim(
+        current_store,
+        current_round,
+        current_runners[0],
+        parallelism=8,
+        ceiling=8,
+        excluded=[current_runners[0]],
+    )[:2]
+    assert current["kind"] == "score"
+
+    reservation_identity, reservation = reserve_score_dynamic(
+        current_store, current, current_token, "score-zero-reservation"
+    )
+    assert (reservation["status"], reservation["amount_microusd"]) == (
+        "reserved",
+        0,
+    )
+    _after_reservation_identity, after_reservation = reserve_score_dynamic(
+        current_store, current, current_token, "score-after-zero-reservation"
+    )
+    assert (after_reservation["status"], after_reservation["amount_microusd"]) == (
+        "reserved",
+        0,
+    )
+    assert _dispatch(current_store, current, current_token, reservation_identity)[
+        "status"
+    ] == "dispatched"
+    _after_dispatch_identity, after_dispatch = reserve_score_dynamic(
+        current_store, current, current_token, "score-after-zero-dispatch"
+    )
+    assert (after_dispatch["status"], after_dispatch["amount_microusd"]) == (
+        "reserved",
+        0,
+    )
+    assert current_store.mark_uncertain(
+        run_id=current["run_id"],
+        lease_token_hash=hash_lease_token(current_token),
+        call_identity=reservation_identity,
+        call_doc={"reason": "known_failure", "call_succeeded": False},
+    )["status"] == "uncertain"
+    _after_uncertain_identity, after_uncertain = reserve_score_dynamic(
+        current_store, current, current_token, "score-after-zero-uncertain"
+    )
+    assert (after_uncertain["status"], after_uncertain["amount_microusd"]) == (
+        "reserved",
+        0,
+    )
+
+    uncertain_identity, generation_id, fingerprint = _uncertain_openrouter(
+        current_store,
+        current,
+        current_token,
+        "score-confirmed-failure",
+        succeeded=False,
+    )
+    assert [
+        row["amount_microusd"]
+        for row in current_store.list_ledger(call_identity=uncertain_identity)
+    ] == [0, 0, 0]
+
+    draining_identity, draining = reserve_score_dynamic(
+        current_store, current, current_token, "score-during-pending-bill"
+    )
+    assert (draining["status"], draining["amount_microusd"]) == (
+        "reserved",
+        0,
+    )
+    assert _dispatch(current_store, current, current_token, draining_identity)[
+        "status"
+    ] == "dispatched"
+    assert current_store.mark_uncertain(
+        run_id=current["run_id"],
+        lease_token_hash=hash_lease_token(current_token),
+        call_identity=draining_identity,
+        call_doc={"reason": "known_failure", "call_succeeded": False},
+    )["status"] == "uncertain"
+
+    candidate = next(
+        row
+        for row in current_store.list_openrouter_cost_reconciliations(current_round)
+        if row["call_identity"] == uncertain_identity
+    )
+    reconciliation = {
+        "round_id": current_round,
+        "run_id": current["run_id"],
+        "call_identity": uncertain_identity,
+        "uncertain_entry_id": candidate["uncertain_entry_id"],
+        "generation_id": generation_id,
+        "credential_fingerprint": fingerprint,
+        "actual_microusd": 50_000_000,
+        "cost_units": "50.0",
+    }
+    settled = current_store.reconcile_openrouter_cost(**reconciliation)
+    assert (settled["status"], settled["idempotent"]) == ("settled", False)
+    assert current_store.reconcile_openrouter_cost(**reconciliation)[
+        "idempotent"
+    ] is True
+    assert len(
+        [
+            row
+            for row in current_store.list_ledger(call_identity=uncertain_identity)
+            if row["entry_kind"] == "settlement"
+        ]
+    ) == 1
+    with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT public.lab_arena__successful_call_cost_state(%s,'score',NULL)",
+            (current["submission_id"],),
+        )
+        score_cost = cursor.fetchone()[0]
+    assert score_cost["settled_microusd"] == 50_000_000
+    assert score_cost["successful_microusd"] == 0
+    _blocked_identity, blocked = reserve_score_dynamic(
+        current_store, current, current_token, "score-after-confirmed-cap"
+    )
+    assert (blocked["status"], blocked["reason"]) == (
+        "refused",
+        "money_cap",
+    )
+
     harness, lease, token = _harness(database, tmp_path, "score-separation")
     score_run_id = harness.round_id + ":historical-score"
     with harness.connect() as connection, connection.cursor() as cursor:
@@ -542,6 +693,17 @@ def test_score_admission_and_execute_score_cost_separation_are_unchanged(
         qualified_company_count=1,
     )["execution"]
     assert execution["settled_microusd"] == 100_000
+    costs = harness.service.store.submission_costs(lease["submission_id"])
+    assert sum(
+        row["settled_microusd"]
+        for row in costs["providers"]
+        if row["kind"] == "execute"
+    ) == 100_000
+    assert sum(
+        row["settled_microusd"]
+        for row in costs["providers"]
+        if row["kind"] == "score"
+    ) == 50_000_000
 
 
 def test_migration_is_exactly_replayable_and_keeps_scoped_markers(database):
@@ -585,5 +747,6 @@ def test_migration_is_exactly_replayable_and_keeps_scoped_markers(database):
     assert eligibility_after.count("lab_arena_confirmed_cost_eligibility") == 1
     assert "success_unresolved_microusd')::BIGINT" not in eligibility_after
     assert "lab_arena_closed_scoring_reservation_admission" in after
+    assert after.count("lab_arena_confirmed_score_admission") == 2
     assert "AND (v_dynamic OR p_amount_microusd > 0)" in after
-    assert "IF v_per_icp_policy THEN\n    p_amount_microusd := 0;" in after
+    assert "v_run.kind IN ('execute', 'score')" in after

@@ -1975,15 +1975,6 @@ class RunnerConfig:
         self.socket_root.mkdir(parents=True, exist_ok=True)
 
 
-def max_parallel_runs_from_environment(environ: Mapping[str, str] = os.environ) -> int:
-    raw = str(environ.get(MAX_PARALLEL_ENV) or "").strip()
-    if raw:
-        raise RunnerError("%s is retired; capacity follows verified Webshare proxies" % MAX_PARALLEL_ENV)
-    from lab_arena.proxy_workers import proxy_workers_from_environment
-    inventory = proxy_workers_from_environment(environ)
-    return min(inventory.total_process_capacity, contracts.RUNNER_SLOT_CEILING)
-
-
 @contextmanager
 def _attempt_web_egress(server: Any, worker: Any) -> Iterator[Any]:
     """Release an exit only after all attempt connections are proved closed."""

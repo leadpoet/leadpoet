@@ -449,7 +449,7 @@ def test_broker_exposes_only_internal_bounded_retry_delay_after_zero_cost_settle
     assert "retry_after_seconds" not in absent.call
 
 
-def test_worker_retries_luna_throttle_through_broker_with_same_regional_route(
+def test_worker_retries_luna_throttle_with_same_bounded_host_policy(
     monkeypatch, tmp_path
 ):
     success = {
@@ -515,7 +515,7 @@ def test_worker_retries_luna_throttle_through_broker_with_same_regional_route(
     assert len(transport.sent) == 2
     for request in transport.sent:
         body = json.loads(request["body"])
-        assert body["provider"]["order"] == ["azure/eu", "azure/us"]
+        assert "order" not in body["provider"]
         assert "only" not in body["provider"]
         assert "require_parameters" not in body["provider"]
         assert body["provider"]["max_price"] == {

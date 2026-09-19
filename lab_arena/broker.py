@@ -43,11 +43,10 @@ PRICE_TABLE_SCHEMA_VERSION = "leadpoet.lab_arena.openrouter_price_table.v1"
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_GENERATION_URL = "https://openrouter.ai/api/v1/generation?id="
 OPENROUTER_LUNA_RESPONSES_MODEL = "openai/gpt-5.6-luna"
-OPENROUTER_LUNA_RESPONSES_PRIORITY = ("azure/eu", "azure/us")
-# Both exact regional endpoints are priced at 1.10x the model catalog row.
-# Luna prompt-cache writes are 1.25x its ordinary prompt price.  The regional
-# route reserves that larger input-token ceiling because Responses requests can
-# carry a prompt_cache_key and OpenRouter bills cache writes in usage.cost.
+# Luna's price ceilings use the regional endpoint price at 1.10x the model
+# catalog row. Prompt-cache writes are 1.25x its ordinary prompt price. The
+# bounded host policy reserves that larger input-token ceiling because Responses
+# requests can carry a prompt_cache_key and OpenRouter bills cache writes in usage.cost.
 OPENROUTER_LUNA_REGIONAL_PRICE_MULTIPLIER = Decimal("1.10")
 OPENROUTER_LUNA_CACHE_WRITE_PRICE_MULTIPLIER = Decimal("1.25")
 # The public Luna catalog applies these prices at 272k prompt tokens.  The
@@ -697,11 +696,6 @@ def _openrouter_host_route(
         "data_collection": "deny",
         "zdr": True,
         "allow_fallbacks": True,
-        # Prefer the two priced regional routes, then let OpenRouter use another
-        # endpoint only when it meets the same privacy and price constraints.
-        # Its public endpoint feeds listed the base Azure route as an additional
-        # ZDR endpoint with the same advertised parameter support on 2026-09-18.
-        "order": list(OPENROUTER_LUNA_RESPONSES_PRIORITY),
         "max_price": {
             "prompt": _json_decimal_number(
                 regional["prompt"] * OPENROUTER_PRICE_PER_MILLION

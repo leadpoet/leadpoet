@@ -34,6 +34,8 @@ MAX_LOG_BYTES = 64 * 1024
 MAX_IDLE_WAIT_SECONDS = 2700
 DEFAULT_MAX_OUTPUT_TOKENS = 16_384
 MAX_OUTPUT_TOKENS = 32_768
+# Compact before growing histories approach the bridge's 1 MB request cap.
+MODEL_AUTO_COMPACT_TOKEN_LIMIT = 64_000
 # The broker operation accepts tool output as ordered ``input_text`` parts of
 # this size.  Keep this standalone bridge dependency-free; a contract test
 # couples the value to operations.OPENROUTER_MAX_CONTENT_CHARS.
@@ -636,6 +638,7 @@ def session(
             "model = " + json.dumps(model),
             'model_provider = "arena"',
             "model_reasoning_effort = " + json.dumps(reasoning_effort),
+            "model_auto_compact_token_limit = " + str(MODEL_AUTO_COMPACT_TOKEN_LIMIT),
             'approval_policy = "never"',
             # gVisor owns isolation. Nested platform sandboxes cannot run here.
             'sandbox_mode = "danger-full-access"',

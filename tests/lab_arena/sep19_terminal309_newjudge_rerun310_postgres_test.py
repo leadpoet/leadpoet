@@ -615,11 +615,12 @@ def test_terminal_recovery_archives_judgments_and_retains_miner_sources(
                 "s.miner_hotkey=r.configuration_doc->>'baseline_hotkey') "
                 "FROM public.lab_arena_submissions s WHERE s.round_id=r.round_id "
                 "AND s.submission_id=%s),"
-                "r.configuration_doc->'runner_hotkeys' ? %s "
+                "r.configuration_doc->'runner_hotkeys' ? %s,"
+                "r.configuration_doc ? 'company_quality_policy' "
                 "FROM public.lab_arena_rounds r WHERE r.round_id=%s",
                 (BASELINE, BASELINE, harness.runner_keys[1], ROUND),
             )
-            assert cursor.fetchone() == ("stage1", 3, 10, True, None)
+            assert cursor.fetchone() == ("stage1", 3, 10, True, None, False)
         conn.commit()
         lifecycle._drive_cycle(
             harness.service, harness.objects, BENCHMARK["icps"], harness.runner_keys[1]
@@ -668,6 +669,10 @@ def test_terminal_recovery_archives_judgments_and_retains_miner_sources(
                 "INSERT INTO round_guard_probe SELECT * FROM public.lab_arena_rounds WHERE round_id=%s",
                 (ROUND,),
             )
+            cursor.execute(
+                "UPDATE round_guard_probe SET status='scored' WHERE round_id=%s",
+                (ROUND,),
+            )
             challenger = next(item for item in participants if not item.get("is_king"))
             changed = {
                 "outcome": "crowned",
@@ -679,9 +684,12 @@ def test_terminal_recovery_archives_judgments_and_retains_miner_sources(
                 "CREATE TRIGGER round_guard_probe BEFORE UPDATE ON round_guard_probe "
                 "FOR EACH ROW EXECUTE FUNCTION public.lab_arena_rounds_write_once_v1()"
             )
-            with pytest.raises(psycopg2.Error, match="published round is immutable"):
+            with pytest.raises(
+                psycopg2.Error,
+                match="round publication and commitment columns are write-once",
+            ):
                 cursor.execute(
-                    "UPDATE round_guard_probe SET status='scored',publication_doc=jsonb_set("
+                    "UPDATE round_guard_probe SET status='published',publication_doc=jsonb_set("
                     "publication_doc,'{king_decision}',%s::jsonb,true),"
                     "king_outcome='crowned',king_hotkey=%s WHERE round_id=%s",
                     (json.dumps(changed), challenger["miner_hotkey"], ROUND),
@@ -706,4 +714,5 @@ def test_template_is_terminal_only_and_has_no_release_values():
     assert "lab_arena_accepted_weight_states" in body
     assert "__TERMINAL_BANK_STATE_SHA256__" in body
     assert "__TERMINAL_REWARD_AUTHORITY_SHA256__" in body
+    assert "active_round.configuration_doc ? 'company_quality_policy'" in body
     assert "__NEW_SOURCE_COMMIT__" in body and "__NEW_SCORER_DIGEST__" in body

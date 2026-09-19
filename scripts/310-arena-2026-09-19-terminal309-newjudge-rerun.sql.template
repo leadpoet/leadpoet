@@ -234,6 +234,7 @@ BEGIN
    AND (COALESCE((c.state->>'inflight_calls')::BIGINT,-1)<>0
     OR COALESCE((c.state->>'success_unresolved_calls')::BIGINT,-1)<>0);
  IF active_round.status NOT IN('published','cancelled') OR active_count<>0 OR unsettled<>0
+  OR active_round.configuration_doc ? 'company_quality_policy'
   OR pg_catalog.encode(extensions.digest(pg_catalog.to_jsonb(active_round)::TEXT,
        'sha256'),'hex')<>'__TERMINAL_ROUND_SHA256__'
   OR pg_catalog.encode(extensions.digest(pg_catalog.to_jsonb(active_baseline)::TEXT,

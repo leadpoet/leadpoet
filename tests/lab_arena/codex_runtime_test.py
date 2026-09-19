@@ -248,9 +248,156 @@ def test_bridge_auth_and_stateful_requests_never_dispatch(monkeypatch):
     with broker_socket(monkeypatch) as (store, transport, path), codex.ResponsesBridge(str(path)) as bridge:
         with httpx.Client(trust_env=False) as client:
             assert client.post(bridge.base_url + "/responses", json={}).status_code == 401
-            assert client.post(bridge.base_url + "/responses", headers={"Authorization": "Bearer " + bridge.token}, json={"store": True}).status_code == 400
+            stateful = client.post(bridge.base_url + "/responses", headers={"Authorization": "Bearer " + bridge.token}, json={"store": True})
+            assert stateful.status_code == 400
+            assert stateful.json() == {"error": {
+                "code": "stateful_request",
+                "message": "invalid Responses request or reply",
+            }}
             assert client.post(bridge.base_url + "/chat/completions", json={}).status_code == 404
         assert not store.calls and not transport.sent
+
+
+@pytest.mark.parametrize(("payload", "code", "web_search"), [
+    (b"not-json", "invalid_json", "disabled"),
+    ([], "invalid_request_schema", "disabled"),
+    ({"stream": "true"}, "invalid_stream", "disabled"),
+    ({"max_output_tokens": 0}, "invalid_output_token_limit", "disabled"),
+    ({"tools": {"bad": "shape"}}, "invalid_tools", "disabled"),
+    ({"tools": [{"type": "openrouter:web_search"}]},
+     "hosted_tools_forbidden", "disabled"),
+    ({"tools": [{"type": "web_search"}]},
+     "web_search_unavailable", "disabled"),
+    ({"tools": [{"type": "web_search", "unknown": True}]},
+     "invalid_web_search_tool", "live"),
+    ({"tools": [{"type": "web_search", "external_web_access": False}]},
+     "live_web_search_required", "live"),
+    ({"tools": [{"type": "web_search", "search_context_size": "all"}]},
+     "invalid_web_search_context", "live"),
+])
+def test_bridge_malformed_requests_return_closed_codes_before_dispatch(
+    monkeypatch, payload, code, web_search,
+):
+    monkeypatch.setattr(
+        codex,
+        "_dispatch",
+        lambda *_args, **_kwargs: pytest.fail("invalid request was dispatched"),
+    )
+    with codex.ResponsesBridge(
+        "/synthetic-unused.sock", web_search=web_search,
+    ) as bridge, httpx.Client(trust_env=False) as client:
+        request = {"content": payload} if isinstance(payload, bytes) else {"json": payload}
+        reply = client.post(
+            bridge.base_url + "/responses",
+            headers={"Authorization": "Bearer " + bridge.token},
+            **request,
+        )
+
+    assert reply.status_code == 400
+    assert reply.json() == {"error": {
+        "code": code,
+        "message": "invalid Responses request or reply",
+    }}
+
+
+def test_bridge_oversize_request_returns_closed_code_before_dispatch(monkeypatch):
+    monkeypatch.setattr(
+        codex,
+        "_dispatch",
+        lambda *_args, **_kwargs: pytest.fail("oversize request was dispatched"),
+    )
+    with codex.ResponsesBridge("/synthetic-unused.sock") as bridge:
+        with socket.create_connection(
+            ("127.0.0.1", bridge.server.server_port), timeout=2,
+        ) as connection:
+            connection.sendall(
+                b"POST /v1/responses HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                + ("Authorization: Bearer " + bridge.token + "\r\n").encode()
+                + ("Content-Length: " + str(codex.MAX_REQUEST_BYTES + 1) + "\r\n").encode()
+                + b"Connection: close\r\n\r\n"
+            )
+            chunks = []
+            while True:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+
+    head, body = b"".join(chunks).split(b"\r\n\r\n", 1)
+    assert b" 400 " in head
+    assert json.loads(body) == {"error": {
+        "code": "request_body_too_large",
+        "message": "invalid Responses request or reply",
+    }}
+
+
+def test_bridge_valid_request_keeps_existing_response_behavior(monkeypatch):
+    requests = []
+
+    def dispatch(_socket_path, body, **_kwargs):
+        requests.append(body)
+        return 200, b'{"status":"completed"}'
+
+    monkeypatch.setattr(codex, "_dispatch", dispatch)
+    with codex.ResponsesBridge(
+        "/synthetic-unused.sock",
+    ) as bridge, httpx.Client(trust_env=False) as client:
+        reply = client.post(
+            bridge.base_url + "/responses",
+            headers={"Authorization": "Bearer " + bridge.token},
+            json={"model": "openai/gpt-5.6-luna", "input": "synthetic"},
+        )
+
+    assert reply.status_code == 200
+    assert reply.content == b'{"status":"completed"}'
+    assert requests == [{
+        "model": "openai/gpt-5.6-luna",
+        "input": "synthetic",
+        "max_output_tokens": codex.DEFAULT_MAX_OUTPUT_TOKENS,
+    }]
+
+
+@pytest.mark.parametrize("exception_type", [ValueError, TypeError, KeyError])
+def test_bridge_unexpected_exception_keeps_generic_error_without_secret(
+    monkeypatch, exception_type,
+):
+    secret = "private-upstream-frame-do-not-return"
+
+    def dispatch(*_args, **_kwargs):
+        raise exception_type(secret)
+
+    monkeypatch.setattr(codex, "_dispatch", dispatch)
+    with codex.ResponsesBridge(
+        "/synthetic-unused.sock",
+    ) as bridge, httpx.Client(trust_env=False) as client:
+        reply = client.post(
+            bridge.base_url + "/responses",
+            headers={"Authorization": "Bearer " + bridge.token},
+            json={"model": "openai/gpt-5.6-luna", "input": "synthetic"},
+        )
+
+    assert reply.status_code == 400
+    assert reply.content == codex._INVALID_RESPONSES_ERROR
+    assert reply.json() == {
+        "error": {"message": "invalid Responses request or reply"},
+    }
+    assert secret.encode() not in reply.content
+
+
+def test_bridge_error_code_serialization_is_closed_and_extractable():
+    for code in codex._BRIDGE_REQUEST_ERROR_CODES:
+        document = json.loads(codex._invalid_responses_error(code))
+        assert document == {"error": {
+            "code": code,
+            "message": "invalid Responses request or reply",
+        }}
+
+    secret = "untrusted-error-code-secret"
+    assert codex._invalid_responses_error(secret) == codex._INVALID_RESPONSES_ERROR
+    assert secret.encode() not in codex._invalid_responses_error(secret)
+    with pytest.raises(ValueError, match="invalid bridge request error code"):
+        codex._BridgeRequestError(secret)
 
 
 def test_live_web_search_is_injected_as_one_bounded_native_server_tool(monkeypatch):

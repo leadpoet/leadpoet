@@ -43,6 +43,24 @@ TOOL_OUTPUT_TEXT_CHARS = 32_000
 WEB_SEARCH_MAX_TOOL_CALLS = 1
 WEB_SEARCH_MAX_TOTAL_RESULTS = 5
 REQUEST_GATE_POLL_SECONDS = 0.05
+_INVALID_RESPONSES_ERROR = b'{"error":{"message":"invalid Responses request or reply"}}'
+_BRIDGE_REQUEST_ERROR_CODES = frozenset({
+    "hosted_tools_forbidden",
+    "invalid_body_size",
+    "invalid_json",
+    "invalid_output_token_limit",
+    "invalid_request_schema",
+    "invalid_stream",
+    "invalid_tools",
+    "invalid_web_search_context",
+    "invalid_web_search_tool",
+    "live_web_search_required",
+    "request_body_too_large",
+    "stateful_request",
+    "truncated_request_body",
+    "unsupported_body_encoding",
+    "web_search_unavailable",
+})
 
 
 class CodexRuntimeError(RuntimeError):
@@ -51,6 +69,33 @@ class CodexRuntimeError(RuntimeError):
     def __init__(self, message: str, *, diagnostics: str = "") -> None:
         super().__init__(message)
         self.diagnostics = diagnostics
+
+
+class _BridgeRequestError(Exception):
+    """A known request rejection that can expose only a closed reason code."""
+
+    def __init__(self, code: str) -> None:
+        if code not in _BRIDGE_REQUEST_ERROR_CODES:
+            raise ValueError("invalid bridge request error code")
+        super().__init__()
+        self.code = code
+
+
+def _invalid_responses_error(code: str | None = None) -> bytes:
+    """Return the generic error, optionally with one allowlisted code."""
+
+    if code not in _BRIDGE_REQUEST_ERROR_CODES:
+        return _INVALID_RESPONSES_ERROR
+    return json.dumps(
+        {
+            "error": {
+                "code": code,
+                "message": "invalid Responses request or reply",
+            },
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
 
 
 class _IdleWaitCapability:
@@ -346,35 +391,43 @@ class ResponsesBridge:
                     )
                     lengths = self.headers.get_all("Content-Length", [])
                     if len(lengths) != 1 or self.headers.get("Transfer-Encoding") or self.headers.get("Content-Encoding"):
-                        raise ValueError("unsupported body encoding")
-                    size = int(lengths[0])
-                    if not 0 < size <= MAX_REQUEST_BYTES:
-                        raise ValueError("invalid body size")
+                        raise _BridgeRequestError("unsupported_body_encoding")
+                    try:
+                        size = int(lengths[0])
+                    except ValueError:
+                        raise _BridgeRequestError("invalid_body_size") from None
+                    if size > MAX_REQUEST_BYTES:
+                        raise _BridgeRequestError("request_body_too_large")
+                    if size <= 0:
+                        raise _BridgeRequestError("invalid_body_size")
                     raw = self.rfile.read(size)
                     if len(raw) != size:
-                        raise ValueError("truncated body")
-                    body = json.loads(raw)
+                        raise _BridgeRequestError("truncated_request_body")
+                    try:
+                        body = json.loads(raw)
+                    except ValueError:
+                        raise _BridgeRequestError("invalid_json") from None
                     if not isinstance(body, dict):
-                        raise ValueError("invalid body")
+                        raise _BridgeRequestError("invalid_request_schema")
                     streaming = body.pop("stream", False)
                     if type(streaming) is not bool:
-                        raise ValueError("invalid stream")
+                        raise _BridgeRequestError("invalid_stream")
                     # Codex sends these explicit stateless settings. No server
                     # history, background task, extra routing or headers cross.
                     if body.pop("store", False) is not False or body.pop("previous_response_id", None) is not None:
-                        raise ValueError("stateful request")
+                        raise _BridgeRequestError("stateful_request")
                     # Codex client telemetry is not part of OpenRouter's API.
                     body.pop("client_metadata", None)
                     # Codex omits this field. Make the reasoning + visible-output
                     # allowance explicit before the broker reserves its cost.
                     requested = body.get("max_output_tokens", max_output_tokens)
                     if type(requested) is not int or not 1 <= requested <= max_output_tokens:
-                        raise ValueError("invalid output token limit")
+                        raise _BridgeRequestError("invalid_output_token_limit")
                     body["max_output_tokens"] = requested
                     _chunk_tool_output_text(body)
                     tools = body.get("tools") or []
                     if not isinstance(tools, list):
-                        raise ValueError("invalid tools")
+                        raise _BridgeRequestError("invalid_tools")
                     web_tools = [
                         tool for tool in tools
                         if isinstance(tool, dict) and tool.get("type") == "web_search"
@@ -385,25 +438,25 @@ class ResponsesBridge:
                         and str(tool.get("type") or "").startswith("openrouter:")
                     ]
                     if hosted_tools:
-                        raise ValueError("hosted tools are bridge-controlled")
+                        raise _BridgeRequestError("hosted_tools_forbidden")
                     if web_tools and (
                             owner._web_search != "live" or len(web_tools) != 1):
-                        raise ValueError("web search unavailable")
+                        raise _BridgeRequestError("web_search_unavailable")
                     if owner._web_search == "live":
                         if len(web_tools) > 1:
-                            raise ValueError("web search unavailable")
+                            raise _BridgeRequestError("web_search_unavailable")
                         if web_tools:
                             web_tool = web_tools[0]
                             if set(web_tool) - {
                                 "type", "external_web_access",
                                 "search_context_size",
                             }:
-                                raise ValueError("invalid web search tool")
+                                raise _BridgeRequestError("invalid_web_search_tool")
                             if web_tool.get("external_web_access", True) is not True:
-                                raise ValueError("live web search required")
+                                raise _BridgeRequestError("live_web_search_required")
                             if web_tool.get("search_context_size", "medium") not in (
                                     "low", "medium", "high"):
-                                raise ValueError("invalid web search context")
+                                raise _BridgeRequestError("invalid_web_search_context")
                         replacement = {
                             "type": "openrouter:web_search",
                             "parameters": {
@@ -468,8 +521,10 @@ class ResponsesBridge:
                         self.reply(status, response, "text/event-stream")
                     else:
                         self.reply(status, response)
+                except _BridgeRequestError as exc:
+                    self.reply(400, _invalid_responses_error(exc.code))
                 except (ValueError, TypeError, KeyError):
-                    self.reply(400, b'{"error":{"message":"invalid Responses request or reply"}}')
+                    self.reply(400, _INVALID_RESPONSES_ERROR)
                 except (OSError, CodexRuntimeError):
                     self.reply(502, b'{"error":{"message":"Arena broker unavailable"}}')
                 finally:

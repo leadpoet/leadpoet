@@ -134,6 +134,35 @@ def _seed_terminal_rerun315(conn) -> None:
             (ROUND, BASELINE),
         )
         assert cursor.rowcount == 19
+        cursor.execute(
+            """
+            INSERT INTO public.lab_arena_runs(
+              run_id,assignment_id,round_id,submission_id,miner_hotkey,stage,
+              icp_position,attempt,kind,status,stage_generation,runner_hotkey,
+              terminal_cause,output_ref,scored_run_id,judgment_cache_key,
+              judgment_input_hash,judgment_scope_doc)
+            SELECT execute.round_id||':'||execute.submission_id||':'||
+                     execute.stage::text||':'||execute.icp_position::text||
+                     ':score:rerun315:1',
+                   execute.round_id||':'||execute.submission_id||':'||
+                     execute.stage::text||':'||execute.icp_position::text||
+                     ':score:rerun315',
+                   execute.round_id,execute.submission_id,execute.miner_hotkey,
+                   execute.stage,execute.icp_position,1,'score','accepted',
+                   execute.stage_generation,execute.miner_hotkey,'accepted',
+                   'arena/score/rerun315-baseline-accepted.json',execute.run_id,
+                   'sha256:'||repeat('6',64),'sha256:'||repeat('7',64),
+                   jsonb_build_object(
+                     'scorer_image_digest',round.configuration_doc->>'scorer_image_digest',
+                     'scorer_image_reference',round.configuration_doc->>'scorer_image_reference')
+            FROM public.lab_arena_runs execute
+            JOIN public.lab_arena_rounds round USING(round_id)
+            WHERE execute.round_id=%s AND execute.submission_id=%s
+              AND execute.kind='execute' AND execute.status='accepted'
+            """,
+            (ROUND, BASELINE),
+        )
+        assert cursor.rowcount == 1
         # This is sealed historical evidence. It represents two completed paid
         # calls and proves that recovery moves every ledger entry unchanged.
         cursor.execute(
@@ -175,6 +204,31 @@ def _seed_terminal_rerun315(conn) -> None:
         assert cursor.rowcount == 6
         cursor.execute(
             """
+            WITH score AS (
+              SELECT * FROM public.lab_arena_runs
+              WHERE round_id=%s AND submission_id=%s AND kind='score'
+            )
+            INSERT INTO public.lab_arena_ledger(
+              entry_kind,miner_hotkey,round_id,submission_id,run_id,stage,
+              call_identity,provider,operation_id,funding_source,amount_microusd,
+              entry_doc,terminal_response)
+            SELECT entry_kind,miner_hotkey,round_id,submission_id,run_id,stage,
+                   'sha256:'||repeat('8',64),'openrouter','openrouter.responses','host',
+                   CASE WHEN entry_kind='reservation' THEN 4000000
+                        WHEN entry_kind='settlement' THEN 7777 ELSE 0 END,
+                   jsonb_build_object('sealed_fixture',TRUE,'score_call',TRUE,
+                                      'sequence',ordinality),
+                   CASE WHEN entry_kind='settlement'
+                     THEN jsonb_build_object('call_succeeded',TRUE) ELSE NULL END
+            FROM score CROSS JOIN unnest(ARRAY['reservation','dispatch','settlement'])
+              WITH ORDINALITY AS kinds(entry_kind,ordinality)
+            ORDER BY ordinality
+            """,
+            (ROUND, BASELINE),
+        )
+        assert cursor.rowcount == 3
+        cursor.execute(
+            """
             UPDATE public.lab_arena_rounds
             SET status='cancelled',published_at=NULL,publication_doc=NULL,
                 cancel_reason='execution_incomplete:stage1:5',
@@ -204,13 +258,13 @@ def _seed_terminal_rerun315(conn) -> None:
             "SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s AND kind='score'",
             (ROUND,),
         )
-        assert cursor.fetchone()[0] == 0
+        assert cursor.fetchone()[0] == 1
         cursor.execute(
             "SELECT count(*) FROM public.lab_arena_ledger WHERE round_id=%s "
             "AND submission_id=%s",
             (ROUND, BASELINE),
         )
-        assert cursor.fetchone()[0] == 6
+        assert cursor.fetchone()[0] == 9
     conn.commit()
 
 
@@ -286,6 +340,15 @@ def _render(cursor, schedule: dict) -> tuple[str, str, str]:
             "SELECT count(*) FROM public.lab_arena_ledger "
             "WHERE round_id=%s AND submission_id=%s",
             (ROUND, BASELINE),
+        )),
+        "__TERMINAL_BASELINE_EXECUTE_LEDGER_COUNT__": str(_sha(
+            cursor,
+            "SELECT count(*) FROM public.lab_arena_ledger ledger "
+            "WHERE ledger.round_id=%s AND ledger.submission_id=%s "
+            "AND EXISTS(SELECT 1 FROM public.lab_arena_runs run "
+            "WHERE run.round_id=%s AND run.kind='execute' "
+            "AND run.run_id=ledger.run_id)",
+            (ROUND, BASELINE, ROUND),
         )),
         "__TERMINAL_SCORE_LEDGER_COUNT__": str(_sha(
             cursor,
@@ -446,7 +509,7 @@ def test_terminal315_rerun_executes_scores_and_publishes_with_preservation(
                 (ROUND, BASELINE),
             )
             terminal_baseline_ledger_before = cursor.fetchone()[0]
-            assert len(terminal_baseline_ledger_before) == 6
+            assert len(terminal_baseline_ledger_before) == 9
             cursor.execute(
                 "SELECT jsonb_agg(jsonb_build_object("
                 "'run_id',run_id,'per_icp_score',per_icp_score,"
@@ -571,6 +634,12 @@ def test_terminal315_rerun_executes_scores_and_publishes_with_preservation(
                 (ROUND + "-r316archive", BASELINE + ":r316archive"),
             )
             assert cursor.fetchone()[0] == terminal_baseline_ledger_before
+            cursor.execute(
+                "SELECT count(*) FROM public.lab_arena_runs "
+                "WHERE round_id=%s AND submission_id=%s AND kind='score'",
+                (ROUND + "-r316archive", BASELINE + ":r316archive"),
+            )
+            assert cursor.fetchone()[0] == 1
             cursor.execute(
                 "SELECT configuration_doc->'archived_execution_judgments' "
                 "FROM public.lab_arena_rounds WHERE round_id=%s",
@@ -796,12 +865,14 @@ def test_template_is_sealed_terminal315_only():
     assert "lab_arena_sep19_rerun315_active_valid_v1()" in body
     assert "lab_arena_sep19_rerun316_active_valid_v1()" in body
     assert "DROP TRIGGER IF EXISTS lab_arena_sep19_rerun315_score_namespace_guard" in body
+    assert "AS $score_guard316$" in body and "END $score_guard316$" in body
     assert "active_round.status IS DISTINCT FROM '__TERMINAL_STATUS__'" in body
     assert "active_round.status<>'cancelled'" in body
     assert "active_round.cancel_reason IS DISTINCT FROM '__TERMINAL_CANCEL_REASON__'" in body
     assert "__TERMINAL_BASELINE_ACCEPTED_RUN_COUNT__" in body
     assert "__TERMINAL_BASELINE_FAILED_RUN_COUNT__" in body
     assert "__TERMINAL_BASELINE_LEDGER_COUNT__" in body
+    assert "__TERMINAL_BASELINE_EXECUTE_LEDGER_COUNT__" in body
     assert "__TERMINAL_SCORE_LEDGER_COUNT__" in body
     assert "terminal_cause='model_error')<>25" not in body
     assert "terminal_cause='provider_error')<>15" not in body

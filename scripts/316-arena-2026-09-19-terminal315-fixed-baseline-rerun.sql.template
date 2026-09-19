@@ -86,6 +86,13 @@ BEGIN
       __TERMINAL_BASELINE_LEDGER_COUNT__
   AND (SELECT pg_catalog.count(*) FROM public.lab_arena_ledger ledger
        WHERE ledger.round_id='arena-2026-09-19-r316archive'
+        AND ledger.submission_id='baseline-2026-09-19:r316archive'
+        AND EXISTS(SELECT 1 FROM public.lab_arena_runs run
+          WHERE run.round_id='arena-2026-09-19-r316archive'
+           AND run.kind='execute' AND run.run_id=ledger.run_id))=
+      __TERMINAL_BASELINE_EXECUTE_LEDGER_COUNT__
+  AND (SELECT pg_catalog.count(*) FROM public.lab_arena_ledger ledger
+       WHERE ledger.round_id='arena-2026-09-19-r316archive'
         AND EXISTS(SELECT 1 FROM public.lab_arena_runs run
           WHERE run.round_id='arena-2026-09-19-r316archive'
            AND run.kind='score' AND run.run_id=ledger.run_id))=
@@ -331,6 +338,13 @@ BEGIN
       WHERE l.round_id='arena-2026-09-19'
        AND l.submission_id='baseline-2026-09-19')<>
       __TERMINAL_BASELINE_LEDGER_COUNT__
+  OR (SELECT pg_catalog.count(*) FROM public.lab_arena_ledger ledger
+      WHERE ledger.round_id='arena-2026-09-19'
+       AND ledger.submission_id='baseline-2026-09-19'
+       AND EXISTS(SELECT 1 FROM public.lab_arena_runs run
+         WHERE run.round_id='arena-2026-09-19' AND run.kind='execute'
+          AND run.run_id=ledger.run_id))<>
+      __TERMINAL_BASELINE_EXECUTE_LEDGER_COUNT__
   OR (SELECT pg_catalog.count(*) FROM public.lab_arena_runs
       WHERE round_id='arena-2026-09-19' AND kind='execute'
        AND submission_id<>'baseline-2026-09-19')<>80 THEN
@@ -545,7 +559,7 @@ BEGIN
  IF moved_scores<>__TERMINAL_SCORE_RUN_COUNT__
   OR moved_score_ledger<>__TERMINAL_SCORE_LEDGER_COUNT__
   OR moved_baseline_runs<>__TERMINAL_BASELINE_RUN_COUNT__
-  OR moved_baseline_ledger<>__TERMINAL_BASELINE_LEDGER_COUNT__
+  OR moved_baseline_ledger<>__TERMINAL_BASELINE_EXECUTE_LEDGER_COUNT__
   OR inserted_runs<>20 OR miner_runs_after IS DISTINCT FROM miner_runs_before
   OR miner_ledger_after IS DISTINCT FROM miner_ledger_before
   OR other_after IS DISTINCT FROM other_before
@@ -559,7 +573,7 @@ BEGIN
   'round_id','arena-2026-09-19','fresh_baseline_execute_count',20,
   'retained_miner_execute_count',80,'archived_score_count',moved_scores,
   'archived_score_ledger_count',moved_score_ledger,
-  'archived_baseline_ledger_count',moved_baseline_ledger,
+  'archived_baseline_execute_ledger_count',moved_baseline_ledger,
   'score_namespace','score:rerun316');
 END $prepare316$;
 ALTER FUNCTION public.lab_arena_prepare_sep19_rerun316_v1(
@@ -572,7 +586,7 @@ GRANT EXECUTE ON FUNCTION public.lab_arena_prepare_sep19_rerun316_v1(
 
 CREATE OR REPLACE FUNCTION public.lab_arena_sep19_rerun316_score_namespace_guard_v1()
 RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER
-SET search_path=pg_catalog,public AS $score_guard315$
+SET search_path=pg_catalog,public AS $score_guard316$
 BEGIN
  IF NEW.round_id='arena-2026-09-19' AND NEW.kind='score'
   AND EXISTS(SELECT 1 FROM public.lab_arena_rounds
@@ -583,7 +597,7 @@ BEGIN
    USING ERRCODE='55000';
  END IF;
  RETURN NEW;
-END $score_guard315$;
+END $score_guard316$;
 ALTER FUNCTION public.lab_arena_sep19_rerun316_score_namespace_guard_v1()
  OWNER TO lab_arena_owner;
 REVOKE ALL ON FUNCTION public.lab_arena_sep19_rerun316_score_namespace_guard_v1()

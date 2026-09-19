@@ -43,19 +43,9 @@ def load_release_manifest(path: Path) -> Dict[str, Any]:
 def runtime_configuration_documents(
     *,
     release_manifest: Mapping[str, Any],
-    gateway_release_lineage: Mapping[str, Any],
     protected_workflow_manifest_hash: str,
 ) -> Dict[str, Dict[str, Any]]:
     release = validate_release_manifest(release_manifest)
-    from gateway.tee.release_lineage_v2 import (
-        validate_compact_release_lineage_v2,
-    )
-
-    lineage = validate_compact_release_lineage_v2(
-        gateway_release_lineage,
-        expected_current_commit=str(release["commit_sha"]),
-        expected_current_gateway_release_hash=str(release["release_hash"]),
-    )
     protected_hash = str(protected_workflow_manifest_hash or "").lower()
     if not _HASH_RE.fullmatch(protected_hash):
         raise TEEV2BootstrapError("protected workflow manifest hash is invalid")
@@ -74,7 +64,6 @@ def runtime_configuration_documents(
         "own_build_identity_hash": expectation["build_identity_hash"],
         "release_roles": {COORDINATOR_ROLE: release_role},
         "peer_releases": {},
-        "gateway_release_lineage": lineage,
         "protected_workflow_manifest_hash": protected_hash,
     }
     config_document = {
@@ -163,14 +152,6 @@ async def bootstrap_gateway_enclaves_v2(
 async def _main_async(args) -> Dict[str, Any]:
     release = load_release_manifest(args.release_manifest)
     try:
-        gateway_release_lineage = json.loads(
-            args.gateway_release_lineage.read_text(encoding="utf-8")
-        )
-    except (OSError, json.JSONDecodeError) as exc:
-        raise TEEV2BootstrapError(
-            "gateway release lineage is unavailable"
-        ) from exc
-    try:
         protected_manifest = json.loads(
             args.protected_workflow_manifest.read_text(encoding="utf-8")
         )
@@ -181,7 +162,6 @@ async def _main_async(args) -> Dict[str, Any]:
     protected_hash = str(protected_manifest.get("manifest_hash") or "").lower()
     documents = runtime_configuration_documents(
         release_manifest=release,
-        gateway_release_lineage=gateway_release_lineage,
         protected_workflow_manifest_hash=protected_hash,
     )
     return await bootstrap_gateway_enclaves_v2(
@@ -193,7 +173,6 @@ async def _main_async(args) -> Dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-manifest", required=True, type=Path)
-    parser.add_argument("--gateway-release-lineage", required=True, type=Path)
     parser.add_argument(
         "--protected-workflow-manifest",
         required=True,

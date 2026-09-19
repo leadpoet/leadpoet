@@ -10,11 +10,10 @@ import base64
 import hashlib
 import json
 import re
-from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 
 BOOT_IDENTITY_SCHEMA_VERSION = "leadpoet.attested_boot_identity.v2"
-TRANSPORT_ATTEMPT_SCHEMA_VERSION = "leadpoet.attested_transport_attempt.v2"
 BOOT_ATTESTATION_CLAIM_SCHEMA_VERSION = "leadpoet.attested_boot_claim.v2"
 BOOT_ATTESTATION_PURPOSE = "leadpoet.boot_identity.v2"
 
@@ -25,55 +24,17 @@ SUPPORTED_BOOT_ROLES = frozenset(
     {COORDINATOR_ROLE, SCORING_ROLE}
 )
 
-ARENA_CHAIN_TRANSPORT_PURPOSES = frozenset(
-    {
-        "validator.chain_state.v2",
-        "validator.subnet_epoch_snapshot.v2",
-        "validator.metagraph_state.v2",
-        "validator.weights.finalized.v2",
-    }
-)
-
-
 PHYSICAL_ROLES_BY_SERVICE_ROLE = {
     COORDINATOR_ROLE: frozenset({"gateway_coordinator"}),
     SCORING_ROLE: frozenset({"gateway_scoring"}),
 }
-
-TRANSPORT_TERMINAL_STATUSES = frozenset(
-    {"authenticated_response", "attested_local_response", "transport_failure"}
-)
-TRANSPORT_FAILURE_CODES = frozenset(
-    {
-        "cancelled",
-        "certificate_invalid",
-        "connection_refused",
-        "connection_reset",
-        "dns_failure",
-        "host_dropped",
-        "malformed_reply",
-        "plaintext_forbidden",
-        "policy_denied",
-        "proxy_failure",
-        "response_too_large",
-        "tls_failure",
-        "timeout",
-        "unexpected_eof",
-    }
-)
 
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PCR0_RE = re.compile(r"^[0-9a-f]{96}$")
 _PUBKEY_RE = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _NONCE_RE = re.compile(r"^[0-9a-f]{32,64}$")
-_REQUEST_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}$")
-_METHOD_RE = re.compile(r"^[A-Z]{3,12}$")
-_HOST_RE = re.compile(
-    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
-    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
-)
 _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 
@@ -105,11 +66,6 @@ def sha256_bytes(value: bytes) -> str:
 
 def sha256_json(value: Any) -> str:
     return sha256_bytes(canonical_json(value).encode("utf-8"))
-
-
-DIRECT_EGRESS_REF_HASH = sha256_json(
-    {"schema_version": "leadpoet.egress_route.v2", "route": "direct"}
-)
 
 
 def _hash(value: Any, field: str) -> str:
@@ -372,207 +328,3 @@ def verify_boot_identity_nitro(
         "Nitro boot signing key mismatch",
     )
     return dict(extracted)
-_TRANSPORT_FIELDS = {
-    "schema_version",
-    "attempt_hash",
-    "request_id",
-    "logical_operation_id",
-    "job_id",
-    "purpose",
-    "provider_id",
-    "attempt_number",
-    "method",
-    "destination_host",
-    "destination_port",
-    "path_hash",
-    "nonsecret_headers_hash",
-    "body_hash",
-    "credential_ref_hash",
-    "egress_proxy_ref_hash",
-    "retry_policy_hash",
-    "timeout_ms",
-    "request_hash",
-    "started_at",
-    "terminal_status",
-    "http_status",
-    "response_hash",
-    "request_artifact_hash",
-    "response_artifact_hash",
-    "tls_peer_chain_hash",
-    "tls_protocol",
-    "failure_code",
-    "completed_at",
-}
-
-
-def build_transport_attempt(
-    *,
-    request_id: str,
-    logical_operation_id: str,
-    job_id: str,
-    purpose: str,
-    provider_id: str,
-    attempt_number: int,
-    method: str,
-    destination_host: str,
-    destination_port: int,
-    path_hash: str,
-    nonsecret_headers_hash: str,
-    body_hash: str,
-    credential_ref_hash: str,
-    retry_policy_hash: str,
-    timeout_ms: int,
-    started_at: str,
-    terminal_status: str,
-    http_status: Optional[int],
-    response_hash: Optional[str],
-    request_artifact_hash: str,
-    response_artifact_hash: Optional[str],
-    tls_peer_chain_hash: Optional[str],
-    tls_protocol: Optional[str],
-    failure_code: Optional[str],
-    completed_at: str,
-    egress_proxy_ref_hash: Optional[str] = None,
-) -> Dict[str, Any]:
-    normalized_request_id = str(request_id or "").strip().lower()
-    _require(bool(_REQUEST_ID_RE.fullmatch(normalized_request_id)), "request_id must be 16-byte lowercase hex")
-    normalized_purpose = _identifier(purpose, "purpose")
-    _require(
-        normalized_purpose in ARENA_CHAIN_TRANSPORT_PURPOSES,
-        "transport purpose is unsupported",
-    )
-    _require(isinstance(attempt_number, int) and attempt_number >= 0, "attempt_number must be non-negative")
-    normalized_method = str(method or "").strip().upper()
-    _require(bool(_METHOD_RE.fullmatch(normalized_method)), "transport method is invalid")
-    normalized_host = str(destination_host or "").strip().rstrip(".").lower()
-    _require(bool(_HOST_RE.fullmatch(normalized_host)), "destination_host must be a public DNS name")
-    _require(destination_port == 443, "external attested transport requires port 443")
-    _require(isinstance(timeout_ms, int) and timeout_ms > 0, "timeout_ms must be positive")
-    _require(terminal_status in TRANSPORT_TERMINAL_STATUSES, "transport terminal_status is invalid")
-
-    request_descriptor = {
-        "request_id": normalized_request_id,
-        "logical_operation_id": _identifier(logical_operation_id, "logical_operation_id"),
-        "job_id": _identifier(job_id, "job_id"),
-        "purpose": normalized_purpose,
-        "provider_id": _identifier(provider_id, "provider_id"),
-        "attempt_number": attempt_number,
-        "method": normalized_method,
-        "destination_host": normalized_host,
-        "destination_port": destination_port,
-        "path_hash": _hash(path_hash, "path_hash"),
-        "nonsecret_headers_hash": _hash(nonsecret_headers_hash, "nonsecret_headers_hash"),
-        "body_hash": _hash(body_hash, "body_hash"),
-        "credential_ref_hash": _hash(credential_ref_hash, "credential_ref_hash"),
-        "egress_proxy_ref_hash": _hash(
-            egress_proxy_ref_hash or DIRECT_EGRESS_REF_HASH,
-            "egress_proxy_ref_hash",
-        ),
-        "retry_policy_hash": _hash(retry_policy_hash, "retry_policy_hash"),
-        "timeout_ms": timeout_ms,
-        "started_at": _timestamp(started_at, "started_at"),
-    }
-    request_hash = sha256_json(request_descriptor)
-    normalized_request_artifact_hash = _hash(
-        request_artifact_hash,
-        "request_artifact_hash",
-    )
-
-    if terminal_status in {"authenticated_response", "attested_local_response"}:
-        _require(isinstance(http_status, int) and 100 <= http_status <= 599, "authenticated response needs HTTP status")
-        normalized_response_hash = _hash(response_hash, "response_hash")
-        normalized_artifact_hash = _hash(response_artifact_hash, "response_artifact_hash")
-        if terminal_status == "authenticated_response":
-            normalized_tls_hash = _hash(tls_peer_chain_hash, "tls_peer_chain_hash")
-            normalized_tls_protocol = _identifier(tls_protocol, "tls_protocol")
-        else:
-            _require(
-                tls_peer_chain_hash in (None, "") and tls_protocol in (None, ""),
-                "attested local response cannot claim provider TLS",
-            )
-            normalized_tls_hash = None
-            normalized_tls_protocol = None
-        _require(failure_code in (None, ""), "authenticated response cannot have failure_code")
-        normalized_failure = None
-    else:
-        _require(http_status is None, "transport failure cannot claim an HTTP status")
-        _require(response_hash in (None, ""), "transport failure cannot claim response_hash")
-        _require(
-            response_artifact_hash in (None, ""),
-            "transport failure cannot claim response artifact",
-        )
-        normalized_response_hash = None
-        normalized_artifact_hash = None
-        normalized_tls_hash = (
-            _hash(tls_peer_chain_hash, "tls_peer_chain_hash")
-            if tls_peer_chain_hash not in (None, "")
-            else None
-        )
-        normalized_tls_protocol = (
-            _identifier(tls_protocol, "tls_protocol")
-            if tls_protocol not in (None, "")
-            else None
-        )
-        normalized_failure = str(failure_code or "")
-        _require(
-            normalized_failure in TRANSPORT_FAILURE_CODES,
-            "transport failure_code is invalid",
-        )
-
-    attempt_body = {
-        "schema_version": TRANSPORT_ATTEMPT_SCHEMA_VERSION,
-        **request_descriptor,
-        "request_hash": request_hash,
-        "terminal_status": terminal_status,
-        "http_status": http_status,
-        "response_hash": normalized_response_hash,
-        "request_artifact_hash": normalized_request_artifact_hash,
-        "response_artifact_hash": normalized_artifact_hash,
-        "tls_peer_chain_hash": normalized_tls_hash,
-        "tls_protocol": normalized_tls_protocol,
-        "failure_code": normalized_failure,
-        "completed_at": _timestamp(completed_at, "completed_at"),
-    }
-    attempt_hash = sha256_json(attempt_body)
-    return {**attempt_body, "attempt_hash": attempt_hash}
-
-
-def validate_transport_attempt(attempt: Mapping[str, Any]) -> None:
-    _validate_exact_fields(attempt, _TRANSPORT_FIELDS, "transport attempt")
-    rebuilt = build_transport_attempt(
-        request_id=attempt["request_id"],
-        logical_operation_id=attempt["logical_operation_id"],
-        job_id=attempt["job_id"],
-        purpose=attempt["purpose"],
-        provider_id=attempt["provider_id"],
-        attempt_number=attempt["attempt_number"],
-        method=attempt["method"],
-        destination_host=attempt["destination_host"],
-        destination_port=attempt["destination_port"],
-        path_hash=attempt["path_hash"],
-        nonsecret_headers_hash=attempt["nonsecret_headers_hash"],
-        body_hash=attempt["body_hash"],
-        credential_ref_hash=attempt["credential_ref_hash"],
-        egress_proxy_ref_hash=attempt["egress_proxy_ref_hash"],
-        retry_policy_hash=attempt["retry_policy_hash"],
-        timeout_ms=attempt["timeout_ms"],
-        started_at=attempt["started_at"],
-        terminal_status=attempt["terminal_status"],
-        http_status=attempt["http_status"],
-        response_hash=attempt["response_hash"],
-        request_artifact_hash=attempt["request_artifact_hash"],
-        response_artifact_hash=attempt["response_artifact_hash"],
-        tls_peer_chain_hash=attempt["tls_peer_chain_hash"],
-        tls_protocol=attempt["tls_protocol"],
-        failure_code=attempt["failure_code"],
-        completed_at=attempt["completed_at"],
-    )
-    _require(dict(attempt) == rebuilt, "transport attempt is not canonical")
-
-
-def transport_root(attempts: Sequence[Mapping[str, Any]]) -> str:
-    hashes = []
-    for attempt in attempts:
-        validate_transport_attempt(attempt)
-        hashes.append(str(attempt["attempt_hash"]))
-    return merkle_root(hashes, domain="leadpoet-transport-v2")

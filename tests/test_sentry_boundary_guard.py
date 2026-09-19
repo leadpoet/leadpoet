@@ -34,7 +34,7 @@ ENCLAVE_REQUIREMENT_FILES = (
     "gateway/tee/requirements-enclave-py39.lock",
 )
 
-ENCLAVE_SURFACE_PREFIXES = ("validator_tee/enclave/", "gateway/tee/")
+ENCLAVE_SURFACE_PREFIXES = ("gateway/tee/",)
 
 WIRED_ENTRY_POINTS = (
     "gateway/main.py",

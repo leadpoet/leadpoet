@@ -5,9 +5,7 @@ Submodules:
                       signal_status decision rules, final-judge rules,
                       miner-date consistency check.  Shared assemblers.
   ``social_posting`` — adds PART D author-role check.
-  ``default``       — legacy compatibility builder used for any evidence_type
-                      that is not yet specialised (HIRING / FUNDING / None /
-                      unrecognised values).  During this refactor it still
-                      includes PART D so the dispatcher's output is
-                      byte-identical to the pre-refactor prompt.
+  ``default``       — shared builder for HIRING, FUNDING, missing, and other
+                      evidence types without a specialised builder. PART D
+                      includes its own applicability condition.
 """

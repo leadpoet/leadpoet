@@ -25,13 +25,6 @@ LOCAL_RELEASE_SCHEMA_VERSION = "leadpoet.gateway_local_release.v1"
 BUILDER_DOMAINS = frozenset({"gateway", "validator"})
 BUILDS_PER_DOMAIN = 3
 PROTECTED_BASELINE_COMMIT = "7c9766b71d4c08b0059f6e3230dbe742b1d58e79"
-HISTORICAL_TWO_ROLE_TOPOLOGY_HASH = (
-    "sha256:54a650379cf4de64420db84b09d304159ab5e196531fd6dbb1f33270ac12cece"
-)
-_HISTORICAL_TWO_ROLE_SPECS = {
-    "gateway_coordinator": {"service_role": "gateway_coordinator"},
-    "gateway_scoring": {"service_role": "gateway_scoring"},
-}
 
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PCR0_RE = re.compile(r"^[0-9a-f]{96}$")
@@ -474,20 +467,6 @@ def _validate_independent_release_manifest(
     return dict(value)
 
 
-def historical_two_role_specs(
-    *, expected_topology_hash: str
-) -> Dict[str, Dict[str, str]]:
-    """Return the installed two-role topology after an exact hash opt-in."""
-
-    if expected_topology_hash != HISTORICAL_TWO_ROLE_TOPOLOGY_HASH:
-        raise ReleaseManifestV2Error(
-            "historical release topology hash is unsupported"
-        )
-    return {
-        role: dict(spec) for role, spec in _HISTORICAL_TWO_ROLE_SPECS.items()
-    }
-
-
 def validate_release_manifest(value: Mapping[str, Any]) -> Dict[str, Any]:
     """Validate only the canonical topology used for a current release."""
 
@@ -501,49 +480,6 @@ def validate_release_manifest(value: Mapping[str, Any]) -> Dict[str, Any]:
         role_specs=ROLE_SPECS,
         expected_topology_hash=topology_hash(),
     )
-
-
-def validate_historical_release_manifest(
-    value: Mapping[str, Any],
-    *,
-    expected_topology_hash: str = HISTORICAL_TWO_ROLE_TOPOLOGY_HASH,
-) -> Dict[str, Any]:
-    """Validate the exact installed two-role release topology."""
-
-    role_specs = historical_two_role_specs(
-        expected_topology_hash=expected_topology_hash
-    )
-    if (
-        isinstance(value, Mapping)
-        and value.get("schema_version") == LOCAL_RELEASE_SCHEMA_VERSION
-    ):
-        return _validate_local_release_identity_for_topology(
-            value,
-            role_specs=role_specs,
-            expected_topology_hash=expected_topology_hash,
-        )
-    return _validate_independent_release_manifest(
-        value,
-        role_specs=role_specs,
-        expected_topology_hash=expected_topology_hash,
-    )
-
-
-def validate_prior_release_manifest(
-    value: Mapping[str, Any],
-) -> Dict[str, Any]:
-    """Validate a current or exact known historical lineage release."""
-
-    if (
-        isinstance(value, Mapping)
-        and value.get("topology_hash")
-        == HISTORICAL_TWO_ROLE_TOPOLOGY_HASH
-    ):
-        return validate_historical_release_manifest(
-            value,
-            expected_topology_hash=str(value["topology_hash"]),
-        )
-    return validate_release_manifest(value)
 
 
 def _role_expectation(
@@ -566,25 +502,6 @@ def _role_expectation(
 
 def role_expectation(manifest: Mapping[str, Any], role: str) -> Dict[str, str]:
     return _role_expectation(validate_release_manifest(manifest), role)
-
-
-def prior_role_expectation(
-    manifest: Mapping[str, Any], role: str
-) -> Dict[str, str]:
-    return _role_expectation(validate_prior_release_manifest(manifest), role)
-
-
-def historical_role_expectation(
-    manifest: Mapping[str, Any],
-    role: str,
-    *,
-    expected_topology_hash: str,
-) -> Dict[str, str]:
-    release = validate_historical_release_manifest(
-        manifest,
-        expected_topology_hash=expected_topology_hash,
-    )
-    return _role_expectation(release, role)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

@@ -138,8 +138,10 @@ def test_contact_generation_does_not_activate_an_existing_company_round(
     harness.sandbox.run_icp = run_icp
     harness.clock.now = datetime.now(timezone.utc)
     round_id = "arena-2026-12-01-companyonly"
+    # Begin after the replacement freeze but before submission cutoff so both
+    # the service clock and PostgreSQL wall clock admit the code review.
     configuration = harness.service.create_round(
-        harness.clock.now + timedelta(hours=12), round_id=round_id,
+        harness.clock.now + timedelta(minutes=30), round_id=round_id,
     )
     assert "contact_policy" not in configuration
     harness.round_id = round_id
@@ -381,8 +383,10 @@ def test_v5_full_contact_round_persists_and_publishes_multi_signal_narrative(
     _install_contact_sandbox(harness, intent_details=True)
     harness.clock.now = datetime.now(timezone.utc)
     round_id = "arena-2026-12-01-intentdetails"
+    # Begin after the replacement freeze but before submission cutoff so both
+    # the service clock and PostgreSQL wall clock admit the code review.
     configuration = harness.service.create_round(
-        harness.clock.now + timedelta(hours=12), round_id=round_id
+        harness.clock.now + timedelta(minutes=30), round_id=round_id
     )
     harness.round_id = round_id
     submission_id = harness.submit("IntentWinner", round_id)
@@ -458,8 +462,10 @@ def test_contact_round_saves_scores_budget_counts_and_public_receipts(
         "arena-2026-12-01-contactsdelay"
         if delayed_disclosure else "arena-2026-12-01-contacts"
     )
+    # Begin after the replacement freeze but before submission cutoff so both
+    # the service clock and PostgreSQL wall clock admit the code review.
     configuration = harness.service.create_round(
-        harness.clock.now + timedelta(hours=12), round_id=round_id
+        harness.clock.now + timedelta(minutes=30), round_id=round_id
     )
     harness.round_id = round_id
     assert configuration["contact_policy"] == "contacts_v1"

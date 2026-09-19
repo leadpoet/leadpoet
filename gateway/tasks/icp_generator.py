@@ -235,7 +235,7 @@ STAGE_EMPLOYEE_BUCKETS: Dict[str, tuple] = {
 
 # Geographies - all US states/territories, deliberate multi-state regions
 # (broader supply; see note below), + Dubai & Abu Dhabi (UAE)
-# US states from gateway/utils/geo_lookup_fast.json (source of truth)
+# The current Arena benchmark geography list is explicit and source-controlled.
 GEOGRAPHIES = [
     "United States, Alabama",
     "United States, Alaska",
@@ -1288,7 +1288,6 @@ Each ICP must also return these structured fields for the people to find at ever
                 "intent_max_age_days": icp.get("intent_max_age_days"),
                 "bonus_intents": icp.get("bonus_intents", []),
                 "required_attribute": icp.get("required_attribute", ""),
-                "buyer_description": prompt,                  # Legacy alias of prompt
                 "verified_example_company": verified_example, # Sonar's supply receipt
             }
             validated_icp = canonicalize_generated_icp(
@@ -1446,8 +1445,7 @@ def generate_single_icp(
         "prompt": prompt,
         "industry": industry,
         "sub_industry": sub_industry,
-        # Legacy fields — kept as empty defaults so older miner code that
-        # dict.gets them doesn't crash. The competition is company-only.
+        # Contact targets are filled by canonicalization when contacts are required.
         "target_roles": [],
         "target_seniority": "",
         "employee_count": employee_count_range,
@@ -1459,7 +1457,6 @@ def generate_single_icp(
         "country": country,
         "product_service": product,
         "intent_signals": intent_signals,
-        "buyer_description": prompt,  # Legacy alias of prompt
     }
     return canonicalize_generated_icp(
         icp,

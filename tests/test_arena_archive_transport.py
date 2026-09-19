@@ -13,7 +13,7 @@ from tests.test_validator_chain_source_v2 import (
     _stateful_cutover,
     _stateful_rpc,
 )
-from validator_tee.enclave.chain_source_v2 import ValidatorChainSourceV2Error
+from lab_arena.chain_source import ValidatorChainSourceV2Error
 
 
 @pytest.mark.parametrize(
@@ -37,7 +37,7 @@ def test_operator_archive_http_preserves_canonical_anchor_checks(tampered_block,
                     request_id=request["id"], job_id="operator-archive-test",
                     purpose="validator.subnet_epoch_snapshot.v2",
                     logical_operation_id="operator-archive-test:%s" % request["id"],
-                )["result"]
+                    )
             body = json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}).encode()
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
@@ -49,7 +49,7 @@ def test_operator_archive_http_preserves_canonical_anchor_checks(tampered_block,
 
     class LiveTransport:
         def call(self, **kwargs):
-            return rpc(**kwargs)["result"]
+                return rpc(**kwargs)
 
     with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
         thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01))

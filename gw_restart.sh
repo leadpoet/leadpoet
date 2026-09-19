@@ -19,7 +19,6 @@ ENV_CLONE="/tmp/gw_env_clone.sh"
 ENV_SECRET="/tmp/gw_env_secret.sh"
 MIN_FREE_KB=$((10 * 1024 * 1024))
 EXPECTED_AWS_ACCOUNT="493765492819"
-LEGACY_FOUR_FILE_CONTROLLER_BOUNDARY="202cd66a41f17f3030bcf6889d381cd3ecfd8f1c"
 ENV_BACKUP_DIR="/home/ec2-user/.config/leadpoet/env-backups"
 GATEWAY_RESTART_CONTROLLER_ROOT="${GATEWAY_RESTART_CONTROLLER_ROOT:-/home/ec2-user/.config/leadpoet/restart-controller/gateway}"
 GATEWAY_RESTART_CONTROLLER_CURRENT="$GATEWAY_RESTART_CONTROLLER_ROOT/current"
@@ -394,7 +393,12 @@ GATEWAY_V2_RELEASE_LINEAGE="${GATEWAY_V2_RELEASE_LINEAGE:-$GATEWAY_TEE_EIF_ROOT/
 # Keep candidate evidence restart-scoped so its fail-closed verifier remains
 # bound to the release that actually booted it until destructive cutover.
 GATEWAY_PREPARED_V2_RELEASE_MANIFEST="${GATEWAY_PREPARED_V2_RELEASE_MANIFEST:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.candidate-release.json}"
+# Bounded rollback compatibility: retained lineage-era releases still expose
+# the old release installer/bootstrap CLI. The prepared target selects this
+# branch; remove it after all three retained rollback archives use the
+# manifest-only interface.
 GATEWAY_PREPARED_V2_RELEASE_LINEAGE="${GATEWAY_PREPARED_V2_RELEASE_LINEAGE:-${GATEWAY_RESTART_TIMING_FILE%.jsonl}.candidate-release-lineage.json}"
+GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE="${GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE:-0}"
 GATEWAY_V2_RELEASE_BUCKET="${GATEWAY_V2_RELEASE_BUCKET:-leadpoet-attested-v2-artifacts-493765492819}"
 GATEWAY_V2_RELEASE_PREFIX="${GATEWAY_V2_RELEASE_PREFIX:-attested-v2/releases}"
 export GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="${GATEWAY_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts}"
@@ -427,6 +431,7 @@ GATEWAY_RESTART_PATH_AUTHORITY_KEYS=(
   GATEWAY_V2_RELEASE_LINEAGE
   GATEWAY_PREPARED_V2_RELEASE_MANIFEST
   GATEWAY_PREPARED_V2_RELEASE_LINEAGE
+  GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE
   GATEWAY_V2_OFFLINE_ARTIFACT_ROOT
   GATEWAY_V2_RELEASE_PREFIX
   GATEWAY_V2_RELEASE_BUCKET
@@ -501,6 +506,11 @@ fi
 if ! [[ "$GATEWAY_RELEASE_SUPERSESSION_COUNT" =~ ^[0-9]+$ ]] \
     || ! [[ "$GATEWAY_RELEASE_SUPERSESSION_MAX" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: gateway release supersession counters are invalid" >&2
+  exit 2
+fi
+if [ "$GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE" != "0" ] \
+    && [ "$GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE" != "1" ]; then
+  echo "ERROR: gateway target release interface selection is invalid" >&2
   exit 2
 fi
 GATEWAY_HOST_EXTRA_PYTHON_PACKAGES=(
@@ -821,6 +831,7 @@ follow_superseding_gateway_release() {
     GATEWAY_V2_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE" \
     GATEWAY_PREPARED_V2_RELEASE_MANIFEST="$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
     GATEWAY_PREPARED_V2_RELEASE_LINEAGE="$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
+    GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE="$GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE" \
     GATEWAY_V2_RELEASE_BUCKET="$GATEWAY_V2_RELEASE_BUCKET" \
     GATEWAY_V2_RELEASE_PREFIX="$GATEWAY_V2_RELEASE_PREFIX" \
     GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
@@ -1014,7 +1025,6 @@ wait_for_gateway_build_memory() {
   for attempt in $(seq 1 "$max_attempts"); do
     if python3 "$guard" \
         --cleanup-disposable-tests \
-        --cleanup-stale-vsock-probes \
         --minimum-available-mib 16384 >"$report"; then
       cat "$report"
       rm -f "$report"
@@ -1043,6 +1053,16 @@ run_prepared_gateway_module() {
     cd "$GATEWAY_PREFLIGHT_TREE"
     PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" -m "$@"
   )
+}
+
+select_gateway_target_release_interface() {
+  if [ -f "$GATEWAY_PREFLIGHT_TREE/gateway/tee/release_lineage_v2.py" ] \
+      && [ ! -L "$GATEWAY_PREFLIGHT_TREE/gateway/tee/release_lineage_v2.py" ]; then
+    GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE=1
+  else
+    GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE=0
+  fi
+  export GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE
 }
 
 on_gateway_restart_exit() {
@@ -1174,7 +1194,12 @@ enforce_deployment_environment() {
   export GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS
   export GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS
   export GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES
-  export GATEWAY_V2_CONFIG_DIR GATEWAY_V2_RELEASE_MANIFEST GATEWAY_V2_RELEASE_LINEAGE
+  export GATEWAY_V2_CONFIG_DIR GATEWAY_V2_RELEASE_MANIFEST
+  if [ "$GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE" = "1" ]; then
+    export GATEWAY_V2_RELEASE_LINEAGE
+  else
+    unset GATEWAY_V2_RELEASE_LINEAGE LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
+  fi
   export LEADPOET_LOCAL_RELEASE_COMMIT_SHA LEADPOET_LOCAL_GATEWAY_RELEASE
   export GATEWAY_TEE_FALLBACK_LOG_DIR="$GATEWAY_LOG_ROOT/gateway/logs/tee_fallback"
   export PYTHONPATH="$LEADPOET_REPO_ROOT"
@@ -1186,7 +1211,7 @@ enforce_deployment_environment() {
   export GITHUB_REPO_URL="$GATEWAY_DEPLOY_REMOTE"
   export GATEWAY_BUILD_INFO_GIT_ROOT="$LEADPOET_REPO_ROOT"
   export GATEWAY_BUILD_INFO_FILE="$GATEWAY_ROOT/BUILD_INFO.json"
-  export RESEARCH_LAB_RUNTIME_SOURCE_ROOT="$LEADPOET_REPO_ROOT"
+  export GATEWAY_RUNTIME_SOURCE_ROOT="$LEADPOET_REPO_ROOT"
   export ATTESTED_RUNTIME_COMMIT_SHA="$GATEWAY_DEPLOY_SHA"
   export ATTESTED_RUNTIME_GIT_REPO_URL="$GATEWAY_DEPLOY_REMOTE"
 }
@@ -1231,25 +1256,13 @@ install_successful_restart_script() {
       echo "ERROR: installed gateway restart controller release differs from the exact candidate" >&2
       return 1
     fi
-    if [ -e "$release_dir/scripts/manage_owned_process_group.py" ] \
-        || [ -L "$release_dir/scripts/manage_owned_process_group.py" ]; then
-      if [ -L "$release_dir/scripts/manage_owned_process_group.py" ] \
-          || [ "$(stat -c '%u:%g:%a' "$release_dir/scripts/manage_owned_process_group.py")" != "$(id -u):$(id -g):600" ] \
-          || ! cmp -s "$temporary_dir/scripts/manage_owned_process_group.py" \
-              "$release_dir/scripts/manage_owned_process_group.py"; then
-        rm -rf -- "$temporary_dir"
-        echo "ERROR: installed gateway restart controller process helper differs from the exact candidate" >&2
-        return 1
-      fi
-    elif ! git -C "$LEADPOET_REPO_ROOT" merge-base --is-ancestor \
-        "$controller_sha" "$LEGACY_FOUR_FILE_CONTROLLER_BOUNDARY" \
-        || ! git -C "$LEADPOET_REPO_ROOT" cat-file -e \
-        "$controller_sha:scripts/manage_owned_process_group.py" \
-        || ! git -C "$LEADPOET_REPO_ROOT" show \
-        "$controller_sha:scripts/manage_owned_process_group.py" \
-        | cmp -s - "$temporary_dir/scripts/manage_owned_process_group.py"; then
+    if [ ! -f "$release_dir/scripts/manage_owned_process_group.py" ] \
+        || [ -L "$release_dir/scripts/manage_owned_process_group.py" ] \
+        || [ "$(stat -c '%u:%g:%a' "$release_dir/scripts/manage_owned_process_group.py")" != "$(id -u):$(id -g):600" ] \
+        || ! cmp -s "$temporary_dir/scripts/manage_owned_process_group.py" \
+            "$release_dir/scripts/manage_owned_process_group.py"; then
       rm -rf -- "$temporary_dir"
-      echo "ERROR: installed gateway restart controller lacks a bounded exact process helper transition" >&2
+      echo "ERROR: installed gateway restart controller process helper differs from the exact candidate" >&2
       return 1
     fi
     rm -rf -- "$temporary_dir"
@@ -1630,10 +1643,6 @@ src = Path(sys.argv[1])
 dst = Path(sys.argv[2])
 raw = src.read_text()
 restart_only_keys = {
-    # Remove credentials that belonged only to the retired lead service.
-    "APIFY_API_TOKEN",
-    "DEEPL_API_KEY",
-    "LEADPOET_INTERNAL_SECRET",
     "GATEWAY_DEPLOY_COMMIT",
     "GATEWAY_ENV_FILE",
     "GATEWAY_RESTART_GIT_SSH_COMMAND",
@@ -1660,6 +1669,7 @@ restart_only_keys = {
     "GATEWAY_V2_RELEASE_MANIFEST",
     "GATEWAY_PREPARED_V2_RELEASE_MANIFEST",
     "GATEWAY_PREPARED_V2_RELEASE_LINEAGE",
+    "GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_PREFIX",
     "GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
     "GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS",
@@ -1678,7 +1688,7 @@ except Exception:
 if isinstance(parsed, dict):
     lines = []
     for key, value in parsed.items():
-        if key in restart_only_keys or key == "ENABLE_FULFILLMENT" or key.startswith("FULFILLMENT_"):
+        if key in restart_only_keys:
             continue
         if isinstance(value, (dict, list)):
             value = json.dumps(value, separators=(",", ":"))
@@ -1697,7 +1707,7 @@ else:
             parts = [candidate]
         assignment = parts[0] if len(parts) == 1 else candidate
         key = assignment.split("=", 1)[0].strip() if "=" in assignment else ""
-        if key in restart_only_keys or key == "ENABLE_FULFILLMENT" or key.startswith("FULFILLMENT_"):
+        if key in restart_only_keys:
             continue
         lines.append(raw_line)
     raw = "\n".join(lines)
@@ -1719,10 +1729,6 @@ from pathlib import Path
 env_path = Path(sys.argv[1])
 out_path = Path(sys.argv[2])
 skip_keys = {
-    # Remove credentials that belonged only to the retired lead service.
-    "APIFY_API_TOKEN",
-    "DEEPL_API_KEY",
-    "LEADPOET_INTERNAL_SECRET",
     "AWS_ACCESS_KEY_ID",
     "AWS_CA_BUNDLE",
     "AWS_CONFIG_FILE",
@@ -1782,6 +1788,7 @@ skip_keys = {
     "GATEWAY_V2_RELEASE_MANIFEST",
     "GATEWAY_PREPARED_V2_RELEASE_MANIFEST",
     "GATEWAY_PREPARED_V2_RELEASE_LINEAGE",
+    "GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_PREFIX",
     "GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
     "GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS",
@@ -1825,7 +1832,7 @@ skip_keys = {
     "BUILD_TIMESTAMP",
     "GATEWAY_BUILD_INFO_GIT_ROOT",
     "GATEWAY_BUILD_INFO_FILE",
-    "RESEARCH_LAB_RUNTIME_SOURCE_ROOT",
+    "GATEWAY_RUNTIME_SOURCE_ROOT",
     "ATTESTED_RUNTIME_COMMIT_SHA",
     "ATTESTED_RUNTIME_GIT_REPO_URL",
 }
@@ -1848,7 +1855,7 @@ for raw_line in env_path.read_text(errors="replace").replace("\x00", "\n").split
     else:
         key, value = parts[0].split("=", 1)
     key = key.strip()
-    if key in skip_keys or key == "ENABLE_FULFILLMENT" or key.startswith("FULFILLMENT_"):
+    if key in skip_keys:
         continue
     if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
         continue
@@ -1868,10 +1875,6 @@ import sys
 pid = sys.argv[1]
 out_path = sys.argv[2]
 skip_keys = {
-    # Remove credentials that belonged only to the retired lead service.
-    "APIFY_API_TOKEN",
-    "DEEPL_API_KEY",
-    "LEADPOET_INTERNAL_SECRET",
     "AWS_ACCESS_KEY_ID",
     "AWS_CA_BUNDLE",
     "AWS_CONFIG_FILE",
@@ -1931,6 +1934,7 @@ skip_keys = {
     "GATEWAY_V2_RELEASE_MANIFEST",
     "GATEWAY_PREPARED_V2_RELEASE_MANIFEST",
     "GATEWAY_PREPARED_V2_RELEASE_LINEAGE",
+    "GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE",
     "GATEWAY_V2_RELEASE_PREFIX",
     "GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS",
     "GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS",
@@ -1973,7 +1977,7 @@ skip_keys = {
     "BUILD_TIMESTAMP",
     "GATEWAY_BUILD_INFO_GIT_ROOT",
     "GATEWAY_BUILD_INFO_FILE",
-    "RESEARCH_LAB_RUNTIME_SOURCE_ROOT",
+    "GATEWAY_RUNTIME_SOURCE_ROOT",
     "ATTESTED_RUNTIME_COMMIT_SHA",
     "ATTESTED_RUNTIME_GIT_REPO_URL",
 }
@@ -1986,7 +1990,7 @@ for kv in data.split(b"\0"):
     if "=" not in s:
         continue
     k, v = s.split("=", 1)
-    if k in skip_keys or k == "ENABLE_FULFILLMENT" or k.startswith("FULFILLMENT_"):
+    if k in skip_keys:
         continue
     if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", k):
         continue
@@ -2070,6 +2074,7 @@ if ! git -C "$LEADPOET_REPO_ROOT" archive "$PREPARED_GATEWAY_SHA" \
   echo "ERROR: unable to materialize the prepared commit for V2 preflight" >&2
   exit 1
 fi
+select_gateway_target_release_interface
 echo "Verifying the prepared gateway tree with the preserved restart controller"
 GATEWAY_DEPLOY_STAGE="git_prepared_tree_verification"
 export GATEWAY_DEPLOY_STAGE
@@ -2080,10 +2085,8 @@ export GATEWAY_DEPLOY_STAGE
   --phase prepared_archive \
   --strict-extras
 
-echo "Cleaning stale read-only gateway vsock probes before V2 preflight"
 "$GATEWAY_PYTHON_BIN" \
   "$GATEWAY_PREFLIGHT_TREE/gateway/tee/host_memory_guard_v2.py" \
-  --cleanup-stale-vsock-probes \
   --minimum-available-mib 1024
 
 RESTART_GATE_ARGS=(
@@ -2141,23 +2144,31 @@ if [ -f "$GATEWAY_LOCAL_RELEASE_SCRIPT" ] \
   fi
   export LEADPOET_LOCAL_RELEASE_COMMIT_SHA="$PREPARED_GATEWAY_SHA"
   export LEADPOET_LOCAL_GATEWAY_RELEASE="$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"
-  if [ -e "$GATEWAY_V2_RELEASE_LINEAGE" ] \
-      || [ -L "$GATEWAY_V2_RELEASE_LINEAGE" ]; then
-    export LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE"
+  # The lineage-era compatibility branch creates only the target singleton.
+  # Never merge a newer installed graph into an explicit rollback target.
+  unset LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
+  if [ "$GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE" = "1" ]; then
+    if ! run_prepared_gateway_module gateway.tee.release_channel_v2 \
+          --ensure \
+          --expected-commit "$PREPARED_GATEWAY_SHA" \
+          --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
+          --lineage-output "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
+          --lineage-repository "$LEADPOET_REPO_ROOT" \
+          --lineage-authority-commit "$PREPARED_GATEWAY_SHA" \
+          --lineage-required-commit "$PREPARED_GATEWAY_SHA"; then
+      echo "ERROR: legacy rollback release identity is invalid" >&2
+      echo "Gateway remains running; production shutdown has not started." >&2
+      exit 75
+    fi
   else
-    unset LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE
-  fi
-  if ! run_prepared_gateway_module gateway.tee.release_channel_v2 \
-        --ensure \
-        --expected-commit "$PREPARED_GATEWAY_SHA" \
-        --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-        --lineage-output "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
-        --lineage-repository "$LEADPOET_REPO_ROOT" \
-        --lineage-authority-commit "$PREPARED_GATEWAY_SHA" \
-        --lineage-required-commit "$PREPARED_GATEWAY_SHA"; then
-    echo "ERROR: exact local gateway release lineage is invalid" >&2
-    echo "Gateway remains running; production shutdown has not started." >&2
-    exit 75
+    if ! run_prepared_gateway_module gateway.tee.release_channel_v2 \
+          --ensure \
+          --expected-commit "$PREPARED_GATEWAY_SHA" \
+          --gateway-output "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST"; then
+      echo "ERROR: exact local gateway release identity is invalid" >&2
+      echo "Gateway remains running; production shutdown has not started." >&2
+      exit 75
+    fi
   fi
   record_gateway_restart_timing "local_release_ready"
 else
@@ -2334,6 +2345,7 @@ exec env \
   GATEWAY_V2_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE" \
   GATEWAY_PREPARED_V2_RELEASE_MANIFEST="$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
   GATEWAY_PREPARED_V2_RELEASE_LINEAGE="$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
+  GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE="$GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE" \
   GATEWAY_V2_RELEASE_BUCKET="$GATEWAY_V2_RELEASE_BUCKET" \
   GATEWAY_V2_RELEASE_PREFIX="$GATEWAY_V2_RELEASE_PREFIX" \
   GATEWAY_V2_OFFLINE_ARTIFACT_ROOT="$GATEWAY_V2_OFFLINE_ARTIFACT_ROOT" \
@@ -2343,18 +2355,24 @@ fi
 
 bind_activated_gateway_guard_candidate || exit 1
 record_gateway_restart_timing "candidate_activated"
-echo "Installing the preflighted gateway manifest and lineage"
-PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
-  -m gateway.tee.install_gateway_release_state_v2 \
-  --prepared-manifest "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
-  --prepared-lineage "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
-  --active-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
-  --active-lineage "$GATEWAY_V2_RELEASE_LINEAGE" \
-  --expected-commit "$GATEWAY_DEPLOY_SHA"
-echo "Cleaning stale read-only gateway vsock probes"
+echo "Installing the preflighted gateway manifest"
+if [ "$GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE" = "1" ]; then
+  PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
+    -m gateway.tee.install_gateway_release_state_v2 \
+    --prepared-manifest "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
+    --prepared-lineage "$GATEWAY_PREPARED_V2_RELEASE_LINEAGE" \
+    --active-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
+    --active-lineage "$GATEWAY_V2_RELEASE_LINEAGE" \
+    --expected-commit "$GATEWAY_DEPLOY_SHA"
+else
+  PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
+    -m gateway.tee.install_gateway_release_state_v2 \
+    --prepared-manifest "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" \
+    --active-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
+    --expected-commit "$GATEWAY_DEPLOY_SHA"
+fi
 "$GATEWAY_PYTHON_BIN" \
   "$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py" \
-  --cleanup-stale-vsock-probes \
   --minimum-available-mib 1024
 echo "Verifying prepared and activated gateway trees against exact Git blobs"
 GATEWAY_DEPLOY_STAGE="git_tree_verification"
@@ -2529,14 +2547,20 @@ echo "Building deterministic gateway role EIFs from the staged runtime"
     echo "ERROR: local V2 build identity is missing" >&2
     exit 1
   }
-  test -s "$GATEWAY_V2_RELEASE_LINEAGE" || {
-    echo "ERROR: local V2 build lineage is missing" >&2
-    exit 1
-  }
-  PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_v2_bootstrap \
-    --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
-    --gateway-release-lineage "$GATEWAY_V2_RELEASE_LINEAGE" \
-    --protected-workflow-manifest "$GATEWAY_ROOT/_attested_runtime/protected_workflows.json"
+  if [ "$GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE" = "1" ]; then
+    test -s "$GATEWAY_V2_RELEASE_LINEAGE" || {
+      echo "ERROR: legacy rollback release identity is missing" >&2
+      exit 1
+    }
+    PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_v2_bootstrap \
+      --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
+      --gateway-release-lineage "$GATEWAY_V2_RELEASE_LINEAGE" \
+      --protected-workflow-manifest "$GATEWAY_ROOT/_attested_runtime/protected_workflows.json"
+  else
+    PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m gateway.utils.tee_v2_bootstrap \
+      --release-manifest "$GATEWAY_V2_RELEASE_MANIFEST" \
+      --protected-workflow-manifest "$GATEWAY_ROOT/_attested_runtime/protected_workflows.json"
+  fi
   record_gateway_restart_timing "v2_runtime_bootstrapped"
 
 echo "Verifying measured V2 runtime identity readiness"
@@ -2564,7 +2588,6 @@ export AWS_REGION="${AWS_REGION:-us-east-1}"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 export GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-/home/ec2-user/.config/leadpoet/gateway.env}"
 export LEADPOET_GATEWAY_ENV_SECRET_ID="${LEADPOET_GATEWAY_ENV_SECRET_ID:-leadpoet/prod/gateway/env}"
-unset RESEARCH_LAB_EVIDENCE_PROXY_URL
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
 export LEADPOET_AWS_INSTANCE_ROLE_ONLY=true
 

@@ -15,12 +15,7 @@ import stat
 import tempfile
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-from gateway.tee.release_manifest_v2 import (
-    HISTORICAL_TWO_ROLE_TOPOLOGY_HASH,
-    historical_two_role_specs,
-    validate_prior_release_manifest,
-    validate_release_manifest,
-)
+from gateway.tee.release_manifest_v2 import validate_release_manifest
 from gateway.tee.topology import ROLE_SPECS
 from gateway.tee.verify_release_artifacts_v2 import (
     ReleaseArtifactVerificationError,
@@ -107,15 +102,7 @@ def _load_regular_json(path: Path, field: str) -> Dict[str, Any]:
 
 
 def _normalize_role_pcr0s(value: Any, field: str) -> Dict[str, str]:
-    historical_two_roles = set(
-        historical_two_role_specs(
-            expected_topology_hash=HISTORICAL_TWO_ROLE_TOPOLOGY_HASH
-        )
-    )
-    if not isinstance(value, Mapping) or set(value) not in (
-        set(ROLE_SPECS),
-        historical_two_roles,
-    ):
+    if not isinstance(value, Mapping) or set(value) != set(ROLE_SPECS):
         raise ReleaseArchiveV2Error("%s is incomplete" % field)
     normalized: Dict[str, str] = {}
     for role in sorted(value):
@@ -163,7 +150,7 @@ def _archived_role_pcr0s(root: Path, item: Mapping[str, Any]) -> Dict[str, str]:
     release_hash = str(item.get("release_hash") or "").lower()
     if not _HASH_RE.fullmatch(release_hash):
         raise ReleaseArchiveV2Error("gateway release archive identity is invalid")
-    release = validate_prior_release_manifest(
+    release = validate_release_manifest(
         _load_regular_json(
             root
             / release_hash.split(":", 1)[1]
@@ -396,7 +383,7 @@ def verify_archive_directory(path: Path) -> Dict[str, Any]:
     files = document.get("files")
     if not isinstance(files, Mapping) or not files:
         raise ReleaseArchiveV2Error("gateway release archive inventory is empty")
-    release = validate_prior_release_manifest(
+    release = validate_release_manifest(
         _load_regular_json(
             root / "gateway-v2-release-manifest.json",
             "archived gateway release manifest",

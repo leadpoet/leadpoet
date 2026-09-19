@@ -9,7 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from typing import Any, Mapping, Optional, Tuple
-from urllib.parse import urlsplit
 
 
 MICROUSD_PER_USD = Decimal("1000000")
@@ -140,21 +139,6 @@ def _signed_decimal(value: Any) -> Optional[Decimal]:
 
 def _microusd_ceiling(usd: Decimal) -> int:
     return int((usd * MICROUSD_PER_USD).to_integral_value(rounding=ROUND_CEILING))
-
-
-def _bounded_https_url(value: Any) -> bool:
-    if not isinstance(value, str) or not 8 <= len(value) <= 2_000:
-        return False
-    try:
-        parsed = urlsplit(value)
-        return (
-            parsed.scheme == "https"
-            and bool(parsed.hostname)
-            and parsed.username is None
-            and parsed.password is None
-        )
-    except ValueError:
-        return False
 
 
 def scrapingdog_cost(operation_id: str, parameters: Mapping[str, Any]) -> ProviderCost:

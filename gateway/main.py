@@ -267,13 +267,9 @@ async def lifespan(app: FastAPI):
         print("="*80)
         
         from gateway.utils import epoch as epoch_utils
-        from gateway.utils import registry as registry_utils
         
         epoch_utils.inject_async_subtensor(async_subtensor)
         print("✅ Injected into gateway.utils.epoch")
-        
-        registry_utils.inject_async_subtensor(async_subtensor)
-        print("✅ Injected into gateway.utils.registry")
         
         print("="*80 + "\n")
         

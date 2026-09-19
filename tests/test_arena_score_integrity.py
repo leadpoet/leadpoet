@@ -290,7 +290,6 @@ def test_combined_verifier_fetches_all_sources_and_issues_one_final_judgment(mon
         return supported(urls[0])
     monkeypatch.setattr(verifier, "_fetch_sd_then_exa", fetch)
     monkeypatch.setattr(verifier, "_call_openrouter", judge)
-    monkeypatch.setenv("RESEARCH_LAB_INTENT_CORROBORATION_RESCUE", "1")
     async def run():
         async with httpx.AsyncClient() as client:
             return await verifier.verify_three_stage(client, company_name="Acme",
@@ -821,64 +820,6 @@ def test_integrity_linkedin_job_also_requires_verified_employer(monkeypatch) -> 
         integrity_policy=True,
     ))
     assert result[0] == 54.0
-
-
-def test_confirmed_staleness_is_not_sent_to_evidence_repair(monkeypatch) -> None:
-    from qualification.scoring import deepline_evidence_repair as repair
-
-    calls = {"n": 0}
-
-    async def repair_sources(**kwargs):
-        calls["n"] += 1
-        return []
-
-    monkeypatch.setattr(repair, "enabled", lambda: True)
-    monkeypatch.setattr(repair, "repair_sources", repair_sources)
-    result = asyncio.run(lead_scorer._attempt_competition_evidence_repair(
-        _company_model([{
-            "source": "news", "description": "Acme launched a product", "url": "https://news.example.com/acme", "date": "2026-09-01", "snippet": "launch", "matched_icp_signal": 0,
-        }]),
-        _icp_model(),
-        integrity_policy=True,
-        original_signal_results=[{
-            "matched_icp_signal": 0,
-            "date_verdict": "out_of_window",
-        }],
-    ))
-    assert result is None
-    assert calls["n"] == 0
-
-
-def test_integrity_never_rerolls_terminal_criteria_through_optional_repair(monkeypatch) -> None:
-    from qualification.scoring import deepline_evidence_repair as repair
-
-    calls = {"n": 0}
-
-    async def repair_sources(**kwargs):
-        calls["n"] += 1
-        return []
-
-    monkeypatch.setattr(repair, "enabled", lambda: True)
-    monkeypatch.setattr(repair, "repair_sources", repair_sources)
-    company = _company_model([
-        {
-            "source": "news", "description": "Acme launched a product", "url": "https://news.example.com/acme", "date": None, "snippet": "launch", "matched_icp_signal": 0,
-        },
-        {
-            "source": "news", "description": "Acme is hiring", "url": "https://news.example.com/acme-hiring", "date": None, "snippet": "hiring", "matched_icp_signal": 1,
-        },
-    ])
-    result = asyncio.run(lead_scorer._attempt_competition_evidence_repair(
-        company,
-        _icp_model(),
-        integrity_policy=True,
-        original_signal_results=[{
-            "matched_icp_signal": 1,
-            "date_verdict": "out_of_window",
-        }],
-    ))
-    assert result is None
-    assert calls["n"] == 0
 
 
 def test_arena_date_prompt_is_policy_scoped() -> None:

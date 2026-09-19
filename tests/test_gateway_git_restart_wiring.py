@@ -510,18 +510,76 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
     )
 
 
-def test_gateway_restart_preserves_release_lineage_path_across_reexec() -> None:
+def test_gateway_restart_preserves_only_bounded_legacy_release_state_across_reexec() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     reexec_start = script.index("exec env ", script.index("GATEWAY_DEPLOY_STAGE=\"restart_reexec\""))
     reexec = script[reexec_start : script.index("\nfi", reexec_start)]
 
-    assert (
-        'GATEWAY_V2_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE"' in reexec
-    )
+    assert 'GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE=' in reexec
+    assert 'GATEWAY_V2_RELEASE_LINEAGE="$GATEWAY_V2_RELEASE_LINEAGE"' in reexec
     assert 'GATEWAY_V2_RELEASE_BUCKET="$GATEWAY_V2_RELEASE_BUCKET"' in reexec
     assert 'GATEWAY_V2_RELEASE_PREFIX="$GATEWAY_V2_RELEASE_PREFIX"' in reexec
 
 
+def test_gateway_restart_selects_current_and_lineage_era_target_interfaces(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    selector = _shell_function_source(
+        script, "select_gateway_target_release_interface"
+    )
+
+    current = tmp_path / "current"
+    legacy = tmp_path / "legacy"
+    linked = tmp_path / "linked"
+    for root in (current, legacy, linked):
+        (root / "gateway" / "tee").mkdir(parents=True)
+    (legacy / "gateway" / "tee" / "release_lineage_v2.py").write_text("# old\n")
+    (linked / "target.py").write_text("# unsafe\n")
+    (linked / "gateway" / "tee" / "release_lineage_v2.py").symlink_to(
+        linked / "target.py"
+    )
+
+    def selected(root: Path) -> str:
+        probe = subprocess.run(
+            [
+                "bash",
+                "-c",
+                selector
+                + '\nGATEWAY_PREFLIGHT_TREE="$1"\n'
+                + "select_gateway_target_release_interface\n"
+                + "printf '%s' \"$GATEWAY_TARGET_REQUIRES_RELEASE_LINEAGE\"\n",
+                "release-interface-probe",
+                str(root),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return probe.stdout
+
+    assert selected(current) == "0"
+    assert selected(legacy) == "1"
+    assert selected(linked) == "0"
+
+    acquisition = script[
+        script.index("# The lineage-era compatibility branch") :
+        script.index('record_gateway_restart_timing "local_release_ready"')
+    ]
+    assert acquisition.count("--lineage-output") == 1
+    assert "unset LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE" in acquisition
+    installer = script[
+        script.index('echo "Installing the preflighted gateway manifest"') :
+        script.index('echo "Verifying prepared and activated gateway trees')
+    ]
+    assert installer.count("--prepared-lineage") == 1
+    assert installer.count("--prepared-manifest") == 2
+    bootstrap = script[
+        script.index('echo "Bootstrapping measured coordinator enclave runtime"') :
+        script.index('echo "Verifying measured V2 runtime identity readiness"')
+    ]
+    assert bootstrap.count("--gateway-release-lineage") == 1
+    assert bootstrap.count("--release-manifest") == 2
 
 
 def test_gateway_restart_fails_closed_on_all_authoritative_readiness_routes() -> None:
@@ -1106,68 +1164,6 @@ def test_gateway_live_env_clone_removes_both_prepared_release_paths(
     assert "GATEWAY_PREPARED_V2_RELEASE_MANIFEST" not in cloned
 
 
-@pytest.mark.parametrize("secret_format", ["json", "dotenv"])
-def test_restart_drops_retired_service_environment_at_every_source(
-    tmp_path: Path, secret_format: str,
-) -> None:
-    """Old live env and cached secrets cannot repopulate retired settings."""
-    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-
-    def body(marker: str) -> str:
-        start = script.index(marker) + len(marker)
-        return script[start:script.index("\nPY\n", start)]
-
-    values = {
-        "ENABLE_FULFILLMENT": "true",
-        "APIFY_API_TOKEN": "retired-apify",
-        "DEEPL_API_KEY": "retired-translation",
-        "LEADPOET_INTERNAL_SECRET": "retired-route-secret",
-        "FULFILLMENT_MAX_PARALLEL_REQUESTS": "99",
-        "FULFILLMENT_OPENROUTER_API_KEY": "retired-fixture-key",
-        "OPENROUTER_API_KEY": "shared-fixture-key",
-        "LAB_ARENA_MODE": "live",
-        "QUAL_MAX_COST_PER_LEAD_USD": "0.8",
-    }
-    secret = tmp_path / "secret"
-    cache = tmp_path / "cache"
-    prepared = tmp_path / "prepared"
-    inherited = tmp_path / "inherited"
-    cloned = tmp_path / "cloned"
-    secret.write_text(
-        json.dumps(values) if secret_format == "json" else
-        "\n".join(f"export {key}={shlex.quote(value)}" for key, value in values.items())
-    )
-    hydrate = body('python3 - "$SECRET_TMP" "$GATEWAY_ENV_FILE" <<\'PY\'\n')
-    subprocess.run(
-        [sys.executable, "-", str(secret), str(cache)], input=hydrate,
-        text=True, check=True, capture_output=True, timeout=5,
-    )
-    # Exercise the independently used cache parser with old settings as well.
-    stale_cache = tmp_path / "stale-cache"
-    stale_cache.write_text("\n".join(f"{key}={value}" for key, value in values.items()))
-    prepare = body('python3 - "$GATEWAY_ENV_FILE" "$ENV_SECRET" <<\'PY\'\n')
-    subprocess.run(
-        [sys.executable, "-", str(stale_cache), str(prepared)], input=prepare,
-        text=True, check=True, capture_output=True, timeout=5,
-    )
-    inherited.write_bytes(b"\0".join(f"{key}={value}".encode() for key, value in values.items()))
-    clone = body('python3 - "$PID" "$ENV_CLONE" <<\'PY\'\n').replace(
-        'f"/proc/{pid}/environ"', repr(str(inherited))
-    )
-    subprocess.run(
-        [sys.executable, "-", "fixture", str(cloned)], input=clone,
-        text=True, check=True, capture_output=True, timeout=5,
-    )
-    retired = {"APIFY_API_TOKEN", "DEEPL_API_KEY", "LEADPOET_INTERNAL_SECRET"}
-    expected = {key: value for key, value in values.items() if "FULFILLMENT" not in key and key not in retired}
-    for output in (cache, prepared, cloned):
-        observed = dict(
-            shlex.split(line.removeprefix("export "))[0].split("=", 1)
-            for line in output.read_text().splitlines()
-        )
-        assert observed == expected
-
-
 def test_gateway_candidate_reexec_rebinds_restart_identity_before_telemetry() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
 
@@ -1517,7 +1513,7 @@ def test_gateway_restart_pins_all_build_provenance_to_selected_sha() -> None:
         'export GITHUB_SHA="$GATEWAY_DEPLOY_SHA"',
         'export GITHUB_COMMIT="$GATEWAY_DEPLOY_SHA"',
         'export ATTESTED_RUNTIME_COMMIT_SHA="$GATEWAY_DEPLOY_SHA"',
-        'export RESEARCH_LAB_RUNTIME_SOURCE_ROOT="$LEADPOET_REPO_ROOT"',
+        'export GATEWAY_RUNTIME_SOURCE_ROOT="$LEADPOET_REPO_ROOT"',
         'export GATEWAY_BUILD_INFO_GIT_ROOT="$LEADPOET_REPO_ROOT"',
     ):
         assert assignment in script

@@ -17,7 +17,6 @@ def clean_scorer_environment():
     saved = dict(os.environ)
     for name in [
         shim.TRUSTED_SCORER_ENV,
-        *scoring.POLICY_ENV_BINDINGS,
         *scoring.CREDENTIAL_ENV_NAMES,
     ]:
         os.environ.pop(name, None)

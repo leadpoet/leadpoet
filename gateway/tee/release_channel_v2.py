@@ -15,27 +15,22 @@ import os
 from pathlib import Path
 import re
 import stat
-import subprocess
 import sys
 import tempfile
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from gateway.tee.release_manifest_v2 import (
     LOCAL_RELEASE_SCHEMA_VERSION,
-    validate_prior_release_manifest,
     validate_release_manifest,
 )
 from leadpoet_canonical.attested_v2 import canonical_json, sha256_json
 SCHEMA_VERSION = "leadpoet.gateway_release_channel.v3"
-LINEAGE_SCHEMA_VERSION = "leadpoet.attested_release_lineage.v1"
 DEFAULT_BUCKET = "leadpoet-attested-v2-artifacts-493765492819"
 DEFAULT_PREFIX = "attested-v2/releases"
 DEFAULT_RETENTION_DAYS = 365
-MAX_LINEAGE_RELEASES = 512
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _LOCAL_COMMIT_ENV = "LEADPOET_LOCAL_RELEASE_COMMIT_SHA"
 _LOCAL_GATEWAY_ENV = "LEADPOET_LOCAL_GATEWAY_RELEASE"
-_LOCAL_PRIOR_LINEAGE_ENV = "LEADPOET_LOCAL_PRIOR_RELEASE_LINEAGE"
 
 
 class ReleaseChannelV2Error(RuntimeError):
@@ -117,18 +112,6 @@ def validate_release_channel_v2(
         value,
         expected_commit=expected_commit,
         gateway_validator=validate_release_manifest,
-    )
-
-
-def validate_prior_release_channel_v2(
-    value: Mapping[str, Any], *, expected_commit: Optional[str] = None
-) -> Dict[str, Any]:
-    """Validate a V3 channel for a current or exact two-role prior release."""
-
-    return _validate_release_channel_v2(
-        value,
-        expected_commit=expected_commit,
-        gateway_validator=validate_prior_release_manifest,
     )
 
 
@@ -248,435 +231,22 @@ def fetch_release_channel_v2(
     return validate_release_channel_v2(value, expected_commit=commit_sha)
 
 
-def fetch_prior_release_channel_v2(
-    *,
-    bucket: str,
-    commit_sha: str,
-    prefix: str = DEFAULT_PREFIX,
-    s3_client: Any = None,
-) -> Dict[str, Any]:
-    """Fetch one immutable prior channel for bounded lineage ingestion."""
-
-    if s3_client is None:
-        import boto3
-
-        s3_client = boto3.client("s3")
-    try:
-        response = s3_client.get_object(
-            Bucket=str(bucket), Key=release_channel_key(commit_sha, prefix=prefix)
-        )
-        value = json.loads(response["Body"].read())
-    except Exception as exc:
-        raise ReleaseChannelV2Error(
-            "approved prior release channel is unavailable"
-        ) from exc
-    return validate_prior_release_channel_v2(
-        value,
-        expected_commit=commit_sha,
-    )
-
-
-def _build_release_lineage_v2(
-    channels: Sequence[Mapping[str, Any]],
-    *,
-    current_commit: str,
-    prior_commits: Sequence[str] = (),
-    channel_validator: Any = None,
-) -> Dict[str, Any]:
-    commit = str(current_commit or "").lower()
-    if not _COMMIT_RE.fullmatch(commit):
-        raise ReleaseChannelV2Error("release lineage current commit is invalid")
-    if not channels or len(channels) > MAX_LINEAGE_RELEASES:
-        raise ReleaseChannelV2Error("release lineage size is invalid")
-    prior = {str(item or "").lower() for item in prior_commits}
-    if any(not _COMMIT_RE.fullmatch(item) for item in prior):
-        raise ReleaseChannelV2Error("prior release lineage commit is invalid")
-    releases: Dict[str, Any] = {}
-    for value in channels:
-        if channel_validator is None:
-            claimed_commit = str(value.get("commit_sha") or "").lower()
-            channel = (
-                validate_prior_release_channel_v2(value)
-                if claimed_commit in prior
-                else validate_release_channel_v2(value)
-            )
-        else:
-            channel = channel_validator(value)
-        channel_commit = channel["commit_sha"]
-        if channel_commit in releases:
-            raise ReleaseChannelV2Error("release lineage commit is duplicated")
-        gateway = channel["gateway_release_manifest"]
-        roles = {}
-        for role, summary in sorted(gateway["roles"].items()):
-            roles[role] = {
-                "commit_sha": summary["commit_sha"],
-                "pcr0": summary["pcr0"],
-                "build_manifest_hash": summary["execution_manifest_hash"],
-                "dependency_lock_hash": summary["dependency_lock_hash"],
-            }
-        releases[channel_commit] = {
-            "channel_hash": channel["channel_hash"],
-            "gateway_release_hash": gateway["release_hash"],
-            "roles": roles,
-        }
-    current = releases.get(commit)
-    if current is None:
-        raise ReleaseChannelV2Error(
-            "current release is absent from approved release lineage"
-        )
-    body = {
-        "schema_version": LINEAGE_SCHEMA_VERSION,
-        "current_commit_sha": commit,
-        "current_gateway_release_hash": current["gateway_release_hash"],
-        "releases": {
-            release_commit: releases[release_commit]
-            for release_commit in sorted(releases)
-        },
-    }
-    return {**body, "lineage_hash": sha256_json(body)}
-
-
-def build_release_lineage_v2(
-    channels: Sequence[Mapping[str, Any]],
-    *,
-    current_commit: str,
-) -> Dict[str, Any]:
-    """Compact exact current-topology channels for immutable configuration."""
-
-    return _build_release_lineage_v2(
-        channels,
-        current_commit=current_commit,
-        prior_commits=(),
-        channel_validator=validate_release_channel_v2,
-    )
-
-
 def release_channel_role_identities_v2(
     channel: Mapping[str, Any],
 ) -> Dict[str, Any]:
     """Return the exact compact role identities from one full channel."""
 
     normalized = validate_release_channel_v2(channel)
-    commit = normalized["commit_sha"]
-    return dict(
-        build_release_lineage_v2(
-            (normalized,), current_commit=commit
-        )["releases"][commit]["roles"]
-    )
-
-
-def _local_release_lineage_entries(
-    *,
-    current_commit: str,
-    bucket: str,
-    prefix: str,
-    s3_client: Any,
-) -> Optional[Dict[str, Any]]:
-    local_commit = str(os.environ.get(_LOCAL_COMMIT_ENV) or "").lower()
-    if local_commit != current_commit:
-        return None
-    current_channel = fetch_release_channel_v2(
-        bucket=bucket,
-        commit_sha=current_commit,
-        prefix=prefix,
-        s3_client=s3_client,
-    )
-    current_lineage = build_release_lineage_v2(
-        [current_channel],
-        current_commit=current_commit,
-    )
-    releases = dict(current_lineage["releases"])
-    prior_path = str(os.environ.get(_LOCAL_PRIOR_LINEAGE_ENV) or "").strip()
-    if not prior_path:
-        return releases
-    prior = _project_installed_prior_release_lineage_v2(
-        _load_json(Path(prior_path), "installed prior release lineage")
-    )
-    for commit, release in prior["releases"].items():
-        if commit in releases and releases[commit] != release:
-            raise ReleaseChannelV2Error(
-                "local and installed release identities conflict"
-            )
-        releases[commit] = release
-    return releases
-
-
-def _project_installed_prior_release_lineage_v2(
-    value: Mapping[str, Any],
-) -> Dict[str, Any]:
-    """Validate the exact installed one- or two-role prior lineage."""
-
-    from gateway.tee.release_lineage_v2 import (
-        validate_prior_compact_release_lineage_v2,
-    )
-
-    return validate_prior_compact_release_lineage_v2(value)
-
-
-def _compact_release_lineage_from_entries(
-    releases: Mapping[str, Any],
-    *,
-    current_commit: str,
-) -> Dict[str, Any]:
-    current = releases.get(current_commit)
-    if not isinstance(current, Mapping):
-        raise ReleaseChannelV2Error(
-            "current release is absent from local release lineage"
-        )
-    body = {
-        "schema_version": LINEAGE_SCHEMA_VERSION,
-        "current_commit_sha": current_commit,
-        "current_gateway_release_hash": current["gateway_release_hash"],
-        "releases": {
-            commit: releases[commit] for commit in sorted(releases)
-        },
+    gateway = normalized["gateway_release_manifest"]
+    return {
+        role: {
+            "commit_sha": summary["commit_sha"],
+            "pcr0": summary["pcr0"],
+            "build_manifest_hash": summary["execution_manifest_hash"],
+            "dependency_lock_hash": summary["dependency_lock_hash"],
+        }
+        for role, summary in sorted(gateway["roles"].items())
     }
-    from gateway.tee.release_lineage_v2 import (
-        validate_compact_release_lineage_v2,
-    )
-
-    return validate_compact_release_lineage_v2(
-        {**body, "lineage_hash": sha256_json(body)},
-        expected_current_commit=current_commit,
-    )
-
-
-def fetch_release_lineage_v2(
-    *,
-    bucket: str,
-    current_commit: str,
-    prefix: str = DEFAULT_PREFIX,
-    s3_client: Any = None,
-    allowed_commits: Optional[Sequence[str]] = None,
-    required_commits: Optional[Sequence[str]] = None,
-) -> Dict[str, Any]:
-    """Fetch and validate the selected immutable V2 release channels.
-
-    An explicit ``required_commits`` set is the bounded production path. It
-    reads exactly those content-addressed channel objects and does not enumerate
-    the lifetime release catalog. The prefix scan remains for legacy callers
-    that do not yet provide an explicit requirement set.
-    """
-
-    normalized_prefix = str(prefix or "").strip("/")
-    if not normalized_prefix or ".." in normalized_prefix.split("/"):
-        raise ReleaseChannelV2Error("release channel prefix is invalid")
-    if required_commits is not None:
-        if isinstance(required_commits, (str, bytes)):
-            raise ReleaseChannelV2Error(
-                "required release lineage commits are invalid"
-            )
-        required = tuple(required_commits)
-        if not required or len(required) > MAX_LINEAGE_RELEASES:
-            raise ReleaseChannelV2Error(
-                "required release lineage size is invalid"
-            )
-        if any(
-            not isinstance(commit, str) or not _COMMIT_RE.fullmatch(commit)
-            for commit in required
-        ):
-            raise ReleaseChannelV2Error(
-                "required release lineage commits are invalid"
-            )
-        if len(required) != len(set(required)):
-            raise ReleaseChannelV2Error(
-                "required release lineage commit is duplicated"
-            )
-        current = str(current_commit or "").lower()
-        if not _COMMIT_RE.fullmatch(current) or current not in required:
-            raise ReleaseChannelV2Error(
-                "current release is absent from required release lineage"
-            )
-        if (
-            allowed_commits is None
-            or isinstance(allowed_commits, (str, bytes))
-        ):
-            raise ReleaseChannelV2Error(
-                "required release lineage Git ancestry is unavailable"
-            )
-        allowed_values = tuple(allowed_commits)
-        allowed = {str(commit or "").lower() for commit in allowed_values}
-        if (
-            not allowed_values
-            or not allowed
-            or any(
-                not isinstance(commit, str)
-                or commit != commit.lower()
-                or not _COMMIT_RE.fullmatch(commit)
-                for commit in allowed_values
-            )
-            or any(commit not in allowed for commit in required)
-        ):
-            raise ReleaseChannelV2Error(
-                "required release lineage Git ancestry is invalid"
-            )
-        local_releases = _local_release_lineage_entries(
-            current_commit=current,
-            bucket=bucket,
-            prefix=normalized_prefix,
-            s3_client=s3_client,
-        )
-        releases = local_releases or {}
-        if local_releases is not None:
-            outside_ancestry = sorted(set(local_releases) - allowed)
-            if outside_ancestry:
-                raise ReleaseChannelV2Error(
-                    "installed release lineage contains a non-ancestor commit"
-                )
-        missing = sorted(set(required) - set(releases))
-        if missing:
-            channels = [
-                (
-                    fetch_release_channel_v2(
-                        bucket=bucket,
-                        commit_sha=commit,
-                        prefix=normalized_prefix,
-                        s3_client=s3_client,
-                    )
-                    if commit == current
-                    else fetch_prior_release_channel_v2(
-                        bucket=bucket,
-                        commit_sha=commit,
-                        prefix=normalized_prefix,
-                        s3_client=s3_client,
-                    )
-                )
-                for commit in missing
-            ]
-            fetched = _build_release_lineage_v2(
-                channels,
-                current_commit=(current if current in missing else missing[0]),
-                prior_commits=tuple(
-                    commit for commit in missing if commit != current
-                ),
-            )
-            for commit, release in fetched["releases"].items():
-                if commit in releases and releases[commit] != release:
-                    raise ReleaseChannelV2Error(
-                        "local and fetched release identities conflict"
-                    )
-                releases[commit] = release
-        selected_commits = (
-            set(required) | set(local_releases)
-            if local_releases is not None
-            else set(required)
-        )
-        selected = {commit: releases[commit] for commit in selected_commits}
-        return _compact_release_lineage_from_entries(
-            selected,
-            current_commit=current,
-        )
-    if s3_client is None:
-        import boto3
-
-        s3_client = boto3.client("s3")
-    key_pattern = re.compile(
-        rf"^{re.escape(normalized_prefix)}/([0-9a-f]{{40}})/"
-        r"release-channel-v2\.json$"
-    )
-    allowed = None
-    if allowed_commits is not None:
-        allowed = {str(commit or "").lower() for commit in allowed_commits}
-        if (
-            not allowed
-            or any(not _COMMIT_RE.fullmatch(commit) for commit in allowed)
-            or str(current_commit).lower() not in allowed
-        ):
-            raise ReleaseChannelV2Error(
-                "approved release lineage Git ancestry is invalid"
-            )
-    commits = []
-    continuation_token = None
-    try:
-        while True:
-            request = {
-                "Bucket": str(bucket),
-                "Prefix": normalized_prefix + "/",
-                "MaxKeys": 1000,
-            }
-            if continuation_token is not None:
-                request["ContinuationToken"] = continuation_token
-            response = s3_client.list_objects_v2(**request)
-            for item in response.get("Contents") or ():
-                match = key_pattern.fullmatch(str(item.get("Key") or ""))
-                if match and (
-                    allowed is None or match.group(1) in allowed
-                ):
-                    commits.append(match.group(1))
-                    if len(commits) > MAX_LINEAGE_RELEASES:
-                        raise ReleaseChannelV2Error(
-                            "approved release lineage is too large"
-                        )
-            if not response.get("IsTruncated"):
-                break
-            continuation_token = response.get("NextContinuationToken")
-            if not continuation_token:
-                raise ReleaseChannelV2Error(
-                    "approved release lineage pagination is invalid"
-                )
-    except ReleaseChannelV2Error:
-        raise
-    except Exception as exc:
-        raise ReleaseChannelV2Error(
-            "approved release lineage is unavailable"
-        ) from exc
-    if len(commits) != len(set(commits)):
-        raise ReleaseChannelV2Error("approved release lineage is duplicated")
-    selected_current = str(current_commit or "").lower()
-    channels = [
-        (
-            fetch_release_channel_v2(
-                bucket=bucket,
-                commit_sha=commit,
-                prefix=normalized_prefix,
-                s3_client=s3_client,
-            )
-            if commit == selected_current
-            else fetch_prior_release_channel_v2(
-                bucket=bucket,
-                commit_sha=commit,
-                prefix=normalized_prefix,
-                s3_client=s3_client,
-            )
-        )
-        for commit in sorted(commits)
-    ]
-    return _build_release_lineage_v2(
-        channels,
-        current_commit=selected_current,
-        prior_commits=tuple(
-            commit for commit in commits if commit != selected_current
-        ),
-    )
-
-
-def git_ancestor_commits_v2(
-    *, repository: Path, current_commit: str
-) -> Sequence[str]:
-    commit = str(current_commit or "").lower()
-    if not _COMMIT_RE.fullmatch(commit):
-        raise ReleaseChannelV2Error("release lineage current commit is invalid")
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(Path(repository)), "rev-list", commit],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise ReleaseChannelV2Error(
-            "release lineage Git ancestry is unavailable"
-        ) from exc
-    commits = tuple(line.strip().lower() for line in result.stdout.splitlines())
-    if (
-        not commits
-        or commits[0] != commit
-        or any(not _COMMIT_RE.fullmatch(item) for item in commits)
-    ):
-        raise ReleaseChannelV2Error(
-            "release lineage Git ancestry is invalid"
-        )
-    return commits
 
 
 def publish_release_channel_v2(
@@ -750,10 +320,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--expected-commit")
     parser.add_argument("--gateway-output", type=Path)
-    parser.add_argument("--lineage-output", type=Path)
-    parser.add_argument("--lineage-repository", type=Path)
-    parser.add_argument("--lineage-authority-commit")
-    parser.add_argument("--lineage-required-commit", action="append")
     parser.add_argument("--bucket", default=DEFAULT_BUCKET)
     parser.add_argument("--prefix", default=DEFAULT_PREFIX)
     parser.add_argument("--retention-days", type=int, default=DEFAULT_RETENTION_DAYS)
@@ -797,39 +363,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 expected_commit=commit,
                 gateway_output=args.gateway_output,
             )
-        if args.lineage_output is not None:
-            if args.lineage_repository is None:
-                raise ReleaseChannelV2Error(
-                    "--lineage-output requires --lineage-repository"
-                )
-            authority_commit = str(
-                args.lineage_authority_commit or commit
-            ).lower()
-            if not _COMMIT_RE.fullmatch(authority_commit):
-                raise ReleaseChannelV2Error(
-                    "release lineage authority commit is invalid"
-                )
-            allowed_commits = git_ancestor_commits_v2(
-                repository=args.lineage_repository,
-                current_commit=authority_commit,
-            )
-            if commit not in allowed_commits:
-                raise ReleaseChannelV2Error(
-                    "selected release is absent from main release lineage"
-                )
-            lineage = fetch_release_lineage_v2(
-                bucket=args.bucket,
-                current_commit=commit,
-                prefix=args.prefix,
-                allowed_commits=allowed_commits,
-                required_commits=args.lineage_required_commit,
-            )
-            _atomic_json(args.lineage_output, lineage)
-            result = {
-                **result,
-                "lineage_hash": lineage["lineage_hash"],
-                "lineage_release_count": len(lineage["releases"]),
-            }
     print(json.dumps(result, sort_keys=True, indent=2))
     return 0
 

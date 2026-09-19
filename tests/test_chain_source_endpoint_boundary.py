@@ -20,7 +20,7 @@ def test_chain_source_boundary_rejects_endpoint_authority_suffixes(endpoint):
     profile = json.loads(
         (
             Path(__file__).resolve().parents[1]
-            / "validator_tee/enclave/chain_signing_profile_v2.json"
+            / "lab_arena/chain_signing_profile_v2.json"
         ).read_text(encoding="utf-8")
     )
     profile["chain_endpoint"] = endpoint
@@ -33,7 +33,7 @@ def test_chain_source_boundary_retains_measured_test_network_support():
     profile = json.loads(
         (
             Path(__file__).resolve().parents[1]
-            / "validator_tee/enclave/chain_signing_profile_test_v2.json"
+            / "lab_arena/chain_signing_profile_test_v2.json"
         ).read_text(encoding="utf-8")
     )
 

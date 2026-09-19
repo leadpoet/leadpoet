@@ -26,25 +26,8 @@ SCORING_ADAPTER_VERSION_V1 = "qualification_style_v1"
 DEFAULT_JUDGE_MODELS = {
     "company_fit_reverification": "perplexity/sonar",
     "intent_signal_judge": "anthropic/claude-sonnet-4.5",
-    "intent_verification": "openai/gpt-4o-mini",
-    "intent_precheck": "google/gemini-2.5-flash-lite",
     "intent_three_stage_stage3": "perplexity/sonar-pro",
     "role_batch_check": "google/gemini-2.5-flash",
-}
-# Every scorer behavior the Lab reads from the environment, pinned by policy.
-POLICY_ENV_BINDINGS = {
-    "RESEARCH_LAB_EVAL_FP_PENALTY_POINTS": "10",
-    "RESEARCH_LAB_EVAL_FP_UNVERIFIED_PRIMARY_PENALTY": "10",
-    "RESEARCH_LAB_EVAL_MAX_SCORED_COMPANIES": "0",
-    "RESEARCH_LAB_EVAL_CAPPED_TOP5_SCORE": "0",
-    "RESEARCH_LAB_EVAL_CANDIDATE_CONCURRENCY": "1",
-    "RESEARCH_LAB_EVAL_WORK_CONSERVING": "0",
-    "RESEARCH_LAB_EVAL_PROVIDER_FLAKE_RETRY": "1",
-    "RESEARCH_LAB_EVAL_TIMEOUT_LATCH_LEGACY": "0",
-    "RESEARCH_LAB_GLOBAL_SCORING_QUEUE": "0",
-    "RESEARCH_LAB_INCONTAINER_TRACE_S3_PREFIX": "",
-    "RESEARCH_LAB_INCONTAINER_TRACE_KMS_KEY_ID": "",
-    "RESEARCH_LAB_OPENROUTER_TRACE_CAPTURE": "0",
 }
 CREDENTIAL_ENV_NAMES = (
     "OPENROUTER_API_KEY",
@@ -100,22 +83,21 @@ def build_scorer_policy(
 ) -> Dict[str, Any]:
     """Return the plain scorer settings used for every participant."""
 
-    bindings = dict(POLICY_ENV_BINDINGS)
     return contracts.validate_scorer_policy({
         "schema_version": contracts.SCORER_POLICY_SCHEMA_VERSION,
         "scoring_adapter_version": scoring_adapter_version,
         **({"company_quality_policy": "company_quality_v1"} if company_quality else {}),
         **({"intent_details_policy": "intent_details_v1"} if intent_details else {}),
-        "fp_penalty_points": float(bindings["RESEARCH_LAB_EVAL_FP_PENALTY_POINTS"]),
-        "fp_unverified_primary_penalty_points": float(bindings["RESEARCH_LAB_EVAL_FP_UNVERIFIED_PRIMARY_PENALTY"]),
+        "fp_penalty_points": 10.0,
+        "fp_unverified_primary_penalty_points": 10.0,
         "fp_penalty_icp_floor": 0.0,
         "company_cap_rule": "icp_max_companies",
-        "max_scored_companies": int(bindings["RESEARCH_LAB_EVAL_MAX_SCORED_COMPANIES"]),
+        "max_scored_companies": 0,
         "judge_models": dict(judge_models),
         "provider_profile": provider_profile,
         "pre_slice_rule": "first_n_model_order",
         "employee_bucket_rule": "lab_relaxed_buckets",
-        "env_bindings": bindings,
+        "env_bindings": {},
     })
 
 

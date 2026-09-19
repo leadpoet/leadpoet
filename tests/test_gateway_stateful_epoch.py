@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import asyncio
-from dataclasses import replace
 import json
-import time
 
 import pytest
-from fastapi import HTTPException, Response
+from fastapi import Response
 
 from Leadpoet.utils.subnet_epoch import (
     CUTOVER_JSON_ENV,
@@ -199,18 +196,12 @@ def stateful(monkeypatch):
         lambda _cutover: None,
     )
 
-    async def validated(value=None):
-        return value or cutover
-
     async def lifecycle(**_kwargs):
         return {
             "lifecycle_state": "stateful_active",
             "mapping_hash": cutover.mapping_hash,
         }
 
-    monkeypatch.setattr(
-        epoch_utils, "validate_stateful_cutover_authority_async", validated
-    )
     monkeypatch.setattr(
         epoch_utils,
         "validate_epoch_runtime_lifecycle_async",
@@ -281,125 +272,10 @@ async def test_pending_due_epoch_is_not_active(monkeypatch, stateful):
         pending_epoch_at=8_637_530,
         blocks_since_last_step=14,
     )
-    monkeypatch.setattr(
-        epoch_utils,
-        "get_current_subnet_epoch_snapshot_async",
-        lambda **_kwargs: _async_value(snapshot),
-    )
-
-    assert await epoch_utils.is_epoch_active_async(23_993) is False
-    assert await epoch_utils.is_epoch_closed_async(23_993) is False
-
-
-@pytest.mark.asyncio
-async def test_admission_uses_finalized_identity_and_best_head_timing(
-    monkeypatch, stateful
-):
-    from gateway.utils import epoch as epoch_utils
-
-    finalized = replace(
-        _snapshot(current_block=8_637_520),
-        head_kind="finalized",
-    )
-    best = _snapshot(
-        current_block=8_637_522,
-        blocks_since_last_step=6,
-    )
-    calls = []
-
-    async def snapshot(*, finalized=False):
-        calls.append(finalized)
-        return finalized_snapshot if finalized else best
-
-    finalized_snapshot = finalized
-    monkeypatch.setattr(
-        epoch_utils,
-        "get_current_subnet_epoch_snapshot_async",
-        snapshot,
-    )
-
-    authority, timing, workflow_epoch = (
-        await epoch_utils.get_current_epoch_admission_context_async()
-    )
-    assert authority is finalized_snapshot
-    assert timing is best
-    assert workflow_epoch == 23_993
-    assert timing.blocks_remaining == 354
-    assert calls == [True, False]
-
-
-@pytest.mark.asyncio
-async def test_admission_rejects_best_head_rollover_during_finality_lag(
-    monkeypatch, stateful
-):
-    from gateway.utils import epoch as epoch_utils
-
-    finalized = replace(
-        _snapshot(
-            current_block=8_637_875,
-            blocks_since_last_step=359,
-        ),
-        head_kind="finalized",
-    )
-    best = _snapshot(
-        current_block=8_637_876,
-        last_epoch_block=8_637_876,
-        subnet_epoch_index=23_929,
-        blocks_since_last_step=0,
-    )
-
-    async def snapshot(*, finalized=False):
-        return finalized_snapshot if finalized else best
-
-    finalized_snapshot = finalized
-    monkeypatch.setattr(
-        epoch_utils,
-        "get_current_subnet_epoch_snapshot_async",
-        snapshot,
-    )
-
-    with pytest.raises(SubnetEpochError, match="no longer live"):
-        await epoch_utils.get_current_epoch_admission_context_async()
-
-
-@pytest.mark.asyncio
-async def test_admission_rejects_due_best_head_before_index_advances(
-    monkeypatch, stateful
-):
-    from gateway.utils import epoch as epoch_utils
-
-    finalized = replace(
-        _snapshot(
-            current_block=8_637_875,
-            blocks_since_last_step=359,
-        ),
-        head_kind="finalized",
-    )
-    due_best = _snapshot(
-        current_block=8_637_876,
-        pending_epoch_at=8_637_876,
-        blocks_since_last_step=360,
-    )
-
-    async def snapshot(*, finalized=False):
-        return finalized_snapshot if finalized else due_best
-
-    finalized_snapshot = finalized
-    monkeypatch.setattr(
-        epoch_utils,
-        "get_current_subnet_epoch_snapshot_async",
-        snapshot,
-    )
-
-    with pytest.raises(SubnetEpochError, match="no longer live"):
-        await epoch_utils.get_current_epoch_admission_context_async()
-
-
-@pytest.mark.asyncio
-
-
-async def _async_value(value):
-    return value
+    info = epoch_utils.get_current_epoch_info_from_snapshot(snapshot)
+    assert info["is_active"] is False
+    assert info["is_closed"] is False
+    assert info["phase"] == "transition_pending"
 
 
 @pytest.mark.asyncio
@@ -416,129 +292,3 @@ async def test_epoch_state_route_is_explicitly_no_store(monkeypatch):
     result = await epoch_api.get_epoch_state(response)
     assert result == {"official_subnet_epoch_id": 23_928}
     assert response.headers["cache-control"] == "private, no-store"
-
-
-@pytest.mark.asyncio
-async def test_stateful_metagraph_cache_checks_epoch_before_reuse(
-    monkeypatch, stateful
-):
-    from gateway.utils import epoch as epoch_utils
-    from gateway.utils import registry
-
-    old = type("Metagraph", (), {"hotkeys": ["old"]})()
-    fresh = type("Metagraph", (), {"hotkeys": ["fresh"]})()
-
-    class AsyncSubtensor:
-        network = "finney"
-
-        def __init__(self):
-            self.calls = 0
-
-        async def metagraph(self, *, netuid):
-            assert netuid == 71
-            self.calls += 1
-            return fresh
-
-    source = AsyncSubtensor()
-
-    async def current_epoch():
-        return stateful.first_settlement_epoch_id
-
-    monkeypatch.setattr(epoch_utils, "get_current_epoch_id_async", current_epoch)
-    monkeypatch.setattr(registry, "_async_subtensor", source)
-    monkeypatch.setattr(registry, "_metagraph_cache", old)
-    monkeypatch.setattr(
-        registry,
-        "_cache_epoch",
-        stateful.first_settlement_epoch_id - 1,
-    )
-    monkeypatch.setattr(registry, "_cache_epoch_timestamp", time.time())
-    monkeypatch.setattr(registry, "_fetch_in_progress", False)
-
-    assert await registry.get_metagraph_async() is fresh
-    assert source.calls == 1
-    assert registry._cache_epoch == stateful.first_settlement_epoch_id
-
-
-@pytest.mark.asyncio
-async def test_pre_activation_metagraph_uses_authoritative_cache_epoch(
-    monkeypatch, stateful
-):
-    from gateway.utils import epoch as epoch_utils
-    from gateway.utils import registry
-
-    fresh = type("Metagraph", (), {"hotkeys": ["fresh"]})()
-
-    class AsyncSubtensor:
-        network = "finney"
-
-        async def metagraph(self, *, netuid):
-            assert netuid == 71
-            return fresh
-
-    async def post_activation_authority_is_unavailable():
-        raise AssertionError("pre-activation cache must not load active authority")
-
-    monkeypatch.setattr(
-        epoch_utils,
-        "get_current_epoch_id_async",
-        post_activation_authority_is_unavailable,
-    )
-    monkeypatch.setattr(registry, "_async_subtensor", AsyncSubtensor())
-    monkeypatch.setattr(registry, "_metagraph_cache", None)
-    monkeypatch.setattr(registry, "_cache_epoch", None)
-    monkeypatch.setattr(registry, "_cache_epoch_timestamp", None)
-    monkeypatch.setattr(registry, "_fetch_in_progress", False)
-
-    epoch_id = stateful.first_settlement_epoch_id
-    assert (
-        await registry.get_metagraph_async(cache_epoch_id=epoch_id)
-        is fresh
-    )
-    assert registry._cache_epoch == epoch_id
-
-
-@pytest.mark.asyncio
-async def test_stateful_metagraph_refresh_never_returns_prior_epoch(
-    monkeypatch, stateful
-):
-    from gateway.utils import epoch as epoch_utils
-    from gateway.utils import registry
-
-    old = type("Metagraph", (), {"hotkeys": ["old"]})()
-
-    class FailingAsyncSubtensor:
-        network = "finney"
-
-        async def metagraph(self, *, netuid):
-            raise RuntimeError("async chain unavailable")
-
-    class FailingSyncSubtensor:
-        def metagraph(self, netuid):
-            raise RuntimeError("sync chain unavailable")
-
-    async def current_epoch():
-        return stateful.first_settlement_epoch_id
-
-    async def no_sleep(_seconds):
-        return None
-
-    monkeypatch.setattr(epoch_utils, "get_current_epoch_id_async", current_epoch)
-    monkeypatch.setattr(registry, "_async_subtensor", FailingAsyncSubtensor())
-    monkeypatch.setattr(registry, "_metagraph_cache", old)
-    monkeypatch.setattr(
-        registry,
-        "_cache_epoch",
-        stateful.first_settlement_epoch_id - 1,
-    )
-    monkeypatch.setattr(registry, "_cache_epoch_timestamp", time.time())
-    monkeypatch.setattr(registry, "_fetch_in_progress", False)
-    monkeypatch.setattr(
-        registry.bt,
-        "Subtensor",
-        lambda **_kwargs: FailingSyncSubtensor(),
-    )
-    monkeypatch.setattr(asyncio, "sleep", no_sleep)
-
-    with pytest.raises(Exception, match="no cache available"):
-        await registry.get_metagraph_async()

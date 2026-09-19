@@ -8,6 +8,8 @@ from datetime import datetime
 from urllib.parse import unquote, urlparse, urlunparse
 from enum import Enum
 
+from qualification.competition_models import public_http_url
+
 # =============================================================================
 # Enums
 # =============================================================================
@@ -492,7 +494,10 @@ class CompanyStageEvidence(BaseModel):
     @field_validator("url")
     @classmethod
     def _validate_url(cls, value: str) -> str:
-        return canonical_candidate_prompt_url(value, "company_stage_evidence.url")
+        public_url = public_http_url(value)
+        return canonical_candidate_prompt_url(
+            public_url, "company_stage_evidence.url"
+        )
 
 
 class CompanyOutput(BaseModel):

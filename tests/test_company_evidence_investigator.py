@@ -195,6 +195,26 @@ def test_v5_stage_evidence_reaches_only_untrusted_investigator_observations(
     assert "Fetch a relevant saved URL before using it" in investigator._SYSTEM_PROMPT
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://localhost/stage",
+        "https://127.0.0.1/stage",
+        "https://stage.internal/evidence",
+        "evidence.example/stage",
+    ],
+)
+def test_internal_stage_evidence_requires_absolute_public_url(url):
+    mapped = _normalized_company(_competition_company_v5(), integrity_policy=True)
+    mapped["company_stage_evidence"] = [{
+        "url": url,
+        "quote": "Acme completed a Series B financing round.",
+    }]
+
+    with pytest.raises(ValueError):
+        CompanyOutput.model_validate(mapped)
+
+
 def test_repaired_stage_gap_gets_one_targeted_investigation(monkeypatch):
     initial = _complete_verdict(
         observed_employee_count=None,

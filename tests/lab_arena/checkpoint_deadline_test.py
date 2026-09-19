@@ -149,8 +149,8 @@ def test_new_round_freezes_deadline_and_lease_while_legacy_opt_out_stays_300_sec
     assert current["icp_wall_clock_seconds"] == 2700
     assert current["lease_ttl_seconds"] == 3600
     assert current["call_quotas"] == {
-        "scrapingdog": 30,
-        "deepline": 30,
+        "scrapingdog": 200,
+        "deepline": 200,
         "openrouter": 200,
     }
     assert current["scoring_call_quotas"]["openrouter"] == 120

@@ -58,8 +58,10 @@ CHECKPOINT_MODULE_PATH = Path(__file__).with_name("lab_arena_checkpoint.py").res
 CODEX_MODULE_PATH = Path(__file__).with_name("lab_arena_codex.py").resolve()
 WEB_BRIDGE_PATH = Path(__file__).with_name("web_egress_bridge.py").resolve()
 MAX_REFUSED_FRAMES = 25  # after this many refused calls the worker answers a run's frames locally
-MAX_QUOTA_SNAPSHOT_REQUESTS = 256
-QUOTA_SNAPSHOT_CACHE_SECONDS = 1.0
+QUOTA_SNAPSHOT_SCHEMA_VARIANTS = 2
+QUOTA_SNAPSHOT_STARTUP_REQUESTS = 2
+QUOTA_SNAPSHOT_CACHE_MILLISECONDS = 1000
+QUOTA_SNAPSHOT_CACHE_SECONDS = QUOTA_SNAPSHOT_CACHE_MILLISECONDS / 1000.0
 # A request on the worker socket is either a length-prefixed operation frame
 # (first byte 0x00: the judge shim) or an HTTP request (an ASCII method).
 HTTP_FIRST_BYTES = b"GPHDO"
@@ -175,6 +177,9 @@ _KNOWN_CLAIM_DENIAL_CODES = frozenset(
         "validator_checkpoint_upgrade_required",
         "signature_invalid",
     }
+)
+_QUOTA_SNAPSHOT_FAILURE_REASONS = frozenset(
+    ("read_cap", "upstream_exception", "invalid_snapshot")
 )
 
 
@@ -404,6 +409,34 @@ def _log_pickup_failure(
             flush=True,
         )
     except OSError:
+        pass
+
+
+def _log_quota_snapshot_failure(
+    *,
+    reason: str,
+    read_count: int,
+    read_limit: int,
+    include_sourcing_cost: bool,
+) -> None:
+    """Write one payload-free quota diagnostic to the private journal."""
+
+    safe_reason = (
+        reason if reason in _QUOTA_SNAPSHOT_FAILURE_REASONS else "invalid_snapshot"
+    )
+    safe_count = read_count if type(read_count) is int and read_count >= 0 else 0
+    safe_limit = read_limit if type(read_limit) is int and read_limit >= 1 else 1
+    try:
+        print(
+            "Lab Arena quota snapshot failure: "
+            f"reason={safe_reason} read_count={safe_count} "
+            f"read_limit={safe_limit} "
+            f"include_sourcing_cost={str(include_sourcing_cost is True).lower()}",
+            file=sys.stderr,
+            flush=True,
+        )
+    except (OSError, ValueError):
+        # Diagnostics must never change the fail-closed quota result.
         pass
 
 
@@ -1442,6 +1475,9 @@ class RunState:
     quota_snapshot_inflight: bool = False
     quota_snapshot_generation: int = 0
     trusted_quota_failure: bool = False
+    quota_failure_diagnostics: set[Tuple[str, bool]] = field(
+        default_factory=set
+    )
     quota_condition: threading.Condition = field(
         default_factory=threading.Condition, repr=False
     )
@@ -1449,6 +1485,24 @@ class RunState:
 
 def _timestamp(clock: Callable[[], datetime]) -> str:
     return clock().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _quota_snapshot_upstream_limit(wall_clock_seconds: int) -> int:
+    """Bound authoritative reads for one signed sandbox lifetime."""
+
+    if (
+        isinstance(wall_clock_seconds, bool)
+        or not isinstance(wall_clock_seconds, int)
+        or wall_clock_seconds < 1
+    ):
+        raise RunnerError("quota snapshot wall clock is invalid")
+    cache_intervals = (
+        wall_clock_seconds * 1000 + QUOTA_SNAPSHOT_CACHE_MILLISECONDS - 1
+    ) // QUOTA_SNAPSHOT_CACHE_MILLISECONDS
+    return (
+        QUOTA_SNAPSHOT_SCHEMA_VARIANTS * cache_intervals
+        + QUOTA_SNAPSHOT_STARTUP_REQUESTS
+    )
 
 
 class WorkerSocketServer:
@@ -1467,17 +1521,29 @@ class WorkerSocketServer:
         *,
         max_connections: int = MAX_WORKER_CONNECTIONS,
         read_timeout_seconds: float = WORKER_SOCKET_READ_TIMEOUT_SECONDS,
+        quota_snapshot_upstream_limit: Optional[int] = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         if isinstance(max_connections, bool) or not isinstance(max_connections, int) or max_connections < 1:
             raise RunnerError("worker socket connection limit is invalid")
         if read_timeout_seconds <= 0:
             raise RunnerError("worker socket read timeout is invalid")
+        if quota_snapshot_upstream_limit is None:
+            quota_snapshot_upstream_limit = _quota_snapshot_upstream_limit(
+                contracts.ICP_WALL_CLOCK_SECONDS
+            )
+        if (
+            isinstance(quota_snapshot_upstream_limit, bool)
+            or not isinstance(quota_snapshot_upstream_limit, int)
+            or quota_snapshot_upstream_limit < 1
+        ):
+            raise RunnerError("worker quota snapshot limit is invalid")
         self._path = Path(socket_path)
         self._api = api
         self._state = state
         self._max_connections = max_connections
         self._read_timeout_seconds = float(read_timeout_seconds)
+        self._quota_snapshot_upstream_limit = quota_snapshot_upstream_limit
         self._monotonic = monotonic
         self._server: Optional[socketserver.ThreadingUnixStreamServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -1490,7 +1556,7 @@ class WorkerSocketServer:
 
         state = self._state
         condition = state.quota_condition
-        started_at = self._monotonic()
+        wait_deadline = time.monotonic() + API_TIMEOUT_SECONDS + 1.0
 
         def cached_view() -> Optional[Dict[str, Any]]:
             snapshot = state.quota_snapshot
@@ -1505,38 +1571,72 @@ class WorkerSocketServer:
                 "providers": snapshot["providers"],
             }
 
+        def log_failure_once(reason: str) -> None:
+            key = (reason, include_sourcing_cost)
+            with condition:
+                if key in state.quota_failure_diagnostics:
+                    return
+                state.quota_failure_diagnostics.add(key)
+                read_count = state.quota_request_count
+            _log_quota_snapshot_failure(
+                reason=reason,
+                read_count=read_count,
+                read_limit=self._quota_snapshot_upstream_limit,
+                include_sourcing_cost=include_sourcing_cost,
+            )
+
         with condition:
-            if state.quota_request_count >= MAX_QUOTA_SNAPSHOT_REQUESTS:
-                return None
-            state.quota_request_count += 1
-            if (
-                cached_view() is not None
-                and started_at - state.quota_snapshot_at
-                < QUOTA_SNAPSHOT_CACHE_SECONDS
-            ):
-                return cached_view()
-            generation = state.quota_snapshot_generation
-            if state.quota_snapshot_inflight:
+            while True:
+                if (
+                    cached_view() is not None
+                    and self._monotonic() - state.quota_snapshot_at
+                    < QUOTA_SNAPSHOT_CACHE_SECONDS
+                ):
+                    return cached_view()
+                if not state.quota_snapshot_inflight:
+                    break
+                generation = state.quota_snapshot_generation
+                remaining = wait_deadline - time.monotonic()
+                if remaining <= 0:
+                    log_failure_once("upstream_exception")
+                    return None
                 condition.wait_for(
                     lambda: (
                         not state.quota_snapshot_inflight
                         or state.quota_snapshot_generation != generation
                     ),
-                    timeout=API_TIMEOUT_SECONDS + 1.0,
+                    timeout=remaining,
                 )
-                if (
-                    state.quota_snapshot_generation != generation
-                    and cached_view() is not None
-                    and started_at - state.quota_snapshot_at
-                    < QUOTA_SNAPSHOT_CACHE_SECONDS
-                ):
-                    return cached_view()
+                if state.quota_snapshot_generation == generation:
+                    # The leader produced no usable upstream result within
+                    # the same bounded API window. The diagnostic deliberately
+                    # groups this wait timeout with upstream exceptions; both
+                    # have identical fail-closed behavior and share no payload.
+                    log_failure_once("upstream_exception")
+                    return None
+                if state.quota_snapshot is None:
+                    # The single-flight leader already logged and published
+                    # its fail-closed result. A joiner does not spend another
+                    # upstream read merely because it arrived concurrently.
+                    return None
+                # Recheck the current cache and leader. When several v2
+                # callers wait behind one v1 leader, only the first becomes
+                # the v2 upgrade leader; the others join that new generation.
+            if (
+                state.quota_request_count
+                >= self._quota_snapshot_upstream_limit
+            ):
+                log_failure_once("read_cap")
                 return None
+            # Only the single-flight leader consumes the finite upstream-read
+            # allowance. Cached reads and waiters are passive local views.
+            state.quota_request_count += 1
             state.quota_snapshot_inflight = True
 
         snapshot = None
         run_id = state.lease["run_id"]
         lease_token = state.lease_token
+        failure_reason = None
         try:
             if include_sourcing_cost:
                 document = self._api.quota_usage(
@@ -1545,7 +1645,7 @@ class WorkerSocketServer:
             else:
                 document = self._api.quota_usage(run_id, lease_token)
         except Exception:
-            pass
+            failure_reason = "upstream_exception"
         else:
             try:
                 snapshot = (
@@ -1554,7 +1654,10 @@ class WorkerSocketServer:
                     else lab_arena_checkpoint.validate_quota_snapshot(document)
                 )
             except lab_arena_checkpoint.QuotaUnavailable:
-                pass
+                failure_reason = "invalid_snapshot"
+
+        if failure_reason is not None:
+            log_failure_once(failure_reason)
 
         with condition:
             state.quota_snapshot_inflight = False
@@ -1750,21 +1853,34 @@ class WorkerSocketServer:
 
     @staticmethod
     def _responses_rate_limit_delay(call: Mapping[str, Any], retry: int) -> Optional[float]:
-        if not (
+        common = (
             call.get("operation_id") == "openrouter.responses"
             and call.get("provider") == "openrouter"
-            and call.get("funding_source") in ("host", "miner_key")
-            and call.get("outcome") == "settled"
             and call.get("error_code") == "provider_unavailable"
             and type(call.get("status")) is int
             and call.get("status") == 502
             and type(call.get("provider_status")) is int
             and call.get("provider_status") == 429
-            and type(call.get("actual_microusd")) is int
-            and call.get("actual_microusd") == 0
             and call.get("idempotent", False) is False
             and 0 <= retry < RESPONSES_RATE_LIMIT_RETRIES
-        ):
+        )
+        proved_free = (
+            call.get("funding_source") in ("host", "miner_key")
+            and call.get("outcome") == "settled"
+            and type(call.get("actual_microusd")) is int
+            and call.get("actual_microusd") == 0
+        )
+        completed_price_unknown = (
+            call.get("funding_source") == "host"
+            and call.get("outcome") == "uncertain"
+            and call.get("completed_rate_limit_retryable") is True
+            and "actual_microusd" not in call
+            and type(call.get("reserved_microusd")) is int
+            and call.get("reserved_microusd") == 0
+            and isinstance(call.get("call_identity"), str)
+            and contracts.SHA256_RE.fullmatch(call["call_identity"]) is not None
+        )
+        if not (common and (proved_free or completed_price_unknown)):
             return None
         if "retry_after_seconds" in call:
             hint = call["retry_after_seconds"]
@@ -2261,7 +2377,6 @@ class AssignmentExecutor:
             shutil.rmtree(socket_dir, ignore_errors=True)
             shutil.rmtree(run_dir, ignore_errors=True)
             raise RunnerError("worker socket path exceeds %d bytes; set a shorter socket_root" % MAX_SOCKET_PATH_BYTES)
-        server = WorkerSocketServer(socket_path, config.api, state)
         started_at = _timestamp(config.clock)
         kind = str(lease.get("kind") or "execute")
         scoring_run = kind == "score"
@@ -2288,6 +2403,14 @@ class AssignmentExecutor:
                 contracts.SCORING_WALL_CLOCK_SECONDS if scoring_run
                 else config.wall_clock_seconds
             )
+        )
+        server = WorkerSocketServer(
+            socket_path,
+            config.api,
+            state,
+            quota_snapshot_upstream_limit=_quota_snapshot_upstream_limit(
+                wall_clock_seconds
+            ),
         )
 
         def valid_checkpoint(candidate: bytes) -> bool:

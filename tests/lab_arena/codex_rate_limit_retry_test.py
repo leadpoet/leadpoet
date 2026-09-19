@@ -62,6 +62,25 @@ def identified_document(sequence, **changes):
     return result
 
 
+def identified_completed_unknown_document(sequence, **changes):
+    result = identified_document(
+        sequence,
+        outcome="uncertain",
+        actual=0,
+        idempotent=False,
+        retry_after=0,
+        **changes,
+    )
+    result["call"].pop("actual_microusd")
+    result["call"].update(
+        {
+            "reserved_microusd": 0,
+            "completed_rate_limit_retryable": True,
+        }
+    )
+    return result
+
+
 class ResponsesThenTerminalRuntime(BridgingRuntime):
     def __init__(self, statuses, *, timed_out=False):
         super().__init__(output=None, exit_code=1, timed_out=timed_out, calls=0)
@@ -153,6 +172,75 @@ def test_worker_retries_two_free_throttles_with_new_sequences_and_shared_deadlin
     assert len(worker._state.calls) == 3
 
 
+def test_worker_retries_completed_failed_429_with_distinct_stable_identity(
+    monkeypatch, tmp_path
+):
+    documents = [
+        identified_completed_unknown_document(0),
+        identified_completed_unknown_document(1),
+        identified_document(
+            2,
+            status=200,
+            provider_status=200,
+            actual=7,
+            error_code=None,
+            idempotent=False,
+        ),
+    ]
+    api = Api(documents)
+    worker = server(tmp_path, api)
+    event = install_clock(monkeypatch, worker)
+
+    error, result = worker._dispatch(
+        "openrouter.responses", PARAMETERS, 120_000
+    )
+
+    assert error is None and result["status"] == 200
+    assert [frame["action_sequence"] for frame in api.frames] == [0, 1, 2]
+    assert event.waits == [0.001, 0.001]
+    identities = [call["call_identity"] for call in worker._state.calls]
+    assert len(set(identities)) == 3
+    assert worker._state.recovered_responses_retry_call_identities == set(
+        identities[:2]
+    )
+    assert all(
+        call["outcome"] == "uncertain"
+        and "actual_microusd" not in call
+        for call in worker._state.calls[:2]
+    )
+
+
+def test_completed_failed_429_retry_identity_is_sequence_bound_and_stable():
+    request_hash = contracts.document_hash(PARAMETERS)
+    common = {
+        "assignment_id": "assignment-1",
+        "attempt": 1,
+        "icp_position": 2,
+        "operation_id": "openrouter.responses",
+        "request_hash": request_hash,
+    }
+    first = contracts.provider_call_identity(action_sequence=7, **common)
+    assert first == contracts.provider_call_identity(action_sequence=7, **common)
+    assert first != contracts.provider_call_identity(action_sequence=8, **common)
+
+
+def test_completed_failed_429_does_not_exceed_original_deadline(
+    monkeypatch, tmp_path
+):
+    api = Api([
+        identified_completed_unknown_document(0),
+        identified_document(
+            1, status=200, provider_status=200, actual=7, error_code=None
+        ),
+    ])
+    worker = server(tmp_path, api)
+    event = install_clock(monkeypatch, worker)
+
+    worker._dispatch("openrouter.responses", PARAMETERS, 10_000)
+
+    assert len(api.frames) == 1 and event.waits == []
+
+
 @pytest.mark.parametrize(
     "timed_out,expected_terminal",
     [(False, "model_error"), (True, "model_timeout")],
@@ -201,6 +289,36 @@ def test_recovered_transparent_retry_does_not_replace_later_model_terminal(
     assert result["terminal_status"] == expected_terminal
     assert result["resource_summary"]["provider_call_count"] == len(documents)
     assert len(api.provider_frames) == len(documents)
+
+
+def test_recovered_unknown_price_429_does_not_replace_later_model_terminal(
+    monkeypatch, tmp_path
+):
+    documents = [
+        identified_completed_unknown_document(0),
+        identified_document(
+            1,
+            provider_status=200,
+            actual=7,
+            status=200,
+            error_code=None,
+            idempotent=False,
+        ),
+    ]
+    api = FakeApi(
+        [lease("recovered-unknown-price")], broker_documents=documents
+    )
+    (tmp_path / "work").mkdir()
+    monkeypatch.setattr(rn.secrets, "randbelow", lambda _bound: 0)
+
+    assert rn.Runner(
+        make_config(tmp_path, api, ResponsesThenTerminalRuntime([200]))
+    ).run_once() == 1
+
+    result = api.completions[0]["body"]["result"]
+    assert result["terminal_status"] == "model_error"
+    assert result["resource_summary"]["provider_call_count"] == 2
+    assert len(api.provider_frames) == 2
 
 
 @pytest.mark.parametrize(
@@ -363,6 +481,33 @@ def test_worker_never_retries_unproved_or_malformed_outcomes(monkeypatch, tmp_pa
     event = install_clock(monkeypatch, worker)
 
     assert worker._dispatch("openrouter.responses", PARAMETERS, 120_000)[0] is None
+    assert len(api.frames) == 1 and event.waits == []
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"completed_rate_limit_retryable": False},
+        {"completed_rate_limit_retryable": None},
+        {"outcome": "settled"},
+        {"reserved_microusd": 1},
+        {"actual_microusd": 0},
+        {"call_identity": "sha256:" + "g" * 64},
+        {"funding_source": "miner_key"},
+        {"idempotent": True},
+    ],
+)
+def test_worker_never_retries_malformed_completed_unknown_marker(
+    monkeypatch, tmp_path, change
+):
+    document = identified_completed_unknown_document(0)
+    document["call"].update(change)
+    api = Api([document])
+    worker = server(tmp_path, api)
+    event = install_clock(monkeypatch, worker)
+
+    worker._dispatch("openrouter.responses", PARAMETERS, 120_000)
+
     assert len(api.frames) == 1 and event.waits == []
 
 

@@ -847,6 +847,60 @@ def _openrouter_failed_cost_structure(document: Any, model: str) -> Dict[str, An
     return result
 
 
+def _openrouter_completed_rate_limit_retryable(
+    document: Any,
+    *,
+    model: str,
+    generation_id: Optional[str],
+    credential_fingerprint: Optional[str],
+) -> bool:
+    """Recognize one complete failed response whose price is still unknown.
+
+    This is execution evidence only. It never proves a zero charge: the
+    original call stays uncertain and its generation remains reconcilable.
+    """
+
+    if (
+        not isinstance(document, Mapping)
+        or document.get("status") != "failed"
+        or document.get("error_type") != "rate_limit_exceeded"
+        or document.get("output") != []
+        or "usage" not in document
+        or document.get("usage") is not None
+        or not isinstance(generation_id, str)
+        or _OPENROUTER_GENERATION_ID_RE.fullmatch(generation_id) is None
+        or not isinstance(credential_fingerprint, str)
+        or _CREDENTIAL_FINGERPRINT_RE.fullmatch(credential_fingerprint) is None
+    ):
+        return False
+    try:
+        if _openrouter_responses_error_status(
+            document, document.get("error")
+        ) != 429:
+            return False
+    except operations.OperationResponseError:
+        return False
+    structure = _openrouter_failed_cost_structure(document, model)
+    return (
+        structure.get("usage_kind") == "null"
+        and structure.get("metadata_kind") == "object"
+        and structure.get("output_kind") == "array"
+        and structure.get("output_count") == 0
+        and structure.get("rate_limit_error") is True
+        and structure.get("requested_model_matches") is True
+        and structure.get("is_byok") is False
+        and type(structure.get("attempt")) is int
+        and structure.get("pipeline_present") is True
+        and structure.get("pipeline_kind") == "array"
+        and type(structure.get("pipeline_count")) is int
+        and structure.get("attempts_present") is True
+        and structure.get("attempts_kind") == "array"
+        and type(structure.get("attempts_count")) is int
+        and 0 < structure["attempts_count"] <= 128
+        and structure.get("all_attempts_failed_http") is True
+    )
+
+
 def _missing_provider_cost_call_doc(
     response: ProviderResponse,
     document: Any,
@@ -3583,6 +3637,39 @@ class Broker:
                         "provider_status": int(response.status),
                     }
                 )
+                completed_rate_limit_retryable = (
+                    getattr(context, "kind", "execute") == "execute"
+                    and effective_operation_id == "openrouter.responses"
+                    and funding_source == "host"
+                    and effective_normalized.get("model")
+                    == OPENROUTER_LUNA_RESPONSES_MODEL
+                    and openrouter_host_route is not None
+                    and amount == 0
+                    and openrouter_canonical_response_error
+                    and call_succeeded is False
+                    and uncertain_state.get("status") == "uncertain"
+                    and uncertain_state.get("idempotent") is False
+                    and _openrouter_completed_rate_limit_retryable(
+                        raw_document,
+                        model=OPENROUTER_LUNA_RESPONSES_MODEL,
+                        generation_id=openrouter_generation_id,
+                        credential_fingerprint=provider_credential_fingerprint,
+                    )
+                )
+                if completed_rate_limit_retryable:
+                    # Internal worker control only. The generic response and
+                    # durable unknown-price ledger entry remain unchanged.
+                    summary.update(
+                        {
+                            "completed_rate_limit_retryable": True,
+                            "idempotent": False,
+                            "status": sanitized_status,
+                        }
+                    )
+                    if openrouter_retry_after_seconds is not _RETRY_AFTER_ABSENT:
+                        summary["retry_after_seconds"] = (
+                            openrouter_retry_after_seconds
+                        )
                 if (
                     request_refused
                     and effective_operation.provider == "openrouter"

@@ -227,13 +227,16 @@ def test_control_frame_denies_extra_fields_and_malformed_api_result(tmp_path):
     assert decoded(server.handle_frame(control_frame())) == {
         "error": "quota_unavailable"
     }
+    assert decoded(server.handle_frame(control_frame())) == {
+        "error": "quota_unavailable"
+    }
     assert state.action_sequence == 0
     assert state.refusals == 0
     assert state.calls == []
     assert state.trusted_quota_failure is True
 
 
-def test_quota_reads_are_one_hz_cached_and_capped_without_counter_changes(
+def test_cached_quota_reads_do_not_consume_finite_upstream_allowance(
     tmp_path,
 ):
     clock = [10.0]
@@ -248,19 +251,102 @@ def test_quota_reads_are_one_hz_cached_and_capped_without_counter_changes(
     assert decoded(server.handle_frame(control_frame())) == snapshot()
     assert decoded(server.handle_frame(control_frame())) == snapshot()
     assert len(api.calls) == 1
+    for _ in range(300):
+        assert decoded(server.handle_frame(control_frame())) == snapshot()
+    assert len(api.calls) == 1
+    assert state.quota_request_count == 1
+
     clock[0] += 1.0
     assert decoded(server.handle_frame(control_frame())) == snapshot()
     assert len(api.calls) == 2
-    for _ in range(runner.MAX_QUOTA_SNAPSHOT_REQUESTS - 3):
-        assert decoded(server.handle_frame(control_frame())) == snapshot()
-    assert decoded(server.handle_frame(control_frame())) == {
-        "error": "quota_unavailable"
-    }
-    assert state.quota_request_count == runner.MAX_QUOTA_SNAPSHOT_REQUESTS
+    assert state.quota_request_count == 2
     assert state.action_sequence == 0
     assert state.refusals == 0
     assert state.calls == []
     assert state.trusted_quota_failure is False
+
+
+def test_quota_upstream_allowance_stays_finite_and_fail_closed(
+    tmp_path, capsys
+):
+    clock = [10.0]
+    api = QuotaApi()
+    state = runner.RunState(
+        lease={"run_id": "run-1"}, lease_token=LEASE_TOKEN
+    )
+    server = runner.WorkerSocketServer(
+        tmp_path / "worker.sock",
+        api,
+        state,
+        monotonic=lambda: clock[0],
+        quota_snapshot_upstream_limit=3,
+    )
+
+    for _ in range(3):
+        assert decoded(server.handle_frame(control_frame())) == snapshot()
+        clock[0] += runner.QUOTA_SNAPSHOT_CACHE_SECONDS
+    assert decoded(server.handle_frame(control_frame())) == {
+        "error": "quota_unavailable"
+    }
+    assert len(api.calls) == 3
+    assert state.quota_request_count == 3
+    assert state.action_sequence == 0
+    assert state.refusals == 0
+    assert state.calls == []
+    assert state.trusted_quota_failure is False
+    assert capsys.readouterr().err.strip() == (
+        "Lab Arena quota snapshot failure: reason=read_cap "
+        "read_count=3 read_limit=3 include_sourcing_cost=false"
+    )
+
+
+@pytest.mark.parametrize(
+    ("document", "reason"),
+    [
+        (RuntimeError("private upstream detail"), "upstream_exception"),
+        ({"private": "invalid snapshot"}, "invalid_snapshot"),
+    ],
+)
+def test_quota_upstream_failure_diagnostic_is_bounded(
+    tmp_path, capsys, document, reason
+):
+    state = runner.RunState(
+        lease={"run_id": "run-1"}, lease_token=LEASE_TOKEN
+    )
+    server = runner.WorkerSocketServer(
+        tmp_path / "worker.sock", QuotaApi(document), state
+    )
+
+    assert server._quota_snapshot() is None
+    assert server._quota_snapshot() is None
+
+    lines = capsys.readouterr().err.splitlines()
+    assert lines == [
+        "Lab Arena quota snapshot failure: "
+        f"reason={reason} read_count=1 read_limit=602 "
+        "include_sourcing_cost=false"
+    ]
+
+
+def test_quota_upstream_limit_is_derived_from_signed_lifetime():
+    assert runner._quota_snapshot_upstream_limit(2700) == 5402
+    assert runner._quota_snapshot_upstream_limit(300) == 602
+    for invalid in (True, 0, -1, 1.0, None):
+        with pytest.raises(runner.RunnerError, match="wall clock"):
+            runner._quota_snapshot_upstream_limit(invalid)
+
+
+@pytest.mark.parametrize("invalid", [True, 0, -1, 1.0, "602"])
+def test_worker_rejects_invalid_quota_upstream_limit(tmp_path, invalid):
+    with pytest.raises(runner.RunnerError, match="snapshot limit"):
+        runner.WorkerSocketServer(
+            tmp_path / "worker.sock",
+            QuotaApi(),
+            runner.RunState(
+                lease={"run_id": "run-1"}, lease_token=LEASE_TOKEN
+            ),
+            quota_snapshot_upstream_limit=invalid,
+        )
 
 
 def test_concurrent_quota_reads_singleflight(tmp_path):
@@ -509,15 +595,16 @@ def test_authoritative_quota_failure_without_output_completes_as_provider_error(
         )
 
 
-def test_quota_read_cap_is_client_misuse_and_stays_model_error(tmp_path):
+def test_cached_quota_read_volume_does_not_change_model_terminal(tmp_path):
     api = _CompletionQuotaApi(snapshot())
     sandbox = _StagedQuotaPreflightRuntime(
-        reads=runner.MAX_QUOTA_SNAPSHOT_REQUESTS + 1
+        reads=300
     )
 
     _run_preflight(tmp_path, api, sandbox)
 
-    assert sandbox.outcomes[-1] == "quota_unavailable"
+    assert len(sandbox.outcomes) == 300
+    assert all(outcome == snapshot() for outcome in sandbox.outcomes)
     assert len(api.calls) == 1
     result = api.completions[0]["body"]["result"]
     assert result["terminal_status"] == "model_error"

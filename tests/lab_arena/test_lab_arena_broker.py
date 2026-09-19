@@ -2247,10 +2247,13 @@ def test_luna_regional_unproved_provider_failure_keeps_full_reservation():
     assert store.log == ["reserve", "dispatch", "uncertain"]
 
 
-def test_canonical_failed_responses_retain_only_billing_structure_and_stay_uncertain():
+def test_canonical_failed_responses_retain_only_billing_structure_and_stay_uncertain(
+    monkeypatch,
+):
     private_text = "private source passage and provider account detail"
     payload = {
-        "object": "response", "status": "failed", "error_type": "rate_limit_exceeded",
+        "id": "gen-completed-failed-429", "object": "response",
+        "status": "failed", "error_type": "rate_limit_exceeded",
         "error": {"code": "rate_limit_exceeded", "message": private_text},
         "output": [], "usage": None,
         "openrouter_metadata": {
@@ -2258,12 +2261,21 @@ def test_canonical_failed_responses_retain_only_billing_structure_and_stay_uncer
             "attempt": 1, "pipeline": [], "attempts": [{"status": 429, "detail": private_text}],
         },
     }
-    broker, store, transport = make_broker(transport=FakeTransport([(200, payload)]))
+    store = ZeroReservationLedgerStore()
+    monkeypatch.setattr(br, "_openrouter_generation_readback", lambda **_kwargs: None)
+    broker, store, transport = make_broker(
+        store=store,
+        transport=FakeTransport([(200, payload)]),
+    )
     broker._price_table = luna_price_table()
     result = broker.execute(CONTEXT, operation_id="openrouter.responses",
                             parameters=LUNA_RESPONSES, action_sequence=0, timeout_ms=300_000)
     assert result.status == 502
-    assert_unpriced_uncertain(result)
+    assert_unpriced_uncertain(result, reserved=0)
+    assert result.call["completed_rate_limit_retryable"] is True
+    assert result.call["reserved_microusd"] == 0
+    assert result.call["idempotent"] is False
+    assert "actual_microusd" not in result.call
     assert store.log == ["reserve", "dispatch", "uncertain"]
     assert len(transport.sent) == 1
     diagnostic = store.calls[result.call["call_identity"]]["uncertain_doc"]
@@ -2278,6 +2290,183 @@ def test_canonical_failed_responses_retain_only_billing_structure_and_stay_uncer
     assert private_text not in json.dumps(diagnostic)
     assert "openrouter_failed_response_structure" not in result.call
     assert private_text.encode() not in result.body
+
+    replay = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.responses",
+        parameters=LUNA_RESPONSES,
+        action_sequence=0,
+        timeout_ms=300_000,
+    )
+    assert replay.status == 409
+    assert replay.call["outcome"] == "uncertain"
+    assert replay.call["error_code"] == "call_uncertain"
+    assert "completed_rate_limit_retryable" not in replay.call
+    assert len(transport.sent) == 1
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"output": [{"type": "message"}]},
+        {"usage": {}},
+        {"usage": {"cost": None}},
+        {"status": "completed"},
+        {"error_type": "server_error"},
+        {"openrouter_metadata": None},
+        {
+            "openrouter_metadata": {
+                "requested": "wrong-model",
+                "is_byok": False,
+                "attempt": 1,
+                "pipeline": [],
+                "attempts": [{"status": 429}],
+            }
+        },
+        {
+            "openrouter_metadata": {
+                "requested": br.OPENROUTER_LUNA_RESPONSES_MODEL,
+                "is_byok": True,
+                "attempt": 1,
+                "pipeline": [],
+                "attempts": [{"status": 429}],
+            }
+        },
+    ],
+)
+def test_completed_failed_429_retry_marker_rejects_partial_or_ambiguous_shape(
+    patch,
+):
+    document = {
+        "status": "failed",
+        "error_type": "rate_limit_exceeded",
+        "error": {"code": "rate_limit_exceeded", "message": "limited"},
+        "output": [],
+        "usage": None,
+        "openrouter_metadata": {
+            "requested": br.OPENROUTER_LUNA_RESPONSES_MODEL,
+            "is_byok": False,
+            "attempt": 1,
+            "pipeline": [],
+            "attempts": [{"status": 429}],
+        },
+        **patch,
+    }
+    assert br._openrouter_completed_rate_limit_retryable(
+        document,
+        model=br.OPENROUTER_LUNA_RESPONSES_MODEL,
+        generation_id="gen-failed-429",
+        credential_fingerprint="sha256:" + "a" * 64,
+    ) is False
+
+
+def test_completed_failed_429_retry_marker_requires_reconciliation_binding():
+    document = {
+        "status": "failed",
+        "error_type": "rate_limit_exceeded",
+        "error": {"code": "rate_limit_exceeded", "message": "limited"},
+        "output": [],
+        "usage": None,
+        "openrouter_metadata": {
+            "requested": br.OPENROUTER_LUNA_RESPONSES_MODEL,
+            "is_byok": False,
+            "attempt": 1,
+            "pipeline": [],
+            "attempts": [{"status": 429}],
+        },
+    }
+    fingerprint = "sha256:" + "a" * 64
+    assert br._openrouter_completed_rate_limit_retryable(
+        document,
+        model=br.OPENROUTER_LUNA_RESPONSES_MODEL,
+        generation_id="gen-failed-429",
+        credential_fingerprint=fingerprint,
+    ) is True
+    assert br._openrouter_completed_rate_limit_retryable(
+        document,
+        model=br.OPENROUTER_LUNA_RESPONSES_MODEL,
+        generation_id=None,
+        credential_fingerprint=fingerprint,
+    ) is False
+    assert br._openrouter_completed_rate_limit_retryable(
+        document,
+        model=br.OPENROUTER_LUNA_RESPONSES_MODEL,
+        generation_id="gen-failed-429",
+        credential_fingerprint=None,
+    ) is False
+
+
+def test_completed_failed_429_and_distinct_success_keep_both_actual_costs(
+    monkeypatch,
+):
+    failed = {
+        "id": "gen-failed-429-cost",
+        "object": "response",
+        "status": "failed",
+        "error_type": "rate_limit_exceeded",
+        "error": {"code": "rate_limit_exceeded", "message": "limited"},
+        "output": [],
+        "usage": None,
+        "openrouter_metadata": {
+            "requested": br.OPENROUTER_LUNA_RESPONSES_MODEL,
+            "is_byok": False,
+            "attempt": 1,
+            "pipeline": [],
+            "attempts": [{"status": 429}],
+        },
+    }
+    completed = {
+        "id": "gen-distinct-success-cost",
+        "object": "response",
+        "status": "completed",
+        "model": br.OPENROUTER_LUNA_RESPONSES_MODEL,
+        "error": None,
+        "output": [],
+        "usage": {"cost": "0.00025"},
+    }
+    monkeypatch.setattr(br, "_openrouter_generation_readback", lambda **_kwargs: None)
+    store = ZeroReservationLedgerStore()
+    broker, _store, transport = make_broker(
+        store=store, transport=FakeTransport([(200, failed), (200, completed)])
+    )
+    broker._price_table = luna_price_table()
+
+    first = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.responses",
+        parameters=LUNA_RESPONSES,
+        action_sequence=0,
+        timeout_ms=300_000,
+    )
+    second = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.responses",
+        parameters=LUNA_RESPONSES,
+        action_sequence=1,
+        timeout_ms=300_000,
+    )
+
+    assert first.call["completed_rate_limit_retryable"] is True
+    assert second.status == 200 and second.call["actual_microusd"] == 250
+    assert first.call["call_identity"] != second.call["call_identity"]
+    original = store.calls[first.call["call_identity"]]
+    assert original["kind"] == "uncertain" and "actual" not in original
+    reconciled = store.reconcile_openrouter_cost(
+        round_id=CONTEXT.round_id,
+        run_id=CONTEXT.run_id,
+        call_identity=first.call["call_identity"],
+        uncertain_entry_id=1,
+        generation_id=original["uncertain_doc"]["openrouter_generation_id"],
+        credential_fingerprint=original["uncertain_doc"]["credential_fingerprint"],
+        actual_microusd=125,
+        cost_units="0.000125",
+    )
+    assert reconciled["actual_microusd"] == 125
+    assert sorted(
+        call["actual"] for call in store.calls.values()
+        if call["kind"] == "settlement"
+    ) == [125, 250]
+    assert [request["method"] for request in transport.sent].count("POST") == 2
 
 
 @pytest.mark.parametrize("invalid", [True, -1, 1_000_000_001, "private numeric field", {}, []])

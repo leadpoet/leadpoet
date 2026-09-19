@@ -5,8 +5,7 @@ dedicated ``lab_arena_service`` role over PostgREST: every write is one of
 the SECURITY DEFINER functions in ``scripts/179-lab-arena-v1.sql`` and reads
 are plain selects. The HTTP/1.1-pinned client construction is copied from
 ``gateway/db/client.py`` (never imported: the validator enclave image copies
-that file). The preferred scoped ``sb_secret_`` API key is sent only as
-``apikey``. Legacy parity environments can still use an operator-minted JWT.
+that file). The scoped ``sb_secret_`` API key is sent only as ``apikey``.
 
 ``PsycopgTransport`` exists for tests and local tooling only: it calls the
 same SQL functions through a PostgreSQL driver so disposable-PostgreSQL
@@ -56,11 +55,6 @@ SCORE_BATCH_SIZE = 500
 
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_per_icp_cost_schema_v1": (),
-    "lab_arena_prepare_sep18_published_rerun295_v1": (
-        ("p_source_size_bytes", "bigint"), ("p_source_sha256", "text"),
-        ("p_source_commit", "text"), ("p_bank_sha256", "text"),
-        ("p_forward_schedule", "jsonb"),
-    ),
     "lab_arena_next_closed_deepline_reconciliation_v1": (
         ("p_mode", "text"), ("p_network_name", "text"),
         ("p_netuid", "integer"), ("p_round_id", "text"),
@@ -320,9 +314,7 @@ class PostgrestTransport(StoreTransport):
         self,
         base_url: str,
         *,
-        anon_key: str,
-        service_jwt: str = "",
-        service_key: str = "",
+        service_key: str,
         timeout_seconds: float = 8.0,
         http_client: Optional[httpx.Client] = None,
     ) -> None:
@@ -337,20 +329,14 @@ class PostgrestTransport(StoreTransport):
             or parsed.fragment
         ):
             raise ArenaStoreError("PostgREST base URL must be https (or loopback for tests)")
-        if bool(service_key) == bool(service_jwt):
-            raise ArenaStoreError("exactly one PostgREST service credential is required")
-        if service_key and not service_key.startswith("sb_secret_"):
+        if not service_key.startswith("sb_secret_"):
             raise ArenaStoreError("scoped service key has an invalid shape")
-        if service_jwt and (not anon_key or service_jwt.count(".") != 2):
-            raise ArenaStoreError("anon key and valid service JWT are required")
         self._base_url = base_url.rstrip("/")
         self._headers = {
-            "apikey": service_key or anon_key,
+            "apikey": service_key,
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        if service_jwt:
-            self._headers["Authorization"] = "Bearer " + service_jwt
         self._client = http_client or create_http1_client(timeout_seconds)
         self.deadlock_retries = 0
 

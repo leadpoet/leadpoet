@@ -14,7 +14,6 @@ def test_scoped_service_key_is_only_apikey_header():
     client = httpx.Client(transport=httpx.MockTransport(handler), trust_env=False)
     transport = PostgrestTransport(
         "https://project.example",
-        anon_key="anon-must-not-be-used",
         service_key="sb_secret_scoped-value",
         http_client=client,
     )
@@ -39,17 +38,8 @@ def test_scoped_service_key_still_rejects_wrong_database_role():
         ArenaStore(WrongRoleTransport()).require_service_role()
 
 
-def test_legacy_jwt_header_path_remains_available():
-    transport = PostgrestTransport(
-        "https://project.example", anon_key="anon", service_jwt="a.b.c"
-    )
-    assert transport._headers["apikey"] == "anon"
-    assert transport._headers["Authorization"] == "Bearer a.b.c"
-    transport.close()
-
-
 def test_full_service_role_key_is_not_accepted_as_scoped_key():
     with pytest.raises(Exception, match="invalid shape"):
         PostgrestTransport(
-            "https://project.example", anon_key="anon", service_key="service-role-key"
+            "https://project.example", service_key="service-role-key"
         )

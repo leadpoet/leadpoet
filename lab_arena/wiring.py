@@ -370,16 +370,12 @@ def build_service_from_environment(mode: str):
     """Construct the production service and its FastAPI app from the environment."""
 
     supabase_url = _required("LAB_ARENA_SUPABASE_URL")
-    supabase_anon_key = _required("LAB_ARENA_SUPABASE_ANON_KEY")
     service_key = os.environ.get("LAB_ARENA_SERVICE_KEY", "").strip()
-    service_jwt = os.environ.get("LAB_ARENA_SERVICE_JWT", "").strip()
-    if not service_key and not service_jwt:
+    if not service_key:
         raise ServiceError("environment LAB_ARENA_SERVICE_KEY is required", 500)
     transport = PostgrestTransport(
         supabase_url,
-        anon_key=supabase_anon_key,
         service_key=service_key,
-        service_jwt="" if service_key else service_jwt,
     )
     store = ArenaStore(transport)
     objects = S3ObjectStore(

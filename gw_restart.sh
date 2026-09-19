@@ -299,9 +299,7 @@ run_lab_arena_restart_guard() {
   local -a guard_environment=(
     env
     -u LAB_ARENA_SUPABASE_URL
-    -u LAB_ARENA_SUPABASE_ANON_KEY
     -u LAB_ARENA_SERVICE_KEY
-    -u LAB_ARENA_SERVICE_JWT
   )
   if [ ! -r "$source_root/scripts/lab_arena_restart_claim_guard.py" ]; then
     echo "ERROR: exact Lab Arena restart guard helper is unavailable" >&2

@@ -1,8 +1,8 @@
 """Prove the least-privilege PostgREST route (labarena.md 11.1, 18.1) with a
-real PostgREST container: an operator-minted JWT carrying the
-``lab_arena_service`` role reaches the Arena functions through
-``PostgrestTransport``, the whoami readback shows the exact role, and the
-``anon`` role is denied on every Arena table and function.
+real PostgREST container. A test-only client Authorization header carries the
+``lab_arena_service`` role while ``PostgrestTransport`` keeps its production
+scoped-key headers. The whoami readback shows the exact role, and unauthorized
+roles are denied on every Arena table and function.
 
 This is the local stand-in for the hosted-Supabase preflight the plan
 requires before step 2; hosted PostgREST behaves identically for the role
@@ -35,7 +35,6 @@ DOCKER = shutil.which("docker")
 POSTGREST_IMAGE = "postgrest/postgrest:v12.2.3"
 POSTGRES_IMAGE = "postgres:15"
 JWT_SECRET = "lab-arena-local-jwt-secret-" + "x" * 40
-ANON_KEY_ROLE = "anon"
 
 pytestmark = pytest.mark.skipif(DOCKER is None, reason="Docker is unavailable")
 
@@ -163,15 +162,28 @@ class RestClientTransport:
     """A PostgrestTransport whose URLs omit the Supabase /rest/v1 prefix (bare PostgREST)."""
 
 
-def make_transport(stack, role: str) -> PostgrestTransport:
-    transport = PostgrestTransport("https://placeholder.invalid", anon_key=mint_jwt(ANON_KEY_ROLE), service_jwt=mint_jwt(role), http_client=httpx.Client(http1=True, http2=False, timeout=httpx.Timeout(15.0), base_url=stack["base_url"]))
+def make_transport(
+    stack, role: str, *, jwt_secret: str = JWT_SECRET
+) -> PostgrestTransport:
+    client = httpx.Client(
+        http1=True,
+        http2=False,
+        timeout=httpx.Timeout(15.0),
+        base_url=stack["base_url"],
+        headers={"Authorization": "Bearer " + mint_jwt(role, secret=jwt_secret)},
+    )
+    transport = PostgrestTransport(
+        "https://placeholder.invalid",
+        service_key="sb_secret_local_postgrest_test",
+        http_client=client,
+    )
     # Bare PostgREST serves at the root; Supabase adds /rest/v1. Point the transport at the container.
     transport._base_url = ""
     transport._client.base_url = httpx.URL(stack["base_url"])
     return transport
 
 
-def test_service_jwt_reaches_whoami_and_functions_through_postgrest(stack):
+def test_service_role_authorization_reaches_whoami_and_functions_through_postgrest(stack):
     transport = make_transport(stack, "lab_arena_service")
     # PostgREST has no /rest/v1 prefix: rewrite the request paths.
     original_post = transport._client.post
@@ -286,9 +298,13 @@ def test_anon_and_service_role_tokens_are_denied_on_arena_tables_and_functions(s
 
 
 def test_wrong_secret_or_unknown_role_is_rejected(stack):
-    forged = PostgrestTransport("https://placeholder.invalid", anon_key=mint_jwt("anon"), service_jwt=mint_jwt("lab_arena_service", secret="wrong-secret-" + "y" * 40), http_client=httpx.Client(http1=True, http2=False, timeout=httpx.Timeout(15.0)))
+    forged = make_transport(
+        stack,
+        "lab_arena_service",
+        jwt_secret="wrong-secret-" + "y" * 40,
+    )
     response = forged._client.post(stack["base_url"] + "/rpc/lab_arena_whoami", headers=forged._headers, content=b"{}")
     assert response.status_code == 401
-    unknown = PostgrestTransport("https://placeholder.invalid", anon_key=mint_jwt("anon"), service_jwt=mint_jwt("postgres"), http_client=httpx.Client(http1=True, http2=False, timeout=httpx.Timeout(15.0)))
+    unknown = make_transport(stack, "postgres")
     response = unknown._client.post(stack["base_url"] + "/rpc/lab_arena_whoami", headers=unknown._headers, content=b"{}")
     assert response.status_code in (401, 403), response.text

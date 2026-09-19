@@ -175,7 +175,6 @@ def _run_post_activate_guard_reexec(
     canonical_env = tmp_path / "gateway.env"
     canonical_env.write_text(
         "LAB_ARENA_SUPABASE_URL=https://arena.invalid\n"
-        "LAB_ARENA_SUPABASE_ANON_KEY=test-anon\n"
         "LAB_ARENA_SERVICE_KEY=sb_secret_test\n",
         encoding="utf-8",
     )
@@ -229,7 +228,6 @@ def _run_post_activate_guard_reexec(
         "#!/bin/bash\nset -euo pipefail\n"
         + assignments
         + "\nexport LAB_ARENA_SUPABASE_URL=https://arena.invalid\n"
-        + "export LAB_ARENA_SUPABASE_ANON_KEY=test-anon\n"
         + "export LAB_ARENA_SERVICE_KEY=test-service\n"
         + f"export FAKE_HELPER_OUTPUT={shlex.quote(str(helper_output))}\n"
         + f"export FAKE_PLAN_SHA={shlex.quote(plan_candidate if plan_candidate is not None else candidate)}\n"

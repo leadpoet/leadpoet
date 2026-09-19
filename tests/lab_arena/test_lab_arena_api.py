@@ -159,7 +159,7 @@ def test_provider_rpc_transport_timeout_is_sanitized_and_next_request_is_healthy
         return httpx.Response(200, json=healthy)
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as database:
-        transport = PostgrestTransport("https://project.example", anon_key="anon", service_jwt="a.b.c", http_client=database)
+        transport = PostgrestTransport("https://project.example", service_key="sb_secret_test", http_client=database)
         store = ArenaStore(transport)
 
         class RpcService(StubService):
@@ -219,7 +219,7 @@ def test_current_handles_failed_reward_basis_read(error_type, recovers):
         pytest.fail("public read called a write/provider dependency")
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as database:
-        store = ArenaStore(PostgrestTransport("https://project.example", anon_key="anon", service_jwt="a.b.c", http_client=database))
+        store = ArenaStore(PostgrestTransport("https://project.example", service_key="sb_secret_test", http_client=database))
         service = ArenaService(ServiceConfig(
             mode="live", store=store, object_store=None, signer=None,
             chain=SimpleNamespace(current_settlement_epoch=lambda: 25040),

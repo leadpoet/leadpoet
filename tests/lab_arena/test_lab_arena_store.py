@@ -24,8 +24,7 @@ def test_transports_refuse_unknown_rpc_before_io():
     ) as client:
         postgrest = PostgrestTransport(
             "https://project.example",
-            anon_key="anon",
-            service_jwt="a.b.c",
+            service_key="sb_secret_test",
             http_client=client,
         )
         with pytest.raises(ArenaStoreError, match="unknown Arena function"):
@@ -74,7 +73,7 @@ def test_select_retries_one_read_failure_without_changing_query(error_type, reco
         return httpx.Response(200, json=rows)
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        transport = PostgrestTransport("https://project.example", anon_key="anon", service_jwt="a.b.c", http_client=client)
+        transport = PostgrestTransport("https://project.example", service_key="sb_secret_test", http_client=client)
         kwargs = dict(filters={"status": "published"}, order="created_at", descending=True, limit=5, offset=20, columns="round_id,status")
         if recovers:
             assert transport.select("lab_arena_rounds", **kwargs) == rows
@@ -102,7 +101,7 @@ def test_select_does_not_retry_authorization_or_contract_errors(response):
         return response
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        transport = PostgrestTransport("https://project.example", anon_key="anon", service_jwt="a.b.c", http_client=client)
+        transport = PostgrestTransport("https://project.example", service_key="sb_secret_test", http_client=client)
         with pytest.raises((ArenaStoreError, ValueError)) as caught:
             transport.select("lab_arena_rounds")
         assert not isinstance(caught.value, ArenaStoreUnavailable)
@@ -118,7 +117,7 @@ def test_rpc_transport_failure_is_typed_without_replay(error_type):
         raise error_type("private transport diagnostic", request=request)
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        transport = PostgrestTransport("https://project.example", anon_key="anon", service_jwt="a.b.c", http_client=client)
+        transport = PostgrestTransport("https://project.example", service_key="sb_secret_test", http_client=client)
         with pytest.raises(ArenaStoreUnavailable) as caught:
             transport.rpc("lab_arena_cancel_round", {"p_round_id": "arena-2026-09-10", "p_reason": "test"})
         assert isinstance(caught.value, ArenaStoreError)
@@ -138,7 +137,7 @@ def test_rpc_other_http_error_stays_base_store_error_without_replay():
         )
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        transport = PostgrestTransport("https://project.example", anon_key="anon", service_jwt="a.b.c", http_client=client)
+        transport = PostgrestTransport("https://project.example", service_key="sb_secret_test", http_client=client)
         with pytest.raises(ArenaStoreError) as caught:
             transport.rpc("lab_arena_cancel_round", {"p_round_id": "arena-2026-09-10", "p_reason": "test"})
         assert not isinstance(caught.value, ArenaStoreUnavailable)
@@ -156,7 +155,7 @@ def test_rpc_response_status_and_schema_errors_remain_base(response):
         requests.append(request)
         return response
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        transport = PostgrestTransport("https://project.example", anon_key="anon", service_jwt="a.b.c", http_client=client)
+        transport = PostgrestTransport("https://project.example", service_key="sb_secret_test", http_client=client)
         with pytest.raises(ArenaStoreError) as caught:
             transport.rpc("lab_arena_cancel_round", {"p_round_id": "arena-2026-09-10", "p_reason": "test"})
         assert not isinstance(caught.value, ArenaStoreUnavailable)
@@ -239,7 +238,7 @@ def test_list_ledger_supports_bounded_exact_source_filters():
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         transport = PostgrestTransport(
-            "https://project.example", anon_key="anon", service_jwt="a.b.c",
+            "https://project.example", service_key="sb_secret_test",
             http_client=client,
         )
         assert ArenaStore(transport).list_ledger(
@@ -406,7 +405,7 @@ def test_postgrest_rejects_http_loopback_lookalikes():
         "https://user:password@example.com",
     ):
         with pytest.raises(ArenaStoreError, match="base URL"):
-            PostgrestTransport(url, anon_key="anon", service_jwt="a.b.c")
+            PostgrestTransport(url, service_key="sb_secret_test")
 
 
 def test_production_http_client_ignores_proxy_environment_and_redirects(monkeypatch):
@@ -431,7 +430,7 @@ def test_postgrest_does_not_follow_a_cross_origin_redirect():
         return httpx.Response(307, headers={"location": "https://attacker.example/collect"})
 
     client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False, trust_env=False)
-    transport = PostgrestTransport("https://project.example", anon_key="anon", service_jwt="a.b.c", http_client=client)
+    transport = PostgrestTransport("https://project.example", service_key="sb_secret_test", http_client=client)
     with pytest.raises(ArenaStoreError, match="HTTP 307"):
         transport.rpc("lab_arena_whoami", {})
     assert contacted == ["https://project.example/rest/v1/rpc/lab_arena_whoami"]
@@ -450,8 +449,7 @@ def test_postgrest_filters_round_mode_and_status_before_limit_with_pagination():
     )
     transport = PostgrestTransport(
         "https://project.example",
-        anon_key="anon",
-        service_jwt="a.b.c",
+        service_key="sb_secret_test",
         http_client=client,
     )
     rows = transport.select(
@@ -495,8 +493,7 @@ def test_postgrest_round_filters_reject_reserved_query_syntax(filters, statuses)
     )
     transport = PostgrestTransport(
         "https://project.example",
-        anon_key="anon",
-        service_jwt="a.b.c",
+        service_key="sb_secret_test",
         http_client=client,
     )
     with pytest.raises(ArenaStoreError, match="reserved characters"):

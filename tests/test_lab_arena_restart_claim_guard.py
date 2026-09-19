@@ -118,9 +118,7 @@ def test_transport_uses_exact_arena_database_and_scoped_key(monkeypatch):
     monkeypatch.setenv("SUPABASE_URL", "https://wrong-primary.example")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "primary-secret")
     monkeypatch.setenv("LAB_ARENA_SUPABASE_URL", "https://arena.example")
-    monkeypatch.setenv("LAB_ARENA_SUPABASE_ANON_KEY", "arena-anon")
     monkeypatch.setenv("LAB_ARENA_SERVICE_KEY", "sb_secret_arena")
-    monkeypatch.setenv("LAB_ARENA_SERVICE_JWT", "cached.legacy.jwt")
     monkeypatch.setattr(guard_cli.http.client, "HTTPSConnection", _Connection)
     _Connection.created.clear()
 
@@ -189,32 +187,26 @@ def test_environment_parser_rejects_fifo_without_blocking(tmp_path):
     assert __import__("time").monotonic() - started < 1
 
 
-def test_transport_uses_legacy_arena_jwt_without_secret_diagnostics(monkeypatch):
+def test_transport_rejects_missing_or_invalid_scoped_key_without_diagnostics(monkeypatch):
     monkeypatch.setenv("LAB_ARENA_SUPABASE_URL", "https://arena.example")
-    monkeypatch.setenv("LAB_ARENA_SUPABASE_ANON_KEY", "arena-anon")
     monkeypatch.delenv("LAB_ARENA_SERVICE_KEY", raising=False)
-    monkeypatch.setenv("LAB_ARENA_SERVICE_JWT", "header.payload.signature")
     monkeypatch.setattr(guard_cli.http.client, "HTTPSConnection", _Connection)
     _Connection.created.clear()
 
-    guard_cli._request("safe_rpc", {})
-    headers = _Connection.created[-1].request_args[1]["headers"]
-    assert headers["apikey"] == "arena-anon"
-    assert headers["Authorization"] == "Bearer header.payload.signature"
+    with pytest.raises(guard_cli.GuardError):
+        guard_cli._request("safe_rpc", {})
+    assert _Connection.created == []
 
     monkeypatch.setenv("LAB_ARENA_SERVICE_KEY", "invalid-key")
     with pytest.raises(guard_cli.GuardError) as error:
         guard_cli._request("safe_rpc", {})
-    assert "header.payload.signature" not in str(error.value)
     assert "invalid-key" not in str(error.value)
 
 
 def test_malformed_header_value_never_appears_in_cli_diagnostics(monkeypatch, capsys):
     marker = "private-marker"
     monkeypatch.setenv("LAB_ARENA_SUPABASE_URL", "https://arena.example")
-    monkeypatch.setenv("LAB_ARENA_SUPABASE_ANON_KEY", "arena-anon")
     monkeypatch.setenv("LAB_ARENA_SERVICE_KEY", f"sb_secret_{marker}\r\nInjected: yes")
-    monkeypatch.delenv("LAB_ARENA_SERVICE_JWT", raising=False)
     monkeypatch.setattr(
         sys, "argv",
         [str(SCRIPT), "state", "--candidate", CANDIDATE, "--invocation", INVOCATION],

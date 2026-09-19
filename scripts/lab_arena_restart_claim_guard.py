@@ -140,9 +140,7 @@ def _read_scoped_environment(path: Path) -> dict[str, str]:
 
 def _request(function: str, payload: Mapping[str, Any]) -> Any:
     origin = os.environ.get("LAB_ARENA_SUPABASE_URL", "").strip().rstrip("/")
-    anon_key = os.environ.get("LAB_ARENA_SUPABASE_ANON_KEY", "").strip()
     service_key = os.environ.get("LAB_ARENA_SERVICE_KEY", "").strip()
-    service_jwt = os.environ.get("LAB_ARENA_SERVICE_JWT", "").strip()
     parsed = urlsplit(origin)
     try:
         port = parsed.port
@@ -152,12 +150,8 @@ def _request(function: str, payload: Mapping[str, Any]) -> Any:
         parsed.scheme != "https" or not parsed.hostname
         or port not in (None, 443) or parsed.path not in ("", "/")
         or parsed.username or parsed.password or parsed.query or parsed.fragment
-        or not _valid_header_value(anon_key)
-        or not (service_key or service_jwt)
-        or (service_key and not _valid_header_value(service_key))
-        or (not service_key and not _valid_header_value(service_jwt))
-        or (service_key and not service_key.startswith("sb_secret_"))
-        or (not service_key and service_jwt.count(".") != 2)
+        or not _valid_header_value(service_key)
+        or not service_key.startswith("sb_secret_")
     ):
         raise GuardError("Arena restart database authority is unavailable")
     body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -165,11 +159,9 @@ def _request(function: str, payload: Mapping[str, Any]) -> Any:
     try:
         headers = {
             "Accept": "application/json", "Content-Type": "application/json",
-            "apikey": service_key or anon_key,
+            "apikey": service_key,
             "Content-Length": str(len(body)), "Connection": "close",
         }
-        if service_jwt and not service_key:
-            headers["Authorization"] = "Bearer " + service_jwt
         try:
             connection.request(
                 "POST", f"/rest/v1/rpc/{function}", body=body,

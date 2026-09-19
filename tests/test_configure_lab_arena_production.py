@@ -345,7 +345,7 @@ def test_validator_uses_protected_hotkey_and_persistent_arena_state():
 
 @pytest.mark.parametrize("missing", [
     "OPENROUTER_API_KEY", "SCRAPINGDOG_API_KEY", "DEEPLINE_API_KEY",
-    "SUPABASE_URL", "SUPABASE_ANON_KEY",
+    "SUPABASE_URL",
 ])
 def test_gateway_configuration_rejects_missing_existing_values(missing):
     values = existing()
@@ -515,7 +515,6 @@ else:
             "SCRAPINGDOG_API_KEY": "LAB_ARENA_SCRAPINGDOG_API_KEY",
             "DEEPLINE_API_KEY": "LAB_ARENA_DEEPLINE_API_KEY",
             "SUPABASE_URL": "LAB_ARENA_SUPABASE_URL",
-            "SUPABASE_ANON_KEY": "LAB_ARENA_SUPABASE_ANON_KEY",
         },
     }
     if request_override:
@@ -561,7 +560,7 @@ def test_remote_fake_aws_noops_when_current_document_already_matches(tmp_path):
         "SUPABASE_ANON_KEY": "anon", "LAB_ARENA_MODE": "live",
         "LAB_ARENA_OPENROUTER_API_KEY": "or", "LAB_ARENA_SCRAPINGDOG_API_KEY": "sd",
         "LAB_ARENA_DEEPLINE_API_KEY": "deep", "LAB_ARENA_SUPABASE_URL": "https://db.example",
-        "LAB_ARENA_SUPABASE_ANON_KEY": "anon", "LAB_ARENA_SERVICE_KEY": "sb_secret_scoped-test",
+        "LAB_ARENA_SERVICE_KEY": "sb_secret_scoped-test",
     }
     raw = json.dumps(source, separators=(",", ":"))
     result, state = _run_remote_with_fake_aws(tmp_path, raw, return_state=True)

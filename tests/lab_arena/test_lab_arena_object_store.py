@@ -155,8 +155,7 @@ def test_service_wiring_passes_the_optional_object_prefix(
     captured = {}
 
     monkeypatch.setenv("LAB_ARENA_SUPABASE_URL", "https://database.example")
-    monkeypatch.setenv("LAB_ARENA_SUPABASE_ANON_KEY", "anon")
-    monkeypatch.setenv("LAB_ARENA_SERVICE_KEY", "service")
+    monkeypatch.setenv("LAB_ARENA_SERVICE_KEY", "sb_secret_test")
     monkeypatch.setenv("LAB_ARENA_BUCKET", "arena")
     monkeypatch.setenv("LAB_ARENA_CHAIN_ENDPOINT", "wss://chain.example")
     if configured_prefix is None:

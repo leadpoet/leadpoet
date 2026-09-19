@@ -296,7 +296,6 @@ def gateway_updates(values: Mapping[str, str], args: argparse.Namespace, service
         "LAB_ARENA_SCRAPINGDOG_API_KEY": _required_alias(values, "SCRAPINGDOG_API_KEY"),
         "LAB_ARENA_DEEPLINE_API_KEY": _required_alias(values, "DEEPLINE_API_KEY"),
         "LAB_ARENA_SUPABASE_URL": _required_alias(values, "SUPABASE_URL"),
-        "LAB_ARENA_SUPABASE_ANON_KEY": _required_alias(values, "SUPABASE_ANON_KEY"),
         "LAB_ARENA_SERVICE_KEY": service_key,
         "LAB_ARENA_BUCKET": args.bucket,
         "LAB_ARENA_SCORER_IMAGE": args.scorer_image,
@@ -922,8 +921,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "aliases": {"OPENROUTER_API_KEY": "LAB_ARENA_OPENROUTER_API_KEY",
                             "SCRAPINGDOG_API_KEY": "LAB_ARENA_SCRAPINGDOG_API_KEY",
                             "DEEPLINE_API_KEY": "LAB_ARENA_DEEPLINE_API_KEY",
-                            "SUPABASE_URL": "LAB_ARENA_SUPABASE_URL",
-                            "SUPABASE_ANON_KEY": "LAB_ARENA_SUPABASE_ANON_KEY"},
+                            "SUPABASE_URL": "LAB_ARENA_SUPABASE_URL"},
             }),
             (args.validator_host, {
                 "secret_id": VALIDATOR_SECRET, "allowed_accounts": args.allowed_account,

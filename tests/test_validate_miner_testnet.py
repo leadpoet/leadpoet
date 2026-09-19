@@ -189,22 +189,27 @@ def test_resume_configuration_requires_the_exact_baseline_source():
     assert not SCRIPT._resume_configuration_matches(changed, **arguments)
 
 
-@pytest.mark.parametrize("service_key", ("", "sb_secret_example"))
-def test_managed_transport_uses_arena_environment_without_network(monkeypatch, service_key):
+def test_managed_transport_uses_scoped_arena_key_without_network(monkeypatch):
     monkeypatch.setenv("LAB_ARENA_SUPABASE_URL", "https://example.supabase.co")
-    monkeypatch.setenv("LAB_ARENA_SUPABASE_ANON_KEY", "anon")
-    monkeypatch.setenv("LAB_ARENA_SERVICE_JWT", "header.payload.signature")
-    monkeypatch.setenv("LAB_ARENA_SERVICE_KEY", service_key)
+    monkeypatch.setenv("LAB_ARENA_SERVICE_KEY", "sb_secret_example")
     args = type("Args", (), {"arena_environment_file": None})()
 
     transport = SCRIPT._managed_postgrest_transport(args)
     try:
-        assert "header.payload.signature" not in repr(transport)
         assert "example.supabase.co" in repr(transport)
-        assert ("Authorization" in transport._headers) is not bool(service_key)
-        assert transport._headers["apikey"] == (service_key or "anon")
+        assert "Authorization" not in transport._headers
+        assert transport._headers["apikey"] == "sb_secret_example"
     finally:
         transport.close()
+
+
+def test_managed_transport_requires_scoped_arena_key(monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.delenv("LAB_ARENA_SERVICE_KEY", raising=False)
+    args = type("Args", (), {"arena_environment_file": None})()
+
+    with pytest.raises(SCRIPT.ConfigurationError, match="LAB_ARENA_SERVICE_KEY"):
+        SCRIPT._managed_postgrest_transport(args)
 
 
 def test_managed_driver_is_pinned_and_does_not_create_daily_rounds():

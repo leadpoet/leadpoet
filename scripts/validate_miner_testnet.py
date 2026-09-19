@@ -239,20 +239,16 @@ def _managed_postgrest_transport(args: argparse.Namespace):
     from lab_arena.store import PostgrestTransport
 
     url = os.environ.get("LAB_ARENA_SUPABASE_URL", "").strip()
-    anon_key = os.environ.get("LAB_ARENA_SUPABASE_ANON_KEY", "").strip()
     service_key = os.environ.get("LAB_ARENA_SERVICE_KEY", "").strip()
-    service_jwt = os.environ.get("LAB_ARENA_SERVICE_JWT", "").strip()
-    if not url or not anon_key or not (service_key or service_jwt):
+    if not url or not service_key:
         raise ConfigurationError(
-            "managed PostgREST requires LAB_ARENA_SUPABASE_URL, "
-            "LAB_ARENA_SUPABASE_ANON_KEY, and one Arena service credential"
+            "managed PostgREST requires LAB_ARENA_SUPABASE_URL and "
+            "LAB_ARENA_SERVICE_KEY"
         )
     try:
         return PostgrestTransport(
             url,
-            anon_key=anon_key,
             service_key=service_key,
-            service_jwt="" if service_key else service_jwt,
         )
     except Exception as exc:
         raise ConfigurationError("managed PostgREST transport is invalid") from exc

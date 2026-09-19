@@ -62,7 +62,6 @@ def test_guard_helper_ignores_stale_cloned_restart_authority(tmp_path: Path) -> 
     canonical_env = tmp_path / "gateway.env"
     canonical_env.write_text(
         "LAB_ARENA_SUPABASE_URL=https://fresh.invalid\n"
-        "LAB_ARENA_SUPABASE_ANON_KEY=fresh-anon\n"
         "LAB_ARENA_SERVICE_KEY=sb_secret_fresh\n",
         encoding="utf-8",
     )
@@ -177,9 +176,7 @@ def test_guard_helper_uses_canonical_file_before_and_after_clone_removal(
         "            'hostname': hostname,\n"
         "            **{name: os.environ.get(name) for name in (\n"
         "                'LAB_ARENA_SUPABASE_URL',\n"
-        "                'LAB_ARENA_SUPABASE_ANON_KEY',\n"
         "                'LAB_ARENA_SERVICE_KEY',\n"
-        "                'LAB_ARENA_SERVICE_JWT',\n"
         "            )},\n"
         "            }) + '\\n')\n"
         "    def request(self, *args, **kwargs): pass\n"
@@ -198,9 +195,7 @@ def test_guard_helper_uses_canonical_file_before_and_after_clone_removal(
     environment_file = tmp_path / "gateway.env"
     file_values = {
         "LAB_ARENA_SUPABASE_URL": "https://file-authority.invalid",
-        "LAB_ARENA_SUPABASE_ANON_KEY": "file-anon",
         "LAB_ARENA_SERVICE_KEY": "sb_secret_file",
-        "LAB_ARENA_SERVICE_JWT": "file.legacy.jwt",
     }
     environment_file.write_text(
         "\n".join(f"export {name}={value}" for name, value in file_values.items())
@@ -233,9 +228,7 @@ def test_guard_helper_uses_canonical_file_before_and_after_clone_removal(
     harness.chmod(0o755)
     ambient = {
         "LAB_ARENA_SUPABASE_URL": "https://ambient-authority.invalid",
-        "LAB_ARENA_SUPABASE_ANON_KEY": "ambient-anon",
         "LAB_ARENA_SERVICE_KEY": "sb_secret_ambient",
-        "LAB_ARENA_SERVICE_JWT": "ambient.legacy.jwt",
     }
 
     completed = subprocess.run(
@@ -282,9 +275,7 @@ def test_guard_helper_missing_canonical_file_fails_closed(
     environment = dict(os.environ)
     for name in (
         "LAB_ARENA_SUPABASE_URL",
-        "LAB_ARENA_SUPABASE_ANON_KEY",
         "LAB_ARENA_SERVICE_KEY",
-        "LAB_ARENA_SERVICE_JWT",
     ):
         environment.pop(name, None)
 
@@ -347,9 +338,7 @@ def test_guard_helper_does_not_fall_back_to_ambient_credentials_when_file_exists
     )
     ambient = {
         "LAB_ARENA_SUPABASE_URL": "https://ambient-authority.invalid",
-        "LAB_ARENA_SUPABASE_ANON_KEY": "ambient-anon",
         "LAB_ARENA_SERVICE_KEY": "sb_secret_ambient",
-        "LAB_ARENA_SERVICE_JWT": "ambient.legacy.jwt",
     }
 
     completed = subprocess.run(

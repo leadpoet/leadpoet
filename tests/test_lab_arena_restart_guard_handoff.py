@@ -27,9 +27,7 @@ ENV = {
 }
 for _credential_name in (
     "LAB_ARENA_SUPABASE_URL",
-    "LAB_ARENA_SUPABASE_ANON_KEY",
     "LAB_ARENA_SERVICE_KEY",
-    "LAB_ARENA_SERVICE_JWT",
 ):
     ENV.pop(_credential_name, None)
 

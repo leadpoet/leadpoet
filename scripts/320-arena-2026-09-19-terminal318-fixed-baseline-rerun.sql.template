@@ -2,8 +2,8 @@
 -- has been captured from the protected database. This file is not an active
 -- migration while it retains the .template suffix.
 -- Intended source: leadpoet-sales-agent commit
--- d4005afc7d78457895099943e804cd6ac9071907 on
--- codex/arena-finish-cost-release-20260919. Verify the sealed archive bytes
+-- 10442b6a9112732ed5452a4b4afa3f139d8a256f on
+-- lab. Verify the sealed archive bytes
 -- before replacing the source placeholders.
 BEGIN;
 SET LOCAL TIME ZONE 'UTC';

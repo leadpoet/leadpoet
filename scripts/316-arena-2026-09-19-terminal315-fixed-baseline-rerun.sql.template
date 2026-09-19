@@ -20,9 +20,9 @@ BEGIN
   AND archived.rewards_enabled IS FALSE
   AND archived.cancel_reason='authorized_sep19_terminal315_fixed_baseline_archive'
   AND archived.configuration_doc->>'archived_terminal_status'='__TERMINAL_STATUS__'
-  AND archived.configuration_doc->>'archived_terminal_status'='cancelled'
-  AND archived.configuration_doc->>'archived_terminal_cancel_reason'=
-      '__TERMINAL_CANCEL_REASON__'
+  AND archived.configuration_doc->>'archived_terminal_status' IN('published','cancelled')
+  AND archived.configuration_doc->>'archived_terminal_cancel_reason'
+      IS NOT DISTINCT FROM __TERMINAL_CANCEL_REASON_SQL__
   AND archived.configuration_doc->>'archived_terminal_round_sha256'='__TERMINAL_ROUND_SHA256__'
   AND archived.configuration_doc->>'archived_terminal_baseline_sha256'='__TERMINAL_BASELINE_SHA256__'
   AND archived.configuration_doc->>'archived_terminal_miner_submissions_sha256'='__TERMINAL_MINER_SUBMISSIONS_SHA256__'
@@ -287,9 +287,9 @@ BEGIN
   WHERE s.round_id='arena-2026-09-19'
    AND (COALESCE((c.state->>'inflight_calls')::BIGINT,-1)<>0
     OR COALESCE((c.state->>'success_unresolved_calls')::BIGINT,-1)<>0);
- IF active_round.status<>'cancelled'
+ IF active_round.status NOT IN('published','cancelled')
   OR active_round.status IS DISTINCT FROM '__TERMINAL_STATUS__'
-  OR active_round.cancel_reason IS DISTINCT FROM '__TERMINAL_CANCEL_REASON__'
+  OR active_round.cancel_reason IS DISTINCT FROM __TERMINAL_CANCEL_REASON_SQL__
   OR public.lab_arena_sep19_rerun315_active_valid_v1() IS NOT TRUE
   OR active_count<>0 OR unsettled<>0
   OR active_round.configuration_doc ? 'company_quality_policy'

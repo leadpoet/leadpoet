@@ -88,7 +88,8 @@ def _scorer_patch(definition: str) -> str:
     return definition.replace(old_guard, new_guard).replace(old_assignment, new_assignment)
 
 
-def _seed_terminal_rerun315(conn) -> None:
+def _seed_terminal_rerun315(conn, *, terminal_status: str = "cancelled") -> None:
+    assert terminal_status in {"published", "cancelled"}
     prior._seed_terminal_rerun313_failure(conn)
     schedule = prior._schedule()
     with conn.cursor() as cursor:
@@ -230,12 +231,20 @@ def _seed_terminal_rerun315(conn) -> None:
         cursor.execute(
             """
             UPDATE public.lab_arena_rounds
-            SET status='cancelled',published_at=NULL,publication_doc=NULL,
-                cancel_reason='execution_incomplete:stage1:5',
+            SET status=%s,
+                published_at=CASE WHEN %s='published' THEN clock_timestamp() ELSE NULL END,
+                publication_doc=CASE WHEN %s='published' THEN jsonb_build_object(
+                  'schema_version','leadpoet.lab_arena.publication.v1',
+                  'fixture','terminal315-published',
+                  'final_ranking',jsonb_build_array('miner-a','miner-b','miner-c',
+                                                    'miner-d','miner-e'))
+                  ELSE NULL END,
+                cancel_reason=CASE WHEN %s='cancelled'
+                  THEN 'execution_incomplete:stage1:5' ELSE NULL END,
                 updated_at=clock_timestamp()
             WHERE round_id=%s
             """,
-            (ROUND,),
+            (terminal_status, terminal_status, terminal_status, terminal_status, ROUND),
         )
         assert cursor.rowcount == 1
         cursor.execute("SET session_replication_role=origin")
@@ -281,7 +290,11 @@ def _render(cursor, schedule: dict) -> tuple[str, str, str]:
     )
     terminal_status, terminal_cancel_reason = cursor.fetchone()
     assert re.fullmatch(r"[a-z0-9_]+", terminal_status)
-    assert re.fullmatch(r"[a-z0-9_:.-]+", terminal_cancel_reason)
+    if terminal_cancel_reason is not None:
+        assert re.fullmatch(r"[a-z0-9_:.-]+", terminal_cancel_reason)
+    terminal_cancel_reason_sql = (
+        "NULL" if terminal_cancel_reason is None else f"'{terminal_cancel_reason}'"
+    )
     values = {
         "__NEW_SOURCE_REF__": NEW_SOURCE_REF,
         "__NEW_SOURCE_SIZE_BYTES__": str(NEW_SOURCE_SIZE),
@@ -295,7 +308,7 @@ def _render(cursor, schedule: dict) -> tuple[str, str, str]:
             new_definition.encode()
         ).hexdigest(),
         "__TERMINAL_STATUS__": terminal_status,
-        "__TERMINAL_CANCEL_REASON__": terminal_cancel_reason,
+        "__TERMINAL_CANCEL_REASON_SQL__": terminal_cancel_reason_sql,
         "__TERMINAL_EXECUTE_RUN_COUNT__": str(_sha(
             cursor,
             "SELECT count(*) FROM public.lab_arena_runs "
@@ -461,7 +474,7 @@ def test_terminal315_rerun_executes_scores_and_publishes_with_preservation(
     psycopg2, dsn = database
     conn = psycopg2.connect(**dsn)
     try:
-        _seed_terminal_rerun315(conn)
+        _seed_terminal_rerun315(conn, terminal_status="published")
         schedule = _schedule()
         with conn.cursor() as cursor:
             cursor.execute(
@@ -530,6 +543,22 @@ def test_terminal315_rerun_executes_scores_and_publishes_with_preservation(
                 (ROUND,),
             )
             authority_and_policy_before = cursor.fetchone()
+            cursor.execute(
+                "SELECT status,published_at,publication_doc,cancel_reason "
+                "FROM public.lab_arena_rounds WHERE round_id=%s",
+                (ROUND,),
+            )
+            terminal_publication_before = cursor.fetchone()
+            assert terminal_publication_before[0] == "published"
+            assert terminal_publication_before[1] is not None
+            assert terminal_publication_before[2]["fixture"] == "terminal315-published"
+            assert terminal_publication_before[3] is None
+            terminal_round_sha_before = _sha(
+                cursor,
+                "SELECT encode(extensions.digest(to_jsonb(r)::text,'sha256'),'hex') "
+                "FROM public.lab_arena_rounds r WHERE round_id=%s",
+                (ROUND,),
+            )
             behavior_seals_before = _function_seals(cursor)
             rendered, old_scorer_hash, new_scorer_hash = _render(cursor, schedule)
 
@@ -611,6 +640,22 @@ def test_terminal315_rerun_executes_scores_and_publishes_with_preservation(
             ]
             assert _function_seals(cursor) == behavior_seals_before
             assert _round_history(cursor, ROUND + "-r315archive") == rerun315_history_before
+            cursor.execute(
+                "SELECT publication_doc,published_at,"
+                "configuration_doc->>'archived_terminal_status',"
+                "configuration_doc->>'archived_terminal_cancel_reason',"
+                "configuration_doc->>'archived_terminal_round_sha256' "
+                "FROM public.lab_arena_rounds WHERE round_id=%s",
+                (ROUND + "-r316archive",),
+            )
+            archived_publication = cursor.fetchone()
+            assert archived_publication == (
+                terminal_publication_before[2],
+                terminal_publication_before[1],
+                "published",
+                None,
+                terminal_round_sha_before,
+            )
             cursor.execute(
                 "SELECT count(*),count(*) FILTER(WHERE status='accepted'),"
                 "count(*) FILTER(WHERE status='failed'),"
@@ -846,6 +891,23 @@ def test_terminal315_preimage_requires_exact_shape_active_validity_and_settlemen
             with conn.cursor() as cursor:
                 cursor.execute(rendered)
         conn.rollback()
+
+        with conn.cursor() as cursor:
+            cancelled_rendered, _, _ = _render(cursor, _schedule())
+            cursor.execute(cancelled_rendered)
+            cursor.execute(
+                "SELECT publication_doc,published_at,"
+                "configuration_doc->>'archived_terminal_status',"
+                "configuration_doc->>'archived_terminal_cancel_reason' "
+                "FROM public.lab_arena_rounds WHERE round_id=%s",
+                (ROUND + "-r316archive",),
+            )
+            assert cursor.fetchone() == (
+                None,
+                None,
+                "cancelled",
+                "execution_incomplete:stage1:5",
+            )
     finally:
         conn.close()
 
@@ -867,8 +929,8 @@ def test_template_is_sealed_terminal315_only():
     assert "DROP TRIGGER IF EXISTS lab_arena_sep19_rerun315_score_namespace_guard" in body
     assert "AS $score_guard316$" in body and "END $score_guard316$" in body
     assert "active_round.status IS DISTINCT FROM '__TERMINAL_STATUS__'" in body
-    assert "active_round.status<>'cancelled'" in body
-    assert "active_round.cancel_reason IS DISTINCT FROM '__TERMINAL_CANCEL_REASON__'" in body
+    assert "active_round.status NOT IN('published','cancelled')" in body
+    assert "active_round.cancel_reason IS DISTINCT FROM __TERMINAL_CANCEL_REASON_SQL__" in body
     assert "__TERMINAL_BASELINE_ACCEPTED_RUN_COUNT__" in body
     assert "__TERMINAL_BASELINE_FAILED_RUN_COUNT__" in body
     assert "__TERMINAL_BASELINE_LEDGER_COUNT__" in body

@@ -616,6 +616,171 @@ def test_verified_rebrand_is_a_separate_identity_proof_not_a_domain_rewrite():
     assert receipt["reason_code"] == "verified_rebrand_continuity"
 
 
+def test_same_domain_alias_flows_from_selector_through_evidence_to_identity():
+    company = _company(name="Acme", website="https://acme.example")
+    verdict = _complete_verdict(observed_company_name="Northstar Systems LLC")
+    initial = _reverify_decision(
+        verdict,
+        "",
+        "",
+        icp=_icp(),
+        company=company,
+        company_quality=True,
+    )
+
+    assert initial.decision == COMPANY_FIT_UNAVAILABLE
+    assert _targeted_company_investigation_dimensions(
+        initial,
+        icp_stage="",
+        employee_size_conflict=False,
+    ) == ("rebrand",)
+
+    url = "https://acme.example/legal-name"
+    quote = "Northstar Systems LLC trades as Acme."
+    anchor = {
+        "submitted_name": company.company_name,
+        "submitted_domain": "acme.example",
+        "submitted_linkedin_slug": "acme",
+        "observed_name": verdict["observed_company_name"],
+        "observed_domain": "acme.example",
+        "observed_linkedin_slug": "acme",
+    }
+    proof = _validated_findings(
+        {"findings": [_finding(
+            "rebrand",
+            observed_value="Acme",
+            evidence_url=url,
+            evidence_quote=quote,
+            old_name="Northstar Systems LLC",
+            new_name="Acme",
+            old_domain="acme.example",
+            new_domain="acme.example",
+            shared_linkedin_slug="acme",
+        )]},
+        targets=("rebrand",),
+        fetched_pages={url: quote},
+        first_party_domains={"acme.example"},
+        identity_anchor=anchor,
+    )["rebrand"]
+
+    assert proof["status"] == "VERIFIED"
+    projected = _reverify_decision(
+        verdict,
+        "",
+        "",
+        icp=_icp(),
+        company=company,
+        verified_rebrand_identity=proof,
+        company_quality=True,
+    )
+    assert projected.decision == COMPANY_FIT_MATCH
+    assert projected.details["identity_receipt"]["reason_code"] == (
+        "verified_rebrand_continuity"
+    )
+
+
+@pytest.mark.parametrize(
+    ("evidence_url", "fetched_text", "quote"),
+    [
+        (
+            "https://acme.example/legal-name",
+            "Acme and Northstar Systems LLC use the same website.",
+            "Acme and Northstar Systems LLC use the same website.",
+        ),
+        (
+            "https://acme.example/legal-name",
+            "Acme is the parent of Northstar Systems LLC, which operates as a subsidiary.",
+            "Acme is the parent of Northstar Systems LLC, which operates as a subsidiary.",
+        ),
+        (
+            "https://acme.example/legal-name",
+            "This fetched page has different text.",
+            "Northstar Systems LLC trades as Acme.",
+        ),
+        (
+            "https://unrelated.example/legal-name",
+            "Northstar Systems LLC trades as Acme.",
+            "Northstar Systems LLC trades as Acme.",
+        ),
+    ],
+)
+def test_same_domain_alias_rejects_weak_or_unfetched_first_party_evidence(
+    evidence_url, fetched_text, quote
+):
+    anchor = {
+        "submitted_name": "Acme",
+        "submitted_domain": "acme.example",
+        "submitted_linkedin_slug": "acme",
+        "observed_name": "Northstar Systems LLC",
+        "observed_domain": "acme.example",
+        "observed_linkedin_slug": "acme",
+    }
+    finding = _finding(
+        "rebrand",
+        evidence_url=evidence_url,
+        evidence_quote=quote,
+        old_name="Northstar Systems LLC",
+        new_name="Acme",
+        old_domain="acme.example",
+        new_domain="acme.example",
+        shared_linkedin_slug="acme",
+    )
+    result = _validated_findings(
+        {"findings": [finding]},
+        targets=("rebrand",),
+        fetched_pages={evidence_url: fetched_text},
+        first_party_domains={"acme.example"},
+        identity_anchor=anchor,
+    )
+
+    assert result["rebrand"]["status"] == "UNPROVEN"
+
+
+def test_same_domain_alias_requires_matching_linkedin_slug_and_unproven_is_retryable():
+    company = _company(name="Acme", website="https://acme.example")
+    conflicting = _complete_verdict(
+        observed_company_name="Northstar Systems LLC",
+        observed_company_linkedin="https://www.linkedin.com/company/other",
+    )
+    conflict_result = _reverify_decision(
+        conflicting,
+        "",
+        "",
+        icp=_icp(),
+        company=company,
+        verified_rebrand_identity=_finding(
+            "rebrand",
+            old_name="Northstar Systems LLC",
+            new_name="Acme",
+            old_domain="acme.example",
+            new_domain="acme.example",
+            shared_linkedin_slug="acme",
+        ),
+        company_quality=True,
+    )
+    assert conflict_result.decision == COMPANY_FIT_MISMATCH
+    assert _targeted_company_investigation_dimensions(
+        conflict_result,
+        icp_stage="",
+        employee_size_conflict=False,
+    ) == ()
+
+    matching = _complete_verdict(observed_company_name="Northstar Systems LLC")
+    unproven = _reverify_decision(
+        matching,
+        "",
+        "",
+        icp=_icp(),
+        company=company,
+        verified_rebrand_identity={"status": "UNPROVEN"},
+        company_quality=True,
+    )
+    assert unproven.decision == COMPANY_FIT_UNAVAILABLE
+    assert unproven.details["identity_receipt"]["reason_code"] == (
+        "rebrand_continuity_unproven"
+    )
+
+
 def test_rebrand_proof_cannot_bind_an_unrelated_linkedin_company():
     company = _company(
         name="Wayground formerly Quizizz",

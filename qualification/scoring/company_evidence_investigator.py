@@ -28,6 +28,7 @@ from qualification.scoring.linkedin_company_size import (
     PROVIDER_ERROR_FAILURE_REASON,
     UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON,
     VERIFIER_FAILURE_REASON_KEY,
+    linkedin_company_page_slug,
 )
 
 # Use an already proven scorer tool model from the signed Arena policy. This
@@ -75,8 +76,10 @@ evaluate completed stage events under either verified name. Do not discard an
 earlier completed round solely because it uses the old name; still check for a
 later completed stage event. Rebrand VERIFIED needs an explicit first-party
 statement that the old and new names are the same entity, and must identify
-both names and both domains. A redirect or shared LinkedIn slug alone is
-insufficient. Headcount must be current company-wide headcount; department,
+both names. A domain-changing rebrand must identify both domains. A same-domain
+legal or trading-name alias must retain the independently observed shared
+domain and LinkedIn slug. A common domain, redirect, or shared LinkedIn slug
+alone is insufficient. Headcount must be current company-wide headcount; department,
 office, job, associated-member count, or stale evidence is UNPROVEN. An exact
 entity-bound LinkedIn Company size/employeeCountRange is primary over a
 third-party exact estimate. Other conflicts are UNPROVEN. Use only a canonical
@@ -234,6 +237,27 @@ def _first_party_url(url: str, domains: set[str]) -> bool:
     return bool(_registrable_domain(url) in domains)
 
 
+def _same_domain_name_alias(identity: Mapping[str, Any]) -> bool:
+    """Identify the narrow independent anchor for a disputed company name."""
+
+    def _name_key(value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", "", _normalized_span(value))
+
+    submitted_name_key = _name_key(identity.get("submitted_name"))
+    observed_name_key = _name_key(identity.get("observed_name"))
+    submitted_domain = identity.get("submitted_domain")
+    submitted_slug = identity.get("submitted_linkedin_slug")
+    return bool(
+        submitted_domain
+        and submitted_domain == identity.get("observed_domain")
+        and submitted_slug
+        and submitted_slug == identity.get("observed_linkedin_slug")
+        and submitted_name_key
+        and observed_name_key
+        and submitted_name_key != observed_name_key
+    )
+
+
 def _quote_proves_rebrand_continuity(
     quote: str,
     *,
@@ -245,13 +269,15 @@ def _quote_proves_rebrand_continuity(
     normalized_new = _normalized_span(new_name)
     if re.search(
         r"\b(?:plan(?:s|ned)?|intend(?:s|ed)?|propos(?:e|ed)|consider(?:s|ed)?|"
-        r"may|might|could|will|would|not|never|den(?:y|ied)|cancel(?:led)?|failed)\b",
+        r"may|might|could|will|would|not|never|den(?:y|ied)|cancel(?:led)?|failed|"
+        r"parent|subsidiar(?:y|ies))\b",
         normalized_quote,
     ):
         return False
     continuity = re.search(
         r"\b(?:formerly known as|is now|renamed(?: itself)?(?: from)?|"
-        r"changed (?:its )?name|same (?:legal )?(?:entity|company)|becomes?)\b",
+        r"changed (?:its )?name|same (?:legal )?(?:entity|company)|becomes?|"
+        r"trad(?:es|ing) as|doing business as|legal name)\b",
         normalized_quote,
     )
     return bool(
@@ -388,6 +414,7 @@ def _validated_findings(
     fetched_pages: Mapping[str, str],
     first_party_domains: set[str],
     identity_names: Optional[set[str]] = None,
+    identity_anchor: Optional[Mapping[str, Any]] = None,
 ) -> Optional[dict[str, dict[str, Any]]]:
     if not isinstance(arguments, Mapping) or set(arguments) != {"findings"}:
         return None
@@ -485,29 +512,56 @@ def _validated_findings(
                     evidence_quote="",
                     reason="source quote did not prove the submitted company-wide headcount",
                 )
-            elif target == "rebrand" and (
-                not _first_party_url(evidence_url, first_party_domains)
-                or not finding["old_name"]
-                or not finding["new_name"]
-                or not finding["old_domain"]
-                or not finding["new_domain"]
-                or finding["old_domain"] == finding["new_domain"]
-                or finding["old_domain"] not in first_party_domains
-                or finding["new_domain"] not in first_party_domains
-                or finding["old_domain"].casefold() not in fetched_text.casefold()
-                or finding["new_domain"].casefold() not in fetched_text.casefold()
-                or not _quote_proves_rebrand_continuity(
-                    finding["evidence_quote"],
-                    old_name=finding["old_name"],
-                    new_name=finding["new_name"],
+            elif target == "rebrand":
+                anchor = identity_anchor or {}
+                same_domain_alias = bool(
+                    _same_domain_name_alias(anchor)
+                    and {
+                        re.sub(r"[^a-z0-9]+", "", _normalized_span(name))
+                        for name in (finding["old_name"], finding["new_name"])
+                        if name
+                    }
+                    == {
+                        re.sub(r"[^a-z0-9]+", "", _normalized_span(anchor.get(key)))
+                        for key in ("submitted_name", "observed_name")
+                    }
+                    and finding["old_domain"]
+                    == finding["new_domain"]
+                    == anchor.get("submitted_domain")
+                    == _registrable_domain(evidence_url)
+                    and finding["shared_linkedin_slug"].casefold()
+                    == anchor.get("submitted_linkedin_slug")
                 )
-            ):
-                finding.update(
-                    status="UNPROVEN",
-                    evidence_url="",
-                    evidence_quote="",
-                    reason="first-party old/new identity continuity was not complete",
-                )
+                if (
+                    not _first_party_url(evidence_url, first_party_domains)
+                    or not finding["old_name"]
+                    or not finding["new_name"]
+                    or (
+                        not same_domain_alias
+                        and (
+                            not finding["old_domain"]
+                            or not finding["new_domain"]
+                            or finding["old_domain"] == finding["new_domain"]
+                            or finding["old_domain"] not in first_party_domains
+                            or finding["new_domain"] not in first_party_domains
+                            or finding["old_domain"].casefold()
+                            not in fetched_text.casefold()
+                            or finding["new_domain"].casefold()
+                            not in fetched_text.casefold()
+                        )
+                    )
+                    or not _quote_proves_rebrand_continuity(
+                        finding["evidence_quote"],
+                        old_name=finding["old_name"],
+                        new_name=finding["new_name"],
+                    )
+                ):
+                    finding.update(
+                        status="UNPROVEN",
+                        evidence_url="",
+                        evidence_quote="",
+                        reason="first-party old/new identity continuity was not complete",
+                    )
         findings[target] = finding
         if target == "rebrand" and finding["status"] == "VERIFIED":
             stage_attribution_names.update(
@@ -627,6 +681,20 @@ async def investigate_company_evidence(
         )
         if normalized
     }
+    identity_anchor = {
+        "submitted_name": company_locator.get("name"),
+        "submitted_domain": _registrable_domain(company_locator.get("website")),
+        "submitted_linkedin_slug": linkedin_company_page_slug(
+            company_locator.get("linkedin")
+        ),
+        "observed_name": (prior_observations or {}).get("observed_company_name"),
+        "observed_domain": _registrable_domain(
+            (prior_observations or {}).get("observed_company_website")
+        ),
+        "observed_linkedin_slug": linkedin_company_page_slug(
+            (prior_observations or {}).get("observed_company_linkedin")
+        ),
+    }
 
     started = time.monotonic()
     timeout = aiohttp.ClientTimeout(total=BROKER_SETTLEMENT_TIMEOUT_SECONDS)
@@ -745,6 +813,7 @@ async def investigate_company_evidence(
                         fetched_pages=fetched_pages,
                         first_party_domains=first_party_domains,
                         identity_names=identity_names,
+                        identity_anchor=identity_anchor,
                     )
                     if claims is None:
                         raise ValueError("reasoning_findings_malformed")

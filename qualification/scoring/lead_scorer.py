@@ -63,6 +63,7 @@ from qualification.scoring.company_fit_decision import (
     strict_company_fit_boolean,
 )
 from qualification.scoring.company_evidence_investigator import (
+    _same_domain_name_alias,
     investigate_company_evidence,
 )
 from qualification.scoring.evaluation_clock import evaluation_date
@@ -1081,6 +1082,14 @@ def _web_identity_receipt(
         if isinstance(verified_rebrand_identity, Mapping)
         else {}
     )
+    receipt_submitted_domain = str(receipt.get("submitted_domain") or "").casefold()
+    receipt_observed_domain = str(receipt.get("observed_domain") or "").casefold()
+    receipt_submitted_slug = str(receipt.get("submitted_linkedin_slug") or "").casefold()
+    receipt_observed_slug = str(receipt.get("observed_linkedin_slug") or "").casefold()
+    same_domain_name_alias = bool(
+        receipt.get("evidence_source") == "company_web_reverification"
+        and _same_domain_name_alias(receipt)
+    )
     if (
         receipt.get("decision") != COMPANY_FIT_MATCH
         and rebrand.get("status") == "VERIFIED"
@@ -1096,8 +1105,8 @@ def _web_identity_receipt(
         old_domain = str(rebrand.get("old_domain") or "").casefold()
         new_domain = str(rebrand.get("new_domain") or "").casefold()
         shared_slug = str(rebrand.get("shared_linkedin_slug") or "").casefold()
-        submitted_slug = str(receipt.get("submitted_linkedin_slug") or "").casefold()
-        observed_slug = str(receipt.get("observed_linkedin_slug") or "").casefold()
+        submitted_slug = receipt_submitted_slug
+        observed_slug = receipt_observed_slug
         def _name_binds_rebrand(value: str) -> bool:
             return bool(
                 value in {old_name, new_name}
@@ -1110,15 +1119,21 @@ def _web_identity_receipt(
             and _name_binds_rebrand(submitted_raw_name)
             and _name_binds_rebrand(observed_raw_name)
         )
-        domains_bind = bool(
+        cross_domain_binds = bool(
             old_domain
             and new_domain
             and old_domain != new_domain
             and {old_domain, new_domain}
             == {
-                str(receipt.get("submitted_domain") or "").casefold(),
-                str(receipt.get("observed_domain") or "").casefold(),
+                receipt_submitted_domain,
+                receipt_observed_domain,
             }
+        )
+        same_domain_binds = bool(
+            same_domain_name_alias
+            and old_domain == new_domain == receipt_submitted_domain
+            and shared_slug
+            and shared_slug == submitted_slug
         )
         linkedin_binds = bool(
             submitted_slug
@@ -1126,7 +1141,7 @@ def _web_identity_receipt(
             and submitted_slug == observed_slug
             and (not shared_slug or shared_slug == submitted_slug)
         )
-        if names_bind and domains_bind and linkedin_binds:
+        if names_bind and (cross_domain_binds or same_domain_binds) and linkedin_binds:
             receipt.update(
                 decision=COMPANY_FIT_MATCH,
                 reason_code="verified_rebrand_continuity",
@@ -1138,13 +1153,15 @@ def _web_identity_receipt(
                 verified_new_domain=new_domain,
             )
             return receipt
-    if (
-        receipt.get("decision") == COMPANY_FIT_MISMATCH
-        and receipt.get("reason_code") == "identity_mismatch"
-        and rebrand.get("status") == "UNPROVEN"
-        and receipt.get("submitted_domain")
-        and receipt.get("observed_domain")
-        and receipt.get("submitted_domain") != receipt.get("observed_domain")
+    if rebrand.get("status") == "UNPROVEN" and (
+        same_domain_name_alias
+        or (
+            receipt.get("decision") == COMPANY_FIT_MISMATCH
+            and receipt.get("reason_code") == "identity_mismatch"
+            and receipt_submitted_domain
+            and receipt_observed_domain
+            and receipt_submitted_domain != receipt_observed_domain
+        )
     ):
         receipt.update(
             decision=COMPANY_FIT_UNAVAILABLE,
@@ -2299,11 +2316,21 @@ def _targeted_company_investigation_dimensions(
     ):
         targets.append("stage")
     identity = details.get("identity_receipt")
-    if isinstance(identity, Mapping) and (
-        details.get("identity_decision") != COMPANY_FIT_MATCH
-        and identity.get("submitted_domain")
-        and identity.get("observed_domain")
-        and identity.get("submitted_domain") != identity.get("observed_domain")
+    if (
+        isinstance(identity, Mapping)
+        and details.get("identity_decision") != COMPANY_FIT_MATCH
+        and (
+            (
+                identity.get("submitted_domain")
+                and identity.get("observed_domain")
+                and identity.get("submitted_domain")
+                != identity.get("observed_domain")
+            )
+            or (
+                identity.get("evidence_source") == "company_web_reverification"
+                and _same_domain_name_alias(identity)
+            )
+        )
     ):
         targets.append("rebrand")
     conflict_receipt = details.get("employee_size_conflict_receipt")

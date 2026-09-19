@@ -1905,9 +1905,9 @@ def test_luna_responses_uses_bounded_zdr_fallback_and_reserves_its_price_ceiling
         "allow_fallbacks": True,
         "data_collection": "deny",
         "zdr": True,
+        "order": ["azure/us"],
         "max_price": {"prompt": 0.275, "completion": 1.32, "request": 0},
     }
-    assert "order" not in body["provider"]
     assert "only" not in body["provider"]
     assert result.call["funding_source"] == funding_source
     assert body["store"] is False and body["stream"] is False

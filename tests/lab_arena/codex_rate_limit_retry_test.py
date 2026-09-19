@@ -515,7 +515,7 @@ def test_worker_retries_luna_throttle_with_same_bounded_host_policy(
     assert len(transport.sent) == 2
     for request in transport.sent:
         body = json.loads(request["body"])
-        assert "order" not in body["provider"]
+        assert body["provider"]["order"] == ["azure/us"]
         assert "only" not in body["provider"]
         assert "require_parameters" not in body["provider"]
         assert body["provider"]["max_price"] == {

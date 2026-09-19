@@ -246,6 +246,36 @@ def test_responses_provider_order_cannot_be_injected_after_normalization():
     assert excinfo.value.code == "forbidden_field"
 
 
+def test_luna_host_provider_order_is_exact_and_keeps_privacy_controls():
+    parameters = {**VALID["openrouter.responses"], "model": "openai/gpt-5.6-luna"}
+    route = {
+        "data_collection": "deny",
+        "zdr": True,
+        "allow_fallbacks": True,
+        "order": ["azure/us"],
+        "max_price": {"prompt": 0.275, "completion": 1.32, "request": 0},
+    }
+    outbound = ops.build_outbound_request(
+        "openrouter.responses", parameters, openrouter_provider_policy=route
+    )
+    assert json.loads(outbound.body)["provider"] == route
+    for changes in (
+        {"zdr": False}, {"data_collection": "allow"},
+        {"order": ["azure/eu"]}, {"order": ["azure/us", "openai"]},
+        {"only": ["azure/us"]},
+    ):
+        with pytest.raises(ops.OperationRequestError):
+            ops.build_outbound_request(
+                "openrouter.responses", parameters,
+                openrouter_provider_policy={**route, **changes},
+            )
+    with pytest.raises(ops.OperationRequestError):
+        ops.build_outbound_request(
+            "openrouter.responses", {**parameters, "model": "openai/gpt-4o-mini"},
+            openrouter_provider_policy=route,
+        )
+
+
 @pytest.mark.parametrize("payload", [
     {"url": "https://www.linkedin.com/company/example/"},
     {"universalName": "example"},

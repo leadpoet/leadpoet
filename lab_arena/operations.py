@@ -1828,14 +1828,17 @@ def build_outbound_request(
                 raise OperationRequestError("invalid_request")
             policy = _deep_copy_json(openrouter_provider_policy)
             price_fields = {"prompt", "completion", "request"}
+            policy_fields = {"data_collection", "zdr", "allow_fallbacks", "max_price"}
             if (
                 not isinstance(policy, dict)
-                or set(policy) != {
-                    "data_collection",
-                    "zdr",
-                    "allow_fallbacks",
-                    "max_price",
-                }
+                or set(policy) not in (policy_fields, policy_fields | {"order"})
+                or (
+                    "order" in policy
+                    and (
+                        normalized.get("model") != "openai/gpt-5.6-luna"
+                        or policy["order"] != ["azure/us"]
+                    )
+                )
                 or policy.get("data_collection") != "deny"
                 or policy.get("zdr") is not True
                 or type(policy.get("allow_fallbacks")) is not bool

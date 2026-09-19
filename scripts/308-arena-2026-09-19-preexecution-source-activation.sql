@@ -1,8 +1,8 @@
 -- 308: Activate the reviewed Sep19 baseline archive before execution.
 -- This source-only transition requires all 20 baseline runs to remain pending.
--- Six completed miner runs and the completed code-review ledger are preserved.
+-- Concurrent miner execution and ledger progress is permitted and preserved.
 -- It preserves both round configurations, the frozen bank, all miner sources,
--- all 100 run rows, all 12 ledger rows, and all Sep20 state.
+-- all 100 run rows, all existing ledger rows, and all Sep20 state.
 --
 -- External object preconditions, verified by the protected read/apply helper:
 --   new source ref: arena/arena-2026-09-19/sources/baseline-2026-09-19-preexecution307.tar.gz
@@ -234,15 +234,10 @@ BEGIN
          WHERE round_id = 'arena-2026-09-19' AND stage = 1) <> 50
      OR (SELECT pg_catalog.count(*) FROM public.lab_arena_runs
          WHERE round_id = 'arena-2026-09-19' AND stage = 2) <> 50
-     OR (SELECT pg_catalog.count(*) FROM public.lab_arena_runs
-         WHERE round_id = 'arena-2026-09-19' AND status = 'accepted') <> 6
-     OR (SELECT pg_catalog.count(*) FROM public.lab_arena_runs
-         WHERE round_id = 'arena-2026-09-19' AND status = 'pending') <> 94
      OR EXISTS (
        SELECT 1 FROM public.lab_arena_runs
        WHERE round_id = 'arena-2026-09-19'
          AND (kind IS DISTINCT FROM 'execute'
-           OR status NOT IN ('pending', 'accepted')
            OR attempt IS DISTINCT FROM 1
            OR icp_position NOT BETWEEN 0 AND 19
            OR stage IS DISTINCT FROM CASE WHEN icp_position < 10 THEN 1 ELSE 2 END
@@ -268,25 +263,9 @@ BEGIN
          AND (entry.submission_id = 'baseline-2026-09-19'
            OR run.submission_id = 'baseline-2026-09-19'
            OR run.kind = 'score'
-           OR entry.operation_id IS DISTINCT FROM 'openrouter.code_review')
+           OR entry.operation_id IN ('openrouter.score', 'deepline.score'))
      ) THEN
     RAISE EXCEPTION 'Sep19 baseline or scoring ledger differs'
-      USING ERRCODE = '55000';
-  END IF;
-
-  IF (SELECT pg_catalog.count(*) FROM public.lab_arena_ledger
-      WHERE round_id = 'arena-2026-09-19') <> 12
-     OR EXISTS (
-       SELECT 1 FROM public.lab_arena_ledger
-       WHERE round_id = 'arena-2026-09-19'
-         AND run_id IS NOT NULL
-     ) OR (SELECT pg_catalog.count(*) FROM public.lab_arena_ledger
-           WHERE round_id = 'arena-2026-09-19' AND entry_kind = 'reservation') <> 4
-     OR (SELECT pg_catalog.count(*) FROM public.lab_arena_ledger
-         WHERE round_id = 'arena-2026-09-19' AND entry_kind = 'dispatch') <> 4
-     OR (SELECT pg_catalog.count(*) FROM public.lab_arena_ledger
-         WHERE round_id = 'arena-2026-09-19' AND entry_kind = 'settlement') <> 4 THEN
-    RAISE EXCEPTION 'Sep19 code-review ledger or execution ledger differs'
       USING ERRCODE = '55000';
   END IF;
 

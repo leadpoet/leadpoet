@@ -18,6 +18,8 @@ from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migrati
 
 ROOT = Path(__file__).parents[2]
 TEMPLATE = ROOT / "scripts/316-arena-2026-09-19-terminal315-fixed-baseline-rerun.sql.template"
+RENDERED = ROOT / "scripts/316-arena-2026-09-19-terminal315-fixed-baseline-rerun.sql"
+RENDERED_SHA256 = "bd2f7980090bcef35aba3dcffe2c27bfe8042d6a3769ff6c02774b3d0c5f13be"
 rerun310 = prior.prior.rerun310
 ROUND = prior.ROUND
 BASELINE = prior.BASELINE
@@ -42,6 +44,11 @@ def database():
 
 @pytest.fixture(scope="module")
 def terminal_failure_database():
+    yield from database_with_lab_arena_migration(_test_migrations())
+
+
+@pytest.fixture(scope="module")
+def exact_render_database():
     yield from database_with_lab_arena_migration(_test_migrations())
 
 
@@ -947,3 +954,72 @@ def test_template_is_sealed_terminal315_only():
     assert "DELETE FROM" not in body and "TRUNCATE " not in body
     assert "lab_arena_accepted_weight_states" in body
     assert "company_quality_policy" in body
+
+
+def test_exact_render_has_terminal_seals_and_rejects_wrong_preimage_atomically(
+    exact_render_database,
+):
+    raw = RENDERED.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == RENDERED_SHA256
+    body = raw.decode()
+    assert re.search(r"__[A-Z0-9_]+__", body) is None
+    assert "a9aab3dac66661b9d727109ba7eab59f2159aa2f" in body
+    assert "8f64bcf9cd10acd198ca9ede9a2a2b1da1445f747a5afb0d1de887575ea477b8" in body
+    assert "baseline-2026-09-19-rerun316-a9aab3da.tar.gz" in body
+    assert '"benchmark_deadline":"2026-09-19T13:45:00Z"' in body
+    assert "active_round.status IS DISTINCT FROM 'cancelled'" in body
+    assert "active_round.cancel_reason IS DISTINCT FROM 'scoring_incomplete'" in body
+    assert "kind='score')<>82" in body
+    for terminal_seal in (
+        "4ef9e9be958539f71b4fd7703a6e58509bc44eeac2c9a1bb7aa687b57abfa964",
+        "7b7c79d770ddc36859ca8d71b051567f40cb49e61ee596af3af2b8a9dd8a6ede",
+        "b8c8728e954a021afefef44234be454b47d9ed7ceb9197cf7efcc6b9f40fc555",
+    ):
+        assert terminal_seal in body
+    assert "moved_score_ledger<>2171" in body
+    assert "moved_baseline_ledger<>1167" in body
+
+    psycopg2, dsn = exact_render_database
+    conn = psycopg2.connect(**dsn)
+    try:
+        _seed_terminal_rerun315(conn)
+        with conn.cursor() as cursor:
+            before = _round_history(cursor, ROUND)
+            previous_archive_before = _round_history(cursor, ROUND + "-r315archive")
+            scorer_hash_before = _sha(
+                cursor,
+                "SELECT encode(extensions.digest(pg_get_functiondef("
+                "'public.lab_arena_open_scoring_v2(text,smallint,jsonb)'::regprocedure),"
+                "'sha256'),'hex')",
+            )
+        with pytest.raises(
+            psycopg2.Error,
+            match=(
+                "Sep19 rerun316 (scorer definition differs|terminal preimage differs|"
+                "admission window closed)"
+            ),
+        ):
+            with conn.cursor() as cursor:
+                cursor.execute(body)
+        conn.rollback()
+        with conn.cursor() as cursor:
+            assert _round_history(cursor, ROUND) == before
+            assert _round_history(cursor, ROUND + "-r315archive") == previous_archive_before
+            cursor.execute(
+                "SELECT count(*) FROM public.lab_arena_rounds WHERE round_id=%s",
+                (ROUND + "-r316archive",),
+            )
+            assert cursor.fetchone()[0] == 0
+            cursor.execute(
+                "SELECT to_regprocedure("
+                "'public.lab_arena_prepare_sep19_rerun316_v1(bigint,text,text,jsonb,text,text)')"
+            )
+            assert cursor.fetchone()[0] is None
+            assert _sha(
+                cursor,
+                "SELECT encode(extensions.digest(pg_get_functiondef("
+                "'public.lab_arena_open_scoring_v2(text,smallint,jsonb)'::regprocedure),"
+                "'sha256'),'hex')",
+            ) == scorer_hash_before
+    finally:
+        conn.close()

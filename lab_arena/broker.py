@@ -3644,7 +3644,7 @@ class Broker:
                 completed_rate_limit_retryable = (
                     getattr(context, "kind", "execute") == "execute"
                     and effective_operation_id == "openrouter.responses"
-                    and funding_source == "host"
+                    and funding_source in ("host", "miner_key")
                     and effective_normalized.get("model")
                     == OPENROUTER_LUNA_RESPONSES_MODEL
                     and openrouter_host_route is not None

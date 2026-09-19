@@ -1871,7 +1871,7 @@ class WorkerSocketServer:
             and call.get("actual_microusd") == 0
         )
         completed_price_unknown = (
-            call.get("funding_source") == "host"
+            call.get("funding_source") in ("host", "miner_key")
             and call.get("outcome") == "uncertain"
             and call.get("completed_rate_limit_retryable") is True
             and "actual_microusd" not in call

@@ -16,8 +16,10 @@ from lab_arena import contracts, runtime, shim
 from lab_arena import runner as rn
 from tests.lab_arena.test_lab_arena_broker import (
     CONTEXT,
+    HOST_KEYS,
     LUNA_RESPONSES,
     FakeTransport,
+    ZeroReservationLedgerStore,
     luna_price_table,
     make_broker,
 )
@@ -493,7 +495,7 @@ def test_worker_never_retries_unproved_or_malformed_outcomes(monkeypatch, tmp_pa
         {"reserved_microusd": 1},
         {"actual_microusd": 0},
         {"call_identity": "sha256:" + "g" * 64},
-        {"funding_source": "miner_key"},
+        {"funding_source": "other"},
         {"idempotent": True},
     ],
 )
@@ -672,6 +674,140 @@ def test_worker_retries_luna_throttle_with_same_bounded_host_policy(
         assert body["provider"]["data_collection"] == "deny"
 
 
+@pytest.mark.parametrize("funding_source", ["host", "miner_key"])
+def test_completed_luna_throttle_has_same_recovery_and_late_cost_for_each_funder(
+    monkeypatch, tmp_path, funding_source
+):
+    failed = {
+        "id": "gen-failed-429-parity",
+        "object": "response",
+        "status": "failed",
+        "error_type": "rate_limit_exceeded",
+        "error": {"code": "rate_limit_exceeded", "message": "limited"},
+        "output": [],
+        "usage": None,
+        "openrouter_metadata": {
+            "requested": br.OPENROUTER_LUNA_RESPONSES_MODEL,
+            "is_byok": False,
+            "attempt": 1,
+            "pipeline": [],
+            "attempts": [{"status": 429}],
+        },
+    }
+    completed = {
+        "id": "gen-completed-parity",
+        "object": "response",
+        "status": "completed",
+        "model": br.OPENROUTER_LUNA_RESPONSES_MODEL,
+        "error": None,
+        "output": [],
+        "usage": {"cost": "0.00025"},
+    }
+    monkeypatch.setattr(br, "_openrouter_generation_readback", lambda **_kwargs: None)
+    store = ZeroReservationLedgerStore()
+    broker, _store, transport = make_broker(
+        store=store,
+        transport=FakeTransport([(200, failed), (200, completed)]),
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        provider_funding_source_for=(
+            lambda _context, _provider: funding_source
+        ),
+    )
+    broker._price_table = luna_price_table()
+
+    class BrokerApi:
+        def __init__(self):
+            self.frames = []
+
+        def provider(self, _run_id, _lease_token, frame):
+            self.frames.append(dict(frame))
+            return broker.execute(CONTEXT, **frame).to_document()
+
+    api = BrokerApi()
+    worker = server(tmp_path, api)
+    event = install_clock(monkeypatch, worker)
+
+    error, result = worker._dispatch(
+        "openrouter.responses", LUNA_RESPONSES, 300_000
+    )
+
+    assert error is None and result["status"] == 200
+    assert [frame["action_sequence"] for frame in api.frames] == [0, 1]
+    assert event.waits == [20.001]
+    calls = worker._state.calls
+    identities = [call["call_identity"] for call in calls]
+    assert len(set(identities)) == 2
+    assert {call["funding_source"] for call in calls} == {funding_source}
+    assert calls[0]["completed_rate_limit_retryable"] is True
+    assert calls[0]["outcome"] == "uncertain"
+    assert "actual_microusd" not in calls[0]
+    assert calls[1]["outcome"] == "settled"
+    assert calls[1]["actual_microusd"] == 250
+    assert worker._state.recovered_responses_retry_call_identities == {
+        identities[0]
+    }
+    original = store.calls[identities[0]]
+    reconciled = store.reconcile_openrouter_cost(
+        round_id=CONTEXT.round_id,
+        run_id=CONTEXT.run_id,
+        call_identity=identities[0],
+        uncertain_entry_id=1,
+        generation_id=original["uncertain_doc"]["openrouter_generation_id"],
+        credential_fingerprint=original["uncertain_doc"]["credential_fingerprint"],
+        actual_microusd=125,
+        cost_units="0.000125",
+    )
+    assert reconciled["actual_microusd"] == 125
+    assert sorted(
+        call["actual"] for call in store.calls.values()
+        if call["kind"] == "settlement"
+    ) == [125, 250]
+    assert len(transport.sent) == 2
+    assert all(
+        json.loads(request["body"])["provider"]["only"]
+        == ["azure/us", "azure/eu"]
+        for request in transport.sent
+    )
+
+
+@pytest.mark.parametrize("funding_source", ["host", "miner_key"])
+def test_unknown_lost_luna_response_is_not_retried(
+    monkeypatch, tmp_path, funding_source
+):
+    store = ZeroReservationLedgerStore()
+    broker, _store, transport = make_broker(
+        store=store,
+        transport=FakeTransport(fail=True),
+        credential_for=lambda _context, provider: HOST_KEYS[provider],
+        provider_funding_source_for=(
+            lambda _context, _provider: funding_source
+        ),
+    )
+    broker._price_table = luna_price_table()
+
+    class BrokerApi:
+        def __init__(self):
+            self.frames = []
+
+        def provider(self, _run_id, _lease_token, frame):
+            self.frames.append(dict(frame))
+            return broker.execute(CONTEXT, **frame).to_document()
+
+    api = BrokerApi()
+    worker = server(tmp_path, api)
+    event = install_clock(monkeypatch, worker)
+
+    error, result = worker._dispatch(
+        "openrouter.responses", LUNA_RESPONSES, 300_000
+    )
+
+    assert error is None and result["status"] == 502
+    assert len(api.frames) == len(transport.sent) == 1
+    assert event.waits == []
+    assert worker._state.calls[0]["outcome"] == "uncertain"
+    assert "completed_rate_limit_retryable" not in worker._state.calls[0]
+
+
 def test_miner_funded_proved_free_throttle_uses_the_same_retry_policy(monkeypatch, tmp_path):
     api = Api([document(funding="miner_key"), document(
         status=200, provider_status=200, actual=7, error_code=None,
@@ -692,6 +828,18 @@ def test_other_operation_and_scoring_retries_remain_unchanged(monkeypatch, tmp_p
     worker = server(tmp_path, api, kind=kind)
     event = install_clock(monkeypatch, worker)
     worker._dispatch(operation, PARAMETERS, 120_000)
+    assert len(api.frames) == 1 and event.waits == []
+
+
+def test_scoring_never_retries_completed_unknown_miner_throttle(monkeypatch, tmp_path):
+    api = Api([
+        identified_completed_unknown_document(0, funding="miner_key")
+    ])
+    worker = server(tmp_path, api, kind="score")
+    event = install_clock(monkeypatch, worker)
+
+    worker._dispatch("openrouter.responses", PARAMETERS, 120_000)
+
     assert len(api.frames) == 1 and event.waits == []
 
 

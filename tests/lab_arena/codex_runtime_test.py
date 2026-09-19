@@ -451,6 +451,11 @@ def test_session_isolates_login_and_provider_keys(monkeypatch, scrapingdog_value
         home = Path(env["CODEX_HOME"])
         assert not (home / "auth.json").exists()
         config = (home / "config.toml").read_text()
+        compact_setting = "model_auto_compact_token_limit = 64000"
+        assert codex.MODEL_AUTO_COMPACT_TOKEN_LIMIT == 64_000
+        assert config.count(compact_setting) == 1
+        assert config.index(compact_setting) < config.index("[agents]")
+        assert "model_context_window" not in config
         assert 'request_max_retries = 0' in config
         assert 'stream_max_retries = 0' in config
     assert not home.exists()
@@ -901,8 +906,12 @@ def test_pinned_luna_code_mode_uses_two_local_mcp_calls_and_compacts(monkeypatch
             # The compaction setting belongs to the top-level TOML table;
             # append only the MCP table after the helper's provider table.
             current = config.read_text(encoding="utf-8")
-            if "model_auto_compact_token_limit" not in current:
-                current = "model_auto_compact_token_limit = 16000\n" + current
+            setting = (
+                "model_auto_compact_token_limit = "
+                + str(codex.MODEL_AUTO_COMPACT_TOKEN_LIMIT)
+            )
+            assert current.count(setting) == 1
+            assert current.index(setting) < current.index("[agents]")
             config.write_text(
                 current
                 + "\n[mcp_servers.fixture]\ncommand = " + json.dumps(sys.executable) + "\n"
@@ -949,8 +958,11 @@ def test_pinned_luna_code_mode_uses_two_local_mcp_calls_and_compacts(monkeypatch
                 output = [{"type": "message", "id": "final-msg", "role": "assistant", "status": "completed",
                            "content": [{"type": "output_text", "text": "ARENA_NATIVE_MCP_OK", "annotations": []}]}]
             count = len(self.sent) + 1
-            usage = {"input_tokens": 17000 if count == 1 else 100, "output_tokens": 20,
-                     "total_tokens": 17020 if count == 1 else 120, "cost": 0.000012}
+            input_tokens = (
+                codex.MODEL_AUTO_COMPACT_TOKEN_LIMIT + 1_000 if count == 1 else 100
+            )
+            usage = {"input_tokens": input_tokens, "output_tokens": 20,
+                     "total_tokens": input_tokens + 20, "cost": 0.000012}
             self.responses.append((200, response(model=body["model"], id="native-%d" % count,
                                                  output=output, usage=usage)))
             return super().send(**kwargs)
@@ -964,7 +976,7 @@ def test_pinned_luna_code_mode_uses_two_local_mcp_calls_and_compacts(monkeypatch
             pytest.fail(exc.diagnostics[-8000:])
     assert "ARENA_NATIVE_MCP_OK" in result
     assert mcp_log.read_text().splitlines() == ["arena_inspect", "arena_review"]
-    assert transport.compaction_requests >= 1, "The forced 17000-token usage did not produce a compacted continuation"
+    assert transport.compaction_requests >= 1, "Usage above the configured limit did not produce a compacted continuation"
     assert any("Another language model started to solve this problem" in json.dumps(body)
                for body in transport.requests[2:])
     assert any(item.get("type") == "custom_tool_call_output" and "input_text" in json.dumps(item.get("output"))

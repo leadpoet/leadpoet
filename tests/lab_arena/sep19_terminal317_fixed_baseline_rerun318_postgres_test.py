@@ -1237,28 +1237,28 @@ def test_exact_render_has_terminal_seals_and_rejects_wrong_preimage_atomically(
     assert hashlib.sha256(raw).hexdigest() == RENDERED_SHA256
     body = raw.decode()
     assert re.search(r"__[A-Z0-9_]+__", body) is None
-    assert "6d6cd05979153e09d7d00d3b2bf04990fb023d3b" in body
-    assert "5da106d1f3b5078460aa43297ead185f1a1257b75c6c30a1effd3b6464cdf5ff" in body
-    assert "baseline-2026-09-19-rerun318-6d6cd059.tar.gz" in body
-    assert "source_size_bytes=793558" in body
+    assert "2c407e709db5af18fbaaca407add0749c137fd94" in body
+    assert "2e026c8adb041c85747b92d1fdb23cb173d87dd36441f094d92a6326ed8f1ab7" in body
+    assert "baseline-2026-09-19-rerun318-2c407e70.tar.gz" in body
+    assert "source_size_bytes=794823" in body
     assert "sha256:e2fa040d8b1398fad2a802c7dd80a1c709fe68efc485115aae45211b8c489889" in body
-    assert '"benchmark_deadline":"2026-09-19T14:00:00Z"' in body
+    assert '"benchmark_deadline":"2026-09-19T14:30:00Z"' in body
     assert "active_round.status IS DISTINCT FROM 'cancelled'" in body
     assert "active_round.cancel_reason IS DISTINCT FROM 'operator'" in body
-    assert "kind='execute')<>110" in body
+    assert "kind='execute')<>109" in body
     assert "kind='score')<>0" in body
-    assert "moved_baseline_runs<>30" in body
-    assert "moved_baseline_ledger<>6579" in body
+    assert "moved_baseline_runs<>29" in body
+    assert "moved_baseline_ledger<>7434" in body
     for terminal_seal in (
-        "edd40e5004b4b654febc4733f94e62b5e82d9b7f69720035f3ce20a7c6fcad2e",
-        "adee534ed61bb1ea0761142d66d22d2edef6de2b89cd73d1b03a5f5a1e675f9f",
-        "781027021d3cadc5f2c0540d9f24a67f65cb25126912ef3544867d5a70153297",
-        "a40087077d409c804d044bdbfaa04b93bbc72f6dc93ccf61c76dca85ffc478f1",
-        "3bc4b1624c68abc3c10cfbea4ddb296969e3c04d6ade07a6b96976f0660c4129",
-        "1af19ff80c88e0fa121d57fa11ea6af14b35220017b0d11a099c70f6b60b314f",
-        "22a411e2edcd506ab991f1e65db14f92dd83bfbfeedf7c95b4d478b2d880de2b",
-        "1bf82d9e27e385424ad96d0552573d63ecc84e55ea04ec81bcd8d74e07c07991",
-        "937c57a010c01a3336165f052a65295fe4fef0fab887ce3babba1c82480d95d7",
+        'e609b43b569f8cdb0e35f96ca36065426ae997ef440c17e681e15d81d0b310d8',
+        '118fdf25629780e113796d0087c7646a7fa4bd9c0e8d70f0a282e31907e271df',
+        '781027021d3cadc5f2c0540d9f24a67f65cb25126912ef3544867d5a70153297',
+        '5e3143f5ed5df1e2bdf11ac29ae0560db84a2c51368ad43fbe5eed2dbb805287',
+        '0daf97d3f2e5252565da9be75f31a11dd4f8aefc85e7832c19de19417f8f5cf1',
+        '1af19ff80c88e0fa121d57fa11ea6af14b35220017b0d11a099c70f6b60b314f',
+        '22a411e2edcd506ab991f1e65db14f92dd83bfbfeedf7c95b4d478b2d880de2b',
+        '6d184e5cc8a401113c38f4ddfabb948eae698057623d7fa4a5641c84603b546c',
+        '937c57a010c01a3336165f052a65295fe4fef0fab887ce3babba1c82480d95d7',
     ):
         assert terminal_seal in body
 

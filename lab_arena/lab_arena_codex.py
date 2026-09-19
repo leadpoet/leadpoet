@@ -19,6 +19,7 @@ import socket
 import subprocess
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -39,6 +40,7 @@ MAX_OUTPUT_TOKENS = 32_768
 TOOL_OUTPUT_TEXT_CHARS = 32_000
 WEB_SEARCH_MAX_TOOL_CALLS = 1
 WEB_SEARCH_MAX_TOTAL_RESULTS = 5
+REQUEST_GATE_POLL_SECONDS = 0.05
 
 
 class CodexRuntimeError(RuntimeError):
@@ -213,18 +215,25 @@ class ResponsesBridge:
         *,
         max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
         request_guard: Callable[[], bool] | None = None,
+        request_gate: Any | None = None,
         web_search: str = "disabled",
     ) -> None:
         if type(max_output_tokens) is not int or not 1 <= max_output_tokens <= MAX_OUTPUT_TOKENS:
             raise CodexRuntimeError("invalid Codex output token limit")
         if request_guard is not None and not callable(request_guard):
             raise CodexRuntimeError("invalid Codex request guard")
+        if request_gate is not None and (
+                not callable(getattr(request_gate, "acquire", None))
+                or not callable(getattr(request_gate, "release", None))):
+            raise CodexRuntimeError("invalid Codex request gate")
         if web_search not in ("disabled", "live"):
             raise CodexRuntimeError("invalid Codex web search mode")
         self.socket_path = socket_path
         self.token = secrets.token_urlsafe(32)
         self._active = threading.BoundedSemaphore(1)
         self._request_guard = request_guard
+        self._request_gate = request_gate
+        self._closed = threading.Event()
         self._web_search = web_search
         owner = self
 
@@ -326,15 +335,28 @@ class ResponsesBridge:
                                     and tool.get("type") == "web_search")
                         ] + [replacement]
                         body["max_tool_calls"] = WEB_SEARCH_MAX_TOOL_CALLS
-                    if owner._request_guard is not None:
-                        try:
-                            permitted = owner._request_guard()
-                        except BaseException:
-                            permitted = False
-                        if permitted is not True:
+                    gate_acquired = False
+                    if owner._request_gate is not None:
+                        if not owner._acquire_request_gate():
                             self.reply(429, b'{"error":{"message":"request unavailable"}}')
                             return
-                    status, response = _dispatch(owner.socket_path, body)
+                        gate_acquired = True
+                    try:
+                        # This check intentionally follows shared-gate waiting:
+                        # an attempt deadline or quota decision may change while
+                        # another session owns the gate.
+                        if owner._request_guard is not None:
+                            try:
+                                permitted = owner._request_guard()
+                            except BaseException:
+                                permitted = False
+                            if permitted is not True:
+                                self.reply(429, b'{"error":{"message":"request unavailable"}}')
+                                return
+                        status, response = _dispatch(owner.socket_path, body)
+                    finally:
+                        if gate_acquired:
+                            owner._request_gate.release()
                     if 200 <= status < 300 and streaming:
                         try:
                             response = b"".join(response_events(json.loads(response)))
@@ -369,11 +391,33 @@ class ResponsesBridge:
             self._active.release()
         return acquired
 
+    def _acquire_request_gate(self) -> bool:
+        """Wait boundedly for an attempt-owned gate, stopping on bridge close."""
+
+        deadline = time.monotonic() + SOCKET_TIMEOUT_SECONDS
+        while not self._closed.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            try:
+                acquired = self._request_gate.acquire(
+                    timeout=min(REQUEST_GATE_POLL_SECONDS, remaining),
+                )
+            except BaseException:
+                return False
+            if acquired is True:
+                if self._closed.is_set():
+                    self._request_gate.release()
+                    return False
+                return True
+        return False
+
     def __enter__(self) -> "ResponsesBridge":
         self.thread.start()
         return self
 
     def __exit__(self, *exc: Any) -> None:
+        self._closed.set()
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
@@ -386,6 +430,7 @@ def session(
     reasoning_effort: str = "medium",
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     request_guard: Callable[[], bool] | None = None,
+    request_gate: Any | None = None,
     web_search: str = "disabled",
 ) -> Iterator[CodexSessionEnvironment]:
     """Yield an isolated child environment for a Codex CLI or SDK launcher.
@@ -398,6 +443,9 @@ def session(
     or silently substitutes another engine itself. The bridge replays citation
     annotations unchanged; Codex 0.154 retains the ``web_search_call`` in a
     continuation but can omit prior message annotations from its next request.
+    An optional caller-owned ``request_gate`` serializes the guard and worker
+    dispatch across otherwise isolated sessions. Scope it to one Arena attempt;
+    this module does not retain or share it globally.
     """
 
     socket_path = os.environ.get("LAB_ARENA_WORKER_SOCKET")
@@ -407,11 +455,16 @@ def session(
         raise CodexRuntimeError("invalid Codex model or reasoning effort")
     if request_guard is not None and not callable(request_guard):
         raise CodexRuntimeError("invalid Codex request guard")
+    if request_gate is not None and (
+            not callable(getattr(request_gate, "acquire", None))
+            or not callable(getattr(request_gate, "release", None))):
+        raise CodexRuntimeError("invalid Codex request gate")
     if web_search not in ("disabled", "live"):
         raise CodexRuntimeError("invalid Codex web search mode")
     with tempfile.TemporaryDirectory(prefix="arena-codex-") as directory, ResponsesBridge(
             socket_path, max_output_tokens=max_output_tokens,
-            request_guard=request_guard, web_search=web_search) as bridge:
+            request_guard=request_guard, request_gate=request_gate,
+            web_search=web_search) as bridge:
         home = Path(directory)
         config = '\n'.join([
             "model = " + json.dumps(model),

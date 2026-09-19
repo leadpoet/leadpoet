@@ -1,12 +1,12 @@
-"""Prove the least-privilege PostgREST route (labarena.md 11.1, 18.1) with a
-real PostgREST container. A test-only client Authorization header carries the
+"""Prove the least-privilege PostgREST route with a real container.
+
+A test-only client Authorization header carries the
 ``lab_arena_service`` role while ``PostgrestTransport`` keeps its production
 scoped-key headers. The whoami readback shows the exact role, and unauthorized
 roles are denied on every Arena table and function.
 
-This is the local stand-in for the hosted-Supabase preflight the plan
-requires before step 2; hosted PostgREST behaves identically for the role
-claim, and that preflight stays an operator gate.
+This is the local stand-in for the hosted-Supabase role preflight. Hosted
+PostgREST uses the same role claim behavior.
 """
 
 from __future__ import annotations
@@ -156,10 +156,6 @@ def stack():
                 _docker("rm", "--force", name, timeout=60)
             else:
                 _docker("network", "rm", name, timeout=60)
-
-
-class RestClientTransport:
-    """A PostgrestTransport whose URLs omit the Supabase /rest/v1 prefix (bare PostgREST)."""
 
 
 def make_transport(

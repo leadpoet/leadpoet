@@ -101,19 +101,36 @@ def _receive(
     *,
     response_deadline: float,
     cancel_requested: Callable[[], bool] | None = None,
+    cancel_signalled: list[bool] | None = None,
 ) -> bytes:
+    if cancel_signalled is None:
+        cancel_signalled = [False]
     chunks = bytearray()
     while len(chunks) < size:
-        if cancel_requested is not None and cancel_requested():
-            raise CodexRuntimeError("Codex request cancelled")
+        cancelled = False
+        if cancel_requested is not None and not cancel_signalled[0]:
+            try:
+                cancelled = bool(cancel_requested())
+            except Exception:
+                cancelled = True
+        if cancelled:
+            # Signal that no later pre-dispatch retry is wanted, but retain
+            # the read side until an already-dispatched paid request settles.
+            try:
+                connection.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            cancel_signalled[0] = True
         remaining = _remaining_seconds(response_deadline)
         connection.settimeout(
-            min(0.1, remaining) if cancel_requested is not None else remaining
+            min(0.1, remaining)
+            if cancel_requested is not None and not cancel_signalled[0]
+            else remaining
         )
         try:
             part = connection.recv(size - len(chunks))
         except socket.timeout:
-            if cancel_requested is None:
+            if cancel_requested is None or cancel_signalled[0]:
                 raise
             continue
         if not part:
@@ -144,12 +161,14 @@ def _dispatch(
         connection.connect(socket_path)
         connection.settimeout(_remaining_seconds(response_deadline))
         connection.sendall(len(payload).to_bytes(4, "big") + payload)
+        cancel_signalled = [False]
         size = int.from_bytes(
             _receive(
                 connection,
                 4,
                 response_deadline=response_deadline,
                 cancel_requested=cancel_requested,
+                cancel_signalled=cancel_signalled,
             ),
             "big",
         )
@@ -161,6 +180,7 @@ def _dispatch(
                 size,
                 response_deadline=response_deadline,
                 cancel_requested=cancel_requested,
+                cancel_signalled=cancel_signalled,
             )
         )
     if not isinstance(response, dict) or "error" in response:

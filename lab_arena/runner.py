@@ -103,7 +103,7 @@ DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 300
 DEPENDENCY_MOUNT_TIMEOUT_SECONDS = 30
 MAX_WORKER_CONNECTIONS = 8
 WORKER_SOCKET_READ_TIMEOUT_SECONDS = 10.0
-TEMPORARY_HOLD_RETRY_SECONDS = 0.2
+TEMPORARY_HOLD_RETRY_SECONDS = 1.0
 MAX_JUDGE_DIAGNOSTIC_CHARS = scoring.MAX_FAILURE_DETAIL_CHARS
 _DIAGNOSTIC_URL_QUERY_RE = re.compile(
     r"(?i)\b([a-z][a-z0-9+.-]*://[^\s?#]+)\?[^\s#]*"
@@ -1625,6 +1625,11 @@ class WorkerSocketServer:
             if self._stopping.wait(
                 TEMPORARY_HOLD_RETRY_SECONDS
             ) or self._cancelled(cancel_requested):
+                # Retain one terminal diagnostic for the hold that consumed
+                # the caller's remaining window. Intermediate polls are not
+                # provider calls and stay out of the run summary.
+                with state.lock:
+                    state.calls.append(dict(document["call"]))
                 return "worker_unavailable", None
         if not isinstance(document, Mapping) or set(document) != {
             "status",

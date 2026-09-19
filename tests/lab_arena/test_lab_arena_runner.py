@@ -1459,7 +1459,9 @@ def test_worker_cancellation_stops_temporary_hold_before_another_api_call(
         cancel_requested=lambda: cancelled[0],
     ) == ("worker_unavailable", None)
     assert len(api.provider_frames) == 1
-    assert worker._state.calls == [] and worker._state.refusals == 0
+    assert len(worker._state.calls) == 1 and worker._state.refusals == 0
+    assert worker._state.calls[0]["reason"] == "provider_cost_uncertain"
+    assert worker._state.calls[0]["outcome"] == "not_dispatched"
 
 
 def test_worker_socket_disconnect_cancels_temporary_hold_retry(monkeypatch, tmp_path):
@@ -1499,7 +1501,8 @@ def test_worker_socket_disconnect_cancels_temporary_hold_retry(monkeypatch, tmp_
         connection.close()
         assert not second_call.wait(0.2)
         assert len(api.provider_frames) == 1
-        assert worker._state.calls == [] and worker._state.refusals == 0
+        assert len(worker._state.calls) == 1 and worker._state.refusals == 0
+        assert worker._state.calls[0]["reason"] == "provider_cost_uncertain"
     finally:
         worker.stop()
         shutil.rmtree(socket_dir)

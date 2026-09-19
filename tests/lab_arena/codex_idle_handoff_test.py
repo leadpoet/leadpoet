@@ -97,6 +97,24 @@ def test_interrupted_request_settles_before_finalization_checkpoint(monkeypatch,
         (200, response(id="research-old")),
         (200, response(id="finalizer", output=final_output)),
     ])
+    cancellation_observed = threading.Event()
+    original_dispatch = codex._dispatch
+
+    def observed_dispatch(socket_path, document, *, cancel_requested, **kwargs):
+        def observed_cancel_requested():
+            cancelled = cancel_requested()
+            if cancelled:
+                cancellation_observed.set()
+            return cancelled
+
+        return original_dispatch(
+            socket_path,
+            document,
+            cancel_requested=observed_cancel_requested,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(codex, "_dispatch", observed_dispatch)
 
     with broker_socket(monkeypatch, transport) as (store, _, _), codex.session(
             model="openai/gpt-4o-mini") as environment:
@@ -107,6 +125,7 @@ def test_interrupted_request_settles_before_finalization_checkpoint(monkeypatch,
         assert transport.entered.wait(2)
         abandoned.shutdown(socket.SHUT_RDWR)
         abandoned.close()
+        assert cancellation_observed.wait(1)
 
         # A zero-time wait is passive: it neither admits a finalizer nor adds
         # a provider call while the old research request still owns the gate.

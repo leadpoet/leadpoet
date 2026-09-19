@@ -498,9 +498,12 @@ def test_codex_timeout_layers_use_the_original_absolute_response_deadline(monkey
     assert "stream_idle_timeout_ms = 25000" in config
 
 
-def test_codex_client_cancellation_closes_the_worker_request(monkeypatch):
+def test_codex_client_cancellation_half_closes_and_drains_worker_request(monkeypatch):
     clock = [100.0]
     cancelled = [False]
+    reply = json.dumps({"status": 200, "body_b64": "e30="}).encode()
+    framed = len(reply).to_bytes(4, "big") + reply
+    shutdowns = []
 
     class Socket:
         def __enter__(self):
@@ -518,20 +521,64 @@ def test_codex_client_cancellation_closes_the_worker_request(monkeypatch):
         def sendall(self, _payload):
             return None
 
+        def shutdown(self, direction):
+            shutdowns.append(direction)
+
         def recv(self, _size):
-            cancelled[0] = True
-            raise socket.timeout
+            if not cancelled[0]:
+                cancelled[0] = True
+                raise socket.timeout
+            offset = getattr(self, "offset", 0)
+            chunk = framed[offset:offset + _size]
+            self.offset = offset + len(chunk)
+            return chunk
 
     monkeypatch.setattr(codex.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(codex.socket, "socket", lambda *_args: Socket())
 
-    with pytest.raises(codex.CodexRuntimeError, match="cancelled"):
-        codex._dispatch(
-            "/worker.sock",
-            {"model": "openai/gpt-5.6-sol", "input": "hi"},
-            response_deadline=125.0,
-            cancel_requested=lambda: cancelled[0],
+    assert codex._dispatch(
+        "/worker.sock",
+        {"model": "openai/gpt-5.6-sol", "input": "hi"},
+        response_deadline=125.0,
+        cancel_requested=lambda: cancelled[0],
+    ) == (200, b"{}")
+    assert shutdowns == [socket.SHUT_WR]
+
+
+def test_codex_disconnect_keeps_bridge_active_until_worker_terminal(monkeypatch):
+    entered = threading.Event()
+    disconnected = threading.Event()
+    terminal = threading.Event()
+
+    def dispatch(_socket_path, _document, *, cancel_requested, **_kwargs):
+        entered.set()
+        for _ in range(100):
+            if cancel_requested():
+                disconnected.set()
+                break
+            threading.Event().wait(0.01)
+        assert disconnected.is_set()
+        assert terminal.wait(1)
+        return 200, b'{"status":"completed","output":[]}'
+
+    monkeypatch.setattr(codex, "_dispatch", dispatch)
+    with codex.ResponsesBridge("/fixture-worker.sock") as bridge:
+        body = b'{"model":"openai/gpt-5.6-sol","input":"hi"}'
+        client = socket.create_connection(("127.0.0.1", bridge.server.server_port))
+        client.sendall(
+            b"POST /v1/responses HTTP/1.1\r\n"
+            + b"Host: 127.0.0.1\r\n"
+            + ("Authorization: Bearer " + bridge.token + "\r\n").encode()
+            + ("Content-Length: " + str(len(body)) + "\r\n").encode()
+            + b"Connection: close\r\n\r\n"
+            + body
         )
+        assert entered.wait(1)
+        client.close()
+        assert disconnected.wait(1)
+        assert bridge.wait_idle(0.05) is False
+        terminal.set()
+        assert bridge.wait_idle(1) is True
 
 
 @pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="set ARENA_TEST_CODEX_BINARY for the real CLI protocol proof")

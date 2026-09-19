@@ -215,6 +215,7 @@ def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
     harness = PerIcpHarness(connect, tmp_path, challengers=[], runners=["alpha"])
     original = harness.sandbox.run_icp
     observed = []
+    deepline_quota = None
 
     def run_icp(spec, **kwargs):
         document = json.loads((spec.input_dir / runtime.INPUT_FILE_NAME).read_text())
@@ -291,15 +292,19 @@ def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
                         }[outcome]
                         observed.append((outcome, status))
                     if stop_reason == "per_icp_quota":
-                        for index in range(31):
+                        assert deepline_quota is not None
+                        for index in range(deepline_quota + 1):
                             status, _, _ = shim.dispatch(
                                 "deepline.execute",
                                 {"tool": "exa_search", "payload": {"query": "fintech"}},
                                 5000,
                             )
-                            expected = 200 if index < 30 else 402
+                            expected = 200 if index < deepline_quota else 402
                             assert status == expected
-                            observed.append(("quota_ok" if index < 30 else "quota_refused", status))
+                            observed.append((
+                                "quota_ok" if index < deepline_quota else "quota_refused",
+                                status,
+                            ))
                 finally:
                     os.environ.pop(shim.WORKER_SOCKET_ENV, None)
             return runtime.fake_result(
@@ -328,6 +333,9 @@ def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
     harness.sandbox.run_icp = run_icp
     participants = fixtures._start_round(harness, day=day, epoch=epoch)
     assert participants == 1
+    deepline_quota = harness.service.store.get_round(harness.round_id)[
+        "configuration_doc"
+    ]["call_quotas"]["deepline"]
     harness.clock.advance_to(harness.schedule()["stage_1_start"])
     assert harness.service.advance_round(harness.round_id)["assignments"] == 10
     harness.run_stage_with_runners(1)
@@ -354,7 +362,7 @@ def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
         assert observed == [("failed", 502), ("ok", 200), ("refused", 402)]
         assert "0.01|ok" not in harness.provider.dispatched
     else:
-        assert observed.count(("quota_ok", 200)) == 30
+        assert observed.count(("quota_ok", 200)) == deepline_quota
         assert observed.count(("quota_refused", 402)) == 1
         refusal_entries = harness.service.store.list_ledger(
             run_id=budget_stops[0]["run_id"], entry_kind="refusal"

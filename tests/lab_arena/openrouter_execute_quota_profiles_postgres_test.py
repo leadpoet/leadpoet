@@ -43,7 +43,9 @@ def store(connect):
     transport.close()
 
 
-def _exercise_profile(store, connect, *, suffix, quotas, limit, checkpoints):
+def _exercise_profile(
+    store, connect, *, suffix, quotas, limit, checkpoints, provider="openrouter"
+):
     round_id = "arena-2026-09-17-" + suffix
     submission_id = "quota-" + suffix + "-submission"
     run_id = "quota-" + suffix + "-run"
@@ -102,15 +104,23 @@ def _exercise_profile(store, connect, *, suffix, quotas, limit, checkpoints):
             assignment_id=assignment_id,
             icp_position=0,
             action_sequence=index,
-            operation_id="openrouter.chat",
+            operation_id={
+                "openrouter": "openrouter.chat",
+                "deepline": "deepline.execute",
+                "scrapingdog": "scrapingdog.scrape",
+            }[provider],
             request_hash=sha("%s-%d" % (suffix, index)),
         )
         reserved = store.reserve_call(
             run_id=run_id,
             lease_token_hash=LEASE_TOKEN_HASH,
             call_identity=identity,
-            operation_id="openrouter.chat",
-            provider="openrouter",
+            operation_id={
+                "openrouter": "openrouter.chat",
+                "deepline": "deepline.execute",
+                "scrapingdog": "scrapingdog.scrape",
+            }[provider],
+            provider=provider,
             funding_source="miner_key",
             amount_microusd=1,
             call_doc={},
@@ -128,12 +138,12 @@ def _exercise_profile(store, connect, *, suffix, quotas, limit, checkpoints):
         if ordinal in checkpoints:
             snapshots[ordinal] = store.run_quota_snapshot(
                 run_id, LEASE_TOKEN_HASH
-            )["providers"]["openrouter"]
+            )["providers"][provider]
 
     costs = store.submission_costs(submission_id)
     execute = next(
         item for item in costs["providers"]
-        if item["kind"] == "execute" and item["provider"] == "openrouter"
+        if item["kind"] == "execute" and item["provider"] == provider
     )
     return statuses, snapshots, execute
 
@@ -184,3 +194,43 @@ def test_frozen_execute_profiles_enforce_dispatch_and_cost_boundaries(
         + current_costs["reserved_or_uncertain_microusd"]
         == 260
     )
+
+
+@pytest.mark.parametrize("provider", ("deepline", "scrapingdog"))
+def test_generic_profile_admits_provider_calls_past_old_thirty_call_limit(
+    store, connect, provider
+):
+    statuses, snapshots, _costs = _exercise_profile(
+        store,
+        connect,
+        suffix={"deepline": "gdl", "scrapingdog": "gsd"}[provider],
+        quotas=dict(contracts.CALL_QUOTAS_PER_ICP),
+        provider=provider,
+        limit=58,
+        checkpoints={30, 31, 54, 58},
+    )
+    assert statuses == ["reserved"] * 59
+    assert snapshots == {
+        30: {"limit": 200, "used": 30, "remaining": 170, "inflight": 30},
+        31: {"limit": 200, "used": 31, "remaining": 169, "inflight": 31},
+        54: {"limit": 200, "used": 54, "remaining": 146, "inflight": 54},
+        58: {"limit": 200, "used": 58, "remaining": 142, "inflight": 58},
+    }
+
+
+def test_frozen_openrouter_200_profile_keeps_deepline_at_thirty(store, connect):
+    statuses, snapshots, _costs = _exercise_profile(
+        store,
+        connect,
+        suffix="fo2dl",
+        quotas=dict(contracts.OPENROUTER_200_CALL_QUOTAS_PER_ICP),
+        provider="deepline",
+        limit=30,
+        checkpoints={30, 31},
+    )
+    assert statuses[:30] == ["reserved"] * 30
+    assert statuses[30] == "refused"
+    assert snapshots == {
+        30: {"limit": 30, "used": 30, "remaining": 0, "inflight": 30},
+        31: {"limit": 30, "used": 30, "remaining": 0, "inflight": 30},
+    }

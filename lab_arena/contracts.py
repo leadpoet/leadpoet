@@ -47,9 +47,15 @@ LEGACY_CALL_QUOTAS_PER_ICP = {
     "deepline": 30,
     "openrouter": 60,
 }
-CALL_QUOTAS_PER_ICP = {"scrapingdog": 30, "deepline": 30, "openrouter": 200}
+OPENROUTER_200_CALL_QUOTAS_PER_ICP = {
+    "scrapingdog": 30,
+    "deepline": 30,
+    "openrouter": 200,
+}
+CALL_QUOTAS_PER_ICP = {provider: 200 for provider in PROVIDERS}
 EXECUTION_CALL_QUOTA_PROFILES = (
     LEGACY_CALL_QUOTAS_PER_ICP,
+    OPENROUTER_200_CALL_QUOTAS_PER_ICP,
     CALL_QUOTAS_PER_ICP,
 )
 # Judge calls made while scoring one work item (one output on one ICP), using

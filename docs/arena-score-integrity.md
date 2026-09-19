@@ -51,10 +51,12 @@ spending. An admitted call can finish above $4; its full charge and response are
 retained. No further paid sourcing calls start for that ICP after the limit is
 reached. Other ICPs continue, and valid saved outputs remain available for scoring.
 
-Runtime admission retains the existing billing rules: actual charges, including
-charged failed calls, consume the sourcing budget; reservations and unresolved
-charges retain their existing safeguards. They are not treated as confirmed spend.
-Judge budgets remain separate.
+With migration 321, only confirmed charges, including billed failures, consume
+the sourcing admission budget. Pending bills and historical monetary holds do not
+block new research. New execute lifecycle reservations have amount zero; this
+means no hold, not a confirmed free call. Exact call identities remain tracked
+for later settlement and cannot be dispatched twice. Concurrent admitted calls
+can take confirmed spend above the cap. Judge budgets remain separate.
 
 After normal quality scoring, each ICP has a successful-sourcing cost allowance
 of $0.80 multiplied by its verified qualified company/contact pairs. Five pairs

@@ -101,8 +101,9 @@ existing limits. Request bytes, text lengths and tool counts remain bounded.
 
 `run` and `session` request 16,384 output tokens per model call by default,
 including reasoning. Callers can choose 1–32,768; the bridge refuses requests
-above the session allowance. The broker reserves the full bounded input and
-output cost before dispatch and refuses insufficient budgets. Direct Responses
+above the session allowance. With migration 321, sourcing admission counts only
+confirmed settlement costs; output estimates and pending bills do not reserve
+money or block another request. Judge budget handling is unchanged. Direct Responses
 calls still default to 4,096; Chat and judge caps remain 4,096. Raising the
 per-call allowance does not raise the round's budget or guarantee that a model
 can finish a turn within it.
@@ -120,12 +121,9 @@ Hosted tools, remote images/files, server-side conversation IDs, background
 work and caller-selected routing are rejected. Research-provider calls still
 use the harness's Arena broker adapter. Codex's built-in hosted web search is
 disabled.
-Codex may retry each Responses HTTP request once after a transport failure or
-HTTP 5xx response. Streaming retries remain disabled. The retry re-enters the
-Arena bridge with a new normal action sequence and therefore passes the same
-call quota, cost reservation, shared gate and signed run deadline as every other
-request. Any uncertain or billed first request remains in its own ledger entry.
-Separately, the runner may retry a Responses request at most twice only after
+Codex HTTP and streaming retries are disabled. A transport failure or HTTP 5xx
+can have an unknown bill, so it must not create an automatic duplicate paid POST.
+The original call remains tracked for exact billing recovery. The runner may retry a Responses request at most twice only after
 the broker proves the preceding attempt settled at zero cost with provider
 status 429. Each runner retry also uses a new normal action sequence, consumes
 the existing call quota, honors a valid bounded `Retry-After`, and stays inside
@@ -161,8 +159,9 @@ worker socket return the existing counters plus `sourcing_cost`. It includes
 all execute attempts for this ICP, including Codex/OpenRouter usage, and
 excludes judge calls. `successful_microusd` is settled successful sourcing;
 `success_unresolved_microusd` is its unresolved exposure. The separate
-`settled_microusd` and `reserved_or_uncertain_microusd` include billed failures
-and reservations used by admission. A reservation is not a confirmed charge.
+`settled_microusd` includes billed failures. `reserved_or_uncertain_microusd`
+retains historical holds for audit; it is not spend and migration 321 excludes it
+from sourcing admission. New execute lifecycle reservations carry amount zero.
 The response includes in-flight/unresolved call counts, the admission cap,
 and the allowance per qualified company/contact pair. Qualification is known
 only after judging. Models own their stopping decisions; this read changes

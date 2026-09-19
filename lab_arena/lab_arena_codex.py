@@ -602,7 +602,9 @@ def session(
             'wire_api = "responses"',
             'requires_openai_auth = false',
             'supports_websockets = false',
-            'request_max_retries = 1',
+            # An unknown bill cannot authorize an automatic duplicate POST.
+            # The worker owns retries proved free by an exact settled receipt.
+            'request_max_retries = 0',
             'stream_max_retries = 0',
             "stream_idle_timeout_ms = " + str(max(
                 1, int(math.ceil(_remaining_seconds(response_deadline) * 1000))

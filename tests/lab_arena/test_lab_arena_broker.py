@@ -29,6 +29,15 @@ ENCODED_ECHO_KEY = quote(ECHO_KEY, safe="")
 LOWERCASE_ENCODED_ECHO_KEY = ENCODED_ECHO_KEY.replace("%2B", "%2b").replace("%2F", "%2f").replace("%3D", "%3d")
 
 
+def assert_unpriced_uncertain(result, *, reserved=None):
+    assert result.call["outcome"] == "uncertain"
+    assert "actual_microusd" not in result.call
+    if reserved is None:
+        assert result.call["reserved_microusd"] > 0
+    else:
+        assert result.call["reserved_microusd"] == reserved
+
+
 def price_table():
     return br.validate_price_table({
         "schema_version": br.PRICE_TABLE_SCHEMA_VERSION,
@@ -227,6 +236,21 @@ class FakeLedgerStore:
                 "idempotent": False,
                 "actual_microusd": actual_microusd,
             }
+
+
+class ZeroReservationLedgerStore(FakeLedgerStore):
+    """Model the execute policy that retains identity without a money hold."""
+
+    def reserve_call(self, **kwargs):
+        result = super().reserve_call(**kwargs)
+        if result.get("status") != "reserved" or result.get("idempotent") is True:
+            return result
+        call = self.calls[kwargs["call_identity"]]
+        self.openrouter_capacity += call["amount"]
+        call["amount"] = 0
+        result["amount_microusd"] = 0
+        return result
+
 
 class FakeTransport:
     def __init__(self, responses=None, *, fail=False):
@@ -1257,7 +1281,8 @@ def test_scrapingdog_without_observed_success_stays_uncertain(status):
         transport.close()
 
     assert len(requests) == 1
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.status == 502
+    assert_unpriced_uncertain(result, reserved=250)
     call = store.calls[result.call["call_identity"]]
     assert call["kind"] == "uncertain" and call["amount"] == 250
     assert call["uncertain_doc"] == {
@@ -1288,7 +1313,8 @@ def test_scrapingdog_known_charge_survives_settlement_failure():
         transport.close()
 
     assert len(requests) == 1
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.status == 502
+    assert_unpriced_uncertain(result, reserved=250)
     uncertain = store.calls[result.call["call_identity"]]["uncertain_doc"]
     assert uncertain["reason"] == "settle_failure"
     assert uncertain["call_succeeded"] is False
@@ -1399,7 +1425,8 @@ def test_stream_timeout_generation_header_credential_echo_is_not_persisted(
 
     diagnostic = store.calls[result.call["call_identity"]]["uncertain_doc"]
     retained = json.dumps(store.calls)
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.status == 502
+    assert_unpriced_uncertain(result)
     assert diagnostic == {
         "reason": "transport_failure",
         "call_succeeded": False,
@@ -1640,8 +1667,7 @@ def test_company_profile_transport_failure_holds_only_fixed_reservation():
     )
 
     assert result.status == 502
-    assert result.call["outcome"] == "uncertain"
-    assert result.call["reserved_microusd"] == result.call["actual_microusd"] == 3000
+    assert_unpriced_uncertain(result, reserved=3000)
     assert store.openrouter_capacity == 7000
     sent_before_replay = len(transport.sent)
     replay = broker.execute(
@@ -2216,8 +2242,8 @@ def test_luna_regional_unproved_provider_failure_keeps_full_reservation():
         timeout_ms=300_000,
     )
 
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
-    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+    assert result.status == 502
+    assert_unpriced_uncertain(result)
     assert store.log == ["reserve", "dispatch", "uncertain"]
 
 
@@ -2236,8 +2262,8 @@ def test_canonical_failed_responses_retain_only_billing_structure_and_stay_uncer
     broker._price_table = luna_price_table()
     result = broker.execute(CONTEXT, operation_id="openrouter.responses",
                             parameters=LUNA_RESPONSES, action_sequence=0, timeout_ms=300_000)
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
-    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+    assert result.status == 502
+    assert_unpriced_uncertain(result)
     assert store.log == ["reserve", "dispatch", "uncertain"]
     assert len(transport.sent) == 1
     diagnostic = store.calls[result.call["call_identity"]]["uncertain_doc"]
@@ -2382,8 +2408,7 @@ def test_openrouter_http_200_server_error_envelope_is_infrastructure(provider_st
     result = broker.execute(CONTEXT, operation_id="openrouter.chat", parameters=CHAT, action_sequence=0, timeout_ms=30000)
     assert result.status == 502 and json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
     assert result.call["provider_status"] == provider_status
-    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
-    assert result.call["outcome"] == "uncertain"
+    assert_unpriced_uncertain(result)
     assert store.log == ["reserve", "dispatch", "uncertain"]
 
 
@@ -2417,8 +2442,7 @@ def test_openrouter_timeout_without_billing_is_uncertain():
     broker, store, _transport = make_broker(transport=FakeTransport([(200, payload)]))
     result = broker.execute(CONTEXT, operation_id="openrouter.chat", parameters=CHAT, action_sequence=0, timeout_ms=30000)
     assert result.status == 502 and result.call["provider_status"] == 408
-    assert result.call["outcome"] == "uncertain"
-    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+    assert_unpriced_uncertain(result)
     assert store.log == ["reserve", "dispatch", "uncertain"]
 
 
@@ -2536,7 +2560,7 @@ def test_openrouter_http_200_ignores_arbitrary_nested_error_code(payload):
         timeout_ms=30000,
     )
 
-    assert result.call["actual_microusd"] == result.call["reserved_microusd"]
+    assert_unpriced_uncertain(result)
     assert result.call["outcome"] == "uncertain"
     assert store.log == ["reserve", "dispatch", "uncertain"]
 
@@ -2593,7 +2617,7 @@ def test_pydantic_model_error_insurance_keeps_cost_uncertain_without_full_proof(
         assert result.call["cost_basis"] == "openrouter_zero_completion_insurance_error_20260911"
         assert store.log == ["reserve", "dispatch", "settle"]
     else:
-        assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+        assert_unpriced_uncertain(result)
         assert store.log == ["reserve", "dispatch", "uncertain"]
 
 
@@ -2670,8 +2694,8 @@ def test_openrouter_502_with_nonzero_separate_request_price_stays_uncertain():
         action_sequence=0,
         timeout_ms=30000,
     )
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
-    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+    assert result.status == 502
+    assert_unpriced_uncertain(result)
     assert store.log == ["reserve", "dispatch", "uncertain"]
 
 
@@ -2796,8 +2820,8 @@ def test_openrouter_generation_conflict_or_failed_readback_stays_uncertain(respo
         action_sequence=0,
         timeout_ms=30000,
     )
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
-    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+    assert result.status == 502
+    assert_unpriced_uncertain(result)
     assert store.log == ["reserve", "dispatch", "uncertain"]
     diagnostic = store.calls[result.call["call_identity"]]["uncertain_doc"]
     if len(responses) == 1:
@@ -3087,7 +3111,8 @@ def test_non_openrouter_transport_failure_ignores_generation_identity():
         timeout_ms=5000,
     )
 
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.status == 502
+    assert_unpriced_uncertain(result)
     assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
         "reason": "transport_failure",
         "credential_fingerprint": br._credential_fingerprint(DL_KEY),
@@ -3141,8 +3166,7 @@ def test_openrouter_http_200_error_finished_choice_is_normalized():
     result = broker.execute(CONTEXT, operation_id="openrouter.chat", parameters=CHAT, action_sequence=0, timeout_ms=30000)
     assert result.status == 502 and json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
     assert result.call["provider_status"] == 502
-    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
-    assert result.call["outcome"] == "uncertain"
+    assert_unpriced_uncertain(result)
     assert store.log == ["reserve", "dispatch", "uncertain"]
 
 
@@ -3171,8 +3195,7 @@ def test_openrouter_http_200_malformed_error_envelope_fails_closed(payload):
     broker, store, _transport = make_broker(transport=FakeTransport([(200, payload)]))
     result = broker.execute(CONTEXT, operation_id="openrouter.chat", parameters=CHAT, action_sequence=0, timeout_ms=30000)
     assert result.status == 502 and json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
-    assert result.call["outcome"] == "uncertain"
-    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
+    assert_unpriced_uncertain(result)
     assert store.log == ["reserve", "dispatch", "uncertain"]
 
 
@@ -3219,18 +3242,24 @@ def test_openrouter_completion_text_that_describes_an_error_is_still_successful(
     assert store.calls[result.call["call_identity"]]["terminal"]["call_succeeded"] is True
 
 
-@pytest.mark.parametrize("payload", [
-    {"choices": []},
-    {"usage": {"prompt_tokens": "x", "completion_tokens": 1}},
-    {"usage": {"prompt_tokens": -1, "completion_tokens": 1}},
-    {"model": "other/model", "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
-    {"usage": {"prompt_tokens": 10 ** 9, "completion_tokens": 10 ** 9}},
+@pytest.mark.parametrize(("payload", "expected_status"), [
+    ({"choices": []}, 200),
+    ({"usage": {"prompt_tokens": "x", "completion_tokens": 1}}, 502),
+    ({"usage": {"prompt_tokens": -1, "completion_tokens": 1}}, 502),
+    ({"model": "other/model", "usage": {"prompt_tokens": 1, "completion_tokens": 1}}, 502),
+    ({"usage": {"prompt_tokens": 10 ** 9, "completion_tokens": 10 ** 9}}, 502),
 ])
-def test_missing_malformed_or_wrong_model_usage_marks_the_call_uncertain(payload):
+def test_missing_malformed_or_wrong_model_usage_keeps_execute_result_when_valid(
+    payload, expected_status
+):
     broker, store, transport = make_broker(transport=FakeTransport([(200, payload)]))
     result = broker.execute(CONTEXT, operation_id="openrouter.chat", parameters=CHAT, action_sequence=0, timeout_ms=30000)
-    assert result.call["actual_microusd"] == result.call["reserved_microusd"] > 0
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.status == expected_status
+    assert_unpriced_uncertain(result)
+    if expected_status == 200:
+        assert json.loads(result.body) == payload
+    else:
+        assert json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
     assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
         "reason": "missing_provider_cost",
         "call_succeeded": isinstance(payload.get("choices"), list),
@@ -3347,14 +3376,14 @@ def test_transport_failure_after_send_marks_uncertain_and_keeps_full_reservation
     assert result.status == 502 and json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
     assert store.log == ["reserve", "dispatch", "uncertain"]
     assert store.calls[result.call["call_identity"]]["kind"] == "uncertain"
-    assert result.call["outcome"] == "uncertain" and result.call["actual_microusd"] == 10_000_000
+    assert_unpriced_uncertain(result, reserved=10_000_000)
     assert store.openrouter_capacity == 0
     # A later identical request neither re-sends nor releases the reservation.
     late = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "x"}}, action_sequence=0, timeout_ms=1000)
     assert late.status == 409 and json.loads(late.body) == {"error": {"code": "call_uncertain"}} and len([request for request in transport.sent if request["method"] == "POST"]) == 1
 
 
-def test_successful_deepline_reply_without_billing_is_uncertain():
+def test_successful_deepline_reply_without_billing_returns_sanitized_execute_result():
     body = b'{"job_id":"job-empty","status":"completed","results":[]}'
     broker, store, _transport = make_broker(
         transport=FakeTransport([(200, body)])
@@ -3366,7 +3395,8 @@ def test_successful_deepline_reply_without_billing_is_uncertain():
         action_sequence=0,
         timeout_ms=1000,
     )
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.status == 200 and result.body == body
+    assert_unpriced_uncertain(result, reserved=10_000_000)
     assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
         "reason": "missing_provider_cost",
         "credential_fingerprint": br._credential_fingerprint(DL_KEY),
@@ -3381,6 +3411,106 @@ def test_successful_deepline_reply_without_billing_is_uncertain():
         "deepline_job_id": "job-empty",
         "deepline_operation": "exa_search",
     }
+
+
+def test_zero_reservation_unknown_call_replays_without_post_but_distinct_call_runs():
+    bodies = [
+        b'{"job_id":"job-zero-a","status":"completed","results":[]}',
+        b'{"job_id":"job-zero-b","status":"completed","results":[]}',
+    ]
+    class TwoUnknownReplies(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.post_bodies = list(bodies)
+
+        def send(self, **kwargs):
+            self.sent.append({
+                "method": kwargs["method"],
+                "url": kwargs["url"],
+                "headers": dict(kwargs["headers"]),
+                "body": kwargs["body"],
+                "timeout": kwargs["timeout_seconds"],
+            })
+            payload = (
+                self.post_bodies.pop(0)
+                if kwargs["method"] == "POST"
+                else b'{"data":[]}'
+            )
+            return br.ProviderResponse(
+                200, {"content-type": "application/json"}, payload
+            )
+
+    store = ZeroReservationLedgerStore()
+    broker, _store, transport = make_broker(
+        store=store, transport=TwoUnknownReplies()
+    )
+    arguments = {
+        "operation_id": "deepline.execute",
+        "parameters": {"tool": "exa_search", "payload": {"query": "x"}},
+        "timeout_ms": 1000,
+    }
+
+    first = broker.execute(CONTEXT, action_sequence=0, **arguments)
+    replay = broker.execute(CONTEXT, action_sequence=0, **arguments)
+    distinct = broker.execute(CONTEXT, action_sequence=1, **arguments)
+
+    assert first.status == distinct.status == 200
+    assert first.body == bodies[0] and distinct.body == bodies[1]
+    assert_unpriced_uncertain(first, reserved=0)
+    assert_unpriced_uncertain(distinct, reserved=0)
+    assert replay.status == 409
+    assert json.loads(replay.body) == {"error": {"code": "call_uncertain"}}
+    assert first.call["call_identity"] != distinct.call["call_identity"]
+    assert [request["method"] for request in transport.sent].count("POST") == 2
+    assert {call["kind"] for call in store.calls.values()} == {"uncertain"}
+
+
+def test_completed_missing_bill_requires_durable_uncertain_state():
+    class RejectUncertainStore(ZeroReservationLedgerStore):
+        def mark_uncertain(self, **kwargs):
+            self.log.append("uncertain_rejected")
+            return {"status": "stale"}
+
+    body = b'{"job_id":"job-rejected","status":"completed","results":[]}'
+    store = RejectUncertainStore()
+    broker, _store, transport = make_broker(
+        store=store, transport=FakeTransport([(200, body)])
+    )
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+
+    assert result.status == 502
+    assert json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
+    assert_unpriced_uncertain(result, reserved=0)
+    call = store.calls[result.call["call_identity"]]
+    assert call["kind"] == "dispatch" and "uncertain_doc" not in call
+    assert [request["method"] for request in transport.sent] == ["POST", "GET"]
+
+
+def test_score_completed_reply_without_bill_remains_unavailable():
+    body = b'{"job_id":"job-score","status":"completed","results":[]}'
+    context = br.RunContext(**{**CONTEXT.__dict__, "kind": "score"})
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, body)])
+    )
+    result = broker.execute(
+        context,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0,
+        timeout_ms=1000,
+    )
+
+    assert result.status == 502
+    assert json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
+    assert_unpriced_uncertain(result)
+    assert store.calls[result.call["call_identity"]]["kind"] == "uncertain"
+    assert [request["method"] for request in transport.sent] == ["POST", "GET"]
 
 
 def test_deepline_422_recovers_exact_failed_zero_from_billing_history():
@@ -3464,8 +3594,7 @@ def test_deepline_payment_refusal_with_unknown_billing_remains_uncertain():
     )
 
     assert result.status == 502
-    assert result.call["outcome"] == "uncertain"
-    assert result.call["actual_microusd"] == 73_321_638
+    assert_unpriced_uncertain(result, reserved=73_321_638)
     assert store.openrouter_capacity == 0
     assert store.log == ["reserve", "dispatch", "uncertain"]
 
@@ -3544,8 +3673,8 @@ def test_deepline_5xx_without_exact_final_charge_remains_uncertain(envelope):
         parameters={"tool": "exa_search", "payload": {"query": "x"}},
         action_sequence=0, timeout_ms=1000,
     )
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
-    assert result.call["actual_microusd"] == result.call["reserved_microusd"]
+    assert result.status == 502
+    assert_unpriced_uncertain(result)
     assert store.log == ["reserve", "dispatch", "uncertain"]
 
 
@@ -3571,7 +3700,8 @@ def test_deepline_tool_error_request_id_is_not_used_as_billing_identity(
         parameters={"tool": "exa_search", "payload": {"query": "x"}},
         action_sequence=0, timeout_ms=1000,
     )
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.status == 502
+    assert_unpriced_uncertain(result)
     assert [sent["method"] for sent in transport.sent] == expected_methods
     diagnostic = store.calls[result.call["call_identity"]]["uncertain_doc"]
     if top_level_id is None:
@@ -3601,8 +3731,8 @@ def test_deepline_synthetic_transport_response_keeps_full_liability_and_provenan
         parameters={"tool": "exa_search", "payload": {"query": "x"}},
         action_sequence=0, timeout_ms=1000,
     )
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
-    assert result.call["actual_microusd"] == result.call["reserved_microusd"]
+    assert result.status == 502
+    assert_unpriced_uncertain(result)
     diagnostic = store.calls[result.call["call_identity"]]["uncertain_doc"]
     assert diagnostic["response_provenance"] == provenance
     assert [sent["method"] for sent in transport.sent] == ["POST"]
@@ -3912,7 +4042,8 @@ def test_real_deepline_free_company_search_malformed_billing_does_not_fall_back(
         action_sequence=0,
         timeout_ms=1000,
     )
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.status == 200 and result.body == raw
+    assert_unpriced_uncertain(result, reserved=0)
     assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
         "reason": "missing_provider_cost",
         "credential_fingerprint": br._credential_fingerprint(DL_KEY),
@@ -4182,7 +4313,8 @@ def test_deepline_native_billing_requires_http_200_completed_job(
         action_sequence=0,
         timeout_ms=1000,
     )
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.status == (provider_status if expected_call_succeeded else 502)
+    assert_unpriced_uncertain(result)
     assert store.calls[result.call["call_identity"]]["kind"] == "uncertain"
     assert (
         store.calls[result.call["call_identity"]]["uncertain_doc"]["call_succeeded"]
@@ -4225,7 +4357,8 @@ def test_deepline_shared_history_cost_never_settles_one_request():
         action_sequence=0,
         timeout_ms=30_000,
     )
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.status == 200
+    assert_unpriced_uncertain(result)
     assert store.calls[result.call["call_identity"]]["kind"] == "uncertain"
     assert len(transport.sent) == 2
 
@@ -4345,7 +4478,8 @@ def test_deepline_billing_history_stops_on_equal_nonadvancing_offset():
         parameters={"tool": "exa_search", "payload": {"query": "x"}},
         action_sequence=0, timeout_ms=30_000,
     )
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.status == 200
+    assert_unpriced_uncertain(result)
     assert [request["url"] for request in transport.sent[1:]] == [
         br.DEEPLINE_BILLING_HISTORY_URL,
         br.DEEPLINE_BILLING_HISTORY_URL + "&recent_offset=50",
@@ -4580,8 +4714,8 @@ def test_deepline_unresolved_reconciliation_stays_uncertain_after_bounded_extra_
         timeout_ms=30_000,
     )
 
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
-    assert result.call["actual_microusd"] == result.call["reserved_microusd"]
+    assert result.status == 200
+    assert_unpriced_uncertain(result)
     assert elapsed[0] == pytest.approx(
         30.0 + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
     )
@@ -4707,7 +4841,8 @@ def test_deepline_invalid_or_conflicting_history_fails_closed(entries):
         action_sequence=0,
         timeout_ms=30_000,
     )
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.status == 200
+    assert_unpriced_uncertain(result)
     assert len(transport.sent) == 2
     persisted = json.dumps(store.calls[result.call["call_identity"]])
     assert sentinel not in persisted
@@ -4742,7 +4877,8 @@ def test_deepline_pending_history_exhausts_bounded_reads_then_fails_closed(monke
         action_sequence=0,
         timeout_ms=30_000,
     )
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.status == 200
+    assert_unpriced_uncertain(result)
     assert len(transport.sent) == 1 + br._DEEPLINE_BILLING_MAX_ATTEMPTS
     assert all(
         sent["url"] == br.DEEPLINE_BILLING_HISTORY_URL
@@ -4786,7 +4922,8 @@ def test_deepline_billing_history_transport_timeout_polls_then_fails_closed(monk
         action_sequence=0,
         timeout_ms=30_000,
     )
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert result.status == 200
+    assert_unpriced_uncertain(result)
     assert len(transport.sent) == 1 + br._DEEPLINE_BILLING_MAX_ATTEMPTS
     diagnostic = store.calls[result.call["call_identity"]]["uncertain_doc"]
     assert diagnostic["reason"] == "missing_provider_cost"
@@ -4836,8 +4973,8 @@ def test_deepline_billing_history_credential_echo_is_never_exposed_or_persisted(
         action_sequence=0,
         timeout_ms=30_000,
     )
-    assert result.status == 502
-    assert json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
+    assert result.status == 200
+    assert_unpriced_uncertain(result)
     assert DL_KEY not in json.dumps(result.call)
     assert DL_KEY not in json.dumps(store.calls[result.call["call_identity"]])
     assert store.calls[result.call["call_identity"]].get("terminal") is None
@@ -4873,8 +5010,8 @@ def test_unknown_dynamic_deepline_billing_holds_the_authoritative_reservation():
         action_sequence=0,
         timeout_ms=5000,
     )
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
-    assert result.call["reserved_microusd"] == result.call["actual_microusd"] == 54_321
+    assert result.status == 502
+    assert_unpriced_uncertain(result, reserved=54_321)
     assert store.openrouter_capacity == 0
 
 
@@ -5093,6 +5230,116 @@ def test_reservation_transport_timeout_uses_exact_idempotent_readback_once(
     assert independent.call["call_identity"] != result.call["call_identity"]
     assert [request["method"] for request in transport.sent].count("POST") == 2
     assert store.log.count("settle") == 2
+
+
+@pytest.mark.parametrize(("kind", "expected_status"), [("execute", 200), ("score", 503)])
+def test_zero_fixed_reservation_response_loss_matches_execute_only(
+    kind, expected_status
+):
+    class CommitThenLoseStore(ZeroReservationLedgerStore):
+        def __init__(self):
+            super().__init__()
+            self.first = True
+
+        def reserve_call(self, **kwargs):
+            result = super().reserve_call(**kwargs)
+            if self.first:
+                self.first = False
+                raise ArenaStoreUnavailable("synthetic reservation response loss")
+            return result
+
+    company = {
+        "name": "Example",
+        "website": "https://example.com",
+        "linkedinUrl": "https://www.linkedin.com/company/example/",
+        "employeeCountRange": {"start": 2, "end": 10},
+        "employeeCount": 6,
+    }
+    response = {
+        "job_id": "zero-fixed-response-loss",
+        "status": "completed",
+        "result": {"data": {"status": 200, "element": company}},
+        "billing": {"credits_charged": 0.03, "cost_usd": 0.003},
+    }
+    store = CommitThenLoseStore()
+    broker, _store, transport = make_broker(
+        store=store, transport=FakeTransport([(200, response)])
+    )
+    context = br.RunContext(**{**CONTEXT.__dict__, "kind": kind})
+    result = broker.execute(
+        context,
+        operation_id="deepline.execute",
+        parameters={
+            "tool": "harvestapi_get_company",
+            "payload": {"url": company["linkedinUrl"]},
+        },
+        action_sequence=38,
+        timeout_ms=1000,
+    )
+
+    assert result.status == expected_status
+    call = next(iter(store.calls.values()))
+    assert call["amount"] == 0
+    if kind == "execute":
+        assert result.call["reserved_microusd"] == 0
+        assert result.call["actual_microusd"] == 3_000
+        assert call["kind"] == "settlement"
+        assert [request["method"] for request in transport.sent] == ["POST"]
+    else:
+        assert json.loads(result.body) == {"error": {"code": "broker_unavailable"}}
+        assert call["kind"] == "reservation"
+        assert transport.sent == []
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("run_id", "other-run"),
+        ("call_identity", "sha256:" + "0" * 64),
+        ("operation_id", "scrapingdog.google"),
+        ("provider", "scrapingdog"),
+        ("funding_source", "miner_key"),
+        ("amount_microusd", 1),
+        ("entry_doc", {"request_hash": "wrong"}),
+    ],
+)
+def test_zero_fixed_reservation_readback_still_requires_exact_binding(
+    field, replacement
+):
+    class CorruptCommitThenLoseStore(ZeroReservationLedgerStore):
+        def __init__(self):
+            super().__init__()
+            self.first = True
+
+        def reserve_call(self, **kwargs):
+            result = super().reserve_call(**kwargs)
+            if self.first:
+                self.first = False
+                raise ArenaStoreUnavailable("synthetic reservation response loss")
+            return result
+
+        def list_ledger(self, **kwargs):
+            rows = super().list_ledger(**kwargs)
+            rows[0][field] = replacement
+            return rows
+
+    store = CorruptCommitThenLoseStore()
+    broker, _store, transport = make_broker(store=store)
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={
+            "tool": "harvestapi_get_company",
+            "payload": {"url": "https://www.linkedin.com/company/example/"},
+        },
+        action_sequence=39,
+        timeout_ms=1000,
+    )
+
+    assert result.status == 503
+    assert json.loads(result.body) == {"error": {"code": "broker_unavailable"}}
+    assert transport.sent == []
+    assert store.log.count("dispatch") == 0
 
 
 def test_persistent_reservation_transport_failure_never_dispatches_provider():
@@ -5580,8 +5827,7 @@ def test_host_account_or_provider_failure_is_infrastructure_for_scoring_and_exec
     broker, store, transport = make_broker(transport=FakeTransport([(status, {"error": {"message": "invalid api key"}})]))
     result = broker.execute(CONTEXT, operation_id="deepline.execute", parameters={"tool": "exa_search", "payload": {"query": "acme"}}, action_sequence=0, timeout_ms=30000)
     assert result.status == 502 and result.call["error_code"] == "provider_unavailable" and json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
-    assert result.call["outcome"] == "uncertain"
-    assert result.call["actual_microusd"] == result.call["reserved_microusd"]
+    assert_unpriced_uncertain(result)
     assert store.openrouter_capacity == 0
 
 

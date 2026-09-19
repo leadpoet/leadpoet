@@ -451,7 +451,7 @@ def test_session_isolates_login_and_provider_keys(monkeypatch, scrapingdog_value
         home = Path(env["CODEX_HOME"])
         assert not (home / "auth.json").exists()
         config = (home / "config.toml").read_text()
-        assert 'request_max_retries = 1' in config
+        assert 'request_max_retries = 0' in config
         assert 'stream_max_retries = 0' in config
     assert not home.exists()
 
@@ -508,7 +508,7 @@ def test_codex_timeout_layers_use_the_original_absolute_response_deadline(monkey
     assert ops.OPERATIONS["openrouter.responses"].timeout_seconds == 300
     assert runner.MAX_PROVIDER_API_TIMEOUT_SECONDS == 365
 
-    assert "request_max_retries = 1" in config
+    assert "request_max_retries = 0" in config
     assert "stream_max_retries = 0" in config
     assert "stream_idle_timeout_ms = 25000" in config
 
@@ -659,12 +659,12 @@ def _pin_real_codex(monkeypatch):
         ((200,), True, 1),
         ((400,), False, 1),
         ((429,), False, 1),
-        ((502, 200), True, 2),
-        ((502, 502, 200), False, 2),
+        ((502, 200), False, 1),
+        ((502, 502, 200), False, 1),
     ],
     ids=("success", "client-error", "rate-limit", "server-error-recovery", "server-error-cap"),
 )
-def test_pinned_codex_request_retry_is_one_and_only_for_5xx(
+def test_pinned_codex_does_not_automatically_repeat_failed_requests(
     monkeypatch, tmp_path, statuses, succeeds, expected_posts
 ):
     _pin_real_codex(monkeypatch)
@@ -702,7 +702,7 @@ def test_pinned_codex_request_retry_is_one_and_only_for_5xx(
 
 
 @pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="set ARENA_TEST_CODEX_BINARY to the complete Codex 0.154.0 package")
-def test_pinned_codex_retries_one_dropped_http_connection(monkeypatch, tmp_path):
+def test_pinned_codex_does_not_retry_a_dropped_http_connection(monkeypatch, tmp_path):
     _pin_real_codex(monkeypatch)
 
     class DropOnceBridge:
@@ -753,43 +753,37 @@ def test_pinned_codex_retries_one_dropped_http_connection(monkeypatch, tmp_path)
 
     bridge = DropOnceBridge()
     monkeypatch.setattr(codex, "ResponsesBridge", lambda *_args, **_kwargs: bridge)
-    assert "ARENA_CODEX_OK" in codex.run(
-        "Reply exactly ARENA_CODEX_OK.",
-        model="openai/gpt-4o-mini",
-        cwd=tmp_path,
-        timeout_seconds=30,
-    )
-    assert bridge.posts == 2
-
-
-@pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="set ARENA_TEST_CODEX_BINARY to the complete Codex 0.154.0 package")
-def test_pinned_codex_retry_uses_distinct_accounted_calls(monkeypatch, tmp_path):
-    _pin_real_codex(monkeypatch)
-    unknown = {
-        "error": {"code": "server_error", "message": "bounded fixture failure"}
-    }
-    transport = FakeTransport([(520, unknown), (200, response(id="gen-retry-success"))])
-
-    with broker_socket(monkeypatch, transport) as (store, transport, _path):
-        assert "ARENA_CODEX_OK" in codex.run(
+    with pytest.raises(codex.CodexRuntimeError):
+        codex.run(
             "Reply exactly ARENA_CODEX_OK.",
             model="openai/gpt-4o-mini",
             cwd=tmp_path,
             timeout_seconds=30,
         )
+    assert bridge.posts == 1
 
-    assert len(transport.sent) == 2
-    assert len(store.calls) == 2
-    calls = sorted(store.calls.values(), key=lambda call: call["call_doc"]["action_sequence"])
-    assert [call["call_doc"]["action_sequence"] for call in calls] == [0, 1]
-    assert calls[0]["kind"] == "uncertain"
-    assert calls[0]["uncertain_doc"]["reason"] == "missing_provider_cost"
-    assert calls[0]["uncertain_doc"]["call_succeeded"] is False
-    assert calls[0]["amount"] > 0
-    assert calls[1]["kind"] == "settlement"
-    assert calls[1]["terminal"]["call_succeeded"] is True
-    assert calls[1]["actual"] == 12
-    assert calls[0]["identity"] != calls[1]["identity"]
+
+@pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="set ARENA_TEST_CODEX_BINARY to the complete Codex 0.154.0 package")
+def test_pinned_codex_does_not_repeat_an_unknown_cost_call(monkeypatch, tmp_path):
+    _pin_real_codex(monkeypatch)
+    unknown = {"error": {"code": "server_error", "message": "bounded fixture failure"}}
+    transport = FakeTransport([(520, unknown), (200, response(id="must-not-dispatch"))])
+
+    with broker_socket(monkeypatch, transport) as (store, transport, _path):
+        with pytest.raises(codex.CodexRuntimeError):
+            codex.run(
+                "Reply exactly ARENA_CODEX_OK.",
+                model="openai/gpt-4o-mini",
+                cwd=tmp_path,
+                timeout_seconds=30,
+            )
+
+    assert len(transport.sent) == len(store.calls) == 1
+    call = next(iter(store.calls.values()))
+    assert call["call_doc"]["action_sequence"] == 0
+    assert call["kind"] == "uncertain"
+    assert call["uncertain_doc"]["reason"] == "missing_provider_cost"
+    assert call["uncertain_doc"]["call_succeeded"] is False
 
 
 @pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="set ARENA_TEST_CODEX_BINARY to the complete Codex 0.154.0 package")
@@ -797,7 +791,7 @@ def test_pinned_codex_retry_uses_distinct_accounted_calls(monkeypatch, tmp_path)
     "limit,expected_reason",
     (("cost", "provider_cost_cap"), ("quota", "per_icp_quota")),
 )
-def test_pinned_codex_retry_cannot_bypass_cost_or_call_quota(
+def test_pinned_codex_failure_does_not_start_another_billable_request(
     monkeypatch, tmp_path, limit, expected_reason
 ):
     _pin_real_codex(monkeypatch)
@@ -832,12 +826,10 @@ def test_pinned_codex_retry_cannot_bypass_cost_or_call_quota(
             )
 
     assert len(transport.sent) == 1
-    assert len(store.calls) == 2
-    assert store.action_sequences == [0, 1]
-    calls = list(store.calls.values())
-    assert calls[0]["kind"] == "uncertain" and calls[0]["amount"] > 0
-    assert calls[1]["kind"] == "refusal"
-    assert calls[1]["reason"] == expected_reason
+    assert len(store.calls) == 1
+    assert store.action_sequences == [0]
+    call = next(iter(store.calls.values()))
+    assert call["kind"] == "uncertain"
 
 
 @pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="set ARENA_TEST_CODEX_BINARY to the complete Codex 0.154.0 package")

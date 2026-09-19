@@ -1520,6 +1520,8 @@ def _reservation_readback_matches(
     store: CallStore,
     reservation_arguments: Mapping[str, Any],
     state: Mapping[str, Any],
+    *,
+    confirmed_cost_admission: bool = False,
 ) -> bool:
     """Validate the durable reservation and current state after response loss."""
 
@@ -1572,7 +1574,11 @@ def _reservation_readback_matches(
     if isinstance(reserved_amount, bool) or not isinstance(reserved_amount, int) or reserved_amount < 0:
         return False
     dynamic = call_doc.get("reserve_remaining_budget") is True
-    if not dynamic and reserved_amount != reservation_arguments.get("amount_microusd"):
+    if (
+        not dynamic
+        and reserved_amount != reservation_arguments.get("amount_microusd")
+        and not (confirmed_cost_admission and reserved_amount == 0)
+    ):
         return False
     kind_to_status = {
         "reservation": "reserved", "dispatch": "dispatched",
@@ -2887,7 +2893,8 @@ class Broker:
                 or reserved.get("idempotent") is True and status == "reserved"
             )
             and not _reservation_readback_matches(
-                self._store, reservation_arguments, reserved
+                self._store, reservation_arguments, reserved,
+                confirmed_cost_admission=getattr(context, "kind", "execute") == "execute",
             )
         ):
             return _error_result("broker_unavailable", summary)
@@ -3029,14 +3036,16 @@ class Broker:
         if status != "reserved":
             return _error_result("broker_unavailable", summary)
 
-        # Dynamic reservations are allocated atomically by the database. Its
-        # amount, not the requested zero placeholder, is the real liability.
+        # The database owns admission. Current sourcing calls retain a zero-
+        # amount lifecycle reservation; older and judge policies may hold money.
         reserved_amount = reserved.get("amount_microusd")
         if isinstance(reserved_amount, bool) or not isinstance(reserved_amount, int) or reserved_amount < 0:
             return _error_result("broker_unavailable", summary)
         amount = reserved_amount
         summary["reserved_microusd"] = amount
-        if reserve_remaining_budget:
+        if amount == 0 and getattr(context, "kind", "execute") == "execute":
+            summary["reservation_basis"] = "confirmed_cost_only"
+        elif reserve_remaining_budget:
             summary["reservation_basis"] = (
                 "remaining_budget_native_web_search"
                 if effective_operation.provider == "openrouter"
@@ -3371,7 +3380,7 @@ class Broker:
                         run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
                         call_doc=uncertain_doc, lease_ttl_seconds=self._lease_ttl_seconds,
                     )
-                    summary.update({"outcome": "uncertain", "actual_microusd": amount})
+                    summary.update({"outcome": "uncertain"})
                     return _error_result("provider_unavailable", summary)
                 if deepline_readback_cost is not None:
                     # A billed request with a lost result is still a failed
@@ -3561,7 +3570,7 @@ class Broker:
                     uncertain_doc["account_failure_evidence"] = (
                         account_failure_evidence
                     )
-                self._store.mark_uncertain(
+                uncertain_state = self._store.mark_uncertain(
                     run_id=context.run_id,
                     lease_token_hash=context.lease_token_hash,
                     call_identity=call_identity,
@@ -3571,7 +3580,6 @@ class Broker:
                 summary.update(
                     {
                         "outcome": "uncertain",
-                        "actual_microusd": amount,
                         "provider_status": int(response.status),
                     }
                 )
@@ -3582,6 +3590,21 @@ class Broker:
                     return _error_result("provider_request_refused", summary)
                 if miner_credential_failure:
                     return _error_result("miner_credentials_unavailable", summary)
+                if (
+                    getattr(context, "kind", "execute") == "execute"
+                    and uncertain_state.get("status") == "uncertain"
+                    and call_succeeded is True
+                    and 200 <= sanitized_status < 300
+                ):
+                    # A complete sanitized result remains useful while its
+                    # exact bill is pending. The ledger still forbids another
+                    # dispatch of this identity and later records the real cost.
+                    summary.update(status=sanitized_status)
+                    if gate_lease is not None:
+                        self._openrouter_shared_gate.observe_success(gate_lease)
+                    return BrokerResult(
+                        sanitized_status, sanitized_headers, sanitized_body, summary
+                    )
                 return _error_result("provider_unavailable", summary)
             failure_stage = "cost_accounting"
             if effective_operation.provider == "openrouter":
@@ -3711,9 +3734,9 @@ class Broker:
                     call_doc=uncertain_doc,
                     lease_ttl_seconds=self._lease_ttl_seconds,
                 )
-                summary.update({"outcome": "uncertain", "actual_microusd": amount})
+                summary.update({"outcome": "uncertain"})
             except Exception:
-                summary.update({"outcome": "uncertain", "actual_microusd": amount})
+                summary.update({"outcome": "uncertain"})
             return _error_result("provider_unavailable", summary)
         settle_status = settled.get("status")
         if settle_status == "settled" and request_refused:
@@ -3753,7 +3776,7 @@ class Broker:
             summary["outcome"] = "uncertain"
             return _error_result("lease_stale", summary)
         if settle_status == "uncertain":
-            summary.update({"outcome": "uncertain", "actual_microusd": amount})
+            summary.update({"outcome": "uncertain"})
             return _error_result("call_uncertain", summary)
         return _error_result("broker_unavailable", summary)
 

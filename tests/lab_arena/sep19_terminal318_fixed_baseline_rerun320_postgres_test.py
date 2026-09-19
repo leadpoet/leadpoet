@@ -20,13 +20,14 @@ TEMPLATE = Path(__file__).resolve().parents[2] / "scripts" / (
     "320-arena-2026-09-19-terminal318-fixed-baseline-rerun.sql.template"
 )
 RENDERED = TEMPLATE.with_suffix("")
-RENDERED_SHA256 = "d1dc484a613cfb438daf135fec4d73e0a78b64646792e3d574b7909dffd6cdb3"
+RENDERED_SHA256 = "d0c0a48c0661b758186105a3aaaebd0e6bfc2ae95e77aaf44d86e4468201fb63"
 rerun310 = prior.rerun310
 ROUND = prior.ROUND
 BASELINE = prior.BASELINE
 # Candidate identity is the verified public lab archive at 66b79ab0.
 # Migration 320 was still unapplied when only this source binding was updated.
-# The terminal seals, schedule, frozen bank, and scoring contract are unchanged.
+# The terminal seals, frozen bank, and scoring contract are unchanged.
+# Before first apply, the restart epoch gate required a one-hour schedule shift.
 NEW_SOURCE_REF = (
     "arena/arena-2026-09-19/sources/"
     "baseline-2026-09-19-rerun320-66b79ab0.tar.gz"
@@ -1253,7 +1254,7 @@ def test_exact_render_has_terminal_seals_and_rejects_wrong_preimage_atomically(
     assert NEW_SOURCE_REF in body
     assert "source_size_bytes=803257" in body
     assert NEW_SCORER_DIGEST in body
-    assert '"benchmark_deadline":"2026-09-19T17:00:00Z"' in body
+    assert '"benchmark_deadline":"2026-09-19T18:00:00Z"' in body
     assert "active_round.status IS DISTINCT FROM 'cancelled'" in body
     assert "active_round.cancel_reason IS DISTINCT FROM 'operator'" in body
     assert "kind='execute')<>116" in body

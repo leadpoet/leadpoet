@@ -248,7 +248,7 @@ BEGIN
  IF p_source_size_bytes<>803257
   OR p_source_sha256<>'26d80f338ba4aa91172255fbaac61199992d903e90833e6edff1044284ae4653'
   OR p_source_commit<>'66b79ab07b8c3b6b4a06cbb8ef18a8ae2b2a575b'
-  OR p_schedule IS DISTINCT FROM '{"submission_open":"2026-09-18T00:00:00Z","submission_cutoff":"2026-09-19T00:00:00Z","benchmark_deadline":"2026-09-19T17:00:00Z","stage_1_start":"2026-09-19T17:00:01Z","stage_1_close":"2026-09-19T20:00:00Z","stage_1_scoring_close":"2026-09-19T23:00:00Z","stage_2_start":"2026-09-19T23:00:01Z","stage_2_close":"2026-09-20T02:00:00Z","final_scoring_close":"2026-09-20T05:00:00Z","publication_deadline":"2026-09-20T05:00:01Z"}'::JSONB
+  OR p_schedule IS DISTINCT FROM '{"submission_open":"2026-09-18T00:00:00Z","submission_cutoff":"2026-09-19T00:00:00Z","benchmark_deadline":"2026-09-19T18:00:00Z","stage_1_start":"2026-09-19T18:00:01Z","stage_1_close":"2026-09-19T21:00:00Z","stage_1_scoring_close":"2026-09-20T00:00:00Z","stage_2_start":"2026-09-20T00:00:01Z","stage_2_close":"2026-09-20T03:00:00Z","final_scoring_close":"2026-09-20T06:00:00Z","publication_deadline":"2026-09-20T06:00:01Z"}'::JSONB
   OR p_scorer_digest<>'sha256:e2fa040d8b1398fad2a802c7dd80a1c709fe68efc485115aae45211b8c489889'
   OR p_scorer_reference<>'493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:e2fa040d8b1398fad2a802c7dd80a1c709fe68efc485115aae45211b8c489889' THEN
   RAISE EXCEPTION 'Sep19 rerun320 source, judge, bank, or schedule differs'
@@ -612,7 +612,7 @@ CREATE TRIGGER lab_arena_sep19_rerun320_score_namespace_guard
 
 SELECT public.lab_arena_prepare_sep19_rerun320_v1(
  803257,'26d80f338ba4aa91172255fbaac61199992d903e90833e6edff1044284ae4653','66b79ab07b8c3b6b4a06cbb8ef18a8ae2b2a575b',
- '{"submission_open":"2026-09-18T00:00:00Z","submission_cutoff":"2026-09-19T00:00:00Z","benchmark_deadline":"2026-09-19T17:00:00Z","stage_1_start":"2026-09-19T17:00:01Z","stage_1_close":"2026-09-19T20:00:00Z","stage_1_scoring_close":"2026-09-19T23:00:00Z","stage_2_start":"2026-09-19T23:00:01Z","stage_2_close":"2026-09-20T02:00:00Z","final_scoring_close":"2026-09-20T05:00:00Z","publication_deadline":"2026-09-20T05:00:01Z"}'::JSONB,
+ '{"submission_open":"2026-09-18T00:00:00Z","submission_cutoff":"2026-09-19T00:00:00Z","benchmark_deadline":"2026-09-19T18:00:00Z","stage_1_start":"2026-09-19T18:00:01Z","stage_1_close":"2026-09-19T21:00:00Z","stage_1_scoring_close":"2026-09-20T00:00:00Z","stage_2_start":"2026-09-20T00:00:01Z","stage_2_close":"2026-09-20T03:00:00Z","final_scoring_close":"2026-09-20T06:00:00Z","publication_deadline":"2026-09-20T06:00:01Z"}'::JSONB,
  'sha256:e2fa040d8b1398fad2a802c7dd80a1c709fe68efc485115aae45211b8c489889','493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:e2fa040d8b1398fad2a802c7dd80a1c709fe68efc485115aae45211b8c489889');
 
 REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;

@@ -57,6 +57,7 @@ OPENROUTER_LUNA_LONG_CONTEXT_MIN_PROMPT_TOKENS = 272_000
 OPENROUTER_LUNA_LONG_CONTEXT_PROMPT_PRICE = Decimal("0.0000004")
 OPENROUTER_LUNA_LONG_CONTEXT_COMPLETION_PRICE = Decimal("0.0000018")
 OPENROUTER_PRICE_PER_MILLION = Decimal("1000000")
+OPENROUTER_NATIVE_WEB_SEARCH_RESERVATION_USD_PER_CALL = Decimal("0.01")
 DEEPLINE_BILLING_LEDGER_URL = "https://code.deepline.com/api/v2/billing/ledger"
 DEEPLINE_BILLING_HISTORY_URL = (
     "https://code.deepline.com/api/v2/billing/usage?recent_limit=50"
@@ -631,13 +632,32 @@ def _max_openrouter_cost_for_pricing(
 ) -> int:
     input_tokens = bounded_input_tokens(parameters)
     output_tokens = int(max_output_tokens)
+    web_search_enabled = _openrouter_web_search_enabled(parameters)
+    web_search_calls = (
+        int(parameters.get("max_tool_calls", 0))
+        if web_search_enabled else 0
+    )
+    web_search_price = max(
+        Decimal(pricing["web_search"]),
+        OPENROUTER_NATIVE_WEB_SEARCH_RESERVATION_USD_PER_CALL,
+    ) if web_search_enabled else Decimal("0")
     usd = (
         Decimal(pricing["prompt"]) * input_tokens
         + Decimal(pricing["completion"]) * output_tokens
         + Decimal(pricing["internal_reasoning"]) * output_tokens
         + Decimal(pricing["request"])
+        + web_search_price * web_search_calls
     )
     return _microusd_ceiling(usd)
+
+
+def _openrouter_web_search_enabled(parameters: Mapping[str, Any]) -> bool:
+    tools = parameters.get("tools", [])
+    return isinstance(tools, list) and any(
+        isinstance(tool, Mapping)
+        and tool.get("type") == "openrouter:web_search"
+        for tool in tools
+    )
 
 
 @dataclass(frozen=True)
@@ -2618,6 +2638,13 @@ class Broker:
                 # Reserve the maximum cost allowed by the request and output cap.
                 effective_normalized, max_output_tokens = self._openrouter_parameters(effective_normalized, kind=getattr(context, "kind", "execute"))
                 normalized = effective_normalized
+                # Server-side search can add provider-owned context and model
+                # passes that are absent from the caller body. Reuse the
+                # existing atomic dynamic reservation so admission holds the
+                # ICP's remaining budget until authoritative usage settles.
+                reserve_remaining_budget = _openrouter_web_search_enabled(
+                    normalized
+                )
                 pricing = self._price_table["models"][normalized["model"]]
                 openrouter_host_route = _openrouter_host_route(
                     kind=getattr(context, "kind", "execute"),
@@ -2986,7 +3013,11 @@ class Broker:
         amount = reserved_amount
         summary["reserved_microusd"] = amount
         if reserve_remaining_budget:
-            summary["reservation_basis"] = "remaining_budget_dynamic_deepline"
+            summary["reservation_basis"] = (
+                "remaining_budget_native_web_search"
+                if effective_operation.provider == "openrouter"
+                else "remaining_budget_dynamic_deepline"
+            )
 
         # Only gated Responses calls share the worker API's absolute deadline.
         # Other providers retain their full post-admission request and billing

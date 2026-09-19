@@ -71,6 +71,8 @@ OPENROUTER_MAX_MESSAGES = 128
 # bound the request.
 OPENROUTER_RESPONSES_MAX_INPUT_ITEMS = 768
 OPENROUTER_MAX_CONTENT_CHARS = 32_000
+OPENROUTER_WEB_SEARCH_MAX_TOOL_CALLS = 1
+OPENROUTER_WEB_SEARCH_MAX_TOTAL_RESULTS = 5
 # The broker injects this policy into every chat body; it is table data so its hash is
 # bound into the round configuration.
 # Zero data retention is the judge's own request for the page content it
@@ -1096,12 +1098,17 @@ _OPERATION_LIST = (
         parameter_location="body",
         request_fields={
             "model": FieldSpec("str", required=True, min_length=3, max_length=128, format="model_id"),
-            # Union members are checked below; only local tools and text are allowed.
+            # Union members are checked below; one source-controlled hosted
+            # search tool is allowed alongside local tools and text.
             "input": FieldSpec("any", required=True),
             "instructions": FieldSpec("str", max_length=OPENROUTER_MAX_CONTENT_CHARS),
             "tools": FieldSpec("any"),
             "tool_choice": FieldSpec("str", choices=("auto", "none", "required")),
             "parallel_tool_calls": FieldSpec("bool"),
+            "max_tool_calls": FieldSpec(
+                "int", minimum=1,
+                maximum=OPENROUTER_WEB_SEARCH_MAX_TOOL_CALLS,
+            ),
             "reasoning": FieldSpec("object", fields={
                 "effort": FieldSpec("str", choices=("none", "minimal", "low", "medium", "high", "xhigh", "max")),
                 "summary": FieldSpec("str", choices=("auto", "concise", "detailed")),
@@ -1497,7 +1504,7 @@ def validate_operation_request(operation_id: str, parameters: Any) -> Dict[str, 
 
 
 def _validate_responses(parameters: Mapping[str, Any]) -> None:
-    """Stateless text and local tool history; no hosted tools or remote inputs."""
+    """Stateless text, local tools, and one bounded native web-search tool."""
 
     text = FieldSpec("str", max_length=OPENROUTER_MAX_CONTENT_CHARS)
     identifier = FieldSpec("str", required=True, min_length=1, max_length=256)
@@ -1510,16 +1517,46 @@ def _validate_responses(parameters: Mapping[str, Any]) -> None:
         "custom_tool_call_output": {"call_id": identifier, "output": FieldSpec("any", required=True)},
         "additional_tools": {"role": FieldSpec("str", required=True, choices=("developer",)), "tools": FieldSpec("any", required=True)},
         "reasoning": {"summary": FieldSpec("any"), "encrypted_content": FieldSpec("str", max_length=128_000), "content": FieldSpec("any"), "status": status},
+        "web_search_call": {
+            "status": status,
+            "action": FieldSpec("object", required=True),
+        },
     }
 
     local_tool_fields = {"type": FieldSpec("str", required=True, choices=("function", "custom")), "name": identifier, "description": text}
 
-    def validate_local_tools(tools: Any, path: str, *, namespaces_allowed: bool) -> int:
+    def validate_local_tools(
+        tools: Any, path: str, *, namespaces_allowed: bool,
+        hosted_web_search_allowed: bool = False,
+    ) -> tuple[int, int]:
         if not isinstance(tools, list) or len(tools) > 64:
             raise OperationRequestError("invalid_field", path)
         total = 0
+        web_searches = 0
         for tool in tools:
             kind = tool.get("type") if isinstance(tool, dict) else None
+            if kind == "openrouter:web_search" and hosted_web_search_allowed:
+                _validate_object({
+                    "type": FieldSpec(
+                        "str", required=True,
+                        choices=("openrouter:web_search",),
+                    ),
+                    "parameters": FieldSpec("object", required=True, fields={
+                        "engine": FieldSpec(
+                            "str", required=True, choices=("native",),
+                        ),
+                        "max_uses": FieldSpec(
+                            "int", required=True, minimum=1,
+                            maximum=OPENROUTER_WEB_SEARCH_MAX_TOOL_CALLS,
+                        ),
+                        "max_total_results": FieldSpec(
+                            "int", required=True, minimum=1,
+                            maximum=OPENROUTER_WEB_SEARCH_MAX_TOTAL_RESULTS,
+                        ),
+                    }),
+                }, tool, path, limits=_RESPONSES_STRUCTURE_LIMITS)
+                web_searches += 1
+                continue
             if kind == "namespace" and namespaces_allowed:
                 _validate_object({
                     "type": FieldSpec("str", required=True, choices=("namespace",)),
@@ -1528,7 +1565,11 @@ def _validate_responses(parameters: Mapping[str, Any]) -> None:
                     "tools": FieldSpec("any", required=True),
                 }, tool, path, limits=_RESPONSES_STRUCTURE_LIMITS)
                 total += 1
-                total += validate_local_tools(tool["tools"], path + ".tools", namespaces_allowed=False)
+                nested_count, nested_web_searches = validate_local_tools(
+                    tool["tools"], path + ".tools", namespaces_allowed=False,
+                )
+                total += nested_count
+                web_searches += nested_web_searches
                 continue
             fields = dict(local_tool_fields)
             if kind == "function":
@@ -1550,7 +1591,100 @@ def _validate_responses(parameters: Mapping[str, Any]) -> None:
                 raise OperationRequestError("invalid_field", path + ".type")
             _validate_object(fields, tool, path, limits=_RESPONSES_STRUCTURE_LIMITS)
             total += 1
-        return total
+        return total, web_searches
+
+    def validate_web_search_action(action: Any) -> None:
+        if not isinstance(action, Mapping):
+            raise OperationRequestError("invalid_field", "$.input.action")
+        action_type = action.get("type")
+        fields = {"type": FieldSpec("str", required=True)}
+        if action_type == "search":
+            fields.update(
+                query=FieldSpec("str", max_length=OPENROUTER_MAX_CONTENT_CHARS),
+                queries=FieldSpec(
+                    "list[str]", max_length=128,
+                    item=FieldSpec("str", min_length=1,
+                                   max_length=OPENROUTER_MAX_CONTENT_CHARS),
+                ),
+                sources=FieldSpec(
+                    "list[object]", max_length=128, fields={
+                        "type": FieldSpec(
+                            "str", required=True, choices=("url",),
+                        ),
+                        "url": FieldSpec(
+                            "str", required=True, max_length=8_192,
+                        ),
+                    },
+                ),
+            )
+        elif action_type == "open_page":
+            fields["url"] = FieldSpec(
+                "str", required=True, max_length=8_192,
+            )
+        elif action_type == "find_in_page":
+            fields.update(
+                url=FieldSpec(
+                    "str", required=True, max_length=8_192,
+                ),
+                pattern=FieldSpec(
+                    "str", required=True,
+                    max_length=OPENROUTER_MAX_CONTENT_CHARS,
+                ),
+            )
+        else:
+            raise OperationRequestError("invalid_field", "$.input.action.type")
+        normalized_action = _validate_object(
+            fields, action, "$.input.action",
+            limits=_RESPONSES_STRUCTURE_LIMITS,
+        )
+        if "url" in normalized_action:
+            validate_response_url(normalized_action["url"], "$.input.action.url")
+        for index, source in enumerate(normalized_action.get("sources", [])):
+            validate_response_url(
+                source["url"], "$.input.action.sources[%d].url" % index,
+            )
+
+    def validate_response_url(value: Any, path: str) -> None:
+        """Validate bounded provider-returned HTTP(S) links without rewriting."""
+
+        if (
+            not isinstance(value, str)
+            or not 1 <= len(value) <= 8_192
+            or any(char.isspace() or ord(char) < 0x20 for char in value)
+        ):
+            raise OperationRequestError("invalid_field", path)
+        try:
+            parts = urlsplit(value)
+        except ValueError as exc:
+            raise OperationRequestError("invalid_field", path) from exc
+        if parts.scheme not in ("http", "https") or not parts.netloc or not parts.hostname:
+            raise OperationRequestError("invalid_field", path)
+
+    def citation_annotations(value: Any) -> None:
+        if not isinstance(value, list) or len(value) > 128:
+            raise OperationRequestError("invalid_field", "$.input.content.annotations")
+        for annotation in value:
+            _validate_object({
+                "type": FieldSpec(
+                    "str", required=True, choices=("url_citation",),
+                ),
+                "url": FieldSpec(
+                    "str", required=True, max_length=8_192,
+                ),
+                "title": FieldSpec(
+                    "str", required=True,
+                    max_length=OPENROUTER_MAX_CONTENT_CHARS,
+                ),
+                "start_index": FieldSpec("int", minimum=0),
+                "end_index": FieldSpec("int", minimum=0),
+                "content": FieldSpec(
+                    "str", max_length=OPENROUTER_MAX_CONTENT_CHARS,
+                ),
+            }, annotation, "$.input.content.annotations",
+               limits=_RESPONSES_STRUCTURE_LIMITS)
+            validate_response_url(
+                annotation["url"], "$.input.content.annotations.url",
+            )
 
     def content_parts(value: Any, *, reasoning: bool = False) -> None:
         if isinstance(value, str) and not reasoning:
@@ -1559,11 +1693,13 @@ def _validate_responses(parameters: Mapping[str, Any]) -> None:
         if not isinstance(value, list) or len(value) > OPENROUTER_MAX_MESSAGES:
             raise OperationRequestError("invalid_field", "$.input.content")
         for part in value:
-            _validate_object({
+            normalized_part = _validate_object({
                 "type": FieldSpec("str", required=True, choices=(("summary_text", "reasoning_text") if reasoning else ("input_text", "output_text"))),
                 "text": dataclasses.replace(text, required=True),
-                "annotations": FieldSpec("list[object]", max_length=0, fields={}),
+                "annotations": FieldSpec("any"),
             }, part, "$.input.content")
+            if "annotations" in normalized_part:
+                citation_annotations(normalized_part["annotations"])
 
     def tool_output(value: Any) -> None:
         if isinstance(value, str):
@@ -1592,7 +1728,12 @@ def _validate_responses(parameters: Mapping[str, Any]) -> None:
                 if "phase" in item and item["role"] != "assistant":
                     raise OperationRequestError("invalid_field", "$.input.phase")
             elif kind == "additional_tools":
-                additional_tool_count += validate_local_tools(item["tools"], "$.input.tools", namespaces_allowed=True)
+                count, hosted_count = validate_local_tools(
+                    item["tools"], "$.input.tools", namespaces_allowed=True,
+                )
+                additional_tool_count += count
+                if hosted_count:
+                    raise OperationRequestError("invalid_field", "$.input.tools")
                 if additional_tool_count > 64:
                     raise OperationRequestError("invalid_field", "$.input.tools")
             elif kind in ("function_call_output", "custom_tool_call_output"):
@@ -1601,10 +1742,23 @@ def _validate_responses(parameters: Mapping[str, Any]) -> None:
                 for name in ("summary", "content"):
                     if item.get(name) is not None:
                         content_parts(item[name], reasoning=True)
+            elif kind == "web_search_call":
+                validate_web_search_action(item["action"])
     else:
         raise OperationRequestError("invalid_field", "$.input")
-    if additional_tool_count + validate_local_tools(parameters.get("tools", []), "$.tools", namespaces_allowed=True) > 64:
+    root_tool_count, web_search_count = validate_local_tools(
+        parameters.get("tools", []), "$.tools", namespaces_allowed=True,
+        hosted_web_search_allowed=True,
+    )
+    if additional_tool_count + root_tool_count > 64:
         raise OperationRequestError("invalid_field", "$.tools")
+    if web_search_count not in (0, 1):
+        raise OperationRequestError("invalid_field", "$.tools")
+    if web_search_count:
+        if parameters.get("max_tool_calls") != OPENROUTER_WEB_SEARCH_MAX_TOOL_CALLS:
+            raise OperationRequestError("invalid_field", "$.max_tool_calls")
+    elif "max_tool_calls" in parameters:
+        raise OperationRequestError("invalid_field", "$.max_tool_calls")
 
 
 # ---------------------------------------------------------------------------

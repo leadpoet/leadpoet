@@ -78,6 +78,148 @@ def test_assistant_phase_and_typed_function_output_are_preserved():
     assert operations.validate_operation_request("openrouter.responses", params)["input"] == items
 
 
+def test_bounded_native_web_search_tool_history_and_citations_are_preserved():
+    web_tool = {
+        "type": "openrouter:web_search",
+        "parameters": {
+            "engine": "native",
+            "max_uses": operations.OPENROUTER_WEB_SEARCH_MAX_TOOL_CALLS,
+            "max_total_results": operations.OPENROUTER_WEB_SEARCH_MAX_TOTAL_RESULTS,
+        },
+    }
+    items = _native_input(tools=False) + [
+        {
+            "type": "web_search_call", "id": "ws-1", "status": "completed",
+            "action": {
+                "type": "search",
+                "queries": [
+                    "current fixture",
+                    "current fixture source",
+                    "current fixture documentation",
+                ],
+                "sources": [
+                    {"type": "url", "url": "http://example.com/source"},
+                    {
+                        "type": "url",
+                        "url": "https://docs.example.com/source#section",
+                    },
+                ],
+            },
+        },
+        {
+            "type": "message", "id": "msg-search", "role": "assistant",
+            "content": [{
+                "type": "output_text", "text": "Current fixture",
+                "annotations": [{
+                    "type": "url_citation", "url": "http://example.com/source",
+                    "title": "Example source", "start_index": 0,
+                    "end_index": 15, "content": "bounded excerpt",
+                }],
+            }],
+        },
+    ]
+    params = {
+        "model": "openai/gpt-5.6-luna", "input": items,
+        "tools": [web_tool],
+        "max_tool_calls": operations.OPENROUTER_WEB_SEARCH_MAX_TOOL_CALLS,
+    }
+
+    normalized = operations.validate_operation_request(
+        "openrouter.responses", params,
+    )
+
+    assert normalized["tools"] == [web_tool]
+    assert normalized["input"] == items
+
+
+@pytest.mark.parametrize("action", [
+    {"type": "open_page", "url": "http://example.com/page"},
+    {
+        "type": "find_in_page",
+        "url": "https://example.com/page#section",
+        "pattern": "documented text",
+    },
+])
+def test_web_search_navigation_history_is_preserved(action):
+    params = {
+        "model": "openai/gpt-5.6-luna",
+        "input": [{
+            "type": "web_search_call", "id": "ws-1", "status": "completed",
+            "action": action,
+        }],
+    }
+
+    normalized = operations.validate_operation_request(
+        "openrouter.responses", params,
+    )
+
+    assert normalized["input"][0]["action"] == action
+
+
+@pytest.mark.parametrize("action", [
+    {"type": "search", "queries": ["query"] * 129},
+    {
+        "type": "search", "queries": ["query"],
+        "sources": [{"type": "url", "url": "ftp://example.com/source"}],
+    },
+    {"type": "open_page", "url": "file:///etc/passwd"},
+])
+def test_web_search_history_remains_bounded_and_http_only(action):
+    params = {
+        "model": "openai/gpt-5.6-luna",
+        "input": [{
+            "type": "web_search_call", "id": "ws-1", "status": "completed",
+            "action": action,
+        }],
+    }
+
+    with pytest.raises(operations.OperationRequestError):
+        operations.validate_operation_request("openrouter.responses", params)
+
+
+def test_web_search_citation_rejects_non_http_url():
+    params = {
+        "model": "openai/gpt-5.6-luna",
+        "input": [{
+            "type": "message", "id": "msg-search", "role": "assistant",
+            "content": [{
+                "type": "output_text", "text": "Current fixture",
+                "annotations": [{
+                    "type": "url_citation", "url": "ftp://example.com/source",
+                    "title": "Example source", "start_index": 0,
+                    "end_index": 15,
+                }],
+            }],
+        }],
+    }
+
+    with pytest.raises(operations.OperationRequestError):
+        operations.validate_operation_request("openrouter.responses", params)
+
+
+@pytest.mark.parametrize("change", [
+    ("engine", "auto"),
+    ("max_uses", operations.OPENROUTER_WEB_SEARCH_MAX_TOOL_CALLS + 1),
+    ("max_total_results", operations.OPENROUTER_WEB_SEARCH_MAX_TOTAL_RESULTS + 1),
+])
+def test_web_search_tool_rejects_fallback_or_unbounded_settings(change):
+    params = {
+        "model": "openai/gpt-5.6-luna", "input": "Search",
+        "tools": [{
+            "type": "openrouter:web_search",
+            "parameters": {
+                "engine": "native",
+                "max_uses": operations.OPENROUTER_WEB_SEARCH_MAX_TOOL_CALLS,
+                "max_total_results": operations.OPENROUTER_WEB_SEARCH_MAX_TOTAL_RESULTS,
+            },
+        }],
+        "max_tool_calls": operations.OPENROUTER_WEB_SEARCH_MAX_TOOL_CALLS,
+    }
+    params["tools"][0]["parameters"][change[0]] = change[1]
+    with pytest.raises(operations.OperationRequestError):
+        operations.validate_operation_request("openrouter.responses", params)
+
+
 @pytest.mark.parametrize("hosted", ["web_search", "mcp", "shell", "code_interpreter"])
 def test_nested_hosted_tools_fail_closed(hosted):
     params = {"model": "openai/gpt-5.4", "input": _native_input()}

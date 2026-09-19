@@ -37,6 +37,8 @@ MAX_OUTPUT_TOKENS = 32_768
 # this size.  Keep this standalone bridge dependency-free; a contract test
 # couples the value to operations.OPENROUTER_MAX_CONTENT_CHARS.
 TOOL_OUTPUT_TEXT_CHARS = 32_000
+WEB_SEARCH_MAX_TOOL_CALLS = 1
+WEB_SEARCH_MAX_TOTAL_RESULTS = 5
 
 
 class CodexRuntimeError(RuntimeError):
@@ -211,15 +213,19 @@ class ResponsesBridge:
         *,
         max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
         request_guard: Callable[[], bool] | None = None,
+        web_search: str = "disabled",
     ) -> None:
         if type(max_output_tokens) is not int or not 1 <= max_output_tokens <= MAX_OUTPUT_TOKENS:
             raise CodexRuntimeError("invalid Codex output token limit")
         if request_guard is not None and not callable(request_guard):
             raise CodexRuntimeError("invalid Codex request guard")
+        if web_search not in ("disabled", "live"):
+            raise CodexRuntimeError("invalid Codex web search mode")
         self.socket_path = socket_path
         self.token = secrets.token_urlsafe(32)
         self._active = threading.BoundedSemaphore(1)
         self._request_guard = request_guard
+        self._web_search = web_search
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -274,6 +280,52 @@ class ResponsesBridge:
                         raise ValueError("invalid output token limit")
                     body["max_output_tokens"] = requested
                     _chunk_tool_output_text(body)
+                    tools = body.get("tools") or []
+                    if not isinstance(tools, list):
+                        raise ValueError("invalid tools")
+                    web_tools = [
+                        tool for tool in tools
+                        if isinstance(tool, dict) and tool.get("type") == "web_search"
+                    ]
+                    hosted_tools = [
+                        tool for tool in tools
+                        if isinstance(tool, dict)
+                        and str(tool.get("type") or "").startswith("openrouter:")
+                    ]
+                    if hosted_tools:
+                        raise ValueError("hosted tools are bridge-controlled")
+                    if web_tools and (
+                            owner._web_search != "live" or len(web_tools) != 1):
+                        raise ValueError("web search unavailable")
+                    if owner._web_search == "live":
+                        if len(web_tools) > 1:
+                            raise ValueError("web search unavailable")
+                        if web_tools:
+                            web_tool = web_tools[0]
+                            if set(web_tool) - {
+                                "type", "external_web_access",
+                                "search_context_size",
+                            }:
+                                raise ValueError("invalid web search tool")
+                            if web_tool.get("external_web_access", True) is not True:
+                                raise ValueError("live web search required")
+                            if web_tool.get("search_context_size", "medium") not in (
+                                    "low", "medium", "high"):
+                                raise ValueError("invalid web search context")
+                        replacement = {
+                            "type": "openrouter:web_search",
+                            "parameters": {
+                                "engine": "native",
+                                "max_uses": WEB_SEARCH_MAX_TOOL_CALLS,
+                                "max_total_results": WEB_SEARCH_MAX_TOTAL_RESULTS,
+                            },
+                        }
+                        body["tools"] = [
+                            tool for tool in tools
+                            if not (isinstance(tool, dict)
+                                    and tool.get("type") == "web_search")
+                        ] + [replacement]
+                        body["max_tool_calls"] = WEB_SEARCH_MAX_TOOL_CALLS
                     if owner._request_guard is not None:
                         try:
                             permitted = owner._request_guard()
@@ -334,11 +386,18 @@ def session(
     reasoning_effort: str = "medium",
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     request_guard: Callable[[], bool] | None = None,
+    web_search: str = "disabled",
 ) -> Iterator[CodexSessionEnvironment]:
     """Yield an isolated child environment for a Codex CLI or SDK launcher.
 
     Call only inside an Arena execute sandbox with private loopback enabled.
     Provider keys and the caller's Codex login/configuration are not inherited.
+    ``web_search="live"`` makes the bridge add one bounded OpenRouter native
+    search tool per Responses request. OpenRouter documents ``native`` as a
+    preference that workspace policy may fall back; this bridge never selects
+    or silently substitutes another engine itself. The bridge replays citation
+    annotations unchanged; Codex 0.154 retains the ``web_search_call`` in a
+    continuation but can omit prior message annotations from its next request.
     """
 
     socket_path = os.environ.get("LAB_ARENA_WORKER_SOCKET")
@@ -348,9 +407,11 @@ def session(
         raise CodexRuntimeError("invalid Codex model or reasoning effort")
     if request_guard is not None and not callable(request_guard):
         raise CodexRuntimeError("invalid Codex request guard")
+    if web_search not in ("disabled", "live"):
+        raise CodexRuntimeError("invalid Codex web search mode")
     with tempfile.TemporaryDirectory(prefix="arena-codex-") as directory, ResponsesBridge(
             socket_path, max_output_tokens=max_output_tokens,
-            request_guard=request_guard) as bridge:
+            request_guard=request_guard, web_search=web_search) as bridge:
         home = Path(directory)
         config = '\n'.join([
             "model = " + json.dumps(model),
@@ -359,7 +420,7 @@ def session(
             'approval_policy = "never"',
             # gVisor owns isolation. Nested platform sandboxes cannot run here.
             'sandbox_mode = "danger-full-access"',
-            'web_search = "disabled"',
+            "web_search = " + json.dumps(web_search),
             'check_for_update_on_startup = false',
             '[agents]',
             'enabled = false',
@@ -407,14 +468,16 @@ def session(
             session_environment._close()
 
 
-def run(prompt: str, *, model: str, cwd: str | Path, reasoning_effort: str = "medium", max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS, timeout_seconds: float = 2700) -> str:
+def run(prompt: str, *, model: str, cwd: str | Path, reasoning_effort: str = "medium", max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS, timeout_seconds: float = 2700, web_search: str = "disabled") -> str:
     """Run Codex once and return its final message; the harness owns JSON output."""
 
     if not isinstance(prompt, str) or not prompt or len(prompt.encode()) > MAX_REQUEST_BYTES:
         raise CodexRuntimeError("invalid Codex prompt")
     if not 0 < timeout_seconds <= 2700:
         raise CodexRuntimeError("invalid Codex timeout")
-    with session(model=model, reasoning_effort=reasoning_effort, max_output_tokens=max_output_tokens) as environment:
+    with session(model=model, reasoning_effort=reasoning_effort,
+                 max_output_tokens=max_output_tokens,
+                 web_search=web_search) as environment:
         final_path = Path(environment["CODEX_HOME"]) / "final.txt"
         with tempfile.TemporaryFile() as prompt_file:
             prompt_file.write(prompt.encode())

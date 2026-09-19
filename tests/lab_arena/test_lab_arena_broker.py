@@ -1964,6 +1964,75 @@ def test_openrouter_reserves_maximum_cost_and_settles_reported_actual():
     assert store.openrouter_capacity == 10_000_000 - expected_actual
 
 
+def test_native_web_search_reserves_every_bounded_search_and_settles_usage_cost_once():
+    table = luna_price_table()
+    # A zero catalog component must not turn an enabled paid hosted tool into
+    # a zero-dollar reservation.
+    assert table["models"][br.OPENROUTER_LUNA_RESPONSES_MODEL]["web_search"] == "0"
+    parameters = {
+        **LUNA_RESPONSES,
+        "tools": [{
+            "type": "openrouter:web_search",
+            "parameters": {
+                "engine": "native",
+                "max_uses": operations.OPENROUTER_WEB_SEARCH_MAX_TOOL_CALLS,
+                "max_total_results": operations.OPENROUTER_WEB_SEARCH_MAX_TOTAL_RESULTS,
+            },
+        }],
+        "max_tool_calls": operations.OPENROUTER_WEB_SEARCH_MAX_TOOL_CALLS,
+    }
+    payload = {
+        "id": "gen-luna-search", "object": "response", "status": "completed",
+        "model": br.OPENROUTER_LUNA_RESPONSES_MODEL, "error": None,
+        "output": [],
+        "usage": {
+            "input_tokens": 30, "output_tokens": 20, "total_tokens": 50,
+            "cost": "0.03125",
+            "server_tool_use": {"web_search_requests": 3},
+        },
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, payload)]),
+    )
+    broker._price_table = table
+
+    result = broker.execute(
+        CONTEXT, operation_id="openrouter.responses", parameters=parameters,
+        action_sequence=0, timeout_ms=300_000,
+    )
+
+    route = br._openrouter_host_route(
+        kind="execute", operation_id="openrouter.responses",
+        model=br.OPENROUTER_LUNA_RESPONSES_MODEL,
+        pricing=table["models"][br.OPENROUTER_LUNA_RESPONSES_MODEL],
+        parameters=parameters,
+    )
+    priced_floor = br._max_openrouter_cost_for_pricing(
+        route.reservation_pricing, parameters,
+        max_output_tokens=parameters["max_output_tokens"],
+    )
+    plain_parameters = {
+        key: value for key, value in parameters.items()
+        if key not in ("tools", "max_tool_calls")
+    }
+    plain_reserve = br._max_openrouter_cost_for_pricing(
+        route.reservation_pricing, plain_parameters,
+        max_output_tokens=plain_parameters["max_output_tokens"],
+    )
+    expected_search_reserve = int(
+        br.OPENROUTER_NATIVE_WEB_SEARCH_RESERVATION_USD_PER_CALL
+        * operations.OPENROUTER_WEB_SEARCH_MAX_TOOL_CALLS * br.MICROUSD
+    )
+    assert priced_floor - plain_reserve >= expected_search_reserve
+    assert result.call["reserved_microusd"] == 10_000_000
+    assert result.call["reservation_basis"] == "remaining_budget_native_web_search"
+    assert result.call["actual_microusd"] == 31_250
+    assert store.log == ["reserve", "dispatch", "settle"]
+    sent = json.loads(transport.sent[0]["body"])
+    assert sent["tools"] == parameters["tools"]
+    assert sent["max_tool_calls"] == operations.OPENROUTER_WEB_SEARCH_MAX_TOOL_CALLS
+
+
 @pytest.mark.parametrize("funding_source", ("host", "miner_key"))
 def test_luna_responses_uses_bounded_zdr_fallback_and_reserves_its_price_ceiling(
     funding_source,

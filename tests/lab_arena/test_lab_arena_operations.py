@@ -198,7 +198,6 @@ def test_host_openrouter_route_override_must_retain_fixed_privacy_policy():
         "data_collection": "deny",
         "zdr": True,
         "allow_fallbacks": True,
-        "order": ["azure/eu", "azure/us"],
         "max_price": {"prompt": 0.275, "completion": 1.32, "request": 0},
     }
     outbound = ops.build_outbound_request(
@@ -213,9 +212,8 @@ def test_host_openrouter_route_override_must_retain_fixed_privacy_policy():
         {**route, "data_collection": "allow"},
         {**route, "allow_fallbacks": "true"},
         {**route, "require_parameters": True},
-        {key: value for key, value in route.items() if key != "order"},
         {**route, "extra": True},
-        {**route, "order": "azure/eu"},
+        {**route, "order": ["azure/eu", "azure/us"]},
         {**route, "only": ["azure/eu", "azure/us"]},
         {**route, "max_price": {"prompt": -1, "completion": 1.32, "request": 0}},
     ):
@@ -234,6 +232,18 @@ def test_host_openrouter_route_override_must_retain_fixed_privacy_policy():
             openrouter_provider_policy=route,
         )
     assert excinfo.value.code == "invalid_request"
+
+
+def test_responses_provider_order_cannot_be_injected_after_normalization():
+    normalized = ops.validate_operation_request(
+        "openrouter.responses", VALID["openrouter.responses"]
+    )
+    normalized["provider"] = {"order": ["azure/eu"]}
+
+    with pytest.raises(ops.OperationRequestError) as excinfo:
+        ops.build_outbound_request("openrouter.responses", normalized)
+
+    assert excinfo.value.code == "forbidden_field"
 
 
 @pytest.mark.parametrize("payload", [

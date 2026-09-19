@@ -1905,9 +1905,9 @@ def test_luna_responses_uses_bounded_zdr_fallback_and_reserves_its_price_ceiling
         "allow_fallbacks": True,
         "data_collection": "deny",
         "zdr": True,
-        "order": ["azure/eu", "azure/us"],
         "max_price": {"prompt": 0.275, "completion": 1.32, "request": 0},
     }
+    assert "order" not in body["provider"]
     assert "only" not in body["provider"]
     assert result.call["funding_source"] == funding_source
     assert body["store"] is False and body["stream"] is False
@@ -1930,7 +1930,7 @@ def test_luna_responses_uses_bounded_zdr_fallback_and_reserves_its_price_ceiling
         ("execute", "openrouter.responses", "openai/gpt-4o-mini"),
     ],
 )
-def test_luna_regional_route_does_not_change_scorers_chat_or_other_models(
+def test_luna_host_policy_does_not_change_scorers_chat_or_other_models(
     kind, operation_id, model
 ):
     assert br._openrouter_host_route(
@@ -1992,7 +1992,7 @@ def test_nonmatching_public_broker_paths_keep_strict_provider_policy(case):
     )
 
 
-def test_luna_regional_route_reserves_published_long_context_tier():
+def test_luna_host_policy_reserves_published_long_context_tier():
     parameters = {
         **LUNA_RESPONSES,
         "input": [
@@ -2024,7 +2024,7 @@ def test_luna_regional_route_reserves_published_long_context_tier():
         (272_000, {"prompt": 0.55, "completion": 1.98, "request": 0}),
     ],
 )
-def test_luna_regional_long_context_tier_boundary(
+def test_luna_host_policy_long_context_tier_boundary(
     monkeypatch, bounded_tokens, expected_max_price
 ):
     monkeypatch.setattr(br, "bounded_input_tokens", lambda _parameters: bounded_tokens)

@@ -14,11 +14,13 @@ import json
 import math
 import os
 import secrets
+import select
 import signal
 import socket
 import subprocess
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -29,7 +31,6 @@ CODEX_BINARY = "/usr/local/bin/codex"
 MAX_REQUEST_BYTES = 1_000_000
 MAX_RESPONSE_BYTES = 4 * 1_048_576
 MAX_LOG_BYTES = 64 * 1024
-SOCKET_TIMEOUT_SECONDS = 380
 MAX_IDLE_WAIT_SECONDS = 2700
 DEFAULT_MAX_OUTPUT_TOKENS = 16_384
 MAX_OUTPUT_TOKENS = 32_768
@@ -87,17 +88,49 @@ class CodexSessionEnvironment(dict[str, str]):
         self._idle_wait.close()
 
 
-def _receive(connection: socket.socket, size: int) -> bytes:
+def _remaining_seconds(response_deadline: float) -> float:
+    remaining = response_deadline - time.monotonic()
+    if remaining <= 0:
+        raise CodexRuntimeError("Codex response deadline reached")
+    return remaining
+
+
+def _receive(
+    connection: socket.socket,
+    size: int,
+    *,
+    response_deadline: float,
+    cancel_requested: Callable[[], bool] | None = None,
+) -> bytes:
     chunks = bytearray()
     while len(chunks) < size:
-        part = connection.recv(size - len(chunks))
+        if cancel_requested is not None and cancel_requested():
+            raise CodexRuntimeError("Codex request cancelled")
+        remaining = _remaining_seconds(response_deadline)
+        connection.settimeout(
+            min(0.1, remaining) if cancel_requested is not None else remaining
+        )
+        try:
+            part = connection.recv(size - len(chunks))
+        except socket.timeout:
+            if cancel_requested is None:
+                raise
+            continue
         if not part:
             raise CodexRuntimeError("worker response truncated")
         chunks.extend(part)
     return bytes(chunks)
 
 
-def _dispatch(socket_path: str, parameters: dict[str, Any]) -> tuple[int, bytes]:
+def _dispatch(
+    socket_path: str,
+    parameters: dict[str, Any],
+    *,
+    response_deadline: float | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
+) -> tuple[int, bytes]:
+    if response_deadline is None:
+        response_deadline = time.monotonic() + MAX_IDLE_WAIT_SECONDS
     payload = json.dumps({
         "schema_version": "leadpoet.lab_arena.operation_frame.v1",
         "operation_id": "openrouter.responses",
@@ -107,13 +140,29 @@ def _dispatch(socket_path: str, parameters: dict[str, Any]) -> tuple[int, bytes]
     if len(payload) > 1_048_576:
         raise CodexRuntimeError("request too large")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(SOCKET_TIMEOUT_SECONDS)
+        connection.settimeout(_remaining_seconds(response_deadline))
         connection.connect(socket_path)
+        connection.settimeout(_remaining_seconds(response_deadline))
         connection.sendall(len(payload).to_bytes(4, "big") + payload)
-        size = int.from_bytes(_receive(connection, 4), "big")
+        size = int.from_bytes(
+            _receive(
+                connection,
+                4,
+                response_deadline=response_deadline,
+                cancel_requested=cancel_requested,
+            ),
+            "big",
+        )
         if not 0 < size <= MAX_RESPONSE_BYTES:
             raise CodexRuntimeError("invalid worker response")
-        response = json.loads(_receive(connection, size))
+        response = json.loads(
+            _receive(
+                connection,
+                size,
+                response_deadline=response_deadline,
+                cancel_requested=cancel_requested,
+            )
+        )
     if not isinstance(response, dict) or "error" in response:
         raise CodexRuntimeError("broker refused request")
     status = response.get("status")
@@ -214,6 +263,7 @@ class ResponsesBridge:
         max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
         request_guard: Callable[[], bool] | None = None,
         web_search: str = "disabled",
+        response_deadline: float | None = None,
     ) -> None:
         if type(max_output_tokens) is not int or not 1 <= max_output_tokens <= MAX_OUTPUT_TOKENS:
             raise CodexRuntimeError("invalid Codex output token limit")
@@ -221,7 +271,17 @@ class ResponsesBridge:
             raise CodexRuntimeError("invalid Codex request guard")
         if web_search not in ("disabled", "live"):
             raise CodexRuntimeError("invalid Codex web search mode")
+        now = time.monotonic()
+        if response_deadline is None:
+            response_deadline = now + MAX_IDLE_WAIT_SECONDS
+        if (
+            type(response_deadline) not in (int, float)
+            or not math.isfinite(response_deadline)
+            or not now < response_deadline <= now + MAX_IDLE_WAIT_SECONDS
+        ):
+            raise CodexRuntimeError("invalid Codex response deadline")
         self.socket_path = socket_path
+        self.response_deadline = float(response_deadline)
         self.token = secrets.token_urlsafe(32)
         self._active = threading.BoundedSemaphore(1)
         self._request_guard = request_guard
@@ -251,7 +311,9 @@ class ResponsesBridge:
                     self.reply(429, b'{"error":{"message":"request already in progress"}}')
                     return
                 try:
-                    self.connection.settimeout(SOCKET_TIMEOUT_SECONDS)
+                    self.connection.settimeout(
+                        _remaining_seconds(owner.response_deadline)
+                    )
                     lengths = self.headers.get_all("Content-Length", [])
                     if len(lengths) != 1 or self.headers.get("Transfer-Encoding") or self.headers.get("Content-Encoding"):
                         raise ValueError("unsupported body encoding")
@@ -334,7 +396,22 @@ class ResponsesBridge:
                         if permitted is not True:
                             self.reply(429, b'{"error":{"message":"request unavailable"}}')
                             return
-                    status, response = _dispatch(owner.socket_path, body)
+
+                    def client_closed() -> bool:
+                        try:
+                            readable, _, _ = select.select(
+                                [self.connection], [], [], 0
+                            )
+                        except (OSError, ValueError):
+                            return True
+                        return bool(readable)
+
+                    status, response = _dispatch(
+                        owner.socket_path,
+                        body,
+                        response_deadline=owner.response_deadline,
+                        cancel_requested=client_closed,
+                    )
                     if 200 <= status < 300 and streaming:
                         try:
                             response = b"".join(response_events(json.loads(response)))
@@ -387,6 +464,7 @@ def session(
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     request_guard: Callable[[], bool] | None = None,
     web_search: str = "disabled",
+    response_deadline: float | None = None,
 ) -> Iterator[CodexSessionEnvironment]:
     """Yield an isolated child environment for a Codex CLI or SDK launcher.
 
@@ -409,9 +487,20 @@ def session(
         raise CodexRuntimeError("invalid Codex request guard")
     if web_search not in ("disabled", "live"):
         raise CodexRuntimeError("invalid Codex web search mode")
+    now = time.monotonic()
+    if response_deadline is None:
+        response_deadline = now + MAX_IDLE_WAIT_SECONDS
+    if (
+        type(response_deadline) not in (int, float)
+        or not math.isfinite(response_deadline)
+        or not now < response_deadline <= now + MAX_IDLE_WAIT_SECONDS
+    ):
+        raise CodexRuntimeError("invalid Codex response deadline")
+    response_deadline = float(response_deadline)
     with tempfile.TemporaryDirectory(prefix="arena-codex-") as directory, ResponsesBridge(
             socket_path, max_output_tokens=max_output_tokens,
-            request_guard=request_guard, web_search=web_search) as bridge:
+            request_guard=request_guard, web_search=web_search,
+            response_deadline=response_deadline) as bridge:
         home = Path(directory)
         config = '\n'.join([
             "model = " + json.dumps(model),
@@ -440,7 +529,9 @@ def session(
             'supports_websockets = false',
             'request_max_retries = 1',
             'stream_max_retries = 0',
-            'stream_idle_timeout_ms = 400000',
+            "stream_idle_timeout_ms = " + str(max(
+                1, int(math.ceil(_remaining_seconds(response_deadline) * 1000))
+            )),
             '',
         ])
         (home / "config.toml").write_text(config, encoding="utf-8")
@@ -475,9 +566,11 @@ def run(prompt: str, *, model: str, cwd: str | Path, reasoning_effort: str = "me
         raise CodexRuntimeError("invalid Codex prompt")
     if not 0 < timeout_seconds <= 2700:
         raise CodexRuntimeError("invalid Codex timeout")
+    response_deadline = time.monotonic() + timeout_seconds
     with session(model=model, reasoning_effort=reasoning_effort,
                  max_output_tokens=max_output_tokens,
-                 web_search=web_search) as environment:
+                 web_search=web_search,
+                 response_deadline=response_deadline) as environment:
         final_path = Path(environment["CODEX_HOME"]) / "final.txt"
         with tempfile.TemporaryFile() as prompt_file:
             prompt_file.write(prompt.encode())

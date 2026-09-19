@@ -97,7 +97,7 @@ def test_bridge_enforces_its_session_allowance(monkeypatch):
     json.dumps(response(output=[{"type": "message", "content": [{"type": "output_text", "text": 3}]}])).encode(),
 ])
 def test_malformed_upstream_reply_has_a_bounded_gateway_error(monkeypatch, payload):
-    monkeypatch.setattr(codex, "_dispatch", lambda *args: (200, payload))
+    monkeypatch.setattr(codex, "_dispatch", lambda *args, **kwargs: (200, payload))
     with codex.ResponsesBridge("/unused.sock") as bridge, httpx.Client(trust_env=False) as client:
         reply = client.post(bridge.base_url + "/responses", headers={"Authorization": "Bearer " + bridge.token},
                             json={"model": "openai/gpt-4o-mini", "input": "hi", "stream": True})

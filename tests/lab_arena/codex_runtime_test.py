@@ -267,7 +267,7 @@ def test_live_web_search_is_injected_as_one_bounded_native_server_tool(monkeypat
     )
     posts = []
 
-    def dispatch(_socket_path, parameters):
+    def dispatch(_socket_path, parameters, **_kwargs):
         posts.append(parameters)
         return 200, json.dumps(payload, separators=(",", ":")).encode()
 
@@ -332,7 +332,7 @@ def test_real_codex_live_web_search_crosses_bridge_with_history_and_citation(
     _pin_real_codex(monkeypatch)
     posts = []
 
-    def dispatch(_socket_path, parameters):
+    def dispatch(_socket_path, parameters, **_kwargs):
         ops.validate_operation_request("openrouter.responses", parameters)
         posts.append(parameters)
         if len(posts) == 1:
@@ -441,10 +441,13 @@ def test_session_isolates_login_and_provider_keys(monkeypatch, scrapingdog_value
     assert not home.exists()
 
 
-def test_codex_timeout_layers_cover_the_derived_provider_window(monkeypatch):
+def test_codex_timeout_layers_use_the_original_absolute_response_deadline(monkeypatch):
     monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", "/worker.sock")
     monkeypatch.setenv("LAB_ARENA_WEB_EGRESS_SOCKET", "/egress.sock")
-    with codex.session(model="openai/gpt-5.6-sol") as environment:
+    monkeypatch.setattr(codex.time, "monotonic", lambda: 100.0)
+    with codex.session(
+        model="openai/gpt-5.6-sol", response_deadline=125.0
+    ) as environment:
         config = (Path(environment["CODEX_HOME"]) / "config.toml").read_text()
 
     sent = bytearray()
@@ -461,7 +464,7 @@ def test_codex_timeout_layers_cover_the_derived_provider_window(monkeypatch):
             return None
 
         def settimeout(self, timeout):
-            assert timeout == 380
+            assert timeout == 25.0
 
         def connect(self, _path):
             pass
@@ -477,7 +480,11 @@ def test_codex_timeout_layers_cover_the_derived_provider_window(monkeypatch):
             return chunk
 
     monkeypatch.setattr(codex.socket, "socket", lambda *_args: Socket())
-    assert codex._dispatch("/worker.sock", {"model": "openai/gpt-5.6-sol", "input": "hi"}) == (200, b"{}")
+    assert codex._dispatch(
+        "/worker.sock",
+        {"model": "openai/gpt-5.6-sol", "input": "hi"},
+        response_deadline=125.0,
+    ) == (200, b"{}")
     size = int.from_bytes(sent[:4], "big")
     operation_id, parameters, timeout_ms = shim.decode_operation_frame(sent[4:4 + size])
     assert operation_id == "openrouter.responses"
@@ -485,12 +492,46 @@ def test_codex_timeout_layers_cover_the_derived_provider_window(monkeypatch):
     assert timeout_ms == 300_000
     assert ops.OPERATIONS["openrouter.responses"].timeout_seconds == 300
     assert runner.MAX_PROVIDER_API_TIMEOUT_SECONDS == 365
-    assert codex.SOCKET_TIMEOUT_SECONDS == 380
 
     assert "request_max_retries = 1" in config
     assert "stream_max_retries = 0" in config
-    assert "stream_idle_timeout_ms = 400000" in config
-    assert 400 > codex.SOCKET_TIMEOUT_SECONDS > runner.MAX_PROVIDER_API_TIMEOUT_SECONDS
+    assert "stream_idle_timeout_ms = 25000" in config
+
+
+def test_codex_client_cancellation_closes_the_worker_request(monkeypatch):
+    clock = [100.0]
+    cancelled = [False]
+
+    class Socket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def settimeout(self, _timeout):
+            return None
+
+        def connect(self, _path):
+            return None
+
+        def sendall(self, _payload):
+            return None
+
+        def recv(self, _size):
+            cancelled[0] = True
+            raise socket.timeout
+
+    monkeypatch.setattr(codex.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(codex.socket, "socket", lambda *_args: Socket())
+
+    with pytest.raises(codex.CodexRuntimeError, match="cancelled"):
+        codex._dispatch(
+            "/worker.sock",
+            {"model": "openai/gpt-5.6-sol", "input": "hi"},
+            response_deadline=125.0,
+            cancel_requested=lambda: cancelled[0],
+        )
 
 
 @pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="set ARENA_TEST_CODEX_BINARY for the real CLI protocol proof")
@@ -498,7 +539,7 @@ def test_real_codex_tool_call_and_continuation(monkeypatch, tmp_path):
     request_errors = []
     original_dispatch = codex._dispatch
 
-    def checked_dispatch(socket_path, document):
+    def checked_dispatch(socket_path, document, **_kwargs):
         try:
             ops.validate_operation_request("openrouter.responses", document)
         except ops.OperationRequestError as exc:
@@ -568,7 +609,7 @@ def test_pinned_codex_request_retry_is_one_and_only_for_5xx(
     remaining = list(statuses)
     posts = []
 
-    def dispatch(_socket_path, document):
+    def dispatch(_socket_path, document, **_kwargs):
         posts.append(document)
         status = remaining.pop(0)
         payload = (

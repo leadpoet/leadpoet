@@ -145,6 +145,29 @@ class FakeApi:
         return self.source_payload
 
 
+def temporary_hold_document(action_sequence=0):
+    body = b'{"error":{"code":"provider_unavailable"}}'
+    return {
+        "status": 502,
+        "headers": {
+            "content-type": "application/json",
+            "content-length": str(len(body)),
+        },
+        "body_b64": base64.b64encode(body).decode(),
+        "call": {
+            "operation_id": "deepline.execute",
+            "action_sequence": action_sequence,
+            "provider": "deepline",
+            "funding_source": "host",
+            "provider_status": None,
+            "outcome": "not_dispatched",
+            "reason": "provider_cost_uncertain",
+            "idempotent": False,
+            "error_code": "provider_unavailable",
+        },
+    }
+
+
 def lease(run_id="r1", position=0):
     return {
         "status": "leased", "run_id": run_id, "assignment_id": "%s:s1:1:%d" % (ROUND, position), "submission_id": "s1", "miner_hotkey": MINER,
@@ -1371,6 +1394,115 @@ def test_provider_http_timeout_covers_the_requested_provider_window():
     assert client.timeouts[-1].read == rn.API_TIMEOUT_SECONDS
     api.claim({"request_id": "claim-1"})
     assert client.timeouts[-1].read == rn.API_TIMEOUT_SECONDS
+
+
+def test_worker_resumes_temporary_hold_with_same_action_identity(monkeypatch, tmp_path):
+    success_api = FakeApi([])
+    success = success_api.provider(
+        "r1",
+        "token",
+        {
+            "operation_id": "deepline.execute",
+            "parameters": {"tool": "exa_search", "payload": {"query": "x"}},
+            "timeout_ms": 30_000,
+            "action_sequence": 0,
+        },
+    )
+    api = FakeApi([], broker_documents=[
+        temporary_hold_document(), temporary_hold_document(), success,
+    ])
+    worker = rn.WorkerSocketServer(
+        tmp_path / "worker.sock",
+        api,
+        rn.RunState(lease=lease(), lease_token="token"),
+    )
+    monkeypatch.setattr(rn, "TEMPORARY_HOLD_RETRY_SECONDS", 0.0)
+
+    error, document = worker._dispatch_once(
+        "deepline.execute",
+        {"tool": "exa_search", "payload": {"query": "x"}},
+        30_000,
+    )
+
+    assert error is None and document == success
+    assert [frame["action_sequence"] for frame in api.provider_frames] == [0, 0, 0]
+    assert len({contracts.document_hash(frame) for frame in api.provider_frames}) == 1
+    assert worker._state.action_sequence == 1
+    assert worker._state.calls == [success["call"]]
+
+
+def test_worker_cancellation_stops_temporary_hold_before_another_api_call(
+    monkeypatch, tmp_path
+):
+    cancelled = [False]
+
+    class HoldThenCancelApi(FakeApi):
+        def provider(self, run_id, lease_token, frame):
+            document = super().provider(run_id, lease_token, frame)
+            cancelled[0] = True
+            return document
+
+    api = HoldThenCancelApi(
+        [], broker_documents=[temporary_hold_document()]
+    )
+    worker = rn.WorkerSocketServer(
+        tmp_path / "worker.sock",
+        api,
+        rn.RunState(lease=lease(), lease_token="token"),
+    )
+    monkeypatch.setattr(rn, "TEMPORARY_HOLD_RETRY_SECONDS", 0.0)
+
+    assert worker._dispatch_once(
+        "deepline.execute",
+        {"tool": "exa_search", "payload": {"query": "x"}},
+        30_000,
+        cancel_requested=lambda: cancelled[0],
+    ) == ("worker_unavailable", None)
+    assert len(api.provider_frames) == 1
+    assert worker._state.calls == [] and worker._state.refusals == 0
+
+
+def test_worker_socket_disconnect_cancels_temporary_hold_retry(monkeypatch, tmp_path):
+    first_call = threading.Event()
+    second_call = threading.Event()
+
+    class HoldingApi(FakeApi):
+        def provider(self, run_id, lease_token, frame):
+            if self.provider_frames:
+                second_call.set()
+            document = super().provider(run_id, lease_token, frame)
+            first_call.set()
+            return document
+
+    api = HoldingApi([], broker_documents=[
+        temporary_hold_document(), temporary_hold_document(),
+    ])
+    socket_dir = Path(tempfile.mkdtemp(prefix="la", dir="/tmp"))
+    socket_path = socket_dir / "worker.sock"
+    worker = rn.WorkerSocketServer(
+        socket_path,
+        api,
+        rn.RunState(lease=lease(), lease_token="token"),
+    )
+    monkeypatch.setattr(rn, "TEMPORARY_HOLD_RETRY_SECONDS", 0.01)
+    worker.start()
+    try:
+        frame = shim.build_operation_frame(
+            "deepline.execute",
+            {"tool": "exa_search", "payload": {"query": "x"}},
+            30_000,
+        )
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.connect(str(socket_path))
+        connection.sendall(len(frame).to_bytes(4, "big") + frame)
+        assert first_call.wait(1)
+        connection.close()
+        assert not second_call.wait(0.2)
+        assert len(api.provider_frames) == 1
+        assert worker._state.calls == [] and worker._state.refusals == 0
+    finally:
+        worker.stop()
+        shutil.rmtree(socket_dir)
 
 
 def test_worker_socket_refuses_connections_above_its_fixed_thread_bound(tmp_path):

@@ -2844,8 +2844,32 @@ class Broker:
                 continue
             if reserved.get("status") != "budget_busy":
                 break
+            busy_reason = reserved.get("reason")
+            if busy_reason == "provider_cost_uncertain":
+                # The driver owns exact billing reconciliation.  Return this
+                # proved pre-dispatch hold immediately so the worker can keep
+                # the same action identity alive without tying up one API
+                # request for the ordinary short admission window.
+                summary.update(
+                    {
+                        "outcome": "not_dispatched",
+                        "reason": busy_reason,
+                        "idempotent": False,
+                    }
+                )
+                return _error_result("provider_unavailable", summary)
             if time.monotonic() >= reserve_deadline:
-                summary.update({"outcome": "not_dispatched", "reason": "budget_busy"})
+                summary.update(
+                    {
+                        "outcome": "not_dispatched",
+                        "reason": (
+                            busy_reason
+                            if busy_reason == "provider_calls_inflight"
+                            else "budget_busy"
+                        ),
+                        "idempotent": False,
+                    }
+                )
                 return _error_result("provider_unavailable", summary)
             time.sleep(min(0.2, max(0.0, reserve_deadline - time.monotonic())))
         status = reserved.get("status")

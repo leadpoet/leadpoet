@@ -4895,6 +4895,37 @@ def test_dynamic_deepline_retries_transient_budget_busy(monkeypatch):
     assert [sent["method"] for sent in transport.sent] == ["POST"]
 
 
+def test_dynamic_deepline_returns_proved_billing_hold_without_short_poll(monkeypatch):
+    class HeldLedger(FakeLedgerStore):
+        def reserve_call(self, **kwargs):
+            self.log.append("reserve")
+            return {
+                "status": "budget_busy",
+                "reason": "provider_cost_uncertain",
+                "idempotent": False,
+                "call_identity": kwargs["call_identity"],
+            }
+
+    sleeps = []
+    monkeypatch.setattr(br.time, "sleep", sleeps.append)
+    broker, store, transport = make_broker(
+        store=HeldLedger(openrouter_capacity=8_765)
+    )
+    result = broker.execute(
+        CONTEXT,
+        operation_id="deepline.execute",
+        parameters={"tool": "exa_search", "payload": {"query": "x"}},
+        action_sequence=0,
+        timeout_ms=5000,
+    )
+
+    assert result.status == 502
+    assert result.call["outcome"] == "not_dispatched"
+    assert result.call["reason"] == "provider_cost_uncertain"
+    assert result.call["idempotent"] is False
+    assert store.log == ["reserve"] and sleeps == [] and transport.sent == []
+
+
 def test_dynamic_deepline_budget_busy_stops_at_the_reserve_deadline(monkeypatch):
     store = FakeLedgerStore(openrouter_capacity=8_765, budget_busy_responses=1000)
     elapsed = [0.0]

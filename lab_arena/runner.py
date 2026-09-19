@@ -19,6 +19,7 @@ import json
 import os
 import re
 import secrets
+import select
 import shutil
 import socket
 import socketserver
@@ -102,6 +103,7 @@ DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 300
 DEPENDENCY_MOUNT_TIMEOUT_SECONDS = 30
 MAX_WORKER_CONNECTIONS = 8
 WORKER_SOCKET_READ_TIMEOUT_SECONDS = 10.0
+TEMPORARY_HOLD_RETRY_SECONDS = 0.2
 MAX_JUDGE_DIAGNOSTIC_CHARS = scoring.MAX_FAILURE_DETAIL_CHARS
 _DIAGNOSTIC_URL_QUERY_RE = re.compile(
     r"(?i)\b([a-z][a-z0-9+.-]*://[^\s?#]+)\?[^\s#]*"
@@ -1536,7 +1538,55 @@ class WorkerSocketServer:
             return shim.encode_worker_error("quota_unavailable")
         return contracts.canonical_json(snapshot).encode("utf-8")
 
-    def _dispatch_once(self, operation_id: str, parameters: Mapping[str, Any], timeout_ms: int) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    @staticmethod
+    def _temporary_hold(
+        document: Mapping[str, Any], operation_id: str, action_sequence: int
+    ) -> bool:
+        """Accept only the broker's proved pre-dispatch billing hold."""
+
+        if not isinstance(document, Mapping):
+            return False
+        call = document.get("call")
+        if not (
+            document.get("status") == 502
+            and isinstance(call, Mapping)
+            and call.get("operation_id") == operation_id
+            and call.get("action_sequence") == action_sequence
+            and call.get("error_code") == "provider_unavailable"
+            and call.get("outcome") == "not_dispatched"
+            and call.get("reason") == "provider_cost_uncertain"
+            and call.get("idempotent") is False
+            and call.get("provider_status") is None
+        ):
+            return False
+        try:
+            body = json.loads(
+                base64.b64decode(str(document.get("body_b64")), validate=True)
+            )
+        except (TypeError, ValueError):
+            return False
+        return body == {"error": {"code": "provider_unavailable"}}
+
+    def _cancelled(
+        self, cancel_requested: Optional[Callable[[], bool]]
+    ) -> bool:
+        if self._stopping.is_set():
+            return True
+        if cancel_requested is None:
+            return False
+        try:
+            return bool(cancel_requested())
+        except Exception:
+            return True
+
+    def _dispatch_once(
+        self,
+        operation_id: str,
+        parameters: Mapping[str, Any],
+        timeout_ms: int,
+        *,
+        cancel_requested: Optional[Callable[[], bool]] = None,
+    ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
         state = self._state
         with state.lock:
             sequence = state.action_sequence
@@ -1547,22 +1597,35 @@ class WorkerSocketServer:
             # spending an Arena round trip and a ledger row on every request.
             return "budget_exhausted", None
         frame = {"operation_id": operation_id, "parameters": dict(parameters), "timeout_ms": int(timeout_ms), "action_sequence": sequence}
-        try:
-            document = self._api.provider(state.lease["run_id"], state.lease_token, frame)
-        except RunnerError:
-            # A gateway failure can occur before dispatch, after dispatch, or
-            # after settlement. Record only the host-observed infrastructure
-            # failure; do not claim a provider outcome or billing state.
-            with state.lock:
-                state.calls.append(
-                    {
-                        "operation_id": operation_id,
-                        "action_sequence": sequence,
-                        "outcome": "unknown",
-                        "error_code": "broker_unavailable",
-                    }
+        while True:
+            if self._cancelled(cancel_requested):
+                return "worker_unavailable", None
+            try:
+                document = self._api.provider(
+                    state.lease["run_id"], state.lease_token, frame
                 )
-            return "worker_unavailable", None
+            except RunnerError:
+                # A gateway failure can occur before dispatch, after dispatch,
+                # or after settlement. Never replay an unknown outcome.
+                with state.lock:
+                    state.calls.append(
+                        {
+                            "operation_id": operation_id,
+                            "action_sequence": sequence,
+                            "outcome": "unknown",
+                            "error_code": "broker_unavailable",
+                        }
+                    )
+                return "worker_unavailable", None
+            if not self._temporary_hold(document, operation_id, sequence):
+                break
+            # The database created no reservation or provider request. Keep
+            # the exact frame and sequence, but stop before a new API request
+            # when the original socket caller has gone away.
+            if self._stopping.wait(
+                TEMPORARY_HOLD_RETRY_SECONDS
+            ) or self._cancelled(cancel_requested):
+                return "worker_unavailable", None
         if not isinstance(document, Mapping) or set(document) != {
             "status",
             "headers",
@@ -1662,14 +1725,26 @@ class WorkerSocketServer:
             return None
         return identity
 
-    def _dispatch(self, operation_id: str, parameters: Mapping[str, Any], timeout_ms: int) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    def _dispatch(
+        self,
+        operation_id: str,
+        parameters: Mapping[str, Any],
+        timeout_ms: int,
+        *,
+        cancel_requested: Optional[Callable[[], bool]] = None,
+    ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
         """Bridge one operation, retrying only proved free Responses throttles."""
 
         state = self._state
         if operation_id != "openrouter.responses" or str(
             state.lease.get("kind") or "execute"
         ) != "execute":
-            return self._dispatch_once(operation_id, parameters, timeout_ms)
+            return self._dispatch_once(
+                operation_id,
+                parameters,
+                timeout_ms,
+                cancel_requested=cancel_requested,
+            )
         deadline = time.monotonic() + max(1, int(timeout_ms)) / 1000.0 + (
             MAX_PROVIDER_API_TIMEOUT_SECONDS - MAX_PROVIDER_OPERATION_TIMEOUT_SECONDS
         )
@@ -1679,7 +1754,10 @@ class WorkerSocketServer:
             if retry and self._stopping.is_set():
                 return error, document
             error, document = self._dispatch_once(
-                operation_id, parameters, attempt_timeout_ms
+                operation_id,
+                parameters,
+                attempt_timeout_ms,
+                cancel_requested=cancel_requested,
             )
             if error or document is None:
                 return error, document
@@ -1727,7 +1805,12 @@ class WorkerSocketServer:
             )
         raise AssertionError("unreachable Responses retry loop")
 
-    def handle_frame(self, raw: bytes) -> bytes:
+    def handle_frame(
+        self,
+        raw: bytes,
+        *,
+        cancel_requested: Optional[Callable[[], bool]] = None,
+    ) -> bytes:
         """The judge shim's transport: one length-prefixed operation frame."""
 
         control_response = self._handle_quota_control(raw)
@@ -1741,12 +1824,25 @@ class WorkerSocketServer:
         except operations.OperationError as exc:
             code = getattr(exc, "code", "invalid_request")
             return shim.encode_worker_error(code if code in shim.FRAME_ERROR_CODES else "invalid_request")
-        error, document = self._dispatch(operation_id, parameters, timeout_ms)
+        error, document = self._dispatch(
+            operation_id,
+            parameters,
+            timeout_ms,
+            cancel_requested=cancel_requested,
+        )
         if error:
             return shim.encode_worker_error(error)
         return contracts.canonical_json({"status": document["status"], "headers": document["headers"], "body_b64": document["body_b64"]}).encode("utf-8")
 
-    def handle_http(self, method: str, url: str, body: bytes, headers: Mapping[str, str]) -> Tuple[int, Dict[str, str], bytes]:
+    def handle_http(
+        self,
+        method: str,
+        url: str,
+        body: bytes,
+        headers: Mapping[str, str],
+        *,
+        cancel_requested: Optional[Callable[[], bool]] = None,
+    ) -> Tuple[int, Dict[str, str], bytes]:
         """The miner contract: a provider's own HTTP request, sent over the socket without a credential."""
 
         try:
@@ -1755,7 +1851,12 @@ class WorkerSocketServer:
             code = getattr(exc, "code", "invalid_request")
             return HTTP_ERROR_STATUS.get(code, 400), {}, _http_error_body(code)
         operation_timeout_ms = operations.OPERATIONS[operation_id].timeout_seconds * 1000
-        error, document = self._dispatch(operation_id, parameters, operation_timeout_ms)
+        error, document = self._dispatch(
+            operation_id,
+            parameters,
+            operation_timeout_ms,
+            cancel_requested=cancel_requested,
+        )
         if error:
             return HTTP_ERROR_STATUS.get(error, 400), {}, _http_error_body(error)
         response_headers = {
@@ -1773,6 +1874,17 @@ class WorkerSocketServer:
         self._stopping.clear()
         server_self = self
         slots = threading.BoundedSemaphore(self._max_connections)
+
+        def connection_closed(connection: socket.socket) -> bool:
+            if server_self._stopping.is_set():
+                return True
+            try:
+                readable, _, _ = select.select([connection], [], [], 0)
+            except (OSError, ValueError):
+                return True
+            # The complete request has already been read. Readability now is
+            # EOF or unexpected pipelined input; both cancel this one-shot RPC.
+            return bool(readable)
 
         class BoundedServer(socketserver.ThreadingUnixStreamServer):
             daemon_threads = True
@@ -1820,7 +1932,13 @@ class WorkerSocketServer:
                     self._answer(400, {}, _http_error_body("invalid_request"))
                     return
                 headers = {name: value for name, value in self.headers.items()}
-                status, response_headers, payload = server_self.handle_http(self.command, "https://" + host + self.path, body, headers)
+                status, response_headers, payload = server_self.handle_http(
+                    self.command,
+                    "https://" + host + self.path,
+                    body,
+                    headers,
+                    cancel_requested=lambda: connection_closed(self.connection),
+                )
                 self._answer(status, response_headers, payload)
 
             def _answer(self, status: int, headers: Mapping[str, str], payload: bytes) -> None:
@@ -1857,7 +1975,10 @@ class WorkerSocketServer:
                     if size < 2 or size > shim.MAX_FRAME_BYTES:
                         payload = shim.encode_worker_error("frame_too_large")
                     else:
-                        payload = server_self.handle_frame(_recv_exact(connection, size))
+                        payload = server_self.handle_frame(
+                            _recv_exact(connection, size),
+                            cancel_requested=lambda: connection_closed(connection),
+                        )
                     connection.sendall(len(payload).to_bytes(4, "big") + payload)
                 except OSError:
                     return

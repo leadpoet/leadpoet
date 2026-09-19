@@ -75,13 +75,15 @@ def _lease_header(value: Optional[str]) -> str:
 def create_app(service: ArenaService) -> FastAPI:
     app = FastAPI(title="Leadpoet Lab Arena", version=contracts.ARENA_CONTRACT_VERSION, docs_url=None, redoc_url=None, openapi_url=None)
 
-    async def no_store_public_call(call: Any, *args: Any) -> JSONResponse:
+    async def no_store_public_call(
+        call: Any, *args: Any, **kwargs: Any
+    ) -> JSONResponse:
         headers = {
             "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
         }
         try:
-            content = await run_in_threadpool(call, *args)
+            content = await run_in_threadpool(call, *args, **kwargs)
         except ServiceError as exc:
             return JSONResponse(
                 status_code=exc.status,
@@ -242,8 +244,16 @@ def create_app(service: ArenaService) -> FastAPI:
     async def run_quota(
         run_id: str,
         x_lab_arena_lease: Optional[str] = Header(default=None),
+        include_sourcing_cost: bool = False,
     ) -> JSONResponse:
         lease_token = _lease_header(x_lab_arena_lease)
+        if include_sourcing_cost:
+            return await no_store_public_call(
+                service.handle_quota_snapshot,
+                run_id,
+                lease_token,
+                include_sourcing_cost=True,
+            )
         return await no_store_public_call(
             service.handle_quota_snapshot, run_id, lease_token
         )

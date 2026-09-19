@@ -155,6 +155,19 @@ raise the same generic `QuotaUnavailable("quota unavailable")` error.
 The result is a point-in-time observation. It does not reserve a call or money,
 renew the lease, change admission, or promise that a later request will succeed.
 
+On a host with migration 319, a model can opt into version 2 with
+`quota_usage(include_sourcing_cost=True)`. The same lease-bound endpoint and
+worker socket return the existing counters plus `sourcing_cost`. It includes
+all execute attempts for this ICP, including Codex/OpenRouter usage, and
+excludes judge calls. `successful_microusd` is settled successful sourcing;
+`success_unresolved_microusd` is its unresolved exposure. The separate
+`settled_microusd` and `reserved_or_uncertain_microusd` include billed failures
+and reservations used by admission. A reservation is not a confirmed charge.
+The response includes in-flight/unresolved call counts, the admission cap,
+and the allowance per qualified company/contact pair. Qualification is known
+only after judging. Models own their stopping decisions; this read changes
+neither admission nor scoring. Default version 1 responses remain unchanged.
+
 The gateway shares a conservative Responses reliability gate across rounds by
 OpenRouter credential. It admits two concurrent requests per credential by
 default; this is a local protection, not a claimed upstream account limit. A

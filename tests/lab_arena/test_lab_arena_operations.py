@@ -214,7 +214,7 @@ def test_host_openrouter_route_override_must_retain_fixed_privacy_policy():
         {**route, "require_parameters": True},
         {**route, "extra": True},
         {**route, "order": ["azure/eu", "azure/us"]},
-        {**route, "only": ["azure/eu", "azure/us"]},
+        {**route, "only": ["azure/us", "azure/eu"]},
         {**route, "max_price": {"prompt": -1, "completion": 1.32, "request": 0}},
     ):
         with pytest.raises(ops.OperationRequestError) as excinfo:
@@ -246,28 +246,46 @@ def test_responses_provider_order_cannot_be_injected_after_normalization():
     assert excinfo.value.code == "forbidden_field"
 
 
-def test_luna_host_provider_order_is_exact_and_keeps_privacy_controls():
+def test_luna_host_provider_allowlist_is_exact_and_keeps_legacy_order_valid():
     parameters = {**VALID["openrouter.responses"], "model": "openai/gpt-5.6-luna"}
     route = {
         "data_collection": "deny",
         "zdr": True,
         "allow_fallbacks": True,
-        "order": ["azure/us"],
+        "only": ["azure/us", "azure/eu"],
         "max_price": {"prompt": 0.275, "completion": 1.32, "request": 0},
     }
     outbound = ops.build_outbound_request(
         "openrouter.responses", parameters, openrouter_provider_policy=route
     )
     assert json.loads(outbound.body)["provider"] == route
+
+    legacy_route = {key: value for key, value in route.items() if key != "only"}
+    legacy_route["order"] = ["azure/us"]
+    legacy_outbound = ops.build_outbound_request(
+        "openrouter.responses", parameters,
+        openrouter_provider_policy=legacy_route,
+    )
+    assert json.loads(legacy_outbound.body)["provider"] == legacy_route
+
     for changes in (
         {"zdr": False}, {"data_collection": "allow"},
-        {"order": ["azure/eu"]}, {"order": ["azure/us", "openai"]},
         {"only": ["azure/us"]},
+        {"only": ["azure/eu", "azure/us"]},
+        {"only": ["azure/us", "azure/eu", "azure"]},
+        {"only": ["azure"]},
+        {"order": ["azure/us"]},
     ):
         with pytest.raises(ops.OperationRequestError):
             ops.build_outbound_request(
                 "openrouter.responses", parameters,
                 openrouter_provider_policy={**route, **changes},
+            )
+    for unsafe_order in (["azure/eu"], ["azure/us", "openai"]):
+        with pytest.raises(ops.OperationRequestError):
+            ops.build_outbound_request(
+                "openrouter.responses", parameters,
+                openrouter_provider_policy={**legacy_route, "order": unsafe_order},
             )
     with pytest.raises(ops.OperationRequestError):
         ops.build_outbound_request(

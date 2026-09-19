@@ -3609,7 +3609,11 @@ class ArenaService:
         return run, broker_module.RunContext(run_id=run_id, assignment_id=run["assignment_id"], attempt=int(run["attempt"]), icp_position=int(run["icp_position"]), lease_token_hash=hash_lease_token(lease_token), miner_hotkey=run["miner_hotkey"], submission_id=run["submission_id"], stage=int(run["stage"]), kind=str(run.get("kind") or "execute"), round_id=str(run.get("round_id") or ""))
 
     def handle_quota_snapshot(
-        self, run_id: str, lease_token: str
+        self,
+        run_id: str,
+        lease_token: str,
+        *,
+        include_sourcing_cost: bool = False,
     ) -> Dict[str, Any]:
         """Return counters for one live lease without changing run state."""
 
@@ -3618,6 +3622,12 @@ class ArenaService:
             if run is None:
                 raise ArenaStoreError("run missing")
             self._require_round_ownership(str(run.get("round_id") or ""))
+            if include_sourcing_cost:
+                return self._store.run_quota_snapshot(
+                    run_id,
+                    hash_lease_token(lease_token),
+                    include_sourcing_cost=True,
+                )
             return self._store.run_quota_snapshot(
                 run_id, hash_lease_token(lease_token)
             )

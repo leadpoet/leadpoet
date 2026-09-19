@@ -19,9 +19,14 @@ MAX_OUTPUT_BYTES = 512 * 1024
 WORKER_SOCKET_ENV = "LAB_ARENA_WORKER_SOCKET"
 QUOTA_CONTROL_SCHEMA_VERSION = "leadpoet.lab_arena.control_frame.v1"
 QUOTA_SNAPSHOT_SCHEMA_VERSION = "leadpoet.lab_arena.quota_snapshot.v1"
+QUOTA_COST_SNAPSHOT_SCHEMA_VERSION = "leadpoet.lab_arena.quota_snapshot.v2"
 QUOTA_CONTROL_FRAME = {
     "schema_version": QUOTA_CONTROL_SCHEMA_VERSION,
     "control": "quota_usage",
+}
+QUOTA_COST_CONTROL_FRAME = {
+    "schema_version": QUOTA_CONTROL_SCHEMA_VERSION,
+    "control": "quota_usage_v2",
 }
 QUOTA_PROVIDERS = ("scrapingdog", "deepline", "openrouter")
 MAX_QUOTA_RESPONSE_BYTES = 4096
@@ -96,14 +101,59 @@ def validate_quota_snapshot(value: Any) -> dict[str, Any]:
     return normalized
 
 
-def quota_usage() -> dict[str, Any]:
+def validate_quota_cost_snapshot(value: Any) -> dict[str, Any]:
+    """Validate opt-in per-ICP execute costs, including model LLM usage."""
+
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != {"schema_version", "providers", "sourcing_cost"}
+        or value.get("schema_version") != QUOTA_COST_SNAPSHOT_SCHEMA_VERSION
+    ):
+        raise QuotaUnavailable("quota unavailable")
+    normalized = validate_quota_snapshot(
+        {
+            "schema_version": QUOTA_SNAPSHOT_SCHEMA_VERSION,
+            "providers": value["providers"],
+        }
+    )
+    cost = value["sourcing_cost"]
+    fields = {
+        "successful_microusd",
+        "success_unresolved_microusd",
+        "settled_microusd",
+        "reserved_or_uncertain_microusd",
+        "inflight_calls",
+        "success_unresolved_calls",
+        "admission_cap_microusd",
+        "per_qualified_pair_cap_microusd",
+    }
+    if (
+        not isinstance(cost, Mapping)
+        or set(cost) != fields
+        or any(type(cost[key]) is not int or cost[key] < 0 for key in fields)
+        or cost["admission_cap_microusd"] < 1
+        or cost["per_qualified_pair_cap_microusd"] < 1
+        or cost["successful_microusd"] > cost["settled_microusd"]
+        or cost["inflight_calls"] > cost["success_unresolved_calls"]
+    ):
+        raise QuotaUnavailable("quota unavailable")
+    normalized["schema_version"] = QUOTA_COST_SNAPSHOT_SCHEMA_VERSION
+    normalized["sourcing_cost"] = dict(cost)
+    return normalized
+
+
+def quota_usage(*, include_sourcing_cost: bool = False) -> dict[str, Any]:
     """Read one cached point-in-time quota snapshot from the run's worker."""
 
     path = str(os.environ.get(WORKER_SOCKET_ENV) or "").strip()
     if not path.startswith("/"):
         raise QuotaUnavailable("quota unavailable")
+    if type(include_sourcing_cost) is not bool:
+        raise QuotaUnavailable("quota unavailable")
     encoded = json.dumps(
-        QUOTA_CONTROL_FRAME, sort_keys=True, separators=(",", ":")
+        QUOTA_COST_CONTROL_FRAME if include_sourcing_cost else QUOTA_CONTROL_FRAME,
+        sort_keys=True,
+        separators=(",", ":"),
     ).encode("utf-8")
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -129,7 +179,11 @@ def quota_usage() -> dict[str, Any]:
         raise QuotaUnavailable("quota unavailable") from None
     if response == {"error": "quota_unavailable"}:
         raise QuotaUnavailable("quota unavailable")
-    return validate_quota_snapshot(response)
+    return (
+        validate_quota_cost_snapshot(response)
+        if include_sourcing_cost
+        else validate_quota_snapshot(response)
+    )
 
 
 def write(companies: list[dict[str, Any]], *, output_path: Path = OUTPUT_PATH) -> None:

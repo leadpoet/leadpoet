@@ -63,6 +63,10 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_run_id", "text"),
         ("p_lease_token_hash", "text"),
     ),
+    "lab_arena_run_quota_snapshot_v2": (
+        ("p_run_id", "text"),
+        ("p_lease_token_hash", "text"),
+    ),
     "lab_arena_mark_champion_provider_fallback": (
         ("p_run_id", "text"), ("p_lease_token_hash", "text"),
         ("p_provider", "text"), ("p_evidence", "jsonb"),
@@ -657,13 +661,21 @@ class ArenaStore:
         ), "provider_funding")
 
     def run_quota_snapshot(
-        self, run_id: str, lease_token_hash: str
+        self,
+        run_id: str,
+        lease_token_hash: str,
+        *,
+        include_sourcing_cost: bool = False,
     ) -> Dict[str, Any]:
         """Read bounded counters for one active lease without renewing it."""
 
         result = _require_mapping(
             self._transport.rpc(
-                "lab_arena_run_quota_snapshot_v1",
+                (
+                    "lab_arena_run_quota_snapshot_v2"
+                    if include_sourcing_cost
+                    else "lab_arena_run_quota_snapshot_v1"
+                ),
                 {
                     "p_run_id": run_id,
                     "p_lease_token_hash": lease_token_hash,
@@ -671,6 +683,15 @@ class ArenaStore:
             ),
             "run_quota_snapshot",
         )
+        if include_sourcing_cost:
+            from lab_arena import lab_arena_checkpoint
+
+            try:
+                return lab_arena_checkpoint.validate_quota_cost_snapshot(result)
+            except lab_arena_checkpoint.QuotaUnavailable:
+                raise ArenaStoreError(
+                    "run quota snapshot schema mismatch"
+                ) from None
         if set(result) != {"schema_version", "providers"} or result.get(
             "schema_version"
         ) != RUN_QUOTA_SNAPSHOT_SCHEMA_VERSION:

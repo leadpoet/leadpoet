@@ -64,9 +64,8 @@ def extract_article_body(content: str, *, min_body_chars: int = 200) -> str:
       - Otherwise HTML becomes visible plain text through the stdlib parser.
       - Non-HTML returns unchanged.
 
-    Safe to call on any content — markdown, plain text, or HTML. Non-HTML
-    inputs pass through unchanged because trafilatura's HTML parser declines
-    to extract from non-HTML.
+    Safe to call on any content — markdown, plain text, or HTML. The cheap HTML
+    pre-check leaves non-HTML inputs unchanged.
     """
     if not content:
         return content
@@ -89,7 +88,7 @@ def extract_article_body(content: str, *, min_body_chars: int = 200) -> str:
             body = None
         if body and len(body) >= min_body_chars:
             return body
-    return _visible_html_text(content) or content
+    return _visible_html_text(content)
 
 
 GENERIC_INTENT_PATTERNS = [

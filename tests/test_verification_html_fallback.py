@@ -84,6 +84,12 @@ def test_script_text_cannot_become_source_evidence(monkeypatch):
     assert "appointed" not in extracted
     assert "acquisition" not in extracted
 
+    hidden_only = """<html><head>
+    <script>Acme appointed a Chief Revenue Officer on 2026-09-03.</script>
+    <style>.claim::after { content: "Acme completed an acquisition"; }</style>
+    </head></html>"""
+    assert verification_helpers.extract_article_body(hidden_only) == ""
+
 
 def test_failed_trafilatura_uses_same_visible_text_fallback(monkeypatch):
     class _FailingTrafilatura:

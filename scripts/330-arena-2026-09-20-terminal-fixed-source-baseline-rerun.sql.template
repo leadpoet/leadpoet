@@ -124,9 +124,9 @@ BEGIN
     OR (active.configuration_doc->>'icp_wall_clock_seconds')::INTEGER<>5400
     OR (active.configuration_doc->>'lease_ttl_seconds')::INTEGER<>6300
     OR active.configuration_doc->>'scorer_image_digest' IS DISTINCT FROM
-       'sha256:333ae499ede5eb51d60385bc2d11c80fed2c2a9ce6922111adde5fa52b40236f'
+       'sha256:9d4c30797ac6910ec2c2e9549f0bdec9fb8f0ec30b78ee53f2ce5cd3f4c47493'
     OR active.configuration_doc->>'scorer_image_reference' IS DISTINCT FROM
-       '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:333ae499ede5eb51d60385bc2d11c80fed2c2a9ce6922111adde5fa52b40236f'
+       '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:9d4c30797ac6910ec2c2e9549f0bdec9fb8f0ec30b78ee53f2ce5cd3f4c47493'
     OR active.configuration_doc->'call_quotas' IS DISTINCT FROM
        '{"deepline":200,"openrouter":2000,"scrapingdog":200}'::JSONB
     OR active.configuration_doc->'schedule' IS DISTINCT FROM
@@ -480,7 +480,11 @@ BEGIN
   status_generation=status_generation+1,stage_generation=stage_generation+1,
   configuration_doc=configuration_doc||pg_catalog.jsonb_build_object(
    'schedule','__RERUN_SCHEDULE_JSON__'::JSONB,
-   'call_quotas','{"deepline":200,"openrouter":2000,"scrapingdog":200}'::JSONB),
+   'call_quotas','{"deepline":200,"openrouter":2000,"scrapingdog":200}'::JSONB,
+   'scorer_image_digest',
+    'sha256:9d4c30797ac6910ec2c2e9549f0bdec9fb8f0ec30b78ee53f2ce5cd3f4c47493',
+   'scorer_image_reference',
+    '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:9d4c30797ac6910ec2c2e9549f0bdec9fb8f0ec30b78ee53f2ce5cd3f4c47493'),
   participants=new_participants,stage1_scoring_plan_doc=NULL,
   stage2_scoring_plan_doc=NULL,stage3_scoring_plan_doc=NULL,finalists=NULL,
   publication_doc=NULL,published_at=NULL,cancel_reason=NULL,

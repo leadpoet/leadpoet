@@ -24,10 +24,15 @@ ROUND = "arena-2026-09-20"
 BASELINE = "baseline-2026-09-20"
 PRIOR_ARCHIVES = (ROUND + "-r326archive", ROUND + "-r328archive")
 ARCHIVE = ROUND + "-r330archive"
-SCORER_DIGEST = "sha256:333ae499ede5eb51d60385bc2d11c80fed2c2a9ce6922111adde5fa52b40236f"
-SCORER_REFERENCE = (
+TERMINAL_SCORER_DIGEST = "sha256:333ae499ede5eb51d60385bc2d11c80fed2c2a9ce6922111adde5fa52b40236f"
+TERMINAL_SCORER_REFERENCE = (
     "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@"
-    + SCORER_DIGEST
+    + TERMINAL_SCORER_DIGEST
+)
+NEW_SCORER_DIGEST = "sha256:9d4c30797ac6910ec2c2e9549f0bdec9fb8f0ec30b78ee53f2ce5cd3f4c47493"
+NEW_SCORER_REFERENCE = (
+    "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@"
+    + NEW_SCORER_DIGEST
 )
 SOURCE_REF = (
     "arena/arena-2026-09-20/sources/"
@@ -318,8 +323,8 @@ def _scope_snapshot(cursor, round_id: str):
 
 def _publish_rerun328(connection, harness, monkeypatch) -> None:
     rerun328._publish_rerun326(connection, harness, monkeypatch)
-    monkeypatch.setattr(rerun328, "NEW_SCORER_DIGEST", SCORER_DIGEST)
-    monkeypatch.setattr(rerun328, "NEW_SCORER_REFERENCE", SCORER_REFERENCE)
+    monkeypatch.setattr(rerun328, "NEW_SCORER_DIGEST", TERMINAL_SCORER_DIGEST)
+    monkeypatch.setattr(rerun328, "NEW_SCORER_REFERENCE", TERMINAL_SCORER_REFERENCE)
     schedule = rerun328._schedule(start_in_minutes=10)
     with connection.cursor() as cursor:
         rendered, _, _ = rerun328._render(cursor, schedule)
@@ -408,7 +413,7 @@ def _inject_exhausted_provider_zero_and_failed_unknown(connection) -> str:
     return identity
 
 
-def test_sep20_rerun330_preserves_history_and_reuses_unchanged_scorer_cache(
+def test_sep20_rerun330_preserves_history_and_isolates_new_scorer_cache(
     database, tmp_path, monkeypatch
 ):
     psycopg2, dsn = database
@@ -461,6 +466,14 @@ def test_sep20_rerun330_preserves_history_and_reuses_unchanged_scorer_cache(
                     "SELECT jsonb_agg(judgment_cache_key) FROM public.lab_arena_runs "
                     "WHERE round_id=%s AND kind='score' AND submission_id<>%s",
                     (ROUND, BASELINE),
+                )
+            )
+            old_score_cache_keys = set(
+                _json(
+                    cursor,
+                    "SELECT jsonb_agg(judgment_cache_key) FROM public.lab_arena_runs "
+                    "WHERE round_id=%s AND kind='score'",
+                    (ROUND,),
                 )
             )
             terminal_baseline_runs = _scalar(
@@ -554,7 +567,8 @@ def test_sep20_rerun330_preserves_history_and_reuses_unchanged_scorer_cache(
             assert config["checkpoint_deadline_policy"] == "atomic_checkpoint_90m_v1"
             assert config["icp_wall_clock_seconds"] == 5400
             assert config["lease_ttl_seconds"] == 6300
-            assert config["scorer_image_digest"] == SCORER_DIGEST
+            assert config["scorer_image_digest"] == NEW_SCORER_DIGEST
+            assert config["scorer_image_reference"] == NEW_SCORER_REFERENCE
             assert (ref, size, sha256, commit) == (
                 SOURCE_REF,
                 SOURCE_SIZE,
@@ -585,12 +599,14 @@ def test_sep20_rerun330_preserves_history_and_reuses_unchanged_scorer_cache(
             cursor.execute(
                 "SELECT count(*),count(DISTINCT assignment_id),"
                 "bool_and(status='accepted'),"
-                "bool_and(assignment_id LIKE '%%:score:rerun330') "
+                "bool_and(assignment_id LIKE '%%:score:rerun330'),"
+                "bool_and(judgment_scope_doc->>'scorer_image_digest'=%s),"
+                "bool_and(judgment_scope_doc->>'scorer_image_reference'=%s) "
                 "FROM public.lab_arena_runs WHERE round_id=%s AND kind='score'",
-                (ROUND,),
+                (NEW_SCORER_DIGEST, NEW_SCORER_REFERENCE, ROUND),
             )
-            assert cursor.fetchone() == (100, 100, True, True)
-            reused_miner_keys = set(
+            assert cursor.fetchone() == (100, 100, True, True, True, True)
+            new_miner_keys = set(
                 _json(
                     cursor,
                     "SELECT jsonb_agg(judgment_cache_key) FROM public.lab_arena_runs "
@@ -598,7 +614,18 @@ def test_sep20_rerun330_preserves_history_and_reuses_unchanged_scorer_cache(
                     (ROUND, BASELINE),
                 )
             )
-            assert reused_miner_keys == miner_cache_keys
+            assert len(new_miner_keys) == len(miner_cache_keys)
+            assert new_miner_keys.isdisjoint(miner_cache_keys)
+            new_score_cache_keys = set(
+                _json(
+                    cursor,
+                    "SELECT jsonb_agg(judgment_cache_key) FROM public.lab_arena_runs "
+                    "WHERE round_id=%s AND kind='score'",
+                    (ROUND,),
+                )
+            )
+            assert None not in new_score_cache_keys
+            assert new_score_cache_keys.isdisjoint(old_score_cache_keys)
             assert _json(
                 cursor,
                 "SELECT publication_doc FROM public.lab_arena_rounds WHERE round_id=%s",
@@ -613,7 +640,8 @@ def test_sep20_rerun330_template_is_inactive_and_narrow():
     assert all(round_id in body for round_id in PRIOR_ARCHIVES)
     assert ARCHIVE in body and "score:rerun330" in body
     assert '"openrouter":500' in body and '"openrouter":2000' in body
-    assert SCORER_DIGEST in body and SCORER_REFERENCE in body
+    assert TERMINAL_SCORER_DIGEST in body and TERMINAL_SCORER_REFERENCE in body
+    assert NEW_SCORER_DIGEST in body and NEW_SCORER_REFERENCE in body
     assert "atomic_checkpoint_90m_v1" in body
     assert "icp_wall_clock_seconds')::INTEGER<>5400" in body
     assert "lease_ttl_seconds')::INTEGER<>6300" in body

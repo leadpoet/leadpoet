@@ -2898,15 +2898,19 @@ def test_public_stage_uses_verified_web_identity_without_homepage_linkedin(
 
 
 @pytest.mark.parametrize("missing_size_observation", [False, True])
+@pytest.mark.parametrize("frozen_round_policy", [False, True])
 def test_state_street_web_identity_reuses_structured_profile_for_size_and_stage(
-    monkeypatch, missing_size_observation,
+    monkeypatch, missing_size_observation, frozen_round_policy,
 ):
     """Reproduce the saved rerun337 profile through the full outer fit gate."""
 
     company = _company().model_copy(update={
         "company_name": "State Street",
         "company_website": "https://www.statestreet.com",
-        "company_linkedin": "https://www.linkedin.com/company/state-street",
+        "company_linkedin": (
+            "" if frozen_round_policy
+            else "https://www.linkedin.com/company/state-street"
+        ),
         "company_stage": "Public",
         "industry": "Financial services",
         "employee_count": "10,001+",
@@ -2980,7 +2984,12 @@ def test_state_street_web_identity_reuses_structured_profile_for_size_and_stage(
         return dict(verdict), ""
 
     async def structured_profile(
-        domain, url, *, diagnostic, public_company_evidence
+        domain,
+        url,
+        *,
+        diagnostic,
+        public_company_evidence,
+        company_identity_evidence=None,
     ):
         del diagnostic
         structured_calls.append((domain, url))
@@ -2989,6 +2998,14 @@ def test_state_street_web_identity_reuses_structured_profile_for_size_and_stage(
         )
         assert public is not None
         public_company_evidence.update(public)
+        if company_identity_evidence is not None:
+            company_identity_evidence.update({
+                "name": "State Street",
+                "provider": "harvestapi_get_company",
+                "source_field": "name",
+                "url": profile_url,
+                "website": "https://statestreet.com/",
+            })
         return linkedin_company_size.project_structured_linkedin_company_size(
             domain, url, payload
         )
@@ -3008,32 +3025,72 @@ def test_state_street_web_identity_reuses_structured_profile_for_size_and_stage(
         lead_scorer, "fetch_current_linkedin_company_size", exa_profile
     )
 
-    result = asyncio.run(
-        lead_scorer._verify_company_fit(
-            company,
-            icp,
-            0.0,
-            0.0,
-            set(),
-            require_https_transport=True,
-            company_quality=True,
-            evidence_investigator=True,
-        )
-    )
+    if frozen_round_policy:
+        for name, value in scorer_entrypoint.PLACEHOLDER_CREDENTIALS.items():
+            monkeypatch.setenv(name, value)
+        async def intent_score(*_args, **_kwargs):
+            return 60.0, 100, "verified", "2026-08-01", 0
 
-    assert result.decision == COMPANY_FIT_MATCH, result.details
+        monkeypatch.setattr(
+            lead_scorer, "_score_single_intent_signal", intent_score
+        )
+        policy = arena_scoring.build_scorer_policy(
+            scoring_adapter_version="qualification_integrity_v2",
+        )
+        assert "company_quality_policy" not in policy
+        submitted = _competition_company()
+        submitted.update({
+            "company_name": "State Street",
+            "company_website": "https://www.statestreet.com",
+            "company_linkedin": "",
+            "industry": "Financial services",
+            "employee_count": "10,001+",
+            "company_stage": "Public",
+            "state": "Massachusetts",
+        })
+        document = arena_scoring.build_scoring_input(
+            scored_run_id="state-street-frozen-policy",
+            icp=icp.model_copy(update={
+                "intent_signals": ["Leadership change"],
+            }).model_dump(mode="json"),
+            companies=[submitted],
+            policy=policy,
+            evaluation_date="2026-09-20",
+        )
+        output = scorer_entrypoint.score_input(document)
+        assert "failure" not in output, output
+        result = output["breakdowns"][0]
+        details = result["verifier_gate_receipts"][0]
+        decision = details["decision"]
+    else:
+        result = asyncio.run(
+            lead_scorer._verify_company_fit(
+                company,
+                icp,
+                0.0,
+                0.0,
+                set(),
+                require_https_transport=True,
+                company_quality=True,
+                evidence_investigator=True,
+            )
+        )
+        details = result.details
+        decision = result.decision
+
+    assert decision == COMPANY_FIT_MATCH, details
     assert exa_calls == [profile_url]
     assert structured_calls == [("statestreet.com", profile_url)]
-    assert result.details["company_fit_dimensions"]["employee_size"] == COMPANY_FIT_MATCH
-    assert result.details["company_fit_dimensions"]["stage"] == COMPANY_FIT_MATCH
-    assert result.details["dimension_evidence"]["employee_size"]["web_evidence"] == {
+    assert details["company_fit_dimensions"]["employee_size"] == COMPANY_FIT_MATCH
+    assert details["company_fit_dimensions"]["stage"] == COMPANY_FIT_MATCH
+    assert details["dimension_evidence"]["employee_size"]["web_evidence"] == {
         "employee_count": "10,001+",
         "provider": "harvestapi_get_company",
         "source_field": "employeeCountRange",
         "url": profile_url,
         "website": "https://statestreet.com/",
     }
-    assert result.details["dimension_evidence"]["stage"]["web_evidence"] == {
+    assert details["dimension_evidence"]["stage"]["web_evidence"] == {
         "company_type": "Public Company",
         "provider": "harvestapi_get_company",
         "source_field": "companyType",

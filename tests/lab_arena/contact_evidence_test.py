@@ -36,6 +36,21 @@ def ledger():
     ]
 
 
+def _settlement(call_id, *, profile_id, linkedin_url, email):
+    body = {"status": "completed", "result": {"data": {"element": {
+        "id": profile_id, "linkedinUrl": linkedin_url, "email": email,
+    }}}}
+    return {
+        "run_id": "execution-1", "call_identity": call_id,
+        "provider": "deepline", "operation_id": "deepline.execute",
+        "entry_kind": "settlement", "terminal_response": {
+            "status": 200,
+            "body_b64": base64.b64encode(json.dumps(body).encode()).decode(),
+        },
+        "created_at": "2026-09-11T12:00:00Z",
+    }
+
+
 def test_scoped_broker_evidence_is_gateway_constructed():
     store = Store(ledger())
     row = {"contact": contact(), "source_evidence": {"response": "forged"}}
@@ -75,7 +90,7 @@ def test_record_reference_requests_a_trusted_profile_refetch_without_match():
     result = contact_evidence.resolve_sources(store, {"run_id": "execution-1"}, [{"contact": claim}])
     assert store.calls == [{
         "run_id": "execution-1", "provider": "deepline",
-        "entry_kind": "settlement", "limit": 31,
+        "entry_kind": "settlement", "limit": 201,
     }]
     assert result["profile-1"] == {"provider": "harvestapi", "tool": "harvestapi_get_profile", "input": {"url": claim["linkedin_url"], "findEmail": "true"}}
 
@@ -95,7 +110,7 @@ def test_record_reference_reuses_one_exact_same_run_settlement():
     assert store.calls == [
         {
             "run_id": "execution-1", "provider": "deepline",
-            "entry_kind": "settlement", "limit": 31,
+            "entry_kind": "settlement", "limit": 201,
         },
         {"run_id": "execution-1", "call_identity": "sha256:abc"},
     ]
@@ -187,6 +202,45 @@ def test_record_reference_falls_back_when_same_run_source_is_not_exact(mutation)
     assert source["input"]["findEmail"] == "true"
 
 
+def test_record_reference_reuses_exact_match_after_more_than_31_settlements():
+    matching_rows = ledger()
+    settlements = [
+        _settlement(
+            f"sha256:other-{index}",
+            profile_id=f"other-profile-{index}",
+            linkedin_url=f"https://www.linkedin.com/in/other-{index}/",
+            email=f"other-{index}@example.com",
+        )
+        for index in range(46)
+    ] + [matching_rows[1]]
+
+    class FilteredStore(Store):
+        def list_ledger(self, **kwargs):
+            self.calls.append(kwargs)
+            if kwargs.get("entry_kind") == "settlement":
+                return settlements[:kwargs["limit"]]
+            if kwargs.get("call_identity") == "sha256:abc":
+                return matching_rows
+            return []
+
+    store = FilteredStore(settlements)
+    source = contact_evidence.resolve_sources(
+        store, {"run_id": "execution-1"}, [{"contact": record_contact()}]
+    )["profile-1"]
+
+    assert source["call_identity"] == {
+        "call_id": "sha256:abc", "record_id": "profile-1",
+    }
+    assert source["response"]["result"]["data"]["element"]["id"] == "profile-1"
+    assert store.calls == [
+        {
+            "run_id": "execution-1", "provider": "deepline",
+            "entry_kind": "settlement", "limit": 201,
+        },
+        {"run_id": "execution-1", "call_identity": "sha256:abc"},
+    ]
+
+
 def test_ambiguous_or_truncated_record_settlement_scan_falls_back():
     duplicate = deepcopy(ledger()[1])
     duplicate["call_identity"] = "sha256:def"
@@ -197,7 +251,7 @@ def test_ambiguous_or_truncated_record_settlement_scan_falls_back():
     assert "response" not in source
     assert len(ambiguous.calls) == 1
 
-    sentinel = Store([deepcopy(ledger()[1]) for _ in range(31)])
+    sentinel = Store([deepcopy(ledger()[1]) for _ in range(201)])
     source = contact_evidence.resolve_sources(
         sentinel, {"run_id": "execution-1"}, [{"contact": record_contact()}]
     )["profile-1"]

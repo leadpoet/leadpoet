@@ -7,12 +7,16 @@ import binascii
 import json
 from typing import Any, Mapping, Sequence
 
+from lab_arena import contracts
 from qualification.contact_models import validate_contact_claim
 from qualification.scoring.contact_verification import contact_source_semantics
 
 INVALID_REFERENCE = {"invalid": True, "reason": "email_source_reference_invalid"}
 _MAX_SOURCE_RESPONSE_BYTES = 1024 * 1024
-_SETTLEMENT_SENTINEL = 31
+_SETTLEMENT_SCAN_LIMIT = (
+    max(profile["deepline"] for profile in contracts.EXECUTION_CALL_QUOTA_PROFILES)
+    + 1
+)
 
 
 def source_key(company: Mapping[str, Any]) -> str:
@@ -126,10 +130,10 @@ def resolve_sources(store: Any, run: Mapping[str, Any], companies: Sequence[Mapp
                     run_id=run_id,
                     provider="deepline",
                     entry_kind="settlement",
-                    limit=_SETTLEMENT_SENTINEL,
+                    limit=_SETTLEMENT_SCAN_LIMIT,
                 )
                 record_settlements_complete = (
-                    len(record_settlements) < _SETTLEMENT_SENTINEL
+                    len(record_settlements) < _SETTLEMENT_SCAN_LIMIT
                 )
             candidates: list[str] = []
             if record_settlements_complete:

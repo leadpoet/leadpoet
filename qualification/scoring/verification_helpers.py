@@ -5,6 +5,7 @@ import logging
 import os
 import re
 from datetime import date
+from html.parser import HTMLParser
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
@@ -21,39 +22,74 @@ except ImportError:
     _TRAFILATURA_AVAILABLE = False
 
 
+class _VisibleHTMLTextParser(HTMLParser):
+    """Collect page-visible text while excluding executable or fallback markup."""
+
+    _HIDDEN_ELEMENTS = frozenset({"script", "style", "template", "noscript"})
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._hidden_depth = 0
+        self.parts = []
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        if tag.lower() in self._HIDDEN_ELEMENTS:
+            self._hidden_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in self._HIDDEN_ELEMENTS and self._hidden_depth:
+            self._hidden_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if not self._hidden_depth:
+            self.parts.append(data)
+
+
+def _visible_html_text(content: str) -> str:
+    parser = _VisibleHTMLTextParser()
+    try:
+        parser.feed(content)
+        parser.close()
+    except Exception:
+        return ""
+    return " ".join(" ".join(parser.parts).split())
+
+
 def extract_article_body(content: str, *, min_body_chars: int = 200) -> str:
-    """Extract article body from raw HTML; fall back to input unchanged.
+    """Extract article body from raw HTML without admitting hidden page text.
 
     Returns the cleanest content available:
       - If trafilatura is installed AND input looks like HTML AND extraction
         succeeds with ≥ ``min_body_chars`` chars, returns the extracted body.
-      - Otherwise returns the original input.
+      - Otherwise HTML becomes visible plain text through the stdlib parser.
+      - Non-HTML returns unchanged.
 
     Safe to call on any content — markdown, plain text, or HTML. Non-HTML
     inputs pass through unchanged because trafilatura's HTML parser declines
     to extract from non-HTML.
     """
-    if not content or not _TRAFILATURA_AVAILABLE:
+    if not content:
         return content
     # Cheap pre-check: only attempt extraction if the content looks like HTML.
     # trafilatura accepts non-HTML but spends real time parsing — skip it for
     # markdown/text inputs.
     if "<html" not in content[:2000].lower() and "<body" not in content[:2000].lower() and "<div" not in content[:5000].lower():
         return content
-    try:
-        body = _trafilatura.extract(
-            content,
-            include_comments=False,
-            include_links=True,
-            include_tables=True,
-            favor_recall=True,
-            no_fallback=False,
-        )
-    except Exception:
-        return content
-    if body and len(body) >= min_body_chars:
-        return body
-    return content
+    if _TRAFILATURA_AVAILABLE:
+        try:
+            body = _trafilatura.extract(
+                content,
+                include_comments=False,
+                include_links=True,
+                include_tables=True,
+                favor_recall=True,
+                no_fallback=False,
+            )
+        except Exception:
+            body = None
+        if body and len(body) >= min_body_chars:
+            return body
+    return _visible_html_text(content) or content
 
 
 GENERIC_INTENT_PATTERNS = [

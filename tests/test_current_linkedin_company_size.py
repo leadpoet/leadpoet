@@ -2756,8 +2756,9 @@ def test_public_stage_uses_verified_web_identity_without_homepage_linkedin(
         )
 
 
+@pytest.mark.parametrize("missing_size_observation", [False, True])
 def test_state_street_web_identity_reuses_structured_profile_for_size_and_stage(
-    monkeypatch,
+    monkeypatch, missing_size_observation,
 ):
     """Reproduce the saved rerun337 profile through the full outer fit gate."""
 
@@ -2803,6 +2804,13 @@ def test_state_street_web_identity_reuses_structured_profile_for_size_and_stage(
         stage_evidence_url=profile_url,
         stage_evidence_quote="Public Company",
     )
+    if missing_size_observation:
+        verdict.update(
+            observed_employee_count=None,
+            employee_size_matches=None,
+            employee_size_evidence_url="",
+            employee_size_evidence_quote="",
+        )
     payload = {
         "status": "completed",
         "result": {"data": {"status": 200, "element": {

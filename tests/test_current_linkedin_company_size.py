@@ -2957,7 +2957,7 @@ def test_structured_public_profile_never_overrides_proven_nonpublic_stage(
     assert result.details["dimension_decisions"]["stage"] != COMPANY_FIT_MATCH
 
 
-def test_exact_structured_private_company_contradicts_stale_public_observation():
+def test_exact_structured_private_company_marks_public_stage_conflict_unavailable():
     verdict = _verdict(observed_size=25, size_matches=True)
     verdict.update(
         observed_company_stage="Public",
@@ -2987,14 +2987,38 @@ def test_exact_structured_private_company_contradicts_stale_public_observation()
         structured_public_company_evidence=private_evidence,
     )
 
-    assert result.decision == COMPANY_FIT_MISMATCH
-    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MISMATCH
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_UNAVAILABLE
     assert result.details["dimension_evidence"]["stage"] == private_evidence
+    assert lead_scorer._targeted_company_investigation_dimensions(
+        result,
+        icp_stage="public",
+        employee_size_conflict=False,
+    ) == ("stage",)
 
 
-def test_exact_structured_private_company_survives_full_company_fit_merge(
-    monkeypatch,
+@pytest.mark.parametrize(
+    ("investigated_stage", "status", "quote", "expected"),
+    [
+        (
+            "Public",
+            "VERIFIED",
+            "Acme common stock began trading on Nasdaq under ticker ACME.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Private Equity",
+            "CONTRADICTED",
+            "The acquisition closed and the buyer took Acme private.",
+            COMPANY_FIT_MISMATCH,
+        ),
+    ],
+)
+def test_exact_structured_private_conflict_uses_bounded_stage_investigation(
+    monkeypatch, investigated_stage, status, quote, expected
 ):
+    captured = {}
+
     async def prechecks(*_args, **_kwargs):
         return company_fit_match("prechecks passed")
 
@@ -3044,6 +3068,22 @@ def test_exact_structured_private_company_survives_full_company_fit_merge(
             "website": "https://example.com/",
         }
 
+    async def investigate(**kwargs):
+        captured.update(kwargs)
+        finding = {
+            "target": "stage",
+            "status": status,
+            "observed_value": investigated_stage,
+            "evidence_url": "https://example.com/current-stage",
+            "evidence_quote": quote,
+            "reason": "Current first-party stage evidence was verified.",
+        }
+        return {
+            "claims": {"stage": finding},
+            "_validated_stage_finding": finding,
+            "failure_reason": "",
+        }
+
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
     monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
@@ -3053,6 +3093,7 @@ def test_exact_structured_private_company_survives_full_company_fit_merge(
         "fetch_structured_linkedin_company_size",
         structured_fetch,
     )
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
 
     result = asyncio.run(
         lead_scorer._verify_company_fit(
@@ -3064,18 +3105,20 @@ def test_exact_structured_private_company_survives_full_company_fit_merge(
             0.0,
             set(),
             require_https_transport=True,
+            evidence_investigator=True,
         )
     )
 
-    assert result.decision == COMPANY_FIT_MISMATCH
-    assert result.details["company_fit_dimensions"]["stage"] == COMPANY_FIT_MISMATCH
-    assert result.details["dimension_evidence"]["stage"]["web_evidence"] == {
+    assert captured["targets"] == ("stage",)
+    assert captured["prior_observations"]["structured_company_type_evidence"] == {
         "company_type": "Privately Held",
         "provider": "harvestapi_get_company",
         "source_field": "companyType",
         "url": "https://www.linkedin.com/company/acme",
         "website": "https://example.com/",
     }
+    assert result.decision == expected
+    assert result.details["company_fit_dimensions"]["stage"] == expected
 
 
 @pytest.mark.parametrize(

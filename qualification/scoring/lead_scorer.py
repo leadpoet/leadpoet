@@ -1222,7 +1222,6 @@ def _web_identity_receipt(
         )
         return receipt
     verified_anchor_receipt: Mapping[str, str] = {}
-    verified_anchor_binds_company = False
     if isinstance(verified_homepage_identity, Mapping):
         anchor_name = verified_homepage_identity.get("normalized_name")
         anchor_domain = verified_homepage_identity.get(
@@ -1251,14 +1250,6 @@ def _web_identity_receipt(
                 ),
                 evidence_source="company_homepage",
                 company_quality=company_quality,
-            )
-            claimed_slug = linkedin_company_page_slug(company.company_linkedin)
-            verified_anchor_binds_company = bool(
-                verified_anchor_receipt.get("decision") == COMPANY_FIT_MATCH
-                and (
-                    not str(company.company_linkedin or "").strip()
-                    or claimed_slug == anchor_linkedin_slug
-                )
             )
     if (
         receipt.get("decision") == COMPANY_FIT_MISMATCH
@@ -1393,7 +1384,7 @@ def _web_identity_receipt(
             )
         )
     ) and (
-        verified_anchor_binds_company
+        verified_anchor_receipt.get("decision") == COMPANY_FIT_MATCH
         and isinstance(verified_homepage_identity, Mapping)
         and receipt.get("observed_domain")
         == verified_homepage_identity.get("registrable_dns_domain")
@@ -2114,6 +2105,11 @@ def _reverify_decision(
             structured_public_company_evidence,
             verified_homepage_identity,
         )
+        and not _validated_investigator_stage_matches_verdict(
+            verdict,
+            _normalize_company_stage(verdict.get("observed_company_stage")),
+            validated_stage_finding,
+        )
     )
     dimensions = {
         "employee_size": (
@@ -2140,7 +2136,7 @@ def _reverify_decision(
             company_quality=company_quality,
         ),
         "stage": (
-            COMPANY_FIT_MISMATCH
+            COMPANY_FIT_UNAVAILABLE
             if structured_private_stage_conflict
             else (
                 COMPANY_FIT_MATCH
@@ -2809,6 +2805,15 @@ async def _run_targeted_company_evidence_investigation(
         if "stage" in investigation_targets
         else []
     )
+    structured_private_stage_evidence = (
+        dict(structured_public_company_evidence)
+        if "stage" in investigation_targets
+        and _is_bound_structured_linkedin_private_company_evidence(
+            structured_public_company_evidence,
+            verified_identity,
+        )
+        else {}
+    )
     investigation = await investigate_company_evidence(
         company_locator={
             "name": company.company_name,
@@ -2836,6 +2841,15 @@ async def _run_targeted_company_evidence_investigation(
             **(
                 {"untrusted_company_stage_evidence": stage_evidence}
                 if stage_evidence
+                else {}
+            ),
+            **(
+                {
+                    "structured_company_type_evidence": (
+                        structured_private_stage_evidence
+                    )
+                }
+                if structured_private_stage_evidence
                 else {}
             ),
         },

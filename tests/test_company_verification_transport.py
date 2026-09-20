@@ -652,6 +652,50 @@ def test_verified_homepage_alias_binds_web_identity_without_submitted_linkedin()
         )["decision"] != COMPANY_FIT_MATCH
 
 
+def test_old_national_saved_identity_recovers_only_verified_homepage_alias():
+    company = _academy_company(
+        name="Old National Bank",
+        website="https://oldnational.com/",
+        linkedin="",
+    )
+    verdict = {
+        "observed_company_name": "Old National Bancorp",
+        "observed_company_website": "https://www.oldnational.com/",
+        "observed_company_linkedin": (
+            "https://www.linkedin.com/company/old-national-bank/"
+        ),
+    }
+    anchor = {
+        "normalized_name": "oldnationalbank",
+        "registrable_dns_domain": "oldnational.com",
+        "linkedin_company_slug": "old-national-bank",
+        "verified_legal_name_aliases": ["Old National Bancorp"],
+    }
+
+    initial = evaluate_company_identity(
+        submitted_name=company.company_name,
+        submitted_website=company.company_website,
+        submitted_linkedin=company.company_linkedin,
+        observed_name=verdict["observed_company_name"],
+        observed_website=verdict["observed_company_website"],
+        observed_linkedin=verdict["observed_company_linkedin"],
+        evidence_source="company_web_reverification",
+        company_quality=False,
+    )
+    recovered = _web_identity_receipt(
+        company,
+        verdict,
+        verified_homepage_identity=anchor,
+        company_quality=False,
+    )
+
+    assert initial["decision"] == COMPANY_FIT_UNAVAILABLE
+    assert initial["reason_code"] == "identity_not_proven"
+    assert initial["submitted_linkedin_slug"] == ""
+    assert recovered["decision"] == COMPANY_FIT_MATCH
+    assert recovered["verified_legal_name_aliases"] == ["Old National Bancorp"]
+
+
 def _academy_company(
     *,
     name="Academy Sports + Outdoors",

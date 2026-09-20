@@ -225,7 +225,7 @@ def _local_responder(
                 review_documents.append(json.loads(str(messages[-1]["content"])))
                 content = json.dumps(
                     {**dict(review_checks), "signal_coverage": [
-                        {"matched_icp_signal": index, "paragraph_quote": PARAGRAPH}
+                        {"matched_icp_signal": index, "covered": True}
                         for index in (0, 1)
                     ]} if review_checks is not None else {}
                 )

@@ -352,7 +352,7 @@ def test_v5_full_contact_round_persists_and_publishes_multi_signal_narrative(
         return json.dumps({**{name: True for name in intent_details._CHECKS},
                            "signal_coverage": [
                                {"matched_icp_signal": signal["matched_icp_signal"],
-                                "paragraph_quote": document["intent_details"]}
+                                "covered": True}
                                for signal in document["verified_signals"]
                            ]})
 

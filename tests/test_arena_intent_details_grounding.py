@@ -39,12 +39,7 @@ FISERV_REVIEW = {
     "relevance_grounded": True,
     "signal_coverage": [{
         "matched_icp_signal": 0,
-        "paragraph_quote": (
-            "On October 29, 2025, Fiserv announced several executive changes, "
-            "including Paul Todd's appointment as Chief Financial Officer effective "
-            "October 31 and the appointment of Takis Georgakopoulos and Dhivya "
-            "Suryadevara as Co-Presidents effective December 1."
-        ),
+        "covered": True,
     }],
     "verified_signals_covered": True,
 }
@@ -168,7 +163,7 @@ def test_all_grounding_and_writing_checks_must_pass(monkeypatch, failed_check):
         assert kwargs["max_retries"] == 0
         assert kwargs["model"] == "anthropic/claude-sonnet-4.5"
         return json.dumps({**checks, "signal_coverage": [
-            {"matched_icp_signal": index, "paragraph_quote": PARAGRAPH}
+            {"matched_icp_signal": index, "covered": True}
             for index in (0, 1)
         ]})
 
@@ -179,12 +174,17 @@ def test_all_grounding_and_writing_checks_must_pass(monkeypatch, failed_check):
     assert result["input_hash"].startswith("sha256:")
 
 
-def test_saved_fiserv_review_accepts_ascii_apostrophe_in_exact_quote(monkeypatch):
+def test_review_assesses_original_paragraph_without_requiring_a_copy(monkeypatch):
     company, icp, results, fit = inputs()
     company.intent_details = FISERV_PARAGRAPH
     prompts = []
 
-    async def judge(prompt, **_kwargs):
+    async def judge(prompt, **kwargs):
+        schema = kwargs["response_format"]["json_schema"]["schema"]
+        coverage_schema = schema["properties"]["signal_coverage"]["items"]
+        assert coverage_schema["properties"]["covered"] == {"type": "boolean"}
+        assert "paragraph_quote" not in coverage_schema["properties"]
+        assert "Read the original paragraph directly" in kwargs["system_prompt"]
         prompts.append(prompt)
         return json.dumps(FISERV_REVIEW)
 
@@ -216,13 +216,11 @@ def test_grounded_icp_connection_does_not_require_a_separate_final_sentence(
             "signal_coverage": [
                 {
                     "matched_icp_signal": 0,
-                    "paragraph_quote": (
-                        "Acme launched a reporting platform on September 1, 2026"
-                    ),
+                    "covered": True,
                 },
                 {
                     "matched_icp_signal": 1,
-                    "paragraph_quote": "It also opened a Berlin office on September 3",
+                    "covered": True,
                 },
             ],
         })
@@ -269,11 +267,8 @@ def test_review_projects_factual_and_icp_connection_checks_independently(
         return json.dumps({
             **checks,
             "signal_coverage": [
-                {"matched_icp_signal": index, "paragraph_quote": quote}
-                for index, quote in enumerate((
-                    "Acme launched a reporting platform on September 1, 2026",
-                    "opened a Berlin office on September 3",
-                ))
+                {"matched_icp_signal": index, "covered": True}
+                for index in (0, 1)
             ],
         })
 
@@ -285,25 +280,6 @@ def test_review_projects_factual_and_icp_connection_checks_independently(
     assert receipt["decision"] == "mismatch"
     assert receipt["checks"][failed_check] is False
     assert {name for name, passed in receipt["checks"].items() if passed} == expected_true
-
-
-@pytest.mark.parametrize(("quote", "paragraph"), [
-    ("Todd's \"Finance\" role in 2025", "Todd’s “Finance” role in 2025"),
-    ("Todd’s “Finance” role in 2025", "Todd's \"Finance\" role in 2025"),
-])
-def test_containment_treats_only_straight_and_curly_quotes_as_equivalent(
-    quote, paragraph
-):
-    assert intent_details._quote_is_contained(quote, paragraph)
-    assert not intent_details._quote_is_contained(
-        quote.replace("Finance", "Operations"), paragraph
-    )
-    assert not intent_details._quote_is_contained(
-        quote.replace("2025", "2026"), paragraph
-    )
-    assert not intent_details._quote_is_contained(
-        quote.replace("role in", "role-in"), paragraph
-    )
 
 
 @pytest.mark.parametrize("response", ["{}", "not json", "[]", json.dumps({name: "true" for name in intent_details._CHECKS})])
@@ -328,22 +304,47 @@ def test_provider_error_retains_retry_without_leaking_exception(monkeypatch):
 
 
 @pytest.mark.parametrize("coverage", [
-    [{"matched_icp_signal": 0, "paragraph_quote": PARAGRAPH}],
-    [{"matched_icp_signal": 0, "paragraph_quote": PARAGRAPH},
-     {"matched_icp_signal": 1, "paragraph_quote": ""}],
-    [{"matched_icp_signal": 0, "paragraph_quote": PARAGRAPH},
-     {"matched_icp_signal": 1, "paragraph_quote": "Words absent from the paragraph"}],
-    [{"matched_icp_signal": 0, "paragraph_quote": PARAGRAPH},
-     {"matched_icp_signal": 2, "paragraph_quote": PARAGRAPH}],
+    [{"matched_icp_signal": 0, "covered": True}],
+    [{"matched_icp_signal": 0, "covered": True},
+     {"matched_icp_signal": 2, "covered": True}],
+    [{"matched_icp_signal": 0, "covered": True},
+     {"matched_icp_signal": 0, "covered": True}],
+    [{"matched_icp_signal": 0, "covered": True},
+     {"matched_icp_signal": True, "covered": True}],
+    [{"matched_icp_signal": 0, "covered": True},
+     {"matched_icp_signal": 1, "covered": "true"}],
+    [{"matched_icp_signal": 0, "covered": True},
+     {"matched_icp_signal": 1, "covered": 1}],
+    [{"matched_icp_signal": 0, "covered": True},
+     {"matched_icp_signal": 1, "paragraph_quote": PARAGRAPH}],
 ])
-def test_coverage_requires_an_exact_passage_for_each_verified_signal(monkeypatch, coverage):
+def test_incomplete_or_malformed_coverage_is_retryable(monkeypatch, coverage):
     async def judge(*args, **kwargs):
         return json.dumps({**{name: True for name in intent_details._CHECKS},
                            "signal_coverage": coverage})
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     receipt = asyncio.run(intent_details.review_intent_details(*inputs()))
+    assert receipt["decision"] == "unavailable"
+    assert receipt["failure_reason_code"] == "malformed_response"
+    assert scorer_breakdown_has_retryable_infrastructure_failure({
+        "verifier_gate_receipts": [receipt],
+    })
+
+
+def test_a_missing_activity_remains_a_terminal_mismatch(monkeypatch):
+    async def judge(*args, **kwargs):
+        return json.dumps({**{name: True for name in intent_details._CHECKS},
+                           "signal_coverage": [
+                               {"matched_icp_signal": 0, "covered": True},
+                               {"matched_icp_signal": 1, "covered": False},
+                           ]})
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(*inputs()))
     assert receipt["decision"] == "mismatch"
     assert receipt["checks"]["verified_signals_covered"] is False
+    assert not scorer_breakdown_has_retryable_infrastructure_failure({
+        "verifier_gate_receipts": [receipt],
+    })
 
 
 @pytest.mark.parametrize("decision", ["match", "mismatch", "unavailable"])

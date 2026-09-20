@@ -20,9 +20,6 @@ _CHECKS = (
     "facts_supported", "verified_signals_covered", "relevance_grounded",
     "connects_icp", "natural_paragraph",
 )
-_TYPOGRAPHIC_QUOTES = str.maketrans({
-    "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
-})
 _RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {
@@ -36,9 +33,9 @@ _RESPONSE_FORMAT = {
                         "type": "object", "additionalProperties": False,
                         "properties": {
                             "matched_icp_signal": {"type": "integer"},
-                            "paragraph_quote": {"type": "string"},
+                            "covered": {"type": "boolean"},
                         },
-                        "required": ["matched_icp_signal", "paragraph_quote"],
+                        "required": ["matched_icp_signal", "covered"],
                     },
                 },
             },
@@ -66,11 +63,13 @@ completed expansion. Do not accept facts drawn only from a submitted claim.
 Use authoritative_date_basis: publication dates must not become event dates.
 An unknown date must stay unknown; do not invent recency or urgency.
 For verified_signals_covered, require all distinct supported activities below.
-For EACH verified signal, return its matched_icp_signal and an EXACT contiguous
-quote from the submitted paragraph that states that specific activity in
-signal_coverage. Return an empty paragraph_quote if the activity is absent.
+For EACH distinct matched_icp_signal, return that index once and a covered
+Boolean in signal_coverage. Read the original paragraph directly: covered is
+true only when it states that specific verified activity, including a supported
+paraphrase. Return covered=false when the activity is absent. Do not copy or
+rewrite the paragraph in your response.
 Generic relevance, product expansion or growth language does not cover a
-distinct office opening, hire, funding or other event. Never quote the source
+distinct office opening, hire, funding or other event. Never treat source
 evidence as if it appeared in the paragraph. Check coverage independently for
 each signal before deciding verified_signals_covered.
 For relevance_grounded, allow plausible commercial implications only as clearly
@@ -91,12 +90,6 @@ signal_coverage.
 
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
-
-
-def _quote_is_contained(quote: str, paragraph: str) -> bool:
-    return quote.translate(_TYPOGRAPHIC_QUOTES) in paragraph.translate(
-        _TYPOGRAPHIC_QUOTES
-    )
 
 
 def _texts(value: Any, *, maximum: int, length: int) -> list[str]:
@@ -225,22 +218,19 @@ missing review into an accepted paragraph or a terminal company mismatch.
         coverage = checks.pop("signal_coverage")
         if not isinstance(coverage, list) or any(
             not isinstance(item, dict)
-            or set(item) != {"matched_icp_signal", "paragraph_quote"}
+            or set(item) != {"matched_icp_signal", "covered"}
             or type(item["matched_icp_signal"]) is not int
-            or not isinstance(item["paragraph_quote"], str)
+            or type(item["covered"]) is not bool
             for item in coverage
         ):
             raise ValueError("invalid signal coverage")
         expected = {item["matched_icp_signal"] for item in document["verified_signals"]}
         observed = {item["matched_icp_signal"] for item in coverage}
-        complete = len(coverage) == len(expected) and observed == expected and all(
-            item["paragraph_quote"].strip()
-            and _quote_is_contained(
-                item["paragraph_quote"], document["intent_details"]
-            )
-            for item in coverage
+        if len(coverage) != len(expected) or observed != expected:
+            raise ValueError("incomplete signal review")
+        checks["verified_signals_covered"] = (
+            checks["verified_signals_covered"] and all(item["covered"] for item in coverage)
         )
-        checks["verified_signals_covered"] = checks["verified_signals_covered"] and bool(complete)
     except (TypeError, ValueError):
         return {**receipt, "decision": "unavailable", "failure_class": "intent_details_review_unavailable",
                 "failure_reason_code": "malformed_response"}

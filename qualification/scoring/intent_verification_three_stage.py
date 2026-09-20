@@ -242,20 +242,43 @@ def _is_careers_index_url(url: str) -> bool:
 def _careers_link_evidence(body: str, source_url: str) -> tuple[str, int]:
     """Return observed ATS or same-index child links as a bounded prefix."""
 
-    from bs4 import BeautifulSoup
+    from html.parser import HTMLParser
 
-    document = BeautifulSoup(body, "html.parser")
+    class Links(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.links: list[tuple[str, str]] = []
+            self.href: str | None = None
+            self.parts: list[str] = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "a":
+                self.href = dict(attrs).get("href")
+                self.parts = []
+
+        def handle_data(self, data):
+            if self.href is not None:
+                self.parts.append(data)
+
+        def handle_endtag(self, tag):
+            if tag == "a" and self.href is not None:
+                self.links.append((self.href, " ".join(self.parts)))
+                self.href = None
+                self.parts = []
+
+    document = Links()
+    document.feed(body)
     source = urlsplit(source_url)
     source_path = source.path.rstrip("/")
     rows: list[tuple[str, str]] = []
     seen: set[str] = set()
-    for anchor in document.find_all("a", href=True):
-        title = " ".join(anchor.get_text(" ", strip=True).split())[:300]
+    for href, label in document.links:
+        title = " ".join(label.split())[:300]
         if not title:
             continue
         try:
             candidate = canonical_candidate_prompt_url(
-                urljoin(source_url, str(anchor.get("href") or "").strip()),
+                urljoin(source_url, href.strip()),
                 "rendered_job.url",
             )
             parsed = urlsplit(candidate)

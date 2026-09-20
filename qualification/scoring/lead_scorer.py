@@ -3187,7 +3187,10 @@ async def _llm_reverify_company(
     if (
         _normalize_company_stage(icp_stage) == "public"
         and isinstance(result_dimensions, Mapping)
-        and result_dimensions.get("stage") == COMPANY_FIT_UNAVAILABLE
+        and result_dimensions.get("stage") in {
+            COMPANY_FIT_MATCH,
+            COMPANY_FIT_UNAVAILABLE,
+        }
         and result.details.get("identity_decision") == COMPANY_FIT_MATCH
         and not current_profile_cache.get("structured_attempted")
     ):

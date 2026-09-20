@@ -3018,6 +3018,7 @@ def test_exact_structured_private_conflict_uses_bounded_stage_investigation(
     monkeypatch, investigated_stage, status, quote, expected
 ):
     captured = {}
+    structured_fetches = []
 
     async def prechecks(*_args, **_kwargs):
         return company_fit_match("prechecks passed")
@@ -3037,7 +3038,11 @@ def test_exact_structured_private_conflict_uses_bounded_stage_investigation(
         )
 
     async def provider(**_kwargs):
-        verdict = _verdict(observed_size=25, size_matches=True)
+        verdict = _verdict(
+            observed_size=25,
+            size_matches=True,
+            employee_url="https://example.com/current-headcount",
+        )
         verdict.update(
             observed_company_website="https://example.com/",
             observed_company_stage="Public",
@@ -3051,6 +3056,7 @@ def test_exact_structured_private_conflict_uses_bounded_stage_investigation(
         _domain, url, *, diagnostic, public_company_evidence
     ):
         del diagnostic
+        structured_fetches.append((_domain, url))
         public_company_evidence.update(
             {
                 "company_type": "Privately Held",
@@ -3109,6 +3115,9 @@ def test_exact_structured_private_conflict_uses_bounded_stage_investigation(
         )
     )
 
+    assert structured_fetches == [
+        ("example.com", "https://www.linkedin.com/company/acme")
+    ]
     assert captured["targets"] == ("stage",)
     assert captured["prior_observations"]["structured_company_type_evidence"] == {
         "company_type": "Privately Held",

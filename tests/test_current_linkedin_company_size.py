@@ -3862,6 +3862,179 @@ def test_archived_sec_snapshot_cannot_override_bound_current_private_type(
 
 
 @pytest.mark.parametrize(
+    "scored_run_id",
+    [
+        "sub-0bf251718e4bb4e01ce4fab57d448b07",
+        "sub-1e704990611d1fb4167d32f59fbe195b",
+        "sub-a9371aca5c5f319e63d2f789ad6f7269",
+    ],
+)
+def test_envestnet_private_type_rejects_old_sec_under_frozen_policy(
+    monkeypatch,
+    scored_run_id,
+):
+    """Reproduce all saved Envestnet rows with the exact non-quality policy."""
+
+    for name, value in scorer_entrypoint.PLACEHOLDER_CREDENTIALS.items():
+        monkeypatch.setenv(name, value)
+    profile_url = "https://www.linkedin.com/company/envestnet"
+    old_sec_url = (
+        "https://www.sec.gov/Archives/edgar/data/1337619/"
+        "000133761924000003/env-20240222.htm"
+    )
+    calls = {"web": 0, "structured": 0, "investigator": 0}
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_match(
+            "homepage identity verified",
+            details={
+                "identity": {
+                    "decision": COMPANY_FIT_MATCH,
+                    "evidence_source": "company_homepage",
+                    "observed_name": "envestnet",
+                    "observed_domain": "envestnet.com",
+                    "observed_linkedin_slug": "envestnet",
+                }
+            },
+        )
+
+    async def provider(**_kwargs):
+        calls["web"] += 1
+        verdict = _verdict(
+            observed_size=700,
+            size_matches=True,
+            employee_url=profile_url,
+        )
+        verdict.update(
+            observed_company_name="Envestnet",
+            observed_company_website="https://envestnet.com/",
+            observed_company_linkedin=profile_url,
+            observed_company_stage="Public",
+            stage_matches=True,
+            stage_evidence_url=old_sec_url,
+            stage_evidence_quote=(
+                "Envestnet common stock was registered on the New York Stock "
+                "Exchange under ticker ENV."
+            ),
+        )
+        return verdict, ""
+
+    async def structured_profile(
+        domain,
+        url,
+        *,
+        diagnostic,
+        public_company_evidence,
+    ):
+        del diagnostic
+        calls["structured"] += 1
+        assert (domain, url) == ("envestnet.com", profile_url)
+        public_company_evidence.update({
+            "company_type": "Privately Held",
+            "provider": "harvestapi_get_company",
+            "source_field": "companyType",
+            "url": profile_url,
+            "website": "https://envestnet.com/",
+        })
+        return {
+            "employee_count": "501-1,000",
+            "provider": "harvestapi_get_company",
+            "source_field": "employeeCountRange",
+            "url": profile_url,
+            "website": "https://envestnet.com/",
+        }
+
+    async def exa_profile(url, **_kwargs):
+        return {"outcome": "insufficient_evidence", "url": url}
+
+    async def investigate(**kwargs):
+        calls["investigator"] += 1
+        assert kwargs["targets"] == ("stage",)
+        assert kwargs["prior_observations"][
+            "structured_company_type_evidence"
+        ]["company_type"] == "Privately Held"
+        finding = {
+            "target": "stage",
+            "status": "VERIFIED",
+            "observed_value": "Public",
+            "evidence_url": old_sec_url,
+            "evidence_quote": (
+                "Envestnet common stock was registered on the New York Stock "
+                "Exchange under ticker ENV."
+            ),
+            "reason": "The archived filing names an old exchange registration.",
+        }
+        return {
+            "claims": {"stage": finding},
+            "_validated_stage_finding": finding,
+            "failure_reason": "",
+        }
+
+    async def intent_score(*_args, **_kwargs):
+        raise AssertionError("company-fit rejection must stop intent scoring")
+
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_structured_linkedin_company_size",
+        structured_profile,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_current_linkedin_company_size",
+        exa_profile,
+    )
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
+    monkeypatch.setattr(lead_scorer, "_score_single_intent_signal", intent_score)
+
+    policy = arena_scoring.build_scorer_policy(
+        scoring_adapter_version="qualification_integrity_v2",
+    )
+    assert "company_quality_policy" not in policy
+    icp = _icp().model_copy(update={
+        "industry": "Financial Services",
+        "sub_industry": "Wealth management technology",
+        "employee_count": "501-1,000",
+        "company_stage": "Public",
+        "intent_signals": ["Leadership change"],
+    })
+    company = _competition_company()
+    company.update({
+        "company_name": "Envestnet",
+        "company_website": "https://envestnet.com/",
+        "company_linkedin": "",
+        "industry": "Financial Services",
+        "employee_count": "501-1,000",
+        "company_stage": "",
+    })
+    document = arena_scoring.build_scoring_input(
+        scored_run_id=scored_run_id,
+        icp=icp.model_dump(mode="json"),
+        companies=[company],
+        policy=policy,
+        evaluation_date="2026-09-20",
+    )
+
+    output = scorer_entrypoint.score_input(document)
+
+    assert "failure" not in output, output
+    assert calls == {"web": 1, "structured": 1, "investigator": 1}, output
+    breakdown = output["breakdowns"][0]
+    assert breakdown["company_qualified"] is False
+    receipt = breakdown["verifier_gate_receipts"][0]
+    assert receipt["decision"] == COMPANY_FIT_UNAVAILABLE
+    assert receipt["company_fit_dimensions"]["stage"] == COMPANY_FIT_UNAVAILABLE
+    assert receipt["dimension_evidence"]["stage"]["web_evidence"][
+        "company_type"
+    ] == "Privately Held"
+
+
+@pytest.mark.parametrize(
     ("investigated_stage", "status", "quote", "expected"),
     [
         (

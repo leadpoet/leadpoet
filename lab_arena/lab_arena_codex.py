@@ -31,7 +31,8 @@ CODEX_BINARY = "/usr/local/bin/codex"
 MAX_REQUEST_BYTES = 1_000_000
 MAX_RESPONSE_BYTES = 4 * 1_048_576
 MAX_LOG_BYTES = 64 * 1024
-MAX_IDLE_WAIT_SECONDS = 2700
+DEFAULT_IDLE_WAIT_SECONDS = 2700
+MAX_IDLE_WAIT_SECONDS = 5400
 DEFAULT_MAX_OUTPUT_TOKENS = 16_384
 MAX_OUTPUT_TOKENS = 32_768
 # Compact before growing histories approach the bridge's 1 MB request cap.
@@ -195,7 +196,7 @@ def _dispatch(
     cancel_requested: Callable[[], bool] | None = None,
 ) -> tuple[int, bytes]:
     if response_deadline is None:
-        response_deadline = time.monotonic() + MAX_IDLE_WAIT_SECONDS
+        response_deadline = time.monotonic() + DEFAULT_IDLE_WAIT_SECONDS
     payload = json.dumps({
         "schema_version": "leadpoet.lab_arena.operation_frame.v1",
         "operation_id": "openrouter.responses",
@@ -346,7 +347,7 @@ class ResponsesBridge:
             raise CodexRuntimeError("invalid Codex web search mode")
         now = time.monotonic()
         if response_deadline is None:
-            response_deadline = now + MAX_IDLE_WAIT_SECONDS
+            response_deadline = now + DEFAULT_IDLE_WAIT_SECONDS
         if (
             type(response_deadline) not in (int, float)
             or not math.isfinite(response_deadline)
@@ -621,7 +622,7 @@ def session(
         raise CodexRuntimeError("invalid Codex web search mode")
     now = time.monotonic()
     if response_deadline is None:
-        response_deadline = now + MAX_IDLE_WAIT_SECONDS
+        response_deadline = now + DEFAULT_IDLE_WAIT_SECONDS
     if (
         type(response_deadline) not in (int, float)
         or not math.isfinite(response_deadline)
@@ -694,12 +695,14 @@ def session(
             session_environment._close()
 
 
-def run(prompt: str, *, model: str, cwd: str | Path, reasoning_effort: str = "medium", max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS, timeout_seconds: float = 2700, web_search: str = "disabled") -> str:
+def run(prompt: str, *, model: str, cwd: str | Path, reasoning_effort: str = "medium", max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS, timeout_seconds: float = DEFAULT_IDLE_WAIT_SECONDS, web_search: str = "disabled") -> str:
     """Run Codex once and return its final message; the harness owns JSON output."""
 
     if not isinstance(prompt, str) or not prompt or len(prompt.encode()) > MAX_REQUEST_BYTES:
         raise CodexRuntimeError("invalid Codex prompt")
-    if not 0 < timeout_seconds <= 2700:
+    if (type(timeout_seconds) not in (int, float)
+            or not math.isfinite(timeout_seconds)
+            or not 0 < timeout_seconds <= MAX_IDLE_WAIT_SECONDS):
         raise CodexRuntimeError("invalid Codex timeout")
     response_deadline = time.monotonic() + timeout_seconds
     with session(model=model, reasoning_effort=reasoning_effort,

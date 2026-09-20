@@ -187,12 +187,65 @@ def test_interrupted_request_settles_before_finalization_checkpoint(monkeypatch,
 
 
 @pytest.mark.parametrize("timeout", [
-    True, False, -0.01, math.inf, -math.inf, math.nan, 2700.01, 10 ** 1000, "1",
+    True, False, -0.01, math.inf, -math.inf, math.nan, 5400.01, 10 ** 1000, "1",
 ])
 def test_wait_idle_rejects_invalid_timeouts_without_dispatch(timeout):
     with codex.ResponsesBridge("/unused.sock") as bridge:
         with pytest.raises(codex.CodexRuntimeError, match="idle timeout"):
             bridge.wait_idle(timeout)
+
+
+def test_explicit_90m_window_crosses_real_session_and_bridge(monkeypatch):
+    monkeypatch.setattr(codex.time, "monotonic", lambda: 100.0)
+    transport = FakeTransport([(200, response(id="within-90m-window"))])
+    with broker_socket(monkeypatch, transport) as (store, transport, _), codex.session(
+        model="openai/gpt-4o-mini",
+        response_deadline=100.0 + 5370,
+    ) as environment:
+        config = (Path(environment["CODEX_HOME"]) / "config.toml").read_text()
+        assert "stream_idle_timeout_ms = 5370000" in config
+        assert environment.wait_idle(5370) is True
+        reply = _post(environment)
+        assert environment.wait_idle(5370) is True
+
+    assert reply.status_code == 200, reply.text
+    assert len(store.calls) == len(transport.sent) == 1
+
+
+def test_omitted_deadline_keeps_45m_default(monkeypatch):
+    monkeypatch.setattr(codex.time, "monotonic", lambda: 100.0)
+    with codex.ResponsesBridge("/unused.sock") as bridge:
+        assert codex.DEFAULT_IDLE_WAIT_SECONDS == 2700
+        assert codex.MAX_IDLE_WAIT_SECONDS == 5400
+        assert bridge.response_deadline == 2800.0
+        assert bridge.wait_idle(2700) is True
+    assert codex.run.__kwdefaults__["timeout_seconds"] == 2700
+
+
+@pytest.mark.parametrize(
+    "deadline",
+    [True, 99.0, 100.0, math.inf, -math.inf, math.nan, 5500.01],
+)
+def test_session_and_bridge_reject_invalid_explicit_deadlines(monkeypatch, deadline):
+    monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", "/worker.sock")
+    monkeypatch.setenv("LAB_ARENA_WEB_EGRESS_SOCKET", "/egress.sock")
+    monkeypatch.setattr(codex.time, "monotonic", lambda: 100.0)
+    with pytest.raises(codex.CodexRuntimeError, match="response deadline"):
+        codex.ResponsesBridge("/unused.sock", response_deadline=deadline)
+    with pytest.raises(codex.CodexRuntimeError, match="response deadline"):
+        with codex.session(
+            model="openai/gpt-4o-mini", response_deadline=deadline,
+        ):
+            pass
+
+
+@pytest.mark.parametrize("timeout", [True, 0, -1, math.inf, math.nan, 5400.01])
+def test_run_rejects_invalid_90m_timeout_before_launch(timeout):
+    with pytest.raises(codex.CodexRuntimeError, match="invalid Codex timeout"):
+        codex.run(
+            "do local work", model="openai/gpt-4o-mini", cwd="/tmp",
+            timeout_seconds=timeout,
+        )
 
 
 def test_session_environment_remains_subprocess_compatible_and_scoped(monkeypatch):

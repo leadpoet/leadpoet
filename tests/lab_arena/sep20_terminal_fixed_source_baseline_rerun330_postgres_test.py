@@ -50,14 +50,59 @@ def database():
         "301-lab-arena-score-payer-boundary.sql",
         "326-lab-arena-exhausted-provider-error-isolation.sql",
     )
-    yield from database_with_lab_arena_migration(
+    migrations = (
         CURRENT_SERVICE_MIGRATIONS[:-3]
         + (
+            "264-lab-arena-codex-cost-reconciliation.sql",
             "289-lab-arena-per-icp-cost-policy.sql",
             "292-lab-arena-null-final-score-publication.sql",
         )
-        + CURRENT_SERVICE_MIGRATIONS[-3:]
+        + CURRENT_SERVICE_MIGRATIONS[-3:-1]
+        + (
+            "311-lab-arena-per-icp-closed-billing-reconciliation.sql",
+            "312-lab-arena-temporary-hold-admission.sql",
+            "314-lab-arena-openrouter-web-search-reservation.sql",
+            "319-lab-arena-quota-sourcing-cost.sql",
+            "321-lab-arena-confirmed-cost-admission.sql",
+            CURRENT_SERVICE_MIGRATIONS[-1],
+            "329-lab-arena-explicit-90m-lease.sql",
+        )
     )
+    for psycopg2, dsn in database_with_lab_arena_migration(migrations):
+        with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
+            signatures = {
+                "lab_arena_claim_assignment(text,text,integer,integer,text[],text,text,text,integer)": (
+                    "4c5eb83c3daddfee5bfa2c33eaf33002be07bcd2f7a6fc23b5ff700d5980100a"
+                ),
+                "lab_arena_mark_uncertain(text,text,text,jsonb,integer)": (
+                    "da6b73e012983bb59ed83be2976e435af8ea5c0c9fea1b6ceca177cd892b8d99"
+                ),
+                "lab_arena_reserve_call(text,text,text,text,text,text,bigint,jsonb,integer)": (
+                    "eb08656f73d4421be399a7bb24599a2b3d63912511372d6738e7d989dd134263"
+                ),
+                "lab_arena_settle_call(text,text,text,bigint,jsonb,integer)": (
+                    "7f8537fa88aadd0cfe796c1ce326a6fc0b16a30f76d1f51fc800bd5e18052356"
+                ),
+            }
+            cursor.execute(
+                "SELECT p.oid::regprocedure::text,encode(extensions.digest("
+                "pg_get_functiondef(p.oid),'sha256'),'hex') FROM pg_proc p "
+                "WHERE p.oid=ANY(%s::regprocedure[]) ORDER BY 1",
+                (list(signatures),),
+            )
+            assert dict(cursor.fetchall()) == signatures
+            cursor.execute(
+                "SELECT pg_get_functiondef("
+                "'public.lab_arena_reserve_call(text,text,text,text,text,text,"
+                "bigint,jsonb,integer)'::regprocedure),pg_get_functiondef("
+                "'public.lab_arena_icp_cost_eligibility(text,text,integer,integer)'"
+                "::regprocedure)"
+            )
+            reserve_definition, eligibility_definition = cursor.fetchone()
+            assert "lab_arena_confirmed_cost_admission" in reserve_definition
+            assert "lab_arena_confirmed_score_admission" in reserve_definition
+            assert "lab_arena_confirmed_cost_eligibility" in eligibility_definition
+        yield psycopg2, dsn
 
 
 def _schedule(*, start_in_minutes: int = 10) -> dict[str, str]:
@@ -280,6 +325,10 @@ def _publish_rerun328(connection, harness, monkeypatch) -> None:
         rendered, _, _ = rerun328._render(cursor, schedule)
         cursor.execute(rendered)
     connection.commit()
+    # The shared lifecycle calls the store directly. Match the frozen 90-minute
+    # round so its execute and score claims, reserves and settlements cross the
+    # exact 329 RPC guards instead of the store's historical 3600-second default.
+    harness.service.store._lease_ttl_seconds = 6300
     lifecycle._drive_cycle(
         harness.service, harness.objects, daily_icps(), harness.runner_keys[0]
     )
@@ -372,6 +421,21 @@ def test_sep20_rerun330_preserves_history_and_reuses_unchanged_scorer_cache(
         _publish_rerun328(connection, harness, monkeypatch)
         failed_identity = _inject_exhausted_provider_zero_and_failed_unknown(connection)
         with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT entry_kind,amount_microusd FROM public.lab_arena_ledger "
+                "WHERE round_id=%s AND submission_id=%s "
+                "AND entry_kind IN('reservation','settlement') ORDER BY entry_id",
+                (ROUND, BASELINE),
+            )
+            confirmed_cost_rows = cursor.fetchall()
+            assert any(
+                kind == "reservation" and amount == 0
+                for kind, amount in confirmed_cost_rows
+            )
+            assert any(
+                kind == "settlement" and amount > 0
+                for kind, amount in confirmed_cost_rows
+            )
             prior_before = {
                 round_id: _scope_snapshot(cursor, round_id)
                 for round_id in PRIOR_ARCHIVES

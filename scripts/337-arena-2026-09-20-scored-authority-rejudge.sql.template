@@ -445,21 +445,33 @@ BEGIN
  END IF;
 
  SELECT pg_catalog.jsonb_build_object(
-  'rounds',(SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(r) ORDER BY round_id)
-    FROM public.lab_arena_rounds r WHERE round_id IN
+  'rounds',(SELECT pg_catalog.jsonb_build_object(
+    'count',pg_catalog.count(*),'sha256',pg_catalog.encode(extensions.digest(
+     COALESCE(pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+      pg_catalog.to_jsonb(r)::TEXT,'sha256'),'hex'),'' ORDER BY round_id),''),
+     'sha256'),'hex')) FROM public.lab_arena_rounds r WHERE round_id IN
      ('arena-2026-09-20-r326archive','arena-2026-09-20-r328archive',
       'arena-2026-09-20-r332archive','arena-2026-09-20-r335archive')),
-  'submissions',(SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(s)
-    ORDER BY round_id,submission_id) FROM public.lab_arena_submissions s
-    WHERE round_id IN
+  'submissions',(SELECT pg_catalog.jsonb_build_object(
+    'count',pg_catalog.count(*),'sha256',pg_catalog.encode(extensions.digest(
+     COALESCE(pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+      pg_catalog.to_jsonb(s)::TEXT,'sha256'),'hex'),''
+      ORDER BY round_id,submission_id),''),'sha256'),'hex'))
+    FROM public.lab_arena_submissions s WHERE round_id IN
      ('arena-2026-09-20-r326archive','arena-2026-09-20-r328archive',
       'arena-2026-09-20-r332archive','arena-2026-09-20-r335archive')),
-  'runs',(SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(r)
-    ORDER BY round_id,run_id) FROM public.lab_arena_runs r WHERE round_id IN
+  'runs',(SELECT pg_catalog.jsonb_build_object(
+    'count',pg_catalog.count(*),'sha256',pg_catalog.encode(extensions.digest(
+     COALESCE(pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+      pg_catalog.to_jsonb(r)::TEXT,'sha256'),'hex'),'' ORDER BY round_id,run_id),''),
+     'sha256'),'hex')) FROM public.lab_arena_runs r WHERE round_id IN
      ('arena-2026-09-20-r326archive','arena-2026-09-20-r328archive',
       'arena-2026-09-20-r332archive','arena-2026-09-20-r335archive')),
-  'ledger',(SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(l)
-    ORDER BY round_id,entry_id) FROM public.lab_arena_ledger l WHERE round_id IN
+  'ledger',(SELECT pg_catalog.jsonb_build_object(
+    'count',pg_catalog.count(*),'sha256',pg_catalog.encode(extensions.digest(
+     COALESCE(pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+      pg_catalog.to_jsonb(l)::TEXT,'sha256'),'hex'),'' ORDER BY round_id,entry_id),''),
+     'sha256'),'hex')) FROM public.lab_arena_ledger l WHERE round_id IN
      ('arena-2026-09-20-r326archive','arena-2026-09-20-r328archive',
       'arena-2026-09-20-r332archive','arena-2026-09-20-r335archive')))
  INTO prior_archive_before;
@@ -620,21 +632,33 @@ BEGIN
    FROM public.lab_arena_runs r WHERE r.round_id='arena-2026-09-20'
     AND r.kind='execute' AND r.run_id=l.run_id);
  SELECT pg_catalog.jsonb_build_object(
-  'rounds',(SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(r) ORDER BY round_id)
-    FROM public.lab_arena_rounds r WHERE round_id IN
+  'rounds',(SELECT pg_catalog.jsonb_build_object(
+    'count',pg_catalog.count(*),'sha256',pg_catalog.encode(extensions.digest(
+     COALESCE(pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+      pg_catalog.to_jsonb(r)::TEXT,'sha256'),'hex'),'' ORDER BY round_id),''),
+     'sha256'),'hex')) FROM public.lab_arena_rounds r WHERE round_id IN
      ('arena-2026-09-20-r326archive','arena-2026-09-20-r328archive',
       'arena-2026-09-20-r332archive','arena-2026-09-20-r335archive')),
-  'submissions',(SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(s)
-    ORDER BY round_id,submission_id) FROM public.lab_arena_submissions s
-    WHERE round_id IN
+  'submissions',(SELECT pg_catalog.jsonb_build_object(
+    'count',pg_catalog.count(*),'sha256',pg_catalog.encode(extensions.digest(
+     COALESCE(pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+      pg_catalog.to_jsonb(s)::TEXT,'sha256'),'hex'),''
+      ORDER BY round_id,submission_id),''),'sha256'),'hex'))
+    FROM public.lab_arena_submissions s WHERE round_id IN
      ('arena-2026-09-20-r326archive','arena-2026-09-20-r328archive',
       'arena-2026-09-20-r332archive','arena-2026-09-20-r335archive')),
-  'runs',(SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(r)
-    ORDER BY round_id,run_id) FROM public.lab_arena_runs r WHERE round_id IN
+  'runs',(SELECT pg_catalog.jsonb_build_object(
+    'count',pg_catalog.count(*),'sha256',pg_catalog.encode(extensions.digest(
+     COALESCE(pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+      pg_catalog.to_jsonb(r)::TEXT,'sha256'),'hex'),'' ORDER BY round_id,run_id),''),
+     'sha256'),'hex')) FROM public.lab_arena_runs r WHERE round_id IN
      ('arena-2026-09-20-r326archive','arena-2026-09-20-r328archive',
       'arena-2026-09-20-r332archive','arena-2026-09-20-r335archive')),
-  'ledger',(SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(l)
-    ORDER BY round_id,entry_id) FROM public.lab_arena_ledger l WHERE round_id IN
+  'ledger',(SELECT pg_catalog.jsonb_build_object(
+    'count',pg_catalog.count(*),'sha256',pg_catalog.encode(extensions.digest(
+     COALESCE(pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+      pg_catalog.to_jsonb(l)::TEXT,'sha256'),'hex'),'' ORDER BY round_id,entry_id),''),
+     'sha256'),'hex')) FROM public.lab_arena_ledger l WHERE round_id IN
      ('arena-2026-09-20-r326archive','arena-2026-09-20-r328archive',
       'arena-2026-09-20-r332archive','arena-2026-09-20-r335archive')))
  INTO prior_archive_after;

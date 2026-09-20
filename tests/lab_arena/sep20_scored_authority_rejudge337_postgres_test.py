@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -208,6 +209,20 @@ def test_rerun337_template_is_inactive_and_namespace_bounded():
     assert "__TERMINAL_COMPANY_JUDGMENTS_SHA256__" in body
     assert "__TERMINAL_JUDGMENT_CACHE_SHA256__" in body
     assert "Sep20 rerun337 USER trigger state differs" in body
+    for migration in (TEMPLATE, TEMPLATE.with_suffix("")):
+        prior_seals = re.findall(
+            r"SELECT pg_catalog\.jsonb_build_object\(\n  'rounds'.*?"
+            r"INTO prior_archive_(?:before|after);",
+            migration.read_text(),
+            re.DOTALL,
+        )
+        assert len(prior_seals) == 2
+        for seal in prior_seals:
+            assert "jsonb_agg" not in seal
+            assert seal.count("'count',pg_catalog.count(*),'sha256'") == 4
+            assert len(re.findall(
+                r"extensions\.digest\(\s*pg_catalog\.to_jsonb\(", seal
+            )) == 4
 
 
 def test_rerun337_archives_nullable_empty_execution_judgment_metadata(
@@ -336,3 +351,22 @@ def test_rerun337_rejects_terminal_drift_and_disabled_publication_stop(
                 cursor.execute(rerun332._migration_body(rendered))
             cursor.execute("ROLLBACK TO SAVEPOINT refused")
             cursor.execute("ROLLBACK TO SAVEPOINT stale_rerun332_scorer")
+
+            mutation = (
+                "INTO prior_archive_before;\n"
+                " ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER USER;\n"
+                " UPDATE public.lab_arena_rounds SET configuration_doc="
+                "configuration_doc||'{\"prior_archive_mutation_probe\":true}'::jsonb "
+                "WHERE round_id='arena-2026-09-20-r326archive';\n"
+                " ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER USER;"
+            )
+            mutated = rendered.replace(
+                "INTO prior_archive_before;", mutation, 1
+            )
+            assert mutated != rendered
+            before = rerun332._protected_database_snapshot(cursor)
+            cursor.execute("SAVEPOINT refused")
+            with pytest.raises(psycopg2.Error, match="rerun337 preservation differs"):
+                cursor.execute(rerun332._migration_body(mutated))
+            cursor.execute("ROLLBACK TO SAVEPOINT refused")
+            assert rerun332._protected_database_snapshot(cursor) == before

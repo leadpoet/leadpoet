@@ -2381,12 +2381,15 @@ class AssignmentExecutor:
         kind = str(lease.get("kind") or "execute")
         scoring_run = kind == "score"
         checkpoint_policy = lease.get("checkpoint_deadline_policy")
-        if checkpoint_policy not in (None, contracts.CHECKPOINT_DEADLINE_POLICY):
+        if checkpoint_policy is not None and checkpoint_policy not in contracts.CHECKPOINT_DEADLINE_PROFILES:
             raise RunnerError("lease checkpoint deadline policy is unsupported")
-        if checkpoint_policy == contracts.CHECKPOINT_DEADLINE_POLICY:
+        if checkpoint_policy is not None:
+            checkpoint_wall, checkpoint_lease = (
+                contracts.CHECKPOINT_DEADLINE_PROFILES[checkpoint_policy]
+            )
             if (
-                lease.get("icp_wall_clock_seconds") != contracts.CHECKPOINT_WALL_CLOCK_SECONDS
-                or lease.get("lease_ttl_seconds") != contracts.CHECKPOINT_LEASE_TTL_SECONDS
+                lease.get("icp_wall_clock_seconds") != checkpoint_wall
+                or lease.get("lease_ttl_seconds") != checkpoint_lease
             ):
                 raise RunnerError("lease checkpoint deadline differs from its signed round")
         signed_wall = lease.get(
@@ -2589,7 +2592,7 @@ class AssignmentExecutor:
                         result.stderr
                     )
             if result.timed_out and not (
-                checkpoint_policy == contracts.CHECKPOINT_DEADLINE_POLICY
+                checkpoint_policy in contracts.CHECKPOINT_DEADLINE_PROFILES
                 and not scoring_run and result.output_bytes is not None
             ):
                 terminal = "judge_timeout" if scoring_run else "model_timeout"
@@ -2951,7 +2954,12 @@ class Runner:
             hotkey=config.identity.hotkey,
             body={"declared_parallelism": capacity,
                   "proxy_execution_version": contracts.PROXY_EXECUTION_VERSION,
-                  "checkpoint_deadline_policy": contracts.CHECKPOINT_DEADLINE_POLICY},
+                  # The singular field keeps compatibility with a 45-minute
+                  # service. New services use the full supported profile list.
+                  "checkpoint_deadline_policy": contracts.CHECKPOINT_DEADLINE_POLICY,
+                  "checkpoint_deadline_policies": list(
+                      contracts.CHECKPOINT_DEADLINE_POLICIES
+                  )},
             timestamp=int(config.clock().timestamp()),
             sign_message=config.identity.sign,
         )

@@ -58,8 +58,16 @@ def _execute(tmp_path, lease, result, *, local_wall=30):
     return envelope["body"]["result"], runtime_fake.specs[0]
 
 
-def _lease(*, checkpoint=True, duration=2700):
+def _lease(
+    *, checkpoint=True, duration=None,
+    policy=contracts.DEFAULT_CHECKPOINT_DEADLINE_POLICY,
+):
     digest = "sha256:" + "a" * 64
+    if duration is None:
+        duration = (
+            contracts.CHECKPOINT_DEADLINE_PROFILES[policy][0]
+            if checkpoint else contracts.CHECKPOINT_WALL_CLOCK_SECONDS
+        )
     lease = {
         "round_id": "arena-2026-09-15", "run_id": "run-1",
         "assignment_id": "assignment-1", "kind": "execute",
@@ -70,22 +78,39 @@ def _lease(*, checkpoint=True, duration=2700):
         "icp_wall_clock_seconds": duration,
     }
     if checkpoint:
-        lease["checkpoint_deadline_policy"] = contracts.CHECKPOINT_DEADLINE_POLICY
-        lease["lease_ttl_seconds"] = contracts.CHECKPOINT_LEASE_TTL_SECONDS
+        lease["checkpoint_deadline_policy"] = policy
+        lease["lease_ttl_seconds"] = contracts.CHECKPOINT_DEADLINE_PROFILES[policy][1]
     return lease
 
 
-def test_signed_checkpoint_duration_overrides_local_runner_and_accepts_timeout_snapshot(tmp_path):
+@pytest.mark.parametrize(
+    "policy,duration,lease_ttl",
+    [
+        (contracts.CHECKPOINT_DEADLINE_POLICY, 2700, 3600),
+        (contracts.CHECKPOINT_90M_DEADLINE_POLICY, 5400, 6300),
+    ],
+)
+def test_signed_checkpoint_profiles_override_local_runner_and_accept_timeout_snapshot(
+    tmp_path, policy, duration, lease_ttl,
+):
     result, spec = _execute(
-        tmp_path, _lease(), runtime.fake_result(
+        tmp_path, _lease(policy=policy), runtime.fake_result(
             timed_out=True, exit_code=None, output_bytes=b'{"companies":[]}',
         ), local_wall=30,
     )
-    assert spec.wall_clock_seconds == 2700
-    assert spec.checkpoint_deadline_policy == contracts.CHECKPOINT_DEADLINE_POLICY
+    assert spec.wall_clock_seconds == duration
+    assert spec.checkpoint_deadline_policy == policy
+    assert contracts.CHECKPOINT_DEADLINE_PROFILES[policy] == (duration, lease_ttl)
     assert spec.checkpoint_validator(b'{"companies":[]}')
     assert not spec.checkpoint_validator(b'{"companies":[{"bad":true}]}')
     assert result["terminal_status"] == "accepted"
+    environment = runtime.sandbox_environment(
+        replace(
+            spec,
+            extra_environment={"LAB_ARENA_WALL_CLOCK_SECONDS": "1"},
+        )
+    )
+    assert environment["LAB_ARENA_WALL_CLOCK_SECONDS"] == str(duration)
 
 
 def test_new_checkpoint_lease_missing_signed_duration_fails_closed(tmp_path):
@@ -124,7 +149,7 @@ def test_nonzero_exit_with_complete_checkpoint_keeps_existing_output_rule(tmp_pa
     assert result["terminal_status"] == "accepted"
 
 
-def test_new_round_freezes_deadline_and_lease_while_legacy_opt_out_stays_300_seconds():
+def test_new_round_preserves_45m_default_and_explicit_90m_profile_is_valid():
     service = object.__new__(ArenaService)
     digest = "sha256:" + "a" * 64
     defaults = RoundDefaults(
@@ -158,6 +183,13 @@ def test_new_round_freezes_deadline_and_lease_while_legacy_opt_out_stays_300_sec
         contracts.validate_round_configuration(
             dict(current, icp_wall_clock_seconds=300)
         )
+    explicit_90m = dict(
+        current,
+        checkpoint_deadline_policy=contracts.CHECKPOINT_90M_DEADLINE_POLICY,
+        icp_wall_clock_seconds=5400,
+        lease_ttl_seconds=6300,
+    )
+    assert contracts.validate_round_configuration(explicit_90m) == explicit_90m
     service._config.defaults = replace(defaults, checkpoint_deadline_enabled=False)
     historical = service.create_round(
         datetime(2026, 9, 17, tzinfo=timezone.utc),

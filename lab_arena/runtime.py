@@ -244,7 +244,7 @@ class SandboxSpec:
         ):
             raise SandboxSpecError("agent source mounts are required")
         if self.checkpoint_deadline_policy is not None:
-            if (self.checkpoint_deadline_policy != contracts.CHECKPOINT_DEADLINE_POLICY
+            if (self.checkpoint_deadline_policy not in contracts.CHECKPOINT_DEADLINE_PROFILES
                     or command != AGENT_ENTRY_COMMAND
                     or self.checkpoint_validator is None):
                 raise SandboxSpecError("checkpoint deadline requires the trusted agent runtime and validator")
@@ -300,6 +300,7 @@ def sandbox_environment(spec: SandboxSpec) -> Dict[str, str]:
         "LAB_ARENA_INPUT_PATH": SANDBOX_INPUT_PATH,
         "LAB_ARENA_OUTPUT_PATH": SANDBOX_OUTPUT_PATH,
         "LAB_ARENA_WORKER_SOCKET": SANDBOX_SOCKET_PATH,
+        "LAB_ARENA_WALL_CLOCK_SECONDS": str(spec.wall_clock_seconds),
     })
     environment.update(PROVIDER_BASE_URLS)
     if spec.web_bridge_path is not None:
@@ -911,9 +912,7 @@ def run_sandbox(
         # result cannot include another concurrently completing sandbox.
         injected_cpu_before = rusage()[0] if rusage is not None else None
         launcher_started = clock()
-        checkpoint_execution = (
-            spec.checkpoint_deadline_policy == contracts.CHECKPOINT_DEADLINE_POLICY
-        )
+        checkpoint_execution = spec.checkpoint_deadline_policy is not None
         execution_started: Optional[float] = None
         last_pid_absence_at: Optional[float] = None
         checkpoint_bytes: Optional[bytes] = None

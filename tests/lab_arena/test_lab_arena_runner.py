@@ -693,6 +693,16 @@ def test_run_once_respects_max_claims_and_images_export_once(tmp_path):
     assert runner_.run_once() == 2 and len(api.completions) == 5
     assert runner_.run_once() == 0
     assert all(c["body"]["declared_parallelism"] == 3 for c in api.claims)
+    assert all(
+        c["body"]["checkpoint_deadline_policy"]
+        == contracts.CHECKPOINT_DEADLINE_POLICY
+        for c in api.claims
+    )
+    assert all(
+        c["body"]["checkpoint_deadline_policies"]
+        == list(contracts.CHECKPOINT_DEADLINE_POLICIES)
+        for c in api.claims
+    )
 
 
 def test_run_once_refills_a_slot_before_a_slow_lease_finishes(tmp_path):

@@ -604,7 +604,10 @@ def test_timeout_kills_deletes_and_never_keeps_output(tmp_path):
     assert result.output_bytes == b"{}"
 
 
-def _checkpoint_spec(tmp_path, *, seconds=10):
+def _checkpoint_spec(
+    tmp_path, *, seconds=10,
+    policy=contracts.DEFAULT_CHECKPOINT_DEADLINE_POLICY,
+):
     def valid(candidate):
         try:
             output_document_from_bytes(candidate)
@@ -614,14 +617,17 @@ def _checkpoint_spec(tmp_path, *, seconds=10):
 
     return make_spec(
         tmp_path, wall_clock_seconds=seconds,
-        checkpoint_deadline_policy=contracts.CHECKPOINT_DEADLINE_POLICY,
+        checkpoint_deadline_policy=policy,
         checkpoint_validator=valid,
     )
 
 
-def test_checkpoint_deadline_keeps_last_schema_valid_bytes_before_kill(tmp_path):
+@pytest.mark.parametrize("policy", contracts.CHECKPOINT_DEADLINE_POLICIES)
+def test_checkpoint_deadline_keeps_last_schema_valid_bytes_before_kill(
+    tmp_path, policy,
+):
     config = make_config(tmp_path)
-    spec = _checkpoint_spec(tmp_path)
+    spec = _checkpoint_spec(tmp_path, policy=policy)
     clock = FakeClock()
     first = b'{"companies":[]}'
     latest = (

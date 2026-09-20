@@ -846,6 +846,9 @@ class ArenaService:
 
     def create_round(self, cutoff: datetime, *, round_id: Optional[str] = None) -> Dict[str, Any]:
         defaults = self._config.defaults
+        checkpoint_profile = contracts.CHECKPOINT_DEADLINE_PROFILES[
+            contracts.DEFAULT_CHECKPOINT_DEADLINE_POLICY
+        ]
         round_id = round_id or round_id_for_cutoff(cutoff)
         self._require_round_ownership(round_id)
         runner_hotkeys, banned_hotkeys = self.runner_settings()
@@ -864,7 +867,7 @@ class ArenaService:
             "runner_slot_ceiling": int(defaults.runner_slot_ceiling),
             "max_attempts_per_assignment": contracts.MAX_ATTEMPTS_PER_ASSIGNMENT,
             "lease_ttl_seconds": (
-                contracts.CHECKPOINT_LEASE_TTL_SECONDS
+                checkpoint_profile[1]
                 if defaults.checkpoint_deadline_enabled else contracts.LEASE_TTL_SECONDS
             ),
             "companies_per_icp": 5,
@@ -872,7 +875,7 @@ class ArenaService:
             "call_quotas": dict(contracts.CALL_QUOTAS_PER_ICP),
             "scoring_call_quotas": dict(contracts.SCORING_CALL_QUOTAS_PER_WORK_ITEM),
             "icp_wall_clock_seconds": (
-                contracts.CHECKPOINT_WALL_CLOCK_SECONDS
+                checkpoint_profile[0]
                 if defaults.checkpoint_deadline_enabled else contracts.ICP_WALL_CLOCK_SECONDS
             ),
             "scoring_wall_clock_seconds": contracts.SCORING_WALL_CLOCK_SECONDS,
@@ -900,7 +903,9 @@ class ArenaService:
                 defaults.execution_icp_cap_microusd
             )
         if defaults.checkpoint_deadline_enabled:
-            document["checkpoint_deadline_policy"] = contracts.CHECKPOINT_DEADLINE_POLICY
+            document["checkpoint_deadline_policy"] = (
+                contracts.DEFAULT_CHECKPOINT_DEADLINE_POLICY
+            )
         if defaults.integrity_from is not None and cutoff >= datetime.fromisoformat(defaults.integrity_from.replace("Z", "+00:00")):
             self._require_integrity_schema()
             document["integrity_policy"] = integrity.POLICY
@@ -3458,9 +3463,18 @@ class ArenaService:
         if (configuration.get("parallel_twenty_icp_execution") is True
                 and body.get("proxy_execution_version") != contracts.PROXY_EXECUTION_VERSION):
             raise ServiceError("validator_proxy_execution_upgrade_required", 409)
-        if (configuration.get("checkpoint_deadline_policy") == contracts.CHECKPOINT_DEADLINE_POLICY
-                and body.get("checkpoint_deadline_policy") != contracts.CHECKPOINT_DEADLINE_POLICY):
-            raise ServiceError("validator_checkpoint_upgrade_required", 409)
+        checkpoint_policy = configuration.get("checkpoint_deadline_policy")
+        if checkpoint_policy in contracts.CHECKPOINT_DEADLINE_PROFILES:
+            advertised_policies = body.get("checkpoint_deadline_policies")
+            supports_checkpoint = body.get("checkpoint_deadline_policy") == checkpoint_policy
+            if isinstance(advertised_policies, list) and all(
+                isinstance(policy, str) for policy in advertised_policies
+            ):
+                supports_checkpoint = (
+                    supports_checkpoint or checkpoint_policy in advertised_policies
+                )
+            if not supports_checkpoint:
+                raise ServiceError("validator_checkpoint_upgrade_required", 409)
         response = None
         try:
             uid = self._benchmark_validator_uid(snapshot, validated["hotkey"])
@@ -3518,8 +3532,9 @@ class ArenaService:
             "scoring_wall_clock_seconds", contracts.SCORING_WALL_CLOCK_SECONDS
         ))
         lease["lease_ttl_seconds"] = int(configuration["lease_ttl_seconds"])
-        if configuration.get("checkpoint_deadline_policy") == contracts.CHECKPOINT_DEADLINE_POLICY:
-            lease["checkpoint_deadline_policy"] = contracts.CHECKPOINT_DEADLINE_POLICY
+        checkpoint_policy = configuration.get("checkpoint_deadline_policy")
+        if checkpoint_policy in contracts.CHECKPOINT_DEADLINE_PROFILES:
+            lease["checkpoint_deadline_policy"] = checkpoint_policy
         if integrity.enabled(configuration):
             lease["integrity_policy"] = integrity.POLICY
         if contact_policy.enabled(configuration):

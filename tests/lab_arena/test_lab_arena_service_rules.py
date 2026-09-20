@@ -2167,18 +2167,23 @@ def test_checkpoint_round_fences_old_validator_claims_before_leasing():
         registered=True, role="validator", configured=True,
     )
     original = service._request_round
-    capable = False
+    capability = None
+    required_policy = contracts.CHECKPOINT_DEADLINE_POLICY
 
     def checkpoint_round(*args, **kwargs):
         validated, round_row = original(*args, **kwargs)
         validated["body"] = dict(validated["body"])
-        if capable:
+        if capability == "singular":
             validated["body"]["checkpoint_deadline_policy"] = (
                 contracts.CHECKPOINT_DEADLINE_POLICY
             )
+        elif capability == "plural":
+            validated["body"]["checkpoint_deadline_policies"] = list(
+                contracts.CHECKPOINT_DEADLINE_POLICIES
+            )
         round_row["configuration_doc"] = dict(round_row["configuration_doc"])
         round_row["configuration_doc"]["checkpoint_deadline_policy"] = (
-            contracts.CHECKPOINT_DEADLINE_POLICY
+            required_policy
         )
         return validated, round_row
 
@@ -2186,7 +2191,13 @@ def test_checkpoint_round_fences_old_validator_claims_before_leasing():
     with pytest.raises(ServiceError) as rejected:
         service.handle_claim({})
     assert rejected.value.code == "validator_checkpoint_upgrade_required"
-    capable = True
+    capability = "singular"
+    assert service.handle_claim({}) == {"status": "empty"}
+    required_policy = contracts.CHECKPOINT_90M_DEADLINE_POLICY
+    with pytest.raises(ServiceError) as rejected:
+        service.handle_claim({})
+    assert rejected.value.code == "validator_checkpoint_upgrade_required"
+    capability = "plural"
     assert service.handle_claim({}) == {"status": "empty"}
 
 

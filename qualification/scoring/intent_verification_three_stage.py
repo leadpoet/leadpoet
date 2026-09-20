@@ -1050,6 +1050,38 @@ def _evaluate_sd_response(status_code: int, body: str) -> str:
     return "ok"
 
 
+def _is_title_only_html_shell(raw_body: str, extracted_body: str) -> bool:
+    """Return whether extraction found only the document title or heading."""
+
+    try:
+        from bs4 import BeautifulSoup
+
+        document = BeautifulSoup(raw_body, "html.parser")
+    except Exception:
+        return False
+    labels = {
+        " ".join(node.get_text(" ", strip=True).split()).casefold()
+        for node in [document.title, *document.find_all("h1")]
+        if node is not None and node.get_text(" ", strip=True)
+    }
+    remaining = " ".join(extracted_body.split()).casefold()
+    for label in sorted(labels, key=len, reverse=True):
+        remaining = remaining.replace(label, " ")
+    return bool(labels) and not " ".join(remaining.split())
+
+
+def _evaluate_extracted_sd_body(raw_body: str, body: str) -> str:
+    """Validate visible text extracted from an otherwise accepted HTML page."""
+
+    if not body.strip() or _is_title_only_html_shell(raw_body, body):
+        return "js_shell"
+    if _has_anti_bot_marker(body):
+        return "anti_bot_marker"
+    if not _looks_textual(body):
+        return "non_textual"
+    return "ok"
+
+
 def _should_escalate_sd_response(verdict: str, tier_name: str) -> bool:
     """Return whether a stronger ScrapingDog tier can plausibly help.
 
@@ -1626,6 +1658,7 @@ async def _scrape_sd_hardened(
                     # Extract article body from raw HTML before truncation.
                     # Removes nav/sidebar/footer/related-posts that otherwise
                     # eat the first chars of the prompt input.
+                    raw_body = body
                     try:
                         from qualification.scoring.verification_helpers import extract_article_body
                         body = extract_article_body(body)
@@ -1633,6 +1666,25 @@ async def _scrape_sd_hardened(
                         pass  # fall through with original content
                     if listing_text:
                         body = listing_text + "\n\n" + body
+                    elif body != raw_body:
+                        # A large HTML shell can pass the raw-byte checks while
+                        # yielding only a title after visible-body extraction.
+                        # Reuse the existing bounded content-failure ladder
+                        # instead of admitting that shell as source evidence.
+                        extracted_verdict = _evaluate_extracted_sd_body(
+                            raw_body, body
+                        )
+                        if extracted_verdict != "ok":
+                            last_verdict = extracted_verdict
+                            history[-1] = (tier_name, extracted_verdict)
+                            if prefer_dynamic_job_index \
+                                    and tier_name == "dynamic_render":
+                                continue
+                            if _should_escalate_sd_response(
+                                extracted_verdict, tier_name
+                            ):
+                                continue
+                            break
                     return {"ok": True, "stage": f"sd:{tier_name}",
                             "content": body[:MAX_SCRAPED_CHARS],
                             "source_publication_date": source_publication_date,

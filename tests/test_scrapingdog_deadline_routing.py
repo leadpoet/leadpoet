@@ -4,6 +4,7 @@ from unittest import mock
 import httpx
 
 from qualification.scoring import intent_verification_three_stage as intent
+from qualification.scoring.verification_helpers import extract_article_body
 
 
 class _HttpxClient:
@@ -23,6 +24,44 @@ class _HttpxClient:
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
+
+
+def _synoptek_html_shell():
+    return (
+        "<!doctype html><html><head>"
+        "<script>window.siteData='" + ("shell-data-" * 700) + ("x" * 46)
+        + "';</script>"
+        "</head><body><main><h1>Careers | Synoptek</h1></main></body></html>"
+    )
+
+
+def _synoptek_rendered_page():
+    return (
+        "<!doctype html><html><head><title>Careers | Synoptek</title></head>"
+        "<body><main><article><h1>Careers at Synoptek</h1><p>"
+        + (
+            "Synoptek is hiring technical professionals for current cloud, "
+            "infrastructure, and security roles. " * 40
+        )
+        + "</p></article></main></body></html>"
+    )
+
+
+def _concise_announcement_page():
+    announcement = (
+        "Acme released its new cloud security service today. The product is "
+        "available to customers in North America and includes managed "
+        "detection, response, and compliance reporting. General availability "
+        "starts on September 20, 2026."
+    )
+    assert 200 <= len(announcement) < 500
+    return (
+        "<!doctype html><html><head><title>Product announcement</title>"
+        "<script>window.siteData='" + ("shell-data-" * 700) + "';</script>"
+        "</head><body><article><h1>Product announcement</h1><p>"
+        + announcement
+        + "</p></article></body></html>"
+    )
 
 
 class IntentScrapingDogDeadlineTests(unittest.IsolatedAsyncioTestCase):
@@ -124,6 +163,93 @@ class IntentScrapingDogDeadlineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(len(client.calls), 2)
         self.assertEqual(result["stage"], "sd:dynamic_render")
+
+    async def test_extracted_html_shell_escalates_to_dynamic_content(self):
+        shell = _synoptek_html_shell()
+        rendered = _synoptek_rendered_page()
+        self.assertEqual(intent._evaluate_sd_response(200, shell), "ok")
+        self.assertEqual(len(shell), 7876)
+        self.assertEqual(extract_article_body(shell), "Careers | Synoptek")
+        client = _HttpxClient([
+            httpx.Response(200, text=shell, headers={}),
+            httpx.Response(200, text=rendered, headers={}),
+        ])
+        with mock.patch.object(intent.httpx, "AsyncClient", return_value=client), \
+                mock.patch.dict("os.environ", {"SCRAPINGDOG_API_KEY": "test"}):
+            result = await intent._scrape_sd_hardened(
+                "https://careers.synoptek.com/"
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["stage"], "sd:dynamic_render")
+        self.assertIn("Synoptek is hiring technical professionals", result["content"])
+        self.assertEqual(result["stage_history"], [
+            ("baseline", "js_shell"),
+            ("dynamic_render", "ok"),
+        ])
+        self.assertEqual(len(client.calls), 2)
+
+    async def test_extracted_shell_exhaustion_is_infrastructure_failure(self):
+        shell = _synoptek_html_shell()
+        client = _HttpxClient([
+            httpx.Response(200, text=shell, headers={})
+            for _ in intent._SD_TIERS
+        ])
+        wayback = mock.AsyncMock(return_value={
+            "ok": False,
+            "stage": "wayback_no_snapshot",
+            "content": "",
+            "error": "no archived snapshot",
+        })
+        with mock.patch.object(intent.httpx, "AsyncClient", return_value=client), \
+                mock.patch.object(intent, "_try_wayback", new=wayback), \
+                mock.patch.dict("os.environ", {"SCRAPINGDOG_API_KEY": "test"}):
+            result = await intent._scrape_sd_hardened(
+                "https://careers.synoptek.com/"
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["stage"], "all_tiers_exhausted:js_shell")
+        self.assertEqual(result["error"], "js_shell")
+        self.assertNotIn("target_absence", result)
+        self.assertEqual(len(client.calls), len(intent._SD_TIERS))
+        self.assertLessEqual(len(client.calls), 4)
+        wayback.assert_awaited_once_with("https://careers.synoptek.com/")
+
+    async def test_valid_html_page_keeps_baseline_acceptance(self):
+        rendered = _synoptek_rendered_page()
+        client = _HttpxClient([
+            httpx.Response(200, text=rendered, headers={}),
+        ])
+        with mock.patch.object(intent.httpx, "AsyncClient", return_value=client), \
+                mock.patch.dict("os.environ", {"SCRAPINGDOG_API_KEY": "test"}):
+            result = await intent._scrape_sd_hardened(
+                "https://news.example/announcement"
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["stage"], "sd:baseline")
+        self.assertIn("Synoptek is hiring technical professionals", result["content"])
+        self.assertEqual(result["stage_history"], [("baseline", "ok")])
+        self.assertEqual(len(client.calls), 1)
+
+    async def test_concise_html_announcement_keeps_baseline_acceptance(self):
+        announcement = _concise_announcement_page()
+        client = _HttpxClient([
+            httpx.Response(200, text=announcement, headers={}),
+        ])
+        with mock.patch.object(intent.httpx, "AsyncClient", return_value=client), \
+                mock.patch.dict("os.environ", {"SCRAPINGDOG_API_KEY": "test"}):
+            result = await intent._scrape_sd_hardened(
+                "https://news.example/concise-announcement"
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["stage"], "sd:baseline")
+        self.assertIn("General availability starts", result["content"])
+        self.assertLess(len(result["content"]), 500)
+        self.assertEqual(result["stage_history"], [("baseline", "ok")])
+        self.assertEqual(len(client.calls), 1)
 
     async def test_empty_body_uses_full_native_cascade_then_exa_for_exact_url(self):
         url = "https://news.example/company-announcement"

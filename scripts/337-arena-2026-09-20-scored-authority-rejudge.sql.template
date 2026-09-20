@@ -323,9 +323,9 @@ BEGIN
   OR (active.configuration_doc->>'icp_wall_clock_seconds')::INTEGER<>5400
   OR (active.configuration_doc->>'lease_ttl_seconds')::INTEGER<>6300
   OR active.configuration_doc->>'scorer_image_digest' IS DISTINCT FROM
-     'sha256:cc2dd55dec0b94db8cd0e184d9bf67014e2e83def22d5c5b4e28213c46fe0cd8'
+     'sha256:c0342bcced7f7de2552427cbb6fcf62ab6f10f42a63c0004d1466727863343ec'
   OR active.configuration_doc->>'scorer_image_reference' IS DISTINCT FROM
-     '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:cc2dd55dec0b94db8cd0e184d9bf67014e2e83def22d5c5b4e28213c46fe0cd8'
+     '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:c0342bcced7f7de2552427cbb6fcf62ab6f10f42a63c0004d1466727863343ec'
   OR baseline.source_ref IS DISTINCT FROM
      'arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun328-5d492f17.tar.gz'
   OR baseline.source_size_bytes IS DISTINCT FROM 854708

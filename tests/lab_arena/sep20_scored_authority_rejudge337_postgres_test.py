@@ -15,8 +15,15 @@ ROUND = rerun332.ROUND
 BASELINE = rerun332.BASELINE
 ARCHIVE = ROUND + "-r337archive"
 PRIOR_ARCHIVES = rerun335.PRIOR_ARCHIVES + (rerun335.ARCHIVE,)
-CURRENT_SCORER_DIGEST = rerun335.CURRENT_SCORER_DIGEST
-CURRENT_SCORER_REFERENCE = rerun335.CURRENT_SCORER_REFERENCE
+CURRENT_SCORER_DIGEST = (
+    "sha256:c0342bcced7f7de2552427cbb6fcf62ab6f10f42a63c0004d1466727863343ec"
+)
+CURRENT_SCORER_REFERENCE = (
+    "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@"
+    + CURRENT_SCORER_DIGEST
+)
+OLD_RERUN332_SCORER_DIGEST = rerun335.CURRENT_SCORER_DIGEST
+OLD_RERUN332_SCORER_REFERENCE = rerun335.CURRENT_SCORER_REFERENCE
 NEW_SCORER_DIGEST = "sha256:" + "6c" * 32
 NEW_SCORER_REFERENCE = (
     "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@"
@@ -195,6 +202,7 @@ def test_rerun337_template_is_inactive_and_namespace_bounded():
     assert "arena-2026-09-20-r337archive" in body
     assert "arena-2026-09-20-r335archive" in body
     assert CURRENT_SCORER_DIGEST in body
+    assert OLD_RERUN332_SCORER_DIGEST not in body
     assert "__NEW_SCORER_IMAGE_DIGEST__" in body
     assert "archived_execution_judgments" in body
     assert "__TERMINAL_COMPANY_JUDGMENTS_SHA256__" in body
@@ -312,3 +320,19 @@ def test_rerun337_rejects_terminal_drift_and_disabled_publication_stop(
             )
             assert cursor.fetchone() == ("D",)
             cursor.execute("ROLLBACK TO SAVEPOINT disabled_user_trigger")
+
+            cursor.execute("SAVEPOINT stale_rerun332_scorer")
+            cursor.execute("SET LOCAL session_replication_role=replica")
+            cursor.execute(
+                "UPDATE public.lab_arena_rounds SET configuration_doc="
+                "jsonb_set(jsonb_set(configuration_doc,'{scorer_image_digest}',"
+                "to_jsonb(%s::text)),'{scorer_image_reference}',to_jsonb(%s::text)) "
+                "WHERE round_id=%s",
+                (OLD_RERUN332_SCORER_DIGEST, OLD_RERUN332_SCORER_REFERENCE, ROUND),
+            )
+            cursor.execute("SET LOCAL session_replication_role=origin")
+            cursor.execute("SAVEPOINT refused")
+            with pytest.raises(psycopg2.Error, match="terminal preimage differs"):
+                cursor.execute(rerun332._migration_body(rendered))
+            cursor.execute("ROLLBACK TO SAVEPOINT refused")
+            cursor.execute("ROLLBACK TO SAVEPOINT stale_rerun332_scorer")

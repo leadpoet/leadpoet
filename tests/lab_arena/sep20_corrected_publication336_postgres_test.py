@@ -199,7 +199,9 @@ def _prepare_scored337(connection, harness, monkeypatch):
     connection.commit()
 
 
-def _add_superseded_failed_score_attempt(cursor, *, linked=True):
+def _add_superseded_failed_score_attempt(
+    cursor, *, linked=True, terminal_cause="judge_error"
+):
     cursor.execute(
         "SELECT run_id FROM public.lab_arena_runs WHERE round_id=%s "
         "AND kind='score' AND status='accepted' ORDER BY run_id LIMIT 1",
@@ -220,11 +222,11 @@ def _add_superseded_failed_score_attempt(cursor, *, linked=True):
         "INSERT INTO public.lab_arena_runs SELECT (jsonb_populate_record("
         "NULL::public.lab_arena_runs,to_jsonb(failed)||jsonb_build_object("
         "'run_id',failed.run_id||':failed','assignment_id',%s,'attempt',1,"
-        "'status','failed','terminal_cause','judge_error','result_doc',NULL,"
+        "'status','failed','terminal_cause',%s,'result_doc',NULL,"
         "'claim_request_id',NULL,'claim_request_hash',NULL,'claim_response',NULL,"
         "'created_at',clock_timestamp(),'updated_at',clock_timestamp()))).* "
         "FROM public.lab_arena_runs failed WHERE failed.run_id=%s",
-        (failed_assignment_id, accepted_run_id),
+        (failed_assignment_id, terminal_cause, accepted_run_id),
     )
     cursor.execute("ALTER TABLE public.lab_arena_runs ENABLE TRIGGER USER")
     cursor.execute(
@@ -423,6 +425,29 @@ def test_failed_score_without_later_accepted_attempt_is_rejected(
         publication = _capture_publication(harness.service)
         with connection.cursor() as cursor:
             _add_superseded_failed_score_attempt(cursor, linked=False)
+            rendered = _render(cursor, publication)
+            with pytest.raises(
+                psycopg2.Error, match="corrected publication preimage differs"
+            ):
+                cursor.execute(rendered)
+        connection.rollback()
+
+
+def test_non_judge_failure_with_later_accepted_attempt_is_rejected(
+    database, tmp_path, monkeypatch
+):
+    psycopg2, dsn = database
+    harness = rerun332.IsolatedHarness(
+        lambda: psycopg2.connect(**dsn), tmp_path, challengers=[], runners=["alpha"]
+    )
+    harness.round_id = ROUND
+    with psycopg2.connect(**dsn) as connection:
+        _prepare_scored337(connection, harness, monkeypatch)
+        publication = _capture_publication(harness.service)
+        with connection.cursor() as cursor:
+            _add_superseded_failed_score_attempt(
+                cursor, terminal_cause="provider_error"
+            )
             rendered = _render(cursor, publication)
             with pytest.raises(
                 psycopg2.Error, match="corrected publication preimage differs"

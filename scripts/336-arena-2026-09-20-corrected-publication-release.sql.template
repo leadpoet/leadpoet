@@ -115,7 +115,7 @@ BEGIN
             (score_run.terminal_cause<>'accepted'
              OR score_run.scored_run_id IS NULL OR score_run.result_doc IS NULL))
         OR (score_run.status='failed' AND
-            (score_run.terminal_cause IS NULL OR score_run.terminal_cause='accepted'
+            (score_run.terminal_cause NOT IN('judge_error','judge_timeout')
              OR NOT EXISTS(SELECT 1 FROM public.lab_arena_runs accepted_retry
                 WHERE accepted_retry.round_id=score_run.round_id
                  AND accepted_retry.kind='score'

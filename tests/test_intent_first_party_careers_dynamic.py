@@ -270,7 +270,17 @@ async def test_first_party_careers_page_without_job_links_stops_before_stage3(
 
 
 @pytest.mark.asyncio
-async def test_unverified_careers_domain_cannot_supply_listing_receipt(monkeypatch):
+@pytest.mark.parametrize(
+    ("company", "domain", "verified_identity"),
+    [
+        ("Trace3", "trace3.com", None),
+        ("Acme", "acme.com", _identity("Acme", "acme.com")),
+    ],
+    ids=("missing-independent-identity", "wrong-independent-identity"),
+)
+async def test_unverified_careers_domain_cannot_supply_listing_receipt(
+    monkeypatch, company, domain, verified_identity,
+):
     source_url = "https://www.trace3.com/careers"
     client = _ScrapingDogClient([
         httpx.Response(
@@ -291,17 +301,17 @@ async def test_unverified_careers_domain_cannot_supply_listing_receipt(monkeypat
 
     result = await intent.verify_three_stage(
         None,
-        company_name="Acme",
-        company_linkedin="https://www.linkedin.com/company/acme",
-        company_website="https://acme.com",
+        company_name=company,
+        company_linkedin="",
+        company_website=f"https://{domain}",
         source_url=source_url,
         miner_claim="The company has a current technical opening.",
         target_signal_text="Cloud infrastructure role",
         evidence_type="HIRING",
         declared_source="job_board",
         stage1_soft_reject=True,
-        company_quality=True,
-        verified_company_identity=_identity("Acme", "acme.com"),
+        company_quality=False,
+        verified_company_identity=verified_identity,
     )
 
     assert len(prompts) == 1
@@ -337,8 +347,9 @@ async def test_dynamic_failure_preserves_accepted_baseline_and_stops_escalation(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("company_quality", [True, False])
 async def test_full_verifier_preserves_visible_cards_after_dynamic_failure(
-    monkeypatch,
+    monkeypatch, company_quality,
 ):
     source_url = "https://divergeit.com/careers/"
     page = _html("divergeit_visible_cards_sanitized.html")
@@ -381,7 +392,10 @@ async def test_full_verifier_preserves_visible_cards_after_dynamic_failure(
     result = await intent.verify_three_stage(
         None,
         company_name="DivergeIT",
-        company_linkedin="https://www.linkedin.com/company/divergeit",
+        company_linkedin=(
+            "https://www.linkedin.com/company/divergeit"
+            if company_quality else ""
+        ),
         company_website="https://divergeit.com",
         source_url=source_url,
         miner_claim="The company has current managed-services openings.",
@@ -389,7 +403,7 @@ async def test_full_verifier_preserves_visible_cards_after_dynamic_failure(
         evidence_type="HIRING",
         declared_source="job_board",
         stage1_soft_reject=True,
-        company_quality=True,
+        company_quality=company_quality,
         verified_company_identity=_identity("DivergeIT", "divergeit.com"),
         integrity_policy=True,
     )

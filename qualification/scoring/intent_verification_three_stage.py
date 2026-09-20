@@ -3391,8 +3391,7 @@ async def verify_three_stage(
         fetch_source_url, company_website, company_linkedin,
     ) and len(bundle) <= 1
     _on_verified_company_property = bool(
-        company_quality
-        and _url_on_verified_company_identity(
+        _url_on_verified_company_identity(
             fetch_source_url, verified_identity_context
         )
         and len(bundle) <= 1

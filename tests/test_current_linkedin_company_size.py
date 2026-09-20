@@ -2652,6 +2652,127 @@ def test_structured_public_profile_repairs_unavailable_stage_with_one_fetch(
     }
 
 
+@pytest.mark.parametrize(
+    ("company_type", "profile_website", "profile_slug", "expected"),
+    [
+        ("Public Company", "https://www.statestreet.com", "state-street", "match"),
+        ("Privately Held", "https://www.statestreet.com", "state-street", "unavailable"),
+        ("Public Company", "https://unrelated.example", "state-street", "unavailable"),
+        ("Public Company", "https://www.statestreet.com", "unrelated", "unavailable"),
+        (None, "https://www.statestreet.com", "state-street", "unavailable"),
+    ],
+)
+def test_public_stage_uses_verified_web_identity_without_homepage_linkedin(
+    monkeypatch, company_type, profile_website, profile_slug, expected
+):
+    """Reproduce the saved Sep20 identity/quote through the real fit verifier."""
+
+    company = _company().model_copy(update={
+        "company_name": "State Street",
+        "company_website": "https://www.statestreet.com",
+        "company_linkedin": "https://www.linkedin.com/company/state-street",
+        "company_stage": "Public",
+        "industry": "Financial services",
+        "employee_count": "10,001+",
+        "state": "Massachusetts",
+    })
+    icp = _icp().model_copy(update={
+        "company_stage": "Public",
+        "industry": "Financial services",
+        "sub_industry": "investment services and investment management",
+        "employee_count": "10,001+",
+    })
+    profile_url = "https://www.linkedin.com/company/state-street"
+    verdict = _verdict(observed_size="10,001+", size_matches=True)
+    verdict.update(
+        observed_company_name="State Street Corporation",
+        observed_company_website="https://www.statestreet.com",
+        observed_company_linkedin=profile_url,
+        employee_size_evidence_url=profile_url,
+        employee_size_evidence_quote="Company size 10,001+ employees",
+        observed_industry="Financial services",
+        observed_subindustry="investment services and investment management",
+        industry_evidence_url="https://www.statestreet.com/",
+        industry_evidence_quote=(
+            "State Street is one of the world’s leading providers of financial "
+            "services to institutional investors, including investment servicing, "
+            "investment management and investment research and trading."
+        ),
+        observed_hq_state="Massachusetts",
+        geography_evidence_url="https://www.statestreet.com/about",
+        geography_evidence_quote=(
+            "Our corporate headquarters is located at One Congress Street, "
+            "Boston, Massachusetts 02114."
+        ),
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url=profile_url,
+        stage_evidence_quote=(
+            "Public Company · Founded 1792 · 10001+ employees · 852053 followers"
+        ),
+    )
+    calls = []
+
+    async def provider(**kwargs):
+        calls.append(kwargs["telemetry_purpose"])
+        return dict(verdict), ""
+
+    async def current_profile(url, **_kwargs):
+        return {"employee_count": "10,001+", "url": url,
+                "quote": "Company size 10,001+ employees"}
+
+    async def structured_profile(domain, url, *, diagnostic, public_company_evidence):
+        assert (domain, url) == ("statestreet.com", profile_url)
+        calls.append("structured_profile")
+        if company_type is not None:
+            public_company_evidence.update({
+                "company_type": company_type,
+                "provider": "harvestapi_get_company",
+                "source_field": "companyType",
+                "url": "https://www.linkedin.com/company/" + profile_slug,
+                "website": profile_website,
+            })
+        return None
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", current_profile)
+    monkeypatch.setattr(lead_scorer, "fetch_structured_linkedin_company_size", structured_profile)
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        company, icp, require_company_fit_dimensions=True, company_quality=True,
+        verified_homepage_identity=company_fit_unavailable(
+            "homepage identity evidence unavailable: LinkedIn company binding not found",
+            details={"verified_homepage_transport_domain": "statestreet.com"},
+        ),
+    ))
+    assert result.details["identity_decision"] == COMPANY_FIT_MATCH
+    assert result.details["dimension_decisions"]["stage"] == expected
+    assert result.decision == expected
+    assert calls.count("structured_profile") == 1
+    if expected == COMPANY_FIT_MATCH:
+        assert calls == ["lead_scorer_reverify", "structured_profile"]
+        assert result.details["dimension_evidence"]["stage"]["provider"] == (
+            "harvestapi_get_company"
+        )
+
+
+@pytest.mark.parametrize("field,value", [
+    ("decision", "unavailable"), ("evidence_source", "submitted"),
+    ("observed_domain", "unrelated.example"),
+    ("submitted_domain", "unrelated.example"),
+    ("observed_name", ""), ("observed_linkedin_slug", ""),
+])
+def test_structured_profile_fallback_rejects_incomplete_or_conflicting_identity(field, value):
+    receipt = {
+        "decision": "match", "evidence_source": "company_web_reverification",
+        "observed_domain": "example.com", "submitted_domain": "example.com",
+        "observed_name": "acme", "observed_linkedin_slug": "acme",
+        field: value,
+    }
+    assert not lead_scorer._structured_profile_identity_anchor({}, receipt, "example.com")
+    assert not lead_scorer._structured_profile_identity_anchor({}, receipt, "")
+
+
 @pytest.mark.parametrize("provider_failure", [False, True])
 def test_structured_public_stage_scorer_entrypoint_transition(
     monkeypatch,

@@ -1990,6 +1990,40 @@ async def _refresh_linkedin_employee_size_observation(
     return projected
 
 
+def _structured_profile_identity_anchor(
+    homepage_identity: Optional[Mapping[str, str]],
+    web_identity: Mapping[str, Any],
+    transport_domain: str,
+) -> Mapping[str, str]:
+    """Bind a profile lookup to an independently verified company identity.
+
+    A website need not publish its LinkedIn link. The existing web identity
+    receipt can supply it when the observed website also matches the fetched
+    homepage. The structured response must still bind its own website and slug.
+    """
+
+    if homepage_identity:
+        return homepage_identity
+    if (
+        web_identity.get("decision") != COMPANY_FIT_MATCH
+        or web_identity.get("evidence_source") != "company_web_reverification"
+        or not transport_domain
+        or web_identity.get("observed_domain") != transport_domain
+        or web_identity.get("submitted_domain") != transport_domain
+        or not all(
+            isinstance(web_identity.get(field), str)
+            and bool(web_identity[field].strip())
+            for field in ("observed_name", "observed_linkedin_slug")
+        )
+    ):
+        return {}
+    return {
+        "normalized_name": web_identity["observed_name"],
+        "registrable_dns_domain": transport_domain,
+        "linkedin_company_slug": web_identity["observed_linkedin_slug"],
+    }
+
+
 def _reverify_decision(
     verdict: dict,
     icp_attribute: str,
@@ -2090,20 +2124,25 @@ def _reverify_decision(
         icp_stage,
         validated_stage_finding=validated_stage_finding,
     )
+    profile_identity = _structured_profile_identity_anchor(
+        verified_homepage_identity,
+        identity_receipt,
+        verified_homepage_transport_domain,
+    )
     structured_public_stage = _structured_linkedin_public_stage_matches(
         structured_public_company_evidence,
         icp_stage=icp_stage,
         identity_decision=identity_decision,
         stage_decision=observed_stage_decision,
         stage_evidence=stage_evidence,
-        verified_homepage_identity=verified_homepage_identity,
+        verified_homepage_identity=profile_identity,
     )
     structured_private_stage_conflict = bool(
         _normalize_company_stage(icp_stage) == "public"
         and identity_decision == COMPANY_FIT_MATCH
         and _is_bound_structured_linkedin_private_company_evidence(
             structured_public_company_evidence,
-            verified_homepage_identity,
+            profile_identity,
         )
         and not _validated_investigator_stage_matches_verdict(
             verdict,
@@ -2810,7 +2849,17 @@ async def _run_targeted_company_evidence_investigation(
         if "stage" in investigation_targets
         and _is_bound_structured_linkedin_private_company_evidence(
             structured_public_company_evidence,
-            verified_identity,
+            _structured_profile_identity_anchor(
+                verified_identity,
+                _web_identity_receipt(
+                    company,
+                    verdict,
+                    verified_homepage_identity=verified_identity,
+                    verified_homepage_transport_domain=verified_transport_domain,
+                    company_quality=company_quality,
+                ),
+                verified_transport_domain,
+            ),
         )
         else {}
     )
@@ -3194,8 +3243,13 @@ async def _llm_reverify_company(
         and result.details.get("identity_decision") == COMPANY_FIT_MATCH
         and not current_profile_cache.get("structured_attempted")
     ):
-        await _fetch_structured_linkedin_profile_once(
+        profile_identity = _structured_profile_identity_anchor(
             verified_identity,
+            result.details.get("identity_receipt") or {},
+            verified_transport_domain,
+        )
+        await _fetch_structured_linkedin_profile_once(
+            profile_identity,
             current_profile_cache,
             collect_employee_size=False,
         )

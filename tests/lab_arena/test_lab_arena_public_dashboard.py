@@ -241,8 +241,12 @@ def test_competition_snapshot_fetches_the_latest_published_outside_recent_window
     assert store.queries[1]["netuid"] == 71
 
 
-def test_competition_snapshot_pages_past_server_authored_archives_with_scope():
-    # These exact reasons are authored by SQL256/265 and SQL269 respectively.
+@pytest.mark.parametrize("archive_reason", [
+    "authorized_sep16_failed_native_rerun_archive",
+    "authorized_sep20_invalid_champion_reward_archive340",
+])
+def test_competition_snapshot_pages_past_server_authored_archives_with_scope(archive_reason):
+    # Preserve the archive filter for both old and numbered migration reasons.
     prior_archive = {
         "round_id": "arena-2026-09-15-archive",
         "status": "cancelled",
@@ -255,7 +259,7 @@ def test_competition_snapshot_pages_past_server_authored_archives_with_scope():
         "round_id": "arena-2026-09-16-rerun265archive",
         "status": "cancelled",
         "created_at": "2026-09-16T03:00:00Z",
-        "cancel_reason": "authorized_sep16_failed_native_rerun_archive",
+        "cancel_reason": archive_reason,
         "configuration_doc": _configuration(),
         "participants": [],
     }

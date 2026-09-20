@@ -380,7 +380,7 @@ def _is_administrative_archive(row: Mapping[str, Any]) -> bool:
         row.get("status") == "cancelled"
         and isinstance(reason, str)
         and reason.startswith("authorized_")
-        and reason.endswith("_archive")
+        and reason.rstrip("0123456789").endswith("_archive")
     )
 
 

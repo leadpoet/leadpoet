@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from qualification.scoring import intent_verification_three_stage as intent
+from qualification.scoring import verification_helpers
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "sep20_p1_dynamic_jobs"
@@ -333,6 +334,76 @@ async def test_dynamic_failure_preserves_accepted_baseline_and_stops_escalation(
         ("baseline", "ok"),
     ]
     assert len(client.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_full_verifier_preserves_visible_cards_after_dynamic_failure(
+    monkeypatch,
+):
+    source_url = "https://divergeit.com/careers/"
+    page = _html("divergeit_visible_cards_sanitized.html")
+    client = _ScrapingDogClient([
+        httpx.Response(503, text="provider unavailable", headers={}),
+        httpx.Response(200, text=page, headers={}),
+    ])
+    prompts = []
+
+    class _ArticleOnlyTrafilatura:
+        @staticmethod
+        def extract(_content, **_kwargs):
+            return (
+                "Live openings. Review responsibilities and apply now. "
+                "Senior Consultant Consulting Full-Time. "
+                + "Current careers information. " * 20
+            )
+
+    async def call_openrouter(_client, _model, prompt):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return _verdict(source_url, "unable_to_verify")
+        return _verdict(
+            source_url,
+            "supported",
+            "Dedicated Support Engineer Managed Services Full-Time",
+        )
+
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", "test")
+    monkeypatch.setattr(intent.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(intent, "_call_openrouter", call_openrouter)
+    monkeypatch.setattr(verification_helpers, "_TRAFILATURA_AVAILABLE", True)
+    monkeypatch.setattr(
+        verification_helpers,
+        "_trafilatura",
+        _ArticleOnlyTrafilatura,
+        raising=False,
+    )
+
+    result = await intent.verify_three_stage(
+        None,
+        company_name="DivergeIT",
+        company_linkedin="https://www.linkedin.com/company/divergeit",
+        company_website="https://divergeit.com",
+        source_url=source_url,
+        miner_claim="The company has current managed-services openings.",
+        target_signal_text="Cloud OR infrastructure OR implementation OR security role",
+        evidence_type="HIRING",
+        declared_source="job_board",
+        stage1_soft_reject=True,
+        company_quality=True,
+        verified_company_identity=_identity("DivergeIT", "divergeit.com"),
+        integrity_policy=True,
+    )
+
+    assert result["client_ready"] is True, result
+    assert result["decision"] == "approve"
+    assert len(prompts) == 2
+    assert "Dedicated Support Engineer Managed Services Full-Time" in prompts[1]
+    assert "Sr. Help Desk Technician IT Service Desk Full-Time" in prompts[1]
+    assert "Technical Account Manager Managed Services Full-Time" in prompts[1]
+    assert "Fake Script Role" not in prompts[1]
+    assert "Fake Template Role" not in prompts[1]
+    assert len(client.calls) == 2
+    assert result["job_publisher_relationship"] == "verified"
 
 
 def test_dynamic_recovery_scope_excludes_exact_postings_and_queries():

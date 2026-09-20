@@ -31,18 +31,38 @@ class _VisibleHTMLTextParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self._hidden_depth = 0
         self.parts = []
+        self.job_cards = []
+        self._job_card_parts = None
 
     def handle_starttag(self, tag: str, attrs: Any) -> None:
-        if tag.lower() in self._HIDDEN_ELEMENTS:
+        normalized_tag = tag.lower()
+        if normalized_tag in self._HIDDEN_ELEMENTS:
             self._hidden_depth += 1
+        if normalized_tag != "a" or self._job_card_parts is not None:
+            return
+        attributes = {str(key).lower(): str(value or "") for key, value in attrs}
+        href = attributes.get("href", "")
+        if (
+            attributes.get("data-opening-track") == "careers-opening"
+            and re.search(r"/(?:careers|jobs)/[^/?#]+/?(?:[?#].*)?$", href)
+        ):
+            self._job_card_parts = []
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() in self._HIDDEN_ELEMENTS and self._hidden_depth:
+        normalized_tag = tag.lower()
+        if normalized_tag == "a" and self._job_card_parts is not None:
+            text = " ".join(" ".join(self._job_card_parts).split())
+            if text:
+                self.job_cards.append(text[:1000])
+            self._job_card_parts = None
+        if normalized_tag in self._HIDDEN_ELEMENTS and self._hidden_depth:
             self._hidden_depth -= 1
 
     def handle_data(self, data: str) -> None:
         if not self._hidden_depth:
             self.parts.append(data)
+            if self._job_card_parts is not None:
+                self._job_card_parts.append(data)
 
 
 def _visible_html_text(content: str) -> str:
@@ -53,6 +73,19 @@ def _visible_html_text(content: str) -> str:
     except Exception:
         return ""
     return " ".join(" ".join(parser.parts).split())
+
+
+def _visible_job_card_text(content: str) -> str:
+    """Keep exact visible job-card text that article extraction can omit."""
+
+    parser = _VisibleHTMLTextParser()
+    try:
+        parser.feed(content)
+        parser.close()
+    except Exception:
+        return ""
+    cards = list(dict.fromkeys(parser.job_cards))[:100]
+    return "\n".join(cards)
 
 
 def extract_article_body(content: str, *, min_body_chars: int = 200) -> str:
@@ -87,6 +120,16 @@ def extract_article_body(content: str, *, min_body_chars: int = 200) -> str:
         except Exception:
             body = None
         if body and len(body) >= min_body_chars:
+            job_cards = _visible_job_card_text(content)
+            missing_cards = [
+                card for card in job_cards.splitlines()
+                if " ".join(card.casefold().split())
+                not in " ".join(body.casefold().split())
+            ]
+            if missing_cards:
+                body = body + "\n\nVisible job-opening cards:\n" + "\n".join(
+                    missing_cards
+                )
             return body
     return _visible_html_text(content)
 

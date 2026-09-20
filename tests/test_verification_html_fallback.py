@@ -1,5 +1,7 @@
 """Focused regressions for dependency-free source article extraction."""
 
+from pathlib import Path
+
 from qualification.scoring import intent_verification_three_stage as intent
 from qualification.scoring import verification_helpers
 
@@ -8,6 +10,7 @@ SOURCE_URL = (
     "https://ir.truist.com/2026-09-03-"
     "Tory-Sherman-joins-Truist-Wealth-as-Wealth-Brokerage-national-director"
 )
+FIXTURES = Path(__file__).parent / "fixtures" / "sep20_p1_dynamic_jobs"
 
 
 def _truist_shaped_html() -> str:
@@ -106,3 +109,35 @@ def test_failed_trafilatura_uses_same_visible_text_fallback(monkeypatch):
 
     assert "appointment of Tory Sherman" in extracted
     assert "SCRIPT-BUDGET-NOISE" not in extracted
+
+
+def test_trafilatura_result_retains_visible_job_opening_cards(monkeypatch):
+    html = (FIXTURES / "divergeit_visible_cards_sanitized.html").read_text()
+
+    class _ArticleOnlyTrafilatura:
+        @staticmethod
+        def extract(_content, **_kwargs):
+            return (
+                "Live openings. Senior Consultant Consulting Full-Time. "
+                + "Current careers information. " * 20
+            )
+
+    monkeypatch.setattr(verification_helpers, "_TRAFILATURA_AVAILABLE", True)
+    monkeypatch.setattr(
+        verification_helpers,
+        "_trafilatura",
+        _ArticleOnlyTrafilatura,
+        raising=False,
+    )
+
+    extracted = verification_helpers.extract_article_body(html)
+
+    assert "Dedicated Support Engineer Managed Services Full-Time" in extracted
+    assert "Sr. Help Desk Technician IT Service Desk Full-Time" in extracted
+    assert "Technical Account Manager Managed Services Full-Time" in extracted
+    assert extracted.count("Senior Consultant") == 1
+    assert "Fake Script Role" not in extracted
+    assert "Fake Template Role" not in extracted
+    assert "Careers index noise" not in extracted
+    assert "Unrelated navigation noise" not in extracted
+    assert "empty-card" not in extracted

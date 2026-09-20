@@ -164,6 +164,18 @@ PART_A_BLOCK = """  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
     The miner asserts their evidence proves the buyer's target_icp_signal.
     Check whether the miner_claim, even if true, would actually mean
     the target_icp_signal is satisfied.
+    Read explicit logical requirements in target_icp_signal as written:
+      * `OR` / `either` separates alternatives. One complete alternative is
+        sufficient; do not require conditions from alternatives not chosen.
+      * `AND` / `all` joins requirements. Every joined requirement must hold.
+      * Within the chosen alternative, retain every event or state, time
+        window, threshold, scope qualifier, entity constraint, and factual
+        condition. An alternative does not relax its own requirements.
+      * Judge descriptive qualifiers from the facts the source proves, not
+        from exact copied adjectives. For example, `major` need not appear
+        verbatim when the source proves a concrete, material new capability;
+        a routine update, relabeling, or unsupported marketing claim is not
+        sufficient.
       * "Company X offers product Y" is NOT the same as "Company X hires for
         role Y". Selling an AI BDR is the opposite signal of hiring BDRs.
       * "Company X had a funding round" is NOT the same as "Company X is

@@ -1,0 +1,48 @@
+"""Prompt regressions for generic AND/OR criterion semantics."""
+
+from qualification.scoring import intent_verification_three_stage as intent
+
+
+def _row() -> dict:
+    return {
+        "id": "signal-1",
+        "company": "example.com",
+        "website": "https://example.com",
+        "company_linkedin": "https://linkedin.com/company/example",
+        "contact_linkedin": "",
+        "claim": "Example launched a new security capability this quarter.",
+        "signal_date": "2026-08-03",
+        "signal_type": "intent",
+        "claimed_source_urls": ["https://example.com/news/security"],
+        "_target_signal_text": (
+            "Completed a certification OR launched a major security "
+            "capability this quarter."
+        ),
+        "_evidence_type": "PRODUCT_LAUNCH",
+    }
+
+
+def test_logical_criterion_rules_reach_stage_one_and_stage_three() -> None:
+    row = _row()
+    stage_one = intent._build_verification_prompt(row)
+    stage_three = intent._build_final_judge_prompt(
+        row,
+        {
+            "results": [{
+                "url": row["claimed_source_urls"][0],
+                "title": "Security release",
+                "text": "Example released a new runtime security control today.",
+            }],
+            "statuses": [],
+        },
+    )
+
+    for prompt in (stage_one, stage_three):
+        assert "`OR` / `either` separates alternatives" in prompt
+        assert "One complete alternative is\n        sufficient" in prompt
+        assert "`AND` / `all` joins requirements" in prompt
+        assert "Every joined requirement must hold" in prompt
+        assert "time\n        window, threshold, scope qualifier, entity constraint" in prompt
+        assert "An alternative does not relax its own requirements" in prompt
+        assert "`major` need not appear\n        verbatim" in prompt
+        assert "routine update, relabeling, or unsupported marketing claim" in prompt

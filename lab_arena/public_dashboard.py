@@ -17,6 +17,80 @@ from lab_arena import code_review_policy, contracts, icp_disclosure, source_disc
 PUBLIC_BASELINE_REPOSITORY = "https://github.com/leadpoet/leadpoet-sales-agent/tree/lab"
 DEFAULT_RECENT_ROUND_LIMIT = 30
 MAX_RECENT_ROUND_LIMIT = 100
+
+
+def company_diagnostic(
+    breakdown: Mapping[str, Any], company: Mapping[str, Any], *, icp_position: int
+) -> dict:
+    """Project accepted checks only; never publish verifier prose or evidence."""
+
+    from qualification.scoring.competition import has_verified_primary_intent
+
+    states = {
+        "match": "passed", "verified": "passed", "pass": "passed",
+        "mismatch": "failed", "fail": "failed", "unavailable": "unavailable",
+        "not_evaluated": "not_evaluated", "not_required": "not_required",
+    }
+    gates = {
+        item.get("gate"): item
+        for item in breakdown.get("verifier_gate_receipts") or []
+        if isinstance(item, Mapping)
+    }
+    fit = gates.get("company_fit", {})
+    dimensions = fit.get("company_fit_dimensions") or {}
+    checks = {
+        name: states.get(dimensions.get(name), "unavailable")
+        for name in ("identity", "industry", "employee_size", "geography", "stage")
+    }
+    if fit.get("company_fit_stage_required") is False:
+        checks["stage"] = "not_required"
+    checks["required_attribute"] = states.get(
+        fit.get("required_attribute_decision"), "unavailable"
+    )
+    details = breakdown.get("intent_signals_detail") or []
+    if has_verified_primary_intent(details):
+        checks["intent"] = "passed"
+    elif gates.get("intent_verification", {}).get("decision") == "unavailable":
+        checks["intent"] = "unavailable"
+    elif details:
+        # A supported claim can still be unresolved. Do not call review a mismatch.
+        verdicts = [item.get("judge_verdict") or {} for item in details if isinstance(item, Mapping)]
+        checks["intent"] = "unavailable" if any(
+            item.get("pipeline_decision") in {"review", "unavailable"}
+            or item.get("error_class") for item in verdicts
+        ) else "failed"
+    else:
+        checks["intent"] = "not_evaluated"
+    checks["intent_details"] = states.get(
+        gates.get("intent_details", {}).get("decision"), "not_evaluated"
+    )
+    contact = breakdown.get("contact_verification") or {}
+    checks["contact"] = states.get(contact.get("decision"), "unavailable")
+    subchecks = contact.get("subchecks") or {}
+    checks["email"] = states.get(
+        (subchecks.get("email_verification") or {}).get("status"), "not_evaluated"
+    )
+    # Publish the failing check name, never a provider's free-text error or PII.
+    contact_failure = next((
+        name for name in (
+            "claim", "identity", "source", "company", "role", "location",
+            "email_attribution", "email_verification",
+        ) if (subchecks.get(name) or {}).get("status") in {"fail", "unavailable"}
+    ), None)
+    if contact.get("reason") == "contact_claim_invalid":
+        contact_failure = "claim"
+    return {
+        "icp_position": icp_position,
+        "company_index": breakdown["company_index"],
+        "company_name": str(company.get("company_name") or "")[:200],
+        "qualified": breakdown.get("company_qualified") is True,
+        "duplicate_company": breakdown.get("duplicate_company") is True,
+        "missing_contact": company.get("contact") is None,
+        "checks": checks,
+        "contact_failure": contact_failure,
+    }
+
+
 _COST_REASONS = frozenset(
     {
         "eligible",

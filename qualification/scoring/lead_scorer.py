@@ -207,9 +207,18 @@ _STAGE_PROOF_COMPLETED_EVENT_RE = re.compile(
     r"\b(?:raised|closed|secured|completed|received)\b",
     re.I,
 )
-_CANONICAL_COMPANY_STAGES = frozenset(
-    {"seed", "series a", "series b", "series c+", "private equity", "public"}
-)
+_CANONICAL_COMPANY_STAGES = frozenset({
+    "seed",
+    "series a",
+    "series b",
+    "series c+",
+    "private equity",
+    "public",
+    # An exact current strategic-acquisition observation can disprove every
+    # allowed standalone ICP stage without mislabelling the subsidiary as
+    # Public or Private Equity. It is internal verifier state, not an ICP stage.
+    "acquired",
+})
 _CALENDAR_MAY_LEFT_RE = re.compile(r"\b(?:in|on|since|during|of)\s*$", re.I)
 _CALENDAR_MAY_RIGHT_RE = re.compile(
     r"^\W*(?:\d{1,2}(?:st|nd|rd|th)?(?:\W+\d{4})?|\d{4})\b",
@@ -436,6 +445,22 @@ _CURRENT_NOT_PUBLICLY_TRADED_RE = re.compile(
     r"\b(?:is|remains)\s+(?:not|no\s+longer)\s+publicly\s+traded\b",
     re.I,
 )
+_ACQUIRED_STAGE_PROOF_PATTERNS = (
+    re.compile(
+        r"\b(?:was|has\s+been)\s+(?:fully\s+|wholly\s+)?acquired\s+by\b",
+        re.I,
+    ),
+    re.compile(
+        r"\bis\s+(?:now\s+)?(?:an?\s+)?[^,.;!?\n]{1,80}\s+company\s*,\s*"
+        r"acquired\s+by\b",
+        re.I,
+    ),
+    re.compile(
+        r"\bis\s+(?:now\s+)?(?:an?\s+)?(?:wholly[- ]owned\s+|"
+        r"majority[- ]owned\s+)?subsidiary\s+of\b",
+        re.I,
+    ),
+)
 _PRIVATE_EQUITY_STAGE_SUPERSESSION_PATTERNS = (
     re.compile(
         r"\b(?:was|were|has\s+been)\s+"
@@ -584,11 +609,24 @@ def _stage_quote_supports_observation(observed: str, quote: str) -> bool:
         reject_minority=True,
         supersession_patterns=_PRIVATE_EQUITY_STAGE_SUPERSESSION_PATTERNS,
     )
-    if public and private_equity:
+    acquired = _has_affirmed_stage_proof(
+        text,
+        _ACQUIRED_STAGE_PROOF_PATTERNS,
+        reject_historical=True,
+    )
+    proven_ownership_states = [
+        state
+        for state, proven in (
+            ("public", public),
+            ("private equity", private_equity),
+            ("acquired", acquired),
+        )
+        if proven
+    ]
+    if len(proven_ownership_states) > 1:
         return False
-    if public or private_equity:
-        expected = "public" if public else "private equity"
-        return observed == expected
+    if proven_ownership_states:
+        return observed == proven_ownership_states[0]
 
     proven_venture_stages = [
         stage
@@ -616,6 +654,135 @@ def _stage_quote_supports_observation(observed: str, quote: str) -> bool:
     ):
         return False
     return observed_category == latest
+
+
+_BOUND_ACQUISITION_SUBJECT_PATTERNS = (
+    re.compile(
+        r"(?:^|[,;.!?]\s+)(?P<subject>[a-z0-9&.'’+ -]{2,120}?)\s+"
+        r"(?:was|has\s+been)\s+(?:fully\s+|wholly\s+)?acquired\s+by\b",
+        re.I,
+    ),
+    re.compile(
+        r"\bcompleted\s+(?:(?:the|its|an?)\s+)?"
+        r"(?:previously\s+announced\s+)?acquisition\s+of\s+"
+        r"(?P<subject>[a-z0-9&.'’+ -]{2,120}?)"
+        r"(?=\s+(?:on|for|after|from|in)\b|[,;.!?\n]|$)",
+        re.I,
+    ),
+    re.compile(
+        r"(?:^|[,;.!?]\s+)(?P<subject>[a-z0-9&.'’+ -]{2,120}?)\s+is\s+"
+        r"(?:now\s+)?(?:an?\s+)?[^,.;!?\n]{1,80}\s+company\s*,\s*"
+        r"acquired\s+by\b",
+        re.I,
+    ),
+    re.compile(
+        r"(?:^|[,;.!?]\s+)(?P<subject>[a-z0-9&.'’+ -]{2,120}?)\s+is\s+"
+        r"(?:now\s+)?(?:an?\s+)?(?:wholly[- ]owned\s+|"
+        r"majority[- ]owned\s+)?subsidiary\s+of\b",
+        re.I,
+    ),
+)
+_ACQUISITION_NO_LONGER_CURRENT_RE = re.compile(
+    r"\b(?:later|subsequently|since)\b.{0,100}\b(?:"
+    r"went\s+public|ipo|listed|relisted|spun?\s+out|became\s+independent"
+    r")\b|\bis\s+(?:now\s+)?(?:publicly\s+traded|listed\s+on|independent)\b",
+    re.I | re.S,
+)
+_ACQUISITION_CONDITIONAL_RE = re.compile(
+    r"\b(?:if|unless|conditional(?:ly)?|subject\s+to)\b.{0,100}\b"
+    r"(?:acquisition|acquired|subsidiary)\b|"
+    r"\b(?:acquisition|acquired|subsidiary)\b.{0,100}\bsubject\s+to\b",
+    re.I | re.S,
+)
+
+
+def _acquired_stage_quote_supports_company(
+    company: Optional[CompanyOutput],
+    observed_company_name: Any,
+    quote: str,
+) -> bool:
+    """Require completed acquisition/current-parent proof for this exact entity."""
+
+    if company is None or not isinstance(quote, str) or not quote.strip():
+        return False
+    if _ACQUISITION_NO_LONGER_CURRENT_RE.search(quote):
+        return False
+    names = [company.company_name, observed_company_name]
+    normalized_names = {
+        tuple(re.findall(r"[a-z0-9]+", str(name or "").casefold()))
+        for name in names
+    }
+    normalized_names = {
+        name for name in normalized_names if name and len("".join(name)) >= 4
+    }
+    if not normalized_names:
+        return False
+    for pattern in _BOUND_ACQUISITION_SUBJECT_PATTERNS:
+        for match in pattern.finditer(quote):
+            context = quote[max(0, match.start() - 100):match.end() + 100]
+            exact_match = re.compile(re.escape(match.group(0)), re.I)
+            if not _has_affirmed_stage_proof(
+                context,
+                (exact_match,),
+                reject_historical=True,
+                reject_minority=True,
+                reject_future_will=True,
+            ) or _ACQUISITION_CONDITIONAL_RE.search(context):
+                continue
+            subject = tuple(re.findall(
+                r"[a-z0-9]+", match.group("subject").casefold()
+            ))
+            legal_suffixes = {
+                "co", "company", "corp", "corporation", "inc",
+                "incorporated", "limited", "llc", "ltd", "plc",
+            }
+            if any(
+                subject == name
+                or (
+                    subject[:len(name)] == name
+                    and subject[len(name):]
+                    and set(subject[len(name):]).issubset(legal_suffixes)
+                )
+                for name in normalized_names
+            ):
+                return True
+    return False
+
+
+def _first_party_acquisition_conflicts_with_venture_stage(
+    company: Optional[CompanyOutput],
+    verdict: Mapping[str, Any],
+    observed_stage: str,
+) -> bool:
+    """Reject a stale venture-stage selection when the same response conflicts.
+
+    This does not project the attribute evidence into the stage result. It only
+    makes the stage unresolved so the existing independent stage repair can
+    research current ownership and return its own stage evidence.
+    """
+
+    if company is None or observed_stage not in {
+        "seed", "series a", "series b", "series c+"
+    }:
+        return False
+    evidence = _dimension_web_evidence(verdict, "required_attribute")
+    evidence_url = _valid_web_evidence_url(evidence["url"])
+    if not evidence_url:
+        return False
+    try:
+        company_domain = _registrable_domain(company.company_website)
+        evidence_domain = _registrable_domain(evidence_url)
+    except NormalizationError:
+        return False
+    return bool(
+        company_domain
+        and evidence_domain == company_domain
+        and _acquired_stage_quote_supports_company(
+            company,
+            verdict.get("observed_company_name"),
+            evidence["quote"],
+        )
+    )
 
 
 def _decision_from_observed_employee_size(verdict: dict, icp: ICPPrompt) -> str:
@@ -949,6 +1116,7 @@ def _decision_from_observed_stage(
     icp_stage: str,
     *,
     validated_stage_finding: Optional[Mapping[str, Any]] = None,
+    company: Optional[CompanyOutput] = None,
 ) -> str:
     if not icp_stage:
         return COMPANY_FIT_MATCH
@@ -956,16 +1124,32 @@ def _decision_from_observed_stage(
     if not isinstance(observed_value, str):
         return COMPANY_FIT_UNAVAILABLE
     observed = _normalize_company_stage(observed_value)
+    if _first_party_acquisition_conflicts_with_venture_stage(
+        company, verdict, observed
+    ):
+        return COMPANY_FIT_UNAVAILABLE
     flag = strict_company_fit_boolean(verdict.get("stage_matches"))
     stage_evidence = _dimension_web_evidence(verdict, "stage")
-    if not observed or not (
-        _validated_investigator_stage_matches_verdict(
-            verdict,
-            observed,
-            validated_stage_finding,
+    stage_quote_is_bound = (
+        _acquired_stage_quote_supports_company(
+            company,
+            verdict.get("observed_company_name"),
+            stage_evidence["quote"],
         )
-        or _stage_quote_supports_observation(observed, stage_evidence["quote"])
-    ):
+        if observed == "acquired"
+        else _stage_quote_supports_observation(observed, stage_evidence["quote"])
+    )
+    investigator_stage_matches = _validated_investigator_stage_matches_verdict(
+        verdict,
+        observed,
+        validated_stage_finding,
+    )
+    stage_proof_is_valid = (
+        stage_quote_is_bound
+        if observed == "acquired"
+        else investigator_stage_matches or stage_quote_is_bound
+    )
+    if not observed or not stage_proof_is_valid:
         return COMPANY_FIT_UNAVAILABLE
     canonical_match = _company_stage_matches(observed, icp_stage)
     if flag is None or flag is not canonical_match:
@@ -1327,8 +1511,7 @@ def _web_identity_receipt(
                 )
                 return receipt
     if (
-        company_quality
-        and verified_anchor_receipt.get("decision") == COMPANY_FIT_MATCH
+        verified_anchor_receipt.get("decision") == COMPANY_FIT_MATCH
         and isinstance(verified_homepage_identity, Mapping)
         and not str(observed_values["linkedin"] or "").strip()
     ):
@@ -1338,14 +1521,17 @@ def _web_identity_receipt(
         preserved = evaluate_company_identity(
             submitted_name=company.company_name,
             submitted_website=company.company_website,
-            submitted_linkedin=company.company_linkedin,
+            submitted_linkedin=(
+                company.company_linkedin
+                or f"https://www.linkedin.com/company/{anchor_slug}"
+            ),
             observed_name=observed_values["name"],
             observed_website=observed_values["website"],
             observed_linkedin=(
                 f"https://www.linkedin.com/company/{anchor_slug}"
             ),
             evidence_source="company_web_reverification",
-            company_quality=True,
+            company_quality=company_quality,
         )
         if preserved.get("decision") != COMPANY_FIT_MATCH:
             raw_aliases = verified_homepage_identity.get(
@@ -2239,6 +2425,9 @@ def _reverify_decision(
         return company_fit_unavailable(reason, details=details)
 
     industry_evidence = _dimension_web_evidence(verdict, "industry")
+    required_attribute_evidence = _dimension_web_evidence(
+        verdict, "required_attribute"
+    )
     structured_employee_size_decision = _structured_employee_size_decision(
         structured_employee_size_evidence,
         icp,
@@ -2257,6 +2446,7 @@ def _reverify_decision(
         verdict,
         icp_stage,
         validated_stage_finding=validated_stage_finding,
+        company=company,
     )
     profile_identity = _structured_profile_identity_anchor(
         verified_homepage_identity,
@@ -2329,6 +2519,8 @@ def _reverify_decision(
         for dimension in active_dimensions
     }
     evidence["industry"] = industry_evidence
+    if icp_stage:
+        evidence["stage"] = stage_evidence
     if structured_employee_size_decision != COMPANY_FIT_UNAVAILABLE:
         evidence["employee_size"] = dict(structured_employee_size_evidence or {})
     if structured_public_stage or structured_private_stage_conflict:
@@ -2350,9 +2542,7 @@ def _reverify_decision(
 
     attribute_decision = COMPANY_FIT_MATCH
     if icp_attribute:
-        evidence["required_attribute"] = _dimension_web_evidence(
-            verdict, "required_attribute"
-        )
+        evidence["required_attribute"] = required_attribute_evidence
         attribute_flag = strict_company_fit_boolean(
             verdict.get("attribute_satisfied")
         )
@@ -3187,7 +3377,13 @@ async def _llm_reverify_company(
                 "industry evidence quote must directly support the company's role "
                 "in the requested activity. A clear product description or tagline "
                 "can support that role without a provider verb. Directory labels, "
-                "customer use, and internal department work are not enough."
+                "customer use, and internal department work are not enough. Do not "
+                "treat a broad positioning label as exclusive of a narrower directly "
+                "proved operating activity. For example, an AI-infrastructure "
+                "company that the full cited page says designs, manufactures, or "
+                "ships electrical equipment, switchgear, controls, or other physical "
+                "components is also a hardware supplier/operator. Prefer that direct "
+                "full-body activity quote over a generic label or search snippet."
             ),
             (
                 "geography_matches: independently find the company's headquarters "
@@ -3206,23 +3402,41 @@ async def _llm_reverify_company(
         checks.append(
             f'attribute_satisfied: independently verify from the web whether this '
             f'company actually satisfies: "{icp_attribute}". Do not rely on any '
-            f'model-authored claim or submitted citation. Answer false ONLY if you '
-            f'are confident it does not.'
+            f'model-authored claim or submitted citation. Score this attribute '
+            f'independently from employee size, headquarters/country, and stage; an '
+            f'office opening, acquisition, launch, or expansion need not occur in the '
+            f'company\'s headquarters country unless the attribute itself says so. '
+            f'When one page discusses multiple companies, bind the evidence quote to '
+            f'the candidate company and do not transfer another company\'s event. '
+            f'Use the full fetched page, and quote the candidate\'s concrete activity '
+            f'instead of an unrelated directory label. Answer false ONLY if you are '
+            f'confident it does not.'
         )
     if icp_stage:
         checks.append(
             f'stage_matches: is this company\'s funding/ownership stage consistent with '
             f'"{getattr(icp, "company_stage", "")}" (verify from funding announcements, '
             f'investor pages)? Return observed_company_stage as exactly one of Seed, '
-            f'Series A, Series B, Series C+, Private Equity, or Public. Series C+ '
+            f'Series A, Series B, Series C+, Private Equity, Public, or Acquired. '
+            f'Acquired means a completed strategic acquisition with a current parent; '
+            f'it is not Public merely because the parent is public and is not Private '
+            f'Equity unless a private-equity sponsor currently controls it. Series C+ '
             f'includes Series C and later venture rounds but excludes private-equity '
             f'ownership and public companies. Private Equity means a private-equity '
             f'or private-markets sponsor is the current majority or controlling owner. '
             f'Public means the company itself has publicly listed shares. Answer false '
-            f'ONLY if you are confident it is a different stage. Use the latest '
-            f'completed funding round or current ownership; an older Seed, Series A, '
-            f'or Series B quote does not establish the current stage when later-round '
-            f'evidence exists. The stage evidence quote must itself name the relevant '
+            f'ONLY if you are confident it is a different stage. Do not stop when you '
+            f'find a venture round that matches the requested stage. Before returning '
+            f'any venture stage, independently check whether a later acquisition '
+            f'completed or a current parent now owns the company. Check chronology '
+            f'before selecting evidence: first seek a completed acquisition/current '
+            f'parent, IPO/listing change, or later completed priced round, then select '
+            f'the newest applicable state. For a venture stage, prefer a first-party '
+            f'completed-round announcement and its full body over a directory table, '
+            f'investor summary, funding total, or search snippet. An older Seed, '
+            f'Series A, or Series B quote does not establish the current stage when '
+            f'later-round or completed-ownership evidence exists. The stage evidence '
+            f'quote must itself name the relevant '
             f'completed round, current controlling private-equity ownership, or current '
             f'public listing. A funding amount or total raised, a press release or '
             f'public product launch, a "Privately Held" label, planned IPO, absence of '
@@ -3587,8 +3801,14 @@ async def _llm_reverify_company(
         "label is insufficient. For a venture stage, quote the named completed "
         "round, not only a funding amount. For Private Equity, quote current "
         "majority ownership or control, not merely an investor name. Do not "
-        "force a match; report a different stage or leave it unresolved when "
-        "the evidence requires that."
+        "force a match. Do not stop at a venture round that matches the request. "
+        "Check later completed rounds, acquisitions, and listing changes before "
+        "selecting the quote. Return Acquired for a completed "
+        "strategic acquisition with a current parent; do not copy the parent's "
+        "Public stage onto its subsidiary. Prefer a first-party completed-round "
+        "full-body quote over a directory table, investor summary, or snippet. "
+        "Report a different stage or leave it unresolved when the evidence "
+        "requires that."
         if "stage" in incomplete else ""
     )
     repair_prompt = (

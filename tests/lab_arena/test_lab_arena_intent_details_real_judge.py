@@ -220,14 +220,27 @@ def _local_responder(
                 declared = schema.get("schema") or {}
                 assert declared.get("additionalProperties") is False
                 assert set(declared.get("required") or []) == {
-                    *intent_details._CHECKS, "signal_coverage"
+                    *intent_details._CHECKS,
+                    "signal_coverage",
+                    "unsupported_factual_clause",
+                    "unsupported_factual_reason",
                 }
                 review_documents.append(json.loads(str(messages[-1]["content"])))
                 content = json.dumps(
-                    {**dict(review_checks), "signal_coverage": [
-                        {"matched_icp_signal": index, "covered": True}
-                        for index in (0, 1)
-                    ]} if review_checks is not None else {}
+                    {
+                        **dict(review_checks),
+                        "signal_coverage": [
+                            {"matched_icp_signal": index, "covered": True}
+                            for index in (0, 1)
+                        ],
+                        "unsupported_factual_clause": (
+                            PARAGRAPH if not review_checks["facts_supported"] else ""
+                        ),
+                        "unsupported_factual_reason": (
+                            "The supplied evidence does not support this factual clause."
+                            if not review_checks["facts_supported"] else ""
+                        ),
+                    } if review_checks is not None else {}
                 )
             elif schema_name == "verification":
                 content = json.dumps(_stage3_reply(prompt))

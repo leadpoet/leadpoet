@@ -3210,6 +3210,38 @@ def _decision(
     return "review"
 
 
+def _supported_medium_needs_clarification(
+    verdict: Mapping[str, Any], item: Mapping[str, Any], source_text: str,
+) -> bool:
+    """Find an exactly grounded verdict whose evidence and confidence conflict.
+
+    Medium confidence never passes here. This only permits one final judge
+    clarification when all structured evidence fields say the claim is fully
+    supported but the confidence field would otherwise force review.
+    """
+
+    quotes = item.get("supporting_quotes")
+    if not isinstance(quotes, list) or not quotes:
+        return False
+    grounded_quotes = [
+        str(quote or "").strip(" \t\r\n\"'\u2018\u2019\u201c\u201d")
+        for quote in quotes
+    ]
+    return bool(
+        verdict.get("overall_verdict") == "qualified"
+        and verdict.get("overall_confidence") == "medium"
+        and item.get("signal_status") == "supported"
+        and item.get("confidence") == "medium"
+        and item.get("verification_mode") == "source_grounded"
+        and item.get("same_entity_check") == "pass"
+        and item.get("evidence_urls_used")
+        and not item.get("unsupported_parts")
+        and not item.get("contradicting_quotes")
+        and _grounded_exact_text(source_text, item.get("claim"))
+        and any(_grounded_exact_text(source_text, quote) for quote in grounded_quotes)
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────
@@ -3871,15 +3903,17 @@ async def verify_three_stage(
     s3_verdict = _apply_guardrails(row, s3_verdict_raw)
     s3_item = ((s3_verdict.get("signal_evaluations") or [{}]) or [{}])[0]
     identity_clarification: Optional[Dict[str, Any]] = None
+    evidence_clarification: Optional[Dict[str, Any]] = None
+    clarification_kind = None
     if (
         company_quality
         and s3_item.get("signal_status") == "supported"
         and s3_item.get("confidence") == "high"
         and s3_item.get("same_entity_check") == "unclear"
     ):
-        clarification_prompt = (
-            s3_prompt
-            + "\n\nONE BOUNDED IDENTITY CLARIFICATION:\n"
+        clarification_kind = "identity"
+        clarification_instruction = (
+            "ONE BOUNDED IDENTITY CLARIFICATION:\n"
             "The prior result found the claim supported but left the event subject "
             "unclear. Re-read only the supplied fetched source context. Decide "
             "whether the event happened to the target company, to a customer or "
@@ -3887,6 +3921,31 @@ async def verify_three_stage(
             "schema-valid verdict. Do not treat the publisher, domain, ATS tenant "
             "slug, or keyword overlap alone as proof of the event subject."
         )
+    elif _supported_medium_needs_clarification(
+        s3_verdict, s3_item, combined_text
+    ):
+        clarification_kind = "supported_medium"
+        clarification_instruction = (
+            "ONE BOUNDED EVIDENCE-CONFIDENCE CLARIFICATION:\n"
+            "The prior structured result says the exact supplied source fully "
+            "supports the claim, the company identity passes, no claim part is "
+            "unsupported or contradicted, and the overall verdict is qualified, "
+            "but it assigns medium confidence. Re-read only the supplied fetched "
+            "source context and resolve that inconsistency. Return supported with "
+            "high confidence only if exact source text proves the complete claim "
+            "and its semantic fit to the target ICP signal. Otherwise identify "
+            "the concrete unsupported or ambiguous part in unsupported_parts and "
+            "return partially_supported, contradicted, or unable_to_verify as the "
+            "existing rules require. Return one complete fresh schema-valid "
+            "verdict. Do not copy the prior confidence without re-evaluation."
+        )
+    if clarification_kind is not None:
+        clarification_receipt_key = (
+            "identity_clarification"
+            if clarification_kind == "identity"
+            else "evidence_clarification"
+        )
+        clarification_prompt = s3_prompt + "\n\n" + clarification_instruction
         clarification_envelope = await _call_openrouter(
             client,
             stage3_model or STAGE3_MODEL,
@@ -3898,7 +3957,7 @@ async def verify_three_stage(
                 "client_ready": False,
                 "decision": "unavailable",
                 "rejection_reason": (
-                    "stage3_identity_clarification_error:"
+                    f"stage3_{clarification_kind}_clarification_error:"
                     f"{clarification_envelope['_error']}"
                 ),
                 "stage1": stage1_info,
@@ -3911,13 +3970,13 @@ async def verify_three_stage(
                     "status": "llm_error",
                     "confidence": None,
                     "decision": "unavailable",
-                    "same_entity_check": "unclear",
+                    "same_entity_check": s3_item.get("same_entity_check"),
                     "usage": {},
                     "error": clarification_envelope.get("_error"),
                 },
                 "company_check": company_check,
                 "verdict": s3_verdict,
-                "identity_clarification": {
+                clarification_receipt_key: {
                     "attempted": True,
                     "resolved": False,
                     "provider_error": True,
@@ -3930,11 +3989,19 @@ async def verify_three_stage(
             s3_envelope = clarification_envelope
             s3_verdict = clarified
             s3_item = clarified_items[0]
-        identity_clarification = {
+        clarification_receipt = {
             "attempted": True,
-            "resolved": s3_item.get("same_entity_check") in {"pass", "fail"},
+            "resolved": (
+                s3_item.get("same_entity_check") in {"pass", "fail"}
+                if clarification_kind == "identity"
+                else s3_item.get("confidence") != "medium"
+            ),
             "provider_error": False,
         }
+        if clarification_kind == "identity":
+            identity_clarification = clarification_receipt
+        else:
+            evidence_clarification = clarification_receipt
     s3_decision = _decision(s3_verdict, company_quality=company_quality)
     closed_only_hiring_evidence = False
     if integrity_policy and is_hiring_claim and len(bundle) > 1:
@@ -4045,6 +4112,11 @@ async def verify_three_stage(
         **(
             {"identity_clarification": identity_clarification}
             if identity_clarification is not None
+            else {}
+        ),
+        **(
+            {"evidence_clarification": evidence_clarification}
+            if evidence_clarification is not None
             else {}
         ),
     }

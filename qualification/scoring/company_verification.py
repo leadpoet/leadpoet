@@ -127,7 +127,6 @@ _PARKED_DOMAIN_PATTERNS = [
     r"\bgodaddy\b.*\bparked\b",
     r"\bnamecheap\b.*\bparked\b",
     r"\bhostgator\b.*\bdefault\b",
-    r"\bunder construction\b",
     # Keep these terms local. Minified product pages can mention a coming-soon
     # feature and an unrelated email domain hundreds of kilobytes later.
     r"\bcoming soon\b.{0,80}\bdomain\b",

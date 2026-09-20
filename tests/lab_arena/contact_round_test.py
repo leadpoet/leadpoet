@@ -350,6 +350,8 @@ def test_v5_full_contact_round_persists_and_publishes_multi_signal_narrative(
     async def review_provider(prompt, **_kwargs):
         document = json.loads(prompt)
         return json.dumps({**{name: True for name in intent_details._CHECKS},
+                           "unsupported_factual_clause": "",
+                           "unsupported_factual_reason": "",
                            "signal_coverage": [
                                {"matched_icp_signal": signal["matched_icp_signal"],
                                 "covered": True}

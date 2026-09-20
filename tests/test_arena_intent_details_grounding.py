@@ -42,6 +42,8 @@ FISERV_REVIEW = {
         "covered": True,
     }],
     "verified_signals_covered": True,
+    "unsupported_factual_clause": "",
+    "unsupported_factual_reason": "",
 }
 
 INTEGRATED_CONNECTION_PARAGRAPH = (
@@ -54,6 +56,22 @@ NO_CONNECTION_PARAGRAPH = (
     "Acme launched a reporting platform on September 1, 2026. It also opened a "
     "Berlin office on September 3, 2026."
 )
+
+
+def _review_response(checks, coverage):
+    facts_supported = checks["facts_supported"]
+    return {
+        **checks,
+        "signal_coverage": coverage,
+        "unsupported_factual_clause": (
+            "Acme launched a reporting platform on September 1, 2026"
+            if not facts_supported else ""
+        ),
+        "unsupported_factual_reason": (
+            "The supplied evidence does not support this factual clause."
+            if not facts_supported else ""
+        ),
+    }
 
 
 def inputs():
@@ -212,10 +230,10 @@ def test_all_grounding_and_writing_checks_must_pass(monkeypatch, failed_check):
         assert "untrusted JSON data" in kwargs["system_prompt"]
         assert kwargs["max_retries"] == 0
         assert kwargs["model"] == "anthropic/claude-sonnet-4.5"
-        return json.dumps({**checks, "signal_coverage": [
+        return json.dumps(_review_response(checks, [
             {"matched_icp_signal": index, "covered": True}
             for index in (0, 1)
-        ]})
+        ]))
 
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     result = asyncio.run(intent_details.review_intent_details(company, icp, results, fit))
@@ -261,9 +279,9 @@ def test_grounded_icp_connection_does_not_require_a_separate_final_sentence(
     company.intent_details = INTEGRATED_CONNECTION_PARAGRAPH
 
     async def judge(*_args, **_kwargs):
-        return json.dumps({
-            **{name: True for name in intent_details._CHECKS},
-            "signal_coverage": [
+        return json.dumps(_review_response(
+            {name: True for name in intent_details._CHECKS},
+            [
                 {
                     "matched_icp_signal": 0,
                     "covered": True,
@@ -273,7 +291,7 @@ def test_grounded_icp_connection_does_not_require_a_separate_final_sentence(
                     "covered": True,
                 },
             ],
-        })
+        ))
 
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     receipt = asyncio.run(intent_details.review_intent_details(
@@ -314,13 +332,13 @@ def test_review_projects_factual_and_icp_connection_checks_independently(
     checks = {name: name != failed_check for name in intent_details._CHECKS}
 
     async def judge(*_args, **_kwargs):
-        return json.dumps({
-            **checks,
-            "signal_coverage": [
+        return json.dumps(_review_response(
+            checks,
+            [
                 {"matched_icp_signal": index, "covered": True}
                 for index in (0, 1)
             ],
-        })
+        ))
 
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     receipt = asyncio.run(intent_details.review_intent_details(
@@ -370,8 +388,9 @@ def test_provider_error_retains_retry_without_leaking_exception(monkeypatch):
 ])
 def test_incomplete_or_malformed_coverage_is_retryable(monkeypatch, coverage):
     async def judge(*args, **kwargs):
-        return json.dumps({**{name: True for name in intent_details._CHECKS},
-                           "signal_coverage": coverage})
+        return json.dumps(_review_response(
+            {name: True for name in intent_details._CHECKS}, coverage
+        ))
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     receipt = asyncio.run(intent_details.review_intent_details(*inputs()))
     assert receipt["decision"] == "unavailable"
@@ -383,11 +402,11 @@ def test_incomplete_or_malformed_coverage_is_retryable(monkeypatch, coverage):
 
 def test_a_missing_activity_remains_a_terminal_mismatch(monkeypatch):
     async def judge(*args, **kwargs):
-        return json.dumps({**{name: True for name in intent_details._CHECKS},
-                           "signal_coverage": [
+        return json.dumps(_review_response(
+            {name: True for name in intent_details._CHECKS}, [
                                {"matched_icp_signal": 0, "covered": True},
                                {"matched_icp_signal": 1, "covered": False},
-                           ]})
+                           ]))
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     receipt = asyncio.run(intent_details.review_intent_details(*inputs()))
     assert receipt["decision"] == "mismatch"

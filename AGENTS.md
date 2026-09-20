@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: September 20 company audit fixes
+
+On 2026-09-20 the user authorized the confirmed company, intent, and contact
+verifier fixes from the September 20 miner audit, plus clear company-level
+diagnostics. Keep the changes narrow and test the exact saved miner inputs
+and evidence, with bounded organizer-funded provider checks where needed.
+Authority includes protected inspection, tests, pushes to main, scorer-image
+publication, canonical gateway/normal-validator restarts, dashboard deployment,
+and live verification through the overnight operational permissions. Preserve
+frozen ICPs, submitted code, historical results, actual costs, contact and
+scoring requirements, disclosure timing, rewards, weights, and concurrent work.
+Do not rescore historical rounds or restore retired services. This scope ends
+after the fixes are deployed and verified.
+
 ## Scoped production authorization: public scoring-validator attribution
 
 On 2026-09-20 the user explicitly authorized exposing the validator hotkey that

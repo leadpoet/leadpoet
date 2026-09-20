@@ -635,7 +635,10 @@ def _verified_company_for_contact(
 
 
 async def _classify_contact_role(
-    actual_role: str, target_roles: list[str], _target_seniority: str
+    actual_role: str,
+    target_roles: list[str],
+    _target_seniority: str,
+    duties: str = "",
 ) -> bool:
     """Use the existing pinned role judge only for deterministic gray zones."""
     role_module = import_module("qualification.scoring.role_batch_check")
@@ -651,7 +654,7 @@ async def _classify_contact_role(
             client,
             key,
             target_roles,
-            [{"id": "contact", "role": actual_role}],
+            [{"id": "contact", "role": actual_role, "duties": duties}],
         )
     if (
         not isinstance(parsed, list)

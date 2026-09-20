@@ -4926,6 +4926,7 @@ class ArenaService:
                     judgments.update(self._scoring_outputs(round_id, stage))
             icps = self.evaluation_icps(round_id) if outputs else []
             contacts = {}
+            diagnostics = []
             for run in runs:
                 run_id = str(run["run_id"])
                 judge = judgments.get(run_id)
@@ -4943,5 +4944,14 @@ class ArenaService:
                      if key in {"company_index", "company_qualified", "contact_qualified", "contact_identity_key", "email_status", "contact_verification"}}
                     for item in breakdowns
                 ]
+                diagnostics.extend(
+                    public_dashboard.company_diagnostic(
+                        item,
+                        outputs[run_id]["companies"][item["company_index"]],
+                        icp_position=int(run["icp_position"]),
+                    )
+                    for item in breakdowns
+                )
             result["contact_verifications"] = contacts
+            result["company_diagnostics"] = diagnostics
         return result

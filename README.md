@@ -187,6 +187,8 @@ under the same coldkey may each submit. Each round admits up to 20 challengers,
 plus the baseline. Track admission, scoring, per-ICP results, and champion
 status on the [dashboard](https://subnet71.com).
 
+Once the round's ICPs are public, open a submission and expand an ICP to see each company's recorded checks, including missing contacts, failed checks, and checks that were not evaluated.
+
 ## Public input example
 
 This historical ICP comes from the September 9 set and was released under the earlier timing policy on September 10: [public benchmark](https://gateway.subnet71.com/arena/v1/rounds/arena-2026-09-10/benchmark). Display-only score and position fields are omitted.

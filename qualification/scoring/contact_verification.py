@@ -97,6 +97,7 @@ _KNOWN_INVALID_EMAIL_STATUSES = frozenset(
 _CATCH_ALL_EMAIL_STATUSES = frozenset(
     {"catch_all", "catch-all", "accept_all", "valid_accept_all", "ok_for_all"}
 )
+_ROLE_DUTIES_MAX_CHARS = 4_000
 
 Execute = Callable[[str, Mapping[str, Any]], Awaitable[Any]]
 RoleClassifier = Callable[..., Any]
@@ -472,6 +473,15 @@ def _position_title(position: Mapping[str, Any]) -> str:
     )
 
 
+def _position_duties(position: Mapping[str, Any]) -> str:
+    """Return bounded duties from the verified current job only."""
+
+    description = position.get("description")
+    if not isinstance(description, str):
+        return ""
+    return re.sub(r"\s+", " ", description).strip()[:_ROLE_DUTIES_MAX_CHARS]
+
+
 def _company_identifiers(company: Any) -> dict[str, str]:
     linkedin = _text(
         _get(company, "linkedin_url")
@@ -656,6 +666,7 @@ async def _role_matches(
     targets: Sequence[str],
     target_seniority: str,
     classify_role: Optional[RoleClassifier],
+    duties: str = "",
 ) -> bool:
     deterministic = _deterministic_role_match(actual, targets, target_seniority)
     if deterministic is not None:
@@ -663,7 +674,7 @@ async def _role_matches(
     if classify_role is None:
         return False
     try:
-        result = classify_role(actual, list(targets), target_seniority)
+        result = classify_role(actual, list(targets), target_seniority, duties)
         if inspect.isawaitable(result):
             result = await result
     except _ProviderUnavailable:
@@ -799,13 +810,16 @@ def contact_source_semantics(
     profiles = _profile_candidates(_unwrap_data(response))
     projected_profiles = []
     for profile in profiles[:25]:
-        positions = [
-            {
+        positions = []
+        for position in _current_positions(profile):
+            projected_position = {
                 "title": _normalize_title(_position_title(position)),
                 "company": _position_company(position),
             }
-            for position in _current_positions(profile)
-        ]
+            duties = _position_duties(position)
+            if duties:
+                projected_position["duties"] = duties
+            positions.append(projected_position)
         projected_profiles.append(
             {
                 "id": _text(
@@ -1225,12 +1239,12 @@ async def verify_contact(
 
     claimed_role = _text(contact.get("role"))
     claimed_role_normalized = _normalize_title(claimed_role)
-    actual_roles = [
-        _position_title(position)
+    actual_positions = [
+        position
         for position in matching_positions
         if _normalize_title(_position_title(position)) == claimed_role_normalized
     ]
-    if not actual_roles:
+    if not actual_positions:
         subchecks["role"] = {"status": "fail", "reason": "contact_role_mismatch"}
         return _result(contact, "mismatch", "contact_role_mismatch", subchecks=subchecks, evidence_hashes=evidence_hashes, evidence_timestamps=evidence_timestamps)
     targets = _get(icp, "target_roles") or []
@@ -1239,12 +1253,14 @@ async def verify_contact(
     target_seniority = _text(_get(icp, "target_seniority"))
     role_ok = False
     try:
-        for role in actual_roles:
+        for position in actual_positions:
+            role = _position_title(position)
             if await _role_matches(
                 role,
                 [str(item) for item in targets],
                 target_seniority,
                 classify_role,
+                _position_duties(position),
             ):
                 role_ok = True
                 break

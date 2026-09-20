@@ -1820,7 +1820,7 @@ def test_public_results_take_valid_identity_from_the_round_publication():
     class Store:
         @staticmethod
         def list_runs(_round_id, **filters):
-            assert filters == {"submission_id": "sub-published", "kind": "execute"}
+            assert filters in ({"kind": "execute"}, {"kind": "score"})
             return []
 
         @staticmethod
@@ -1842,6 +1842,11 @@ def test_public_results_take_valid_identity_from_the_round_publication():
         "public_icp_status": "pending",
         "public_icp_count": 0,
         "submission_scores": {"stage_1": None, "final": None},
+        "scoring_attribution": {
+            "validators": [],
+            "icps": [],
+            "unattributed_icp_count": 0,
+        },
     }
 
 

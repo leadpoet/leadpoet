@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: public scoring-validator attribution
+
+On 2026-09-20 the user explicitly authorized exposing the validator hotkey that
+actually judged each published Arena submission and ICP, including judgments
+reused from the whole-ICP or company-level cache. Add only public attribution
+derived from accepted stored scoring evidence. Preserve frozen scoring, costs,
+promotion, disclosure timing, private run and submission identifiers,
+credentials, historical data, and concurrent work. Authority includes narrow
+backend and dashboard changes, focused tests, push to main, and canonical
+gateway, normal-validator, and dashboard deployment with live verification. Do
+not infer that an execution runner was the judge or expose private ICP-level
+details before their existing disclosure time. This scope ends after deployment
+and verification.
+
 ## Scoped production authorization: public stage-score cost parity
 
 On 2026-09-20 the user explicitly authorized fixing the confirmed public

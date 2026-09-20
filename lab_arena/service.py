@@ -2136,11 +2136,14 @@ class ArenaService:
     def close_scoring(self, round_id: str, stage: int) -> Dict[str, Any]:
         return self._store.close_scoring(round_id, stage)
 
-    def _scoring_outputs(self, round_id: str, stage: int) -> Dict[str, Dict[str, Any]]:
-        """The score run that counts for each scored execution run."""
+    @staticmethod
+    def _select_scoring_outputs(
+        runs: Sequence[Mapping[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Select the score run that counts for each scored execution run."""
 
         chosen: Dict[str, Dict[str, Any]] = {}
-        for run in self._store.list_runs(round_id, stage=stage, kind="score"):
+        for run in runs:
             current = chosen.get(run["scored_run_id"])
             if (
                 current is None
@@ -2154,8 +2157,15 @@ class ArenaService:
                     )
                 )
             ):
-                chosen[run["scored_run_id"]] = run
+                chosen[run["scored_run_id"]] = dict(run)
         return chosen
+
+    def _scoring_outputs(self, round_id: str, stage: int) -> Dict[str, Dict[str, Any]]:
+        """The score run that counts for each scored execution run."""
+
+        return self._select_scoring_outputs(
+            self._store.list_runs(round_id, stage=stage, kind="score")
+        )
 
     def _company_judgment_evidence(
         self,
@@ -4558,6 +4568,277 @@ class ArenaService:
         }
         return result
 
+    @staticmethod
+    def _same_scoring_membership(
+        score_run: Mapping[str, Any],
+        execution_run: Mapping[str, Any],
+        *,
+        round_id: str,
+    ) -> bool:
+        """Bind one accepted judgment to its accepted execution without leaking ids."""
+
+        score_stage = score_run.get("stage")
+        execution_stage = execution_run.get("stage")
+        score_position = score_run.get("icp_position")
+        execution_position = execution_run.get("icp_position")
+        return (
+            score_run.get("kind") == "score"
+            and score_run.get("status") == "accepted"
+            and execution_run.get("kind") == "execute"
+            and execution_run.get("status") == "accepted"
+            and type(score_stage) is int
+            and type(execution_stage) is int
+            and type(score_position) is int
+            and type(execution_position) is int
+            and str(score_run.get("round_id") or "") == round_id
+            and str(execution_run.get("round_id") or "") == round_id
+            and str(score_run.get("scored_run_id") or "")
+            == str(execution_run.get("run_id") or "")
+            and str(score_run.get("submission_id") or "")
+            == str(execution_run.get("submission_id") or "")
+            and score_stage == execution_stage
+            and score_position == execution_position
+        )
+
+    def _validated_attribution_source(
+        self,
+        *,
+        source_score_run_id: str,
+        source_scored_run_id: str,
+        source_runner_hotkey: str,
+        round_id: str,
+        runs_by_id: Mapping[str, Mapping[str, Any]],
+    ) -> str:
+        """Return the judge hotkey only for a complete stored source binding."""
+
+        source_score = runs_by_id.get(source_score_run_id)
+        source_execution = runs_by_id.get(source_scored_run_id)
+        if (
+            source_score is None
+            or source_execution is None
+            or source_score.get("runner_hotkey") != source_runner_hotkey
+            or not self._same_scoring_membership(
+                source_score, source_execution, round_id=round_id
+            )
+        ):
+            raise scoring.ScoringError("scoring attribution source is invalid")
+        try:
+            contracts.require_hotkey(source_runner_hotkey)
+        except ArenaContractError as exc:
+            raise scoring.ScoringError(
+                "scoring attribution hotkey is invalid"
+            ) from exc
+        return source_runner_hotkey
+
+    def _score_run_attribution(
+        self,
+        score_run: Mapping[str, Any],
+        execution_run: Mapping[str, Any],
+        *,
+        round_id: str,
+        runs_by_id: Mapping[str, Mapping[str, Any]],
+    ) -> Dict[str, bool]:
+        """Resolve actual judgment authorities for one accepted score row."""
+
+        if not self._same_scoring_membership(
+            score_run, execution_run, round_id=round_id
+        ):
+            raise scoring.ScoringError("scoring attribution membership is invalid")
+        score_run_id = str(score_run["run_id"])
+        attributed: Dict[str, bool] = {}
+
+        if score_run.get("company_judgment_refs") is not None:
+            try:
+                lease = company_judgments.validate_lease_context(
+                    (score_run.get("claim_response") or {}).get(
+                        "company_judgment_cache"
+                    ) or {}
+                )
+            except company_judgments.CompanyJudgmentError as exc:
+                raise scoring.ScoringError(
+                    "company scoring attribution lease is invalid"
+                ) from exc
+            refs = {
+                int(ref["company_index"]): ref
+                for ref in (
+                    company_judgments.validate_company_ref(item)
+                    for item in score_run.get("company_judgment_refs") or []
+                )
+            }
+            lease_rows = sorted(
+                lease["hits"] + lease["misses"],
+                key=lambda item: item["company_index"],
+            )
+            if len(refs) != len(lease_rows):
+                raise scoring.ScoringError(
+                    "company scoring attribution refs are incomplete"
+                )
+            for item in lease_rows:
+                ref = refs.get(int(item["company_index"]))
+                if (
+                    ref is None
+                    or ref["cache_key"] != item["cache_key"]
+                    or ref["company_input_hash"] != item["company_input_hash"]
+                ):
+                    raise scoring.ScoringError(
+                        "company scoring attribution ref is invalid"
+                    )
+                evidence = item.get("evidence_doc")
+                if evidence is None:
+                    hotkey = self._validated_attribution_source(
+                        source_score_run_id=score_run_id,
+                        source_scored_run_id=str(score_run["scored_run_id"]),
+                        source_runner_hotkey=str(
+                            score_run.get("runner_hotkey") or ""
+                        ),
+                        round_id=round_id,
+                        runs_by_id=runs_by_id,
+                    )
+                    attributed[hotkey] = attributed.get(hotkey, False)
+                    continue
+                hotkey = self._validated_attribution_source(
+                    source_score_run_id=str(evidence["source_score_run_id"]),
+                    source_scored_run_id=str(evidence["source_scored_run_id"]),
+                    source_runner_hotkey=str(evidence["source_runner_hotkey"]),
+                    round_id=round_id,
+                    runs_by_id=runs_by_id,
+                )
+                reused = str(evidence["source_score_run_id"]) != score_run_id
+                attributed[hotkey] = attributed.get(hotkey, False) or reused
+            return attributed
+
+        cache_key = str(score_run.get("judgment_cache_key") or "")
+        if cache_key:
+            source_score_run_id = str(
+                score_run.get("judgment_cache_source_run_id") or ""
+            )
+            source_score = runs_by_id.get(source_score_run_id) or {}
+            if (
+                not source_score_run_id
+                or not source_score.get("scored_run_id")
+                or source_score.get("judgment_cache_key") != cache_key
+                or source_score.get("judgment_cache_source_run_id")
+                != source_score_run_id
+            ):
+                raise scoring.ScoringError(
+                    "scoring attribution cache authority is invalid"
+                )
+            if source_score_run_id != score_run_id:
+                cached_result = score_run.get("result_doc") or {}
+                if (
+                    cached_result.get("schema_version")
+                    != "leadpoet.lab_arena.cached_run_result.v1"
+                    or cached_result.get("terminal_status") != "accepted"
+                    or cached_result.get("cache_key") != cache_key
+                    or cached_result.get("source_score_run_id")
+                    != source_score_run_id
+                ):
+                    raise scoring.ScoringError(
+                        "scoring attribution cached result is invalid"
+                    )
+            hotkey = self._validated_attribution_source(
+                source_score_run_id=source_score_run_id,
+                source_scored_run_id=str(source_score["scored_run_id"]),
+                source_runner_hotkey=str(source_score.get("runner_hotkey") or ""),
+                round_id=round_id,
+                runs_by_id=runs_by_id,
+            )
+            attributed[hotkey] = source_score_run_id != score_run_id
+            return attributed
+
+        hotkey = self._validated_attribution_source(
+            source_score_run_id=score_run_id,
+            source_scored_run_id=str(score_run["scored_run_id"]),
+            source_runner_hotkey=str(score_run.get("runner_hotkey") or ""),
+            round_id=round_id,
+            runs_by_id=runs_by_id,
+        )
+        attributed[hotkey] = False
+        return attributed
+
+    def _public_scoring_attribution(
+        self,
+        round_id: str,
+        execution_runs: Sequence[Mapping[str, Any]],
+        source_execution_runs: Sequence[Mapping[str, Any]],
+        public_positions: set[int],
+    ) -> Dict[str, Any]:
+        """Build aggregate and disclosed per-ICP judge attribution."""
+
+        score_runs = self._store.list_runs(round_id, kind="score")
+        judgments = self._select_scoring_outputs(score_runs)
+        runs_by_id = {
+            str(run["run_id"]): run
+            for run in list(source_execution_runs) + list(score_runs)
+            if run.get("run_id")
+        }
+        by_position: Dict[int, Dict[str, bool]] = {}
+        unattributed_positions = set()
+        for execution_run in execution_runs:
+            score_run = judgments.get(str(execution_run.get("run_id") or ""))
+            if score_run is None or score_run.get("status") != "accepted":
+                continue
+            position = int(execution_run.get("icp_position") or 0)
+            try:
+                authorities = self._score_run_attribution(
+                    score_run,
+                    execution_run,
+                    round_id=round_id,
+                    runs_by_id=runs_by_id,
+                )
+                if not authorities:
+                    raise scoring.ScoringError(
+                        "scoring attribution authority is missing"
+                    )
+            except (
+                ArenaContractError,
+                ArenaStoreError,
+                KeyError,
+                TypeError,
+                ValueError,
+                scoring.ScoringError,
+            ):
+                unattributed_positions.add(position)
+                by_position.pop(position, None)
+                continue
+            if position in unattributed_positions:
+                continue
+            combined = by_position.setdefault(position, {})
+            for hotkey, reused in authorities.items():
+                combined[hotkey] = combined.get(hotkey, False) or reused
+
+        validator_counts: Dict[str, Dict[str, int]] = {}
+        for authorities in by_position.values():
+            for hotkey, reused in authorities.items():
+                counts = validator_counts.setdefault(
+                    hotkey, {"icp_count": 0, "reused_icp_count": 0}
+                )
+                counts["icp_count"] += 1
+                counts["reused_icp_count"] += int(reused)
+
+        return {
+            "validators": [
+                {"hotkey": hotkey, **validator_counts[hotkey]}
+                for hotkey in sorted(validator_counts)
+            ],
+            "icps": [
+                {
+                    "icp_position": position,
+                    "validator_hotkeys": sorted(
+                        by_position.get(position, {})
+                    ),
+                    "reused_judgment": any(
+                        by_position.get(position, {}).values()
+                    ),
+                }
+                for position in sorted(
+                    set(by_position).union(unattributed_positions)
+                    & public_positions
+                )
+            ],
+            "unattributed_icp_count": len(unattributed_positions),
+        }
+
     def public_results(self, round_id: str, submission_id: str) -> Dict[str, Any]:
         if not submission_id or not isinstance(submission_id, str):
             raise ServiceError("submission_missing", 404)  # an empty id must never mean "every submission"
@@ -4579,8 +4860,13 @@ class ArenaService:
             raise ServiceError("submission_missing", 404)
         disclosure = self._public_icp_disclosure(row)
         public_positions = set(disclosure["public_positions"]) if disclosure else set()
+        source_execution_runs = self._store.list_runs(round_id, kind="execute")
+        execution_runs = [
+            run for run in source_execution_runs
+            if run.get("submission_id") == submission_id
+        ]
         runs = [
-            run for run in self._store.list_runs(round_id, submission_id=submission_id, kind="execute")
+            run for run in execution_runs
             if run.get("icp_position") in public_positions
         ]
         outputs = {}
@@ -4626,6 +4912,12 @@ class ArenaService:
                 "stage_1": None if stage1_entry is None else stage1_entry.get("stage1_score"),
                 "final": None if final_entry is None else final_entry.get("final_score"),
             },
+            "scoring_attribution": self._public_scoring_attribution(
+                round_id,
+                execution_runs,
+                source_execution_runs,
+                public_positions,
+            ),
         }
         if contact_policy.enabled(row.get("configuration_doc") or {}):
             judgments = {}

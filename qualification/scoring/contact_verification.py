@@ -66,6 +66,12 @@ _COUNTRY_ALIASES = {
     "great britain": "united kingdom",
     "uae": "united arab emirates",
 }
+_LOCATION_PART_ALIASES = {
+    ("US", "city", "new york"): "new york city",
+    ("PL", "city", "cracow"): "krakow",
+    ("PL", "region", "małopolskie"): "lesser poland voivodeship",
+    ("PL", "region", "malopolskie"): "lesser poland voivodeship",
+}
 _TITLE_EXPANSIONS = {
     "ceo": "chief executive officer",
     "coo": "chief operating officer",
@@ -146,6 +152,16 @@ def _norm_region(value: Any, country: Any) -> str:
         if state:
             return _norm(state)
     return _norm(text)
+
+
+def _norm_location_part(value: Any, country: Any, part: str) -> str:
+    normalized_country = _norm_country(country)
+    normalized = (
+        _norm_region(value, normalized_country) if part == "region" else _norm(value)
+    )
+    return _LOCATION_PART_ALIASES.get(
+        (normalized_country, part, normalized), normalized
+    )
 
 
 def _canonical_linkedin(value: Any) -> str:
@@ -674,7 +690,7 @@ def _profile_location(profile: Mapping[str, Any]) -> dict[str, str]:
     )
     return {
         "country": country,
-        "region": _norm_region(
+        "region": _norm_location_part(
             profile.get("region")
             or profile.get("state")
             or location.get("region")
@@ -682,8 +698,13 @@ def _profile_location(profile: Mapping[str, Any]) -> dict[str, str]:
             or parsed.get("state")
             or parsed.get("regionCode"),
             country,
+            "region",
         ),
-        "city": _norm(profile.get("city") or location.get("city") or parsed.get("city")),
+        "city": _norm_location_part(
+            profile.get("city") or location.get("city") or parsed.get("city"),
+            country,
+            "city",
+        ),
     }
 
 
@@ -697,11 +718,7 @@ def _location_check(claim: Mapping[str, Any], profile: Mapping[str, Any], icp: A
         return "fail", "contact_location_mismatch"
     for part in ("region", "city"):
         claimed_part = claimed.get(part)
-        expected = (
-            _norm_region(claimed_part, country)
-            if part == "region"
-            else _norm(claimed_part)
-        )
+        expected = _norm_location_part(claimed_part, country, part)
         if part == "region" and _text(claimed_part) and not expected:
             return "unknown", "contact_location_unverified"
         if expected:
@@ -723,10 +740,10 @@ def _location_check(claim: Mapping[str, Any], profile: Mapping[str, Any], icp: A
             continue
         if part == "country":
             normalize = _norm_country
-        elif part == "region":
-            normalize = lambda item: _norm_region(item, observed["country"])
         else:
-            normalize = _norm
+            normalize = lambda item: _norm_location_part(
+                item, observed["country"], part
+            )
         allowed_values = {
             normalize(item)
             for item in allowed

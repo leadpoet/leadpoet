@@ -81,6 +81,25 @@ def _profile(**updates: object) -> dict:
     return value
 
 
+def _parsed_location_profile(
+    *, country_code: str, raw: str, region: str, city: str
+) -> dict:
+    return _profile(
+        country=None,
+        region=None,
+        city=None,
+        location={
+            "countryCode": country_code,
+            "linkedinText": raw,
+            "parsed": {
+                "countryCode": country_code,
+                "state": region,
+                "city": city,
+            },
+        },
+    )
+
+
 def _source(profile: dict | None = None, **updates: object) -> dict:
     value = {
         "provider": "harvestapi",
@@ -428,6 +447,160 @@ def test_country_or_supported_city_mismatch_rejects() -> None:
 
     assert country["contact_verification"]["reason"] == "contact_location_mismatch"
     assert city["contact_verification"]["reason"] == "contact_location_mismatch"
+
+
+@pytest.mark.parametrize(
+    (
+        "country",
+        "country_code",
+        "claimed_region",
+        "claimed_city",
+        "provider_region",
+        "provider_city",
+        "raw_location",
+    ),
+    [
+        (
+            "United States of America",
+            "US",
+            "New York",
+            "New York",
+            "New York",
+            "New York City",
+            "New York, New York, United States",
+        ),
+        (
+            "United States of America",
+            "US",
+            "New York",
+            "New York City",
+            "New York",
+            "New York",
+            "New York City, New York, United States",
+        ),
+        (
+            "Poland",
+            "PL",
+            "Małopolskie",
+            "Cracow",
+            "Lesser Poland Voivodeship",
+            "Kraków",
+            "Cracow, Małopolskie, Poland",
+        ),
+        (
+            "Poland",
+            "PL",
+            "Lesser Poland Voivodeship",
+            "Kraków",
+            "Małopolskie",
+            "Cracow",
+            "Kraków, Lesser Poland Voivodeship, Poland",
+        ),
+    ],
+)
+def test_evidenced_location_aliases_verify_in_both_directions(
+    country: str,
+    country_code: str,
+    claimed_region: str,
+    claimed_city: str,
+    provider_region: str,
+    provider_city: str,
+    raw_location: str,
+) -> None:
+    company = _company(
+        contact=_contact(
+            location={
+                "country": country,
+                "region": claimed_region,
+                "city": claimed_city,
+            }
+        )
+    )
+    profile = _parsed_location_profile(
+        country_code=country_code,
+        raw=raw_location,
+        region=provider_region,
+        city=provider_city,
+    )
+    icp = _icp(
+        contact_geography={
+            "countries": [country],
+            "regions": [claimed_region],
+            "cities": [claimed_city],
+        }
+    )
+
+    result = _run(
+        company=company,
+        icp=icp,
+        source=_source(profile),
+        execute=ScriptedExecute({"zerobounce_validate": [_zero("valid")]}),
+    )
+
+    assert result["contact_qualified"] is True
+    assert result["contact_verification"]["reason"] == "contact_verified"
+
+
+@pytest.mark.parametrize(
+    ("claim_location", "provider_location"),
+    [
+        (
+            {"country": "US", "region": "New York", "city": "New York"},
+            {"country": "US", "region": "New York", "city": "Albany"},
+        ),
+        (
+            {"country": "PL", "region": "Małopolskie", "city": "Cracow"},
+            {"country": "PL", "region": "Silesian", "city": "Kraków"},
+        ),
+        (
+            {"country": "US", "region": "New York", "city": "New York"},
+            {"country": "CA", "region": "Ontario", "city": "New York City"},
+        ),
+        (
+            {"country": "CA", "region": "Ontario", "city": "New York"},
+            {"country": "CA", "region": "Ontario", "city": "New York City"},
+        ),
+    ],
+)
+def test_location_aliases_preserve_real_and_cross_country_mismatches(
+    claim_location: dict, provider_location: dict
+) -> None:
+    status, reason = contact_verification._location_check(
+        {"location": claim_location},
+        provider_location,
+        {"contact_geography": {}},
+    )
+
+    assert (status, reason) == ("fail", "contact_location_mismatch")
+
+
+@pytest.mark.parametrize(
+    "contact_geography",
+    [
+        {"countries": ["Poland"], "regions": ["Silesian"], "cities": []},
+        {"countries": ["Poland"], "regions": [], "cities": ["Warsaw"]},
+    ],
+)
+def test_location_aliases_do_not_bypass_required_geography(
+    contact_geography: dict,
+) -> None:
+    status, reason = contact_verification._location_check(
+        {
+            "location": {
+                "country": "Poland",
+                "region": "Małopolskie",
+                "city": "Cracow",
+            }
+        },
+        {
+            "country": "PL",
+            "region": "Lesser Poland Voivodeship",
+            "city": "Kraków",
+        },
+        {"contact_geography": contact_geography},
+    )
+
+    assert (status, reason) == ("fail", "contact_geography_mismatch")
 
 
 def test_missing_provider_location_is_unverified_not_a_mismatch() -> None:

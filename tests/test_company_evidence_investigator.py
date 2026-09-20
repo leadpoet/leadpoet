@@ -276,6 +276,10 @@ def test_repaired_stage_gap_gets_one_targeted_investigation(monkeypatch):
     receipt = result.details["investigation_receipt"]
     assert receipt["gate"] == "company_evidence_investigation"
     assert receipt["targets"] == ["stage"]
+    assert receipt["prior_decision"] == COMPANY_FIT_UNAVAILABLE
+    assert receipt["prior_dimension_decisions"]["stage"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
     assert receipt["claims"]["stage"] == _finding("stage")
 
 

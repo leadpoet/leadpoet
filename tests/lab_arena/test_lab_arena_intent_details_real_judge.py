@@ -266,6 +266,7 @@ def _local_responder(
                 + real_judge.PAGE_TEXT
                 + "</p><p>"
                 + LAUNCH_SENTENCE
+                + "</p><p>Acme Robotics sells a robotics fleet-management platform."
                 + "</p></body></html>"
             )
             return 200, {"content-type": "text/html; charset=utf-8"}, html.encode()

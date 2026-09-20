@@ -252,6 +252,237 @@ def test_model_declared_linkedin_final_url_is_not_trusted():
     ] == COMPANY_FIT_MISMATCH
 
 
+def _required_attribute_verdict(*, satisfied, url, quote):
+    return {
+        "observed_company_name": "First Capital REIT",
+        "observed_company_website": "https://fcr.ca/",
+        "observed_company_linkedin": "",
+        "attribute_satisfied": satisfied,
+        "required_attribute_evidence_url": url,
+        "required_attribute_evidence_quote": quote,
+        "reason": "required attribute check",
+    }
+
+
+def test_first_capital_invented_quote_uses_fetched_body_in_normal_repair(
+    monkeypatch,
+):
+    source_url = "https://fcr.ca/news/acquisition-agreement"
+    source_text = (
+        "First Capital REIT today announced that it entered into an agreement "
+        "to be acquired. Upon close of the transaction, the buyers will acquire "
+        "First Capital's assets."
+    )
+    responses = [
+        _required_attribute_verdict(
+            satisfied=True,
+            url=source_url,
+            quote="First Capital REIT completed the acquisition.",
+        ),
+        _required_attribute_verdict(
+            satisfied=False,
+            url=source_url,
+            quote=(
+                "First Capital REIT today announced that it entered into an "
+                "agreement to be acquired."
+            ),
+        ),
+    ]
+    prompts = []
+
+    async def provider(**kwargs):
+        prompts.append(kwargs["prompt"])
+        return responses.pop(0), ""
+
+    fetch = AsyncMock(return_value=(200, source_url, source_text))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", fetch)
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _company(
+            company_name="First Capital REIT",
+            company_website="https://fcr.ca/",
+        ),
+        _icp(
+            company_stage="",
+            required_attribute="Completed an acquisition in the last 12 months.",
+        ),
+    ))
+
+    assert result.decision == COMPANY_FIT_MISMATCH
+    assert fetch.await_count == 1
+    assert len(prompts) == 2
+    assert "<untrusted_required_attribute_source>" in prompts[1]
+    assert "entered into an agreement" in prompts[1]
+    assert result.details["required_attribute_grounding"]["status"] == "grounded"
+    assert "fcr.ca" not in str(result.details["required_attribute_grounding"])
+
+
+def test_valid_required_attribute_announcement_quote_is_grounded(monkeypatch):
+    source_url = "https://example.com/announcement"
+    quote = "Example Company announced a new regional office in Phoenix."
+    provider = AsyncMock(return_value=(
+        _required_attribute_verdict(
+            satisfied=True,
+            url=source_url,
+            quote=quote,
+        ) | {
+            "observed_company_name": "Example Company",
+            "observed_company_website": "https://example.com/",
+        },
+        "",
+    ))
+    fetch = AsyncMock(return_value=(200, source_url, f"News {quote} Details"))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", fetch)
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _company(),
+        _icp(
+            company_stage="",
+            required_attribute="Announced a new office in the last year.",
+        ),
+    ))
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert provider.await_count == 1
+    assert fetch.await_count == 1
+    assert result.details["required_attribute_grounding"]["status"] == "grounded"
+
+
+def test_required_attribute_source_outage_is_unavailable_and_cached(monkeypatch):
+    source_url = "https://example.com/announcement"
+    verdict = _required_attribute_verdict(
+        satisfied=True,
+        url=source_url,
+        quote="Example Company announced a new office.",
+    ) | {
+        "observed_company_name": "Example Company",
+        "observed_company_website": "https://example.com/",
+        "dimension_evidence": {
+            "required_attribute": {
+                "url": source_url,
+                "quote": "Stale nested quote must not survive.",
+            }
+        },
+    }
+    provider = AsyncMock(side_effect=[(dict(verdict), ""), (dict(verdict), "")])
+    fetch = AsyncMock(side_effect=asyncio.TimeoutError)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", fetch)
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _company(),
+        _icp(company_stage="", required_attribute="Announced a new office."),
+    ))
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert provider.await_count == 2
+    assert fetch.await_count == 1
+    grounding = result.details["required_attribute_grounding"]
+    assert grounding["status"] == "source_unavailable"
+    assert grounding["cache_hit"] is True
+    assert result.details["failure_reason_code"] == "provider_error"
+    assert result.details["dimension_evidence"]["required_attribute"] == {
+        "url": "",
+        "quote": "",
+    }
+
+
+def test_repeated_ungrounded_attribute_quote_is_retryable_malformed(monkeypatch):
+    source_url = "https://example.com/announcement"
+    verdict = _required_attribute_verdict(
+        satisfied=True,
+        url=source_url,
+        quote="Example Company completed the acquisition.",
+    ) | {
+        "observed_company_name": "Example Company",
+        "observed_company_website": "https://example.com/",
+    }
+    provider = AsyncMock(side_effect=[(dict(verdict), ""), (dict(verdict), "")])
+    fetch = AsyncMock(return_value=(
+        200,
+        source_url,
+        "Example Company entered into an acquisition agreement.",
+    ))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", fetch)
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _company(),
+        _icp(company_stage="", required_attribute="Completed an acquisition."),
+    ))
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert provider.await_count == 2
+    assert fetch.await_count == 1
+    assert result.details["failure_reason_code"] == "malformed_response"
+    assert result.details.get("failure_class") != "insufficient_fit_evidence"
+
+
+def test_required_attribute_grounding_cache_bounds_distinct_urls():
+    cache = {}
+    fetched_urls = []
+
+    async def fetch(_session, url):
+        fetched_urls.append(url)
+        return 200, url, "Example Company announced a new office."
+
+    async def run(url):
+        verdict = {
+            "attribute_satisfied": True,
+            "required_attribute_evidence_url": url,
+            "required_attribute_evidence_quote": (
+                "Example Company announced a new office."
+            ),
+        }
+        return await lead_scorer._ground_required_attribute_evidence(
+            verdict,
+            active_attribute=True,
+            source_cache=cache,
+        )
+
+    with patch.object(lead_scorer, "_fetch_bounded_html", fetch):
+        first, _ = asyncio.run(run("https://one.example/news"))
+        repeated, _ = asyncio.run(run("https://one.example/news"))
+        second, _ = asyncio.run(run("https://two.example/news"))
+        limited, _ = asyncio.run(run("https://three.example/news"))
+
+    assert len(fetched_urls) == 2
+    assert first[lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING]["status"] == "grounded"
+    assert repeated[lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING]["cache_hit"] is True
+    assert second[lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING]["status"] == "grounded"
+    assert limited[lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING]["status"] == "url_limit"
+    assert limited["attribute_satisfied"] is None
+
+
+def test_inactive_required_attribute_never_fetches_source():
+    fetch = AsyncMock(side_effect=AssertionError("source fetch must not run"))
+    verdict = {
+        "attribute_satisfied": True,
+        "required_attribute_evidence_url": "https://example.com/news",
+        "required_attribute_evidence_quote": "Example Company announced news.",
+        lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING: {"status": "grounded"},
+    }
+
+    with patch.object(lead_scorer, "_fetch_bounded_html", fetch):
+        resolved, repair_source = asyncio.run(
+            lead_scorer._ground_required_attribute_evidence(
+                verdict,
+                active_attribute=False,
+                source_cache={},
+            )
+        )
+
+    assert fetch.await_count == 0
+    assert repair_source == {}
+    assert lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING not in resolved
+
+
 @pytest.mark.parametrize(
     ("observed", "quote", "supported"),
     [
@@ -731,6 +962,15 @@ def test_company_research_prompt_selects_full_activity_and_current_stage(
         lead_scorer,
         "_refresh_linkedin_employee_size_observation",
         keep_observation,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "_fetch_bounded_html",
+        AsyncMock(return_value=(
+            200,
+            "https://example.com/manufacturing",
+            "Example Company opened a new switchgear factory.",
+        )),
     )
     result = asyncio.run(lead_scorer._llm_reverify_company(
         _company(industry="Hardware"),

@@ -950,6 +950,21 @@ def test_stage_decision_requires_category_specific_proof(
     assert result.details["dimension_decisions"]["stage"] == expected
 
 
+def test_ownership_stage_proof_prefers_private_equity_over_acquired():
+    private_equity_quote = (
+        "Acme was acquired by a private-equity firm that is its controlling owner."
+    )
+
+    assert _stage_quote_supports_observation(
+        "private equity", private_equity_quote
+    )
+    assert not _stage_quote_supports_observation("acquired", private_equity_quote)
+    assert _stage_quote_supports_observation(
+        "acquired",
+        "Acme was acquired by Oracle and is now an Oracle subsidiary.",
+    )
+
+
 @pytest.mark.parametrize(
     ("observed", "quote", "expected"),
     [
@@ -1988,7 +2003,7 @@ def test_industry_prompt_keeps_requested_value_in_an_inert_data_boundary(
     assert '"industry_activity_role":"unresolved"' in prompt
     assert "classify the cited company's relationship to the requested" in prompt
     assert "not to any unrelated product or service it supplies" in prompt
-    assert "Use the latest completed funding round or current ownership" in prompt
+    assert "then select the newest applicable state" in prompt
     assert "older Seed, Series A, or Series B quote does not establish" in prompt
     assert "funding amount or total raised" in prompt
     assert 'a "Privately Held" label' in prompt
@@ -2087,8 +2102,17 @@ def test_company_fit_accepts_exact_identity_on_verified_root_child_subdomain(
     async def provider(**_kwargs):
         return copy.deepcopy(verdict), ""
 
+    async def evidence_source(_session, url):
+        assert url == "https://investors.academy.com/news/expansion"
+        return (
+            200,
+            url,
+            "Academy opened two new stores and announced nine more openings.",
+        )
+
     monkeypatch.setattr(scorer, "verify_company_exists", homepage)
     monkeypatch.setattr(scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(scorer, "_fetch_bounded_html", evidence_source)
     result = asyncio.run(
         _verify_company_fit(
             company,
@@ -2542,6 +2566,12 @@ def test_shared_verifier_persists_complete_dimension_receipt(monkeypatch):
                     "stage": "match",
                 },
                 "required_attribute_decision": "match",
+                "required_attribute_grounding": {
+                    "status": "grounded",
+                    "source_url_sha256": "source-hash",
+                    "final_url_sha256": "final-hash",
+                    "cache_hit": False,
+                },
                 "identity_decision": "match",
                 "identity_receipt": {
                     "decision": "match",
@@ -2559,7 +2589,12 @@ def test_shared_verifier_persists_complete_dimension_receipt(monkeypatch):
                         "url": f"https://evidence.example/{dimension}",
                         "quote": f"Verified {dimension}",
                     }
-                    for dimension in ("employee_size", "industry", "geography")
+                    for dimension in (
+                        "employee_size",
+                        "industry",
+                        "geography",
+                        "required_attribute",
+                    )
                 },
                 "provider_observations": {
                     "observed_employee_count": "51-200",
@@ -2575,7 +2610,10 @@ def test_shared_verifier_persists_complete_dimension_receipt(monkeypatch):
     result = asyncio.run(
         _verify_company_fit(
             _company(linkedin="https://linkedin.com/company/acme"),
-            _icp(company_stage=""),
+            _icp(
+                company_stage="",
+                required_attribute="Uses workflow software",
+            ),
             0.0,
             1.0,
             set(),
@@ -2599,6 +2637,15 @@ def test_shared_verifier_persists_complete_dimension_receipt(monkeypatch):
         "geography",
         "stage",
     }
+    assert receipt["supporting_receipts"] == [
+        {
+            "gate": "required_attribute_source",
+            "status": "grounded",
+            "source_url_sha256": "source-hash",
+            "final_url_sha256": "final-hash",
+            "cache_hit": False,
+        }
+    ]
 
 
 def test_homepage_unavailable_can_be_rescued_by_complete_web_receipt(monkeypatch):

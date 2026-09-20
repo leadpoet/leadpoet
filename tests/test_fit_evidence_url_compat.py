@@ -284,6 +284,15 @@ def test_company_fit_accepts_complete_pdf_evidence_without_spurious_retries(monk
     monkeypatch.setattr(
         "qualification.scoring.lead_scorer._request_company_reverify_json", request
     )
+
+    async def source_body(_session, url):
+        assert url == pdf_url
+        return 200, url, "Acme supplies workflow software."
+
+    monkeypatch.setattr(
+        "qualification.scoring.lead_scorer._fetch_bounded_html",
+        source_body,
+    )
     result = asyncio.run(_llm_reverify_company(
         _company(),
         _icp().model_copy(update={"required_attribute": "Supplies workflow software"}),

@@ -116,13 +116,6 @@ def main(argv=None) -> int:
     print("lab arena service identity", {k: v for k, v in checks.items() if k != "database_identity"}, "role", checks["database_identity"].get("current_user"))
     if args.check_only:
         return 0
-    if not args.no_driver:
-        initial = drive_once(service)
-        if "failed" in initial:
-            print("initial driver tick", initial, file=sys.stderr)
-        elif initial != "idle":
-            print("initial driver tick", initial)
-
     stop = threading.Event()
 
     def review_submissions() -> None:
@@ -142,6 +135,13 @@ def main(argv=None) -> int:
         review_thread.start()
 
     def driver() -> None:
+        # A full scoring/publication cycle can take longer than API startup.
+        # Run the initial cycle in the existing worker, just like later ticks.
+        initial = drive_once(service)
+        if "failed" in initial:
+            print("initial driver tick", initial, file=sys.stderr)
+        elif initial != "idle":
+            print("initial driver tick", initial)
         while not stop.wait(max(5, int(args.tick_seconds))):
             outcome = drive_once(service)
             if "failed" in outcome:

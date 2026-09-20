@@ -74,6 +74,10 @@ def test_leadership_rules_reach_both_prompt_stages() -> None:
     for prompt in prompts:
         assert "reliable independent publisher can establish" in prompt
         assert "ordinary employee move does not automatically establish" in prompt
+        assert "retirement of a senior division or function leader" in prompt
+        assert "A third-party issuer's release" in prompt
+        assert "`Announced` does not by itself require" in prompt
+        assert "company name in an old\n        or undated biography" in prompt
         assert "different company fails the entity check" in prompt
         assert "Preserve every explicit" in prompt
         assert "company involved in the CLAIMED EVENT" in prompt

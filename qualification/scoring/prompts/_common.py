@@ -190,13 +190,21 @@ PART_A_BLOCK = """  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
         evidence from a reliable independent publisher can establish the
         appointment or departure of a genuine leader at the target company.
         A business-unit or function leader can satisfy broad leadership-change
-        wording.
+        wording. The retirement of a senior division or function leader is a
+        departure and can satisfy that wording. A third-party issuer's release,
+        including a board-appointment biography, can prove that retirement when
+        it explicitly states the senior role and recent departure from the target
+        company. `Announced` does not by itself require the target company to be
+        the issuer; require first-party evidence only when the target criterion
+        explicitly says so.
       * An ordinary employee move does not automatically establish a
         leadership change. Exact evidence must establish both the person's
         leadership role and the change at the target company. A true departure
-        at a different company fails the entity check. Preserve every explicit
-        role, seniority, source or issuer, and organizational-scope constraint
-        in the target ICP signal.
+        at a different company fails the entity check. A company name in an old
+        or undated biography is not a recent leadership change without an exact
+        appointment, departure, or retirement and evidence that satisfies the
+        target time window. Preserve every explicit role, seniority, source or
+        issuer, and organizational-scope constraint in the target ICP signal.
       * "Company X offers product Y" is NOT the same as "Company X hires for
         role Y". Selling an AI BDR is the opposite signal of hiring BDRs.
       * "Company X had a funding round" is NOT the same as "Company X is

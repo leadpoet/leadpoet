@@ -194,6 +194,9 @@ _GREENHOUSE_EXACT_POSTING_PATH_RE = re.compile(
     r"^/(?P<board>[A-Za-z0-9_-]{1,100})/jobs/"
     r"(?P<posting>[0-9]{5,20})/?$"
 )
+_GREENHOUSE_BOARD_ROOT_PATH_RE = re.compile(
+    r"^/(?P<board>[A-Za-z0-9_-]{1,100})/?$"
+)
 _ASHBY_EXACT_POSTING_PATH_RE = re.compile(
     r"^/(?P<board>[A-Za-z0-9_-]{1,100})/"
     r"(?P<posting>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
@@ -223,27 +226,29 @@ def _is_job_board_url(url: str) -> bool:
 
 
 def _is_careers_index_url(url: str) -> bool:
-    """Return true only for a top-level careers or jobs index."""
+    """Return true only for a bounded careers or jobs index shape."""
 
     try:
         parsed = urlsplit(url)
     except (TypeError, ValueError):
         return False
     segments = [segment.casefold() for segment in parsed.path.split("/") if segment]
+    host = (parsed.hostname or "").casefold()
     return bool(
         parsed.scheme == "https"
-        and parsed.hostname
+        and host
         and not parsed.query
         and not parsed.fragment
         and segments
-        and segments[-1] in {"careers", "jobs"}
+        and (
+            segments[-1] in {"careers", "jobs"}
+            or (host.startswith("careers.") and len(segments) == 1)
+        )
     )
 
 
-def _careers_link_evidence(body: str, source_url: str) -> tuple[str, int]:
-    """Return observed ATS or same-index child links as a bounded prefix."""
-
-    from html.parser import HTMLParser
+def _visible_page_links(body: str) -> list[tuple[str, str]]:
+    """Parse a bounded set of visible links from one rendered HTML page."""
 
     class Links(HTMLParser):
         _HIDDEN = frozenset({"script", "style", "template", "noscript"})
@@ -268,7 +273,8 @@ def _careers_link_evidence(body: str, source_url: str) -> tuple[str, int]:
 
         def handle_endtag(self, tag):
             if tag == "a" and self.href is not None:
-                self.links.append((self.href, " ".join(self.parts)))
+                if len(self.links) < 500:
+                    self.links.append((self.href, " ".join(self.parts)))
                 self.href = None
                 self.parts = []
             if tag in self._HIDDEN and self.hidden_depth:
@@ -276,11 +282,17 @@ def _careers_link_evidence(body: str, source_url: str) -> tuple[str, int]:
 
     document = Links()
     document.feed(body)
+    return document.links
+
+
+def _careers_link_evidence(body: str, source_url: str) -> tuple[str, int]:
+    """Return observed ATS or same-index child links as a bounded prefix."""
+
     source = urlsplit(source_url)
     source_path = source.path.rstrip("/")
     rows: list[tuple[str, str]] = []
     seen: set[str] = set()
-    for href, label in document.links:
+    for href, label in _visible_page_links(body):
         title = " ".join(label.split())[:300]
         if not title:
             continue
@@ -321,6 +333,37 @@ def _careers_link_evidence(body: str, source_url: str) -> tuple[str, int]:
     text = "Observed links on the rendered first-party careers page:\n"
     text += "\n".join(f"- {title} ({url})" for title, url in rows)
     return text, len(rows)
+
+
+def _linked_greenhouse_board_url(
+    body: str,
+    source_url: str,
+    *,
+    company_domain: str,
+    company_name: str,
+) -> str:
+    """Return one exact company-bound Greenhouse root linked by the page."""
+
+    for href, _label in _visible_page_links(body):
+        try:
+            candidate = canonical_candidate_prompt_url(
+                urljoin(source_url, href.strip()),
+                "rendered_job_board.url",
+            )
+        except (TypeError, ValueError):
+            continue
+        identity = _greenhouse_board_identity(candidate)
+        if identity is None or not _ats_tenant_matches_company(
+            identity,
+            company_domain=company_domain,
+            company_name=company_name,
+        ):
+            continue
+        parsed = urlsplit(candidate)
+        return urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path, parsed.query, "")
+        )
+    return ""
 
 
 class _CareersIndexReceipt(TypedDict):
@@ -477,6 +520,49 @@ def _greenhouse_posting_identity(source_url: str) -> tuple[str, str] | None:
     if query and query != [("gh_jid", posting)]:
         return None
     return match.group("board"), posting
+
+
+def _greenhouse_board_identity(source_url: str) -> str | None:
+    """Return an exact Greenhouse board tenant from a human board root."""
+
+    try:
+        canonical = canonical_candidate_prompt_url(
+            source_url,
+            "rendered_job_board.url",
+        )
+        parsed = urlsplit(canonical)
+    except (TypeError, ValueError):
+        return None
+    if (
+        _GREENHOUSE_EXACT_POSTING_HOST_RE.fullmatch(
+            (parsed.hostname or "").casefold()
+        )
+        is None
+        or parsed.fragment
+    ):
+        return None
+    match = _GREENHOUSE_BOARD_ROOT_PATH_RE.fullmatch(parsed.path)
+    if match is None:
+        return None
+    query = parse_qsl(parsed.query, keep_blank_values=True)
+    if query and query != [("error", "true")]:
+        return None
+    return match.group("board").casefold()
+
+
+def _greenhouse_board_api_url(source_url: str) -> str:
+    """Return the fixed-host public list API for one exact board root."""
+
+    board = _greenhouse_board_identity(source_url)
+    if board is None:
+        return ""
+    return urlunsplit((
+        "https",
+        "boards-api.greenhouse.io",
+        "/v1/boards/" + quote(board, safe="-._~") + "/jobs",
+        "content=true",
+        "",
+    ))
 
 
 def _greenhouse_job_api_url(source_url: str) -> str:
@@ -833,6 +919,142 @@ async def _scrape_greenhouse_job(source_url: str) -> Dict[str, Any]:
         "ok": False,
         "stage": "greenhouse_api_exhausted",
         "content": "",
+        "error": history[-1][1] if history else "not_attempted",
+        "stage_history": history,
+    }
+
+
+async def _scrape_linked_greenhouse_board(
+    source_url: str,
+    *,
+    company_domain: str,
+    company_name: str,
+) -> Dict[str, Any]:
+    """Enumerate one first-party-linked, company-bound Greenhouse board."""
+
+    board = _greenhouse_board_identity(source_url)
+    transport_url = _greenhouse_board_api_url(source_url)
+    if (
+        board is None
+        or not transport_url
+        or not _ats_tenant_matches_company(
+            board,
+            company_domain=company_domain,
+            company_name=company_name,
+        )
+    ):
+        return {
+            "ok": False,
+            "stage": "greenhouse_board_not_applicable",
+            "content": "",
+            "observed_job_link_count": 0,
+            "error": "unbound board",
+        }
+    api_key = os.environ.get("SCRAPINGDOG_API_KEY") or os.environ.get(
+        "QUALIFICATION_SCRAPINGDOG_API_KEY"
+    )
+    if not api_key:
+        return {
+            "ok": False,
+            "stage": "greenhouse_board_no_sd_key",
+            "content": "",
+            "observed_job_link_count": 0,
+            "error": "missing key",
+        }
+    history: List[tuple[str, str]] = []
+    async with httpx.AsyncClient(timeout=SCRAPINGDOG_TERMINAL_TIMEOUT_S) as cli:
+        for attempt, extra in enumerate(({}, {"premium": "true"}), start=1):
+            try:
+                response = await cli.get(
+                    "https://api.scrapingdog.com/scrape",
+                    headers={"Accept": "application/json"},
+                    params={
+                        "api_key": api_key,
+                        "url": transport_url,
+                        "dynamic": "false",
+                        **extra,
+                    },
+                )
+            except httpx.TimeoutException:
+                history.append((f"attempt_{attempt}", "client_deadline"))
+                continue
+            except httpx.TransportError as exc:
+                history.append((
+                    f"attempt_{attempt}",
+                    "transport_error:" + type(exc).__name__,
+                ))
+                continue
+            status = int(response.status_code)
+            history.append((f"attempt_{attempt}", f"http_{status}"))
+            if status != 200:
+                if status in {400, 401, 402, 403, 404, 410, 422}:
+                    break
+                continue
+            try:
+                payload = response.json()
+            except (TypeError, ValueError):
+                history[-1] = (f"attempt_{attempt}", "invalid_json")
+                continue
+            jobs = payload.get("jobs") if isinstance(payload, Mapping) else None
+            if not isinstance(jobs, list):
+                history[-1] = (f"attempt_{attempt}", "jobs_missing")
+                continue
+            rows: list[str] = []
+            for job in jobs[:200]:
+                if not isinstance(job, Mapping):
+                    continue
+                posting = str(job.get("id") or "")
+                absolute_url = job.get("absolute_url")
+                title = job.get("title")
+                if (
+                    not posting.isdigit()
+                    or not isinstance(absolute_url, str)
+                    or _greenhouse_posting_identity(absolute_url)
+                    != (board, posting)
+                    or not isinstance(title, str)
+                    or not title.strip()
+                    or "\x00" in title
+                ):
+                    continue
+                fields = [title.strip()]
+                location = job.get("location")
+                if isinstance(location, Mapping):
+                    location_name = location.get("name")
+                    if (
+                        isinstance(location_name, str)
+                        and location_name.strip()
+                        and "\x00" not in location_name
+                    ):
+                        fields.append(location_name.strip())
+                for date_field in ("first_published", "updated_at"):
+                    published = job.get(date_field)
+                    if (
+                        isinstance(published, str)
+                        and published.strip()
+                        and "\x00" not in published
+                    ):
+                        fields.append(published.strip())
+                fields.append(absolute_url)
+                rows.append(" | ".join(fields))
+            if not rows:
+                history[-1] = (f"attempt_{attempt}", "jobs_empty")
+                continue
+            history[-1] = (f"attempt_{attempt}", "ok")
+            content = "Observed jobs on the linked Greenhouse board:\n"
+            content += "\n".join(f"- {row}" for row in rows)
+            return {
+                "ok": True,
+                "stage": f"sd:greenhouse_board_api:{attempt}",
+                "content": content[:MAX_SCRAPED_CHARS],
+                "observed_job_link_count": len(rows),
+                "error": "",
+                "stage_history": history,
+            }
+    return {
+        "ok": False,
+        "stage": "greenhouse_board_api_exhausted",
+        "content": "",
+        "observed_job_link_count": 0,
         "error": history[-1][1] if history else "not_attempted",
         "stage_history": history,
     }
@@ -1426,7 +1648,22 @@ def _exact_ats_tenant_binds_company(
         identity = _lever_posting_identity(source_url)
     if identity is None:
         return False
-    tenant = re.sub(r"[^a-z0-9]+", "", identity[0].casefold())
+    return _ats_tenant_matches_company(
+        identity[0],
+        company_domain=company_domain,
+        company_name=company_name,
+    )
+
+
+def _ats_tenant_matches_company(
+    tenant_value: str,
+    *,
+    company_domain: str,
+    company_name: str,
+) -> bool:
+    """Match one normalized ATS tenant to the verified company identity."""
+
+    tenant = re.sub(r"[^a-z0-9]+", "", tenant_value.casefold())
     registrable_label = str(company_domain or "").casefold().split(".", 1)[0]
     expected = {
         re.sub(r"[^a-z0-9]+", "", registrable_label),
@@ -1621,6 +1858,8 @@ async def _scrape_sd_hardened(
     url: str,
     *,
     prefer_dynamic_job_index: bool = False,
+    trusted_company_domain: str = "",
+    trusted_company_name: str = "",
 ) -> Dict[str, Any]:
     """Content-driven progressive escalation.
 
@@ -1698,6 +1937,27 @@ async def _scrape_sd_hardened(
                     listing_receipt: Optional[_CareersIndexReceipt] = None
                     if prefer_dynamic_job_index:
                         listing_text, listing_count = _careers_link_evidence(body, url)
+                        linked_board_url = _linked_greenhouse_board_url(
+                            body,
+                            url,
+                            company_domain=trusted_company_domain,
+                            company_name=trusted_company_name,
+                        )
+                        if not listing_count and linked_board_url:
+                            board = await _scrape_linked_greenhouse_board(
+                                linked_board_url,
+                                company_domain=trusted_company_domain,
+                                company_name=trusted_company_name,
+                            )
+                            history.append((
+                                "linked_greenhouse_board",
+                                str(board.get("stage") or "unknown"),
+                            ))
+                            if board.get("ok"):
+                                listing_text = str(board.get("content") or "")
+                                listing_count = int(
+                                    board.get("observed_job_link_count") or 0
+                                )
                         if not listing_count and tier_name == "dynamic_render":
                             last_verdict = "job_links_absent"
                             history[-1] = (tier_name, last_verdict)
@@ -2721,6 +2981,8 @@ async def _fetch_sd_then_exa(
     max_chars: int = MAX_SCRAPED_CHARS,
     *,
     prefer_dynamic_job_index: bool = False,
+    trusted_company_domain: str = "",
+    trusted_company_name: str = "",
 ) -> Dict[str, Any]:
     """For each supplied URL: try Scrapingdog (hardened) first; if SD fails,
     fall back to Exa Contents.  Returns the same {"results", "statuses"}
@@ -2915,6 +3177,8 @@ async def _fetch_sd_then_exa(
             sd = await _scrape_sd_hardened(
                 url,
                 prefer_dynamic_job_index=True,
+                trusted_company_domain=trusted_company_domain,
+                trusted_company_name=trusted_company_name,
             )
         else:
             sd = await _scrape_sd_hardened(url)
@@ -3567,6 +3831,12 @@ async def verify_three_stage(
         fetched_contents = await _fetch_sd_then_exa(
             row["claimed_source_urls"],
             prefer_dynamic_job_index=True,
+            trusted_company_domain=str(
+                verified_identity_context.get("observed_domain") or ""
+            ),
+            trusted_company_name=str(
+                verified_identity_context.get("observed_name") or ""
+            ),
         )
     else:
         fetched_contents = await _fetch_sd_then_exa(row["claimed_source_urls"])

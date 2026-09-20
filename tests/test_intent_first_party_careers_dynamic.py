@@ -6,6 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from qualification.scoring import competition
 from qualification.scoring import intent_verification_three_stage as intent
 from qualification.scoring import verification_helpers
 
@@ -96,6 +97,13 @@ def _verdict(source_url: str, status: str, quote: str = "") -> dict:
             "https://divergeit.com/careers/",
             "Dedicated Support Engineer",
         ),
+        (
+            "synoptek",
+            "Synoptek",
+            "synoptek.com",
+            "https://careers.synoptek.com/synoptek/",
+            "Azure Solutions | USA | July 9",
+        ),
     ],
 )
 async def test_full_verifier_recovers_rendered_first_party_job_listings(
@@ -104,7 +112,11 @@ async def test_full_verifier_recovers_rendered_first_party_job_listings(
     client = _ScrapingDogClient([
         httpx.Response(
             200,
-            text=_html(f"{label}_dynamic_sanitized.html"),
+            text=(
+                _html(f"{label}_dynamic_sanitized.html")
+                + (" Current openings published by the company." * 100
+                   if label == "synoptek" else "")
+            ),
             headers={},
         ),
     ])
@@ -154,6 +166,210 @@ async def test_full_verifier_recovers_rendered_first_party_job_listings(
         "dynamic": "true",
         "wait": "5000",
     }
+    if label == "synoptek":
+        assert (
+            "Network Administrator | Las Vegas, United States | August 18"
+            in prompts[1]
+        )
+        assert (
+            "Salesforce Functional Consultant | Glendale, United States | August 17"
+            in prompts[1]
+        )
+
+
+def test_verified_careers_subdomain_tenant_has_job_board_source_shape():
+    source_url = "https://careers.synoptek.com/synoptek/"
+
+    assert intent._is_careers_index_url(source_url)
+    assert competition._evidence_source(
+        source_url,
+        company_website="https://www.synoptek.com/",
+    ) == "job_board"
+    assert competition._evidence_source(
+        "https://careers.other.example/synoptek/",
+        company_website="https://www.synoptek.com/",
+    ) == "news"
+
+
+@pytest.mark.asyncio
+async def test_synoptek_unproved_exact_count_stays_rejected(monkeypatch):
+    source_url = "https://careers.synoptek.com/synoptek/"
+    client = _ScrapingDogClient([
+        httpx.Response(
+            200,
+            text=(
+                _html("synoptek_dynamic_sanitized.html")
+                + (" Current openings published by Synoptek." * 100)
+            ),
+            headers={},
+        ),
+    ])
+    prompts = []
+
+    async def call_openrouter(_client, _model, prompt):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return _verdict(source_url, "unable_to_verify")
+        return _verdict(source_url, "partially_supported")
+
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", "test")
+    monkeypatch.setattr(intent.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(intent, "_call_openrouter", call_openrouter)
+
+    result = await intent.verify_three_stage(
+        None,
+        company_name="Synoptek",
+        company_linkedin="https://www.linkedin.com/company/synoptek",
+        company_website="https://synoptek.com",
+        source_url=source_url,
+        miner_claim="Synoptek has exactly 14 United States openings.",
+        target_signal_text="Cloud OR infrastructure OR implementation role",
+        evidence_type="HIRING",
+        declared_source="job_board",
+        stage1_soft_reject=True,
+        company_quality=True,
+        verified_company_identity=_identity("Synoptek", "synoptek.com"),
+        integrity_policy=True,
+    )
+
+    assert len(prompts) == 2
+    assert result["client_ready"] is False
+    assert result["decision"] == "review"
+    assert result["rejection_reason"] == "stage3_review"
+
+
+@pytest.mark.asyncio
+async def test_first_party_linked_greenhouse_root_enumerates_bound_jobs(
+    monkeypatch,
+):
+    source_url = "https://www.trace3.com/careers"
+    board_payload = {
+        "jobs": [
+            {
+                "id": 8119730,
+                "title": "Sr. Solutions Architect | Security",
+                "absolute_url": (
+                    "https://job-boards.greenhouse.io/trace3/jobs/8119730"
+                ),
+                "location": {"name": "Remote, United States"},
+                "first_published": "2026-09-18T10:30:00-07:00",
+            },
+            {
+                "id": 8104120,
+                "title": "Atlan Implementation Project Manager",
+                "absolute_url": (
+                    "https://job-boards.greenhouse.io/trace3/jobs/8104120"
+                ),
+                "location": {"name": "Irvine, California"},
+                "first_published": "2026-09-15T09:00:00-07:00",
+            },
+        ],
+    }
+    client = _ScrapingDogClient([
+        httpx.Response(
+            200,
+            text=(
+                _html("trace3_board_root_sanitized.html")
+                + (" Current public careers information." * 100)
+            ),
+            headers={},
+        ),
+        httpx.Response(200, json=board_payload, headers={}),
+    ])
+    prompts = []
+
+    async def call_openrouter(_client, _model, prompt):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return _verdict(source_url, "unable_to_verify")
+        return _verdict(
+            source_url,
+            "supported",
+            "Sr. Solutions Architect | Security",
+        )
+
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", "test")
+    monkeypatch.setattr(intent.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(intent, "_call_openrouter", call_openrouter)
+
+    result = await intent.verify_three_stage(
+        None,
+        company_name="Trace3",
+        company_linkedin="https://www.linkedin.com/company/trace3",
+        company_website="https://trace3.com",
+        source_url=source_url,
+        miner_claim="The company has a current technical opening.",
+        target_signal_text="Cloud OR infrastructure OR implementation OR security role",
+        evidence_type="HIRING",
+        declared_source="job_board",
+        stage1_soft_reject=True,
+        company_quality=True,
+        verified_company_identity=_identity("Trace3", "trace3.com"),
+        integrity_policy=True,
+    )
+
+    assert result["client_ready"] is True
+    assert result["job_publisher_relationship"] == "verified"
+    assert result["verified_job_source_urls"] == [source_url]
+    assert len(client.calls) == 2
+    assert client.calls[1][1]["params"] == {
+        "api_key": "test",
+        "url": (
+            "https://boards-api.greenhouse.io/v1/boards/trace3/jobs"
+            "?content=true"
+        ),
+        "dynamic": "false",
+    }
+    assert "Remote, United States" in prompts[1]
+    assert "2026-09-18T10:30:00-07:00" in prompts[1]
+    assert "Irvine, California" in prompts[1]
+
+
+@pytest.mark.asyncio
+async def test_linked_greenhouse_empty_board_returns_no_listing(monkeypatch):
+    client = _ScrapingDogClient([
+        httpx.Response(200, json={"jobs": []}, headers={}),
+        httpx.Response(200, json={"jobs": []}, headers={}),
+    ])
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", "test")
+    monkeypatch.setattr(intent.httpx, "AsyncClient", lambda **_kwargs: client)
+
+    result = await intent._scrape_linked_greenhouse_board(
+        "https://job-boards.greenhouse.io/trace3?error=true",
+        company_domain="trace3.com",
+        company_name="Trace3",
+    )
+
+    assert result["ok"] is False
+    assert result["observed_job_link_count"] == 0
+    assert result["stage"] == "greenhouse_board_api_exhausted"
+    assert len(client.calls) == 2
+
+
+def test_linked_board_rejects_untrusted_and_misbound_roots():
+    source_url = "https://www.trace3.com/careers"
+    untrusted = (
+        '<a href="https://attacker.example/trace3?error=true">Jobs</a>'
+    )
+    misbound = (
+        '<a href="https://job-boards.greenhouse.io/acme?error=true">Jobs</a>'
+    )
+
+    assert intent._linked_greenhouse_board_url(
+        untrusted,
+        source_url,
+        company_domain="trace3.com",
+        company_name="Trace3",
+    ) == ""
+    assert intent._linked_greenhouse_board_url(
+        misbound,
+        source_url,
+        company_domain="trace3.com",
+        company_name="Trace3",
+    ) == ""
+    assert intent._greenhouse_board_identity(
+        "https://job-boards.greenhouse.io/trace3?next=https://attacker.example"
+    ) is None
 
 
 @pytest.mark.asyncio
@@ -431,4 +647,7 @@ def test_dynamic_recovery_scope_excludes_exact_postings_and_queries():
     )
     assert not intent._is_careers_index_url(
         "https://example.com/careers?department=engineering"
+    )
+    assert not intent._is_careers_index_url(
+        "https://careers.example.com/tenant/jobs/12345"
     )

@@ -542,6 +542,8 @@ def _evidence_source(url: str, *, company_website: str) -> str:
         return "github"
     if any(marker in path for marker in ("/jobs", "/job/", "/careers")):
         return "job_board"
+    if company_hostname and hostname == "careers." + company_hostname:
+        return "job_board"
     if company_hostname and (
         hostname == company_hostname or hostname.endswith("." + company_hostname)
     ):

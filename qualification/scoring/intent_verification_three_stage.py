@@ -66,7 +66,7 @@ import re
 import time
 from datetime import date
 from typing import Any, Dict, List, Mapping, Optional
-from urllib.parse import parse_qsl, quote, unquote, urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote, urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
 
@@ -219,6 +219,77 @@ def _looks_like_job_body(text: str) -> bool:
 def _is_job_board_url(url: str) -> bool:
     host = _host(url)
     return any(h in host for h in JOB_BOARD_HOSTS)
+
+
+def _is_careers_index_url(url: str) -> bool:
+    """Return true only for a top-level careers or jobs index."""
+
+    try:
+        parsed = urlsplit(url)
+    except (TypeError, ValueError):
+        return False
+    segments = [segment.casefold() for segment in parsed.path.split("/") if segment]
+    return bool(
+        parsed.scheme == "https"
+        and parsed.hostname
+        and not parsed.query
+        and not parsed.fragment
+        and segments
+        and segments[-1] in {"careers", "jobs"}
+    )
+
+
+def _careers_link_evidence(body: str, source_url: str) -> tuple[str, int]:
+    """Return observed ATS or same-index child links as a bounded prefix."""
+
+    from bs4 import BeautifulSoup
+
+    document = BeautifulSoup(body, "html.parser")
+    source = urlsplit(source_url)
+    source_path = source.path.rstrip("/")
+    rows: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for anchor in document.find_all("a", href=True):
+        title = " ".join(anchor.get_text(" ", strip=True).split())[:300]
+        if not title:
+            continue
+        try:
+            candidate = canonical_candidate_prompt_url(
+                urljoin(source_url, str(anchor.get("href") or "").strip()),
+                "rendered_job.url",
+            )
+            parsed = urlsplit(candidate)
+        except (TypeError, ValueError):
+            continue
+        exact_ats_posting = bool(
+            _greenhouse_posting_identity(candidate)
+            or _ashby_posting_identity(candidate)
+            or _lever_posting_identity(candidate)
+            or _workable_markdown_url(candidate)
+            or _workday_cxs_url(candidate)
+        )
+        same_index_child = bool(
+            parsed.hostname == source.hostname
+            and source_path
+            and parsed.path.rstrip("/") != source_path
+            and parsed.path.startswith(source_path + "/")
+        )
+        if not exact_ats_posting and not same_index_child:
+            continue
+        canonical = urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path, parsed.query, "")
+        )
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        rows.append((title, canonical))
+        if len(rows) >= 200:
+            break
+    if not rows:
+        return "", 0
+    text = "Observed links on the rendered first-party careers page:\n"
+    text += "\n".join(f"- {title} ({url})" for title, url in rows)
+    return text, len(rows)
 
 
 def _workday_cxs_url(source_url: str) -> str:
@@ -1417,7 +1488,11 @@ async def _try_wayback(url: str) -> Dict[str, Any]:
                 "content": "", "error": f"{type(e).__name__}: {str(e)[:80]}"}
 
 
-async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
+async def _scrape_sd_hardened(
+    url: str,
+    *,
+    prefer_dynamic_job_index: bool = False,
+) -> Dict[str, Any]:
     """Content-driven progressive escalation.
 
     Starts with the cheapest ScrapingDog call (baseline) and escalates only
@@ -1450,7 +1525,12 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
     last_verdict: str = "no_tier_attempted"
 
     async with httpx.AsyncClient() as cli:
-        for tier_name, extra in _SD_TIERS:
+        tiers = (
+            (_SD_TIERS[1], _SD_TIERS[0])
+            if prefer_dynamic_job_index
+            else _SD_TIERS
+        )
+        for tier_name, extra in tiers:
             tier_timeout = _SD_TIER_TIMEOUT.get(tier_name, SCRAPE_TIMEOUT)
             params = {**base_params, **extra}
             started = time.monotonic()
@@ -1485,6 +1565,13 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
                     _safe_sd_request_id(r),
                 )
                 if verdict == "ok":
+                    listing_text = ""
+                    if prefer_dynamic_job_index and tier_name == "dynamic_render":
+                        listing_text, listing_count = _careers_link_evidence(body, url)
+                        if not listing_count:
+                            last_verdict = "job_links_absent"
+                            history[-1] = (tier_name, last_verdict)
+                            continue
                     source_publication_date = _published_date_from_html(body, url)
                     # Extract article body from raw HTML before truncation.
                     # Removes nav/sidebar/footer/related-posts that otherwise
@@ -1494,10 +1581,14 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
                         body = extract_article_body(body)
                     except Exception:
                         pass  # fall through with original content
+                    if listing_text:
+                        body = listing_text + "\n\n" + body
                     return {"ok": True, "stage": f"sd:{tier_name}",
                             "content": body[:MAX_SCRAPED_CHARS],
                             "source_publication_date": source_publication_date,
                             "error": None, "stage_history": history}
+                if prefer_dynamic_job_index and tier_name == "dynamic_render":
+                    continue
                 if not _should_escalate_sd_response(verdict, tier_name):
                     break
             except httpx.TimeoutException:
@@ -1510,6 +1601,8 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
                     tier_timeout,
                     int((time.monotonic() - started) * 1000),
                 )
+                if prefer_dynamic_job_index and tier_name == "dynamic_render":
+                    continue
                 break
             except httpx.TransportError as e:
                 last_verdict = f"transport_error:{type(e).__name__}"
@@ -1522,6 +1615,8 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
                     int((time.monotonic() - started) * 1000),
                     type(e).__name__,
                 )
+                if prefer_dynamic_job_index and tier_name == "dynamic_render":
+                    continue
                 break
             except Exception as e:
                 last_verdict = f"exception:{type(e).__name__}"
@@ -1534,7 +1629,18 @@ async def _scrape_sd_hardened(url: str) -> Dict[str, Any]:
                     int((time.monotonic() - started) * 1000),
                     type(e).__name__,
                 )
+                if prefer_dynamic_job_index and tier_name == "dynamic_render":
+                    continue
                 break
+
+    if prefer_dynamic_job_index:
+        return {
+            "ok": False,
+            "stage": f"job_index_tiers_exhausted:{last_verdict}",
+            "content": "",
+            "error": last_verdict,
+            "stage_history": history,
+        }
 
     # All ScrapingDog tiers exhausted. Try Wayback as the final source of
     # content — stale snapshot is better than nothing for evidence verification.
@@ -2455,7 +2561,10 @@ def _verified_company_identity_instructions(
 # Stage 2 — SD-primary + Exa-fallback per URL
 # ─────────────────────────────────────────────────────────────────────
 async def _fetch_sd_then_exa(
-    urls: List[str], max_chars: int = MAX_SCRAPED_CHARS,
+    urls: List[str],
+    max_chars: int = MAX_SCRAPED_CHARS,
+    *,
+    prefer_dynamic_job_index: bool = False,
 ) -> Dict[str, Any]:
     """For each supplied URL: try Scrapingdog (hardened) first; if SD fails,
     fall back to Exa Contents.  Returns the same {"results", "statuses"}
@@ -2646,7 +2755,13 @@ async def _fetch_sd_then_exa(
             })
             continue
 
-        sd = await _scrape_sd_hardened(url)
+        if prefer_dynamic_job_index:
+            sd = await _scrape_sd_hardened(
+                url,
+                prefer_dynamic_job_index=True,
+            )
+        else:
+            sd = await _scrape_sd_hardened(url)
         if sd.get("ok") and sd.get("content"):
             results.append({
                 "url": url, "title": "",
@@ -3124,6 +3239,13 @@ async def verify_three_stage(
         )
         and len(bundle) <= 1
     )
+    prefer_dynamic_job_index = bool(
+        _on_verified_company_property
+        and row.get("_evidence_type") == "HIRING"
+        and row.get("_declared_source") == "job_board"
+        and len(row["claimed_source_urls"]) == 1
+        and _is_careers_index_url(fetch_source_url)
+    )
     official_publisher_binding = (
         _on_verified_company_property if company_quality else _on_lead_domain
     )
@@ -3252,7 +3374,13 @@ async def verify_three_stage(
             },
         }
 
-    fetched_contents = await _fetch_sd_then_exa(row["claimed_source_urls"])
+    if prefer_dynamic_job_index:
+        fetched_contents = await _fetch_sd_then_exa(
+            row["claimed_source_urls"],
+            prefer_dynamic_job_index=True,
+        )
+    else:
+        fetched_contents = await _fetch_sd_then_exa(row["claimed_source_urls"])
     source_absent = all(
         _confirmed_source_absence(fetched_contents, url)
         for url in row["claimed_source_urls"]

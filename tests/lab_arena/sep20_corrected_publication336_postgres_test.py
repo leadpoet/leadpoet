@@ -12,12 +12,12 @@ import pytest
 from lab_arena import weight_state
 from leadpoet_canonical import arena_weights
 from tests.lab_arena import sep20_authority_preserving_rejudge332_postgres_test as rerun332
-from tests.lab_arena import sep20_scored_authority_rejudge335_postgres_test as rerun335
+from tests.lab_arena import sep20_scored_authority_rejudge337_postgres_test as rerun337
 from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS
 
 
 ROUND = rerun332.ROUND
-ARCHIVE = ROUND + "-r335archive"
+ARCHIVE = ROUND + "-r337archive"
 TEMPLATE = (
     Path(__file__).parents[2]
     / "scripts/336-arena-2026-09-20-corrected-publication-release.sql.template"
@@ -170,6 +170,32 @@ def _weight_snapshot(cursor):
     return cursor.fetchone()[0]
 
 
+def _prepare_scored337(connection, harness, monkeypatch):
+    rerun337._prepare_scored335(connection, harness, monkeypatch)
+    with connection.cursor() as cursor:
+        rendered337, _, _ = rerun337._render337(
+            cursor, rerun332._schedule(), harness.objects, monkeypatch
+        )
+        cursor.execute(rendered337)
+    connection.commit()
+    rerun332._drive_rejudge_cycle(
+        harness.service, harness.objects, harness.runner_keys[0]
+    )
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT active_round.status,count(*) FILTER(WHERE run.kind='score'),"
+            "count(*) FILTER(WHERE run.kind='score' AND run.status='accepted' "
+            "AND run.terminal_cause='accepted' "
+            "AND run.assignment_id LIKE '%%:score:rerun337') "
+            "FROM public.lab_arena_rounds active_round "
+            "JOIN public.lab_arena_runs run USING(round_id) "
+            "WHERE active_round.round_id=%s GROUP BY active_round.status",
+            (ROUND,),
+        )
+        assert cursor.fetchone() == ("scored", 98, 98)
+    connection.commit()
+
+
 def test_changed_decision_publishes_without_rewriting_reward_or_weights(
     database, tmp_path, monkeypatch
 ):
@@ -179,28 +205,19 @@ def test_changed_decision_publishes_without_rewriting_reward_or_weights(
     )
     harness.round_id = ROUND
     with psycopg2.connect(**dsn) as connection:
-        schedule = rerun335._prepare_scored_rerun332(
-            connection, harness, monkeypatch
-        )
-        with connection.cursor() as cursor:
-            rendered335, _, _ = rerun335._render335(
-                cursor, schedule, harness.objects, monkeypatch
-            )
-            cursor.execute(rendered335)
-        connection.commit()
-
-        rerun332._drive_rejudge_cycle(
-            harness.service, harness.objects, harness.runner_keys[0]
-        )
+        _prepare_scored337(connection, harness, monkeypatch)
         publication = _capture_publication(harness.service)
         with connection.cursor() as cursor:
-            archived = rerun332._json(
-                cursor,
-                "SELECT publication_doc->'king_decision' FROM public.lab_arena_rounds "
+            cursor.execute(
+                "SELECT king_outcome,king_hotkey FROM public.lab_arena_rounds "
                 "WHERE round_id=%s",
                 (ARCHIVE,),
             )
-            assert publication["king_decision"] != archived
+            archived_decision = cursor.fetchone()
+            assert archived_decision != (
+                publication["king_decision"]["outcome"],
+                publication["king_decision"].get("king_hotkey") or None,
+            )
             historical = _reward_promotion_snapshot(cursor)
             weights = _weight_snapshot(cursor)
             rendered336 = _render(cursor, publication)
@@ -302,12 +319,43 @@ def test_template_is_inactive_and_separates_publication_from_reward():
     assert body.count("UPDATE public.lab_arena_rounds SET") == 1
     assert "king_outcome=corrected_outcome,king_hotkey=corrected_hotkey" in body
     assert "INSERT INTO" not in body and "DELETE FROM" not in body
-    assert "assignment_id NOT LIKE '%:score:rerun335'" in body
+    assert "assignment_id NOT LIKE '%:score:rerun337'" in body
+    assert "arena-2026-09-20-r337archive" in body
+    assert "archived.king_outcome IS DISTINCT FROM '__OLD_KING_OUTCOME__'" in body
     assert "__CORRECTED_KING_DECISION_SHA256__" in body
     assert "DISABLE TRIGGER USER" in body
     assert "CREATE OR REPLACE FUNCTION" not in body
     assert "stable_after IS DISTINCT FROM stable_before" in body
     assert "lab_arena_000_sep20_rejudge332_publication_stop" in body
+
+
+def test_no_king_alignment_keeps_historical_reward_authority(
+    database, tmp_path, monkeypatch
+):
+    psycopg2, dsn = database
+    harness = rerun332.IsolatedHarness(
+        lambda: psycopg2.connect(**dsn), tmp_path, challengers=[], runners=["alpha"]
+    )
+    harness.round_id = ROUND
+    with psycopg2.connect(**dsn) as connection:
+        _prepare_scored337(connection, harness, monkeypatch)
+        publication = _capture_publication(harness.service)
+        publication["king_decision"] = {"outcome": "no_king", "king_hotkey": ""}
+        with connection.cursor() as cursor:
+            historical = _reward_promotion_snapshot(cursor)
+            weights = _weight_snapshot(cursor)
+            cursor.execute(_render(cursor, publication))
+            cursor.execute(
+                "SELECT status,king_outcome,king_hotkey,reward_basis_hash "
+                "FROM public.lab_arena_rounds WHERE round_id=%s",
+                (ROUND,),
+            )
+            assert cursor.fetchone() == (
+                "scored", "no_king", None, historical[2]
+            )
+            assert _reward_promotion_snapshot(cursor) == historical
+            assert _weight_snapshot(cursor) == weights
+        connection.commit()
 
 
 def test_disabled_user_trigger_is_rejected_without_changing_operator_state(
@@ -319,18 +367,7 @@ def test_disabled_user_trigger_is_rejected_without_changing_operator_state(
     )
     harness.round_id = ROUND
     with psycopg2.connect(**dsn) as connection:
-        schedule = rerun335._prepare_scored_rerun332(
-            connection, harness, monkeypatch
-        )
-        with connection.cursor() as cursor:
-            rendered335, _, _ = rerun335._render335(
-                cursor, schedule, harness.objects, monkeypatch
-            )
-            cursor.execute(rendered335)
-        connection.commit()
-        rerun332._drive_rejudge_cycle(
-            harness.service, harness.objects, harness.runner_keys[0]
-        )
+        _prepare_scored337(connection, harness, monkeypatch)
         publication = _capture_publication(harness.service)
         with connection.cursor() as cursor:
             rendered336 = _render(cursor, publication)

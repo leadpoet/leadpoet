@@ -202,6 +202,51 @@ def test_rerun337_template_is_inactive_and_namespace_bounded():
     assert "Sep20 rerun337 USER trigger state differs" in body
 
 
+def test_rerun337_archives_nullable_empty_execution_judgment_metadata(
+    database, tmp_path, monkeypatch
+):
+    psycopg2, dsn = database
+    harness = rerun332.IsolatedHarness(
+        lambda: psycopg2.connect(**dsn), tmp_path, challengers=[], runners=["alpha"]
+    )
+    harness.round_id = ROUND
+    with psycopg2.connect(**dsn) as connection:
+        _prepare_scored335(connection, harness, monkeypatch)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT run_id FROM public.lab_arena_runs WHERE round_id=%s "
+                "AND kind='execute' AND status='accepted' ORDER BY run_id LIMIT 1",
+                (ROUND,),
+            )
+            run_id = cursor.fetchone()[0]
+            cursor.execute("SET LOCAL session_replication_role=replica")
+            cursor.execute(
+                "UPDATE public.lab_arena_runs SET per_icp_score=NULL,"
+                "qualification_doc=NULL WHERE run_id=%s",
+                (run_id,),
+            )
+            cursor.execute("SET LOCAL session_replication_role=origin")
+            rendered, _, _ = _render337(
+                cursor, rerun332._schedule(), harness.objects, monkeypatch
+            )
+            cursor.execute(rendered)
+            cursor.execute(
+                "SELECT item->'per_icp_score',item->'qualification_doc' "
+                "FROM public.lab_arena_rounds archived "
+                "CROSS JOIN LATERAL jsonb_array_elements("
+                "archived.configuration_doc->'archived_execution_judgments') item "
+                "WHERE archived.round_id=%s AND item->>'run_id'=%s",
+                (ARCHIVE, run_id),
+            )
+            assert cursor.fetchone() == (None, None)
+            cursor.execute(
+                "SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s "
+                "AND kind='execute' AND status='accepted' AND terminal_cause='accepted'",
+                (ROUND,),
+            )
+            assert cursor.fetchone() == (98,)
+
+
 def test_rerun337_rejects_terminal_drift_and_disabled_publication_stop(
     database, tmp_path, monkeypatch
 ):

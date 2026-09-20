@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lab_arena import public_dashboard, source_disclosure
+from lab_arena import contracts, public_dashboard, source_disclosure
 from lab_arena.service import ArenaService, ServiceError
 
 
@@ -527,6 +527,227 @@ def test_published_submissions_expose_judged_stage1_and_final_scores():
     assert by_id["sub-miner"]["final_score"] == 4.0
     assert by_id["sub-miner"]["status"] == "champion"
     assert by_id["sub-miner"]["is_champion"] is True
+
+
+def _successful_cost_bucket():
+    counters = {
+        "settled_microusd": 100,
+        "reserved_or_uncertain_microusd": 0,
+        "conservative_microusd": 100,
+        "inflight_calls": 0,
+        "uncertain_calls": 0,
+        "refused_calls": 0,
+        "call_count": 1,
+        "successful_microusd": 100,
+        "successful_calls": 1,
+        "success_unresolved_microusd": 0,
+        "success_unresolved_calls": 0,
+    }
+    return {**counters, "providers": []}
+
+
+def _per_icp_cost_summary(*, eligible_positions):
+    return {
+        "returned_company_count": 20,
+        "qualified_company_count": len(eligible_positions),
+        "eligible_icp_count": len(eligible_positions),
+        "competition_sourcing_microusd": 2_000,
+        "execution_icp_cap_microusd": 4_000_000,
+        "cost_per_company_cap_microusd": 800_000,
+        "per_icp": [
+            {
+                "icp_position": position,
+                "returned_company_count": 1,
+                "qualified_company_count": int(position in eligible_positions),
+                "competition_sourcing_microusd": 100,
+                "eligibility_cap_microusd": (
+                    800_000 if position in eligible_positions else 0
+                ),
+                "eligible": position in eligible_positions,
+                "eligibility_reason": (
+                    "eligible"
+                    if position in eligible_positions
+                    else "cost_per_company_exceeded"
+                ),
+            }
+            for position in range(contracts.BENCHMARK_ICP_COUNT)
+        ],
+        "execution": _successful_cost_bucket(),
+        "judge": _successful_cost_bucket(),
+    }
+
+
+def _per_icp_published_round():
+    row = _published_round(outcome="no_king")
+    row["configuration_doc"]["sourcing_cost_eligibility_policy"] = (
+        contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+    )
+    row["publication_doc"]["stage1_ranking"] = [
+        {"rank": 1, "submission_id": "sub-miner", "stage1_score": 2.1}
+    ]
+    for ranking in row["publication_doc"]["final_ranking"]:
+        ranking["final_score"] = (
+            1.62 if ranking["submission_id"] == "baseline-1" else 1.59
+        )
+        ranking.update(
+            {
+                "eligible": True,
+                "eligibility_reason": "eligible",
+                "cost_summary": _per_icp_cost_summary(eligible_positions={8}),
+            }
+        )
+    return row
+
+
+def _stage1_runs(*, miner_position=8):
+    baseline_scores = [10.2, 0.0, 10.8, 0.0, 0.0, 0.0, 21.6, 0.0, 32.4, 0.0]
+    return [
+        {
+            "submission_id": submission_id,
+            "icp_position": position,
+            "attempt": 1,
+            "per_icp_score": score,
+        }
+        for submission_id, scores in (
+            ("baseline-1", baseline_scores),
+            (
+                "sub-miner",
+                [21.0 if position == miner_position else 0.0 for position in range(10)],
+            ),
+        )
+        for position, score in enumerate(scores)
+    ]
+
+
+def _published_submission_records():
+    return [
+        {
+            "submission_id": "baseline-1",
+            "miner_hotkey": BASELINE_HOTKEY,
+            "status": "frozen",
+            "is_king": True,
+            "accepted_at": "2026-09-08T00:00:01Z",
+        },
+        {
+            "submission_id": "sub-miner",
+            "miner_hotkey": MINER_HOTKEY,
+            "status": "frozen",
+            "is_king": False,
+            "accepted_at": "2026-09-08T01:05:00Z",
+        },
+    ]
+
+
+def test_per_icp_stage1_uses_frozen_cost_adjusted_baseline_and_miner_scores():
+    row = _per_icp_published_round()
+    service = SimpleNamespace(
+        _store=SimpleNamespace(list_runs=lambda *_args, **_kwargs: _stage1_runs())
+    )
+
+    scores = public_dashboard._stage1_scores(service, row)
+
+    assert scores == {"baseline-1": 3.24, "sub-miner": 2.1}
+    assert sum(
+        run["per_icp_score"]
+        for run in _stage1_runs()
+        if run["submission_id"] == "baseline-1"
+    ) / 10 == 7.5
+
+
+def test_per_icp_submissions_snapshot_changes_only_stage1_projection():
+    row = _per_icp_published_round()
+
+    class Store:
+        @staticmethod
+        def list_runs(*_args, **_kwargs):
+            return _stage1_runs()
+
+        @staticmethod
+        def list_submissions(*_args, **_kwargs):
+            return _published_submission_records()
+
+    service = SimpleNamespace(
+        _round=lambda _round_id: row,
+        _store=Store(),
+        now=_now,
+    )
+
+    result = public_dashboard.submissions_snapshot(service, row["round_id"])
+    by_id = {item["submission_id"]: item for item in result["submissions"]}
+
+    assert by_id["baseline-1"]["stage1_score"] == 3.24
+    assert by_id["baseline-1"]["final_score"] == 1.62
+    assert by_id["baseline-1"]["status"] == "scored"
+    assert by_id["baseline-1"]["is_champion"] is False
+    assert by_id["sub-miner"]["stage1_score"] == 2.1
+    assert by_id["sub-miner"]["final_score"] == 1.59
+    assert by_id["sub-miner"]["status"] == "scored"
+    assert by_id["sub-miner"]["is_champion"] is False
+
+
+def test_per_icp_stage1_does_not_restore_raw_cost_ineligible_miner_score():
+    row = _per_icp_published_round()
+    row["publication_doc"]["stage1_ranking"][0]["stage1_score"] = 0.0
+    service = SimpleNamespace(
+        _store=SimpleNamespace(
+            list_runs=lambda *_args, **_kwargs: _stage1_runs(miner_position=0)
+        )
+    )
+
+    scores = public_dashboard._stage1_scores(service, row)
+
+    assert scores["sub-miner"] == 0.0
+
+
+@pytest.mark.parametrize("published_score", [None, "invalid"])
+def test_per_icp_stage1_does_not_fall_back_to_raw_miner_score(published_score):
+    row = _per_icp_published_round()
+    ranking = row["publication_doc"]["stage1_ranking"][0]
+    if published_score is None:
+        del ranking["stage1_score"]
+    else:
+        ranking["stage1_score"] = published_score
+    service = SimpleNamespace(
+        _store=SimpleNamespace(list_runs=lambda *_args, **_kwargs: _stage1_runs())
+    )
+
+    scores = public_dashboard._stage1_scores(service, row)
+
+    assert "sub-miner" not in scores
+
+
+@pytest.mark.parametrize("invalid_cost_basis", [None, "duplicate_position"])
+def test_per_icp_stage1_hides_baseline_when_frozen_cost_basis_is_invalid(
+    invalid_cost_basis,
+):
+    row = _per_icp_published_round()
+    baseline = row["publication_doc"]["final_ranking"][0]
+    if invalid_cost_basis is None:
+        baseline["cost_summary"] = None
+    else:
+        baseline["cost_summary"]["per_icp"][1]["icp_position"] = 0
+    service = SimpleNamespace(
+        _store=SimpleNamespace(list_runs=lambda *_args, **_kwargs: _stage1_runs())
+    )
+
+    scores = public_dashboard._stage1_scores(service, row)
+
+    assert "baseline-1" not in scores
+    assert scores["sub-miner"] == 2.1
+
+
+def test_successful_calls_policy_round_keeps_historical_raw_stage1_rule():
+    row = _per_icp_published_round()
+    row["configuration_doc"]["sourcing_cost_eligibility_policy"] = (
+        contracts.SUCCESSFUL_CALLS_COST_POLICY
+    )
+    service = SimpleNamespace(
+        _store=SimpleNamespace(list_runs=lambda *_args, **_kwargs: _stage1_runs())
+    )
+
+    scores = public_dashboard._stage1_scores(service, row)
+
+    assert scores == {"baseline-1": 7.5, "sub-miner": 2.1}
 
 
 def test_cancelled_round_never_fabricates_aggregate_scores():

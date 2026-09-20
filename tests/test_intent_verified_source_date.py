@@ -14,6 +14,18 @@ from qualification.scoring.arena_integrity import (
 URL = "https://example.test/blog/reporting-api"
 
 
+@pytest.mark.parametrize("other_date", ["2026-09-18", "2027-01-01"])
+def test_primary_wordpress_post_date_excludes_related_stories(other_date):
+    html = f'''<main><h1 class="wp-block-post-title">Leadership appointments</h1>
+      <div class="wp-block-post-date"><time datetime="2026-09-14T04:23:26-07:00">September 14</time></div>
+      <div class="entry-content wp-block-post-content"><p>Effective today.</p></div>
+      <div class="wp-block-post-date"><time datetime="{other_date}">Other story</time></div></main>'''
+    assert intent._published_date_from_html(html, URL) == "2026-09-14"
+    conflicting = '<head><meta property="article:published_time" content="2026-09-15"></head>' + html
+    assert intent._published_date_from_html(conflicting, URL) == ""
+    assert intent._published_date_from_html(html.replace('wp-block-post-title', 'widget-title'), URL) == ""
+
+
 def test_page_metadata_date_and_semantic_paraphrase_reach_final_judge() -> None:
     html = """
     <html><head>

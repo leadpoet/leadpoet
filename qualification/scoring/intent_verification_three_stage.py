@@ -2168,6 +2168,22 @@ def _published_date_from_html(html: str, source_url: str) -> str:
             normalized = _source_publication_date(match.group(1))
             if normalized:
                 candidates.add(normalized)
+    # WordPress block articles can expose the publication time only in the
+    # primary post header. Do not collect dates from related-story cards.
+    post_headers = re.findall(
+        r'<h1\b[^>]*\bclass=["\'][^"\']*\bwp-block-post-title\b[^"\']*["\'][^>]*>'
+        r'.*?</h1\s*>(.{0,8192}?)'
+        r'<div\b[^>]*\bclass=["\'][^"\']*\bwp-block-post-content\b',
+        html, re.IGNORECASE | re.DOTALL,
+    )
+    if len(post_headers) == 1:
+        for match in re.finditer(
+            r'<time\b[^>]*\bdatetime=["\']([^"\']+)',
+            post_headers[0], re.IGNORECASE,
+        ):
+            normalized = _source_publication_date(match.group(1))
+            if normalized:
+                candidates.add(normalized)
     for match in re.finditer(
         r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
         html,
@@ -3769,4 +3785,22 @@ async def verify_three_stage(
             "job_publisher_relationship": job_publisher_relationship,
             "verified_job_source_urls": verified_job_source_urls,
         })
+        if client_ready:
+            cited = {_normalize_url(url) for url in s3_item.get("evidence_urls_used") or []}
+            declared = {
+                _normalize_url(url): url for url in row["claimed_source_urls"]
+                if _normalize_url(url) in cited
+            }
+            # The paragraph review needs the source context, not only the
+            # signal judge's chosen quotes. Reuse fetched, cited pages; no
+            # submitted snippets or additional provider calls enter this path.
+            result["verified_source_context"] = [
+                {
+                    "url": declared[_normalize_url(item["url"])],
+                    "text": str(item.get("text") or "").encode("utf-8")[:6_000].decode("utf-8", errors="ignore"),
+                    "source_publication_date": item.get("source_publication_date") or "",
+                }
+                for item in (contents.get("results") or [])[:3]
+                if _normalize_url(item.get("url") or "") in declared
+            ]
     return result

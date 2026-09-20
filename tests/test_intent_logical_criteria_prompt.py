@@ -76,3 +76,6 @@ def test_leadership_rules_reach_both_prompt_stages() -> None:
         assert "ordinary employee move does not automatically establish" in prompt
         assert "different company fails the entity check" in prompt
         assert "Preserve every explicit" in prompt
+        assert "company involved in the CLAIMED EVENT" in prompt
+        assert "that departure belongs to Company A" in prompt
+        assert "Merely mentioning a former employer without a departure" in prompt

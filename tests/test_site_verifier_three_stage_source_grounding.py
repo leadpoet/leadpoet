@@ -45,6 +45,36 @@ def contradicted(url: str) -> dict:
 
 
 class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_verified_context_is_exact_cited_fetched_content_only(self):
+        url = "https://acme.example/news/leadership"
+        body = "Acme appointed a new chief executive. Effective today, the executive leads technology and operations."
+        verdict = supported(url)
+        verdict["answer"]["signal_evaluations"][0]["supporting_quotes"] = [body.split(" Effective")[0]]
+        uncertain = supported(url)
+        uncertain["answer"]["signal_evaluations"][0]["signal_status"] = "unable_to_verify"
+        call = AsyncMock(side_effect=[uncertain, verdict])
+        fetch = AsyncMock(return_value={"results": [
+            {"url": url, "text": body, "source_publication_date": "2026-09-14"},
+            {"url": "https://unrelated.example/", "text": "UNRELATED SOURCE"},
+        ], "statuses": []})
+        with (
+            patch("qualification.scoring.intent_verification_three_stage._call_openrouter", call),
+            patch("qualification.scoring.intent_verification_three_stage._fetch_sd_then_exa", fetch),
+        ):
+            result = await verify_three_stage(
+                object(), company_name="Acme", company_linkedin="https://linkedin.com/company/acme",
+                company_website="https://acme.example", source_url=url,
+                miner_claim="Acme appointed a new chief executive.",
+                target_signal_text="Announced a leadership change in the past year.",
+                miner_signal_date="2026-09-14", evidence_type="LEADERSHIP_CHANGE",
+                declared_source="news", integrity_policy=True,
+            )
+        assert result["client_ready"] is True
+        assert result["verified_source_context"] == [{
+            "url": url, "text": body, "source_publication_date": "2026-09-14",
+        }]
+        assert fetch.await_count == 1
+
     async def _scrape_exa_outcomes(self, url: str, outcomes: list[object]):
         calls = 0
 

@@ -142,6 +142,37 @@ def test_review_uses_authoritative_dates_and_excludes_failed_signals():
     assert result["verified_company_evidence"]["industry"]["quote"] == "Acme provides reporting software."
 
 
+def test_review_keeps_fetched_context_missing_from_selected_signal_quotes():
+    company, icp, results, fit = inputs()
+    source = {
+        "url": company.intent_signals[0].url,
+        "text": "September 1, 2026. Acme launched its reporting platform today. The platform integrates reporting and analytics.",
+        "source_publication_date": "2026-09-01",
+    }
+    trace = results[0]["judge_verdict"]["verification_trace"]
+    trace["verified_source_context"] = [source, {
+        "url": "https://unrelated.example/", "text": "UNRELATED SOURCE",
+    }]
+    result = intent_details.review_evidence(company, icp, results, fit)
+    assert result["verified_signals"][0]["source_context"] == [source]
+    assert "UNRELATED SOURCE" not in json.dumps(result)
+    assert "platform integrates" not in str(result["verified_signals"][0]["supporting_quotes"])
+
+
+def test_source_context_preserves_review_size_and_utf8_bounds():
+    company, icp, results, fit = inputs()
+    for result, signal in zip(results, company.intent_signals):
+        result["judge_verdict"]["verification_trace"]["verified_source_context"] = [{
+            "url": signal.url, "text": "é" * 20_000,
+        }]
+    document = intent_details.review_evidence(company, icp, results, fit)
+    contexts = [c for v in document["verified_signals"] for c in v["source_context"]]
+    assert sum(len(c["text"].encode("utf-8")) for c in contexts) <= 12_000
+    assert all(len(c["text"].encode("utf-8")) <= 6_000 for c in contexts)
+    assert len(json.dumps(document, ensure_ascii=False)) <= 48_000
+    assert json.loads(json.dumps(document)) == document
+
+
 @pytest.mark.parametrize("missing", ["supporting_quotes", "same_entity_check"])
 def test_claims_cannot_replace_missing_source_support(missing):
     company, icp, results, fit = inputs()

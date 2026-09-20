@@ -79,9 +79,17 @@ PART_0_BLOCK = """  PART 0 — ENTITY CHECK (CRITICAL, evaluate FIRST and REJECT
     ``company`` field alone CANNOT disambiguate.  The ``website`` and
     ``company_linkedin`` are the canonical entity identifiers.
 
-    To return `supported`, you must affirmatively verify the article
-    (URL + extracted content) is about THE SPECIFIC entity at the
-    lead's ``website`` and ``company_linkedin``.  This means at least
+    Identify the company involved in the CLAIMED EVENT, not only the
+    publisher or the main subject of the headline. One article can report
+    different events at different companies. For example, Company B's board
+    announcement can explicitly prove a leader retired from Company A;
+    that departure belongs to Company A, while the appointment belongs to B.
+    Merely mentioning a former employer without a departure or other claimed
+    event does not establish a signal at that employer.
+
+    To return `supported`, you must affirmatively verify the claimed event
+    in the extracted content concerns THE SPECIFIC entity at the
+    lead's ``website`` and ``company_linkedin``. This means at least
     ONE of the following is true:
       (a) URL hostname matches the lead's website domain (case already
           handled structurally — these URLs are guaranteed same-entity).
@@ -116,7 +124,7 @@ PART_0_BLOCK = """  PART 0 — ENTITY CHECK (CRITICAL, evaluate FIRST and REJECT
             lead at halcyon.ai (ransomware security)
               vs article about a "Halcyon AI" doing
               energy data analytics & clean energy      → wrong_entity
-      • The URL or content's actual subject is in a clearly different
+      • The claimed event's company is in a clearly different
         INDUSTRY / DOMAIN than the lead.  Examples:
             lead at zefir.fr (French real estate AI)
               vs trendyol.com product page describing

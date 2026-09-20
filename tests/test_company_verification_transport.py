@@ -611,6 +611,66 @@ def test_off_domain_newsroom_link_is_not_fetched(monkeypatch):
     assert calls == [root_url]
 
 
+def test_malformed_newsroom_port_stays_unavailable(monkeypatch):
+    root_url = "https://www.truist.com/"
+    calls = []
+    routes = {
+        root_url: _Response(
+            200,
+            b"<title>Truist | Banking</title>"
+            b'<a href="https://media.truist.com:bad/">Newsroom</a>',
+            root_url,
+        ),
+    }
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification._registrable_domain",
+        lambda _url: "truist.com",
+    )
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification.aiohttp.ClientSession",
+        lambda **_kwargs: _RoutingSession(routes, calls),
+    )
+
+    result = asyncio.run(
+        verify_company_exists("Truist", root_url, company_linkedin="")
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert calls == [root_url]
+
+
+def test_newsroom_off_domain_redirect_cannot_complete_identity(monkeypatch):
+    root_url = "https://www.truist.com/"
+    media_url = "https://media.truist.com/"
+    calls = []
+    routes = {
+        root_url: _Response(
+            200,
+            b"<title>Truist | Banking</title>"
+            b'<a href="https://media.truist.com/">Newsroom</a>',
+            root_url,
+        ),
+        media_url: _Response(
+            200,
+            b'<title>Truist Financial Corporation</title>'
+            b'<a href="https://www.linkedin.com/company/'
+            b'truistfinancialcorporation">LinkedIn</a>',
+            "https://attacker.example/",
+        ),
+    }
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification.aiohttp.ClientSession",
+        lambda **_kwargs: _RoutingSession(routes, calls),
+    )
+
+    result = asyncio.run(
+        verify_company_exists("Truist", root_url, company_linkedin="")
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert calls == [root_url, media_url]
+
+
 def test_linked_first_party_identity_provider_failure_stays_unavailable(
     monkeypatch,
 ):

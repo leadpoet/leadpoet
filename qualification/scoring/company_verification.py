@@ -486,12 +486,13 @@ def _linked_identity_source_url(
         try:
             absolute = urljoin(base_url, href)
             parsed = urlsplit(absolute)
+            candidate_port = parsed.port
             candidate_domain = _registrable_domain(absolute)
         except (NormalizationError, TypeError, ValueError):
             continue
         if (
             _is_https_url(absolute)
-            and parsed.port in (None, 443)
+            and candidate_port in (None, 443)
             and candidate_domain == registrable_domain
             and parsed.path.rstrip("/") == ""
             and str(parsed.hostname or "").casefold().split(".")[0]
@@ -703,6 +704,27 @@ def _identity_result(
     return company_fit_unavailable(reason, details=details)
 
 
+async def _fetch_bounded_html(
+    session: aiohttp.ClientSession,
+    url: str,
+) -> tuple[int, str, str]:
+    async with session.get(url, allow_redirects=True) as resp:
+        raw = bytearray()
+        while len(raw) < _MAX_BYTES:
+            chunk = await resp.content.read(_MAX_BYTES - len(raw))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        return (
+            resp.status,
+            str(getattr(resp, "url", url) or url),
+            _decode_homepage_html(
+                raw,
+                _content_type_header(getattr(resp, "headers", {})),
+            ),
+        )
+
+
 # ----------------------------------------------------------------------------
 # Public API
 # ----------------------------------------------------------------------------
@@ -772,22 +794,10 @@ async def verify_company_exists(
                     timeout=timeout,
                     headers=_HEADERS,
                 ) as session:
-                    async with session.get(request_url, allow_redirects=True) as resp:
-                        status = resp.status
-                        observed_url = str(
-                            getattr(resp, "url", request_url) or request_url
-                        )
-                        # A stream read can return before EOF. Collect the body
-                        # up to the existing cap, including later footer chunks.
-                        raw = bytearray()
-                        while len(raw) < _MAX_BYTES:
-                            chunk = await resp.content.read(_MAX_BYTES - len(raw))
-                            if not chunk:
-                                break
-                            raw.extend(chunk)
-                        headers = getattr(resp, "headers", {})
-                        content_type = _content_type_header(headers)
-                        text = _decode_homepage_html(raw, content_type)
+                    status, observed_url, text = await _fetch_bounded_html(
+                        session,
+                        request_url,
+                    )
                 break
             except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
                 if attempt + 1 >= _TRANSIENT_FETCH_ATTEMPTS:
@@ -875,21 +885,9 @@ async def verify_company_exists(
                     timeout=timeout,
                     headers=_HEADERS,
                 ) as session:
-                    async with session.get(source_url, allow_redirects=True) as resp:
-                        source_status = resp.status
-                        source_final_url = str(resp.url or source_url)
-                        source_raw = bytearray()
-                        while len(source_raw) < _MAX_BYTES:
-                            chunk = await resp.content.read(
-                                _MAX_BYTES - len(source_raw)
-                            )
-                            if not chunk:
-                                break
-                            source_raw.extend(chunk)
-                        source_text = _decode_homepage_html(
-                            source_raw,
-                            _content_type_header(getattr(resp, "headers", {})),
-                        )
+                    source_status, source_final_url, source_text = (
+                        await _fetch_bounded_html(session, source_url)
+                    )
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 pass
             else:

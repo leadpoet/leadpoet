@@ -38,7 +38,10 @@ CONSTANTS = {
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from database_with_lab_arena_migration(
+        CURRENT_SERVICE_MIGRATIONS
+        + ("342-lab-arena-reward-predecessor-barrier.sql",)
+    )
 
 
 def _pg_sha(cursor, expression: str, parameters=()) -> str:
@@ -238,9 +241,39 @@ def test_correction_is_prospective_atomic_private_and_cleanup_is_final(database)
     psycopg2, dsn = database
     with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
         signer, key_doc, old_basis, replacement, accepted = _seed(cursor)
+        cursor.execute(
+            "SELECT has_schema_privilege('lab_arena_owner','public','CREATE')"
+        )
+        assert cursor.fetchone()[0] is False
         install = _render_install(cursor, key_doc, old_basis, replacement)
+        cursor.execute(
+            "CREATE ROLE correction340_migration_runner NOLOGIN NOSUPERUSER "
+            "NOBYPASSRLS NOCREATEDB NOCREATEROLE"
+        )
+        cursor.execute(
+            "GRANT lab_arena_owner TO correction340_migration_runner"
+        )
+        cursor.execute(
+            "GRANT USAGE ON SCHEMA public,extensions "
+            "TO correction340_migration_runner"
+        )
+        cursor.execute(
+            "GRANT CREATE ON SCHEMA public TO correction340_migration_runner "
+            "WITH GRANT OPTION"
+        )
+        cursor.execute("SET ROLE correction340_migration_runner")
         cursor.execute(install)
+        cursor.execute("RESET ROLE")
         cursor.execute("BEGIN")
+        cursor.execute(
+            "SELECT rolsuper,rolbypassrls,rolcreaterole FROM pg_catalog.pg_roles "
+            "WHERE rolname='correction340_migration_runner'"
+        )
+        assert cursor.fetchone() == (False, False, False)
+        cursor.execute(
+            "SELECT has_schema_privilege('lab_arena_owner','public','CREATE')"
+        )
+        assert cursor.fetchone()[0] is False
 
         cursor.execute("SAVEPOINT unauthorized")
         cursor.execute("SET LOCAL ROLE lab_arena_service")
@@ -348,8 +381,10 @@ def test_correction_is_prospective_atomic_private_and_cleanup_is_final(database)
         assert cursor.fetchone()[0] == 0
 
         cleanup = _render_cleanup(cursor, old_basis, replacement)
+        cursor.execute("SET ROLE correction340_migration_runner")
         cursor.execute(cleanup)
         cursor.execute(cleanup)
+        cursor.execute("RESET ROLE")
         cursor.execute(
             "SELECT to_regprocedure("
             "'public.lab_arena_sep20_revoke_invalid_reward340(jsonb)')"

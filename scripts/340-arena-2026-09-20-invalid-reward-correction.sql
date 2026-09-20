@@ -5,6 +5,10 @@ BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 
+-- The migration runner transfers this temporary function to the locked Arena
+-- owner. That target role needs CREATE only for the ownership transfer.
+GRANT CREATE ON SCHEMA public TO lab_arena_owner;
+
 CREATE OR REPLACE FUNCTION public.lab_arena_sep20_revoke_invalid_reward340(
   p_reward_basis JSONB
 )
@@ -285,4 +289,5 @@ END;
 $correction340_acl$;
 
 NOTIFY pgrst, 'reload schema';
+REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
 COMMIT;

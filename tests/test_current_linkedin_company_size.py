@@ -3123,6 +3123,106 @@ def test_exact_structured_private_company_marks_public_stage_conflict_unavailabl
 
 
 @pytest.mark.parametrize(
+    ("stage_url", "stage_quote", "private_update", "expected"),
+    [
+        (
+            "https://www.sec.gov/Archives/edgar/data/1337619/"
+            "000133761924000003/env-20240222.htm",
+            "ENVESTNET, INC. (Exact name of registrant as specified in its "
+            "charter) Delaware 001-34835 20-1409613 (State or Other "
+            "Jurisdiction of Incorporation) (Commission File Number) "
+            "(I.R.S. Employer Identification Number) 1000 Chesterbrook "
+            "Boulevard , Suite 250 , Berwyn , Pennsylvania 19312 (Address "
+            "of principal executive offices) (Zip Code) ( 312 ) 827-2800 "
+            "(Registrant’s telephone number, including area code) Not "
+            "Applicable (Former name or former address, if changed since "
+            "last report) Check the appropriate box below if the Form 8-K "
+            "filing is intended to simultaneously satisfy the filing "
+            "obligation of the registrant under any of the following "
+            "provisions (see General Instruction A.2. below): ☐ Written "
+            "communications pursuant to Rule 425 under the Securities Act "
+            "(17 CFR 230.425) ☐ Soliciting material pursuant to Rule 14a-12 "
+            "under the Exchange Act (17 CFR 240.14a-12) ☐ Pre-commencement "
+            "communications pursuant to Rule 14d-2(b) under the Exchange "
+            "Act (17 CFR 240.14d-2(b)) ☐ Pre-commencement communications "
+            "pursuant to Rule 13e-4(c) under the Exchange Act (17 CFR "
+            "240-13e-4(c)) Securities registered pursuant to Section 12(b) "
+            "of the Act: Title of each class Trading symbol(s) Name of "
+            "exchange on which registered Common Stock, par value $0.005 "
+            "per share ENV New York Stock Exchange",
+            {},
+            COMPANY_FIT_UNAVAILABLE,
+        ),
+        (
+            "https://www.envestnet.com/investor-relations",
+            "Envestnet common stock is currently listed on the New York "
+            "Stock Exchange under ticker ENV.",
+            {},
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "https://www.sec.gov/Archives/edgar/data/1337619/"
+            "000133761924000003/env-20240222.htm",
+            "Envestnet common stock is registered on the New York Stock "
+            "Exchange under ticker ENV.",
+            {"website": "https://unrelated.example/"},
+            COMPANY_FIT_MATCH,
+        ),
+    ],
+)
+def test_archived_sec_snapshot_cannot_override_bound_current_private_type(
+    stage_url, stage_quote, private_update, expected
+):
+    verdict = _verdict(observed_size=25, size_matches=True)
+    verdict.update(
+        observed_company_name="Envestnet",
+        observed_company_website="https://envestnet.com/",
+        observed_company_linkedin="https://www.linkedin.com/company/envestnet",
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url=stage_url,
+        stage_evidence_quote=stage_quote,
+    )
+    finding = {
+        "target": "stage",
+        "status": "VERIFIED",
+        "observed_value": "Public",
+        "evidence_url": stage_url,
+        "evidence_quote": stage_quote,
+    }
+    private_evidence = {
+        "company_type": "Privately Held",
+        "provider": "harvestapi_get_company",
+        "source_field": "companyType",
+        "url": "https://www.linkedin.com/company/envestnet",
+        "website": "https://envestnet.com/",
+        **private_update,
+    }
+    result = lead_scorer._reverify_decision(
+        verdict,
+        "",
+        "public",
+        icp=_icp().model_copy(update={"company_stage": "Public"}),
+        company=_company().model_copy(update={
+            "company_name": "Envestnet",
+            "company_website": "https://envestnet.com",
+            "company_linkedin": "https://www.linkedin.com/company/envestnet",
+            "company_stage": "Public",
+        }),
+        verified_homepage_identity={
+            "normalized_name": "envestnet",
+            "registrable_dns_domain": "envestnet.com",
+            "linkedin_company_slug": "envestnet",
+        },
+        validated_stage_finding=finding,
+        structured_public_company_evidence=private_evidence,
+    )
+
+    assert result.details["dimension_decisions"]["stage"] == expected
+    assert result.decision == expected
+
+
+@pytest.mark.parametrize(
     ("investigated_stage", "status", "quote", "expected"),
     [
         (

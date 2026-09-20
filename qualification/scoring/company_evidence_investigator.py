@@ -74,6 +74,13 @@ A later completed priced-equity round, controlling acquisition, or IPO/listing
 event can supersede it and must be evaluated chronologically. Thus a later
 Series C, controlling acquisition, or IPO can contradict an earlier Series B;
 later debt alone cannot. Conflicting labels without chronology are UNPROVEN.
+When prior observations contain exact structured `Privately Held` company-type
+evidence, first seek current first-party take-private, delisting, or listing
+evidence. An archived SEC filing cover page is a historical snapshot and cannot
+by itself override that current private-company evidence, even when its
+registered-securities table names a ticker and exchange. Only current official
+exchange or company investor-relations wording that the shares are now listed
+or traded can verify Public against that conflict.
 Once first-party continuity proves that old and new names are the same entity,
 evaluate completed stage events under either verified name. Do not discard an
 earlier completed round solely because it uses the old name; still check for a

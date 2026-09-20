@@ -929,6 +929,20 @@ def _validated_investigator_stage_matches_verdict(
     )
 
 
+def _is_archived_sec_filing_snapshot(value: Any) -> bool:
+    """Identify an SEC filing snapshot that cannot prove current listing."""
+
+    url = _valid_web_evidence_url(value)
+    if not url:
+        return False
+    parsed = urlsplit(url)
+    hostname = str(parsed.hostname or "").casefold().rstrip(".")
+    return bool(
+        hostname in {"sec.gov", "www.sec.gov"}
+        and parsed.path.casefold().startswith("/archives/edgar/")
+    )
+
+
 def _decision_from_observed_stage(
     verdict: dict,
     icp_stage: str,
@@ -2154,10 +2168,13 @@ def _reverify_decision(
             structured_public_company_evidence,
             profile_identity,
         )
-        and not _validated_investigator_stage_matches_verdict(
-            verdict,
-            _normalize_company_stage(verdict.get("observed_company_stage")),
-            validated_stage_finding,
+        and (
+            not _validated_investigator_stage_matches_verdict(
+                verdict,
+                _normalize_company_stage(verdict.get("observed_company_stage")),
+                validated_stage_finding,
+            )
+            or _is_archived_sec_filing_snapshot(stage_evidence.get("url"))
         )
     )
     dimensions = {

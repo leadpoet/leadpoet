@@ -176,6 +176,19 @@ PART_A_BLOCK = """  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
         verbatim when the source proves a concrete, material new capability;
         a routine update, relabeling, or unsupported marketing claim is not
         sufficient.
+      * For a leadership-change alternative, do not invent an issuer or
+        companywide-restructuring requirement. Unless the target explicitly
+        requires a target-company announcement or a companywide change, exact
+        evidence from a reliable independent publisher can establish the
+        appointment or departure of a genuine leader at the target company.
+        A business-unit or function leader can satisfy broad leadership-change
+        wording.
+      * An ordinary employee move does not automatically establish a
+        leadership change. Exact evidence must establish both the person's
+        leadership role and the change at the target company. A true departure
+        at a different company fails the entity check. Preserve every explicit
+        role, seniority, source or issuer, and organizational-scope constraint
+        in the target ICP signal.
       * "Company X offers product Y" is NOT the same as "Company X hires for
         role Y". Selling an AI BDR is the opposite signal of hiring BDRs.
       * "Company X had a funding round" is NOT the same as "Company X is

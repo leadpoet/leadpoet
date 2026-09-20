@@ -247,7 +247,7 @@ def _start_round(harness: ChampionHarness, *, day: int, epoch: int, challengers=
         pool_percent=pool_percent,
     )
     configuration = harness.service.create_round(
-        harness.clock.now + timedelta(hours=12),
+        harness.clock.now + timedelta(minutes=30),
         round_id="arena-2026-11-%02d" % day,
     )
     harness.round_id = configuration["round_id"]

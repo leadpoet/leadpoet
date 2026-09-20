@@ -44,7 +44,8 @@ def store(connect):
 
 
 def _exercise_profile(
-    store, connect, *, suffix, quotas, limit, checkpoints, provider="openrouter"
+    store, connect, *, suffix, quotas, limit, checkpoints, provider="openrouter",
+    confirmed_cost_policy=False,
 ):
     round_id = "arena-2026-09-17-" + suffix
     submission_id = "quota-" + suffix + "-submission"
@@ -63,6 +64,16 @@ def _exercise_profile(
         "scoring_cap_microusd": 50_000_000,
         "baseline_hotkey": hotkey("quota-profile-baseline"),
     }
+    if confirmed_cost_policy:
+        configuration.update(
+            {
+                "sourcing_cost_eligibility_policy": (
+                    contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+                ),
+                "execution_icp_cap_microusd": 4_000_000,
+                "cost_per_company_microusd": 800_000,
+            }
+        )
     connection = connect()
     connection.autocommit = True
     try:
@@ -98,6 +109,7 @@ def _exercise_profile(
         connection.close()
     snapshots = {}
     statuses = []
+    last_reserved_identity = None
     for index in range(limit + 1):
         identity = contracts.provider_call_identity(
             attempt=1,
@@ -122,11 +134,14 @@ def _exercise_profile(
             }[provider],
             provider=provider,
             funding_source="miner_key",
-            amount_microusd=1,
+            amount_microusd=0 if confirmed_cost_policy else 1,
             call_doc={},
         )
         statuses.append(reserved["status"])
         if reserved["status"] == "reserved":
+            last_reserved_identity = identity
+            if confirmed_cost_policy:
+                assert reserved["amount_microusd"] == 0
             assert store.mark_dispatched(
                 run_id=run_id,
                 lease_token_hash=LEASE_TOKEN_HASH,
@@ -145,13 +160,17 @@ def _exercise_profile(
         item for item in costs["providers"]
         if item["kind"] == "execute" and item["provider"] == provider
     )
-    return statuses, snapshots, execute
+    return statuses, snapshots, execute, {
+        "run_id": run_id,
+        "submission_id": submission_id,
+        "last_reserved_identity": last_reserved_identity,
+    }
 
 
 def test_frozen_execute_profiles_enforce_dispatch_and_cost_boundaries(
     store, connect
 ):
-    historical_statuses, historical_snapshots, historical_costs = _exercise_profile(
+    historical_statuses, historical_snapshots, historical_costs, _ = _exercise_profile(
         store, connect,
         suffix="historical60",
         quotas=dict(contracts.LEGACY_CALL_QUOTAS_PER_ICP),
@@ -168,7 +187,7 @@ def test_frozen_execute_profiles_enforce_dispatch_and_cost_boundaries(
     assert historical_costs["reserved_or_uncertain_microusd"] == 60
     assert historical_costs["refused_calls"] == 1
 
-    all_provider_200_statuses, all_provider_200_snapshots, all_provider_200_costs = _exercise_profile(
+    all_provider_200_statuses, all_provider_200_snapshots, all_provider_200_costs, _ = _exercise_profile(
         store, connect,
         suffix="allprovider200",
         quotas=dict(contracts.ALL_PROVIDER_200_CALL_QUOTAS_PER_ICP),
@@ -188,12 +207,13 @@ def test_frozen_execute_profiles_enforce_dispatch_and_cost_boundaries(
     assert all_provider_200_costs["reserved_or_uncertain_microusd"] == 200
     assert all_provider_200_costs["refused_calls"] == 1
 
-    current_statuses, current_snapshots, current_costs = _exercise_profile(
+    current_statuses, current_snapshots, current_costs, current = _exercise_profile(
         store, connect,
         suffix="current500",
         quotas=dict(contracts.CALL_QUOTAS_PER_ICP),
         limit=500,
         checkpoints={499, 500, 501},
+        confirmed_cost_policy=True,
     )
     assert current_statuses[:500] == ["reserved"] * 500
     assert current_statuses[500] == "refused"
@@ -203,15 +223,38 @@ def test_frozen_execute_profiles_enforce_dispatch_and_cost_boundaries(
         501: {"limit": 500, "used": 500, "remaining": 0, "inflight": 500},
     }
     assert current_costs["call_count"] == 501
-    assert current_costs["reserved_or_uncertain_microusd"] == 500
+    assert current_costs["reserved_or_uncertain_microusd"] == 0
     assert current_costs["refused_calls"] == 1
+
+    settled = store.settle_call(
+        run_id=current["run_id"],
+        lease_token_hash=LEASE_TOKEN_HASH,
+        call_identity=current["last_reserved_identity"],
+        actual_microusd=60_000,
+        terminal_response={"status": 200, "call_succeeded": True},
+    )
+    assert settled["status"] == "settled"
+    replay = store.settle_call(
+        run_id=current["run_id"],
+        lease_token_hash=LEASE_TOKEN_HASH,
+        call_identity=current["last_reserved_identity"],
+        actual_microusd=60_000,
+        terminal_response={"status": 200, "call_succeeded": True},
+    )
+    assert (replay["status"], replay["idempotent"]) == ("settled", True)
+    current_costs = next(
+        item for item in store.submission_costs(current["submission_id"])["providers"]
+        if item["kind"] == "execute" and item["provider"] == "openrouter"
+    )
+    assert current_costs["settled_microusd"] == 60_000
+    assert current_costs["reserved_or_uncertain_microusd"] == 0
 
     # Each submission aggregates only its own frozen-profile run.
     assert (
         historical_costs["reserved_or_uncertain_microusd"]
         + all_provider_200_costs["reserved_or_uncertain_microusd"]
         + current_costs["reserved_or_uncertain_microusd"]
-        == 760
+        == 260
     )
 
 
@@ -219,7 +262,7 @@ def test_frozen_execute_profiles_enforce_dispatch_and_cost_boundaries(
 def test_generic_profile_admits_provider_calls_past_old_thirty_call_limit(
     store, connect, provider
 ):
-    statuses, snapshots, _costs = _exercise_profile(
+    statuses, snapshots, _costs, _ = _exercise_profile(
         store,
         connect,
         suffix={"deepline": "gdl", "scrapingdog": "gsd"}[provider],
@@ -238,7 +281,7 @@ def test_generic_profile_admits_provider_calls_past_old_thirty_call_limit(
 
 
 def test_frozen_openrouter_200_profile_keeps_deepline_at_thirty(store, connect):
-    statuses, snapshots, _costs = _exercise_profile(
+    statuses, snapshots, _costs, _ = _exercise_profile(
         store,
         connect,
         suffix="fo2dl",

@@ -3886,20 +3886,9 @@ async def _verify_company_fit(
                 _verified_homepage_identity_anchor(identity),
             )
         )
-        structured_private_stage_proof = (
-            dimension == "stage"
-            and observed_decision == COMPANY_FIT_MISMATCH
-            and _normalize_company_stage(icp.company_stage) == "public"
-            and web_identity_decision == COMPANY_FIT_MATCH
-            and _is_bound_structured_linkedin_private_company_evidence(
-                web_evidence,
-                _verified_homepage_identity_anchor(identity),
-            )
-        )
         if dimension in active_web_dimensions and (
             not structured_employee_proof
             and not structured_public_stage_proof
-            and not structured_private_stage_proof
             and (
                 not _valid_web_evidence_url(web_evidence.get("url"))
                 or not str(web_evidence.get("quote") or "").strip()

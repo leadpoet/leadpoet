@@ -31,11 +31,11 @@ SCORER_REFERENCE = (
 )
 SOURCE_REF = (
     "arena/arena-2026-09-20/sources/"
-    "baseline-2026-09-20-rerun330-618eb6e6.tar.gz"
+    "baseline-2026-09-20-rerun330-51f1c3c8.tar.gz"
 )
-SOURCE_SIZE = 856_357
-SOURCE_SHA256 = "c0425436556c590b5d29649edb2b1df19a2a32a8d6072b68b72af8163932453f"
-SOURCE_COMMIT = "618eb6e695de19d8cc6b3cf95b65c9b257756bb6"
+SOURCE_SIZE = 857_598
+SOURCE_SHA256 = "f403292595dd753e8398ad46de388dd75165ebe1265526cfffd7ef7c6c3e72a4"
+SOURCE_COMMIT = "51f1c3c8e17a436ec2ccfb80162beae7fc1f02b2"
 TEMPLATE = (
     Path(__file__).parents[2]
     / "scripts/330-arena-2026-09-20-terminal-fixed-source-baseline-rerun.sql.template"

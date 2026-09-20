@@ -113,12 +113,12 @@ BEGIN
        AND archived.configuration_doc->>'archived_bank_object_sha256'=
            '7aaa7fbb4b4ce078dd62217c4d594dafdc82161d30c7718bd4500fa659fe5ad9')
     OR baseline.source_ref IS DISTINCT FROM
-       'arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun330-618eb6e6.tar.gz'
-    OR baseline.source_size_bytes IS DISTINCT FROM 856357
+       'arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun330-51f1c3c8.tar.gz'
+    OR baseline.source_size_bytes IS DISTINCT FROM 857598
     OR baseline.submission_doc->>'source_sha256' IS DISTINCT FROM
-       'c0425436556c590b5d29649edb2b1df19a2a32a8d6072b68b72af8163932453f'
+       'f403292595dd753e8398ad46de388dd75165ebe1265526cfffd7ef7c6c3e72a4'
     OR baseline.submission_doc->>'source_commit' IS DISTINCT FROM
-       '618eb6e695de19d8cc6b3cf95b65c9b257756bb6'
+       '51f1c3c8e17a436ec2ccfb80162beae7fc1f02b2'
     OR active.configuration_doc->>'checkpoint_deadline_policy' IS DISTINCT FROM
        'atomic_checkpoint_90m_v1'
     OR (active.configuration_doc->>'icp_wall_clock_seconds')::INTEGER<>5400
@@ -347,15 +347,15 @@ BEGIN
   INTO cache_before FROM public.lab_arena_judgment_cache c;
 
  expected_submission:=baseline.submission_doc||pg_catalog.jsonb_build_object(
-  'source_ref','arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun330-618eb6e6.tar.gz',
-  'source_size_bytes',856357,
-  'source_sha256','c0425436556c590b5d29649edb2b1df19a2a32a8d6072b68b72af8163932453f',
-  'source_commit','618eb6e695de19d8cc6b3cf95b65c9b257756bb6');
+  'source_ref','arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun330-51f1c3c8.tar.gz',
+  'source_size_bytes',857598,
+  'source_sha256','f403292595dd753e8398ad46de388dd75165ebe1265526cfffd7ef7c6c3e72a4',
+  'source_commit','51f1c3c8e17a436ec2ccfb80162beae7fc1f02b2');
  SELECT pg_catalog.jsonb_agg(CASE
    WHEN item->>'submission_id'='baseline-2026-09-20' THEN
     item||pg_catalog.jsonb_build_object(
-     'source_ref','arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun330-618eb6e6.tar.gz',
-     'source_size_bytes',856357)
+     'source_ref','arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun330-51f1c3c8.tar.gz',
+     'source_size_bytes',857598)
    ELSE item END ORDER BY ordinal)
   INTO new_participants FROM pg_catalog.jsonb_array_elements(active.participants)
    WITH ORDINALITY entries(item,ordinal);
@@ -471,8 +471,8 @@ BEGIN
  WHERE round_id='arena-2026-09-20' AND kind='execute'
   AND submission_id<>'baseline-2026-09-20';
  UPDATE public.lab_arena_submissions SET
-  source_ref='arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun330-618eb6e6.tar.gz',
-  source_size_bytes=856357,submission_doc=expected_submission,
+  source_ref='arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun330-51f1c3c8.tar.gz',
+  source_size_bytes=857598,submission_doc=expected_submission,
   updated_at=pg_catalog.clock_timestamp()
  WHERE round_id='arena-2026-09-20' AND submission_id='baseline-2026-09-20';
  IF NOT FOUND THEN RAISE EXCEPTION 'Sep20 rerun330 baseline update missing'; END IF;

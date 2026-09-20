@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: September 20 invalid champion correction
+
+On 2026-09-20 the user explicitly authorized correcting the invalid September 20
+champion allocation to zero and increasing the future champion pool from 25% to
+30%. This includes protected inspection, exact committed corrective migrations,
+normal Arena signing and reward activation, narrow code and tests, pushes,
+canonical gateway and normal-validator restarts, and automatic chain submission
+and finalized readback through the overnight recovery skills. Preserve the
+published September 20 scores, frozen research, previous signed reward and
+accepted weight-state history, completed payouts, and concurrent work. Do not
+reset the baseline or manufacture manual chain vectors. This authority expires
+when the correction and future reward policy are deployed and verified.
+
+
 ## Scoped production authorization: exhausted provider-error ICP isolation
 
 On 2026-09-20 the user explicitly authorized treating an execution ICP whose

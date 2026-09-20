@@ -3222,17 +3222,20 @@ class ArenaService:
     def _latest_miner_basis(
         bases: Sequence[Mapping[str, Any]],
     ) -> Optional[Dict[str, Any]]:
-        candidates = [
-            dict(basis)
-            for basis in bases
-            if basis.get("king_outcome") in rewards.PAYING_KING_OUTCOMES
-            and str(basis.get("king_hotkey") or "")
-        ]
-        return max(
-            candidates,
+        latest = max(
+            (dict(basis) for basis in bases),
             key=lambda basis: int(basis["effective_reward_epoch"]),
             default=None,
         )
+        # Nonpaying signed bases are explicit continuity barriers. Looking
+        # past one would revive a champion that a later activation revoked.
+        if (
+            latest is None
+            or latest.get("king_outcome") not in rewards.PAYING_KING_OUTCOMES
+            or not str(latest.get("king_hotkey") or "")
+        ):
+            return None
+        return latest
 
     def _baseline_fully_succeeded(self, row: Mapping[str, Any]) -> bool:
         """Whether all twenty baseline executions and judgments succeeded."""

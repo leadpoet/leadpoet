@@ -65,7 +65,7 @@ import os
 import re
 import time
 from datetime import date
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Literal, Mapping, Optional, TypedDict
 from urllib.parse import parse_qsl, quote, unquote, urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
@@ -313,6 +313,28 @@ def _careers_link_evidence(body: str, source_url: str) -> tuple[str, int]:
     text = "Observed links on the rendered first-party careers page:\n"
     text += "\n".join(f"- {title} ({url})" for title, url in rows)
     return text, len(rows)
+
+
+class _CareersIndexReceipt(TypedDict):
+    kind: Literal["first_party_careers_index"]
+    observed_job_link_count: int
+
+
+def _careers_index_receipt(value: Any) -> Optional[_CareersIndexReceipt]:
+    """Accept only the bounded receipt created from parsed rendered links."""
+
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != {"kind", "observed_job_link_count"}
+        or value.get("kind") != "first_party_careers_index"
+        or type(value.get("observed_job_link_count")) is not int
+        or not 1 <= value["observed_job_link_count"] <= 200
+    ):
+        return None
+    return {
+        "kind": "first_party_careers_index",
+        "observed_job_link_count": value["observed_job_link_count"],
+    }
 
 
 def _workday_cxs_url(source_url: str) -> str:
@@ -1589,12 +1611,17 @@ async def _scrape_sd_hardened(
                 )
                 if verdict == "ok":
                     listing_text = ""
+                    listing_receipt: Optional[_CareersIndexReceipt] = None
                     if prefer_dynamic_job_index and tier_name == "dynamic_render":
                         listing_text, listing_count = _careers_link_evidence(body, url)
                         if not listing_count:
                             last_verdict = "job_links_absent"
                             history[-1] = (tier_name, last_verdict)
                             continue
+                        listing_receipt = {
+                            "kind": "first_party_careers_index",
+                            "observed_job_link_count": listing_count,
+                        }
                     source_publication_date = _published_date_from_html(body, url)
                     # Extract article body from raw HTML before truncation.
                     # Removes nav/sidebar/footer/related-posts that otherwise
@@ -1609,6 +1636,7 @@ async def _scrape_sd_hardened(
                     return {"ok": True, "stage": f"sd:{tier_name}",
                             "content": body[:MAX_SCRAPED_CHARS],
                             "source_publication_date": source_publication_date,
+                            "meta": listing_receipt or {},
                             "error": None, "stage_history": history}
                 if prefer_dynamic_job_index and tier_name == "dynamic_render":
                     continue
@@ -2786,15 +2814,17 @@ async def _fetch_sd_then_exa(
         else:
             sd = await _scrape_sd_hardened(url)
         if sd.get("ok") and sd.get("content"):
+            listing_receipt = _careers_index_receipt(sd.get("meta"))
+            result_meta = listing_receipt or (
+                {"kind": "lever_job"}
+                if _lever_posting_identity(url) is not None
+                else {}
+            )
             results.append({
                 "url": url, "title": "",
                 "text": sd["content"][:max_chars],
                 "source_publication_date": sd.get("source_publication_date") or "",
-                "meta": (
-                    {"kind": "lever_job"}
-                    if _lever_posting_identity(url) is not None
-                    else {}
-                ),
+                "meta": result_meta,
             })
             statuses.append({
                 "url": url, "source": "scrapingdog",
@@ -3575,6 +3605,19 @@ async def verify_three_stage(
         (r.get("meta") or {}).get("kind") == "linkedin_job"
         for r in (contents.get("results") or [])
     )
+    first_party_careers_listing_count = 0
+    if prefer_dynamic_job_index and official_publisher_binding:
+        for result in (contents.get("results") or []):
+            if _normalize_url(result.get("url") or "") != _normalize_url(
+                fetch_source_url
+            ):
+                continue
+            receipt = _careers_index_receipt(result.get("meta"))
+            if receipt is not None:
+                first_party_careers_listing_count = receipt[
+                    "observed_job_link_count"
+                ]
+                break
     is_job_board = (
         row.get("_declared_source") == "job_board"
         or _is_job_board_url(fetch_source_url)
@@ -3590,7 +3633,10 @@ async def verify_three_stage(
         combined_for_gate = "\n".join(
             (r.get("text") or "") for r in (contents.get("results") or [])
         )
-        if not _looks_like_job_body(combined_for_gate):
+        if (
+            not _looks_like_job_body(combined_for_gate)
+            and not first_party_careers_listing_count
+        ):
             return {
                 "client_ready": False,
                 "decision": "reject",
@@ -3814,7 +3860,10 @@ async def verify_three_stage(
     job_publisher_relationship = (
         "verified"
         if is_job_board
-        and _looks_like_job_body(combined_text)
+        and (
+            _looks_like_job_body(combined_text)
+            or bool(first_party_careers_listing_count)
+        )
         and (
             official_publisher_binding
             or exact_ats_employer_binding
@@ -3906,7 +3955,14 @@ async def verify_three_stage(
             ))
         verified_job_source_urls = [
             item["url"] for item in contents.get("results") or []
-            if _looks_like_job_body(item.get("text") or "")
+            if (
+                _looks_like_job_body(item.get("text") or "")
+                or (
+                    first_party_careers_listing_count
+                    and _normalize_url(item.get("url") or "")
+                    == _normalize_url(fetch_source_url)
+                )
+            )
             and not (item.get("meta") or {}).get("is_closed")
             and (
                 (

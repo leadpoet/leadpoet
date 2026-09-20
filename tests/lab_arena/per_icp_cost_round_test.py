@@ -205,7 +205,11 @@ def test_per_icp_overshoot_preserves_output_other_icps_restart_and_rewards(datab
 
 @pytest.mark.parametrize(
     ("stop_reason", "day", "epoch"),
-    [("money_cap", 29, 31801), ("per_icp_quota", 30, 31802)],
+    [
+        ("money_cap", 29, 31801),
+        ("per_icp_quota", 30, 31802),
+        ("provider_error", 32, 31804),
+    ],
 )
 def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
     database, tmp_path, stop_reason, day, epoch
@@ -352,20 +356,32 @@ def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
         harness.round_id, submission_id=baseline_id, kind="execute"
     )
     accepted = [run for run in runs if run["status"] == "accepted"]
-    budget_stops = [
-        run for run in runs if run["terminal_cause"] == "budget_exhausted"
+    expected_cause = (
+        "provider_error" if stop_reason == "provider_error" else "budget_exhausted"
+    )
+    terminal_stops = [
+        run for run in runs if run["terminal_cause"] == expected_cause
     ]
     assert len(accepted) == 19
-    assert len(budget_stops) == 1
-    assert budget_stops[0]["icp_position"] == 0
+    assert len(terminal_stops) == (2 if stop_reason == "provider_error" else 1)
+    assert all(run["icp_position"] == 0 for run in terminal_stops)
     if stop_reason == "money_cap":
         assert observed == [("failed", 502), ("ok", 200), ("refused", 402)]
         assert "0.01|ok" not in harness.provider.dispatched
+    elif stop_reason == "provider_error":
+        assert observed == [("failed", 502), ("failed", 502)]
+        assert [run["attempt"] for run in terminal_stops] == [1, 2]
+        assert terminal_stops[0]["per_icp_score"] is None
+        assert terminal_stops[1]["per_icp_score"] == 0
+        assert all(
+            harness.service.store.list_ledger(run_id=run["run_id"])
+            for run in terminal_stops
+        )
     else:
         assert observed.count(("quota_ok", 200)) == deepline_quota
         assert observed.count(("quota_refused", 402)) == 1
         refusal_entries = harness.service.store.list_ledger(
-            run_id=budget_stops[0]["run_id"], entry_kind="refusal"
+            run_id=terminal_stops[0]["run_id"], entry_kind="refusal"
         )
         assert [entry["entry_doc"]["reason"] for entry in refusal_entries] == [
             "per_icp_quota"
@@ -375,8 +391,23 @@ def test_per_icp_budget_stop_after_provider_failure_does_not_cancel_round(
     assert result["submission_id"] == baseline_id
     assert result["eligible"] is True
     assert result["final_score"] > 0
+    if stop_reason == "provider_error":
+        scored = [
+            float(run["per_icp_score"])
+            for run in runs
+            if run["per_icp_score"] is not None
+        ]
+        assert len(scored) == 20
+        assert result["final_score"] == pytest.approx(sum(scored) / 20)
+        public = harness.service.public_results(harness.round_id, baseline_id)
+        assert len(public["scores"]["stage_1"] + public["scores"]["stage_2"]) == 20
     per_icp = {item["icp_position"]: item for item in result["cost_summary"]["per_icp"]}
-    assert per_icp[0]["eligible"] is (stop_reason == "per_icp_quota")
+    assert per_icp[0]["eligible"] is (
+        stop_reason in ("per_icp_quota", "provider_error")
+    )
+    if stop_reason == "provider_error":
+        assert per_icp[0]["execution"]["settled_microusd"] == 2_000_000
+        assert per_icp[0]["execution"]["successful_microusd"] == 0
     assert all(per_icp[position]["eligible"] for position in range(1, 20))
     fixtures.assert_canary_absent(harness, connect)
 

@@ -148,9 +148,9 @@ def build_scoring_plan(
 
     ``runs`` are every attempt row of the stage. An assignment with an
     accepted attempt contributes exactly one work item named by its run and
-    output reference; every other assignment contributes a zero row named
-    by the cause of its latest model-caused attempt. Any infrastructure cause
-    means the stage should have cancelled and is refused here.
+    output reference. A model-caused failure, or a provider error that remains
+    after both normal attempts, contributes a zero row. Other infrastructure
+    causes mean the stage should have cancelled and are refused here.
     """
 
     if stage not in (1, 2):
@@ -183,8 +183,18 @@ def build_scoring_plan(
             # are still judged as distinct competition results.
             items[scored_run_id] = {"scored_run_id": scored_run_id, "icp_position": position, "output_ref": output_ref, "submission_id": submission_id}
             continue
-        cause = str(latest[key].get("terminal_cause") or "")
-        if cause not in contracts.MODEL_CAUSED_TERMINAL_CAUSES:
+        latest_run = latest[key]
+        cause = str(latest_run.get("terminal_cause") or "")
+        provider_error_exhausted = (
+            cause == "provider_error"
+            and latest_run.get("status") == "failed"
+            and int(latest_run.get("attempt") or 0)
+            >= contracts.MAX_ATTEMPTS_PER_ASSIGNMENT
+        )
+        if (
+            cause not in contracts.MODEL_CAUSED_TERMINAL_CAUSES
+            and not provider_error_exhausted
+        ):
             # A retry that the window closed before it ran leaves the
             # earlier model-caused failure standing.
             confirmed = [run for run in runs if (str(run.get("submission_id")), int(run.get("icp_position") or 0)) == key and str(run.get("terminal_cause") or "") in contracts.MODEL_CAUSED_TERMINAL_CAUSES]

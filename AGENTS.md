@@ -1,5 +1,20 @@
 # Agent Instructions
 
+## Scoped production authorization: exhausted provider-error ICP isolation
+
+On 2026-09-20 the user explicitly authorized treating an execution ICP whose
+`provider_error` remains after the normal retry limit as a zero for that ICP,
+while the other ICPs continue through judging, aggregation, and publication.
+Apply this behavior to baseline and miner submissions. Preserve the fixed ICP
+denominator, actual terminal causes, provider and judge costs, saved accepted
+outputs, historical rows, and concurrent work. Judge failures, unexhausted
+work, worker loss, rejected results, unknown states, and trust failures remain
+fail-closed. Authority includes focused tests, a numbered committed migration,
+push, and canonical gateway and normal-validator deployment after existing
+workers drain through the normal path. Do not interrupt or kill those workers.
+This scope ends after the change is deployed and the unaffected live flow is
+verified.
+
 ## Scoped production authorization: confirmed-cost-only provider admission
 
 On 2026-09-19 the user explicitly authorized removing monetary holds from current Arena

@@ -2122,14 +2122,31 @@ def _source_publication_date(value: Any) -> str:
 
     if not isinstance(value, str):
         return ""
-    match = re.match(r"^(\d{4}-\d{2}-\d{2})(?:[T ]|$)", value.strip())
-    if not match:
+    text = value.strip()
+    match = re.match(r"^(\d{4}-\d{2}-\d{2})(?:[T ]|$)", text)
+    if match:
+        try:
+            date.fromisoformat(match.group(1))
+        except ValueError:
+            return ""
+        return match.group(1)
+
+    english = re.fullmatch(r"([A-Za-z]+) ([0-9]{1,2}), ([0-9]{4})", text)
+    if english is None:
+        return ""
+    month = {
+        name.casefold(): number for number, name in enumerate((
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December",
+        ), start=1)
+    }.get(english.group(1).casefold())
+    if month is None:
         return ""
     try:
-        date.fromisoformat(match.group(1))
+        parsed = date(int(english.group(3)), month, int(english.group(2)))
     except ValueError:
         return ""
-    return match.group(1)
+    return parsed.isoformat()
 
 
 def _published_date_from_html(html: str, source_url: str) -> str:

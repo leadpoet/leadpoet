@@ -1153,6 +1153,32 @@ def test_structured_company_projects_exact_identity_public_company_metadata():
     }
 
 
+def test_structured_company_projects_only_explicit_bound_private_metadata():
+    payload = _structured_company_payload(companyType="Privately Held")
+
+    assert linkedin_company_size.project_structured_linkedin_company_type(
+        "acme.example.com",
+        "https://www.linkedin.com/company/acme",
+        payload,
+    ) == {
+        "company_type": "Privately Held",
+        "provider": "harvestapi_get_company",
+        "source_field": "companyType",
+        "url": "https://www.linkedin.com/company/acme",
+        "website": "https://acme.example.com/",
+    }
+    assert linkedin_company_size.project_structured_linkedin_company_type(
+        "other.example.com",
+        "https://www.linkedin.com/company/acme",
+        payload,
+    ) is None
+    assert linkedin_company_size.project_structured_linkedin_company_type(
+        "acme.example.com",
+        "https://www.linkedin.com/company/acme",
+        _structured_company_payload(companyType="Partnership"),
+    ) is None
+
+
 def test_structured_company_accepts_child_host_of_requested_registrable_root():
     payload = _structured_company_payload(
         website="https://news.microsoft.com/",
@@ -2929,6 +2955,171 @@ def test_structured_public_profile_never_overrides_proven_nonpublic_stage(
 
     assert result.decision != COMPANY_FIT_MATCH
     assert result.details["dimension_decisions"]["stage"] != COMPANY_FIT_MATCH
+
+
+def test_exact_structured_private_company_contradicts_stale_public_observation():
+    verdict = _verdict(observed_size=25, size_matches=True)
+    verdict.update(
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url="https://www.sec.gov/Archives/old-filing.htm",
+        stage_evidence_quote="The company filed this report in 2024.",
+    )
+    private_evidence = {
+        "company_type": "Privately Held",
+        "provider": "harvestapi_get_company",
+        "source_field": "companyType",
+        "url": "https://www.linkedin.com/company/acme",
+        "website": "https://example.com/",
+    }
+
+    result = lead_scorer._reverify_decision(
+        verdict,
+        "",
+        "public",
+        icp=_icp().model_copy(update={"company_stage": "Public"}),
+        company=_company().model_copy(update={"company_stage": "Public"}),
+        verified_homepage_identity={
+            "normalized_name": "acme",
+            "registrable_dns_domain": "example.com",
+            "linkedin_company_slug": "acme",
+        },
+        structured_public_company_evidence=private_evidence,
+    )
+
+    assert result.decision == COMPANY_FIT_MISMATCH
+    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MISMATCH
+    assert result.details["dimension_evidence"]["stage"] == private_evidence
+
+
+def test_exact_structured_private_company_survives_full_company_fit_merge(
+    monkeypatch,
+):
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_match(
+            "homepage identity verified",
+            details={
+                "identity": {
+                    "decision": COMPANY_FIT_MATCH,
+                    "evidence_source": "company_homepage",
+                    "observed_name": "acme",
+                    "observed_domain": "example.com",
+                    "observed_linkedin_slug": "acme",
+                }
+            },
+        )
+
+    async def provider(**_kwargs):
+        verdict = _verdict(observed_size=25, size_matches=True)
+        verdict.update(
+            observed_company_website="https://example.com/",
+            observed_company_stage="Public",
+            stage_matches=True,
+            stage_evidence_url="https://www.sec.gov/Archives/old-filing.htm",
+            stage_evidence_quote="The company filed this report in 2024.",
+        )
+        return verdict, ""
+
+    async def structured_fetch(
+        _domain, url, *, diagnostic, public_company_evidence
+    ):
+        del diagnostic
+        public_company_evidence.update(
+            {
+                "company_type": "Privately Held",
+                "provider": "harvestapi_get_company",
+                "source_field": "companyType",
+                "url": url,
+                "website": "https://example.com/",
+            }
+        )
+        return {
+            "employee_count": "11-50",
+            "provider": "harvestapi_get_company",
+            "source_field": "employeeCountRange",
+            "url": url,
+            "website": "https://example.com/",
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_structured_linkedin_company_size",
+        structured_fetch,
+    )
+
+    result = asyncio.run(
+        lead_scorer._verify_company_fit(
+            _company().model_copy(
+                update={"company_website": "https://example.com", "company_stage": "Public"}
+            ),
+            _icp().model_copy(update={"company_stage": "Public"}),
+            0.0,
+            0.0,
+            set(),
+            require_https_transport=True,
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MISMATCH
+    assert result.details["company_fit_dimensions"]["stage"] == COMPANY_FIT_MISMATCH
+    assert result.details["dimension_evidence"]["stage"]["web_evidence"] == {
+        "company_type": "Privately Held",
+        "provider": "harvestapi_get_company",
+        "source_field": "companyType",
+        "url": "https://www.linkedin.com/company/acme",
+        "website": "https://example.com/",
+    }
+
+
+@pytest.mark.parametrize(
+    "evidence_update",
+    [
+        {"website": "https://other.test/"},
+        {"url": "https://www.linkedin.com/company/other"},
+        {"company_type": "Partnership"},
+    ],
+)
+def test_unbound_or_unknown_structured_company_type_cannot_contradict_public(
+    evidence_update,
+):
+    verdict = _verdict(observed_size=25, size_matches=True)
+    verdict.update(
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url="https://example.com/current-listing",
+        stage_evidence_quote="Acme common stock is currently listed.",
+    )
+    evidence = {
+        "company_type": "Privately Held",
+        "provider": "harvestapi_get_company",
+        "source_field": "companyType",
+        "url": "https://www.linkedin.com/company/acme",
+        "website": "https://example.com/",
+        **evidence_update,
+    }
+
+    result = lead_scorer._reverify_decision(
+        verdict,
+        "",
+        "public",
+        icp=_icp().model_copy(update={"company_stage": "Public"}),
+        company=_company().model_copy(update={"company_stage": "Public"}),
+        verified_homepage_identity={
+            "normalized_name": "acme",
+            "registrable_dns_domain": "example.com",
+            "linkedin_company_slug": "acme",
+        },
+        structured_public_company_evidence=evidence,
+    )
+
+    assert result.details["dimension_decisions"]["stage"] != COMPANY_FIT_MISMATCH
 
 
 def test_exa_size_short_circuits_structured_fallback(monkeypatch):

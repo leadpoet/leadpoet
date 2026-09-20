@@ -614,6 +614,44 @@ def test_homepage_identity_can_follow_large_bounded_style_prefix(monkeypatch):
     ]
 
 
+def test_verified_homepage_alias_binds_web_identity_without_submitted_linkedin():
+    company = _academy_company(linkedin="")
+    anchor = {
+        "normalized_name": "academysportsoutdoors",
+        "registrable_dns_domain": "academy.com",
+        "linkedin_company_slug": "academy-sports-and-outdoors",
+        "verified_legal_name_aliases": ["Academy Sports and Outdoors, Inc."],
+    }
+    verdict = {
+        "observed_company_name": "Academy Sports and Outdoors, Inc.",
+        "observed_company_website": "https://www.academy.com/",
+        "observed_company_linkedin": (
+            "https://www.linkedin.com/company/academy-sports-and-outdoors/"
+        ),
+    }
+
+    assert _web_identity_receipt(
+        company,
+        verdict,
+        verified_homepage_identity=anchor,
+    )["decision"] == COMPANY_FIT_MATCH
+
+    for changed in (
+        {"observed_company_website": "https://unrelated.example/"},
+        {
+            "observed_company_linkedin": (
+                "https://www.linkedin.com/company/unrelated/"
+            )
+        },
+        {"observed_company_name": "Unlisted Corporate Alias"},
+    ):
+        assert _web_identity_receipt(
+            company,
+            {**verdict, **changed},
+            verified_homepage_identity=anchor,
+        )["decision"] != COMPANY_FIT_MATCH
+
+
 def _academy_company(
     *,
     name="Academy Sports + Outdoors",

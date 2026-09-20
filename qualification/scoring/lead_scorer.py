@@ -95,6 +95,7 @@ from qualification.scoring.linkedin_company_size import (
     is_linkedin_evidence_url,
     linkedin_company_page_slug,
     STRUCTURED_PROFILE_COMPANY_TYPE_SOURCE_FIELD,
+    STRUCTURED_PROFILE_PRIVATE_COMPANY_TYPE,
     STRUCTURED_PROFILE_PROVIDER,
     STRUCTURED_PROFILE_PUBLIC_COMPANY_TYPE,
     STRUCTURED_PROFILE_SOURCE_FIELD,
@@ -1221,6 +1222,7 @@ def _web_identity_receipt(
         )
         return receipt
     verified_anchor_receipt: Mapping[str, str] = {}
+    verified_anchor_binds_company = False
     if isinstance(verified_homepage_identity, Mapping):
         anchor_name = verified_homepage_identity.get("normalized_name")
         anchor_domain = verified_homepage_identity.get(
@@ -1249,6 +1251,14 @@ def _web_identity_receipt(
                 ),
                 evidence_source="company_homepage",
                 company_quality=company_quality,
+            )
+            claimed_slug = linkedin_company_page_slug(company.company_linkedin)
+            verified_anchor_binds_company = bool(
+                verified_anchor_receipt.get("decision") == COMPANY_FIT_MATCH
+                and (
+                    not str(company.company_linkedin or "").strip()
+                    or claimed_slug == anchor_linkedin_slug
+                )
             )
     if (
         receipt.get("decision") == COMPANY_FIT_MISMATCH
@@ -1368,12 +1378,22 @@ def _web_identity_receipt(
             and receipt.get("reason_code") == "identity_mismatch"
         )
         or (
-            company_quality
-            and receipt.get("decision") == COMPANY_FIT_UNAVAILABLE
-            and receipt.get("reason_code") == "identity_name_alias_unresolved"
+            receipt.get("decision") == COMPANY_FIT_UNAVAILABLE
+            and (
+                (
+                    company_quality
+                    and receipt.get("reason_code")
+                    == "identity_name_alias_unresolved"
+                )
+                or (
+                    not str(company.company_linkedin or "").strip()
+                    and receipt.get("reason_code")
+                    in {"identity_not_proven", "identity_name_alias_unresolved"}
+                )
+            )
         )
     ) and (
-        verified_anchor_receipt.get("decision") == COMPANY_FIT_MATCH
+        verified_anchor_binds_company
         and isinstance(verified_homepage_identity, Mapping)
         and receipt.get("observed_domain")
         == verified_homepage_identity.get("registrable_dns_domain")
@@ -1648,11 +1668,13 @@ async def _fetch_structured_linkedin_profile_once(
         invocation_cache["structured_failure_reason"] = failure_reason
 
 
-def _is_bound_structured_linkedin_public_company_evidence(
+def _is_bound_structured_linkedin_company_type_evidence(
     evidence: Any,
     verified_homepage_identity: Optional[Mapping[str, str]],
+    *,
+    expected_company_type: str,
 ) -> bool:
-    """Validate the exact structured Public receipt against the homepage."""
+    """Validate one exact structured company-type receipt against the homepage."""
 
     if not isinstance(evidence, Mapping) or set(evidence) != {
         "company_type",
@@ -1669,17 +1691,41 @@ def _is_bound_structured_linkedin_public_company_evidence(
     )
     anchor_domain = str(anchor.get("registrable_dns_domain") or "").strip()
     anchor_slug = str(anchor.get("linkedin_company_slug") or "").strip().casefold()
-    evidence_domain = _registrable_domain(str(evidence.get("website") or ""))
-    evidence_slug = linkedin_company_page_slug(evidence.get("url"))
     return bool(
-        evidence.get("company_type") == STRUCTURED_PROFILE_PUBLIC_COMPANY_TYPE
+        evidence.get("company_type") == expected_company_type
         and evidence.get("provider") == STRUCTURED_PROFILE_PROVIDER
         and evidence.get("source_field")
         == STRUCTURED_PROFILE_COMPANY_TYPE_SOURCE_FIELD
         and anchor_domain
         and anchor_slug
-        and evidence_domain == anchor_domain
-        and evidence_slug == anchor_slug
+        and _registrable_domain(str(evidence.get("website") or "")) == anchor_domain
+        and linkedin_company_page_slug(evidence.get("url")) == anchor_slug
+    )
+
+
+def _is_bound_structured_linkedin_public_company_evidence(
+    evidence: Any,
+    verified_homepage_identity: Optional[Mapping[str, str]],
+) -> bool:
+    """Validate the exact structured Public receipt against the homepage."""
+
+    return _is_bound_structured_linkedin_company_type_evidence(
+        evidence,
+        verified_homepage_identity,
+        expected_company_type=STRUCTURED_PROFILE_PUBLIC_COMPANY_TYPE,
+    )
+
+
+def _is_bound_structured_linkedin_private_company_evidence(
+    evidence: Any,
+    verified_homepage_identity: Optional[Mapping[str, str]],
+) -> bool:
+    """Validate an exact structured Privately Held receipt against the homepage."""
+
+    return _is_bound_structured_linkedin_company_type_evidence(
+        evidence,
+        verified_homepage_identity,
+        expected_company_type=STRUCTURED_PROFILE_PRIVATE_COMPANY_TYPE,
     )
 
 
@@ -2061,6 +2107,14 @@ def _reverify_decision(
         stage_evidence=stage_evidence,
         verified_homepage_identity=verified_homepage_identity,
     )
+    structured_private_stage_conflict = bool(
+        _normalize_company_stage(icp_stage) == "public"
+        and identity_decision == COMPANY_FIT_MATCH
+        and _is_bound_structured_linkedin_private_company_evidence(
+            structured_public_company_evidence,
+            verified_homepage_identity,
+        )
+    )
     dimensions = {
         "employee_size": (
             COMPANY_FIT_UNAVAILABLE
@@ -2086,9 +2140,13 @@ def _reverify_decision(
             company_quality=company_quality,
         ),
         "stage": (
-            COMPANY_FIT_MATCH
-            if structured_public_stage
-            else observed_stage_decision
+            COMPANY_FIT_MISMATCH
+            if structured_private_stage_conflict
+            else (
+                COMPANY_FIT_MATCH
+                if structured_public_stage
+                else observed_stage_decision
+            )
         ),
     }
     active_dimensions = {"employee_size", "industry", "geography"}
@@ -2101,7 +2159,7 @@ def _reverify_decision(
     evidence["industry"] = industry_evidence
     if structured_employee_size_decision != COMPANY_FIT_UNAVAILABLE:
         evidence["employee_size"] = dict(structured_employee_size_evidence or {})
-    if structured_public_stage:
+    if structured_public_stage or structured_private_stage_conflict:
         evidence["stage"] = dict(structured_public_company_evidence or {})
     if strict_web_proof:
         for dimension in active_dimensions:
@@ -2110,7 +2168,9 @@ def _reverify_decision(
                 and structured_employee_size_decision != COMPANY_FIT_UNAVAILABLE
             ):
                 continue
-            if dimension == "stage" and structured_public_stage:
+            if dimension == "stage" and (
+                structured_public_stage or structured_private_stage_conflict
+            ):
                 continue
             dimensions[dimension] = _decision_with_web_evidence(
                 dimensions[dimension], evidence[dimension]
@@ -3812,9 +3872,20 @@ async def _verify_company_fit(
                 _verified_homepage_identity_anchor(identity),
             )
         )
+        structured_private_stage_proof = (
+            dimension == "stage"
+            and observed_decision == COMPANY_FIT_MISMATCH
+            and _normalize_company_stage(icp.company_stage) == "public"
+            and web_identity_decision == COMPANY_FIT_MATCH
+            and _is_bound_structured_linkedin_private_company_evidence(
+                web_evidence,
+                _verified_homepage_identity_anchor(identity),
+            )
+        )
         if dimension in active_web_dimensions and (
             not structured_employee_proof
             and not structured_public_stage_proof
+            and not structured_private_stage_proof
             and (
                 not _valid_web_evidence_url(web_evidence.get("url"))
                 or not str(web_evidence.get("quote") or "").strip()

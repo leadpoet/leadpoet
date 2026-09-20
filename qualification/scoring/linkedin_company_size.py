@@ -31,6 +31,7 @@ STRUCTURED_PROFILE_PROVIDER = "harvestapi_get_company"
 STRUCTURED_PROFILE_SOURCE_FIELD = "employeeCountRange"
 STRUCTURED_PROFILE_COMPANY_TYPE_SOURCE_FIELD = "companyType"
 STRUCTURED_PROFILE_PUBLIC_COMPANY_TYPE = "Public Company"
+STRUCTURED_PROFILE_PRIVATE_COMPANY_TYPE = "Privately Held"
 CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE: Literal[
     "insufficient_evidence"
 ] = "insufficient_evidence"
@@ -146,6 +147,9 @@ class StructuredLinkedInPublicCompanyEvidence(TypedDict):
     source_field: str
     url: str
     website: str
+
+
+StructuredLinkedInCompanyTypeEvidence = StructuredLinkedInPublicCompanyEvidence
 
 VERIFIER_FAILURE_REASON_KEY = "failure_reason"
 SOURCE_BLOCKED_FAILURE_REASON = "source_blocked"
@@ -422,6 +426,42 @@ def project_structured_linkedin_public_company(
     return None
 
 
+def project_structured_linkedin_company_type(
+    requested_domain: str,
+    requested_profile_url: str,
+    payload: Any,
+) -> Optional[StructuredLinkedInCompanyTypeEvidence]:
+    """Project one exact-identity structured Public or Privately Held value."""
+
+    domain = _canonical_company_domain(requested_domain)
+    profile_url = _strict_linkedin_company_profile_url(requested_profile_url)
+    requested_slug = linkedin_company_page_slug(profile_url)
+    if not domain or not requested_slug or _structured_provider_reported_error(payload):
+        return None
+    for element in _structured_company_elements(payload):
+        if not _structured_company_domain_matches(domain, element.get("website")):
+            continue
+        returned_profile = _strict_linkedin_company_profile_url(
+            element.get("linkedinUrl") or element.get("linkedin_url")
+        )
+        if linkedin_company_page_slug(returned_profile) != requested_slug:
+            continue
+        company_type = element.get("companyType")
+        if company_type not in {
+            STRUCTURED_PROFILE_PUBLIC_COMPANY_TYPE,
+            STRUCTURED_PROFILE_PRIVATE_COMPANY_TYPE,
+        }:
+            continue
+        return {
+            "company_type": company_type,
+            "provider": STRUCTURED_PROFILE_PROVIDER,
+            "source_field": STRUCTURED_PROFILE_COMPANY_TYPE_SOURCE_FIELD,
+            "url": profile_url,
+            "website": f"https://{domain}/",
+        }
+    return None
+
+
 async def fetch_structured_linkedin_company_size(
     requested_domain: str,
     profile_url: str,
@@ -471,7 +511,7 @@ async def fetch_structured_linkedin_company_size(
     if not _structured_company_elements(body):
         _set_failure_reason(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)
         return None
-    public_evidence = project_structured_linkedin_public_company(
+    public_evidence = project_structured_linkedin_company_type(
         domain,
         canonical_profile,
         body,

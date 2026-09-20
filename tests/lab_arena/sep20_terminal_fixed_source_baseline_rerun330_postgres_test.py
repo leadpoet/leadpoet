@@ -48,6 +48,10 @@ TEMPLATE = (
     / "scripts/330-arena-2026-09-20-terminal-fixed-source-baseline-rerun.sql.template"
 )
 RENDERED = TEMPLATE.with_suffix("")
+AUTHORITY_HOLD = (
+    Path(__file__).parents[2]
+    / "scripts/331-arena-2026-09-20-promotion-reward-hold.sql"
+)
 
 
 class IsolatedHarness(lifecycle.Harness):
@@ -464,6 +468,10 @@ def _publish_rerun328(
     assert harness.service.publish(ROUND)["status"] == "ok"
     if zero_baseline:
         monkeypatch.setattr(lifecycle, "_proof_breakdown", normal_breakdown)
+        with connection.cursor() as cursor:
+            cursor.execute(AUTHORITY_HOLD.read_text())
+            cursor.execute(AUTHORITY_HOLD.read_text())
+        connection.commit()
 
 
 def _inject_exhausted_provider_zero_and_failed_unknown(connection) -> str:
@@ -1110,6 +1118,8 @@ def test_sep20_rerun330_template_is_inactive_and_narrow():
     assert "jsonb_typeof(entry->'final_score')='number'" in body
     assert "output_ref IS NOT NULL)<>80" in body
     assert "archived_execution_artifacts_sha256" in body
+    assert "331-arena-2026-09-20-promotion-reward-hold" in body
+    assert "sep20_rerun328_promotion_reward_hold" in body
     assert "worker_lost" not in body
     assert "__TERMINAL_SCORE_RUN_COUNT__" in body
     assert "__TERMINAL_BASELINE_RUN_COUNT__" in body

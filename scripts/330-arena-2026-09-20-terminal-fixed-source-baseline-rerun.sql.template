@@ -107,7 +107,10 @@ BEGIN
        AND archived.configuration_doc->>'archived_bank_object_sha256'=
            '7aaa7fbb4b4ce078dd62217c4d594dafdc82161d30c7718bd4500fa659fe5ad9'
        AND archived.configuration_doc->>'archived_execution_artifacts_sha256'=
-           '__TERMINAL_EXECUTION_ARTIFACTS_SHA256__')
+           '__TERMINAL_EXECUTION_ARTIFACTS_SHA256__'
+       AND archived.configuration_doc#>>
+          '{sep20_rerun328_promotion_reward_hold,migration}'=
+           '331-arena-2026-09-20-promotion-reward-hold')
     OR baseline.source_ref IS DISTINCT FROM
        'arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun328-5d492f17.tar.gz'
     OR baseline.source_size_bytes IS DISTINCT FROM 854708
@@ -127,6 +130,10 @@ BEGIN
        '{"deepline":200,"openrouter":500,"scrapingdog":200}'::JSONB
     OR active.configuration_doc->'schedule' IS DISTINCT FROM
        '__RERUN_SCHEDULE_JSON__'::JSONB
+    OR active.rewards_enabled IS DISTINCT FROM TRUE
+    OR active.promotion_required IS DISTINCT FROM TRUE
+    OR active.configuration_doc->'rewards_enabled' IS DISTINCT FROM 'true'::JSONB
+    OR active.configuration_doc ? 'sep20_rerun328_promotion_reward_hold'
     OR (SELECT pg_catalog.count(*) FROM public.lab_arena_submissions
         WHERE round_id='arena-2026-09-20-r330archive')<>
        __TERMINAL_SUBMISSION_COUNT__
@@ -248,6 +255,39 @@ BEGIN
   OR active.reward_basis_hash IS NOT NULL OR active.reward_basis_doc IS NOT NULL
   OR active.signing_key_doc IS NOT NULL OR active.reward_activated_at IS NOT NULL
   OR active.promotion_doc IS NOT NULL OR active.baseline_promoted_at IS NOT NULL
+  OR active.rewards_enabled IS DISTINCT FROM FALSE
+  OR active.promotion_required IS DISTINCT FROM FALSE
+  OR active.configuration_doc->'rewards_enabled' IS DISTINCT FROM 'false'::JSONB
+  OR pg_catalog.jsonb_typeof(active.configuration_doc->
+      'sep20_rerun328_promotion_reward_hold') IS DISTINCT FROM 'object'
+  OR (SELECT pg_catalog.count(*) FROM pg_catalog.jsonb_object_keys(
+      active.configuration_doc->'sep20_rerun328_promotion_reward_hold'))<>8
+  OR active.configuration_doc#>>
+      '{sep20_rerun328_promotion_reward_hold,schema_version}' IS DISTINCT FROM
+     'leadpoet.sep20.rerun328.authority_hold.v1'
+  OR active.configuration_doc#>>
+      '{sep20_rerun328_promotion_reward_hold,migration}' IS DISTINCT FROM
+     '331-arena-2026-09-20-promotion-reward-hold'
+  OR active.configuration_doc#>
+      '{sep20_rerun328_promotion_reward_hold,original_configuration_rewards_enabled}'
+     IS DISTINCT FROM 'true'::JSONB
+  OR active.configuration_doc#>
+      '{sep20_rerun328_promotion_reward_hold,original_row_rewards_enabled}'
+     IS DISTINCT FROM 'true'::JSONB
+  OR active.configuration_doc#>
+      '{sep20_rerun328_promotion_reward_hold,original_promotion_required}'
+     IS DISTINCT FROM 'true'::JSONB
+  OR active.configuration_doc#>>
+      '{sep20_rerun328_promotion_reward_hold,source_commit}' IS DISTINCT FROM
+     '5d492f1715e27c8d9b919bcc3ad69d1be5160524'
+  OR active.configuration_doc#>>
+      '{sep20_rerun328_promotion_reward_hold,scorer_image_digest}' IS DISTINCT FROM
+     'sha256:333ae499ede5eb51d60385bc2d11c80fed2c2a9ce6922111adde5fa52b40236f'
+  OR pg_catalog.encode(extensions.digest(((active.configuration_doc-
+      'sep20_rerun328_promotion_reward_hold')||pg_catalog.jsonb_build_object(
+       'rewards_enabled',TRUE))::TEXT,'sha256'),'hex') IS DISTINCT FROM
+     active.configuration_doc#>>
+      '{sep20_rerun328_promotion_reward_hold,original_configuration_sha256}'
   OR active.benchmark_ref IS DISTINCT FROM
      'arena/arena-2026-09-20/benchmark.json'
   OR active.evaluation_date IS DISTINCT FROM '2026-09-20'
@@ -511,7 +551,9 @@ BEGIN
  WHERE round_id='arena-2026-09-20' AND kind='execute';
  UPDATE public.lab_arena_rounds SET status='stage1',
   status_generation=status_generation+1,stage_generation=stage_generation+1,
-  configuration_doc=configuration_doc||pg_catalog.jsonb_build_object(
+  configuration_doc=(configuration_doc-
+   'sep20_rerun328_promotion_reward_hold')||pg_catalog.jsonb_build_object(
+   'rewards_enabled',TRUE,
    'schedule','__RERUN_SCHEDULE_JSON__'::JSONB,
    'scorer_image_digest',
     '__NEW_SCORER_IMAGE_DIGEST__',
@@ -523,7 +565,8 @@ BEGIN
   king_outcome=NULL,king_hotkey=NULL,king_start_epoch=NULL,
   effective_reward_epoch=NULL,reward_basis_hash=NULL,reward_basis_doc=NULL,
   signing_key_doc=NULL,reward_activated_at=NULL,
-  promotion_required=TRUE,promotion_doc=NULL,baseline_promoted_at=NULL,
+  rewards_enabled=TRUE,promotion_required=TRUE,
+  promotion_doc=NULL,baseline_promoted_at=NULL,
   updated_at=pg_catalog.clock_timestamp()
  WHERE round_id='arena-2026-09-20';
  IF NOT FOUND THEN RAISE EXCEPTION 'Sep20 rerun330 round update missing'; END IF;

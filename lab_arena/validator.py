@@ -27,10 +27,13 @@ from typing import Any, Dict, Mapping, Optional, Protocol, Sequence
 from lab_arena import contracts
 from lab_arena.contracts import document_hash
 from lab_arena.runtime_host import RuntimeHostError, runtime_host_diagnostic
+from lab_arena.scoring_startup import ScoringStartupError, scoring_startup_diagnostic
 
 MAX_ARENA_WEIGHT_ATTEMPTS = 3
 FINNEY_SN71_API_BASE_URL = "https://gateway.subnet71.com"
 FINNEY_SN71_SIGNING_KEY_HASH = "sha256:fb0a422d437700f468beda94b4d3e05bb22dbaa6141f0e6c5f1dac9e7257d99a"
+DEFAULT_RUNSC_PATH = "/usr/local/bin/runsc"
+APT_RUNSC_PATH = "/usr/bin/runsc"
 _ARENA_ARCHIVED_ATTEMPT_RE = re.compile(
     r"epoch-[0-9]+-attempt-[0-9]+-signed\.json\Z"
 )
@@ -579,6 +582,16 @@ class ArenaWeightOrchestrator:
             )
 
 
+def _default_runsc_path(environment: Mapping[str, str], *, path_exists=os.path.exists) -> str:
+    """Use the two supported install locations without searching ``PATH``."""
+
+    if "LAB_ARENA_RUNSC_PATH" in environment:
+        return str(environment["LAB_ARENA_RUNSC_PATH"])
+    if not path_exists(DEFAULT_RUNSC_PATH) and path_exists(APT_RUNSC_PATH):
+        return APT_RUNSC_PATH
+    return DEFAULT_RUNSC_PATH
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run one normal Leadpoet Arena validator", add_help=True)
     parser.add_argument("--netuid", type=int)
@@ -591,11 +604,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--arena-api-base-url", dest="api_base_url", default=os.environ.get("LAB_ARENA_API_BASE_URL", ""))
     parser.add_argument("--round-id", default=os.environ.get("LAB_ARENA_ROUND_ID", ""), help="pin one round for scoring; unset follows every running Arena round across days")
     parser.add_argument("--arena-work-dir", dest="work_dir", default=os.environ.get("LAB_ARENA_RUNNER_WORK_DIR", "/var/lib/lab-arena/runner"))
-    parser.add_argument("--arena-runsc-path", dest="runsc_path", default=os.environ.get("LAB_ARENA_RUNSC_PATH", "/usr/local/bin/runsc"))
+    parser.add_argument("--arena-runsc-path", dest="runsc_path", default=_default_runsc_path(os.environ))
     parser.add_argument("--arena-poll-seconds", dest="poll_seconds", type=int)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check-only", action="store_true", help="Check wallet, gateway key and chain readiness; scoring is not checked")
-    mode.add_argument("--check-scoring-only", action="store_true", help="Check local scoring host setup without wallets, chain access or claims; no sandbox is executed")
+    mode.add_argument("--check-scoring-only", action="store_true", help="Check scoring host, proxy connections and memory without wallets, chain access or claims; no sandbox is executed")
     mode.add_argument("--once", action="store_true")
     return parser
 
@@ -682,6 +695,10 @@ def run_validator_loops(*, orchestrator, runner_factory, epoch_supplier, stop,
                     print("Arena validator scoring unavailable: phase=%s %s; weight loop continues"
                           % ("setup" if runner is None else "cycle", runtime_host_diagnostic(exc)),
                           file=sys.stderr, flush=True)
+                elif isinstance(exc, ScoringStartupError):
+                    print("Arena validator scoring unavailable: phase=%s %s; weight loop continues"
+                          % ("setup" if runner is None else "cycle", scoring_startup_diagnostic(exc)),
+                          file=sys.stderr, flush=True)
                 else:
                     # Arbitrary provider errors can contain credential-bearing URLs.
                     print("Arena validator scoring cycle failed: type=%s; weight loop continues"
@@ -719,16 +736,31 @@ def main(argv=None) -> int:
 
     maybe_reexec_rootful(args, sys.argv[1:] if argv is None else argv)
     if args.check_scoring_only:
-        from lab_arena.runtime_host import prepare_scoring_host, scoring_host_details
+        from lab_arena.runtime_host import scoring_host_details
+        from lab_arena.scoring_startup import prepare_validator_scoring
 
         try:
-            prepare_scoring_host(Path(args.runsc_path), Path(args.work_dir))
+            startup = prepare_validator_scoring(args)
         except RuntimeHostError as exc:
             print("Arena scoring host checks failed: %s" % runtime_host_diagnostic(exc),
                   file=sys.stderr, flush=True)
             return 1
-        print("Arena scoring host checks passed: %s; sandbox_execution=not_checked"
-              % scoring_host_details(runsc_path=args.runsc_path, work_dir=args.work_dir), flush=True)
+        except ScoringStartupError as exc:
+            print("Arena scoring host checks failed: %s" % scoring_startup_diagnostic(exc),
+                  file=sys.stderr, flush=True)
+            return 1
+        print(
+            "Arena scoring host checks passed: %s; proxies=%d; execution_slots=%d; "
+            "native_coordinator=1; sandbox_execution=not_checked"
+            % (
+                scoring_host_details(
+                    runsc_path=args.runsc_path, work_dir=args.work_dir
+                ),
+                startup.verified_proxies.webshare_worker_count,
+                startup.parallelism,
+            ),
+            flush=True,
+        )
         return 0
 
     # Scoring-only checks do not depend on chain or loop configuration.

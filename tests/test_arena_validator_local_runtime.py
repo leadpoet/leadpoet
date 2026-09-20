@@ -261,3 +261,23 @@ def test_generic_scoring_error_still_hides_provider_details(capsys):
     assert "type=RuntimeError; weight loop continues" in output.err
     assert "secret-token" not in output.err
     assert orchestrator.runs >= 1
+
+
+def test_fixed_proxy_preflight_failure_keeps_weights_running(capsys):
+    from lab_arena.scoring_startup import ScoringStartupError
+
+    def factory():
+        raise ScoringStartupError(reason="proxy_preflight_failed")
+
+    orchestrator = _WeightRecorder()
+    validator.run_validator_loops(
+        orchestrator=orchestrator,
+        runner_factory=factory,
+        epoch_supplier=lambda: 1,
+        stop=_ImmediateStop(),
+        once=True,
+    )
+    output = capsys.readouterr()
+    assert "phase=setup reason=proxy_preflight_failed" in output.err
+    assert "weight loop continues" in output.err
+    assert orchestrator.runs >= 1

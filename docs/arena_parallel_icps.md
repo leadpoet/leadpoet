@@ -11,9 +11,60 @@ validator identity, or wallet use.
 Use indexed settings in the validator environment:
 
 ```text
-LAB_ARENA_WEBSHARE_PROXY_1=https://user:password@proxy.example.com:443
-LAB_ARENA_WEBSHARE_PROXY_2=https://user:password@proxy.example.net:443
+LAB_ARENA_WEBSHARE_PROXY_1=http://USER:PASSWORD@PROXY_IP_1:PORT_1
+LAB_ARENA_WEBSHARE_PROXY_2=http://USER:PASSWORD@PROXY_IP_2:PORT_2
 ```
+
+### Webshare setup for external validators
+
+Use your own [Webshare Proxy Server](https://www.webshare.io/proxy-server)
+datacenter proxies. Select **Username/Password** authentication and **Direct
+Connection** on the Proxy List page. Use the address, port, username and
+password shown on each row. Start with ten different US proxies; rotating
+residential proxies are not needed for this setup. Plan prices and bandwidth
+allowances can change, so check them before purchase.
+
+Use `http://` for Webshare's standard direct endpoints, including when the
+destination is HTTPS. The host opens a CONNECT tunnel and verifies TLS to the
+destination. `https://` instead requires TLS on the proxy endpoint itself;
+do not change the scheme merely because the destination uses HTTPS. This
+matches [Webshare's direct connection example](https://apidocs.webshare.io/proxy-connection#direct-connection).
+
+Create a private file outside the repository, for example
+`$HOME/.config/leadpoet/validator-proxies.env`, containing the indexed settings
+above, with your own values. Continue through `LAB_ARENA_WEBSHARE_PROXY_10` for
+ten proxies. Quote each URL with single quotes. URL-encode special characters
+in the username or password, such as `@` as `%40`. Do not paste credentials
+into Discord, Git, shell command arguments, or screenshots.
+
+```bash
+chmod 600 "$HOME/.config/leadpoet/validator-proxies.env"
+export LAB_ARENA_PROXY_ENV_FILE="$HOME/.config/leadpoet/validator-proxies.env"
+```
+
+Set that export in the environment used to start your validator. The normal
+command does not source an arbitrary `.env` file. The private proxy file is
+parsed as data; only the indexed proxy settings are imported. Existing direct
+environment values must not conflict with values in the file.
+
+After the one-time [host setup](arena_normal_validator_weights.md#run-a-validator),
+check the exact Python environment and proxy settings before starting:
+
+```bash
+python neurons/validator.py --check-scoring-only
+python neurons/validator.py \
+  --netuid 71 --subtensor.network finney \
+  --wallet.name YOUR_WALLET --wallet.hotkey YOUR_HOTKEY \
+  --wallet.path /absolute/path/to/YOUR_WALLETS_DIRECTORY
+```
+
+The check uses the same existing sudo permission and scoring setup as normal
+startup. It verifies the host, proxy connections, distinct exit IPs, and memory
+capacity. It does not load a wallet, claim a job, or submit weights. Host rights
+and gVisor still need to be installed by the operator once. Keep existing
+wallet, journal and runner paths, and run only one process for each hotkey.
+
+### Configuration rules
 
 Indices must be positive. Gaps are permitted. Each configured URL must be
 valid and each route must pass an authenticated TLS CONNECT check. Startup

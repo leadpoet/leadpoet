@@ -61,8 +61,7 @@ def rootful_startup_command(args, argv: Sequence[str], environment: Mapping[str,
 
 def maybe_reexec_rootful(args, argv: Sequence[str]) -> None:
     """Replace this process only when existing sudo policy permits startup."""
-    if (platform.system() != "Linux" or os.geteuid() == 0
-            or args.check_only or args.check_scoring_only):
+    if platform.system() != "Linux" or os.geteuid() == 0 or args.check_only:
         return
     sudo = next((path for path in ("/usr/bin/sudo", "/bin/sudo")
                  if os.path.isfile(path) and os.access(path, os.X_OK)), None)
@@ -72,10 +71,10 @@ def maybe_reexec_rootful(args, argv: Sequence[str]) -> None:
         command, environment, preserve = rootful_startup_command(args, argv, os.environ)
         checks = (
             # Listing the exact command does not execute it. A restricted
-            # sudo rule must not authorize a different Python invocation.
+            # sudo rule must not authorize a different validator invocation.
             [sudo, "-n", "-l", "--", *command],
-            # -I -S makes this a side-effect-free identity probe, without
-            # sitecustomize, wallet loading, chain access or validator work.
+            # Confirm non-interactive authentication, root identity and the
+            # same named environment preservation before replacing weights.
             [sudo, "-n", preserve, "--", command[0], "-I", "-S", "-c", _ROOT_PROBE],
         )
         for check in checks:

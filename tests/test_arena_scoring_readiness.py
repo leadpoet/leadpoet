@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,9 +16,24 @@ from lab_arena import runtime_host as host, validator
 
 @pytest.fixture
 def scoring_host(tmp_path, monkeypatch):
+    from lab_arena import proxy_workers
+
     monkeypatch.setattr(host.platform, "system", lambda: "Linux")
     monkeypatch.setattr(host.platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(host.os, "geteuid", lambda: 0)
+    monkeypatch.setenv(
+        "LAB_ARENA_WEBSHARE_PROXY_1",
+        "https://user:private-value@proxy.example:443",
+    )
+    monkeypatch.setattr(
+        proxy_workers,
+        "preflight_proxy_workers",
+        lambda _inventory: SimpleNamespace(
+            total_process_capacity=2,
+            webshare_worker_count=1,
+        ),
+    )
+    monkeypatch.setattr(host, "parallel_memory_capacity", lambda ceiling, _bytes: ceiling)
     binary = tmp_path / "runsc"
     binary.write_text("#!/bin/sh\nexit 0\n")
     binary.chmod(0o755)
@@ -61,6 +77,8 @@ def test_scoring_check_needs_no_wallet_chain_gateway_or_signing_key(
     output = capsys.readouterr()
     assert "host checks passed" in output.out
     assert "sandbox_execution=not_checked" in output.out
+    assert "proxies=1" in output.out
+    assert "execution_slots=2" in output.out
     assert str(binary) in output.out
     assert not output.err
     assert sorted(path.name for path in work.iterdir()) == [
@@ -89,6 +107,22 @@ def test_explicit_runsc_path_wins_over_environment_and_path_search(
         )
         == 0
     )
+
+
+def test_scoring_check_requires_a_proxy_inventory(scoring_host, monkeypatch, capsys):
+    binary, work = scoring_host
+    monkeypatch.delenv("LAB_ARENA_WEBSHARE_PROXY_1")
+
+    assert validator.main(
+        [
+            "--check-scoring-only",
+            "--arena-runsc-path", str(binary),
+            "--arena-work-dir", str(work),
+        ]
+    ) == 1
+    output = capsys.readouterr()
+    assert "reason=proxy_inventory_invalid" in output.err
+    assert "private-value" not in output.err
 
 
 @pytest.mark.parametrize(

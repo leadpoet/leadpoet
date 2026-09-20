@@ -153,9 +153,11 @@ the executable may leave an incomplete installation. Follow the
 [official gVisor installation instructions](https://gvisor.dev/docs/user_guide/install/).
 Select its actual absolute path with `LAB_ARENA_RUNSC_PATH` in the service's
 configuration, or with `--arena-runsc-path`. The command-line flag takes
-precedence, then the environment, then `/usr/local/bin/runsc`. The validator
-does not search `PATH` or download a replacement binary. For an installation
-at `/usr/bin/runsc`, explicitly configure that path instead.
+precedence, then the environment. Without an explicit setting, the validator
+uses `/usr/local/bin/runsc`, or `/usr/bin/runsc` when the first path is absent.
+These are the standard release-bundle and apt-package locations. It does not
+search arbitrary `PATH` entries or download a replacement binary. An explicit
+incorrect path fails rather than selecting a different installation.
 
 For Finney SN71, the validator includes the public RPC endpoint, gateway URL,
 and trusted gateway signing-key hash. No public-configuration exports are
@@ -178,7 +180,7 @@ persistent writable directories and replace the proxy placeholders below:
 export LAB_ARENA_VALIDATOR_STATE_DIR="$PWD/validator-state"
 export LAB_ARENA_RUNNER_WORK_DIR="$PWD/arena-runner"
 export LAB_ARENA_RUNSC_PATH=/usr/local/bin/runsc
-export LAB_ARENA_WEBSHARE_PROXY_1='https://USER:PASSWORD@YOUR_PROXY_HOST:PORT'
+export LAB_ARENA_WEBSHARE_PROXY_1='http://USER:PASSWORD@YOUR_PROXY_HOST:PORT'
 
 python neurons/validator.py \
   --netuid 71 --subtensor.network finney \
@@ -268,7 +270,8 @@ configuration, logs, or Git.
 ## Diagnose scoring setup
 
 Run `--check-scoring-only` with the same interpreter, runtime path, work path,
-and account as the validator. It checks Linux x86_64, the selected executable,
+and account as the validator. It uses the same existing non-interactive sudo
+permission as normal startup. It checks Linux x86_64, the selected executable,
 rootful service identity, a five-second `runsc --version` invocation, and runner
 directory access, including `sandboxes`, `runs`, `images`, `sources`, and the
 fixed `/tmp` socket root. It creates missing named runner directories with private
@@ -295,9 +298,11 @@ It exits nonzero with a reason on failure. Success explicitly reports
 gateway authorization, or accepted scoring. This mode is mutually exclusive
 with `--check-only` and `--once`.
 
-Neither `--check-only` nor `--check-scoring-only` validates proxy configuration
-or connectivity. Normal scoring startup performs those checks; a readiness
-pass does not replace the required proxy configuration above.
+`--check-scoring-only` also checks the configured proxy inventory, real CONNECT
+transport, distinct public exit IPs, and memory-supported capacity using the
+same checks as normal scoring startup. It makes bounded public network probes,
+but no paid provider requests. Missing or invalid proxies fail this check.
+`--check-only` remains a separate wallet/chain check and does not test scoring.
 
 | Reason | Required action |
 | --- | --- |
@@ -312,6 +317,10 @@ pass does not replace the required proxy configuration above.
 | `unsafe_work_directory` | Inspect the reported path; preserve its contents and correct the configuration. |
 | `work_directory_unwritable` | Check ownership, permissions, read-only mounts, and available storage. |
 | `sandbox_launch_failed` | Run the installed-runtime probe and investigate sandbox capabilities. |
+| `proxy_environment_invalid` | Check the private proxy file path, owner, mode 0600, and syntax. |
+| `proxy_inventory_invalid` | Configure at least one unique indexed proxy URL. |
+| `proxy_preflight_failed` | Check proxy credentials, CONNECT access, and distinct public exit IPs. |
+| `retired_parallel_config` | Remove `LAB_ARENA_MAX_PARALLEL_RUNS`; proxy and memory checks determine capacity. |
 
 After host checks pass, exercise the actual installation with the existing
 probe from the same release and with equivalent service privileges:

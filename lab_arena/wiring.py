@@ -36,6 +36,7 @@ from lab_arena.store import ArenaStore, PostgrestTransport
 from lab_arena.submission_runtime import SubmissionProviderKeys
 from lab_arena.code_review_runtime import SubmissionCodeReviewer
 from lab_arena.runtime_host import parallel_memory_capacity, prepare_scoring_host
+from lab_arena.scoring_startup import prepare_validator_scoring
 
 
 _DIRECT_URLOPEN = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
@@ -525,24 +526,18 @@ def build_runner_from_environment(args, *, keypair=None):
     round_id = str(getattr(args, "round_id", "") or "").strip() or None
     if round_id is not None and contracts.ROUND_ID_RE.fullmatch(round_id) is None:
         raise ServiceError("round_id_invalid", 400)
-    prepare_scoring_host(Path(args.runsc_path), Path(args.work_dir))
     from lab_arena import runner as runner_module
-    from lab_arena.proxy_workers import ProxyWorkerPool, preflight_proxy_workers, proxy_workers_from_environment
-    from lab_arena.validator_proxy_environment import validator_proxy_environment
+    from lab_arena.proxy_workers import ProxyWorkerPool
 
-    proxy_environment = validator_proxy_environment(os.environ)
-    if str(proxy_environment.get(runner_module.MAX_PARALLEL_ENV) or "").strip():
-        raise ServiceError("LAB_ARENA_MAX_PARALLEL_RUNS is retired; use indexed Webshare proxies", 500)
-    verified_proxies = preflight_proxy_workers(proxy_workers_from_environment(proxy_environment))
-    proxy_parallelism = min(
-        verified_proxies.total_process_capacity, contracts.RUNNER_SLOT_CEILING
+    startup = prepare_validator_scoring(
+        args,
+        environment=os.environ,
+        prepare_host=prepare_scoring_host,
+        memory_capacity=parallel_memory_capacity,
     )
-    parallelism = parallel_memory_capacity(
-        proxy_parallelism, runtime.DEFAULT_MEMORY_LIMIT_BYTES
-    )
-    proxy_pool = ProxyWorkerPool(verified_proxies)
+    proxy_pool = ProxyWorkerPool(startup.verified_proxies)
     print("Arena proxy workers verified: proxies=%d; execution_slots=%d; native_coordinator=1" % (
-        verified_proxies.webshare_worker_count, parallelism), flush=True)
+        startup.verified_proxies.webshare_worker_count, startup.parallelism), flush=True)
 
     if keypair is None:
         from bittensor_wallet import Wallet
@@ -568,7 +563,7 @@ def build_runner_from_environment(args, *, keypair=None):
     )
     runner_config = runner_module.RunnerConfig(
         round_id=round_id, identity=identity, api=api, sandbox_runtime=sandbox_runtime, image_cache=cache, source_cache=source_cache,
-        work_dir=runs_work, max_parallel_runs=parallelism, proxy_worker_pool=proxy_pool,
+        work_dir=runs_work, max_parallel_runs=startup.parallelism, proxy_worker_pool=proxy_pool,
         claim_poll_seconds=max(5, int(getattr(args, "poll_seconds", 30))),
     )
     if round_id is not None:

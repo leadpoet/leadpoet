@@ -45,8 +45,12 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from lab_arena import contracts
 from lab_arena.operations import SCRAPINGDOG_RUNTIME_HANDLE
 from lab_arena.runtime_host import (
-    ArenaRuntimeError, RuntimeHostError, require_linux_x86_64,
-    require_rootful_runtime, require_runsc_executable,
+    ArenaRuntimeError,
+    DEFAULT_SANDBOX_MEMORY_BYTES,
+    RuntimeHostError,
+    require_linux_x86_64,
+    require_rootful_runtime,
+    require_runsc_executable,
 )
 
 SANDBOX_MODEL_DIR = "/model"
@@ -90,7 +94,7 @@ SANDBOX_UID = 65534
 SANDBOX_GID = 65534
 DEFAULT_CPU_QUOTA = 100_000
 DEFAULT_CPU_PERIOD = 100_000
-DEFAULT_MEMORY_LIMIT_BYTES = 2 * 1024 * 1024 * 1024
+DEFAULT_MEMORY_LIMIT_BYTES = DEFAULT_SANDBOX_MEMORY_BYTES
 DEFAULT_PIDS_LIMIT = 256
 DEFAULT_PLATFORM = "systrap"
 RUNSC_PLATFORMS = ("systrap", "ptrace", "kvm")

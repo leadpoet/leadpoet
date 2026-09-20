@@ -11,7 +11,12 @@ from types import SimpleNamespace
 import pytest
 
 from lab_arena import validator_startup as startup
-from lab_arena.validator import _parser
+from lab_arena.validator import (
+    APT_RUNSC_PATH,
+    DEFAULT_RUNSC_PATH,
+    _default_runsc_path,
+    _parser,
+)
 
 
 @pytest.fixture
@@ -48,15 +53,49 @@ def test_standard_script_delegates_to_one_validator_from_unrelated_cwd(tmp_path)
     assert "sudo permission" not in result.stdout
 
 
+def test_runsc_default_uses_only_supported_install_locations(monkeypatch):
+    assert _default_runsc_path(
+        {}, path_exists=lambda path: path == DEFAULT_RUNSC_PATH
+    ) == DEFAULT_RUNSC_PATH
+    assert _default_runsc_path(
+        {}, path_exists=lambda path: path == APT_RUNSC_PATH
+    ) == APT_RUNSC_PATH
+    assert _default_runsc_path(
+        {}, path_exists=lambda _path: False
+    ) == DEFAULT_RUNSC_PATH
+
+
+def test_explicit_runsc_settings_never_fall_back_to_apt(monkeypatch):
+    bad_path = "/operator/selected/missing-runsc"
+    assert _default_runsc_path(
+        {"LAB_ARENA_RUNSC_PATH": bad_path},
+        path_exists=lambda path: path == APT_RUNSC_PATH,
+    ) == bad_path
+    assert _parser().parse_args(
+        ["--arena-runsc-path", bad_path]
+    ).runsc_path == bad_path
+
+
 def test_reexec_keeps_venv_wallet_state_and_proxy_out_of_arguments(host, monkeypatch, tmp_path):
     checks, launches = host
     python = str(tmp_path / "venv/bin/python")
     monkeypatch.setattr(startup.sys, "executable", python)
     monkeypatch.setenv("LAB_ARENA_VALIDATOR_STATE_DIR", "existing-state")
     monkeypatch.setenv("LAB_ARENA_WEBSHARE_PROXY_1", "https://user:secret@proxy.example:443")
+    monkeypatch.setenv(
+        "QUALIFICATION_WEBSHARE_PROXY_2",
+        "http://user:other-secret@proxy-two.example:80",
+    )
     monkeypatch.setenv("LAB_ARENA_SIGNING_KEY_HASH", "trusted-pin")
+    monkeypatch.setenv("LAB_ARENA_API_BASE_URL", "https://gateway.example")
     monkeypatch.setenv("LEADPOET_SUBNET_EPOCH_CUTOVER_PATH", "epoch.json")
-    argv = ["--wallet.name", "existing", "--wallet.hotkey", "hk", "--arena-work-dir", "runner"]
+    argv = [
+        "--netuid", "71",
+        "--subtensor.network", "finney",
+        "--wallet.name", "existing",
+        "--wallet.hotkey", "hk",
+        "--arena-work-dir", "runner",
+    ]
     args = _parser().parse_args(argv)
     startup.maybe_reexec_rootful(args, argv)
 
@@ -64,18 +103,23 @@ def test_reexec_keeps_venv_wallet_state_and_proxy_out_of_arguments(host, monkeyp
     path, command, environment = launches[0]
     assert path == "/usr/bin/sudo"
     assert command[1] == "-n"
-    assert "--preserve-env=LAB_ARENA_SIGNING_KEY_HASH" in command[2]
+    assert "LAB_ARENA_SIGNING_KEY_HASH" in command[2]
     assert command[4] == python
     assert command[5] == "-B"
     assert command[6] == str(Path(startup.__file__).resolve())
     child = _parser().parse_args(command[7:])
     assert child.wallet_name == "existing" and child.hotkey_name == "hk"
+    assert child.netuid == 71 and child.subtensor_network == "finney"
     assert child.wallet_path == str(tmp_path / "operator/.bittensor/wallets")
     assert child.work_dir == str(tmp_path / "runner")
     assert environment["LAB_ARENA_VALIDATOR_STATE_DIR"] == str(tmp_path / "existing-state")
     assert environment["LEADPOET_SUBNET_EPOCH_CUTOVER_PATH"] == str(tmp_path / "epoch.json")
     assert environment["LAB_ARENA_SIGNING_KEY_HASH"] == "trusted-pin"
+    assert environment["LAB_ARENA_API_BASE_URL"] == "https://gateway.example"
     assert environment["LAB_ARENA_WEBSHARE_PROXY_1"].endswith("proxy.example:443")
+    assert environment["QUALIFICATION_WEBSHARE_PROXY_2"].endswith(
+        "proxy-two.example:80"
+    )
     assert "secret" not in repr(command) + repr([c for c, _ in checks])
     preserved = command[2].partition("=")[2].split(",")
     assert "PATH" not in preserved and "HOME" not in preserved
@@ -96,6 +140,15 @@ def test_explicit_wallet_path_overrides_environment_and_keeps_symlink(host, monk
     assert child.wallet_path == str(tmp_path / "wallet-link")
 
 
+def test_scoring_diagnostic_uses_the_same_existing_sudo_handoff(host):
+    argv = ["--check-scoring-only"]
+    startup.maybe_reexec_rootful(_parser().parse_args(argv), argv)
+
+    assert len(host[0]) == 2 and len(host[1]) == 1
+    child = _parser().parse_args(host[1][0][1][7:])
+    assert child.check_scoring_only is True
+
+
 def test_secondary_proxy_file_is_read_as_caller_and_not_again_as_root(monkeypatch, tmp_path):
     proxy = tmp_path / "proxies.env"
     proxy.write_text("QUALIFICATION_WEBSHARE_PROXY_3='http://user:secret@proxy.example:80'\nOPENROUTER_API_KEY=not-imported\n")
@@ -113,7 +166,7 @@ def test_secondary_proxy_file_is_read_as_caller_and_not_again_as_root(monkeypatc
     assert original == {"LAB_ARENA_PROXY_ENV_FILE": str(proxy), "UNRELATED": "untouched"}
 
 
-@pytest.mark.parametrize("mode", ["root", "not_linux", "--check-only", "--check-scoring-only", "no_sudo"])
+@pytest.mark.parametrize("mode", ["root", "not_linux", "--check-only", "no_sudo"])
 def test_root_and_diagnostic_paths_do_not_elevate(host, monkeypatch, mode):
     argv = [mode] if mode.startswith("--") else []
     if mode == "root":

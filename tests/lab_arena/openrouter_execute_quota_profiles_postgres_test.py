@@ -6,11 +6,17 @@ import json
 
 import pytest
 
+from lab_arena import broker as broker_module
 from lab_arena import contracts
 from lab_arena.store import ArenaStore, PsycopgTransport
 from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
+)
+from tests.lab_arena.test_lab_arena_broker import (
+    FakeTransport,
+    HOST_KEYS,
+    price_table,
 )
 from tests.lab_arena.test_lab_arena_migration_postgres import (
     hotkey,
@@ -23,7 +29,18 @@ LEASE_TOKEN_HASH = "sha256:" + "a" * 64
 
 @pytest.fixture(scope="module")
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from database_with_lab_arena_migration(
+        CURRENT_SERVICE_MIGRATIONS
+        + (
+            "264-lab-arena-codex-cost-reconciliation.sql",
+            "289-lab-arena-per-icp-cost-policy.sql",
+            "311-lab-arena-per-icp-closed-billing-reconciliation.sql",
+            "312-lab-arena-temporary-hold-admission.sql",
+            "314-lab-arena-openrouter-web-search-reservation.sql",
+            "319-lab-arena-quota-sourcing-cost.sql",
+            "321-lab-arena-confirmed-cost-admission.sql",
+        )
+    )
 
 
 @pytest.fixture(scope="module")
@@ -67,6 +84,7 @@ def _exercise_profile(
     if confirmed_cost_policy:
         configuration.update(
             {
+                "integrity_policy": "arena_integrity_v1",
                 "sourcing_cost_eligibility_policy": (
                     contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
                 ),
@@ -161,6 +179,10 @@ def _exercise_profile(
         if item["kind"] == "execute" and item["provider"] == provider
     )
     return statuses, snapshots, execute, {
+        "assignment_id": assignment_id,
+        "icp_position": 0,
+        "miner_hotkey": miner,
+        "round_id": round_id,
         "run_id": run_id,
         "submission_id": submission_id,
         "last_reserved_identity": last_reserved_identity,
@@ -209,8 +231,8 @@ def test_frozen_execute_profiles_enforce_dispatch_and_cost_boundaries(
 
     current_statuses, current_snapshots, current_costs, current = _exercise_profile(
         store, connect,
-        suffix="current500",
-        quotas=dict(contracts.CALL_QUOTAS_PER_ICP),
+        suffix="frozen500",
+        quotas=dict(contracts.OPENROUTER_500_CALL_QUOTAS_PER_ICP),
         limit=500,
         checkpoints={499, 500, 501},
         confirmed_cost_policy=True,
@@ -256,6 +278,112 @@ def test_frozen_execute_profiles_enforce_dispatch_and_cost_boundaries(
         + current_costs["reserved_or_uncertain_microusd"]
         == 260
     )
+
+
+def test_current_2000_profile_crosses_real_broker_and_confirmed_cost_accounting(
+    store, connect
+):
+    statuses, snapshots, costs, current = _exercise_profile(
+        store,
+        connect,
+        suffix="current2000",
+        quotas=dict(contracts.CALL_QUOTAS_PER_ICP),
+        limit=1998,
+        checkpoints={1999},
+        confirmed_cost_policy=True,
+    )
+    assert statuses == ["reserved"] * 1999
+    assert snapshots == {
+        1999: {
+            "limit": 2000,
+            "used": 1999,
+            "remaining": 1,
+            "inflight": 1999,
+        }
+    }
+    assert costs["call_count"] == 1999
+    assert costs["reserved_or_uncertain_microusd"] == 0
+
+    payload = {
+        "id": "quota-2000",
+        "model": "openai/gpt-4o-mini",
+        "error": None,
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 1,
+            "cost": "0.0000021",
+        },
+    }
+    transport = FakeTransport([(200, payload)])
+    broker = broker_module.Broker(
+        store=store,
+        key_for=lambda provider: HOST_KEYS[provider],
+        funding_source_for=lambda _context: "miner_key",
+        price_table=price_table(),
+        transport=transport,
+        lease_ttl_seconds=3600,
+    )
+    context = broker_module.RunContext(
+        run_id=current["run_id"],
+        assignment_id=current["assignment_id"],
+        icp_position=current["icp_position"],
+        lease_token_hash=LEASE_TOKEN_HASH,
+        miner_hotkey=current["miner_hotkey"],
+        submission_id=current["submission_id"],
+        stage=1,
+        round_id=current["round_id"],
+    )
+    parameters = {
+        "model": "openai/gpt-4o-mini",
+        "messages": [{"role": "user", "content": "finish"}],
+        "max_tokens": 1,
+    }
+    accepted = broker.execute(
+        context,
+        operation_id="openrouter.chat",
+        parameters=parameters,
+        action_sequence=1999,
+        timeout_ms=5000,
+    )
+    assert accepted.status == 200
+    assert accepted.call["outcome"] == "settled"
+    assert accepted.call["actual_microusd"] == 3
+    assert len(transport.sent) == 1
+
+    refused = broker.execute(
+        context,
+        operation_id="openrouter.chat",
+        parameters=parameters,
+        action_sequence=2000,
+        timeout_ms=5000,
+    )
+    assert refused.status == 402
+    assert refused.call["outcome"] == "refused"
+    assert refused.call["reason"] == "per_icp_quota"
+    assert len(transport.sent) == 1
+
+    snapshot = store.run_quota_snapshot(current["run_id"], LEASE_TOKEN_HASH)
+    assert snapshot["providers"]["openrouter"] == {
+        "limit": 2000,
+        "used": 2000,
+        "remaining": 0,
+        "inflight": 1999,
+    }
+    costs = next(
+        item
+        for item in store.submission_costs(current["submission_id"])["providers"]
+        if item["kind"] == "execute" and item["provider"] == "openrouter"
+    )
+    assert costs["call_count"] == 2001
+    assert costs["settled_microusd"] == 3
+    assert costs["reserved_or_uncertain_microusd"] == 0
+    assert costs["refused_calls"] == 1
 
 
 @pytest.mark.parametrize("provider", ("deepline", "scrapingdog"))

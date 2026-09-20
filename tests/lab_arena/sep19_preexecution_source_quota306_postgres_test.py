@@ -14,7 +14,7 @@ OLD_REF=f'arena/{ROUND19}/sources/{BASELINE}.tar.gz'
 NEW_REF=f'arena/{ROUND19}/sources/{BASELINE}-preexecution306.tar.gz'
 NEW_SIZE=673_106; NEW_SHA='9ad94f534ffcecd6c43a554d79ec6f30c6f40d8d3892277dcc04a415f9bb5f38'; NEW_COMMIT='66459d982ad43106a9186339cd42558594abb99a'
 OLD_QUOTAS=dict(contracts.OPENROUTER_200_CALL_QUOTAS_PER_ICP)
-NEW_QUOTAS=dict(contracts.CALL_QUOTAS_PER_ICP)
+NEW_QUOTAS=dict(contracts.ALL_PROVIDER_200_CALL_QUOTAS_PER_ICP)
 
 @pytest.fixture(scope='module')
 def database(): yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)

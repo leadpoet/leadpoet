@@ -176,7 +176,7 @@ def test_new_round_preserves_45m_default_and_explicit_90m_profile_is_valid():
     assert current["call_quotas"] == {
         "scrapingdog": 200,
         "deepline": 200,
-        "openrouter": 500,
+        "openrouter": 2000,
     }
     assert current["scoring_call_quotas"]["openrouter"] == 120
     with pytest.raises(contracts.ArenaContractError):

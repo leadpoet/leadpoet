@@ -43,6 +43,11 @@ def test_public_constants_are_the_plan_values():
     assert c.CALL_QUOTAS_PER_ICP == {
         "scrapingdog": 200,
         "deepline": 200,
+        "openrouter": 2000,
+    }
+    assert c.OPENROUTER_500_CALL_QUOTAS_PER_ICP == {
+        "scrapingdog": 200,
+        "deepline": 200,
         "openrouter": 500,
     }
     assert c.ALL_PROVIDER_200_CALL_QUOTAS_PER_ICP == {
@@ -264,7 +269,12 @@ def test_round_configuration_accepts_only_frozen_execute_quota_profiles():
     validated = c.validate_round_configuration(all_provider_200)
     assert validated["call_quotas"] == c.ALL_PROVIDER_200_CALL_QUOTAS_PER_ICP
 
-    for provider, quota in (("openrouter", 499), ("deepline", 58), ("scrapingdog", 199)):
+    openrouter_500 = base_round_configuration()
+    openrouter_500["call_quotas"] = dict(c.OPENROUTER_500_CALL_QUOTAS_PER_ICP)
+    validated = c.validate_round_configuration(openrouter_500)
+    assert validated["call_quotas"] == c.OPENROUTER_500_CALL_QUOTAS_PER_ICP
+
+    for provider, quota in (("openrouter", 2001), ("deepline", 201), ("scrapingdog", 201)):
         invalid = base_round_configuration()
         invalid["call_quotas"][provider] = quota
         with pytest.raises(c.ArenaContractError, match="fixed public constants"):

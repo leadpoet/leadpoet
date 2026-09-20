@@ -69,7 +69,9 @@ _TRANSIENT_FETCH_RETRY_DELAY_SECS = 0.25
 _MAX_ORGANIZATION_LEGAL_NAME_ALIASES = 3
 _MAX_ORGANIZATION_NAME_LENGTH = 200
 _HTML_ENCODING_SNIFF_BYTES = 1024
+_MIN_NON_HTML_HOMEPAGE_CHARS = 50
 _IDENTITY_SOURCE_HOST_LABELS = frozenset({"media", "news", "newsroom", "press"})
+_HTML_ELEMENT_RE = re.compile(r"<\s*!doctype\s+html\b|<\s*/?\s*[a-z][a-z0-9:-]*\b", re.I)
 
 # Python also exposes binary transforms as codecs. This explicit text-codec
 # subset prevents an untrusted HTTP or HTML label from selecting one of them.
@@ -260,6 +262,16 @@ def _content_type_header(headers: object) -> object:
         if str(name).casefold() == "content-type":
             return value
     return ""
+
+
+def _homepage_body_is_unusable(text: str) -> bool:
+    """Recognize only empty or tiny non-HTML fetch placeholders."""
+
+    body = str(text or "").strip()
+    return not body or (
+        len(body) < _MIN_NON_HTML_HOMEPAGE_CHARS
+        and _HTML_ELEMENT_RE.search(body) is None
+    )
 
 
 def _registrable_domain(url: str) -> str:
@@ -681,6 +693,7 @@ def _identity_result(
     *,
     actual_final_url: str = "",
     source_fetch_failed: bool = False,
+    failure_reason_code: str = "",
     verified_homepage_transport_domain: str = "",
 ) -> CompanyFitDecisionResult:
     details = {
@@ -695,7 +708,11 @@ def _identity_result(
             if verified_homepage_transport_domain
             else {}
         ),
-        **({"failure_reason_code": "source_blocked"} if source_fetch_failed else {}),
+        **(
+            {"failure_reason_code": failure_reason_code or "source_blocked"}
+            if source_fetch_failed or failure_reason_code
+            else {}
+        ),
     }
     if receipt["decision"] == "match":
         return company_fit_match(reason, details=details)
@@ -846,6 +863,14 @@ async def verify_company_exists(
             submitted_identity,
             "website is a parked / for-sale page",
             actual_final_url=observed_url,
+        )
+
+    if _homepage_body_is_unusable(text):
+        return _identity_result(
+            submitted_identity,
+            "website fetch error: homepage response body is unusable",
+            actual_final_url=observed_url,
+            failure_reason_code="malformed_response",
         )
 
     try:

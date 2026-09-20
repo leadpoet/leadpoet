@@ -7,7 +7,7 @@ import pytest
 from gateway.qualification.models import CompanyOutput, ICPPrompt
 from lab_arena import scorer_entrypoint
 from lab_arena import scoring as arena_scoring
-from qualification.scoring import lead_scorer
+from qualification.scoring import company_verification, lead_scorer
 from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
     COMPANY_FIT_MISMATCH,
@@ -3026,6 +3026,140 @@ def test_structured_public_stage_scorer_entrypoint_transition(
     assert receipt["dimension_evidence"]["stage"]["web_evidence"] == (
         structured_stage_evidence
     )
+
+
+@pytest.mark.parametrize("recovers", [True, False])
+def test_tiny_homepage_placeholder_retries_full_scorer(
+    monkeypatch,
+    recovers,
+):
+    for name, value in scorer_entrypoint.PLACEHOLDER_CREDENTIALS.items():
+        monkeypatch.setenv(name, value)
+
+    root_url = "https://example.com/"
+    newsroom_url = "https://media.example.com/"
+    bad_body = b"Provider account capacity details redacted."
+    root_body = (
+        b"<title>Acme</title>"
+        b'<a href="https://media.example.com/">Newsroom</a>'
+    )
+    newsroom_body = (
+        b"<title>Acme Newsroom</title>"
+        b'<a href="https://www.linkedin.com/company/acme">LinkedIn</a>'
+    )
+
+    class Content:
+        def __init__(self, body):
+            self.body = body
+
+        async def read(self, limit):
+            value, self.body = self.body[:limit], self.body[limit:]
+            return value
+
+    class Response:
+        def __init__(self, body, url):
+            self.status = 200
+            self.url = url
+            self.headers = {"Content-Type": "text/html"}
+            self.content = Content(body)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    pending = (
+        [Response(bad_body, root_url), Response(root_body, root_url),
+         Response(newsroom_body, newsroom_url)]
+        if recovers
+        else [Response(bad_body, root_url) for _ in range(3)]
+    )
+    fetched_urls = []
+
+    class Session:
+        def __init__(self, **_kwargs):
+            self.response = pending.pop(0)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def get(self, url, **_kwargs):
+            fetched_urls.append(url)
+            return self.response
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def web_verification(*_args, verified_homepage_identity, **_kwargs):
+        identity_match = verified_homepage_identity.decision == COMPANY_FIT_MATCH
+        decision = COMPANY_FIT_MATCH if identity_match else COMPANY_FIT_UNAVAILABLE
+        evidence = {
+            dimension: {
+                "url": f"https://example.com/{dimension}",
+                "quote": f"Acme {dimension} evidence.",
+            }
+            for dimension in ("employee_size", "industry", "geography")
+        }
+        details = {
+            "dimension_decisions": {
+                "employee_size": COMPANY_FIT_MATCH,
+                "industry": COMPANY_FIT_MATCH,
+                "geography": COMPANY_FIT_MATCH,
+                "stage": COMPANY_FIT_MATCH,
+            },
+            "dimension_evidence": evidence,
+            "identity_decision": decision,
+            "identity_receipt": {
+                "decision": decision,
+                "evidence_source": "company_web_reverification",
+                "submitted_name": "acme",
+                "submitted_domain": "example.com",
+                "submitted_linkedin_slug": "acme",
+                "observed_name": "acme",
+                "observed_domain": "example.com",
+                "observed_linkedin_slug": "acme",
+            },
+            "required_attribute_decision": COMPANY_FIT_MATCH,
+            **({"failure_class": "insufficient_fit_evidence"}
+               if not identity_match else {}),
+        }
+        if identity_match:
+            return company_fit_match("company fit verified", details=details)
+        return company_fit_unavailable("company identity unavailable", details=details)
+
+    async def intent_score(*_args, **_kwargs):
+        return 60.0, 100, "verified", "2026-08-01", 0
+
+    monkeypatch.setattr(company_verification.aiohttp, "ClientSession", Session)
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "_llm_reverify_company", web_verification)
+    monkeypatch.setattr(lead_scorer, "_score_single_intent_signal", intent_score)
+    icp = _icp().model_copy(update={"intent_signals": ["Launched a product"]})
+    document = arena_scoring.build_scoring_input(
+        scored_run_id="tiny-homepage-retry",
+        icp=icp.model_dump(mode="json"),
+        companies=[_competition_company()],
+        policy=arena_scoring.build_scorer_policy(),
+        evaluation_date="2026-09-19",
+    )
+
+    output = scorer_entrypoint.score_input(document)
+
+    if not recovers:
+        assert fetched_urls == [root_url] * 3
+        assert output.get("failure") == "judge_error", output
+        assert output["reason"] == "malformed_response"
+        return
+    assert fetched_urls == [root_url, root_url, newsroom_url]
+    receipt = output["breakdowns"][0]["verifier_gate_receipts"][0]
+    assert receipt["decision"] == COMPANY_FIT_MATCH
+    assert receipt["dimension_evidence"]["identity"][
+        "homepage_identity_decision"
+    ] == COMPANY_FIT_MATCH
 
 
 def test_structured_profile_cache_reuses_one_response_for_stage_and_size(

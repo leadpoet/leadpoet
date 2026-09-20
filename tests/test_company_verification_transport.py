@@ -480,6 +480,35 @@ def test_homepage_account_or_quota_error_is_not_source_local(monkeypatch, status
     assert "failure_reason_code" not in result.details
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [b"", b"Provider account capacity details redacted."],
+)
+def test_tiny_non_html_homepage_body_is_malformed_provider_response(
+    monkeypatch, payload
+):
+    result = asyncio.run(_verify_with_response(monkeypatch, 200, payload))
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.reason == "website fetch error: homepage response body is unusable"
+    assert result.details["failure_reason_code"] == "malformed_response"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"<html><body>Hi</body></html>",
+        b"Welcome to our company website. " * 4,
+    ],
+)
+def test_valid_html_or_meaningful_plain_text_stays_semantic(monkeypatch, payload):
+    result = asyncio.run(_verify_with_response(monkeypatch, 200, payload))
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert "company name metadata not found" in result.reason
+    assert "failure_reason_code" not in result.details
+
+
 def test_homepage_colon_title_is_a_match(monkeypatch):
     import asyncio
 

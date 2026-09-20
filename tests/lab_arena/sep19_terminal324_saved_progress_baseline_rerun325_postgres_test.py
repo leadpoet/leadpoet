@@ -1071,7 +1071,10 @@ def test_template_is_sealed_terminal324_only():
     body = TEMPLATE.read_text()
     assert _test_migrations()[-1] == "321-lab-arena-confirmed-cost-admission.sql"
     assert RENDERED == TEMPLATE.with_suffix("")
-    assert not RENDERED.exists()
+    if RENDERED_SHA256 is None:
+        assert not RENDERED.exists()
+    else:
+        assert hashlib.sha256(RENDERED.read_bytes()).hexdigest() == RENDERED_SHA256
     assert RENDERED.name not in _test_migrations()
     assert TEMPLATE.name not in _test_migrations()
     assert "after the Sep19 rerun324 round is terminal" in body

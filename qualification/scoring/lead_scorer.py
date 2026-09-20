@@ -3214,12 +3214,23 @@ async def _llm_reverify_company(
             company_fit_unavailable(error),
             request_diagnostic.get(VERIFIER_FAILURE_REASON_KEY),
         )
+    profile_identity = _structured_profile_identity_anchor(
+        verified_identity,
+        _web_identity_receipt(
+            company,
+            verdict,
+            verified_homepage_identity=verified_identity,
+            verified_homepage_transport_domain=verified_transport_domain,
+            company_quality=company_quality,
+        ),
+        verified_transport_domain,
+    )
     if require_company_fit_dimensions:
         verdict = await _refresh_linkedin_employee_size_observation(
             verdict,
             company,
             icp,
-            verified_homepage_identity=verified_identity,
+            verified_homepage_identity=profile_identity,
             invocation_cache=current_profile_cache,
             collect_structured_conflict=evidence_investigator,
         )
@@ -3893,6 +3904,20 @@ async def _verify_company_fit(
         if isinstance(web_identity_receipt, Mapping)
         else {}
     )
+    homepage_identity = _verified_homepage_identity_anchor(identity)
+    identity_details = (
+        identity.details if isinstance(identity.details, Mapping) else {}
+    )
+    verified_transport_domain = str(
+        identity_details.get("verified_homepage_transport_domain")
+        or homepage_identity.get("registrable_dns_domain")
+        or ""
+    )
+    profile_identity = _structured_profile_identity_anchor(
+        homepage_identity,
+        web_identity_mapping,
+        verified_transport_domain,
+    )
     identity_receipt_complete = (
         isinstance(web_identity_receipt, Mapping)
         and all(
@@ -3967,7 +3992,7 @@ async def _verify_company_fit(
             and web_identity_decision == COMPANY_FIT_MATCH
             and _is_bound_structured_linkedin_public_company_evidence(
                 web_evidence,
-                _verified_homepage_identity_anchor(identity),
+                profile_identity,
             )
         )
         if dimension in active_web_dimensions and (

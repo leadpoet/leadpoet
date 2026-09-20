@@ -2756,6 +2756,143 @@ def test_public_stage_uses_verified_web_identity_without_homepage_linkedin(
         )
 
 
+def test_state_street_web_identity_reuses_structured_profile_for_size_and_stage(
+    monkeypatch,
+):
+    """Reproduce the saved rerun337 profile through the full outer fit gate."""
+
+    company = _company().model_copy(update={
+        "company_name": "State Street",
+        "company_website": "https://www.statestreet.com",
+        "company_linkedin": "https://www.linkedin.com/company/state-street",
+        "company_stage": "Public",
+        "industry": "Financial services",
+        "employee_count": "10,001+",
+        "state": "Massachusetts",
+    })
+    icp = _icp().model_copy(update={
+        "company_stage": "Public",
+        "industry": "Financial services",
+        "sub_industry": "investment services and investment management",
+        "employee_count": "10,001+",
+    })
+    profile_url = "https://www.linkedin.com/company/state-street"
+    verdict = _verdict(
+        observed_size=52000,
+        size_matches=False,
+        employee_url="https://www.statestreet.com/about/annual-report",
+    )
+    verdict.update(
+        observed_company_name="State Street Corporation",
+        observed_company_website="https://www.statestreet.com",
+        observed_company_linkedin=profile_url,
+        employee_size_evidence_quote="approximately 52,000 employees worldwide",
+        observed_industry="Financial services",
+        observed_subindustry="investment services and investment management",
+        industry_evidence_url="https://www.statestreet.com/",
+        industry_evidence_quote=(
+            "State Street provides investment servicing and investment management "
+            "to institutional investors."
+        ),
+        observed_hq_country="United States",
+        observed_hq_state="Massachusetts",
+        geography_evidence_url="https://www.statestreet.com/about",
+        geography_evidence_quote="Corporate headquarters: Boston, Massachusetts.",
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url=profile_url,
+        stage_evidence_quote="Public Company",
+    )
+    payload = {
+        "status": "completed",
+        "result": {"data": {"status": 200, "element": {
+            "name": "State Street",
+            "universalName": "state-street",
+            "linkedinUrl": profile_url + "/",
+            "website": "http://www.statestreet.com",
+            "employeeCount": 47424,
+            "employeeCountRange": {"start": 10001, "end": None},
+            "companyType": "Public Company",
+        }}},
+    }
+    structured_calls = []
+    exa_calls = []
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_unavailable(
+            "homepage identity evidence unavailable: LinkedIn binding not found",
+            details={"verified_homepage_transport_domain": "statestreet.com"},
+        )
+
+    async def provider(**_kwargs):
+        return dict(verdict), ""
+
+    async def structured_profile(
+        domain, url, *, diagnostic, public_company_evidence
+    ):
+        del diagnostic
+        structured_calls.append((domain, url))
+        public = linkedin_company_size.project_structured_linkedin_company_type(
+            domain, url, payload
+        )
+        assert public is not None
+        public_company_evidence.update(public)
+        return linkedin_company_size.project_structured_linkedin_company_size(
+            domain, url, payload
+        )
+
+    async def exa_profile(url, **_kwargs):
+        exa_calls.append(url)
+        return {"outcome": "insufficient_evidence", "url": url}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer, "fetch_structured_linkedin_company_size", structured_profile
+    )
+    monkeypatch.setattr(
+        lead_scorer, "fetch_current_linkedin_company_size", exa_profile
+    )
+
+    result = asyncio.run(
+        lead_scorer._verify_company_fit(
+            company,
+            icp,
+            0.0,
+            0.0,
+            set(),
+            require_https_transport=True,
+            company_quality=True,
+            evidence_investigator=True,
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH, result.details
+    assert exa_calls == [profile_url]
+    assert structured_calls == [("statestreet.com", profile_url)]
+    assert result.details["company_fit_dimensions"]["employee_size"] == COMPANY_FIT_MATCH
+    assert result.details["company_fit_dimensions"]["stage"] == COMPANY_FIT_MATCH
+    assert result.details["dimension_evidence"]["employee_size"]["web_evidence"] == {
+        "employee_count": "10,001+",
+        "provider": "harvestapi_get_company",
+        "source_field": "employeeCountRange",
+        "url": profile_url,
+        "website": "https://statestreet.com/",
+    }
+    assert result.details["dimension_evidence"]["stage"]["web_evidence"] == {
+        "company_type": "Public Company",
+        "provider": "harvestapi_get_company",
+        "source_field": "companyType",
+        "url": profile_url,
+        "website": "https://statestreet.com/",
+    }
+
+
 @pytest.mark.parametrize("field,value", [
     ("decision", "unavailable"), ("evidence_source", "submitted"),
     ("observed_domain", "unrelated.example"),
@@ -2795,7 +2932,10 @@ def test_structured_public_stage_scorer_entrypoint_transition(
         return company_fit_match("prechecks passed")
 
     async def homepage(*_args, **_kwargs):
-        return _public_homepage_anchor()
+        return company_fit_unavailable(
+            "homepage identity evidence unavailable: LinkedIn binding not found",
+            details={"verified_homepage_transport_domain": "example.com"},
+        )
 
     async def web_verification(*_args, **_kwargs):
         nonlocal calls

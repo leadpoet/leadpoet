@@ -101,12 +101,12 @@ BEGIN
            archived.configuration_doc->'archived_execution_judgments')=
            __TERMINAL_EXECUTE_RUN_COUNT__)
     OR baseline.source_ref IS DISTINCT FROM
-       'arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun326-4ebe18de.tar.gz'
-    OR baseline.source_size_bytes IS DISTINCT FROM 850440
+       'arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun326-c26122a7.tar.gz'
+    OR baseline.source_size_bytes IS DISTINCT FROM 854161
     OR baseline.submission_doc->>'source_sha256' IS DISTINCT FROM
-       '422c4e6cb24a658d4f02f328d1b8a8b75b477999197207554075bb2bbae56cf3'
+       '61e60812b4ca4506c7c1ea7ee7a7678750e50ad5adec17ca500f44708f71b8b4'
     OR baseline.submission_doc->>'source_commit' IS DISTINCT FROM
-       '4ebe18de628d58cdc0e24a96f3f8be8c5a68c2ab'
+       'c26122a7287c2e9366c2b6a897b8d56a8fab41b1'
     OR active.configuration_doc->'call_quotas' IS DISTINCT FROM
        '{"deepline":200,"openrouter":500,"scrapingdog":200}'::JSONB
     OR active.configuration_doc->'schedule' IS DISTINCT FROM
@@ -246,15 +246,15 @@ BEGIN
  END IF;
 
  expected_submission:=baseline.submission_doc||pg_catalog.jsonb_build_object(
-  'source_ref','arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun326-4ebe18de.tar.gz',
-  'source_size_bytes',850440,
-  'source_sha256','422c4e6cb24a658d4f02f328d1b8a8b75b477999197207554075bb2bbae56cf3',
-  'source_commit','4ebe18de628d58cdc0e24a96f3f8be8c5a68c2ab');
+  'source_ref','arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun326-c26122a7.tar.gz',
+  'source_size_bytes',854161,
+  'source_sha256','61e60812b4ca4506c7c1ea7ee7a7678750e50ad5adec17ca500f44708f71b8b4',
+  'source_commit','c26122a7287c2e9366c2b6a897b8d56a8fab41b1');
  SELECT pg_catalog.jsonb_agg(CASE
    WHEN item->>'submission_id'='baseline-2026-09-20' THEN
     item||pg_catalog.jsonb_build_object(
-     'source_ref','arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun326-4ebe18de.tar.gz',
-     'source_size_bytes',850440)
+     'source_ref','arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun326-c26122a7.tar.gz',
+     'source_size_bytes',854161)
    ELSE item END ORDER BY ordinal)
   INTO new_participants FROM pg_catalog.jsonb_array_elements(active.participants)
    WITH ORDINALITY entries(item,ordinal);
@@ -282,6 +282,12 @@ BEGIN
   'archived_reward_basis_doc',active.reward_basis_doc,
   'archived_signing_key_doc',active.signing_key_doc,
   'archived_reward_activated_at',active.reward_activated_at,
+  'archived_king_outcome',active.king_outcome,
+  'archived_king_hotkey',active.king_hotkey,
+  'archived_king_start_epoch',active.king_start_epoch,
+  'archived_promotion_required',active.promotion_required,
+  'archived_promotion_doc',active.promotion_doc,
+  'archived_baseline_promoted_at',active.baseline_promoted_at,
   'archived_execution_judgments',archived_execution_judgments,
   'archived_bank_object_sha256',
    '7aaa7fbb4b4ce078dd62217c4d594dafdc82161d30c7718bd4500fa659fe5ad9');
@@ -358,8 +364,8 @@ BEGIN
  WHERE round_id='arena-2026-09-20' AND kind='execute'
   AND submission_id<>'baseline-2026-09-20';
  UPDATE public.lab_arena_submissions SET
-  source_ref='arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun326-4ebe18de.tar.gz',
-  source_size_bytes=850440,submission_doc=expected_submission,
+  source_ref='arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun326-c26122a7.tar.gz',
+  source_size_bytes=854161,submission_doc=expected_submission,
   updated_at=pg_catalog.clock_timestamp()
  WHERE round_id='arena-2026-09-20' AND submission_id='baseline-2026-09-20';
  UPDATE public.lab_arena_rounds SET status='stage1',
@@ -370,6 +376,10 @@ BEGIN
   participants=new_participants,stage1_scoring_plan_doc=NULL,
   stage2_scoring_plan_doc=NULL,stage3_scoring_plan_doc=NULL,finalists=NULL,
   publication_doc=NULL,published_at=NULL,cancel_reason=NULL,
+  king_outcome=NULL,king_hotkey=NULL,king_start_epoch=NULL,
+  effective_reward_epoch=NULL,reward_basis_hash=NULL,reward_basis_doc=NULL,
+  signing_key_doc=NULL,reward_activated_at=NULL,
+  promotion_required=TRUE,promotion_doc=NULL,baseline_promoted_at=NULL,
   updated_at=pg_catalog.clock_timestamp()
  WHERE round_id='arena-2026-09-20';
  FOR position IN 0..19 LOOP

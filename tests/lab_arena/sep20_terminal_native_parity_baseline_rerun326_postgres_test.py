@@ -10,13 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from lab_arena import judgment_cache, scoring
-from lab_arena.store import ArenaStore, PsycopgTransport
+from tests.lab_arena import sep18_published_rerun295_postgres_test as lifecycle
+from tests.lab_arena import sep19_terminal309_newjudge_rerun310_postgres_test as rerun310
+from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
 )
-from tests.lab_arena.judgment_cache_test import _company, _icp
 from tests.lab_arena.test_lab_arena_migration_postgres import hotkey
 
 
@@ -31,7 +31,19 @@ TEMPLATE = (
 
 @pytest.fixture(scope="module")
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    assert CURRENT_SERVICE_MIGRATIONS[-3:] == (
+        "294-lab-arena-retire-open-cost-backfill.sql",
+        "301-lab-arena-score-payer-boundary.sql",
+        "326-lab-arena-exhausted-provider-error-isolation.sql",
+    )
+    yield from database_with_lab_arena_migration(
+        CURRENT_SERVICE_MIGRATIONS[:-3]
+        + (
+            "289-lab-arena-per-icp-cost-policy.sql",
+            "292-lab-arena-null-final-score-publication.sql",
+        )
+        + CURRENT_SERVICE_MIGRATIONS[-3:]
+    )
 
 
 def _schedule() -> dict[str, str]:
@@ -51,7 +63,9 @@ def _schedule() -> dict[str, str]:
     }
 
 
-def _configuration(schedule: dict[str, str]) -> dict:
+def _configuration(
+    schedule: dict[str, str], *, baseline_hotkey: str, runner_hotkeys: list[str]
+) -> dict:
     return {
         "schema_version": "leadpoet.lab_arena.round_configuration.v1",
         "round_id": ROUND,
@@ -72,14 +86,20 @@ def _configuration(schedule: dict[str, str]) -> dict:
         "scoring_wall_clock_seconds": 900,
         "stage_1_icp_count": 10,
         "stage_2_icp_count": 10,
+        "parallel_twenty_icp_execution": True,
+        "runner_slot_ceiling": 20,
         "scorer_image_digest": "sha256:" + "a" * 64,
         "scorer_image_reference": "registry.example/lab/scorer@sha256:" + "a" * 64,
-        "scorer_policy": {"scoring_adapter_version": "qualification_contacts_v3"},
+        "scorer_policy": lifecycle.scoring.build_scorer_policy(
+            scoring_adapter_version="qualification_contacts_v3"
+        ),
+        "baseline_hotkey": baseline_hotkey,
+        "runner_hotkeys": runner_hotkeys,
         "schedule": schedule,
     }
 
 
-def _seed_terminal(connection, schedule: dict[str, str]) -> None:
+def _seed_terminal(connection, schedule: dict[str, str], *, runner_hotkeys: list[str]) -> None:
     miners = [hotkey(f"sep20-r326-miner-{index}") for index in range(4)]
     baseline_hotkey = hotkey("sep20-r326-baseline")
     frozen = [
@@ -109,17 +129,33 @@ def _seed_terminal(connection, schedule: dict[str, str]) -> None:
             INSERT INTO public.lab_arena_rounds(
               round_id,status,status_generation,stage_generation,
               configuration_doc,rewards_enabled,participants,benchmark_ref,
-              evaluation_date,icp_set_date,cancel_reason)
-            VALUES(%s,'cancelled',4,3,%s::jsonb,TRUE,%s::jsonb,%s,%s,%s,%s)
+              evaluation_date,icp_set_date,publication_doc,published_at,
+              king_outcome,king_hotkey,king_start_epoch,effective_reward_epoch,
+              reward_basis_hash,reward_basis_doc,signing_key_doc,reward_activated_at,
+              promotion_required,promotion_doc,baseline_promoted_at,cancel_reason)
+            VALUES(%s,'published',4,3,%s::jsonb,TRUE,%s::jsonb,%s,%s,%s,
+              '{"fixture":"stale-terminal-publication"}'::jsonb,clock_timestamp(),
+              'crowned',%s,100,101,%s,%s::jsonb,%s::jsonb,clock_timestamp(),
+              FALSE,%s::jsonb,clock_timestamp(),NULL)
             """,
             (
                 ROUND,
-                json.dumps(_configuration(schedule)),
+                json.dumps(
+                    _configuration(
+                        schedule,
+                        baseline_hotkey=baseline_hotkey,
+                        runner_hotkeys=runner_hotkeys,
+                    )
+                ),
                 json.dumps(participants),
                 f"arena/{ROUND}/benchmark.json",
                 "2026-09-20",
                 "2026-09-19",
-                "execution_incomplete:stage1:7",
+                miners[0],
+                "sha256:" + "c" * 64,
+                json.dumps({"fixture": "stale-reward-basis"}),
+                json.dumps({"fixture": "stale-signing-key"}),
+                json.dumps({"fixture": "stale-promotion"}),
             ),
         )
         for item in frozen:
@@ -133,8 +169,11 @@ def _seed_terminal(connection, schedule: dict[str, str]) -> None:
                 """
                 INSERT INTO public.lab_arena_submissions(
                   submission_id,round_id,miner_hotkey,status,is_king,
-                  submission_doc,source_ref,source_size_bytes)
-                VALUES(%s,%s,%s,'frozen',%s,%s::jsonb,%s,%s)
+                  submission_doc,source_ref,source_size_bytes,code_review_status,
+                  code_review_attempts,code_review_doc,code_review_claim,
+                  code_review_started_at)
+                VALUES(%s,%s,%s,'frozen',%s,%s::jsonb,%s,%s,%s,%s,%s::jsonb,
+                  %s,%s)
                 """,
                 (
                     item["submission_id"],
@@ -144,6 +183,11 @@ def _seed_terminal(connection, schedule: dict[str, str]) -> None:
                     json.dumps(submission_doc),
                     item["source_ref"],
                     item["source_size_bytes"],
+                    "pending" if item["is_king"] else "passed",
+                    0 if item["is_king"] else 1,
+                    None if item["is_king"] else json.dumps({"verdict": "pass"}),
+                    None if item["is_king"] else "sha256:" + "d" * 64,
+                    None if item["is_king"] else datetime.now(timezone.utc),
                 ),
             )
         for index in range(3):
@@ -312,25 +356,6 @@ def _scalar(cursor, query: str) -> str:
     return str(cursor.fetchone()[0])
 
 
-def _scope326(scored_run_id: str) -> dict:
-    scoring_input = scoring.build_scoring_input(
-        scored_run_id=scored_run_id,
-        icp={**_icp(), "icp_id": "icp-0", "prompt": "Find rerun326"},
-        companies=[_company("rerun326")],
-        policy=scoring.build_scorer_policy(),
-        evaluation_date="2026-09-20",
-    )
-    return judgment_cache.build_cache_scope(
-        scoring_input=scoring_input,
-        round_id=ROUND,
-        network_name="finney",
-        netuid=71,
-        scorer_image_digest="sha256:" + "a" * 64,
-        scorer_image_reference="registry.example/lab/scorer@sha256:" + "a" * 64,
-        integrity_policy="arena_integrity_v1",
-    )
-
-
 def _template_block(name: str) -> str:
     matches = re.findall(
         rf"\${re.escape(name)}\$(.*?)\${re.escape(name)}\$",
@@ -382,11 +407,17 @@ def _render(cursor, schedule: dict[str, str]) -> tuple[str, str, str]:
     return body, scoring_definition, patched_scoring_definition
 
 
-def test_sep20_recovery_rejects_drift_then_preserves_history_and_is_idempotent(database):
+def test_sep20_recovery_rejects_drift_then_publishes_fresh_scores(
+    database, tmp_path, monkeypatch
+):
     psycopg2, dsn = database
     schedule = _schedule()
+    harness = lifecycle.Harness(
+        lambda: psycopg2.connect(**dsn), tmp_path, challengers=[], runners=["alpha"]
+    )
+    harness.round_id = ROUND
     with psycopg2.connect(**dsn) as connection:
-        _seed_terminal(connection, schedule)
+        _seed_terminal(connection, schedule, runner_hotkeys=harness.runner_keys)
         with connection.cursor() as cursor:
             rendered, scoring_before, scoring_after = _render(cursor, schedule)
             cursor.execute("SET session_replication_role=replica")
@@ -451,64 +482,137 @@ def test_sep20_recovery_rejects_drift_then_preserves_history_and_is_idempotent(d
             8,
             2,
             1,
-            "arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun326-4ebe18de.tar.gz",
+            "arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun326-c26122a7.tar.gz",
         )
 
-        scored_run_id = f"{ROUND}:{BASELINE}:1:0:rerun326:1"
-        output_ref = f"arena/{ROUND}/outputs/{scored_run_id}.json"
-        work_item = {
-            "scored_run_id": scored_run_id,
-            "submission_id": BASELINE,
-            "icp_position": 0,
-            "output_ref": output_ref,
-        }
-        scope = _scope326(scored_run_id)
-        work_item.update(
-            {
-                "judgment_cache_key": scope["cache_key"],
-                "judgment_scope_doc": scope,
-                "judgment_input_hash": scope["scoring_input_hash"],
-                "judgment_group_leader": True,
-                "judgment_group_miner_hotkeys": [hotkey("sep20-r326-baseline")],
-            }
-        )
-        with connection.cursor() as cursor:
-            cursor.execute("SET session_replication_role=replica")
-            cursor.execute(
-                "UPDATE public.lab_arena_runs SET status='accepted',"
-                "terminal_cause='accepted',result_doc=%s::jsonb,output_ref=%s "
-                "WHERE run_id=%s",
-                (json.dumps({"terminal_status": "accepted"}), output_ref, scored_run_id),
-            )
-            cursor.execute(
-                "UPDATE public.lab_arena_rounds SET status='stage1_closed',"
-                "stage1_scoring_plan_doc=%s::jsonb WHERE round_id=%s",
-                (json.dumps({"round_id": ROUND, "stage": 1, "work_items": [work_item]}), ROUND),
-            )
-            cursor.execute("SET session_replication_role=origin")
-        connection.commit()
-        store = ArenaStore(PsycopgTransport(lambda: psycopg2.connect(**dsn)))
-        try:
-            opened = store.open_scoring(ROUND, 1, [work_item], integrity_cache=True)
-        finally:
-            store._transport.close()
-        assert (opened["status"], opened["assignments"]) == ("ok", 1)
         with connection.cursor() as cursor:
             cursor.execute(
-                "SELECT assignment_id,scored_run_id FROM public.lab_arena_runs "
-                "WHERE round_id=%s AND kind='score'",
+                "SELECT king_outcome,king_hotkey,king_start_epoch,"
+                "effective_reward_epoch,reward_basis_hash,reward_basis_doc,"
+                "signing_key_doc,reward_activated_at,promotion_required,"
+                "promotion_doc,baseline_promoted_at FROM public.lab_arena_rounds "
+                "WHERE round_id=%s",
                 (ROUND,),
             )
             assert cursor.fetchone() == (
-                f"{ROUND}:{BASELINE}:1:0:score:rerun326",
-                scored_run_id,
+                None, None, None, None, None, None, None, None, True, None, None
             )
+            cursor.execute(
+                "SELECT configuration_doc->>'archived_king_outcome',"
+                "configuration_doc->>'archived_reward_basis_hash',"
+                "configuration_doc->'archived_promotion_doc' "
+                "FROM public.lab_arena_rounds WHERE round_id=%s",
+                (ARCHIVE,),
+            )
+            assert cursor.fetchone() == (
+                "crowned",
+                "sha256:" + "c" * 64,
+                {"fixture": "stale-promotion"},
+            )
+            cursor.execute(
+                "SELECT run_id,output_ref,icp_position FROM public.lab_arena_runs "
+                "WHERE round_id=%s AND kind='execute' AND submission_id<>%s",
+                (ROUND, BASELINE),
+            )
+            retained = cursor.fetchall()
+
+        icps = daily_icps()
+        benchmark = {
+            "schema_version": "leadpoet.lab_arena.benchmark.v1",
+            "round_id": ROUND,
+            "icps": icps,
+        }
+        harness.objects.put(
+            f"arena/{ROUND}/benchmark.json", json.dumps(benchmark).encode()
+        )
+        for index, (run_id, output_ref, position) in enumerate(retained, 1):
+            rerun310._proof_execution_v2(
+                harness.objects, icps[position], index, position, run_id
+            )
+            harness.objects.put(
+                output_ref, harness.objects.get(f"arena/output/{run_id}.json")
+            )
+
+        monkeypatch.setattr(lifecycle, "ROUND", ROUND)
+        monkeypatch.setattr(lifecycle, "BASELINE", BASELINE)
+        monkeypatch.setattr(lifecycle, "_proof_execution", rerun310._proof_execution_v2)
+        lifecycle._drive_cycle(
+            harness.service, harness.objects, icps, harness.runner_keys[0]
+        )
+        publication = harness.service.publish(ROUND)
+        assert publication["status"] == "ok"
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT status,publication_doc->'king_decision'->>'outcome',"
+                "jsonb_array_length(publication_doc->'final_ranking'),"
+                "king_outcome,reward_basis_hash,reward_basis_doc,signing_key_doc,"
+                "reward_activated_at,promotion_required,promotion_doc,"
+                "baseline_promoted_at FROM public.lab_arena_rounds WHERE round_id=%s",
+                (ROUND,),
+            )
+            published = cursor.fetchone()
+            cursor.execute(
+                "SELECT array_agg(per_icp_score ORDER BY icp_position),"
+                "jsonb_agg(qualification_doc ORDER BY icp_position) "
+                "FROM public.lab_arena_runs WHERE round_id=%s AND kind='execute' "
+                "AND submission_id=%s AND status='accepted'",
+                (ROUND, BASELINE),
+            )
+            baseline_scores = cursor.fetchone()
+            assert published[:4] == ("published", "no_king", 5, "no_king"), (
+                published,
+                baseline_scores,
+            )
+            assert published[4:] == (None, None, None, None, True, None, None)
+            cursor.execute(
+                "SELECT count(*),min(per_icp_score),"
+                "bool_and(qualification_doc IS NOT NULL) "
+                "FROM public.lab_arena_runs WHERE round_id=%s AND kind='execute' "
+                "AND submission_id=%s AND status='accepted'",
+                (ROUND, BASELINE),
+            )
+            count, minimum_score, persisted = cursor.fetchone()
+            assert count == 20 and minimum_score > 0 and persisted is True
+            cursor.execute(
+                "SELECT count(*),bool_and(status='accepted'),"
+                "bool_and(assignment_id LIKE '%%:score:rerun326') "
+                "FROM public.lab_arena_runs WHERE round_id=%s AND kind='score'",
+                (ROUND,),
+            )
+            assert cursor.fetchone() == (100, True, True)
+            cursor.execute(
+                "SELECT (entry->>'final_score')::double precision "
+                "FROM public.lab_arena_rounds r,"
+                "jsonb_array_elements(r.publication_doc->'final_ranking') entry "
+                "WHERE r.round_id=%s AND entry->>'submission_id'=%s",
+                (ROUND, BASELINE),
+            )
+            assert cursor.fetchone()[0] > 0
+            cursor.execute(
+                "SELECT to_jsonb(r) FROM public.lab_arena_rounds r WHERE round_id=%s",
+                (ROUND,),
+            )
+            published_before = cursor.fetchone()[0]
+            cursor.execute(rendered)
+            cursor.execute(
+                "SELECT to_jsonb(r) FROM public.lab_arena_rounds r WHERE round_id=%s",
+                (ROUND,),
+            )
+            assert cursor.fetchone()[0] == published_before
 
 
 def test_sep20_recovery_template_is_inactive_and_narrow():
     body = TEMPLATE.read_text()
     assert TEMPLATE.name not in CURRENT_SERVICE_MIGRATIONS
-    assert not TEMPLATE.with_suffix("").exists()
+    rendered_path = TEMPLATE.with_suffix("")
+    if rendered_path.exists():
+        rendered = rendered_path.read_text()
+        assert re.search(r"__[A-Z0-9_]+__", rendered) is None
+        assert rendered.count("BEGIN;") == 1 and rendered.count("COMMIT;") == 1
+        assert "score:rerun326" in rendered
+        assert "c26122a7287c2e9366c2b6a897b8d56a8fab41b1" in rendered
+        assert "61e60812b4ca4506c7c1ea7ee7a7678750e50ad5adec17ca500f44708f71b8b4" in rendered
     assert "arena-2026-09-19" not in body
     assert "DELETE FROM" not in body and "TRUNCATE " not in body
     assert "openrouter\":500" in body
@@ -517,7 +621,22 @@ def test_sep20_recovery_template_is_inactive_and_narrow():
     assert "icp_wall_clock_seconds" in body and "2700" in body
     assert "lease_ttl_seconds" in body and "3600" in body
     assert "archived_execution_judgments" in body
+    for field in (
+        "archived_reward_basis_hash",
+        "archived_reward_basis_doc",
+        "archived_signing_key_doc",
+        "archived_effective_reward_epoch",
+        "archived_reward_activated_at",
+        "archived_king_outcome",
+        "archived_king_hotkey",
+        "archived_king_start_epoch",
+        "archived_promotion_required",
+        "archived_promotion_doc",
+        "archived_baseline_promoted_at",
+    ):
+        assert field in body
+    assert "moved_baseline_ledger<>__TERMINAL_BASELINE_EXECUTE_LEDGER_COUNT__" in body
     assert "score:rerun326" in body
-    assert "4ebe18de628d58cdc0e24a96f3f8be8c5a68c2ab" in body
-    assert "422c4e6cb24a658d4f02f328d1b8a8b75b477999197207554075bb2bbae56cf3" in body
+    assert "c26122a7287c2e9366c2b6a897b8d56a8fab41b1" in body
+    assert "61e60812b4ca4506c7c1ea7ee7a7678750e50ad5adec17ca500f44708f71b8b4" in body
     assert len(set(re.findall(r"__[A-Z0-9_]+__", body))) == 17

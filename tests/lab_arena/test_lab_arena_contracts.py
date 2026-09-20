@@ -43,6 +43,11 @@ def test_public_constants_are_the_plan_values():
     assert c.CALL_QUOTAS_PER_ICP == {
         "scrapingdog": 200,
         "deepline": 200,
+        "openrouter": 500,
+    }
+    assert c.ALL_PROVIDER_200_CALL_QUOTAS_PER_ICP == {
+        "scrapingdog": 200,
+        "deepline": 200,
         "openrouter": 200,
     }
     assert c.OPENROUTER_200_CALL_QUOTAS_PER_ICP == {

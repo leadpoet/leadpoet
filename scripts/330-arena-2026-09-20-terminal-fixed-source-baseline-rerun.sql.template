@@ -1,8 +1,8 @@
--- Render only after the Sep20 rerun328 round is published, drained and every protected
--- database seal below matches. The .template suffix prevents application
--- before the final baseline source and live schedule are fixed. While this
--- transition is active, the public dashboard can temporarily show the prior
--- published live round; the complete rerun328 publication remains in r330archive.
+-- Render only after the Sep20 rerun328 round publishes exactly one numeric zero
+-- baseline, is drained, every accepted output artifact is hash-readable, and every
+-- protected database seal below matches. Rejudge the sealed rerun328 executions
+-- under the fixed scorer without repeating paid sourcing or changing source/cost policy.
+-- The complete prior publication and scoring authority remain in r330archive.
 BEGIN;
 SET LOCAL TIME ZONE 'UTC';
 SET LOCAL lock_timeout='5s';
@@ -48,14 +48,12 @@ DECLARE
  baseline public.lab_arena_submissions;
  archive_config JSONB;
  archive_participants JSONB;
- new_participants JSONB;
- expected_submission JSONB;
- miner_submissions_before JSONB;
- miner_submissions_after JSONB;
- miner_runs_before JSONB;
- miner_runs_after JSONB;
- miner_ledger_before JSONB;
- miner_ledger_after JSONB;
+ submissions_before JSONB;
+ submissions_after JSONB;
+ execution_runs_before JSONB;
+ execution_runs_after JSONB;
+ execution_ledger_before JSONB;
+ execution_ledger_after JSONB;
  archived_execution_judgments JSONB;
  prior_archive_before JSONB;
  prior_archive_after JSONB;
@@ -68,14 +66,8 @@ DECLARE
  reservation_count BIGINT;
  baseline_publication_count BIGINT;
  zero_baseline_publication_count BIGINT;
- moved_baseline_runs BIGINT;
- moved_baseline_ledger BIGINT;
  moved_score_runs BIGINT;
  moved_score_ledger BIGINT;
- inserted_runs BIGINT:=0;
- position INTEGER;
- stage SMALLINT;
- assignment TEXT;
 BEGIN
  PERFORM pg_catalog.pg_advisory_xact_lock(
   pg_catalog.hashtextextended('arena-2026-09-20-rerun330',0));
@@ -99,7 +91,7 @@ BEGIN
       WHERE archived.round_id='arena-2026-09-20-r330archive'
        AND archived.status='cancelled' AND archived.rewards_enabled IS FALSE
        AND archived.cancel_reason=
-           'authorized_sep20_fixed_source_baseline_archive'
+           'authorized_sep20_same_source_rejudge_archive'
        AND archived.configuration_doc->>'archived_terminal_round_sha256'=
            '__TERMINAL_ROUND_SHA256__'
        AND archived.configuration_doc->>'archived_terminal_submissions_sha256'=
@@ -113,44 +105,57 @@ BEGIN
        AND archived.configuration_doc->>'archived_terminal_judgment_cache_sha256'=
            '__TERMINAL_JUDGMENT_CACHE_SHA256__'
        AND archived.configuration_doc->>'archived_bank_object_sha256'=
-           '7aaa7fbb4b4ce078dd62217c4d594dafdc82161d30c7718bd4500fa659fe5ad9')
+           '7aaa7fbb4b4ce078dd62217c4d594dafdc82161d30c7718bd4500fa659fe5ad9'
+       AND archived.configuration_doc->>'archived_execution_artifacts_sha256'=
+           '__TERMINAL_EXECUTION_ARTIFACTS_SHA256__')
     OR baseline.source_ref IS DISTINCT FROM
-       'arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun330-51f1c3c8.tar.gz'
-    OR baseline.source_size_bytes IS DISTINCT FROM 857598
+       'arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun328-5d492f17.tar.gz'
+    OR baseline.source_size_bytes IS DISTINCT FROM 854708
     OR baseline.submission_doc->>'source_sha256' IS DISTINCT FROM
-       'f403292595dd753e8398ad46de388dd75165ebe1265526cfffd7ef7c6c3e72a4'
+       'f1f24e24e0cd736d8c9695640093f4d5f28c360e2773b9824dd5010fe5100f3e'
     OR baseline.submission_doc->>'source_commit' IS DISTINCT FROM
-       '51f1c3c8e17a436ec2ccfb80162beae7fc1f02b2'
+       '5d492f1715e27c8d9b919bcc3ad69d1be5160524'
     OR active.configuration_doc->>'checkpoint_deadline_policy' IS DISTINCT FROM
        'atomic_checkpoint_90m_v1'
     OR (active.configuration_doc->>'icp_wall_clock_seconds')::INTEGER<>5400
     OR (active.configuration_doc->>'lease_ttl_seconds')::INTEGER<>6300
     OR active.configuration_doc->>'scorer_image_digest' IS DISTINCT FROM
-       'sha256:9d4c30797ac6910ec2c2e9549f0bdec9fb8f0ec30b78ee53f2ce5cd3f4c47493'
+       '__NEW_SCORER_IMAGE_DIGEST__'
     OR active.configuration_doc->>'scorer_image_reference' IS DISTINCT FROM
-       '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:9d4c30797ac6910ec2c2e9549f0bdec9fb8f0ec30b78ee53f2ce5cd3f4c47493'
+       '__NEW_SCORER_IMAGE_REFERENCE__'
     OR active.configuration_doc->'call_quotas' IS DISTINCT FROM
-       '{"deepline":200,"openrouter":2000,"scrapingdog":200}'::JSONB
+       '{"deepline":200,"openrouter":500,"scrapingdog":200}'::JSONB
     OR active.configuration_doc->'schedule' IS DISTINCT FROM
        '__RERUN_SCHEDULE_JSON__'::JSONB
     OR (SELECT pg_catalog.count(*) FROM public.lab_arena_submissions
         WHERE round_id='arena-2026-09-20-r330archive')<>
        __TERMINAL_SUBMISSION_COUNT__
-    OR (SELECT pg_catalog.count(*) FROM public.lab_arena_runs
-        WHERE round_id='arena-2026-09-20-r330archive' AND kind='execute'
-         AND submission_id='baseline-2026-09-20:r330archive')<>
-       __TERMINAL_BASELINE_RUN_COUNT__
+    OR EXISTS(SELECT 1 FROM public.lab_arena_runs
+        WHERE round_id='arena-2026-09-20-r330archive' AND kind='execute')
     OR (SELECT pg_catalog.count(*) FROM public.lab_arena_runs
         WHERE round_id='arena-2026-09-20-r330archive' AND kind='score')<>
        __TERMINAL_SCORE_RUN_COUNT__
     OR (SELECT pg_catalog.count(DISTINCT assignment_id)
         FROM public.lab_arena_runs WHERE round_id='arena-2026-09-20'
          AND kind='execute' AND submission_id='baseline-2026-09-20'
-         AND assignment_id LIKE '%:rerun330')<>20
+         AND assignment_id LIKE '%:rerun328')<>20
+    OR (SELECT pg_catalog.count(*) FROM public.lab_arena_runs
+        WHERE round_id='arena-2026-09-20' AND kind='execute'
+         AND submission_id='baseline-2026-09-20')<>
+       __TERMINAL_BASELINE_RUN_COUNT__
+    OR (SELECT pg_catalog.count(*) FROM public.lab_arena_runs
+        WHERE round_id='arena-2026-09-20' AND kind='execute'
+         AND submission_id='baseline-2026-09-20'
+         AND status='accepted' AND terminal_cause='accepted')<>
+       __TERMINAL_BASELINE_ACCEPTED_RUN_COUNT__
+    OR (SELECT pg_catalog.count(*) FROM public.lab_arena_runs
+        WHERE round_id='arena-2026-09-20' AND kind='execute'
+         AND submission_id='baseline-2026-09-20' AND status='failed')<>
+       __TERMINAL_BASELINE_FAILED_RUN_COUNT__
     OR EXISTS(SELECT 1 FROM public.lab_arena_runs
         WHERE round_id='arena-2026-09-20' AND kind='execute'
          AND submission_id='baseline-2026-09-20'
-         AND assignment_id NOT LIKE '%:rerun330')
+         AND assignment_id NOT LIKE '%:rerun328')
     OR (SELECT pg_catalog.count(*) FROM public.lab_arena_runs
         WHERE round_id='arena-2026-09-20' AND kind='execute'
          AND submission_id<>'baseline-2026-09-20' AND status='accepted'
@@ -197,6 +202,13 @@ BEGIN
   RAISE EXCEPTION 'Sep20 rerun330 schedule differs' USING ERRCODE='22023';
  END IF;
 
+ IF '__NEW_SCORER_IMAGE_DIGEST__' !~ '^sha256:[0-9a-f]{64}$'
+  OR '__NEW_SCORER_IMAGE_REFERENCE__' IS DISTINCT FROM
+    '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@'||
+    '__NEW_SCORER_IMAGE_DIGEST__' THEN
+  RAISE EXCEPTION 'Sep20 rerun330 scorer identity differs' USING ERRCODE='22023';
+ END IF;
+
  SELECT pg_catalog.count(*) INTO active_count FROM public.lab_arena_runs
   WHERE round_id='arena-2026-09-20'
    AND status IN('pending','leased','submitted');
@@ -232,6 +244,10 @@ BEGIN
   OR active.status IS DISTINCT FROM 'published'
   OR active.cancel_reason IS DISTINCT FROM __TERMINAL_CANCEL_REASON_SQL__
   OR active_count<>0 OR unsettled_count<>0 OR reservation_count<>0
+  OR active.effective_reward_epoch IS NOT NULL
+  OR active.reward_basis_hash IS NOT NULL OR active.reward_basis_doc IS NOT NULL
+  OR active.signing_key_doc IS NOT NULL OR active.reward_activated_at IS NOT NULL
+  OR active.promotion_doc IS NOT NULL OR active.baseline_promoted_at IS NOT NULL
   OR active.benchmark_ref IS DISTINCT FROM
      'arena/arena-2026-09-20/benchmark.json'
   OR active.evaluation_date IS DISTINCT FROM '2026-09-20'
@@ -283,6 +299,15 @@ BEGIN
       WHERE round_id='arena-2026-09-20' AND kind='execute'
        AND submission_id='baseline-2026-09-20')<>
      __TERMINAL_BASELINE_RUN_COUNT__
+  OR (SELECT pg_catalog.count(*) FROM public.lab_arena_runs
+      WHERE round_id='arena-2026-09-20' AND kind='execute'
+       AND submission_id='baseline-2026-09-20'
+       AND status='accepted' AND terminal_cause='accepted')<>
+     __TERMINAL_BASELINE_ACCEPTED_RUN_COUNT__
+  OR (SELECT pg_catalog.count(*) FROM public.lab_arena_runs
+      WHERE round_id='arena-2026-09-20' AND kind='execute'
+       AND submission_id='baseline-2026-09-20' AND status='failed')<>
+     __TERMINAL_BASELINE_FAILED_RUN_COUNT__
   OR EXISTS(SELECT 1 FROM public.lab_arena_runs
       WHERE round_id='arena-2026-09-20' AND kind='execute'
        AND submission_id='baseline-2026-09-20'
@@ -294,6 +319,27 @@ BEGIN
       WHERE round_id='arena-2026-09-20' AND kind='execute'
        AND submission_id<>'baseline-2026-09-20' AND status='accepted'
        AND terminal_cause='accepted' AND output_ref IS NOT NULL)<>80
+  OR (SELECT pg_catalog.count(*) FROM public.lab_arena_runs
+      WHERE round_id='arena-2026-09-20' AND kind='execute'
+       AND status='accepted' AND terminal_cause='accepted'
+       AND pg_catalog.char_length(output_ref) BETWEEN 1 AND 1024)<>
+     __TERMINAL_ACCEPTED_EXECUTION_COUNT__
+  OR '__TERMINAL_EXECUTION_ARTIFACTS_SHA256__' !~ '^[0-9a-f]{64}$'
+  OR EXISTS(SELECT 1 FROM (
+      SELECT assignment_id,
+       pg_catalog.bool_or(status='accepted') has_accepted,
+       pg_catalog.bool_or(COALESCE(terminal_cause,'') IN(
+        'model_timeout','invalid_output','budget_exhausted',
+        'credential_error','model_error')) has_model_zero,
+       (pg_catalog.array_agg(attempt ORDER BY attempt DESC))[1] latest_attempt,
+       (pg_catalog.array_agg(status ORDER BY attempt DESC))[1] latest_status,
+       (pg_catalog.array_agg(COALESCE(terminal_cause,'')
+         ORDER BY attempt DESC))[1] latest_cause
+      FROM public.lab_arena_runs WHERE round_id='arena-2026-09-20'
+       AND kind='execute' GROUP BY assignment_id) outcome
+     WHERE NOT has_accepted AND NOT has_model_zero AND NOT(
+       latest_attempt>=2 AND latest_status='failed'
+       AND latest_cause='provider_error'))
   OR NOT EXISTS(SELECT 1 FROM public.lab_arena_rounds archived
       WHERE archived.round_id='arena-2026-09-20-r326archive'
        AND archived.configuration_doc->>'archived_bank_object_sha256'=
@@ -363,19 +409,18 @@ BEGIN
     ORDER BY cache_key),''),'sha256'),'hex'))
   INTO cache_before FROM public.lab_arena_judgment_cache c;
 
- expected_submission:=baseline.submission_doc||pg_catalog.jsonb_build_object(
-  'source_ref','arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun330-51f1c3c8.tar.gz',
-  'source_size_bytes',857598,
-  'source_sha256','f403292595dd753e8398ad46de388dd75165ebe1265526cfffd7ef7c6c3e72a4',
-  'source_commit','51f1c3c8e17a436ec2ccfb80162beae7fc1f02b2');
- SELECT pg_catalog.jsonb_agg(CASE
-   WHEN item->>'submission_id'='baseline-2026-09-20' THEN
-    item||pg_catalog.jsonb_build_object(
-     'source_ref','arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun330-51f1c3c8.tar.gz',
-     'source_size_bytes',857598)
-   ELSE item END ORDER BY ordinal)
-  INTO new_participants FROM pg_catalog.jsonb_array_elements(active.participants)
-   WITH ORDINALITY entries(item,ordinal);
+ SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(item) ORDER BY submission_id)
+  INTO submissions_before FROM public.lab_arena_submissions item
+  WHERE round_id='arena-2026-09-20';
+ SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(r)-'per_icp_score'-
+   'qualification_doc' ORDER BY run_id) INTO execution_runs_before
+  FROM public.lab_arena_runs r WHERE round_id='arena-2026-09-20'
+   AND kind='execute';
+ SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(l) ORDER BY entry_id)
+  INTO execution_ledger_before FROM public.lab_arena_ledger l
+  WHERE round_id='arena-2026-09-20' AND EXISTS(SELECT 1
+   FROM public.lab_arena_runs r WHERE r.round_id='arena-2026-09-20'
+    AND r.kind='execute' AND r.run_id=l.run_id);
  SELECT pg_catalog.jsonb_agg(item||pg_catalog.jsonb_build_object(
    'submission_id',(item->>'submission_id')||':r330archive') ORDER BY ordinal)
   INTO archive_participants FROM pg_catalog.jsonb_array_elements(active.participants)
@@ -397,6 +442,8 @@ BEGIN
   'archived_terminal_company_judgments_sha256',
    '__TERMINAL_COMPANY_JUDGMENTS_SHA256__',
   'archived_terminal_judgment_cache_sha256','__TERMINAL_JUDGMENT_CACHE_SHA256__',
+  'archived_execution_artifacts_sha256','__TERMINAL_EXECUTION_ARTIFACTS_SHA256__',
+  'archived_execution_artifact_count',__TERMINAL_EXECUTION_ARTIFACT_COUNT__,
   'archived_rewards_enabled',active.rewards_enabled,
   'archived_effective_reward_epoch',active.effective_reward_epoch,
   'archived_reward_basis_hash',active.reward_basis_hash,
@@ -412,20 +459,6 @@ BEGIN
   'archived_execution_judgments',archived_execution_judgments,
   'archived_bank_object_sha256',
    '7aaa7fbb4b4ce078dd62217c4d594dafdc82161d30c7718bd4500fa659fe5ad9');
- SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(s) ORDER BY submission_id)
-  INTO miner_submissions_before FROM public.lab_arena_submissions s
-  WHERE round_id='arena-2026-09-20' AND submission_id<>'baseline-2026-09-20';
- SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(r)-'per_icp_score'-
-   'qualification_doc'-'updated_at' ORDER BY run_id) INTO miner_runs_before
-  FROM public.lab_arena_runs r WHERE round_id='arena-2026-09-20'
-   AND kind='execute' AND submission_id<>'baseline-2026-09-20';
- SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(l) ORDER BY entry_id)
-  INTO miner_ledger_before FROM public.lab_arena_ledger l
-  WHERE round_id='arena-2026-09-20'
-   AND submission_id<>'baseline-2026-09-20'
-   AND NOT EXISTS(SELECT 1 FROM public.lab_arena_runs s
-    WHERE s.round_id='arena-2026-09-20' AND s.kind='score' AND s.run_id=l.run_id);
-
  ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER USER;
  ALTER TABLE public.lab_arena_submissions DISABLE TRIGGER USER;
  ALTER TABLE public.lab_arena_runs DISABLE TRIGGER USER;
@@ -457,7 +490,7 @@ BEGIN
     'configuration_doc',archive_config,'participants',archive_participants,
     'rewards_enabled',FALSE,'reward_basis_hash',NULL,'reward_basis_doc',NULL,
     'signing_key_doc',NULL,'effective_reward_epoch',NULL,'reward_activated_at',NULL,
-    'cancel_reason','authorized_sep20_fixed_source_baseline_archive'));
+    'cancel_reason','authorized_sep20_same_source_rejudge_archive'));
  INSERT INTO public.lab_arena_submissions SELECT (pg_catalog.jsonb_populate_record(
   NULL::public.lab_arena_submissions,pg_catalog.to_jsonb(s)||
   pg_catalog.jsonb_build_object('round_id','arena-2026-09-20-r330archive',
@@ -474,35 +507,17 @@ BEGIN
   FROM public.lab_arena_runs s WHERE s.round_id='arena-2026-09-20-r330archive'
    AND s.kind='score' AND s.run_id=l.run_id);
  GET DIAGNOSTICS moved_score_ledger=ROW_COUNT;
- UPDATE public.lab_arena_runs SET round_id='arena-2026-09-20-r330archive',
-  submission_id='baseline-2026-09-20:r330archive'
- WHERE round_id='arena-2026-09-20' AND kind='execute'
-  AND submission_id='baseline-2026-09-20';
- GET DIAGNOSTICS moved_baseline_runs=ROW_COUNT;
- UPDATE public.lab_arena_ledger SET round_id='arena-2026-09-20-r330archive',
-  submission_id='baseline-2026-09-20:r330archive'
- WHERE round_id='arena-2026-09-20'
-  AND submission_id='baseline-2026-09-20';
- GET DIAGNOSTICS moved_baseline_ledger=ROW_COUNT;
  UPDATE public.lab_arena_runs SET per_icp_score=NULL,qualification_doc=NULL
- WHERE round_id='arena-2026-09-20' AND kind='execute'
-  AND submission_id<>'baseline-2026-09-20';
- UPDATE public.lab_arena_submissions SET
-  source_ref='arena/arena-2026-09-20/sources/baseline-2026-09-20-rerun330-51f1c3c8.tar.gz',
-  source_size_bytes=857598,submission_doc=expected_submission,
-  updated_at=pg_catalog.clock_timestamp()
- WHERE round_id='arena-2026-09-20' AND submission_id='baseline-2026-09-20';
- IF NOT FOUND THEN RAISE EXCEPTION 'Sep20 rerun330 baseline update missing'; END IF;
+ WHERE round_id='arena-2026-09-20' AND kind='execute';
  UPDATE public.lab_arena_rounds SET status='stage1',
   status_generation=status_generation+1,stage_generation=stage_generation+1,
   configuration_doc=configuration_doc||pg_catalog.jsonb_build_object(
    'schedule','__RERUN_SCHEDULE_JSON__'::JSONB,
-   'call_quotas','{"deepline":200,"openrouter":2000,"scrapingdog":200}'::JSONB,
    'scorer_image_digest',
-    'sha256:9d4c30797ac6910ec2c2e9549f0bdec9fb8f0ec30b78ee53f2ce5cd3f4c47493',
+    '__NEW_SCORER_IMAGE_DIGEST__',
    'scorer_image_reference',
-    '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:9d4c30797ac6910ec2c2e9549f0bdec9fb8f0ec30b78ee53f2ce5cd3f4c47493'),
-  participants=new_participants,stage1_scoring_plan_doc=NULL,
+    '__NEW_SCORER_IMAGE_REFERENCE__'),
+  stage1_scoring_plan_doc=NULL,
   stage2_scoring_plan_doc=NULL,stage3_scoring_plan_doc=NULL,finalists=NULL,
   publication_doc=NULL,published_at=NULL,cancel_reason=NULL,
   king_outcome=NULL,king_hotkey=NULL,king_start_epoch=NULL,
@@ -512,33 +527,23 @@ BEGIN
   updated_at=pg_catalog.clock_timestamp()
  WHERE round_id='arena-2026-09-20';
  IF NOT FOUND THEN RAISE EXCEPTION 'Sep20 rerun330 round update missing'; END IF;
- FOR position IN 0..19 LOOP
-  stage:=CASE WHEN position<10 THEN 1 ELSE 2 END;
-  assignment:='arena-2026-09-20:baseline-2026-09-20:'||stage::TEXT||':'||
-   position::TEXT||':rerun330';
-  INSERT INTO public.lab_arena_runs(run_id,assignment_id,round_id,submission_id,
-   miner_hotkey,stage,icp_position,attempt,kind,status,stage_generation)
-  VALUES(assignment||':1',assignment,'arena-2026-09-20','baseline-2026-09-20',
-   baseline.miner_hotkey,stage,position,1,'execute','pending',
-   active.stage_generation+1);
-  inserted_runs:=inserted_runs+1;
- END LOOP;
  ALTER TABLE public.lab_arena_ledger ENABLE TRIGGER USER;
  ALTER TABLE public.lab_arena_runs ENABLE TRIGGER USER;
  ALTER TABLE public.lab_arena_submissions ENABLE TRIGGER USER;
  ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER USER;
 
- SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(s) ORDER BY submission_id)
-  INTO miner_submissions_after FROM public.lab_arena_submissions s
-  WHERE round_id='arena-2026-09-20' AND submission_id<>'baseline-2026-09-20';
+ SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(item) ORDER BY submission_id)
+  INTO submissions_after FROM public.lab_arena_submissions item
+  WHERE round_id='arena-2026-09-20';
  SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(r)-'per_icp_score'-
-   'qualification_doc'-'updated_at' ORDER BY run_id) INTO miner_runs_after
+   'qualification_doc' ORDER BY run_id) INTO execution_runs_after
   FROM public.lab_arena_runs r WHERE round_id='arena-2026-09-20'
-   AND kind='execute' AND submission_id<>'baseline-2026-09-20';
+   AND kind='execute';
  SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(l) ORDER BY entry_id)
-  INTO miner_ledger_after FROM public.lab_arena_ledger l
-  WHERE round_id='arena-2026-09-20'
-   AND submission_id<>'baseline-2026-09-20';
+  INTO execution_ledger_after FROM public.lab_arena_ledger l
+  WHERE round_id='arena-2026-09-20' AND EXISTS(SELECT 1
+   FROM public.lab_arena_runs r WHERE r.round_id='arena-2026-09-20'
+    AND r.kind='execute' AND r.run_id=l.run_id);
  SELECT pg_catalog.jsonb_build_object(
   'rounds',(SELECT pg_catalog.jsonb_agg(pg_catalog.to_jsonb(r) ORDER BY round_id)
     FROM public.lab_arena_rounds r WHERE round_id IN
@@ -566,17 +571,20 @@ BEGIN
   INTO cache_after FROM public.lab_arena_judgment_cache c;
  IF moved_score_runs<>__TERMINAL_SCORE_RUN_COUNT__
   OR moved_score_ledger<>__TERMINAL_SCORE_LEDGER_COUNT__
-  OR moved_baseline_runs<>__TERMINAL_BASELINE_RUN_COUNT__
-  OR moved_baseline_ledger<>__TERMINAL_BASELINE_LEDGER_COUNT__
-  OR inserted_runs<>20
-  OR miner_submissions_after IS DISTINCT FROM miner_submissions_before
-  OR miner_runs_after IS DISTINCT FROM miner_runs_before
-  OR miner_ledger_after IS DISTINCT FROM miner_ledger_before
+  OR submissions_after IS DISTINCT FROM submissions_before
+  OR execution_runs_after IS DISTINCT FROM execution_runs_before
+  OR execution_ledger_after IS DISTINCT FROM execution_ledger_before
   OR prior_archive_after IS DISTINCT FROM prior_archive_before
   OR judgments_after IS DISTINCT FROM judgments_before
   OR cache_after IS DISTINCT FROM cache_before
   OR EXISTS(SELECT 1 FROM public.lab_arena_runs
-      WHERE round_id='arena-2026-09-20' AND kind='score') THEN
+      WHERE round_id='arena-2026-09-20' AND kind='score')
+  OR EXISTS(SELECT 1 FROM public.lab_arena_runs
+      WHERE round_id='arena-2026-09-20-r330archive' AND kind='execute')
+  OR (SELECT pg_catalog.count(*) FROM public.lab_arena_runs
+      WHERE round_id='arena-2026-09-20' AND kind='execute'
+       AND status='accepted' AND terminal_cause='accepted')<>
+     __TERMINAL_ACCEPTED_EXECUTION_COUNT__ THEN
   RAISE EXCEPTION 'Sep20 rerun330 preservation differs' USING ERRCODE='55000';
  END IF;
 END $sep20_rerun330$;

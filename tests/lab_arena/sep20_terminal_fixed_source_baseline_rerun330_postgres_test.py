@@ -1,7 +1,8 @@
-"""Sealed Sep20 fixed-source rerun330 in disposable PostgreSQL."""
+"""Sealed Sep20 same-source rejudge-only rerun330 in disposable PostgreSQL."""
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -29,18 +30,19 @@ TERMINAL_SCORER_REFERENCE = (
     "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@"
     + TERMINAL_SCORER_DIGEST
 )
-NEW_SCORER_DIGEST = "sha256:9d4c30797ac6910ec2c2e9549f0bdec9fb8f0ec30b78ee53f2ce5cd3f4c47493"
+# Fixture-only identity proves the template binds a supplied digest and reference.
+NEW_SCORER_DIGEST = "sha256:" + "4a" * 32
 NEW_SCORER_REFERENCE = (
     "493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@"
     + NEW_SCORER_DIGEST
 )
 SOURCE_REF = (
     "arena/arena-2026-09-20/sources/"
-    "baseline-2026-09-20-rerun330-51f1c3c8.tar.gz"
+    "baseline-2026-09-20-rerun328-5d492f17.tar.gz"
 )
-SOURCE_SIZE = 857_598
-SOURCE_SHA256 = "f403292595dd753e8398ad46de388dd75165ebe1265526cfffd7ef7c6c3e72a4"
-SOURCE_COMMIT = "51f1c3c8e17a436ec2ccfb80162beae7fc1f02b2"
+SOURCE_SIZE = 854_708
+SOURCE_SHA256 = "f1f24e24e0cd736d8c9695640093f4d5f28c360e2773b9824dd5010fe5100f3e"
+SOURCE_COMMIT = "5d492f1715e27c8d9b919bcc3ad69d1be5160524"
 TEMPLATE = (
     Path(__file__).parents[2]
     / "scripts/330-arena-2026-09-20-terminal-fixed-source-baseline-rerun.sql.template"
@@ -175,7 +177,41 @@ def _assert_exact_render_shape(rendered: str) -> dict[str, str]:
     return values
 
 
-def _render(cursor, schedule: dict[str, str]) -> tuple[str, str, str]:
+class ArtifactProofError(RuntimeError):
+    pass
+
+
+def _execution_artifact_proof(cursor, objects) -> str:
+    cursor.execute(
+        "SELECT run_id,output_ref FROM public.lab_arena_runs WHERE round_id=%s "
+        "AND kind='execute' AND status='accepted' AND terminal_cause='accepted' "
+        "ORDER BY run_id",
+        (ROUND,),
+    )
+    rows = cursor.fetchall()
+    if len(rows) != 98:
+        raise ArtifactProofError("expected 98 accepted execution artifacts")
+    items = []
+    for run_id, output_ref in rows:
+        try:
+            body = objects.get(str(output_ref))
+            parsed = json.loads(body.decode("utf-8"))
+        except (OSError, KeyError, TypeError, ValueError, UnicodeDecodeError) as exc:
+            raise ArtifactProofError("execution artifact is not hash-readable") from exc
+        if not isinstance(parsed, dict):
+            raise ArtifactProofError("execution artifact is not an object")
+        items.append(
+            {
+                "run_id": str(run_id),
+                "output_ref": str(output_ref),
+                "object_sha256": hashlib.sha256(body).hexdigest(),
+            }
+        )
+    encoded = json.dumps(items, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _render(cursor, schedule: dict[str, str], objects) -> tuple[str, str, str]:
     cursor.execute(
         "SELECT status,cancel_reason FROM public.lab_arena_rounds WHERE round_id=%s",
         (ROUND,),
@@ -194,6 +230,8 @@ def _render(cursor, schedule: dict[str, str]) -> tuple[str, str, str]:
         "__RERUN_SCHEDULE_JSON__": json.dumps(
             schedule, sort_keys=True, separators=(",", ":")
         ),
+        "__NEW_SCORER_IMAGE_DIGEST__": NEW_SCORER_DIGEST,
+        "__NEW_SCORER_IMAGE_REFERENCE__": NEW_SCORER_REFERENCE,
         "__TERMINAL_STATUS__": status,
         "__TERMINAL_CANCEL_REASON_SQL__": (
             "NULL" if cancel_reason is None else "'" + cancel_reason + "'"
@@ -204,6 +242,9 @@ def _render(cursor, schedule: dict[str, str]) -> tuple[str, str, str]:
         "__PATCHED_SCORING_DEFINITION_SHA256__": hashlib.sha256(
             patched_definition.encode()
         ).hexdigest(),
+        "__TERMINAL_EXECUTION_ARTIFACTS_SHA256__": _execution_artifact_proof(
+            cursor, objects
+        ),
         "__TERMINAL_ROUND_SHA256__": _scalar(
             cursor,
             "SELECT encode(extensions.digest(to_jsonb(r)::text,'sha256'),'hex') "
@@ -254,6 +295,33 @@ def _render(cursor, schedule: dict[str, str]) -> tuple[str, str, str]:
             "AND kind='execute' AND submission_id=%s",
             (ROUND, BASELINE),
         ),
+        "__TERMINAL_BASELINE_ACCEPTED_RUN_COUNT__": _scalar(
+            cursor,
+            "SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s "
+            "AND kind='execute' AND submission_id=%s AND status='accepted' "
+            "AND terminal_cause='accepted'",
+            (ROUND, BASELINE),
+        ),
+        "__TERMINAL_BASELINE_FAILED_RUN_COUNT__": _scalar(
+            cursor,
+            "SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s "
+            "AND kind='execute' AND submission_id=%s AND status='failed'",
+            (ROUND, BASELINE),
+        ),
+        "__TERMINAL_ACCEPTED_EXECUTION_COUNT__": _scalar(
+            cursor,
+            "SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s "
+            "AND kind='execute' AND status='accepted' "
+            "AND terminal_cause='accepted'",
+            (ROUND,),
+        ),
+        "__TERMINAL_EXECUTION_ARTIFACT_COUNT__": _scalar(
+            cursor,
+            "SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s "
+            "AND kind='execute' AND status='accepted' "
+            "AND terminal_cause='accepted' AND output_ref IS NOT NULL",
+            (ROUND,),
+        ),
         "__TERMINAL_LEDGER_SHA256__": _scalar(
             cursor,
             "SELECT encode(extensions.digest(coalesce(string_agg(encode("
@@ -292,13 +360,6 @@ def _render(cursor, schedule: dict[str, str]) -> tuple[str, str, str]:
             "AND EXISTS(SELECT 1 FROM public.lab_arena_runs r WHERE r.run_id=l.run_id "
             "AND r.round_id=%s AND r.kind='score')",
             (ROUND, ROUND),
-        ),
-        "__TERMINAL_BASELINE_LEDGER_COUNT__": _scalar(
-            cursor,
-            "SELECT count(*) FROM public.lab_arena_ledger l WHERE l.round_id=%s "
-            "AND l.submission_id=%s AND EXISTS(SELECT 1 FROM public.lab_arena_runs r "
-            "WHERE r.run_id=l.run_id AND r.round_id=%s AND r.kind='execute')",
-            (ROUND, BASELINE, ROUND),
         ),
     }
     body = TEMPLATE.read_text()
@@ -349,6 +410,30 @@ def _protected_database_snapshot(cursor):
     )
 
 
+def _migration_body(rendered: str) -> str:
+    prefix, remainder = rendered.split("BEGIN;\n", 1)
+    body, suffix = remainder.rsplit("COMMIT;\n", 1)
+    assert prefix.strip().startswith("-- Render only") and not suffix.strip()
+    return body
+
+
+def _execution_snapshot(cursor):
+    return _json(
+        cursor,
+        "SELECT jsonb_build_object("
+        "'submissions',(SELECT jsonb_agg(to_jsonb(s) ORDER BY submission_id) "
+        "FROM public.lab_arena_submissions s WHERE round_id=%s),"
+        "'runs',(SELECT jsonb_agg(to_jsonb(r)-'per_icp_score'-"
+        "'qualification_doc'-'updated_at' ORDER BY run_id) FROM public.lab_arena_runs r "
+        "WHERE round_id=%s AND kind='execute'),"
+        "'ledger',(SELECT jsonb_agg(to_jsonb(l) ORDER BY entry_id) "
+        "FROM public.lab_arena_ledger l WHERE round_id=%s AND EXISTS("
+        "SELECT 1 FROM public.lab_arena_runs r WHERE r.round_id=%s "
+        "AND r.kind='execute' AND r.run_id=l.run_id)))",
+        (ROUND, ROUND, ROUND, ROUND),
+    )
+
+
 def _publish_rerun328(
     connection, harness, monkeypatch, *, zero_baseline: bool = False
 ) -> None:
@@ -377,51 +462,110 @@ def _publish_rerun328(
         harness.service, harness.objects, daily_icps(), harness.runner_keys[0]
     )
     assert harness.service.publish(ROUND)["status"] == "ok"
+    if zero_baseline:
+        monkeypatch.setattr(lifecycle, "_proof_breakdown", normal_breakdown)
 
 
 def _inject_exhausted_provider_zero_and_failed_unknown(connection) -> str:
-    """Model the terminal state explicitly accepted by migration 326."""
+    """Model 24 baseline attempts: 18 accepted and six terminal failures."""
     identity = "sha256:" + hashlib.sha256(b"rerun330-failed-unknown").hexdigest()
     with connection.cursor() as cursor:
         cursor.execute("SET session_replication_role=replica")
+
+        def row_for(position):
+            return _json(
+                cursor,
+                "SELECT to_jsonb(r) FROM public.lab_arena_runs r WHERE round_id=%s "
+                "AND submission_id=%s AND kind='execute' AND icp_position=%s "
+                "AND status='accepted'",
+                (ROUND, BASELINE, position),
+            )
+
+        def insert_attempt(document, *, status, cause, keep_output):
+            retry = copy.deepcopy(document)
+            retry.update(
+                {
+                    "run_id": document["assignment_id"] + ":2",
+                    "attempt": 2,
+                    "status": status,
+                    "terminal_cause": cause,
+                    "claim_request_id": None,
+                    "claim_request_hash": None,
+                    "claim_response": None,
+                    "lease_token_hash": None,
+                    "lease_expires_at": None,
+                    "per_icp_score": document["per_icp_score"] if keep_output else None,
+                    "qualification_doc": document["qualification_doc"] if keep_output else None,
+                    "output_ref": document["output_ref"] if keep_output else None,
+                    "result_doc": (
+                        document["result_doc"]
+                        if keep_output
+                        else {"terminal_status": cause}
+                    ),
+                }
+            )
+            cursor.execute(
+                "INSERT INTO public.lab_arena_runs SELECT "
+                "(jsonb_populate_record(NULL::public.lab_arena_runs,%s::jsonb)).*",
+                (json.dumps(retry),),
+            )
+            return retry["run_id"]
+
+        # The seed already has one accepted retry. Add one more retained retry.
+        for position in (17,):
+            accepted = row_for(position)
+            cursor.execute(
+                "UPDATE public.lab_arena_runs SET status='failed',"
+                "terminal_cause='provider_error',result_doc="
+                "'{\"terminal_status\":\"provider_error\"}'::jsonb,output_ref=NULL,"
+                "per_icp_score=NULL,qualification_doc=NULL WHERE run_id=%s",
+                (accepted["run_id"],),
+            )
+            retry_run = insert_attempt(
+                accepted, status="accepted", cause="accepted", keep_output=True
+            )
+            cursor.execute(
+                "UPDATE public.lab_arena_runs SET scored_run_id=%s "
+                "WHERE round_id=%s AND kind='score' AND scored_run_id=%s",
+                (retry_run, ROUND, accepted["run_id"]),
+            )
+            assert cursor.rowcount == 1
+
+        # Position 18 exhausted with a model-owned zero on both attempts.
+        model_zero = row_for(18)
         cursor.execute(
-            "SELECT run_id,assignment_id,miner_hotkey,stage,icp_position,"
-            "stage_generation FROM public.lab_arena_runs WHERE round_id=%s "
-            "AND submission_id=%s AND kind='execute' AND icp_position=19 "
-            "AND status='accepted'",
-            (ROUND, BASELINE),
+            "UPDATE public.lab_arena_runs SET status='failed',"
+            "terminal_cause='budget_exhausted',result_doc="
+            "'{\"terminal_status\":\"budget_exhausted\"}'::jsonb,output_ref=NULL,"
+            "per_icp_score=NULL,qualification_doc=NULL WHERE run_id=%s",
+            (model_zero["run_id"],),
         )
-        old_run, assignment, hotkey, stage, position, generation = cursor.fetchone()
+        insert_attempt(
+            model_zero, status="failed", cause="budget_exhausted", keep_output=False
+        )
+        cursor.execute(
+            "UPDATE public.lab_arena_runs SET round_id=%s,submission_id=%s "
+            "WHERE round_id=%s AND kind='score' AND scored_run_id=%s",
+            (PRIOR_ARCHIVES[1], BASELINE + ":r328archive", ROUND, model_zero["run_id"]),
+        )
+        assert cursor.rowcount == 1
+
+        # Position 19 exhausted provider retries; its failed call has unknown cost.
+        provider_zero = row_for(19)
         cursor.execute(
             "UPDATE public.lab_arena_runs SET status='failed',"
             "terminal_cause='provider_error',result_doc="
             "'{\"terminal_status\":\"provider_error\"}'::jsonb,output_ref=NULL,"
             "per_icp_score=NULL,qualification_doc=NULL WHERE run_id=%s",
-            (old_run,),
+            (provider_zero["run_id"],),
         )
-        failed_run = assignment + ":2"
-        cursor.execute(
-            "INSERT INTO public.lab_arena_runs(run_id,assignment_id,round_id,"
-            "submission_id,miner_hotkey,stage,icp_position,attempt,kind,status,"
-            "runner_hotkey,terminal_cause,result_doc,stage_generation) "
-            "VALUES(%s,%s,%s,%s,%s,%s,%s,2,'execute','failed',%s,"
-            "'provider_error','{\"terminal_status\":\"provider_error\"}'::jsonb,%s)",
-            (
-                failed_run,
-                assignment,
-                ROUND,
-                BASELINE,
-                hotkey,
-                stage,
-                position,
-                hotkey,
-                generation,
-            ),
+        failed_run = insert_attempt(
+            provider_zero, status="failed", cause="provider_error", keep_output=False
         )
         cursor.execute(
             "UPDATE public.lab_arena_runs SET round_id=%s,submission_id=%s "
             "WHERE round_id=%s AND kind='score' AND scored_run_id=%s",
-            (PRIOR_ARCHIVES[1], BASELINE + ":r328archive", ROUND, old_run),
+            (PRIOR_ARCHIVES[1], BASELINE + ":r328archive", ROUND, provider_zero["run_id"]),
         )
         assert cursor.rowcount == 1
         cursor.execute(
@@ -437,9 +581,23 @@ def _inject_exhausted_provider_zero_and_failed_unknown(connection) -> str:
             "ELSE '{}'::jsonb END,CASE WHEN entry_kind='uncertain' THEN "
             "'{\"status\":503,\"call_succeeded\":false}'::jsonb ELSE NULL END "
             "FROM entries ORDER BY ordinality",
-            (hotkey, ROUND, BASELINE, failed_run, stage, identity),
+            (
+                provider_zero["miner_hotkey"],
+                ROUND,
+                BASELINE,
+                failed_run,
+                provider_zero["stage"],
+                identity,
+            ),
         )
         cursor.execute("SET session_replication_role=origin")
+        cursor.execute(
+            "SELECT count(*),count(*) FILTER(WHERE status='accepted'),"
+            "count(*) FILTER(WHERE status='failed') FROM public.lab_arena_runs "
+            "WHERE round_id=%s AND submission_id=%s AND kind='execute'",
+            (ROUND, BASELINE),
+        )
+        assert cursor.fetchone() == (24, 18, 6)
         cursor.execute(
             "SELECT public.lab_arena__successful_call_cost_state(%s,'execute',NULL)",
             (BASELINE,),
@@ -450,6 +608,74 @@ def _inject_exhausted_provider_zero_and_failed_unknown(connection) -> str:
         assert cost["uncertain_calls"] >= 1
     connection.commit()
     return identity
+
+
+def _drive_rejudge_cycle(service, objects, runner_hotkey) -> None:
+    """Use the real parallel close and score lifecycle without execute claims."""
+    assert service.close_stage(ROUND, 1)["status"] == "ok"
+    for stage, expected in ((1, 50), (2, 48)):
+        assert service.open_scoring(ROUND, stage)["assignments"] == expected
+        while True:
+            pending = [
+                row
+                for row in service.store.list_runs(ROUND, stage=stage, kind="score")
+                if row["status"] != "accepted"
+            ]
+            if not pending:
+                break
+            token = lifecycle.new_lease_token()
+            request_id = lifecycle.contracts.new_request_id()
+            run = service.store.claim_assignment(
+                round_id=ROUND,
+                runner_hotkey=runner_hotkey,
+                declared_parallelism=1,
+                slot_ceiling=20,
+                excluded_miner_hotkeys=[runner_hotkey],
+                request_id=request_id,
+                request_hash=lifecycle.contracts.document_hash(
+                    {"request_id": request_id}
+                ),
+                lease_token_hash=lifecycle.hash_lease_token(token),
+            )
+            assert run["status"] == "leased" and run["kind"] == "score"
+            scored_run = service.store.get_run(run["scored_run_id"])
+            executed = json.loads(objects.get(scored_run["output_ref"]).decode())
+            document = lifecycle.scoring.build_scoring_output(
+                run["scored_run_id"],
+                [
+                    lifecycle._proof_breakdown(
+                        executed["companies"][0],
+                        40 if run["submission_id"] == BASELINE else 0,
+                    )
+                ],
+            )
+            ref = "arena/score/%s.json" % run["run_id"]
+            objects.put(ref, json.dumps(document).encode())
+            stored = service.store.get_run(run["run_id"])
+            evidence = lifecycle.judgment_cache.build_evidence_snapshot(
+                output=document,
+                cache_scope=stored["judgment_scope_doc"],
+                source_score_run_id=run["run_id"],
+                source_scored_run_id=run["scored_run_id"],
+                source_output_ref=ref,
+                source_runner_hotkey=runner_hotkey,
+                runner_authority_exclusions=run["runner_authority_exclusions"],
+            )
+            assert service.store.complete_attempt(
+                run_id=run["run_id"],
+                lease_token_hash=lifecycle.hash_lease_token(token),
+                result={"terminal_status": "accepted"},
+                terminal_cause="accepted",
+                output_ref=ref,
+                judgment_evidence=evidence,
+                judgment_evidence_hash=lifecycle.contracts.document_hash(evidence),
+            )["status"] == "accepted"
+        assert service.close_scoring(ROUND, stage)["status"] == "closed"
+        scored = service.score_stage(ROUND, stage)
+        assert scored["status"] == "ok", scored
+        if stage == 1:
+            assert service.open_stage(ROUND, 2)["status"] == "ok"
+            assert service.close_stage(ROUND, 2)["status"] == "ok"
 
 
 def test_sep20_rerun330_preserves_history_and_isolates_new_scorer_cache(
@@ -507,6 +733,23 @@ def test_sep20_rerun330_preserves_history_and_isolates_new_scorer_cache(
                 "SELECT publication_doc FROM public.lab_arena_rounds WHERE round_id=%s",
                 (ROUND,),
             )
+            historical_award_before = _json(
+                cursor,
+                "SELECT jsonb_build_object('king_outcome',king_outcome,"
+                "'king_hotkey',king_hotkey,'king_start_epoch',king_start_epoch,"
+                "'effective_reward_epoch',effective_reward_epoch,"
+                "'reward_basis_hash',reward_basis_hash,"
+                "'reward_basis_doc',reward_basis_doc,"
+                "'signing_key_doc',signing_key_doc,"
+                "'reward_activated_at',reward_activated_at,"
+                "'promotion_doc',promotion_doc,"
+                "'baseline_promoted_at',baseline_promoted_at) "
+                "FROM public.lab_arena_rounds WHERE round_id=%s",
+                (ROUND,),
+            )
+            assert historical_award_before["king_outcome"] is not None
+            assert historical_award_before["reward_activated_at"] is None
+            assert historical_award_before["baseline_promoted_at"] is None
             judgments_before = _json(
                 cursor,
                 "SELECT jsonb_agg(to_jsonb(j) ORDER BY cache_key,authority_slot) "
@@ -533,42 +776,25 @@ def test_sep20_rerun330_preserves_history_and_isolates_new_scorer_cache(
                     (ROUND,),
                 )
             )
-            terminal_baseline_runs = _scalar(
-                cursor,
-                "SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s "
-                "AND kind='execute' AND submission_id=%s",
-                (ROUND, BASELINE),
-            )
             terminal_score_runs = _scalar(
                 cursor,
                 "SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s "
                 "AND kind='score'",
                 (ROUND,),
             )
-            miner_before = _json(
-                cursor,
-                "SELECT jsonb_build_object("
-                "'submissions',(SELECT jsonb_agg(to_jsonb(s) ORDER BY submission_id) "
-                "FROM public.lab_arena_submissions s WHERE round_id=%s AND submission_id<>%s),"
-                "'runs',(SELECT jsonb_agg(to_jsonb(r)-'per_icp_score'-"
-                "'qualification_doc'-'updated_at' ORDER BY run_id) "
-                "FROM public.lab_arena_runs r WHERE round_id=%s AND kind='execute' "
-                "AND submission_id<>%s),"
-                "'ledger',(SELECT jsonb_agg(to_jsonb(l) ORDER BY entry_id) "
-                "FROM public.lab_arena_ledger l WHERE round_id=%s AND submission_id<>%s "
-                "AND NOT EXISTS(SELECT 1 FROM public.lab_arena_runs r "
-                "WHERE r.run_id=l.run_id AND r.round_id=%s AND r.kind='score')))",
-                (ROUND, BASELINE, ROUND, BASELINE, ROUND, BASELINE, ROUND),
+            execution_before = _execution_snapshot(cursor)
+            artifact_proof = _execution_artifact_proof(cursor, harness.objects)
+            rendered, scoring_before, scoring_after = _render(
+                cursor, schedule, harness.objects
             )
-            rendered, scoring_before, scoring_after = _render(cursor, schedule)
             cursor.execute(rendered)
             cursor.execute(rendered)
             assert _scalar(
                 cursor,
                 "SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s "
-                "AND kind='execute' AND submission_id=%s",
-                (ARCHIVE, BASELINE + ":r330archive"),
-            ) == terminal_baseline_runs
+                "AND kind='execute'",
+                (ARCHIVE,),
+            ) == "0"
             assert _scalar(
                 cursor,
                 "SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s "
@@ -586,6 +812,20 @@ def test_sep20_rerun330_preserves_history_and_isolates_new_scorer_cache(
             ) == publication_before
             assert _json(
                 cursor,
+                "SELECT jsonb_build_object('king_outcome',king_outcome,"
+                "'king_hotkey',king_hotkey,'king_start_epoch',king_start_epoch,"
+                "'effective_reward_epoch',configuration_doc->'archived_effective_reward_epoch',"
+                "'reward_basis_hash',configuration_doc->'archived_reward_basis_hash',"
+                "'reward_basis_doc',configuration_doc->'archived_reward_basis_doc',"
+                "'signing_key_doc',configuration_doc->'archived_signing_key_doc',"
+                "'reward_activated_at',configuration_doc->'archived_reward_activated_at',"
+                "'promotion_doc',configuration_doc->'archived_promotion_doc',"
+                "'baseline_promoted_at',configuration_doc->'archived_baseline_promoted_at') "
+                "FROM public.lab_arena_rounds WHERE round_id=%s",
+                (ARCHIVE,),
+            ) == historical_award_before
+            assert _json(
+                cursor,
                 "SELECT jsonb_agg(to_jsonb(j) ORDER BY cache_key,authority_slot) "
                 "FROM public.lab_arena_company_judgments j",
             ) == judgments_before
@@ -594,20 +834,7 @@ def test_sep20_rerun330_preserves_history_and_isolates_new_scorer_cache(
                 "SELECT jsonb_agg(to_jsonb(c) ORDER BY cache_key) "
                 "FROM public.lab_arena_judgment_cache c",
             ) == cache_before
-            miner_after = _json(
-                cursor,
-                "SELECT jsonb_build_object("
-                "'submissions',(SELECT jsonb_agg(to_jsonb(s) ORDER BY submission_id) "
-                "FROM public.lab_arena_submissions s WHERE round_id=%s AND submission_id<>%s),"
-                "'runs',(SELECT jsonb_agg(to_jsonb(r)-'per_icp_score'-"
-                "'qualification_doc'-'updated_at' ORDER BY run_id) "
-                "FROM public.lab_arena_runs r WHERE round_id=%s AND kind='execute' "
-                "AND submission_id<>%s),"
-                "'ledger',(SELECT jsonb_agg(to_jsonb(l) ORDER BY entry_id) "
-                "FROM public.lab_arena_ledger l WHERE round_id=%s AND submission_id<>%s))",
-                (ROUND, BASELINE, ROUND, BASELINE, ROUND, BASELINE),
-            )
-            assert miner_after == miner_before
+            assert _execution_snapshot(cursor) == execution_before
             cursor.execute(
                 "SELECT configuration_doc,source_ref,source_size_bytes,"
                 "submission_doc->>'source_sha256',submission_doc->>'source_commit' "
@@ -618,7 +845,7 @@ def test_sep20_rerun330_preserves_history_and_isolates_new_scorer_cache(
             config, ref, size, sha256, commit = cursor.fetchone()
             assert config["call_quotas"] == {
                 "deepline": 200,
-                "openrouter": 2000,
+                "openrouter": 500,
                 "scrapingdog": 200,
             }
             assert config["checkpoint_deadline_policy"] == "atomic_checkpoint_90m_v1"
@@ -632,6 +859,13 @@ def test_sep20_rerun330_preserves_history_and_isolates_new_scorer_cache(
                 SOURCE_SHA256,
                 SOURCE_COMMIT,
             )
+            assert config["schedule"] == schedule
+            assert _scalar(
+                cursor,
+                "SELECT configuration_doc->>'archived_execution_artifacts_sha256' "
+                "FROM public.lab_arena_rounds WHERE round_id=%s",
+                (ARCHIVE,),
+            ) == artifact_proof
             cursor.execute(
                 "SELECT pg_get_functiondef("
                 "'public.lab_arena_open_scoring_v2(text,smallint,jsonb)'::regprocedure)"
@@ -644,12 +878,12 @@ def test_sep20_rerun330_preserves_history_and_isolates_new_scorer_cache(
                 cursor,
                 "SELECT count(*) FROM public.lab_arena_ledger WHERE round_id=%s "
                 "AND call_identity=%s",
-                (ARCHIVE, failed_identity),
+                (ROUND, failed_identity),
             ) == "3"
         connection.commit()
 
-        lifecycle._drive_cycle(
-            harness.service, harness.objects, daily_icps(), harness.runner_keys[0]
+        _drive_rejudge_cycle(
+            harness.service, harness.objects, harness.runner_keys[0]
         )
         assert harness.service.publish(ROUND)["status"] == "ok"
         with connection.cursor() as cursor:
@@ -662,7 +896,7 @@ def test_sep20_rerun330_preserves_history_and_isolates_new_scorer_cache(
                 "FROM public.lab_arena_runs WHERE round_id=%s AND kind='score'",
                 (NEW_SCORER_DIGEST, NEW_SCORER_REFERENCE, ROUND),
             )
-            assert cursor.fetchone() == (100, 100, True, True, True, True)
+            assert cursor.fetchone() == (98, 98, True, True, True, True)
             new_miner_keys = set(
                 _json(
                     cursor,
@@ -688,6 +922,24 @@ def test_sep20_rerun330_preserves_history_and_isolates_new_scorer_cache(
                 "SELECT publication_doc FROM public.lab_arena_rounds WHERE round_id=%s",
                 (ARCHIVE,),
             ) == publication_before
+            assert _execution_snapshot(cursor) == execution_before
+            cursor.execute(
+                "SELECT (entry->>'final_score')::numeric FROM "
+                "public.lab_arena_rounds r CROSS JOIN LATERAL "
+                "jsonb_array_elements(r.publication_doc->'final_ranking') entry "
+                "WHERE r.round_id=%s AND entry->>'submission_id'=%s",
+                (ROUND, BASELINE),
+            )
+            assert cursor.fetchone()[0] > 0
+            cursor.execute(
+                "SELECT effective_reward_epoch,reward_activated_at,"
+                "promotion_doc,baseline_promoted_at FROM public.lab_arena_rounds "
+                "WHERE round_id=%s",
+                (ROUND,),
+            )
+            assert cursor.fetchone() == (None, None, None, None)
+            # The exact migration remains idempotent after its new positive publication.
+            cursor.execute(rendered)
 
 
 def test_sep20_rerun330_refuses_genuine_positive_publication_without_mutation(
@@ -701,6 +953,7 @@ def test_sep20_rerun330_refuses_genuine_positive_publication_without_mutation(
     harness.round_id = ROUND
     with psycopg2.connect(**dsn) as connection:
         _publish_rerun328(connection, harness, monkeypatch)
+        _inject_exhausted_provider_zero_and_failed_unknown(connection)
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT count(*),min((entry->>'final_score')::double precision) "
@@ -711,7 +964,7 @@ def test_sep20_rerun330_refuses_genuine_positive_publication_without_mutation(
             )
             count, baseline_score = cursor.fetchone()
             assert count == 1 and baseline_score > 0
-            rendered, _, _ = _render(cursor, schedule)
+            rendered, _, _ = _render(cursor, schedule, harness.objects)
             before = _protected_database_snapshot(cursor)
         connection.commit()
 
@@ -732,15 +985,122 @@ def test_sep20_rerun330_refuses_genuine_positive_publication_without_mutation(
             ) == "0"
 
 
+def test_sep20_rerun330_refuses_malformed_publication_worker_loss_and_award_replay(
+    database, tmp_path, monkeypatch
+):
+    psycopg2, dsn = database
+    schedule = _schedule()
+    harness = IsolatedHarness(
+        lambda: psycopg2.connect(**dsn), tmp_path, challengers=[], runners=["alpha"]
+    )
+    harness.round_id = ROUND
+    with psycopg2.connect(**dsn) as connection:
+        _publish_rerun328(connection, harness, monkeypatch, zero_baseline=True)
+        _inject_exhausted_provider_zero_and_failed_unknown(connection)
+        with connection.cursor() as cursor:
+            original_get = harness.objects.get
+            cursor.execute(
+                "SELECT output_ref FROM public.lab_arena_runs WHERE round_id=%s "
+                "AND kind='execute' AND status='accepted' ORDER BY run_id LIMIT 1",
+                (ROUND,),
+            )
+            unreadable_ref = cursor.fetchone()[0]
+
+            def fail_one(ref):
+                if ref == unreadable_ref:
+                    raise KeyError(ref)
+                return original_get(ref)
+
+            monkeypatch.setattr(harness.objects, "get", fail_one)
+            with pytest.raises(ArtifactProofError, match="not hash-readable"):
+                _render(cursor, schedule, harness.objects)
+            monkeypatch.setattr(harness.objects, "get", original_get)
+
+            original_publication = _json(
+                cursor,
+                "SELECT publication_doc FROM public.lab_arena_rounds WHERE round_id=%s",
+                (ROUND,),
+            )
+
+            for label, value in (
+                ("missing", None),
+                ("nonnumeric", "zero"),
+                ("negative", -1),
+            ):
+                publication = copy.deepcopy(original_publication)
+                ranking = publication["final_ranking"]
+                if value is None:
+                    publication["final_ranking"] = [
+                        item for item in ranking if item["submission_id"] != BASELINE
+                    ]
+                else:
+                    next(
+                        item for item in ranking if item["submission_id"] == BASELINE
+                    )["final_score"] = value
+                cursor.execute("SAVEPOINT malformed_publication")
+                cursor.execute("SET LOCAL session_replication_role=replica")
+                cursor.execute(
+                    "UPDATE public.lab_arena_rounds SET publication_doc=%s::jsonb "
+                    "WHERE round_id=%s",
+                    (json.dumps(publication), ROUND),
+                )
+                cursor.execute("SET LOCAL session_replication_role=origin")
+                rendered, _, _ = _render(cursor, schedule, harness.objects)
+                before = _protected_database_snapshot(cursor)
+                cursor.execute("SAVEPOINT refused_migration")
+                with pytest.raises(
+                    psycopg2.Error,
+                    match="requires exactly one zero published baseline",
+                ):
+                    cursor.execute(_migration_body(rendered))
+                cursor.execute("ROLLBACK TO SAVEPOINT refused_migration")
+                assert _protected_database_snapshot(cursor) == before, label
+                cursor.execute("ROLLBACK TO SAVEPOINT malformed_publication")
+
+            for label, mutation in (
+                (
+                    "worker_loss",
+                    "UPDATE public.lab_arena_runs SET terminal_cause='worker_lost' "
+                    "WHERE round_id=%s AND submission_id=%s AND kind='execute' "
+                    "AND icp_position=18 AND status='failed'",
+                ),
+                (
+                    "promoted",
+                    "UPDATE public.lab_arena_rounds SET promotion_doc='{}'::jsonb "
+                    "WHERE round_id=%s",
+                ),
+                (
+                    "reward_activated",
+                    "UPDATE public.lab_arena_rounds SET reward_activated_at=clock_timestamp() "
+                    "WHERE round_id=%s",
+                ),
+            ):
+                cursor.execute("SAVEPOINT invalid_terminal")
+                cursor.execute("SET LOCAL session_replication_role=replica")
+                parameters = (ROUND, BASELINE) if label == "worker_loss" else (ROUND,)
+                cursor.execute(mutation, parameters)
+                assert cursor.rowcount == (2 if label == "worker_loss" else 1)
+                cursor.execute("SET LOCAL session_replication_role=origin")
+                rendered, _, _ = _render(cursor, schedule, harness.objects)
+                before = _protected_database_snapshot(cursor)
+                cursor.execute("SAVEPOINT refused_migration")
+                with pytest.raises(psycopg2.Error, match="terminal preimage differs"):
+                    cursor.execute(_migration_body(rendered))
+                cursor.execute("ROLLBACK TO SAVEPOINT refused_migration")
+                assert _protected_database_snapshot(cursor) == before, label
+                cursor.execute("ROLLBACK TO SAVEPOINT invalid_terminal")
+
+
 def test_sep20_rerun330_template_is_inactive_and_narrow():
     body = TEMPLATE.read_text()
     assert TEMPLATE.name not in CURRENT_SERVICE_MIGRATIONS
     assert "DELETE FROM" not in body and "TRUNCATE " not in body
     assert all(round_id in body for round_id in PRIOR_ARCHIVES)
     assert ARCHIVE in body and "score:rerun330" in body
-    assert '"openrouter":500' in body and '"openrouter":2000' in body
+    assert '"openrouter":500' in body and '"openrouter":2000' not in body
     assert TERMINAL_SCORER_DIGEST in body and TERMINAL_SCORER_REFERENCE in body
-    assert NEW_SCORER_DIGEST in body and NEW_SCORER_REFERENCE in body
+    assert "__NEW_SCORER_IMAGE_DIGEST__" in body
+    assert "__NEW_SCORER_IMAGE_REFERENCE__" in body
     assert "atomic_checkpoint_90m_v1" in body
     assert "icp_wall_clock_seconds')::INTEGER<>5400" in body
     assert "lease_ttl_seconds')::INTEGER<>6300" in body
@@ -748,19 +1108,27 @@ def test_sep20_rerun330_template_is_inactive_and_narrow():
     assert "uncertain_calls" not in body
     assert "requires exactly one zero published baseline" in body
     assert "jsonb_typeof(entry->'final_score')='number'" in body
-    assert "output_ref IS NOT NULL)<>100" not in body
     assert "output_ref IS NOT NULL)<>80" in body
+    assert "archived_execution_artifacts_sha256" in body
+    assert "worker_lost" not in body
     assert "__TERMINAL_SCORE_RUN_COUNT__" in body
     assert "__TERMINAL_BASELINE_RUN_COUNT__" in body
+    assert "__TERMINAL_BASELINE_ACCEPTED_RUN_COUNT__" in body
+    assert "__TERMINAL_BASELINE_FAILED_RUN_COUNT__" in body
+    assert "__TERMINAL_ACCEPTED_EXECUTION_COUNT__" in body
+    assert "__TERMINAL_EXECUTION_ARTIFACT_COUNT__" in body
     assert "archived_execution_judgments" in body
+    assert "INSERT INTO public.lab_arena_runs" not in body
+    assert "kind='execute' AND submission_id='baseline-2026-09-20';" not in body
     assert "CREATE TRIGGER" not in body
     assert "INTERVAL '7 hours'" in body
     assert "INTERVAL '10 hours'" in body
     assert "INTERVAL '14 hours 1 second'" in body
     assert SOURCE_REF in body and str(SOURCE_SIZE) in body
     assert SOURCE_SHA256 in body and SOURCE_COMMIT in body
-    assert len(set(re.findall(r"__[A-Z0-9_]+__", body))) == 21
+    marker_count = len(set(re.findall(r"__[A-Z0-9_]+__", body)))
+    assert marker_count == 27
     if RENDERED.exists():
         values = _assert_exact_render_shape(RENDERED.read_text())
-        assert len(values) == 21
+        assert len(values) == marker_count
         assert re.search(r"__[A-Z0-9_]+__", RENDERED.read_text()) is None

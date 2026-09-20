@@ -286,7 +286,7 @@ def test_responses_frame_allowance_is_scoped_and_shared_caps_remain():
     assert contracts.RESPONSES_PROVIDER_FRAME_LIMITS.max_total_bytes == 1_100_000
     assert contracts.RESPONSES_PROVIDER_FRAME_LIMITS.max_list_items == 768
     assert contracts.PROVIDER_FRAME_LIMITS.max_list_items == 256
-    assert contracts.CALL_QUOTAS_PER_ICP["openrouter"] == 200
+    assert contracts.CALL_QUOTAS_PER_ICP["openrouter"] == 500
     assert operations.OPERATIONS["openrouter.chat"].cost_rule["max_output_tokens"] == 4096
     assert operations.OPERATIONS["openrouter.responses"].cost_rule["max_output_tokens"] == 32_768
     assert operations.operation_table_document()["operation_limit_overrides"]["openrouter.responses"] == {

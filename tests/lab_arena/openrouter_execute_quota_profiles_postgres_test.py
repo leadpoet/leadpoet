@@ -168,31 +168,50 @@ def test_frozen_execute_profiles_enforce_dispatch_and_cost_boundaries(
     assert historical_costs["reserved_or_uncertain_microusd"] == 60
     assert historical_costs["refused_calls"] == 1
 
-    current_statuses, current_snapshots, current_costs = _exercise_profile(
+    all_provider_200_statuses, all_provider_200_snapshots, all_provider_200_costs = _exercise_profile(
         store, connect,
-        suffix="current200",
-        quotas=dict(contracts.CALL_QUOTAS_PER_ICP),
+        suffix="allprovider200",
+        quotas=dict(contracts.ALL_PROVIDER_200_CALL_QUOTAS_PER_ICP),
         limit=200,
         checkpoints={60, 61, 199, 200, 201},
     )
-    assert current_statuses[:200] == ["reserved"] * 200
-    assert current_statuses[200] == "refused"
-    assert current_snapshots == {
+    assert all_provider_200_statuses[:200] == ["reserved"] * 200
+    assert all_provider_200_statuses[200] == "refused"
+    assert all_provider_200_snapshots == {
         60: {"limit": 200, "used": 60, "remaining": 140, "inflight": 60},
         61: {"limit": 200, "used": 61, "remaining": 139, "inflight": 61},
         199: {"limit": 200, "used": 199, "remaining": 1, "inflight": 199},
         200: {"limit": 200, "used": 200, "remaining": 0, "inflight": 200},
         201: {"limit": 200, "used": 200, "remaining": 0, "inflight": 200},
     }
-    assert current_costs["call_count"] == 201
-    assert current_costs["reserved_or_uncertain_microusd"] == 200
+    assert all_provider_200_costs["call_count"] == 201
+    assert all_provider_200_costs["reserved_or_uncertain_microusd"] == 200
+    assert all_provider_200_costs["refused_calls"] == 1
+
+    current_statuses, current_snapshots, current_costs = _exercise_profile(
+        store, connect,
+        suffix="current500",
+        quotas=dict(contracts.CALL_QUOTAS_PER_ICP),
+        limit=500,
+        checkpoints={499, 500, 501},
+    )
+    assert current_statuses[:500] == ["reserved"] * 500
+    assert current_statuses[500] == "refused"
+    assert current_snapshots == {
+        499: {"limit": 500, "used": 499, "remaining": 1, "inflight": 499},
+        500: {"limit": 500, "used": 500, "remaining": 0, "inflight": 500},
+        501: {"limit": 500, "used": 500, "remaining": 0, "inflight": 500},
+    }
+    assert current_costs["call_count"] == 501
+    assert current_costs["reserved_or_uncertain_microusd"] == 500
     assert current_costs["refused_calls"] == 1
 
     # Each submission aggregates only its own frozen-profile run.
     assert (
         historical_costs["reserved_or_uncertain_microusd"]
+        + all_provider_200_costs["reserved_or_uncertain_microusd"]
         + current_costs["reserved_or_uncertain_microusd"]
-        == 260
+        == 760
     )
 
 

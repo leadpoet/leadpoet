@@ -151,7 +151,7 @@ def test_new_round_freezes_deadline_and_lease_while_legacy_opt_out_stays_300_sec
     assert current["call_quotas"] == {
         "scrapingdog": 200,
         "deepline": 200,
-        "openrouter": 200,
+        "openrouter": 500,
     }
     assert current["scoring_call_quotas"]["openrouter"] == 120
     with pytest.raises(contracts.ArenaContractError):

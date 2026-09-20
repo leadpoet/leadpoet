@@ -66,6 +66,8 @@ DECLARE
  active_count BIGINT;
  unsettled_count BIGINT;
  reservation_count BIGINT;
+ baseline_publication_count BIGINT;
+ zero_baseline_publication_count BIGINT;
  moved_baseline_runs BIGINT;
  moved_baseline_ledger BIGINT;
  moved_score_runs BIGINT;
@@ -210,6 +212,21 @@ BEGIN
  FROM public.lab_arena_company_judgment_reservations reservation
  JOIN public.lab_arena_runs run ON run.run_id=reservation.run_id
  WHERE run.round_id='arena-2026-09-20';
+ SELECT pg_catalog.count(*),pg_catalog.count(*) FILTER(WHERE
+    CASE WHEN pg_catalog.jsonb_typeof(entry->'final_score')='number'
+      THEN (entry->>'final_score')::NUMERIC=0 ELSE FALSE END)
+ INTO baseline_publication_count,zero_baseline_publication_count
+ FROM pg_catalog.jsonb_array_elements(CASE
+   WHEN pg_catalog.jsonb_typeof(active.publication_doc->'final_ranking')='array'
+   THEN active.publication_doc->'final_ranking' ELSE '[]'::JSONB END) entry
+ WHERE entry->>'submission_id'='baseline-2026-09-20';
+
+ -- User-authorized rerun330 is a zero-score recovery only. A positive,
+ -- negative, missing, nonnumeric or ambiguous published baseline is final.
+ IF baseline_publication_count<>1 OR zero_baseline_publication_count<>1 THEN
+  RAISE EXCEPTION 'Sep20 rerun330 requires exactly one zero published baseline'
+   USING ERRCODE='55000';
+ END IF;
 
  IF active.status IS DISTINCT FROM '__TERMINAL_STATUS__'
   OR active.status IS DISTINCT FROM 'published'

@@ -48,7 +48,12 @@ TEMPLATE = (
 RENDERED = TEMPLATE.with_suffix("")
 
 
-@pytest.fixture(scope="module")
+class IsolatedHarness(lifecycle.Harness):
+    def objects_key(self) -> str:
+        return "rerun330-" + self.tmp.name
+
+
+@pytest.fixture()
 def database():
     assert CURRENT_SERVICE_MIGRATIONS[-3:] == (
         "294-lab-arena-retire-open-cost-backfill.sql",
@@ -321,7 +326,32 @@ def _scope_snapshot(cursor, round_id: str):
     )
 
 
-def _publish_rerun328(connection, harness, monkeypatch) -> None:
+def _protected_database_snapshot(cursor):
+    return _json(
+        cursor,
+        "SELECT jsonb_build_object("
+        "'rounds',(SELECT jsonb_agg(to_jsonb(r) ORDER BY round_id) "
+        "FROM public.lab_arena_rounds r),"
+        "'submissions',(SELECT jsonb_agg(to_jsonb(s) ORDER BY submission_id) "
+        "FROM public.lab_arena_submissions s),"
+        "'runs',(SELECT jsonb_agg(to_jsonb(r) ORDER BY run_id) "
+        "FROM public.lab_arena_runs r),"
+        "'ledger',(SELECT jsonb_agg(to_jsonb(l) ORDER BY entry_id) "
+        "FROM public.lab_arena_ledger l),"
+        "'judgments',(SELECT jsonb_agg(to_jsonb(j) ORDER BY cache_key,authority_slot) "
+        "FROM public.lab_arena_company_judgments j),"
+        "'cache',(SELECT jsonb_agg(to_jsonb(c) ORDER BY cache_key) "
+        "FROM public.lab_arena_judgment_cache c),"
+        "'reservations',(SELECT jsonb_agg(to_jsonb(x) ORDER BY run_id) "
+        "FROM public.lab_arena_company_judgment_reservations x),"
+        "'scoring_definition',pg_get_functiondef("
+        "'public.lab_arena_open_scoring_v2(text,smallint,jsonb)'::regprocedure))",
+    )
+
+
+def _publish_rerun328(
+    connection, harness, monkeypatch, *, zero_baseline: bool = False
+) -> None:
     rerun328._publish_rerun326(connection, harness, monkeypatch)
     monkeypatch.setattr(rerun328, "NEW_SCORER_DIGEST", TERMINAL_SCORER_DIGEST)
     monkeypatch.setattr(rerun328, "NEW_SCORER_REFERENCE", TERMINAL_SCORER_REFERENCE)
@@ -334,6 +364,15 @@ def _publish_rerun328(connection, harness, monkeypatch) -> None:
     # round so its execute and score claims, reserves and settlements cross the
     # exact 329 RPC guards instead of the store's historical 3600-second default.
     harness.service.store._lease_ttl_seconds = 6300
+    if zero_baseline:
+        normal_breakdown = lifecycle._proof_breakdown
+
+        def zero_baseline_breakdown(company, score):
+            return normal_breakdown(company, 0 if float(score) > 0 else 40)
+
+        monkeypatch.setattr(
+            lifecycle, "_proof_breakdown", zero_baseline_breakdown
+        )
     lifecycle._drive_cycle(
         harness.service, harness.objects, daily_icps(), harness.runner_keys[0]
     )
@@ -418,12 +457,30 @@ def test_sep20_rerun330_preserves_history_and_isolates_new_scorer_cache(
 ):
     psycopg2, dsn = database
     schedule = _schedule()
-    harness = lifecycle.Harness(
+    harness = IsolatedHarness(
         lambda: psycopg2.connect(**dsn), tmp_path, challengers=[], runners=["alpha"]
     )
     harness.round_id = ROUND
     with psycopg2.connect(**dsn) as connection:
-        _publish_rerun328(connection, harness, monkeypatch)
+        _publish_rerun328(
+            connection, harness, monkeypatch, zero_baseline=True
+        )
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT entry->>'submission_id',"
+                "(entry->>'final_score')::double precision "
+                "FROM public.lab_arena_rounds r CROSS JOIN LATERAL "
+                "jsonb_array_elements(r.publication_doc->'final_ranking') entry "
+                "WHERE r.round_id=%s ORDER BY entry->>'submission_id'",
+                (ROUND,),
+            )
+            published_scores = dict(cursor.fetchall())
+            assert published_scores[BASELINE] == 0
+            assert all(
+                score > 0
+                for submission_id, score in published_scores.items()
+                if submission_id != BASELINE
+            )
         failed_identity = _inject_exhausted_provider_zero_and_failed_unknown(connection)
         with connection.cursor() as cursor:
             cursor.execute(
@@ -633,6 +690,48 @@ def test_sep20_rerun330_preserves_history_and_isolates_new_scorer_cache(
             ) == publication_before
 
 
+def test_sep20_rerun330_refuses_genuine_positive_publication_without_mutation(
+    database, tmp_path, monkeypatch
+):
+    psycopg2, dsn = database
+    schedule = _schedule()
+    harness = IsolatedHarness(
+        lambda: psycopg2.connect(**dsn), tmp_path, challengers=[], runners=["alpha"]
+    )
+    harness.round_id = ROUND
+    with psycopg2.connect(**dsn) as connection:
+        _publish_rerun328(connection, harness, monkeypatch)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*),min((entry->>'final_score')::double precision) "
+                "FROM public.lab_arena_rounds r CROSS JOIN LATERAL "
+                "jsonb_array_elements(r.publication_doc->'final_ranking') entry "
+                "WHERE r.round_id=%s AND entry->>'submission_id'=%s",
+                (ROUND, BASELINE),
+            )
+            count, baseline_score = cursor.fetchone()
+            assert count == 1 and baseline_score > 0
+            rendered, _, _ = _render(cursor, schedule)
+            before = _protected_database_snapshot(cursor)
+        connection.commit()
+
+        with pytest.raises(
+            psycopg2.Error,
+            match="requires exactly one zero published baseline",
+        ):
+            with connection.cursor() as cursor:
+                cursor.execute(rendered)
+        connection.rollback()
+
+        with connection.cursor() as cursor:
+            assert _protected_database_snapshot(cursor) == before
+            assert _scalar(
+                cursor,
+                "SELECT count(*) FROM public.lab_arena_rounds WHERE round_id=%s",
+                (ARCHIVE,),
+            ) == "0"
+
+
 def test_sep20_rerun330_template_is_inactive_and_narrow():
     body = TEMPLATE.read_text()
     assert TEMPLATE.name not in CURRENT_SERVICE_MIGRATIONS
@@ -647,6 +746,8 @@ def test_sep20_rerun330_template_is_inactive_and_narrow():
     assert "lease_ttl_seconds')::INTEGER<>6300" in body
     assert "inflight_calls" in body and "success_unresolved_calls" in body
     assert "uncertain_calls" not in body
+    assert "requires exactly one zero published baseline" in body
+    assert "jsonb_typeof(entry->'final_score')='number'" in body
     assert "output_ref IS NOT NULL)<>100" not in body
     assert "output_ref IS NOT NULL)<>80" in body
     assert "__TERMINAL_SCORE_RUN_COUNT__" in body

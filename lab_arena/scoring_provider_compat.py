@@ -43,6 +43,9 @@ _ASHBY_API_PATH_RE = re.compile(
 _GREENHOUSE_API_PATH_RE = re.compile(
     r"^/v1/boards/[A-Za-z0-9_-]{1,100}/jobs/[0-9]{5,20}/?$"
 )
+_GREENHOUSE_BOARD_API_PATH_RE = re.compile(
+    r"^/v1/boards/[A-Za-z0-9_-]{1,100}/jobs/?$"
+)
 _WORKDAY_API_PATH_RE = re.compile(
     r"^/wday/cxs/[A-Za-z0-9_-]{1,100}/[A-Za-z0-9_-]{1,100}/job/"
     r"[A-Za-z0-9_./-]{3,500}$"
@@ -92,8 +95,9 @@ def _evaluation_date(round_id: str) -> Optional[date]:
 def _ats_api_kind(value: Any) -> str:
     """Classify only exact public JSON transports used by scoring."""
 
+    raw_url = str(value or "")
     try:
-        parsed = urlsplit(str(value or ""))
+        parsed = urlsplit(raw_url)
         port = parsed.port
     except ValueError:
         return ""
@@ -119,6 +123,13 @@ def _ats_api_kind(value: Any) -> str:
         and _GREENHOUSE_API_PATH_RE.fullmatch(parsed.path)
     ):
         return "greenhouse"
+    if (
+        host == "boards-api.greenhouse.io"
+        and not parsed.query
+        and "?" not in raw_url
+        and _GREENHOUSE_BOARD_API_PATH_RE.fullmatch(parsed.path)
+    ):
+        return "greenhouse_board"
     if (
         host.endswith(".myworkdayjobs.com")
         and not parsed.query
@@ -532,6 +543,8 @@ def _generic_ats_response(
         and isinstance(data.get("jobs"), list)
         or ats_kind == "greenhouse"
         and all(key in data for key in ("id", "absolute_url", "title", "company_name", "content"))
+        or ats_kind == "greenhouse_board"
+        and isinstance(data.get("jobs"), list)
         or ats_kind == "workday"
         and isinstance(data.get("jobPostingInfo"), Mapping)
     )

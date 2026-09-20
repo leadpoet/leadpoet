@@ -216,6 +216,118 @@ def test_exact_ats_json_uses_generic_http_without_html_conversion(url, kind, dat
     assert json.loads(body) == data
 
 
+def test_exact_greenhouse_board_list_round_trips_through_generic_http():
+    url = "https://boards-api.greenhouse.io/v1/boards/trace3/jobs"
+    data = {
+        "jobs": [
+            {
+                "id": 8104120,
+                "absolute_url": (
+                    "https://job-boards.greenhouse.io/trace3/jobs/8104120"
+                ),
+                "title": "Atlan Implementation Project Manager",
+                "location": {"name": "Irvine, CA, United States"},
+                "first_published": "2026-08-03T17:02:45-04:00",
+                "updated_at": "2026-08-06T14:31:55-04:00",
+            }
+        ],
+        "meta": {"total": 1},
+    }
+
+    selected = route("scrapingdog.scrape", {"url": url, "dynamic": False})
+
+    assert selected.adapter == "generic_ats_json:greenhouse_board"
+    assert selected.effective_parameters == {
+        "tool": compat.GENERIC_HTTP_TOOL,
+        "payload": {
+            "url": url,
+            "method": "GET",
+            "follow_redirects": False,
+            "timeout_ms": 60_000,
+        },
+    }
+    status, headers, body = compat.adapt_response(
+        selected,
+        status=200,
+        headers={},
+        body=envelope(data),
+    )
+    status, headers, body = operations.sanitize_response(
+        "scrapingdog.scrape",
+        status,
+        headers,
+        body,
+        parameters={"url": url, "dynamic": False},
+    )
+    assert status == 200
+    assert headers["content-type"] == "application/json"
+    assert json.loads(body) == data
+
+
+@pytest.mark.parametrize(
+    "data",
+    (
+        {},
+        {"jobs": {}},
+        {"jobs": "not-a-list"},
+        [],
+    ),
+)
+def test_greenhouse_board_list_rejects_malformed_success_shape(data):
+    selected = route(
+        "scrapingdog.scrape",
+        {
+            "url": "https://boards-api.greenhouse.io/v1/boards/trace3/jobs",
+            "dynamic": False,
+        },
+    )
+
+    with pytest.raises(
+        compat.CompatibilityResponseError,
+        match="invalid_generic_ats_response",
+    ):
+        compat.adapt_response(
+            selected,
+            status=200,
+            headers={},
+            body=envelope(data),
+        )
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://boards-api.greenhouse.io.evil.example/v1/boards/trace3/jobs",
+        "https://api.greenhouse.io/v1/boards/trace3/jobs",
+        "https://boards-api.greenhouse.io/v1/boards/trace3/jobs?",
+        "https://boards-api.greenhouse.io/v1/boards/trace3/jobs?content=true",
+        "https://boards-api.greenhouse.io/v1/boards/trace3/jobs?mode=json",
+        "https://boards-api.greenhouse.io/v1/boards/trace3/jobs#openings",
+        "https://boards-api.greenhouse.io/v1/boards/trace3/jobs/extra",
+        "https://boards-api.greenhouse.io/v1/boards/trace3/jobs/12345",
+    ),
+)
+def test_non_exact_greenhouse_board_list_does_not_use_generic_http(url):
+    selected = route("scrapingdog.scrape", {"url": url, "dynamic": False})
+
+    assert selected.adapter == "firecrawl_raw_html"
+
+
+def test_greenhouse_board_list_does_not_change_host_funded_route():
+    selected = compat.route_for(
+        kind="score",
+        funding_source="host",
+        round_id="arena-2026-09-20",
+        operation_id="scrapingdog.scrape",
+        parameters={
+            "url": "https://boards-api.greenhouse.io/v1/boards/trace3/jobs",
+            "dynamic": False,
+        },
+    )
+
+    assert selected is None
+
+
 @pytest.mark.parametrize(
     ("url", "data"),
     [

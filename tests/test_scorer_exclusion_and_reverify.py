@@ -1104,6 +1104,110 @@ def test_completed_acquisition_must_belong_to_private_equity_affiliate(quote):
     assert _stage_quote_supports_observation("private equity", quote) is False
 
 
+_MAJORITY_GROWTH_RECAPITALIZATION_QUOTE = (
+    'Coalesce Capital ("Coalesce"), a private equity firm focused on investing '
+    "in business services companies, announced today a majority growth "
+    "recapitalization of Acme."
+)
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        _MAJORITY_GROWTH_RECAPITALIZATION_QUOTE,
+        (
+            "A private equity firm announced a majority recapitalization "
+            "of Acme."
+        ),
+    ],
+)
+def test_private_equity_firm_majority_recapitalization_is_current_stage_proof(
+    quote,
+):
+    assert _stage_quote_supports_observation("private equity", quote)
+
+
+def test_majority_recapitalization_reaches_observed_stage_decision():
+    verdict = {
+        "observed_company_stage": "Private Equity",
+        "stage_matches": True,
+        "stage_evidence_url": "https://issuer.example/majority-recapitalization",
+        "stage_evidence_quote": _MAJORITY_GROWTH_RECAPITALIZATION_QUOTE,
+    }
+
+    assert _decision_from_observed_stage(verdict, "private equity") == (
+        COMPANY_FIT_MATCH
+    )
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        (
+            "An advisor to a private equity firm announced today a majority "
+            "recapitalization of Acme."
+        ),
+        (
+            "A private equity firm announced today a minority "
+            "recapitalization of Acme."
+        ),
+        (
+            "It was rumored that a private equity firm announced today a "
+            "majority recapitalization of Acme."
+        ),
+        (
+            "A private equity firm plans to announce a majority "
+            "recapitalization of Acme."
+        ),
+        (
+            "A private equity firm announced today a planned majority "
+            "recapitalization of Acme."
+        ),
+        (
+            "A private equity firm announced today a majority "
+            "recapitalization of Acme, expected to close next month."
+        ),
+        (
+            "A private equity firm announced today a majority "
+            "recapitalization of Acme that was cancelled."
+        ),
+        (
+            "Formerly, a private equity firm announced today a majority "
+            "recapitalization of Acme."
+        ),
+        (
+            "A private equity firm announced today a majority "
+            "recapitalization of Acme, then exited its investment."
+        ),
+        "Acme is private-equity-backed.",
+    ],
+)
+def test_majority_recapitalization_stage_proof_keeps_fail_closed_controls(quote):
+    assert _stage_quote_supports_observation("private equity", quote) is False
+
+
+def test_majority_recapitalization_transitions_full_reverify_stage_to_match():
+    verdict = _explicitly_unproven_fit_verdict()
+    verdict.update(
+        observed_company_stage="Private Equity",
+        stage_matches=True,
+        stage_evidence_url="https://issuer.example/majority-recapitalization",
+        stage_evidence_quote=_MAJORITY_GROWTH_RECAPITALIZATION_QUOTE,
+    )
+
+    result = _reverify_decision(
+        verdict,
+        "",
+        "private equity",
+        icp=_icp(company_stage="Private Equity"),
+        company=_company(),
+    )
+
+    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MATCH
+    assert result.details["identity_decision"] == COMPANY_FIT_MATCH
+    assert result.decision == COMPANY_FIT_MATCH
+
+
 @pytest.mark.parametrize(
     ("quote", "expected"),
     [

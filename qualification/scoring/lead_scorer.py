@@ -405,6 +405,16 @@ _PRIVATE_EQUITY_STAGE_PROOF_PATTERNS = (
         r"\s+(?:(?:the|its|an?)\s+)?(?:previously\s+announced\s+)?acquisition\b",
         re.I,
     ),
+    re.compile(
+        r"(?:^|,\s+)(?:an?\s+|the\s+)?"
+        rf"{_PRIVATE_EQUITY_LABEL}\b"
+        r"(?:\s+focused\s+on\s+investing\s+in\s+[^,;.!?\n]{1,100})?"
+        r"\s*,?\s+announced\s+(?:today\s+)?(?:an?\s+)?"
+        r"majority(?:\s+growth)?\s+recapitalization\b"
+        r"(?![^.!?\n]{0,100}\b(?:expected|planned|proposed|subject)\b"
+        r"[^.!?\n]{0,30}\b(?:close|complete|completion|closing)\b)",
+        re.I,
+    ),
 )
 _PUBLIC_STAGE_SUPERSESSION_PATTERNS = (
     re.compile(r"\bdelisted(?:\s+from\b)?", re.I),

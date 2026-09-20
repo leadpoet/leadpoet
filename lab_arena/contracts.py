@@ -77,14 +77,13 @@ SCORING_CALL_QUOTAS_PER_WORK_ITEM = {"scrapingdog": 150, "deepline": 40, "openro
 ASSIGNMENT_KINDS = ("execute", "score")
 ICP_WALL_CLOCK_SECONDS = 300
 # Keep the original identifiers and exact values stable for already-signed
-# rounds. New rounds use a separate versioned profile below.
+# rounds. The separate 90-minute profile is available only for explicit recovery.
 CHECKPOINT_DEADLINE_POLICY = "atomic_checkpoint_45m_v1"
 CHECKPOINT_WALL_CLOCK_SECONDS = 45 * 60
 CHECKPOINT_LEASE_TTL_SECONDS = 3600
 CHECKPOINT_90M_DEADLINE_POLICY = "atomic_checkpoint_90m_v1"
 CHECKPOINT_90M_WALL_CLOCK_SECONDS = 90 * 60
 CHECKPOINT_90M_LEASE_TTL_SECONDS = CHECKPOINT_90M_WALL_CLOCK_SECONDS + 15 * 60
-DEFAULT_CHECKPOINT_DEADLINE_POLICY = CHECKPOINT_DEADLINE_POLICY
 CHECKPOINT_DEADLINE_PROFILES = {
     CHECKPOINT_DEADLINE_POLICY: (
         CHECKPOINT_WALL_CLOCK_SECONDS,

@@ -606,7 +606,7 @@ def test_timeout_kills_deletes_and_never_keeps_output(tmp_path):
 
 def _checkpoint_spec(
     tmp_path, *, seconds=10,
-    policy=contracts.DEFAULT_CHECKPOINT_DEADLINE_POLICY,
+    policy=contracts.CHECKPOINT_DEADLINE_POLICY,
 ):
     def valid(candidate):
         try:

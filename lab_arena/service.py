@@ -846,9 +846,6 @@ class ArenaService:
 
     def create_round(self, cutoff: datetime, *, round_id: Optional[str] = None) -> Dict[str, Any]:
         defaults = self._config.defaults
-        checkpoint_profile = contracts.CHECKPOINT_DEADLINE_PROFILES[
-            contracts.DEFAULT_CHECKPOINT_DEADLINE_POLICY
-        ]
         round_id = round_id or round_id_for_cutoff(cutoff)
         self._require_round_ownership(round_id)
         runner_hotkeys, banned_hotkeys = self.runner_settings()
@@ -867,7 +864,7 @@ class ArenaService:
             "runner_slot_ceiling": int(defaults.runner_slot_ceiling),
             "max_attempts_per_assignment": contracts.MAX_ATTEMPTS_PER_ASSIGNMENT,
             "lease_ttl_seconds": (
-                checkpoint_profile[1]
+                contracts.CHECKPOINT_LEASE_TTL_SECONDS
                 if defaults.checkpoint_deadline_enabled else contracts.LEASE_TTL_SECONDS
             ),
             "companies_per_icp": 5,
@@ -875,7 +872,7 @@ class ArenaService:
             "call_quotas": dict(contracts.CALL_QUOTAS_PER_ICP),
             "scoring_call_quotas": dict(contracts.SCORING_CALL_QUOTAS_PER_WORK_ITEM),
             "icp_wall_clock_seconds": (
-                checkpoint_profile[0]
+                contracts.CHECKPOINT_WALL_CLOCK_SECONDS
                 if defaults.checkpoint_deadline_enabled else contracts.ICP_WALL_CLOCK_SECONDS
             ),
             "scoring_wall_clock_seconds": contracts.SCORING_WALL_CLOCK_SECONDS,
@@ -903,9 +900,7 @@ class ArenaService:
                 defaults.execution_icp_cap_microusd
             )
         if defaults.checkpoint_deadline_enabled:
-            document["checkpoint_deadline_policy"] = (
-                contracts.DEFAULT_CHECKPOINT_DEADLINE_POLICY
-            )
+            document["checkpoint_deadline_policy"] = contracts.CHECKPOINT_DEADLINE_POLICY
         if defaults.integrity_from is not None and cutoff >= datetime.fromisoformat(defaults.integrity_from.replace("Z", "+00:00")):
             self._require_integrity_schema()
             document["integrity_policy"] = integrity.POLICY

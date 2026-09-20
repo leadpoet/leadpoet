@@ -60,7 +60,7 @@ def _execute(tmp_path, lease, result, *, local_wall=30):
 
 def _lease(
     *, checkpoint=True, duration=None,
-    policy=contracts.DEFAULT_CHECKPOINT_DEADLINE_POLICY,
+    policy=contracts.CHECKPOINT_DEADLINE_POLICY,
 ):
     digest = "sha256:" + "a" * 64
     if duration is None:

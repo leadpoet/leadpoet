@@ -2080,7 +2080,8 @@ def _alias_unresolved_structured_profile_lookup(
     submitted_slug = str(web_identity.get("submitted_linkedin_slug") or "").strip()
     if (
         web_identity.get("decision") != COMPANY_FIT_UNAVAILABLE
-        or web_identity.get("reason_code") != "identity_name_alias_unresolved"
+        or web_identity.get("reason_code")
+        not in {"identity_name_alias_unresolved", "identity_not_proven"}
         or web_identity.get("evidence_source") != "company_web_reverification"
         or not transport_domain
         or web_identity.get("submitted_domain") != transport_domain
@@ -2110,12 +2111,12 @@ def _structured_profile_alias_identity_receipt(
 
     evidence = structured_identity or {}
     if (
-        not company_quality
-        or set(evidence) != {"name", "provider", "source_field", "url", "website"}
+        set(evidence) != {"name", "provider", "source_field", "url", "website"}
         or evidence.get("provider") != STRUCTURED_PROFILE_PROVIDER
         or evidence.get("source_field") != STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
         or web_identity.get("decision") != COMPANY_FIT_UNAVAILABLE
-        or web_identity.get("reason_code") != "identity_name_alias_unresolved"
+        or web_identity.get("reason_code")
+        not in {"identity_name_alias_unresolved", "identity_not_proven"}
         or web_identity.get("evidence_source") != "company_web_reverification"
         or not transport_domain
         or web_identity.get("submitted_domain") != transport_domain
@@ -2130,10 +2131,12 @@ def _structured_profile_alias_identity_receipt(
         observed_website=evidence.get("website"),
         observed_linkedin=evidence.get("url"),
         evidence_source="company_web_reverification",
-        company_quality=True,
+        company_quality=company_quality,
     )
     if (
         structured_receipt.get("decision") != COMPANY_FIT_MATCH
+        or structured_receipt.get("submitted_name")
+        != structured_receipt.get("observed_name")
         or structured_receipt.get("observed_domain") != transport_domain
         or structured_receipt.get("observed_linkedin_slug")
         != web_identity.get("observed_linkedin_slug")
@@ -3340,7 +3343,7 @@ async def _llm_reverify_company(
         web_identity_receipt,
         verified_transport_domain,
     )
-    if not profile_identity and company_quality:
+    if not profile_identity:
         lookup_identity = _alias_unresolved_structured_profile_lookup(
             web_identity_receipt,
             verified_transport_domain,
@@ -3359,7 +3362,7 @@ async def _llm_reverify_company(
                 web_identity_receipt,
                 structured_identity,
                 verified_transport_domain,
-                company_quality=True,
+                company_quality=company_quality,
             )
             if resolved_identity:
                 profile_identity = {

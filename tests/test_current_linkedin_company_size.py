@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from gateway.qualification.models import CompanyOutput, ICPPrompt
-from lab_arena import company_judgments, scorer_entrypoint
+from lab_arena import scorer_entrypoint
 from lab_arena import scoring as arena_scoring
 from qualification.scoring import company_verification, lead_scorer
 from qualification.scoring.company_fit_decision import (
@@ -1548,6 +1548,16 @@ def test_structured_profile_alias_binds_brand_without_submitted_linkedin():
         None,
         "truist.com",
         company_quality=True,
+    )
+    submitted_slug_company = company.model_copy(update={
+        "company_linkedin": structured["url"],
+    })
+    assert not lead_scorer._structured_profile_alias_identity_receipt(
+        submitted_slug_company,
+        web_identity,
+        {**structured, "name": "Truist Financial Corporation"},
+        "truist.com",
+        company_quality=False,
     )
 
 
@@ -3276,7 +3286,7 @@ def test_truist_structured_identity_recovers_full_scorer_entrypoint(monkeypatch)
     company.update({
         "company_name": "Truist",
         "company_website": "https://www.truist.com/",
-        "company_linkedin": profile_url,
+        "company_linkedin": "",
         "industry": "Financial Services",
         "employee_count": "10,001+",
         "company_stage": "Public",
@@ -3296,30 +3306,9 @@ def test_truist_structured_identity_recovers_full_scorer_entrypoint(monkeypatch)
         companies=[company],
         policy=arena_scoring.build_scorer_policy(
             scoring_adapter_version="qualification_integrity_v2",
-            company_quality=True,
         ),
         evaluation_date="2026-09-20",
     )
-    [company_ref] = company_judgments.build_company_scopes(
-        scoring_input=document,
-        round_id="arena-2026-09-20",
-        network_name="finney",
-        netuid=71,
-        scorer_image_digest="sha256:" + "a" * 64,
-        scorer_image_reference="registry/scorer@sha256:" + "a" * 64,
-        integrity_policy="arena_integrity_v1",
-        company_quality_policy="company_quality_v1",
-    )
-    document["company_judgment_cache"] = {
-        "schema_version": company_judgments.LEASE_SCHEMA_VERSION,
-        "hits": [],
-        "misses": [{
-            "company_index": company_ref["company_index"],
-            "cache_key": company_ref["cache_key"],
-            "company_input_hash": company_ref["company_input_hash"],
-            "authority_slot": 0,
-        }],
-    }
 
     output = scorer_entrypoint.score_input(document)
 

@@ -7,12 +7,13 @@ import os
 
 import pytest
 
-from lab_arena import contracts, rewards
+from lab_arena import contracts, rewards, signing
 from lab_arena.contracts import ArenaContractError
+from leadpoet_canonical.lab_arena_rewards import verify_reward_basis_signature
 
 ALICE = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
 BOB = "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty"
-EXACT_WEEKLY_SHARES = (0.25, 0.2, 0.15, 0.1, 0.05)  # 25% of total emissions, decaying by week
+EXACT_WEEKLY_SHARES = (0.30, 0.24, 0.18, 0.12, 0.06)
 METAGRAPH = ["5C" + "1" * 46, ALICE, BOB]
 
 
@@ -46,7 +47,7 @@ def _values(basis: dict, epoch_id: int, hotkeys=METAGRAPH) -> dict:
 
 
 def test_public_constants_match_section_1():
-    assert contracts.LAB_ARENA_POOL_PERCENT == 25
+    assert contracts.LAB_ARENA_POOL_PERCENT == 30
     assert contracts.LAB_ARENA_POOL_BASIS == "total_emissions" and rewards.reward_constants_document()["pool_basis"] == "total_emissions"
     assert contracts.KING_POOL_SHARE_PERCENT_BY_WEEK == (100, 80, 60, 40, 20)
     assert contracts.EPOCHS_PER_REWARD_WEEK == 140
@@ -113,18 +114,34 @@ def test_account_fallback_halves_each_configured_week_once_and_full_restores():
         previous_start=1000,
         champion_reward_factor_ppm=rewards.FULL_CHAMPION_REWARD_FACTOR_PPM,
     )
-    assert _values(first_fallback, 1000)["champion_share"] == 0.125
-    assert _values(repeated_fallback, 1020)["champion_share"] == 0.125
-    assert _values(restored, 1040)["champion_share"] == 0.25
+    assert _values(first_fallback, 1000)["champion_share"] == 0.15
+    assert _values(repeated_fallback, 1020)["champion_share"] == 0.15
+    assert _values(restored, 1040)["champion_share"] == 0.30
 
 
-def test_reward_factor_is_closed_and_historical_absence_means_full_share():
-    historical = _basis(outcome="crowned", finalized_epoch=999)
+def test_reward_factor_is_closed_and_historical_signed_25_percent_basis_is_unchanged():
+    historical = rewards.reward_basis_document(
+        round_id="arena-2026-09-02",
+        published_at="2026-09-02T10:00:00Z",
+        finalized_epoch=999,
+        king_outcome="crowned",
+        king_hotkey=ALICE,
+        reward_constants=rewards.reward_constants_document(pool_percent=25),
+    )
     historical.pop("champion_reward_factor_ppm")
     historical.pop("reward_basis_hash")
     historical["reward_basis_hash"] = contracts.document_hash(historical)
-    assert _values(historical, 1000)["champion_share"] == 0.25
-    contracts.validate_reward_basis(historical)
+    signer = signing.LocalSigner.generate()
+    signed_historical = signing.sign_document(
+        signer, historical, hash_field="reward_basis_hash"
+    )
+    assert verify_reward_basis_signature(
+        signed_historical,
+        public_key_der=signer.public_key_der,
+        expected_public_key_hash=signer.public_key_hash,
+    ) == historical["reward_basis_hash"]
+    assert _values(signed_historical, 1000)["champion_share"] == 0.25
+    contracts.validate_reward_basis(signed_historical)
 
     for invalid in (True, 0, 499_999, 750_000, 1_000_001):
         with pytest.raises(ValueError, match="champion_reward_factor_ppm"):
@@ -176,7 +193,7 @@ def test_eligibility_boundary_at_exactly_45_epochs():
     assert rewards.epoch_eligible(basis, 1000) is True
     assert rewards.epoch_eligible(basis, 1045) is True
     assert rewards.epoch_eligible(basis, 1046) is False
-    assert _values(basis, 1045)["champion_share"] == 0.25
+    assert _values(basis, 1045)["champion_share"] == 0.30
     assert _values(basis, 1046) == {
         "champion_share": 0.0,
         "effective_champion_share": 0.0,
@@ -199,11 +216,11 @@ def test_no_catch_up_after_an_ineligible_gap():
     assert rewards.governing_reward_basis(rows, 1046) is not None
     assert rewards.governing_reward_basis(rows, 1046)["effective_reward_epoch"] == 1000
     assert rewards.governing_reward_basis(rows, 1060)["effective_reward_epoch"] == 1060
-    assert _values(defended, 1060)["champion_share"] == 0.25
+    assert _values(defended, 1060)["champion_share"] == 0.30
     # A later fresh defense at the week-2 boundary pays week 2 only; the
     # skipped epochs are never recovered.
     later = _basis(outcome="defended", finalized_epoch=1139, previous_start=1000)
-    assert _values(later, 1140)["champion_share"] == 0.2
+    assert _values(later, 1140)["champion_share"] == 0.24
     assert _values(later, 1140)["reward_week_index"] == 1
     # The stale defended row itself is ineligible again 46 epochs later.
     assert _values(defended, 1106)["champion_share"] == 0.0
@@ -218,13 +235,13 @@ def test_new_king_resets_the_schedule_and_defense_keeps_it():
     # Week 3 for the incumbent defending again at that epoch...
     week3 = _basis(outcome="defended", finalized_epoch=1000 + 140 * 2 - 1, previous_start=1000)
     assert week3["king_start_epoch"] == 1000
-    assert _values(week3, 1000 + 140 * 2)["champion_share"] == 0.15
+    assert _values(week3, 1000 + 140 * 2)["champion_share"] == 0.18
     assert _values(week3, 1000 + 140 * 2)["reward_week_index"] == 2
     # ...but a newly crowned king at that same epoch restarts at week 1.
     crowned = _basis(outcome="crowned", finalized_epoch=1000 + 140 * 2 - 1, king_hotkey=BOB)
     assert crowned["king_start_epoch"] == 1000 + 140 * 2
     values = _values(crowned, 1000 + 140 * 2)
-    assert values["champion_share"] == 0.25
+    assert values["champion_share"] == 0.30
     assert values["champion_uid"] == 2
     assert values["reward_week_index"] == 0
     with pytest.raises(ValueError, match="previous reward basis"):
@@ -280,8 +297,8 @@ def test_all_four_king_outcomes():
     no_king = _basis(outcome="no_king", finalized_epoch=1059)
     for basis in (crowned, defended, retained, no_king):
         contracts.validate_reward_basis(basis)
-    assert _values(crowned, 1000)["champion_share"] == 0.25
-    assert _values(defended, 1020)["champion_share"] == 0.25
+    assert _values(crowned, 1000)["champion_share"] == 0.30
+    assert _values(defended, 1020)["champion_share"] == 0.30
     assert _values(retained, 1040) == {
         "champion_share": 0.0,
         "effective_champion_share": 0.0,
@@ -380,7 +397,7 @@ def test_invalid_outcome_fails_closed_everywhere():
 def test_reward_basis_document_binds_constants_and_hashes():
     basis = _basis(outcome="crowned", finalized_epoch=999)
     assert basis["reward_constants"] == {
-        "pool_percent": 25,
+        "pool_percent": 30,
         "pool_basis": "total_emissions",
         "king_pool_share_percent_by_week": [100, 80, 60, 40, 20],
         "epochs_per_reward_week": 140,

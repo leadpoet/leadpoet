@@ -83,7 +83,7 @@ def reward_constants_document(pool_percent: Optional[int] = None) -> Dict[str, A
     """The constants a round publishes and every basis carries.
 
     ``pool_percent`` is the one adjustable value (``LAB_ARENA_POOL_PERCENT``,
-    default 25): the share of total emissions the king's pool takes in week
+    default 30): the share of total emissions the king's pool takes in week
     one. The weekly decay, week length, and eligibility window are public
     constants.
     """

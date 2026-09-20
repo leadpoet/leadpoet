@@ -245,7 +245,7 @@ def test_lost_db_completion_reconciles_git_then_activates_miner_once(
         [BASELINE, MINER_A],
     )
     assert values["champion_uid"] == 1
-    assert values["champion_share"] == values["effective_champion_share"] == 0.25
+    assert values["champion_share"] == values["effective_champion_share"] == 0.30
     assert fresh.activate_reward(round_id)["status"] == "existing"
     assert fresh_store.get_round(round_id)["reward_activated_at"] == first_row["reward_activated_at"]
     _assert_promoted_baseline(fresh, fresh_store, objects, tmp_path)

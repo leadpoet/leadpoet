@@ -151,9 +151,9 @@ BEGIN
     OR (active.configuration_doc->>'icp_wall_clock_seconds')::INTEGER<>5400
     OR (active.configuration_doc->>'lease_ttl_seconds')::INTEGER<>6300
     OR active.configuration_doc->>'scorer_image_digest' IS DISTINCT FROM
-       'sha256:d3a3349a66d92111115646daebfb7d122a8dbd6658e2db8cd35851d57cc36d17'
+       'sha256:9b935f81fd80aaa8e1cd735d8f4d18607160d5adbd7085d82e7bad4ce8a4e09a'
     OR active.configuration_doc->>'scorer_image_reference' IS DISTINCT FROM
-       '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:d3a3349a66d92111115646daebfb7d122a8dbd6658e2db8cd35851d57cc36d17'
+       '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:9b935f81fd80aaa8e1cd735d8f4d18607160d5adbd7085d82e7bad4ce8a4e09a'
     OR active.configuration_doc->'call_quotas' IS DISTINCT FROM
        '{"deepline":200,"openrouter":500,"scrapingdog":200}'::JSONB
     OR active.configuration_doc->'schedule' IS DISTINCT FROM
@@ -250,10 +250,10 @@ BEGIN
   RAISE EXCEPTION 'Sep20 rerun337 schedule differs' USING ERRCODE='22023';
  END IF;
 
- IF 'sha256:d3a3349a66d92111115646daebfb7d122a8dbd6658e2db8cd35851d57cc36d17' !~ '^sha256:[0-9a-f]{64}$'
-  OR '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:d3a3349a66d92111115646daebfb7d122a8dbd6658e2db8cd35851d57cc36d17' IS DISTINCT FROM
+ IF 'sha256:9b935f81fd80aaa8e1cd735d8f4d18607160d5adbd7085d82e7bad4ce8a4e09a' !~ '^sha256:[0-9a-f]{64}$'
+  OR '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:9b935f81fd80aaa8e1cd735d8f4d18607160d5adbd7085d82e7bad4ce8a4e09a' IS DISTINCT FROM
     '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@'||
-    'sha256:d3a3349a66d92111115646daebfb7d122a8dbd6658e2db8cd35851d57cc36d17' THEN
+    'sha256:9b935f81fd80aaa8e1cd735d8f4d18607160d5adbd7085d82e7bad4ce8a4e09a' THEN
   RAISE EXCEPTION 'Sep20 rerun337 scorer identity differs' USING ERRCODE='22023';
  END IF;
 
@@ -605,9 +605,9 @@ BEGIN
   configuration_doc=configuration_doc||pg_catalog.jsonb_build_object(
    'schedule','{"benchmark_deadline":"2026-09-20T13:30:00Z","final_scoring_close":"2026-09-21T03:30:00Z","publication_deadline":"2026-09-21T03:30:01Z","stage_1_close":"2026-09-20T20:30:00Z","stage_1_scoring_close":"2026-09-20T23:30:00Z","stage_1_start":"2026-09-20T13:30:01Z","stage_2_close":"2026-09-21T00:30:00Z","stage_2_start":"2026-09-20T23:30:01Z","submission_cutoff":"2026-09-20T00:00:00Z","submission_open":"2026-09-19T00:00:00Z"}'::JSONB,
    'scorer_image_digest',
-    'sha256:d3a3349a66d92111115646daebfb7d122a8dbd6658e2db8cd35851d57cc36d17',
+    'sha256:9b935f81fd80aaa8e1cd735d8f4d18607160d5adbd7085d82e7bad4ce8a4e09a',
    'scorer_image_reference',
-    '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:d3a3349a66d92111115646daebfb7d122a8dbd6658e2db8cd35851d57cc36d17'),
+    '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:9b935f81fd80aaa8e1cd735d8f4d18607160d5adbd7085d82e7bad4ce8a4e09a'),
   stage1_scoring_plan_doc=NULL,
   stage2_scoring_plan_doc=NULL,stage3_scoring_plan_doc=NULL,finalists=NULL,
   publication_doc=NULL,published_at=NULL,cancel_reason=NULL,

@@ -1012,7 +1012,7 @@ def test_round_scope_treats_legacy_rows_as_finney_71_and_rejects_cross_chain():
     assert service._require_round_mode(testnet) is testnet
 
 
-def test_reward_activation_carries_only_the_latest_miner_winner():
+def test_reward_activation_carries_latest_miner_winner_and_honors_nonpaying_barriers():
     baseline = "5" + "A" * 47
     miner_a = "5" + "B" * 47
     miner_b = "5" + "C" * 47
@@ -1023,13 +1023,26 @@ def test_reward_activation_carries_only_the_latest_miner_winner():
         previous_hotkey="",
         previous_start=80,
         previous_factor=1_000_000,
+        prior_bases=(),
         champion_hotkey="",
         fallback_providers=(),
         complete_baseline=False,
     ):
         signer = signing.LocalSigner.generate()
-        prior = []
+        prior = [
+            {
+                "effective_reward_epoch": int(basis["effective_reward_epoch"]),
+                "reward_basis_doc": basis,
+                "reward_activated_at": "2026-09-01T00:00:01Z",
+                "configuration_doc": {
+                    "mode": "live",
+                    "baseline_hotkey": baseline,
+                },
+            }
+            for basis in prior_bases
+        ]
         if previous_hotkey:
+            assert not prior
             prior_basis = signing.sign_document(
                 signer,
                 rewards.reward_basis_document(
@@ -1214,6 +1227,49 @@ def test_reward_activation_carries_only_the_latest_miner_winner():
     )
     # A historical organizer-baseline basis is never carried or paid.
     assert activate(previous_hotkey=baseline)["king_outcome"] == "no_king"
+
+    crowned = rewards.reward_basis_document(
+        round_id="arena-2026-08-31",
+        published_at="2026-08-31T00:00:00Z",
+        finalized_epoch=89,
+        king_hotkey=miner_a,
+        king_outcome="crowned",
+        reward_constants=constants,
+    )
+    ordinary_defense = activate(prior_bases=(crowned,))
+    assert (
+        ordinary_defense["king_outcome"],
+        ordinary_defense["king_hotkey"],
+        ordinary_defense["king_start_epoch"],
+    ) == ("defended", miner_a, 90)
+    no_king = rewards.reward_basis_document(
+        round_id="arena-2026-09-01",
+        published_at="2026-09-01T00:00:00Z",
+        finalized_epoch=99,
+        king_hotkey="",
+        king_outcome="no_king",
+        reward_constants=constants,
+    )
+    revoked = activate(prior_bases=(crowned, no_king))
+    assert (revoked["king_outcome"], revoked["king_hotkey"]) == ("no_king", "")
+    successor = activate(daily_hotkey=miner_b, prior_bases=(crowned, no_king))
+    assert (
+        successor["king_outcome"],
+        successor["king_hotkey"],
+        successor["king_start_epoch"],
+    ) == ("crowned", miner_b, 101)
+
+    retained_ineligible = rewards.reward_basis_document(
+        round_id="arena-2026-09-01-retained",
+        published_at="2026-09-01T00:00:00Z",
+        finalized_epoch=99,
+        king_hotkey=miner_a,
+        king_outcome="retained_ineligible",
+        previous_king_start_epoch=90,
+        reward_constants=constants,
+    )
+    retained = activate(prior_bases=(crowned, retained_ineligible))
+    assert (retained["king_outcome"], retained["king_hotkey"]) == ("no_king", "")
 
 
 def test_round_selection_and_direct_access_are_scoped_to_service_mode():

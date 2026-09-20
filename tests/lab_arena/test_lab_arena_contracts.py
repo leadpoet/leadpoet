@@ -36,7 +36,7 @@ def signed(keypair: Keypair, **overrides):
 def test_public_constants_are_the_plan_values():
     assert (c.STAGE_1_ICP_COUNT, c.STAGE_2_ICP_COUNT, c.BENCHMARK_ICP_COUNT, c.FINALIST_COUNT) == (10, 10, 20, 10)
     assert (c.MAX_CHALLENGERS, c.RUNNER_SLOT_CEILING, c.MAX_ATTEMPTS_PER_ASSIGNMENT) == (256, 20, 2)
-    assert c.LAB_ARENA_POOL_PERCENT == 25
+    assert c.LAB_ARENA_POOL_PERCENT == 30
     assert c.KING_POOL_SHARE_PERCENT_BY_WEEK == (100, 80, 60, 40, 20)
     assert (c.EPOCHS_PER_REWARD_WEEK, c.ELIGIBILITY_MAX_EPOCHS) == (140, 45)
     assert c.PROVIDERS == ("scrapingdog", "deepline", "openrouter")
@@ -216,7 +216,7 @@ def base_round_configuration():
         "baseline_source_url": "https://github.com/leadpoet/pydantic-harness/archive/refs/heads/main.tar.gz",
         "runner_hotkeys": [Keypair.create_from_uri("//Alice").ss58_address, Keypair.create_from_uri("//Floor").ss58_address],
         "banned_hotkeys": [],
-        "reward_constants": {"pool_percent": 25, "pool_basis": "total_emissions", "king_pool_share_percent_by_week": [100, 80, 60, 40, 20], "epochs_per_reward_week": 140, "eligibility_max_epochs": 45},
+        "reward_constants": {"pool_percent": 30, "pool_basis": "total_emissions", "king_pool_share_percent_by_week": [100, 80, 60, 40, 20], "epochs_per_reward_week": 140, "eligibility_max_epochs": 45},
     }
 
 

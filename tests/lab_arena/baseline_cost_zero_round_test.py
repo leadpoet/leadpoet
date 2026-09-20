@@ -362,8 +362,8 @@ def test_cost_ineligible_baseline_scores_zero_and_eligible_challenger_carries_do
     derived = arena_weights.derive_arena_weights(
         state, [burn, winner["miner_hotkey"]]
     )
-    assert derived["champion_share_ppb"] == 250_000_000
-    assert derived["burned_residual_ppb"] == 750_000_000
+    assert derived["champion_share_ppb"] == 300_000_000
+    assert derived["burned_residual_ppb"] == 700_000_000
     assert derived["sparse_uids"] == [0, 1]
     fixtures.assert_canary_absent(harness, connect)
 
@@ -479,8 +479,8 @@ def test_no_qualifying_challenger_keeps_prior_champion_reward_weights_and_next_b
     derived = arena_weights.derive_arena_weights(
         state, [burn, prior_winner["miner_hotkey"]]
     )
-    assert derived["champion_share_ppb"] == 250_000_000
-    assert derived["burned_residual_ppb"] == 750_000_000
+    assert derived["champion_share_ppb"] == 300_000_000
+    assert derived["burned_residual_ppb"] == 700_000_000
 
     # The next daily round freezes the still-current promoted source again.
     harness.challengers = []

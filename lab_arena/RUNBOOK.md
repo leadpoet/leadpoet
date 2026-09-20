@@ -298,7 +298,7 @@ Common optional values are `AWS_REGION`, `LAB_ARENA_NETUID`,
 `LAB_ARENA_DAILY_CUTOFF_UTC` (default `0`),
 `LAB_ARENA_MAX_CHALLENGERS` (default `20`, hard schema limit `256`),
 `LAB_ARENA_MAX_IMAGE_BYTES` for the trusted scorer image,
-`LAB_ARENA_POOL_PERCENT`, and
+`LAB_ARENA_POOL_PERCENT` (default `30`), and
 `LAB_ARENA_BANNED_HOTKEYS_PATH`. `LAB_ARENA_REWARDS_ENABLED` defaults to
 `false` and is frozen into each new round. `LAB_ARENA_SIGNING_KEY_ID` is
 needed only when a live, reward-enabled published round is activated.

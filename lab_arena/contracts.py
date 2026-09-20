@@ -32,7 +32,7 @@ DEFAULT_MAX_CHALLENGERS = 20  # admitted challengers per daily round, excluding 
 RUNNER_SLOT_CEILING = BENCHMARK_ICP_COUNT
 PROXY_EXECUTION_VERSION = "webshare_parallel_v1"
 MAX_ATTEMPTS_PER_ASSIGNMENT = 2
-LAB_ARENA_POOL_PERCENT = 25  # default share of total emissions for the king's pool; LAB_ARENA_POOL_PERCENT overrides it per round
+LAB_ARENA_POOL_PERCENT = 30  # default share of total emissions for the king's pool; LAB_ARENA_POOL_PERCENT overrides it per round
 # The pool is a share of total emissions, not of what remains after the other
 # allocations (owner decision, 2026-09-03).
 LAB_ARENA_POOL_BASIS = "total_emissions"

@@ -99,6 +99,14 @@ def _wired_factory(monkeypatch):
     return service, store, provider
 
 
+def test_pool_percent_environment_uses_future_default_and_preserves_override(monkeypatch):
+    monkeypatch.delenv("LAB_ARENA_POOL_PERCENT", raising=False)
+    assert wiring._pool_percent_from_environment() == 30
+
+    monkeypatch.setenv("LAB_ARENA_POOL_PERCENT", "25")
+    assert wiring._pool_percent_from_environment() == 25
+
+
 def test_gateway_paid_calls_keep_frozen_45m_round_lease(monkeypatch):
     service, store, provider = _wired_factory(monkeypatch)
     factory = service.config.broker_factory

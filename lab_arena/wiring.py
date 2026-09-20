@@ -246,7 +246,7 @@ def _stage_minutes_from_environment(
 
 
 def _pool_percent_from_environment() -> int:
-    """The king's pool as a percent of total emissions: LAB_ARENA_POOL_PERCENT, default 25, integer 0..100."""
+    """The king's pool as a percent of total emissions: LAB_ARENA_POOL_PERCENT, default 30, integer 0..100."""
 
     raw = os.environ.get("LAB_ARENA_POOL_PERCENT", "").strip()
     if not raw:

@@ -2657,6 +2657,10 @@ def test_structured_public_stage_scorer_entrypoint_transition(
     monkeypatch,
     provider_failure,
 ):
+    # The real scorer starts in an isolated container with these placeholders.
+    # Do not inherit credentials from other tests in this shared test process.
+    for name, value in scorer_entrypoint.PLACEHOLDER_CREDENTIALS.items():
+        monkeypatch.setenv(name, value)
     calls = 0
     structured_stage_evidence = {
         "company_type": "Public Company",

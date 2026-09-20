@@ -173,6 +173,25 @@ def test_source_context_preserves_review_size_and_utf8_bounds():
     assert json.loads(json.dumps(document)) == document
 
 
+@pytest.mark.parametrize("count", [2, 3])
+def test_early_multi_source_signal_cannot_starve_later_context(count):
+    company, icp, results, fit = inputs()
+    if count == 3:
+        results.append(deepcopy(results[1]))
+        results[-1]["matched_icp_signal"] = 2
+    for result in results:
+        url = result["evidence_urls"][0]
+        result["judge_verdict"]["verification_trace"]["verified_source_context"] = [
+            {"url": url, "text": "é" * 3_000},
+            {"url": url, "text": "extra" * 2_000},
+        ]
+    document = intent_details.review_evidence(company, icp, results, fit)
+    sizes = [sum(len(c["text"].encode("utf-8")) for c in v["source_context"])
+             for v in document["verified_signals"]]
+    assert sizes == [12_000 // count] * count
+    assert sum(sizes) == 12_000
+
+
 @pytest.mark.parametrize("missing", ["supporting_quotes", "same_entity_check"])
 def test_claims_cannot_replace_missing_source_support(missing):
     company, icp, results, fit = inputs()

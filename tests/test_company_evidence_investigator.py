@@ -273,6 +273,10 @@ def test_repaired_stage_gap_gets_one_targeted_investigation(monkeypatch):
     assert calls == {"broad": 2, "investigator": 1}
     assert result.decision == COMPANY_FIT_MATCH
     assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MATCH
+    receipt = result.details["investigation_receipt"]
+    assert receipt["gate"] == "company_evidence_investigation"
+    assert receipt["targets"] == ["stage"]
+    assert receipt["claims"]["stage"] == _finding("stage")
 
 
 def test_schema_repair_does_not_get_a_second_targeted_investigation(monkeypatch):

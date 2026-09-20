@@ -1055,6 +1055,15 @@ class CompetitionCompanyScorer:
                 else:
                     contact_result = _not_evaluated_contact(company)
                 _merge_contact_breakdown(breakdown, contact_result)
+                if (
+                    breakdown.get("company_qualified") is True
+                    and contact_result.get("contact_qualified") is not True
+                    and not breakdown.get("failure_reason")
+                ):
+                    breakdown["failure_reason"] = (
+                        contact_result.get("contact_verification", {}).get("reason")
+                        or "contact_not_qualified"
+                    )
                 breakdown["company_qualified"] = bool(
                     breakdown.get("company_qualified")
                     and contact_result.get("contact_qualified") is True

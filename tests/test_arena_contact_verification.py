@@ -930,6 +930,39 @@ def test_semantic_role_judge_outage_is_retryable_unavailable() -> None:
     assert result["verifier_gate_receipts"][0]["failure_class"] == "contact_provider_error"
 
 
+@pytest.mark.parametrize("match", [True, False])
+def test_semantic_role_receipt_preserves_duties_and_reason_without_extra_calls(match: bool) -> None:
+    role = "Vice President of Customer Growth"
+    duties = "Owns sales pipeline and customer growth."
+    company = _company(contact=_contact(role=role))
+    profile = _profile(currentPosition={
+        "title": role,
+        "description": duties,
+        "company": {"name": "Acme", "domain": "acme.com"},
+        "isCurrent": True,
+    })
+    calls = []
+
+    async def classify(*args):
+        calls.append(args)
+        return {"match": match, "reason": "Verified duties support the decision."}
+
+    execute = ScriptedExecute({"zerobounce_validate": [_zero("valid")]})
+    result = asyncio.run(verify_contact(
+        company, _icp(), source_evidence=_source(profile), execute=execute,
+        classify_role=classify,
+    ))
+
+    assert len(calls) == 1
+    assert result["contact_qualified"] is match
+    check = result["contact_verification"]["subchecks"]["role"]["checks"][0]
+    assert check == {
+        "actual_role": role, "duties": duties, "method": "semantic",
+        "match": match, "explanation": "Verified duties support the decision.",
+    }
+    assert len(execute.calls) == (1 if match else 0)
+
+
 def test_nonexact_executive_titles_do_not_use_a_coarse_fast_path() -> None:
     cases = [
         ("Chief Technology Officer", ["Chief Information Security Officer"], "C-level"),

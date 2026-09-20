@@ -667,12 +667,21 @@ async def _role_matches(
     target_seniority: str,
     classify_role: Optional[RoleClassifier],
     duties: str = "",
+    diagnostics: Optional[dict[str, Any]] = None,
 ) -> bool:
+    if diagnostics is not None:
+        diagnostics.update(actual_role=actual, duties=duties[:_ROLE_DUTIES_MAX_CHARS])
     deterministic = _deterministic_role_match(actual, targets, target_seniority)
     if deterministic is not None:
+        if diagnostics is not None:
+            diagnostics.update(method="deterministic", match=deterministic)
         return deterministic
     if classify_role is None:
+        if diagnostics is not None:
+            diagnostics.update(method="unavailable", match=False)
         return False
+    if diagnostics is not None:
+        diagnostics["method"] = "semantic"
     try:
         result = classify_role(actual, list(targets), target_seniority, duties)
         if inspect.isawaitable(result):
@@ -682,8 +691,14 @@ async def _role_matches(
     except Exception as exc:
         raise _ProviderUnavailable("contact_role_provider_error") from exc
     if isinstance(result, Mapping):
-        return result.get("match") is True or result.get("qualified") is True
-    return result is True
+        matched = result.get("match") is True or result.get("qualified") is True
+        if diagnostics is not None:
+            diagnostics.update(match=matched, explanation=_text(result.get("reason"))[:2000])
+        return matched
+    matched = result is True
+    if diagnostics is not None:
+        diagnostics["match"] = matched
+    return matched
 
 
 def _profile_location(profile: Mapping[str, Any]) -> dict[str, str]:
@@ -1252,20 +1267,24 @@ async def verify_contact(
         targets = []
     target_seniority = _text(_get(icp, "target_seniority"))
     role_ok = False
+    role_checks: list[dict[str, Any]] = []
     try:
         for position in actual_positions:
             role = _position_title(position)
+            role_check: dict[str, Any] = {}
+            role_checks.append(role_check)
             if await _role_matches(
                 role,
                 [str(item) for item in targets],
                 target_seniority,
                 classify_role,
                 _position_duties(position),
+                diagnostics=role_check,
             ):
                 role_ok = True
                 break
     except _ProviderUnavailable as exc:
-        subchecks["role"] = {"status": "unknown", "reason": exc.reason}
+        subchecks["role"] = {"status": "unknown", "reason": exc.reason, "checks": role_checks}
         return _result(
             contact,
             "unavailable",
@@ -1275,9 +1294,9 @@ async def verify_contact(
             evidence_timestamps=evidence_timestamps,
         )
     if not role_ok:
-        subchecks["role"] = {"status": "fail", "reason": "contact_role_not_targeted"}
+        subchecks["role"] = {"status": "fail", "reason": "contact_role_not_targeted", "checks": role_checks}
         return _result(contact, "mismatch", "contact_role_not_targeted", subchecks=subchecks, evidence_hashes=evidence_hashes, evidence_timestamps=evidence_timestamps)
-    subchecks["role"] = {"status": "pass", "reason": "contact_role_verified"}
+    subchecks["role"] = {"status": "pass", "reason": "contact_role_verified", "checks": role_checks}
 
     location_status, location_reason = _location_check(contact, profile, icp)
     subchecks["location"] = {"status": location_status, "reason": location_reason}

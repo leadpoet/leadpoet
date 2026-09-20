@@ -316,7 +316,6 @@ async def test_first_party_linked_greenhouse_root_enumerates_bound_jobs(
         "api_key": "test",
         "url": (
             "https://boards-api.greenhouse.io/v1/boards/trace3/jobs"
-            "?content=true"
         ),
         "dynamic": "false",
     }

@@ -83,3 +83,17 @@ def test_leadership_rules_reach_both_prompt_stages() -> None:
         assert "company involved in the CLAIMED EVENT" in prompt
         assert "that departure belongs to Company A" in prompt
         assert "Merely mentioning a former employer without a departure" in prompt
+
+
+def test_advertising_measurement_and_acquisition_completion_reach_both_stages() -> None:
+    row = _row()
+    for prompt in (
+        intent._build_verification_prompt(row),
+        intent._build_final_judge_prompt(row, {"results": [], "statuses": []}),
+    ):
+        assert "paid campaign" in prompt
+        assert "visibility, attribution, or advertising ROI" in prompt
+        assert "even if the product does not" in prompt
+        assert "requires evidence that the transaction closed" in prompt
+        assert "court approval" in prompt
+        assert "expected future closing do not prove completion" in prompt

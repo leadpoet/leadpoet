@@ -212,6 +212,14 @@ PART_A_BLOCK = """  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
         sales-team expansion.
       * "Company X has a careers page" is NOT the same as "Company X has
         open positions for {role}".
+      * Advertising technology includes tools that measure paid campaign
+        visibility, attribution, or advertising ROI. Such a launch can satisfy
+        an advertising-technology launch target even if the product does not
+        buy or serve ads. Verify the actual capability and all target qualifiers.
+      * A completed acquisition requires evidence that the transaction closed.
+        An agreement, proposed deal, shareholder or court approval, and an
+        expected future closing do not prove completion. If the target instead
+        asks for an announced acquisition, apply that wording as written.
     If miner_claim does not semantically map to target_icp_signal, return
     `contradicted` (the URL is about a different topic than the ICP
     signal asks for).  Do NOT return `wrong_entity` — `wrong_entity` is
@@ -219,6 +227,11 @@ PART_A_BLOCK = """  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
 
 
 MARKET_EXPANSION_BLOCK = """  MARKET_EXPANSION — NEW-MARKET PROOF:
+    Apply this block only to a chosen new-market alternative in the actual
+    target ICP text. The MARKET_EXPANSION category label must not add a
+    new-market requirement to a separate product-launch or other OR alternative.
+    Still verify every factual claim: a valid product launch does not prove an
+    additional claim that the company entered a new customer market.
     A MARKET_EXPANSION target is supported only when the exact source proves
     entry or expansion into a new geography, customer market, or clearly
     distinct commercial segment. Another facility or asset, or added capacity

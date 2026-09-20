@@ -415,6 +415,7 @@ def test_contact_rejection_keeps_base_breakdown_and_false_positive_penalty_logic
 
     assert row["final_score"] == 0.0
     assert row["intent_signal_final"] == 60.0
+    assert row["failure_reason"] == "contact_email_mismatch"
     assert row["intent_signals_detail"][0]["after_decay"] == 60.0
     assert count_penalizable_false_positives(
         [row], icp_has_intent_signals=True

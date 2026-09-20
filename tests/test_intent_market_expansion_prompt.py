@@ -80,3 +80,15 @@ def test_market_expansion_excludes_capital_raise_but_preserves_explicit_targets(
     assert "corporate debt and other explicit" in prompt
     assert "financing events remain valid evidence" in prompt
     assert "genuinely new customer market" in prompt
+
+
+def test_market_category_does_not_override_a_product_launch_alternative() -> None:
+    row = _row("MARKET_EXPANSION")
+    row["_target_signal_text"] = "Expanded into a new market OR launched a new product."
+    for prompt in (
+        intent._build_verification_prompt(row),
+        intent._build_final_judge_prompt(row, {"results": [], "statuses": []}),
+    ):
+        assert "category label must not add a" in prompt
+        assert "separate product-launch or other OR alternative" in prompt
+        assert "a valid product launch does not prove an" in prompt

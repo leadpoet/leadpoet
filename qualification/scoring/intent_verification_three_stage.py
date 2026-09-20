@@ -560,7 +560,7 @@ def _greenhouse_board_api_url(source_url: str) -> str:
         "https",
         "boards-api.greenhouse.io",
         "/v1/boards/" + quote(board, safe="-._~") + "/jobs",
-        "content=true",
+        "",
         "",
     ))
 
@@ -1033,7 +1033,7 @@ async def _scrape_linked_greenhouse_board(
                         and published.strip()
                         and "\x00" not in published
                     ):
-                        fields.append(published.strip())
+                        fields.append(f"{date_field}: {published.strip()}")
                 fields.append(absolute_url)
                 rows.append(" | ".join(fields))
             if not rows:

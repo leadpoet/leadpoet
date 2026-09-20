@@ -65,6 +65,7 @@ import os
 import re
 import time
 from datetime import date
+from html.parser import HTMLParser
 from typing import Any, Dict, List, Literal, Mapping, Optional, TypedDict
 from urllib.parse import parse_qsl, quote, unquote, urljoin, urlparse, urlsplit, urlunsplit
 
@@ -1003,25 +1004,76 @@ _HTML_DOCUMENT_RE = re.compile(
 )
 
 
+class _HTMLShellParser(HTMLParser):
+    """Collect visible body text and title/H1 labels from one HTML document."""
+
+    _HIDDEN = frozenset({"script", "style", "template", "noscript"})
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.body_seen = False
+        self.body_depth = 0
+        self.hidden_depth = 0
+        self.body_parts: list[str] = []
+        self.labels: list[str] = []
+        self._label_stack: list[tuple[str, list[str]]] = []
+        self._title_seen = False
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        del attrs
+        tag = tag.casefold()
+        if tag == "body":
+            self.body_seen = True
+            self.body_depth += 1
+        if tag in self._HIDDEN:
+            self.hidden_depth += 1
+        if tag == "h1" or (tag == "title" and not self._title_seen):
+            self._title_seen = self._title_seen or tag == "title"
+            self._label_stack.append((tag, []))
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.casefold()
+        if tag in {"title", "h1"}:
+            for index in range(len(self._label_stack) - 1, -1, -1):
+                label_tag, parts = self._label_stack[index]
+                if label_tag == tag:
+                    del self._label_stack[index]
+                    label = " ".join(" ".join(parts).split())
+                    if label:
+                        self.labels.append(label)
+                    break
+        if tag in self._HIDDEN and self.hidden_depth:
+            self.hidden_depth -= 1
+        if tag == "body" and self.body_depth:
+            self.body_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self.hidden_depth:
+            return
+        if self.body_depth:
+            self.body_parts.append(data)
+        for _tag, parts in self._label_stack:
+            parts.append(data)
+
+
+def _parse_html_shell(body: str) -> Optional[_HTMLShellParser]:
+    document = _HTMLShellParser()
+    try:
+        document.feed(body)
+        document.close()
+    except Exception:
+        return None
+    return document
+
+
 def _has_empty_html_body(body: str) -> bool:
     """Return true only for an explicit HTML document with no visible body."""
     if not _HTML_DOCUMENT_RE.search(body):
         return False
-    try:
-        from bs4 import BeautifulSoup, Comment
-
-        document = BeautifulSoup(body, "html.parser")
-    except Exception:
+    document = _parse_html_shell(body)
+    if document is None or not document.body_seen:
         return False
-    if document.body is None:
-        return False
-    for node in reversed(document.body.find_all(
-        ["script", "style", "template", "noscript"]
-    )):
-        node.decompose()
-    for node in document.body.find_all(string=lambda value: isinstance(value, Comment)):
-        node.extract()
-    return not document.body.get_text(" ", strip=True)
+    return not " ".join(" ".join(document.body_parts).split())
 
 
 def _evaluate_sd_response(status_code: int, body: str) -> str:
@@ -1053,17 +1105,10 @@ def _evaluate_sd_response(status_code: int, body: str) -> str:
 def _is_title_only_html_shell(raw_body: str, extracted_body: str) -> bool:
     """Return whether extraction found only the document title or heading."""
 
-    try:
-        from bs4 import BeautifulSoup
-
-        document = BeautifulSoup(raw_body, "html.parser")
-    except Exception:
+    document = _parse_html_shell(raw_body)
+    if document is None:
         return False
-    labels = {
-        " ".join(node.get_text(" ", strip=True).split()).casefold()
-        for node in [document.title, *document.find_all("h1")]
-        if node is not None and node.get_text(" ", strip=True)
-    }
+    labels = {label.casefold() for label in document.labels}
     remaining = " ".join(extracted_body.split()).casefold()
     for label in sorted(labels, key=len, reverse=True):
         remaining = remaining.replace(label, " ")

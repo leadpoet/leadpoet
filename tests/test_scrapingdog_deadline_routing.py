@@ -65,6 +65,38 @@ def _concise_announcement_page():
 
 
 class IntentScrapingDogDeadlineTests(unittest.IsolatedAsyncioTestCase):
+    def test_html_shell_classifiers_do_not_import_bs4(self):
+        original_import = __import__
+
+        def without_bs4(name, *args, **kwargs):
+            if name == "bs4" or name.startswith("bs4."):
+                raise ImportError("bs4 is not installed in the scorer image")
+            return original_import(name, *args, **kwargs)
+
+        empty = (
+            "<!doctype html><html><head><title>Metadata</title></head><body>"
+            "<!-- comment text -->"
+            "<script>visible = false</script><style>.hidden{}</style>"
+            "<template>template text</template><noscript>fallback</noscript>"
+            "</body></html>"
+        )
+        title_only = (
+            "<!doctype html><html><head><title>Careers | Synoptek</title></head>"
+            "<body><h1>Careers <span>| Synoptek</span></h1></body></html>"
+        )
+        with mock.patch("builtins.__import__", side_effect=without_bs4):
+            self.assertTrue(intent._has_empty_html_body(empty))
+            self.assertTrue(intent._is_title_only_html_shell(
+                title_only, "Careers | Synoptek"
+            ))
+            self.assertFalse(intent._has_empty_html_body(
+                "<html><body><p>Visible text</p></body></html>"
+            ))
+            self.assertFalse(intent._has_empty_html_body("Visible plain text"))
+            self.assertFalse(intent._is_title_only_html_shell(
+                title_only, "Careers | Synoptek Open engineering roles"
+            ))
+
     def test_empty_visible_html_body_is_not_accepted(self):
         long_head = "<meta name='description' content='" + ("metadata " * 100) + "'>"
         empty_body = f"<!doctype html><html><head>{long_head}</head><body> </body></html>"

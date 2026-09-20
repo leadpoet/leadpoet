@@ -39,7 +39,7 @@ import json
 import logging
 import re
 from typing import Mapping
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import aiohttp
 
@@ -69,6 +69,7 @@ _TRANSIENT_FETCH_RETRY_DELAY_SECS = 0.25
 _MAX_ORGANIZATION_LEGAL_NAME_ALIASES = 3
 _MAX_ORGANIZATION_NAME_LENGTH = 200
 _HTML_ENCODING_SNIFF_BYTES = 1024
+_IDENTITY_SOURCE_HOST_LABELS = frozenset({"media", "news", "newsroom", "press"})
 
 # Python also exposes binary transforms as codecs. This explicit text-codec
 # subset prevents an untrusted HTTP or HTML label from selecting one of them.
@@ -466,6 +467,42 @@ def _homepage_company_linkedin_urls(page_text: str) -> list[str]:
     return list(dict.fromkeys(parser.linkedin_urls))[:10]
 
 
+def _linked_identity_source_url(
+    page_text: str,
+    *,
+    base_url: str,
+    registrable_domain: str,
+) -> str:
+    """Return one linked first-party newsroom root, without guessing a path."""
+
+    parser = _HomepageIdentityParser()
+    try:
+        parser.feed(str(page_text or "")[:_MAX_BYTES])
+        parser.close()
+    except Exception:
+        return ""
+
+    for href in parser.source_hrefs:
+        try:
+            absolute = urljoin(base_url, href)
+            parsed = urlsplit(absolute)
+            candidate_domain = _registrable_domain(absolute)
+        except (NormalizationError, TypeError, ValueError):
+            continue
+        if (
+            _is_https_url(absolute)
+            and parsed.port in (None, 443)
+            and candidate_domain == registrable_domain
+            and parsed.path.rstrip("/") == ""
+            and str(parsed.hostname or "").casefold().split(".")[0]
+            in _IDENTITY_SOURCE_HOST_LABELS
+        ):
+            return urlunsplit(
+                ("https", parsed.netloc.casefold(), "/", parsed.query, "")
+            )
+    return ""
+
+
 class _HomepageIdentityParser(HTMLParser):
     """Extract bounded first-party name metadata without trusting input text."""
 
@@ -476,6 +513,7 @@ class _HomepageIdentityParser(HTMLParser):
         self.metadata_names: list[str] = []
         self.copyright_legal_names: list[str] = []
         self.linkedin_urls: list[str] = []
+        self.source_hrefs: list[str] = []
         self.organization_records: list[dict[str, object]] = []
         self._json_ld_parts: list[str] | None = None
         self._nonvisible_depth = 0
@@ -492,7 +530,14 @@ class _HomepageIdentityParser(HTMLParser):
             self._in_title = True
             return
         if tag_name in {"a", "link"}:
-            linkedin = _canonical_linkedin_company_url(attributes.get("href", ""))
+            href = attributes.get("href", "")
+            if (
+                tag_name == "a"
+                and href
+                and len(href) <= 2048
+            ):
+                self.source_hrefs.append(href)
+            linkedin = _canonical_linkedin_company_url(href)
             if linkedin:
                 self.linkedin_urls.append(linkedin)
         if tag_name == "script":
@@ -817,6 +862,63 @@ async def verify_company_exists(
         )
 
     observed_names = _homepage_company_names(text)
+    observed_linkedins = _homepage_company_linkedin_urls(text)
+    if observed_names and not observed_linkedins:
+        source_url = _linked_identity_source_url(
+            text,
+            base_url=observed_url,
+            registrable_domain=domain,
+        )
+        if source_url:
+            try:
+                async with aiohttp.ClientSession(
+                    timeout=timeout,
+                    headers=_HEADERS,
+                ) as session:
+                    async with session.get(source_url, allow_redirects=True) as resp:
+                        source_status = resp.status
+                        source_final_url = str(resp.url or source_url)
+                        source_raw = bytearray()
+                        while len(source_raw) < _MAX_BYTES:
+                            chunk = await resp.content.read(
+                                _MAX_BYTES - len(source_raw)
+                            )
+                            if not chunk:
+                                break
+                            source_raw.extend(chunk)
+                        source_text = _decode_homepage_html(
+                            source_raw,
+                            _content_type_header(getattr(resp, "headers", {})),
+                        )
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                pass
+            else:
+                try:
+                    source_domain = _registrable_domain(source_final_url)
+                except Exception:
+                    source_domain = ""
+                source_linkedins = _homepage_company_linkedin_urls(source_text)
+                if (
+                    source_status < 400
+                    and _is_https_url(source_final_url)
+                    and source_domain == domain
+                    and len(source_linkedins) == 1
+                    and any(
+                        evaluate_company_identity(
+                            submitted_name=homepage_name,
+                            submitted_website=f"https://{domain}",
+                            submitted_linkedin=source_linkedins[0],
+                            observed_name=source_name,
+                            observed_website=f"https://{domain}",
+                            observed_linkedin=source_linkedins[0],
+                            evidence_source="company_homepage",
+                            company_quality=False,
+                        )["decision"] == "match"
+                        for homepage_name in observed_names
+                        for source_name in _homepage_company_names(source_text)
+                    )
+                ):
+                    observed_linkedins = source_linkedins
     if not observed_names:
         return _identity_result(
             submitted_identity,
@@ -824,7 +926,6 @@ async def verify_company_exists(
             actual_final_url=observed_url,
             verified_homepage_transport_domain=domain,
         )
-    observed_linkedins = _homepage_company_linkedin_urls(text)
     if not observed_linkedins:
         return _identity_result(
             submitted_identity,
@@ -867,7 +968,7 @@ async def verify_company_exists(
             matched_receipt["verified_legal_name_aliases"] = legal_name_aliases
         return _identity_result(
             matched_receipt,
-            "verified: independently observed homepage name, final domain, "
+            "verified: independently observed first-party name, final domain, "
             "and exact LinkedIn company identity",
             actual_final_url=observed_url,
         )

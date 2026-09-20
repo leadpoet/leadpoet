@@ -69,6 +69,25 @@ class _Session:
         return self._response
 
 
+class _RoutingSession:
+    def __init__(self, routes, calls) -> None:
+        self._routes = routes
+        self._calls = calls
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+    def get(self, url, **_kwargs):
+        self._calls.append(url)
+        response = self._routes[url]
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
 def _stream_reader():
     from qualification.scoring.company_verification import _MAX_BYTES
 
@@ -483,6 +502,141 @@ def test_homepage_name_without_linkedin_binding_is_unavailable(monkeypatch):
     )
     assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert "LinkedIn company binding not found" in (result.reason or "")
+
+
+def test_linked_first_party_identity_page_completes_truist_shaped_anchor(
+    monkeypatch,
+):
+    root_url = "https://www.truist.com/"
+    media_url = "https://media.truist.com/"
+    calls = []
+    root_html = (
+        b"<title>Truist | Banking</title>"
+        + b'<a href="/product">Product</a>' * 250
+        + b'<a href="https://media.truist.com/">Newsroom</a>'
+        + b'<a href="/who-we-are/about-truist">About Truist</a>'
+    )
+    routes = {
+        root_url: _Response(
+            200,
+            root_html,
+            root_url,
+        ),
+        media_url: _Response(
+            200,
+            b'<meta property="og:site_name" content="Truist Newsroom">'
+            b"<footer>Copyright 2026 Truist Financial Corporation. "
+            b"All rights reserved "
+            b'<a href="https://www.linkedin.com/company/'
+            b'truistfinancialcorporation">LinkedIn</a></footer>',
+            media_url,
+        ),
+    }
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification.aiohttp.ClientSession",
+        lambda **_kwargs: _RoutingSession(routes, calls),
+    )
+
+    result = asyncio.run(
+        verify_company_exists(
+            "Truist",
+            root_url,
+            company_linkedin="",
+            company_quality=True,
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert result.details["identity"]["observed_name"] == "truist"
+    assert result.details["identity"]["observed_linkedin_slug"] == (
+        "truistfinancialcorporation"
+    )
+    assert calls == [root_url, media_url]
+
+
+def test_linked_first_party_identity_page_rejects_mismatched_company(monkeypatch):
+    root_url = "https://www.truist.com/"
+    media_url = "https://media.truist.com/"
+    calls = []
+    routes = {
+        root_url: _Response(
+            200,
+            b"<title>Truist | Banking</title>"
+            b'<a href="https://media.truist.com/">Newsroom</a>',
+            root_url,
+        ),
+        media_url: _Response(
+            200,
+            b'<title>Different Financial Corporation</title>'
+            b'<a href="https://www.linkedin.com/company/different-financial">'
+            b"LinkedIn</a>",
+            media_url,
+        ),
+    }
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification.aiohttp.ClientSession",
+        lambda **_kwargs: _RoutingSession(routes, calls),
+    )
+
+    result = asyncio.run(
+        verify_company_exists("Truist", root_url, company_linkedin="")
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert "LinkedIn company binding not found" in (result.reason or "")
+    assert calls == [root_url, media_url]
+
+
+def test_off_domain_newsroom_link_is_not_fetched(monkeypatch):
+    root_url = "https://www.truist.com/"
+    calls = []
+    routes = {
+        root_url: _Response(
+            200,
+            b"<title>Truist | Banking</title>"
+            b'<a href="https://media.attacker.example/">Newsroom</a>',
+            root_url,
+        ),
+    }
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification.aiohttp.ClientSession",
+        lambda **_kwargs: _RoutingSession(routes, calls),
+    )
+
+    result = asyncio.run(
+        verify_company_exists("Truist", root_url, company_linkedin="")
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert calls == [root_url]
+
+
+def test_linked_first_party_identity_provider_failure_stays_unavailable(
+    monkeypatch,
+):
+    root_url = "https://www.truist.com/"
+    media_url = "https://media.truist.com/"
+    calls = []
+    routes = {
+        root_url: _Response(
+            200,
+            b"<title>Truist | Banking</title>"
+            b'<a href="https://media.truist.com/">Newsroom</a>',
+            root_url,
+        ),
+        media_url: aiohttp.ClientConnectionError("newsroom unavailable"),
+    }
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification.aiohttp.ClientSession",
+        lambda **_kwargs: _RoutingSession(routes, calls),
+    )
+
+    result = asyncio.run(
+        verify_company_exists("Truist", root_url, company_linkedin="")
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert calls == [root_url, media_url]
 
 
 def test_linkedin_text_inside_html_comment_is_not_identity_proof(monkeypatch):

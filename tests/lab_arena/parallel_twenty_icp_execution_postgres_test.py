@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from lab_arena import contracts
+from lab_arena import contact_policy, contracts
 from lab_arena.service import ServiceError
 from lab_arena.proxy_workers import (
     ProxyWorkerPool,
@@ -29,6 +30,11 @@ MIGRATION = (
     Path(__file__).resolve().parents[2]
     / "scripts"
     / "255-lab-arena-parallel-twenty-icp-execution.sql"
+)
+ISOLATION_MIGRATION = (
+    Path(__file__).resolve().parents[2]
+    / "scripts"
+    / "326-lab-arena-exhausted-provider-error-isolation.sql"
 )
 
 
@@ -387,3 +393,203 @@ def test_parallel_execution_preserves_standard_twenty_icp_scoring_and_costs(
         assert costs["submission_id"] == participant["submission_id"]
         assert sum(row["inflight_calls"] for row in costs["providers"]) == 0
         assert sum(row["uncertain_calls"] for row in costs["providers"]) == 0
+
+
+def test_exhausted_provider_error_in_stage_two_scores_zero_and_publishes(
+    connect, tmp_path
+):
+    failed_position = 10
+    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    participants = _start_parallel_round(
+        harness, "arena-2099-01-01-e21", slot_ceiling=20
+    )
+    assert len(participants) == 1
+    baseline_id = participants[0]["submission_id"]
+    original_runner = harness.runner
+    store = harness.service.store
+    runner_hotkey = harness.runner_keys[0]
+    icps = harness.service.evaluation_icps(harness.round_id)
+    output_schema_version = contact_policy.output_schema(
+        store.get_round(harness.round_id)["configuration_doc"]
+    )
+    for expected_position in range(10):
+        lease, token, *_ = claim(
+            store,
+            harness.round_id,
+            runner_hotkey,
+            parallelism=1,
+            ceiling=20,
+        )
+        assert lease["icp_position"] == expected_position
+        icp = icps[expected_position]
+        flavor = "PublicBaseline"
+        companies = [
+            {
+                "company_name": "%s Company %d" % (flavor, index),
+                "company_website": "https://%s-%d.example.com"
+                % (flavor.lower(), index),
+                "company_linkedin": "",
+                "industry": icp["industry"],
+                "employee_count": icp["employee_count"][0],
+                "company_stage": str(icp.get("company_stage") or ""),
+                "country": icp.get("country") or "United States",
+                "state": "",
+                "fit_summary": "The company matches the ICP.",
+                "fit_evidence_urls": [
+                    "https://%s-%d.example.com/about" % (flavor.lower(), index)
+                ],
+                "intent_signals": [
+                    {
+                        "description": "Raised a round",
+                        "url": "https://news.example.com/%s/%d" % (flavor, index),
+                        "date": "2026-08-01",
+                        "why_now": "The funding makes outreach timely.",
+                        "snippet": "Funding announced",
+                        "matched_icp_signal": 0,
+                    }
+                ],
+            }
+            for index in range(5)
+        ]
+        output_ref = "arena/test/outputs/%s.json" % lease["run_id"]
+        harness.objects.put(
+            output_ref,
+            json.dumps(
+                {
+                    "schema_version": output_schema_version,
+                    "companies": companies,
+                }
+            ).encode("utf-8"),
+        )
+        assert complete(
+            store,
+            lease["run_id"],
+            hash_lease_token(token),
+            "accepted",
+            output_ref=output_ref,
+        )["status"] == "accepted"
+
+    first_failure, first_token, *_ = claim(
+        store,
+        harness.round_id,
+        runner_hotkey,
+        parallelism=1,
+        ceiling=20,
+    )
+    assert (first_failure["icp_position"], first_failure["attempt"]) == (
+        failed_position,
+        1,
+    )
+    assert complete(
+        store,
+        first_failure["run_id"],
+        hash_lease_token(first_token),
+        "provider_error",
+    )["confirmation_attempt"] == 2
+    second_failure, second_token, *_ = claim(
+        store,
+        harness.round_id,
+        runner_hotkey,
+        parallelism=1,
+        ceiling=20,
+    )
+    assert (second_failure["icp_position"], second_failure["attempt"]) == (
+        failed_position,
+        2,
+    )
+    assert complete(
+        store,
+        second_failure["run_id"],
+        hash_lease_token(second_token),
+        "provider_error",
+    )["status"] == "failed"
+
+    def runner_with_verified_pool(index, parallel=4):
+        runner = original_runner(index, parallel)
+        runner._config.proxy_worker_pool = _verified_test_pool(parallel)
+        return runner
+
+    harness.runner = runner_with_verified_pool
+    harness.advance_until("published", runners=1, max_steps=100)
+
+    published = harness.service.store.get_round(harness.round_id)
+    assert published["status"] == "published"
+    assert published["stage2_scoring_plan_doc"]["zero_rows"] == [
+        {
+            "submission_id": baseline_id,
+            "icp_position": failed_position,
+            "cause": "provider_error",
+        }
+    ]
+    execute_runs = harness.service.store.list_runs(
+        harness.round_id, submission_id=baseline_id, kind="execute"
+    )
+    failed_runs = [
+        run for run in execute_runs if run["icp_position"] == failed_position
+    ]
+    accepted_runs = [run for run in execute_runs if run["status"] == "accepted"]
+    assert len(execute_runs) == 21
+    assert len(accepted_runs) == 19
+    assert [run["attempt"] for run in failed_runs] == [1, 2]
+    assert all(
+        run["status"] == "failed"
+        and run["terminal_cause"] == "provider_error"
+        and run["output_ref"] is None
+        for run in failed_runs
+    )
+    assert failed_runs[0]["per_icp_score"] is None
+    assert failed_runs[1]["per_icp_score"] == 0
+    costed_accepted = [
+        run for run in accepted_runs if run["icp_position"] > failed_position
+    ]
+    assert len(costed_accepted) == 9
+    assert all(
+        harness.service.store.list_ledger(run_id=run["run_id"])
+        for run in costed_accepted
+    )
+
+    score_runs = harness.service.store.list_runs(
+        harness.round_id, submission_id=baseline_id, kind="score"
+    )
+    assert len(score_runs) == 19
+    assert all(run["status"] == "accepted" for run in score_runs)
+    costs = harness.service.store.submission_costs(baseline_id)
+    assert sum(row["inflight_calls"] for row in costs["providers"]) == 0
+    assert sum(row["uncertain_calls"] for row in costs["providers"]) == 0
+    result = published["publication_doc"]["final_ranking"][0]
+    selected_scores = [
+        float(run["per_icp_score"])
+        for run in accepted_runs + [failed_runs[1]]
+    ]
+    assert result["final_score"] == pytest.approx(sum(selected_scores) / 20)
+    assert result["final_score"] > 0
+
+    before_round = harness.service.store.get_round(harness.round_id)
+    before_runs = harness.service.store.list_runs(harness.round_id)
+    connection = connect()
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            migration = ISOLATION_MIGRATION.read_text(encoding="utf-8")
+            cursor.execute(migration)
+            cursor.execute(migration)
+            cursor.execute(
+                "SELECT pg_catalog.pg_get_functiondef("
+                "'public.lab_arena_close_stage(text,smallint)'::regprocedure),"
+                "pg_catalog.pg_get_functiondef("
+                "'public.lab_arena_close_parallel_execution_v1(text)'::regprocedure),"
+                "has_function_privilege('lab_arena_service',"
+                "'public.lab_arena_close_stage(text,smallint)','EXECUTE'),"
+                "has_function_privilege('anon',"
+                "'public.lab_arena_close_stage(text,smallint)','EXECUTE')"
+            )
+            sequential, parallel, service_execute, anon_execute = cursor.fetchone()
+    finally:
+        connection.close()
+    assert "latest_status = 'failed'" in sequential
+    assert "latest_cause = 'provider_error'" in sequential
+    assert "latest_status = 'failed'" in parallel
+    assert "latest_cause = 'provider_error'" in parallel
+    assert (service_execute, anon_execute) == (True, False)
+    assert harness.service.store.get_round(harness.round_id) == before_round
+    assert harness.service.store.list_runs(harness.round_id) == before_runs

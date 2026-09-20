@@ -609,6 +609,92 @@ def test_plan_makes_one_work_item_per_accepted_assignment_and_synthesizes_zero_r
         scoring.build_scoring_plan(round_id=ROUND, stage=1, runs=runs_for(["c9"], causes={("c9", 3): "lease_expired"}))
 
 
+def test_plan_zeros_only_a_provider_error_that_exhausted_both_attempts():
+    runs = [
+        run
+        for run in runs_for(["king"])
+        if int(run["icp_position"]) != 3
+    ]
+    runs.extend(
+        {
+            "run_id": "king:3:%d" % attempt,
+            "submission_id": "king",
+            "icp_position": 3,
+            "stage": 1,
+            "attempt": attempt,
+            "status": "failed",
+            "terminal_cause": "provider_error",
+            "output_ref": None,
+        }
+        for attempt in (1, 2)
+    )
+
+    plan = scoring.build_scoring_plan(round_id=ROUND, stage=1, runs=runs)
+
+    assert plan["zero_rows"] == [
+        {
+            "submission_id": "king",
+            "icp_position": 3,
+            "cause": "provider_error",
+        }
+    ]
+    assert len(plan["work_items"]) == 9
+
+
+@pytest.mark.parametrize(
+    "latest",
+    [
+        {"attempt": 1, "status": "failed", "terminal_cause": "provider_error"},
+        {"attempt": 2, "status": "pending", "terminal_cause": None},
+        {"attempt": 2, "status": "failed", "terminal_cause": "worker_lost"},
+        {"attempt": 2, "status": "failed", "terminal_cause": "result_rejected"},
+    ],
+)
+def test_plan_rejects_unexhausted_or_nonprovider_execution_failures(latest):
+    runs = [
+        run
+        for run in runs_for(["king"])
+        if int(run["icp_position"]) != 3
+    ]
+    runs.append(
+        {
+            "run_id": "king:3:%d" % latest["attempt"],
+            "submission_id": "king",
+            "icp_position": 3,
+            "stage": 1,
+            "output_ref": None,
+            **latest,
+        }
+    )
+
+    with pytest.raises(contracts.ArenaContractError, match="infrastructure reason"):
+        scoring.build_scoring_plan(round_id=ROUND, stage=1, runs=runs)
+
+
+def test_plan_keeps_a_saved_accepted_attempt_over_a_later_provider_failure():
+    runs = runs_for(["king"])
+    runs.append(
+        {
+            "run_id": "king:3:2",
+            "submission_id": "king",
+            "icp_position": 3,
+            "stage": 1,
+            "attempt": 2,
+            "status": "failed",
+            "terminal_cause": "provider_error",
+            "output_ref": None,
+        }
+    )
+
+    plan = scoring.build_scoring_plan(round_id=ROUND, stage=1, runs=runs)
+
+    assert plan["zero_rows"] == []
+    saved = next(
+        item for item in plan["work_items"] if item["icp_position"] == 3
+    )
+    assert saved["scored_run_id"] == "king:3:1"
+
+
 def test_sixteen_identical_outputs_are_judged_sixteen_times_with_identical_breakdowns():
     """No result cache across miners: identical outputs cost one judge execution each and score the same."""
 

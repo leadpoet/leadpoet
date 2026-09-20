@@ -37,6 +37,7 @@ TEMPLATE = (
     Path(__file__).parents[2]
     / "scripts/328-arena-2026-09-20-90m-verifier-baseline-rerun.sql.template"
 )
+RENDERED = TEMPLATE.with_suffix("")
 
 
 @pytest.fixture(scope="module")
@@ -114,6 +115,33 @@ def _template_block(name: str) -> str:
     )
     assert len(matches) == 1
     return matches[0]
+
+
+def _assert_exact_render_shape(rendered: str) -> dict[str, str]:
+    """Prove a candidate SQL differs from the template only at render seals."""
+    template = TEMPLATE.read_text()
+    marker_pattern = re.compile(r"__[A-Z0-9_]+__")
+    parts = marker_pattern.split(template)
+    markers = marker_pattern.findall(template)
+    pattern = [re.escape(parts[0])]
+    groups: dict[str, str] = {}
+    marker_groups: dict[str, str] = {}
+    for index, marker in enumerate(markers):
+        group = marker_groups.get(marker)
+        if group is None:
+            group = f"seal_{len(marker_groups)}"
+            marker_groups[marker] = group
+            pattern.append(f"(?P<{group}>.*?)")
+        else:
+            pattern.append(f"(?P={group})")
+        pattern.append(re.escape(parts[index + 1]))
+    match = re.fullmatch("".join(pattern), rendered, re.DOTALL)
+    assert match is not None, "rendered recovery SQL changes non-placeholder bytes"
+    for marker, group in marker_groups.items():
+        value = match.group(group)
+        assert value and re.search(r"__[A-Z0-9_]+__", value) is None
+        groups[marker] = value
+    return groups
 
 
 def _render(cursor, schedule: dict[str, str]) -> tuple[str, str, str]:
@@ -236,6 +264,11 @@ def _render(cursor, schedule: dict[str, str]) -> tuple[str, str, str]:
     for marker, value in values.items():
         body = body.replace(marker, value)
     assert re.search(r"__[A-Z0-9_]+__", body) is None
+    fixture_values = _assert_exact_render_shape(body)
+    assert set(fixture_values) == set(values)
+    if RENDERED.exists():
+        production_values = _assert_exact_render_shape(RENDERED.read_text())
+        assert set(production_values) == set(values)
     return body, scoring_definition, patched_scoring_definition
 
 
@@ -468,6 +501,12 @@ def test_sep20_rerun328_seals_transition_and_publishes_100_fresh_scores(
                 _template_block("replacement"), _template_block("anchor")
             ) == scoring_before
             assert _round_scope_snapshot(cursor, PRIOR_ARCHIVE) == prior_archive_before
+            assert _scalar(
+                cursor,
+                "SELECT count(*) FROM pg_catalog.pg_trigger "
+                "WHERE NOT tgisinternal AND tgname LIKE %s",
+                ("%rerun328%",),
+            ) == "0"
             assert _json(
                 cursor,
                 "SELECT jsonb_agg(to_jsonb(j) ORDER BY cache_key,authority_slot) "
@@ -586,28 +625,6 @@ def test_sep20_rerun328_seals_transition_and_publishes_100_fresh_scores(
                 (ARCHIVE, ARCHIVE, BASELINE + ":r328archive", ROUND, BASELINE, ROUND, BASELINE, ROUND, ARCHIVE),
             )
             assert cursor.fetchone() == (220, 100, 20, 80, 80)
-            cursor.execute(
-                "ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER "
-                "lab_arena_integrity_publication_guard"
-            )
-            cursor.execute(
-                "ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER "
-                "lab_arena_rounds_write_once"
-            )
-            with pytest.raises(psycopg2.Error, match="100 fresh distinct scores"):
-                cursor.execute(
-                    "UPDATE public.lab_arena_rounds SET status='published',"
-                    "publication_doc='{\"invalid\":true}'::jsonb WHERE round_id=%s",
-                    (ROUND,),
-                )
-            cursor.execute(
-                "ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER "
-                "lab_arena_integrity_publication_guard"
-            )
-            cursor.execute(
-                "ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER "
-                "lab_arena_rounds_write_once"
-            )
         connection.commit()
 
         lifecycle._drive_cycle(
@@ -667,7 +684,9 @@ def test_sep20_rerun328_template_is_inactive_and_narrow():
     assert SOURCE_SHA256 in body
     assert SOURCE_COMMIT in body
     assert "archived_execution_judgments" in body
-    assert "Sep20 rerun328 requires 100 fresh distinct scores" in body
+    assert "CREATE TRIGGER" not in body
+    assert "publication_guard328" not in body
+    assert "score_namespace_guard" not in body
     assert "lab_arena_company_judgments" in body
     assert "lab_arena_judgment_cache" in body
     assert "moved_baseline_ledger<>__TERMINAL_BASELINE_LEDGER_COUNT__" in body
@@ -676,3 +695,10 @@ def test_sep20_rerun328_template_is_inactive_and_narrow():
     assert "INTERVAL '10 hours'" in body
     assert "INTERVAL '14 hours 1 second'" in body
     assert len(set(re.findall(r"__[A-Z0-9_]+__", body))) == 21
+    if RENDERED.exists():
+        rendered = RENDERED.read_text()
+        values = _assert_exact_render_shape(rendered)
+        assert len(values) == 21
+        assert re.search(r"__[A-Z0-9_]+__", rendered) is None
+        assert rendered.count("BEGIN;") == 1
+        assert rendered.count("COMMIT;") == 1

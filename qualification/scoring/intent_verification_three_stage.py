@@ -246,19 +246,24 @@ def _careers_link_evidence(body: str, source_url: str) -> tuple[str, int]:
     from html.parser import HTMLParser
 
     class Links(HTMLParser):
+        _HIDDEN = frozenset({"script", "style", "template", "noscript"})
+
         def __init__(self):
             super().__init__()
             self.links: list[tuple[str, str]] = []
             self.href: str | None = None
             self.parts: list[str] = []
+            self.hidden_depth = 0
 
         def handle_starttag(self, tag, attrs):
-            if tag == "a":
+            if tag in self._HIDDEN:
+                self.hidden_depth += 1
+            if tag == "a" and not self.hidden_depth:
                 self.href = dict(attrs).get("href")
                 self.parts = []
 
         def handle_data(self, data):
-            if self.href is not None:
+            if self.href is not None and not self.hidden_depth:
                 self.parts.append(data)
 
         def handle_endtag(self, tag):
@@ -266,6 +271,8 @@ def _careers_link_evidence(body: str, source_url: str) -> tuple[str, int]:
                 self.links.append((self.href, " ".join(self.parts)))
                 self.href = None
                 self.parts = []
+            if tag in self._HIDDEN and self.hidden_depth:
+                self.hidden_depth -= 1
 
     document = Links()
     document.feed(body)
@@ -1689,16 +1696,17 @@ async def _scrape_sd_hardened(
                 if verdict == "ok":
                     listing_text = ""
                     listing_receipt: Optional[_CareersIndexReceipt] = None
-                    if prefer_dynamic_job_index and tier_name == "dynamic_render":
+                    if prefer_dynamic_job_index:
                         listing_text, listing_count = _careers_link_evidence(body, url)
-                        if not listing_count:
+                        if not listing_count and tier_name == "dynamic_render":
                             last_verdict = "job_links_absent"
                             history[-1] = (tier_name, last_verdict)
                             continue
-                        listing_receipt = {
-                            "kind": "first_party_careers_index",
-                            "observed_job_link_count": listing_count,
-                        }
+                        if listing_count:
+                            listing_receipt = {
+                                "kind": "first_party_careers_index",
+                                "observed_job_link_count": listing_count,
+                            }
                     source_publication_date = _published_date_from_html(body, url)
                     # Extract article body from raw HTML before truncation.
                     # Removes nav/sidebar/footer/related-posts that otherwise

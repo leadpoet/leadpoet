@@ -402,6 +402,9 @@ async def test_full_verifier_preserves_visible_cards_after_dynamic_failure(
     assert "Technical Account Manager Managed Services Full-Time" in prompts[1]
     assert "Fake Script Role" not in prompts[1]
     assert "Fake Template Role" not in prompts[1]
+    assert "Careers index noise" not in prompts[1]
+    assert "Unrelated navigation noise" not in prompts[1]
+    assert len(prompts[1]) < intent.MAX_SCRAPED_CHARS
     assert len(client.calls) == 2
     assert result["job_publisher_relationship"] == "verified"
 

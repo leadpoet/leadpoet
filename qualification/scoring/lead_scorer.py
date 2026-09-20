@@ -4,9 +4,10 @@ Companies pass deterministic fit and identity gates before intent evidence is
 verified. The competition adapter adds contact checks and score aggregation.
 """
 
-import os
+import asyncio
 import aiohttp
 import json
+import os
 import re
 import logging
 import unicodedata
@@ -46,6 +47,7 @@ from qualification.scoring.intent_signal_gate import (
     judge_intent_signal,
 )
 from qualification.scoring.company_verification import (
+    _fetch_bounded_html,
     _registrable_domain,
     verify_company_exists,
 )
@@ -251,7 +253,17 @@ def _series_stage_proof_patterns(label: str) -> tuple[re.Pattern, ...]:
         _present_tense_raise_proof_pattern(label),
         re.compile(
             rf"\bwe(?:\s+are|['’]re)\s+(?:excited|thrilled)\s+to\s+"
-            rf"announce\s+our\b.{{0,60}}\b{label}\b",
+            rf"announce\s+(?:our|an?|the)\b.{{0,60}}\b{label}\b",
+            re.I,
+        ),
+        re.compile(
+            rf"\b{label}\s+(?:(?:funding|financing)\s+)?round\s+"
+            rf"(?:has\s+)?(?:just\s+)?(?:raised|closed|secured|completed)\b",
+            re.I,
+        ),
+        re.compile(
+            rf"\b{label}\s+(?:funding|financing)(?:\s+round)?\s+"
+            rf"(?:that|which)\s+(?:has\s+)?(?:raised|closed|secured)\b",
             re.I,
         ),
     )
@@ -289,6 +301,10 @@ def _series_stage_statement_patterns(label: str) -> tuple[re.Pattern, ...]:
         re.compile(
             rf"\bemerge[ds]\s+from\s+stealth(?:\s+mode)?\s+with\b"
             rf".{{0,60}}\b{label}\s+(?:financing|funding)\b",
+            re.I,
+        ),
+        re.compile(
+            rf"\bis\s+(?:currently\s+)?(?:an?\s+)?{label}\s+company\b",
             re.I,
         ),
     )
@@ -694,6 +710,97 @@ _ACQUISITION_CONDITIONAL_RE = re.compile(
     r"\b(?:acquisition|acquired|subsidiary)\b.{0,100}\bsubject\s+to\b",
     re.I | re.S,
 )
+_BOUND_PUBLIC_SUPERSESSION_SUBJECT_PATTERNS = (
+    re.compile(
+        r"\b(?:completed|closed|finali[sz]ed)\b[^.!?;:\n]{0,100}"
+        r"\btake[- ]private\b[^.!?;:\n]{0,60}\b(?:of|for)\s+"
+        r"(?P<subject>[a-z0-9&.'’+ -]{2,120}?)"
+        r"(?=[,;.!?\n]|$)",
+        re.I,
+    ),
+    re.compile(
+        r"(?:^|[,;.!?]\s+)(?P<subject>[a-z0-9&.'’+ -]{2,120}?)\s+"
+        r"(?:was|has\s+been)\s+taken\s+private\b",
+        re.I,
+    ),
+    re.compile(
+        r"(?:^|[,;.!?]\s+)(?P<subject>[a-z0-9&.'’+ -]{2,120}?)\s+"
+        r"(?:was|has\s+been)\s+delisted\b",
+        re.I,
+    ),
+    re.compile(
+        r"(?:^|[,;.!?]\s+)(?P<subject>[a-z0-9&.'’+ -]{2,120}?)\s+"
+        r"(?:is|remains)\s+(?:no\s+longer|not)\s+(?:publicly\s+)?listed\b",
+        re.I,
+    ),
+    re.compile(
+        r"(?:^|[,;.!?]\s+)(?P<subject>[a-z0-9&.'’+ -]{2,120}?)['’]s\s+"
+        r"(?:common\s+)?(?:shares?|stock)\s+(?:are|is)\s+no\s+longer\s+"
+        r"(?:publicly\s+)?listed\b",
+        re.I,
+    ),
+)
+
+
+def _bound_public_supersession_supports_company(
+    company: CompanyOutput,
+    observed_company_name: Any,
+    quote: str,
+) -> bool:
+    """Require completed take-private/current delisting proof for this entity."""
+
+    normalized_names = {
+        tuple(re.findall(r"[a-z0-9]+", str(name or "").casefold()))
+        for name in (company.company_name, observed_company_name)
+    }
+    normalized_names = {
+        name for name in normalized_names if name and len("".join(name)) >= 4
+    }
+    legal_suffixes = {
+        "co", "company", "corp", "corporation", "inc", "incorporated",
+        "limited", "llc", "ltd", "plc",
+    }
+    for pattern in _BOUND_PUBLIC_SUPERSESSION_SUBJECT_PATTERNS:
+        for match in pattern.finditer(quote):
+            context = quote[max(0, match.start() - 100):match.end() + 60]
+            prefix = re.split(
+                r"[.!?;:\n]|\bbut\b|\bhowever\b",
+                quote[max(0, match.start() - 100):match.start()],
+                flags=re.I,
+            )[-1]
+            explicit_negative_listing = bool(re.search(
+                r"\b(?:no\s+longer|not)\s+(?:publicly\s+)?listed\b",
+                match.group(0),
+                re.I,
+            ))
+            if (
+                re.search(r"\b(?:if|unless|whether)\b", prefix, re.I)
+                or _has_stage_proof_uncertainty(prefix)
+                or (
+                    not explicit_negative_listing
+                    and not _has_affirmed_stage_proof(
+                        context,
+                        (re.compile(re.escape(match.group(0)), re.I),),
+                        reject_historical=True,
+                        reject_future_will=True,
+                    )
+                )
+            ):
+                continue
+            subject = tuple(re.findall(
+                r"[a-z0-9]+", match.group("subject").casefold()
+            ))
+            if any(
+                subject == name
+                or (
+                    subject[:len(name)] == name
+                    and subject[len(name):]
+                    and set(subject[len(name):]).issubset(legal_suffixes)
+                )
+                for name in normalized_names
+            ):
+                return True
+    return False
 
 
 def _acquired_stage_quote_supports_company(
@@ -749,21 +856,22 @@ def _acquired_stage_quote_supports_company(
     return False
 
 
-def _first_party_acquisition_conflicts_with_venture_stage(
+def _first_party_ownership_conflicts_with_stage(
     company: Optional[CompanyOutput],
     verdict: Mapping[str, Any],
     observed_stage: str,
 ) -> bool:
-    """Reject a stale venture-stage selection when the same response conflicts.
+    """Reject a stale stage selection when same-response ownership conflicts.
 
     This does not project the attribute evidence into the stage result. It only
     makes the stage unresolved so the existing independent stage repair can
     research current ownership and return its own stage evidence.
     """
 
-    if company is None or observed_stage not in {
+    venture_stage = observed_stage in {
         "seed", "series a", "series b", "series c+"
-    }:
+    }
+    if company is None or (not venture_stage and observed_stage != "public"):
         return False
     evidence = _dimension_web_evidence(verdict, "required_attribute")
     evidence_url = _valid_web_evidence_url(evidence["url"])
@@ -774,14 +882,35 @@ def _first_party_acquisition_conflicts_with_venture_stage(
         evidence_domain = _registrable_domain(evidence_url)
     except NormalizationError:
         return False
-    return bool(
-        company_domain
-        and evidence_domain == company_domain
-        and _acquired_stage_quote_supports_company(
-            company,
-            verdict.get("observed_company_name"),
-            evidence["quote"],
-        )
+    if not company_domain or evidence_domain != company_domain:
+        return False
+    acquired_company = _acquired_stage_quote_supports_company(
+        company,
+        verdict.get("observed_company_name"),
+        evidence["quote"],
+    )
+    if venture_stage:
+        return acquired_company
+    # A generic completed acquisition does not prove that a listed company
+    # became private. Public is reopened only by explicit completed
+    # take-private or current delisting language bound to this company.
+    return _bound_public_supersession_supports_company(
+        company,
+        verdict.get("observed_company_name"),
+        evidence["quote"],
+    )
+
+
+# Keep the focused helper name stable for existing callers and receipts.
+def _first_party_acquisition_conflicts_with_venture_stage(
+    company: Optional[CompanyOutput],
+    verdict: Mapping[str, Any],
+    observed_stage: str,
+) -> bool:
+    return _first_party_ownership_conflicts_with_stage(
+        company,
+        verdict,
+        observed_stage,
     )
 
 
@@ -1124,7 +1253,7 @@ def _decision_from_observed_stage(
     if not isinstance(observed_value, str):
         return COMPANY_FIT_UNAVAILABLE
     observed = _normalize_company_stage(observed_value)
-    if _first_party_acquisition_conflicts_with_venture_stage(
+    if _first_party_ownership_conflicts_with_stage(
         company, verdict, observed
     ):
         return COMPANY_FIT_UNAVAILABLE
@@ -1302,6 +1431,76 @@ def _decision_with_web_evidence(
     return decision
 
 
+_VERIFIED_LINKEDIN_REDIRECT_REQUESTED = (
+    "_server_verified_linkedin_redirect_requested_url"
+)
+_VERIFIED_LINKEDIN_REDIRECT_FINAL = "_server_verified_linkedin_redirect_final_url"
+
+
+async def _resolve_observed_linkedin_redirect_alias(
+    company: CompanyOutput,
+    verdict: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project an exact LinkedIn redirect final URL into a web observation."""
+
+    resolved = dict(verdict)
+    # Provider JSON must never be able to declare server transport evidence.
+    resolved.pop(_VERIFIED_LINKEDIN_REDIRECT_REQUESTED, None)
+    resolved.pop(_VERIFIED_LINKEDIN_REDIRECT_FINAL, None)
+    observed_field = (
+        "observed_company_linkedin"
+        if "observed_company_linkedin" in resolved
+        else "observed_linkedin"
+    )
+    requested_url = resolved.get(observed_field)
+    submitted_slug = linkedin_company_page_slug(company.company_linkedin)
+    requested_slug = linkedin_company_page_slug(requested_url)
+    if (
+        not submitted_slug
+        or not requested_slug
+        or submitted_slug == requested_slug
+        or submitted_slug.isdigit()
+        or requested_slug.isdigit()
+        or not is_linkedin_evidence_url(requested_url)
+    ):
+        return resolved
+    try:
+        parsed = urlsplit(str(requested_url))
+    except ValueError:
+        return resolved
+    if parsed.scheme.casefold() != "https":
+        return resolved
+
+    timeout = aiohttp.ClientTimeout(total=5.0, connect=3.0)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            _status, final_url, _text = await _fetch_bounded_html(
+                session,
+                str(requested_url),
+            )
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        return resolved
+    final_slug = linkedin_company_page_slug(final_url)
+    if (
+        not final_slug
+        or final_slug != submitted_slug
+        or not is_linkedin_evidence_url(final_url)
+        or str(final_url) == str(requested_url)
+    ):
+        return resolved
+    try:
+        final_parsed = urlsplit(str(final_url))
+    except ValueError:
+        return resolved
+    if final_parsed.scheme.casefold() != "https":
+        return resolved
+
+    resolved[observed_field] = str(final_url)
+    resolved[_VERIFIED_LINKEDIN_REDIRECT_REQUESTED] = str(requested_url)
+    resolved[_VERIFIED_LINKEDIN_REDIRECT_FINAL] = str(final_url)
+    return resolved
+
+
 def _web_identity_receipt(
     company: CompanyOutput,
     verdict: Mapping[str, Any],
@@ -1340,6 +1539,25 @@ def _web_identity_receipt(
         evidence_source="company_web_reverification",
         company_quality=company_quality,
     )
+    redirect_requested_url = verdict.get(_VERIFIED_LINKEDIN_REDIRECT_REQUESTED)
+    redirect_final_url = verdict.get(_VERIFIED_LINKEDIN_REDIRECT_FINAL)
+    if (
+        receipt.get("decision") == COMPANY_FIT_MATCH
+        and isinstance(redirect_requested_url, str)
+        and isinstance(redirect_final_url, str)
+        and redirect_final_url == observed_values["linkedin"]
+        and linkedin_company_page_slug(redirect_requested_url)
+        and linkedin_company_page_slug(redirect_final_url)
+        == receipt.get("submitted_linkedin_slug")
+    ):
+        receipt.update(
+            observed_linkedin_requested_url=redirect_requested_url,
+            observed_linkedin_final_url=redirect_final_url,
+            requested_observed_linkedin_slug=(
+                linkedin_company_page_slug(redirect_requested_url)
+            ),
+            reason_code="verified_linkedin_redirect_alias",
+        )
     structured_receipt = _structured_profile_alias_identity_receipt(
         company,
         receipt,
@@ -3545,6 +3763,7 @@ async def _llm_reverify_company(
             company_fit_unavailable(error),
             request_diagnostic.get(VERIFIER_FAILURE_REASON_KEY),
         )
+    verdict = await _resolve_observed_linkedin_redirect_alias(company, verdict)
     web_identity_receipt = _web_identity_receipt(
         company,
         verdict,
@@ -3858,6 +4077,10 @@ async def _llm_reverify_company(
             result,
             repair_diagnostic.get(VERIFIER_FAILURE_REASON_KEY),
         )
+    repaired_verdict = await _resolve_observed_linkedin_redirect_alias(
+        company,
+        repaired_verdict,
+    )
     if require_company_fit_dimensions:
         repaired_verdict = await _refresh_linkedin_employee_size_observation(
             repaired_verdict,

@@ -132,6 +132,126 @@ def test_verified_homepage_linkedin_completes_common_legal_name_observation():
     assert strict_receipt["decision"] == COMPANY_FIT_UNAVAILABLE
 
 
+def test_verified_linkedin_redirect_alias_uses_exact_transport_final_url():
+    company = _company(
+        company_name="Magnitude Biosciences Ltd",
+        company_website="https://magnitudebiosciences.com/",
+        company_linkedin="https://www.linkedin.com/company/magnitudebiosciences/",
+    )
+    verdict = {
+        "observed_company_name": "Magnitude Biosciences Ltd",
+        "observed_company_website": "https://magnitudebiosciences.com/",
+        "observed_company_linkedin": (
+            "https://uk.linkedin.com/company/magnitude-biosciences"
+        ),
+    }
+    final_url = "https://uk.linkedin.com/company/magnitudebiosciences"
+
+    with patch.object(
+        lead_scorer,
+        "_fetch_bounded_html",
+        AsyncMock(return_value=(999, final_url, "")),
+    ) as fetch:
+        resolved = asyncio.run(
+            lead_scorer._resolve_observed_linkedin_redirect_alias(
+                company,
+                verdict,
+            )
+        )
+
+    receipt = lead_scorer._web_identity_receipt(company, resolved)
+    assert fetch.await_count == 1
+    assert receipt["decision"] == COMPANY_FIT_MATCH
+    assert receipt["reason_code"] == "verified_linkedin_redirect_alias"
+    assert receipt["requested_observed_linkedin_slug"] == "magnitude-biosciences"
+    assert receipt["observed_linkedin_slug"] == "magnitudebiosciences"
+    assert receipt["observed_linkedin_requested_url"] == verdict[
+        "observed_company_linkedin"
+    ]
+    assert receipt["observed_linkedin_final_url"] == final_url
+
+
+@pytest.mark.parametrize(
+    "final_url",
+    [
+        "https://uk.linkedin.com/company/magnitude-bio-sciences",
+        "https://example.com/company/magnitudebiosciences",
+        "http://uk.linkedin.com/company/magnitudebiosciences",
+    ],
+)
+def test_linkedin_redirect_alias_rejects_noncanonical_or_unsafe_final_url(final_url):
+    company = _company(
+        company_name="Magnitude Biosciences Ltd",
+        company_website="https://magnitudebiosciences.com/",
+        company_linkedin="https://www.linkedin.com/company/magnitudebiosciences/",
+    )
+    verdict = {
+        "observed_company_name": "Magnitude Biosciences Ltd",
+        "observed_company_website": "https://magnitudebiosciences.com/",
+        "observed_company_linkedin": (
+            "https://uk.linkedin.com/company/magnitude-biosciences"
+        ),
+    }
+
+    with patch.object(
+        lead_scorer,
+        "_fetch_bounded_html",
+        AsyncMock(return_value=(200, final_url, "")),
+    ):
+        resolved = asyncio.run(
+            lead_scorer._resolve_observed_linkedin_redirect_alias(
+                company,
+                verdict,
+            )
+        )
+
+    assert resolved["observed_company_linkedin"] == verdict[
+        "observed_company_linkedin"
+    ]
+    assert lead_scorer._web_identity_receipt(company, resolved)[
+        "decision"
+    ] == COMPANY_FIT_MISMATCH
+
+
+def test_model_declared_linkedin_final_url_is_not_trusted():
+    company = _company(
+        company_name="Magnitude Biosciences Ltd",
+        company_website="https://magnitudebiosciences.com/",
+        company_linkedin="https://www.linkedin.com/company/magnitudebiosciences/",
+    )
+    verdict = {
+        "observed_company_name": "Magnitude Biosciences Ltd",
+        "observed_company_website": "https://magnitudebiosciences.com/",
+        "observed_company_linkedin": (
+            "https://uk.linkedin.com/company/magnitude-biosciences"
+        ),
+        lead_scorer._VERIFIED_LINKEDIN_REDIRECT_REQUESTED: (
+            "https://uk.linkedin.com/company/magnitude-biosciences"
+        ),
+        lead_scorer._VERIFIED_LINKEDIN_REDIRECT_FINAL: (
+            "https://uk.linkedin.com/company/magnitudebiosciences"
+        ),
+    }
+
+    with patch.object(
+        lead_scorer,
+        "_fetch_bounded_html",
+        AsyncMock(side_effect=asyncio.TimeoutError),
+    ):
+        resolved = asyncio.run(
+            lead_scorer._resolve_observed_linkedin_redirect_alias(
+                company,
+                verdict,
+            )
+        )
+
+    assert lead_scorer._VERIFIED_LINKEDIN_REDIRECT_REQUESTED not in resolved
+    assert lead_scorer._VERIFIED_LINKEDIN_REDIRECT_FINAL not in resolved
+    assert lead_scorer._web_identity_receipt(company, resolved)[
+        "decision"
+    ] == COMPANY_FIT_MISMATCH
+
+
 @pytest.mark.parametrize(
     ("observed", "quote", "supported"),
     [
@@ -188,6 +308,111 @@ def test_stage_evidence_keeps_current_ownership_and_completed_round_distinctions
     assert lead_scorer._stage_quote_supports_observation(
         observed, quote
     ) is supported
+
+
+@pytest.mark.parametrize(
+    ("observed", "quote"),
+    [
+        (
+            "series c+",
+            "We're excited to announce a Series E funding round of $100 million.",
+        ),
+        (
+            "series c+",
+            "Devoted Health is a Series F company based in Eagan. "
+            "Series F, Jan 30, 2026, $317M.",
+        ),
+        (
+            "series f",
+            "Anduril's Series F funding round that raised $1.5 billion.",
+        ),
+        (
+            "series a",
+            "A $10.3M Series A funding round has just closed for Learnosity.",
+        ),
+    ],
+)
+def test_saved_completed_round_word_orders_are_supported(observed, quote):
+    assert lead_scorer._stage_quote_supports_observation(observed, quote) is True
+
+
+@pytest.mark.parametrize(
+    ("observed", "quote"),
+    [
+        (
+            "series c+",
+            "We're excited to announce plans for a Series E funding round.",
+        ),
+        ("series c+", "Devoted Health is not a Series F company."),
+        (
+            "series c+",
+            "Anduril's Series F funding round could raise $1.5 billion.",
+        ),
+        ("series a", "A Series A funding round has not closed for Learnosity."),
+    ],
+)
+def test_new_round_word_orders_reject_uncompleted_or_negated_claims(observed, quote):
+    assert lead_scorer._stage_quote_supports_observation(observed, quote) is False
+
+
+def test_saved_completed_round_word_orders_match_series_c_plus_icp():
+    cases = [
+        (
+            "Spring Health",
+            "Series C+",
+            "We're excited to announce a Series E funding round of $100 million.",
+        ),
+        (
+            "Devoted Health",
+            "Series C+",
+            "Devoted Health is a Series F company based in Eagan. "
+            "Series F, Jan 30, 2026, $317M.",
+        ),
+        (
+            "Anduril Industries",
+            "Series F",
+            "Anduril's Series F funding round that raised $1.5 billion.",
+        ),
+    ]
+    for name, observed, quote in cases:
+        verdict = {
+            "observed_company_name": name,
+            "observed_company_stage": observed,
+            "stage_matches": True,
+            "stage_evidence_url": "https://example.com/funding",
+            "stage_evidence_quote": quote,
+        }
+        assert lead_scorer._decision_from_observed_stage(
+            verdict,
+            "series c+",
+            company=_company(company_name=name, company_stage=observed),
+        ) == COMPANY_FIT_MATCH
+
+
+def test_learnosity_round_syntax_does_not_override_current_acquisition():
+    verdict = {
+        "observed_company_name": "Learnosity",
+        "observed_company_stage": "Series A",
+        "stage_matches": True,
+        "stage_evidence_url": "https://learnosity.com/series-a",
+        "stage_evidence_quote": (
+            "A $10.3M Series A funding round has just closed for Learnosity."
+        ),
+        "required_attribute_evidence_url": "https://learnosity.com/company",
+        "required_attribute_evidence_quote": (
+            "Learnosity was acquired by Leeds Equity Partners in January 2025."
+        ),
+    }
+
+    assert lead_scorer._decision_from_observed_stage(
+        verdict,
+        "series a",
+        company=_company(
+            company_name="Learnosity",
+            company_website="https://learnosity.com/",
+            company_stage="Series A",
+        ),
+    ) == COMPANY_FIT_UNAVAILABLE
 
 
 @pytest.mark.parametrize(
@@ -364,6 +589,59 @@ def test_stale_venture_stage_with_bound_current_owner_proof_requires_repair():
     )
 
     assert decision == COMPANY_FIT_UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    ("quote", "expected"),
+    [
+        (
+            "Bain Capital completed its take-private acquisition of Envestnet.",
+            COMPANY_FIT_UNAVAILABLE,
+        ),
+        (
+            "Envestnet has been taken private by Bain Capital.",
+            COMPANY_FIT_UNAVAILABLE,
+        ),
+        (
+            "Envestnet is no longer publicly listed after the transaction closed.",
+            COMPANY_FIT_UNAVAILABLE,
+        ),
+        (
+            "Bain Capital completes acquisition of Envestnet.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Envestnet will be taken private if the proposed transaction closes.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Another Company has been taken private. Envestnet remains listed.",
+            COMPANY_FIT_MATCH,
+        ),
+    ],
+)
+def test_public_stage_reopens_only_for_bound_completed_take_private_or_delisting(
+    quote, expected
+):
+    verdict = {
+        "observed_company_name": "Envestnet",
+        "observed_company_stage": "Public",
+        "stage_matches": True,
+        "stage_evidence_url": "https://envestnet.com/old-listing",
+        "stage_evidence_quote": "Envestnet, Inc. (NYSE: ENV) is publicly traded.",
+        "required_attribute_evidence_url": "https://envestnet.com/transaction",
+        "required_attribute_evidence_quote": quote,
+    }
+
+    assert lead_scorer._decision_from_observed_stage(
+        verdict,
+        "public",
+        company=_company(
+            company_name="Envestnet",
+            company_website="https://envestnet.com/",
+            company_stage="Public",
+        ),
+    ) == expected
 
 
 def test_investigator_receipt_cannot_bypass_acquired_subject_binding():

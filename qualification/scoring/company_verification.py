@@ -856,23 +856,6 @@ async def verify_company_exists(
             actual_final_url=observed_url,
         )
 
-    # ----- Parked-domain detection ------------------------------------------
-    if _PARKED_DOMAIN_RE.search(text):
-        submitted_identity.update(decision="mismatch", reason_code="identity_mismatch")
-        return _identity_result(
-            submitted_identity,
-            "website is a parked / for-sale page",
-            actual_final_url=observed_url,
-        )
-
-    if _homepage_body_is_unusable(text):
-        return _identity_result(
-            submitted_identity,
-            "website fetch error: homepage response body is unusable",
-            actual_final_url=observed_url,
-            failure_reason_code="malformed_response",
-        )
-
     try:
         observed_domain = _registrable_domain(observed_url)
     except Exception as exc:
@@ -896,6 +879,23 @@ async def verify_company_exists(
             actual_final_url=observed_url,
         )
 
+    # ----- Parked-domain detection ------------------------------------------
+    if _PARKED_DOMAIN_RE.search(text):
+        submitted_identity.update(decision="mismatch", reason_code="identity_mismatch")
+        return _identity_result(
+            submitted_identity,
+            "website is a parked / for-sale page",
+            actual_final_url=observed_url,
+        )
+
+    if _homepage_body_is_unusable(text):
+        return _identity_result(
+            submitted_identity,
+            "website fetch error: homepage response body is unusable",
+            actual_final_url=observed_url,
+            verified_homepage_transport_domain=domain,
+            failure_reason_code="malformed_response",
+        )
     observed_names = _homepage_company_names(text)
     observed_linkedins = _homepage_company_linkedin_urls(text)
     if observed_names and not observed_linkedins:

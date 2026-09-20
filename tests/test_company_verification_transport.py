@@ -492,6 +492,7 @@ def test_tiny_non_html_homepage_body_is_malformed_provider_response(
     assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert result.reason == "website fetch error: homepage response body is unusable"
     assert result.details["failure_reason_code"] == "malformed_response"
+    assert result.details["verified_homepage_transport_domain"] == "example.co.uk"
 
 
 @pytest.mark.parametrize(
@@ -1729,6 +1730,33 @@ def test_cross_registrable_domain_redirect_is_identity_conflict(monkeypatch):
     )
     assert result.decision == COMPANY_FIT_MISMATCH
     assert result.details["actual_final_url"] == "https://attacker.example/final"
+    assert "redirect changed registrable domain" in (result.reason or "")
+
+
+def test_unusable_off_domain_redirect_never_supplies_transport_anchor(monkeypatch):
+    from urllib.parse import urlsplit
+
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification._registrable_domain",
+        lambda url: str(urlsplit(url).hostname or "").removeprefix("www."),
+    )
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification.aiohttp.ClientSession",
+        lambda **_kwargs: _Session(
+            _Response(
+                200,
+                b"Provider account capacity details redacted.",
+                "https://attacker.example/final",
+            )
+        ),
+    )
+
+    result = asyncio.run(
+        verify_company_exists("Example Company", "https://example.co.uk")
+    )
+
+    assert result.decision == COMPANY_FIT_MISMATCH
+    assert "verified_homepage_transport_domain" not in result.details
     assert "redirect changed registrable domain" in (result.reason or "")
 
 

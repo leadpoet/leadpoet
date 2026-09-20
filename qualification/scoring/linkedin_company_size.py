@@ -30,6 +30,7 @@ STRUCTURED_PROFILE_TIMEOUT_SECONDS = 30.0
 STRUCTURED_PROFILE_PROVIDER = "harvestapi_get_company"
 STRUCTURED_PROFILE_SOURCE_FIELD = "employeeCountRange"
 STRUCTURED_PROFILE_COMPANY_TYPE_SOURCE_FIELD = "companyType"
+STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD = "name"
 STRUCTURED_PROFILE_PUBLIC_COMPANY_TYPE = "Public Company"
 STRUCTURED_PROFILE_PRIVATE_COMPANY_TYPE = "Privately Held"
 CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE: Literal[
@@ -143,6 +144,14 @@ class StructuredLinkedInCompanySizeEvidence(TypedDict):
 
 class StructuredLinkedInPublicCompanyEvidence(TypedDict):
     company_type: str
+    provider: str
+    source_field: str
+    url: str
+    website: str
+
+
+class StructuredLinkedInCompanyIdentityEvidence(TypedDict):
+    name: str
     provider: str
     source_field: str
     url: str
@@ -389,6 +398,45 @@ def project_structured_linkedin_company_size(
     return None
 
 
+def project_structured_linkedin_company_identity(
+    requested_domain: str,
+    requested_profile_url: str,
+    payload: Any,
+) -> Optional[StructuredLinkedInCompanyIdentityEvidence]:
+    """Project the main profile's exact name, website, and LinkedIn slug."""
+
+    domain = _canonical_company_domain(requested_domain)
+    profile_url = _strict_linkedin_company_profile_url(requested_profile_url)
+    requested_slug = linkedin_company_page_slug(profile_url)
+    if not domain or not requested_slug or _structured_provider_reported_error(payload):
+        return None
+    elements = _structured_company_elements(payload)
+    if len(elements) != 1:
+        return None
+    element = elements[0]
+    returned_profile = _strict_linkedin_company_profile_url(
+        element.get("linkedinUrl") or element.get("linkedin_url")
+    )
+    name = element.get("name")
+    if (
+        not _structured_company_domain_matches(domain, element.get("website"))
+        or linkedin_company_page_slug(returned_profile) != requested_slug
+        or not isinstance(name, str)
+        or name != name.strip()
+        or not name
+        or len(name) > 200
+        or any(ord(character) < 32 for character in name)
+    ):
+        return None
+    return {
+        "name": name,
+        "provider": STRUCTURED_PROFILE_PROVIDER,
+        "source_field": STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD,
+        "url": profile_url,
+        "website": f"https://{domain}/",
+    }
+
+
 def project_structured_linkedin_public_company(
     requested_domain: str,
     requested_profile_url: str,
@@ -451,6 +499,7 @@ async def fetch_structured_linkedin_company_size(
     *,
     diagnostic: Optional[dict[str, str]] = None,
     public_company_evidence: Optional[dict[str, str]] = None,
+    company_identity_evidence: Optional[dict[str, str]] = None,
 ) -> Optional[StructuredLinkedInCompanySizeEvidence]:
     """Fetch one profile and project size plus optional company-type evidence."""
 
@@ -501,6 +550,13 @@ async def fetch_structured_linkedin_company_size(
     )
     if public_company_evidence is not None and public_evidence is not None:
         public_company_evidence.update(public_evidence)
+    identity_evidence = project_structured_linkedin_company_identity(
+        domain,
+        canonical_profile,
+        body,
+    )
+    if company_identity_evidence is not None and identity_evidence is not None:
+        company_identity_evidence.update(identity_evidence)
     evidence = project_structured_linkedin_company_size(
         domain,
         canonical_profile,

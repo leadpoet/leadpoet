@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from gateway.qualification.models import CompanyOutput, ICPPrompt
-from lab_arena import scorer_entrypoint
+from lab_arena import company_judgments, scorer_entrypoint
 from lab_arena import scoring as arena_scoring
 from qualification.scoring import company_verification, lead_scorer
 from qualification.scoring.company_fit_decision import (
@@ -1418,6 +1418,137 @@ def test_structured_company_fetch_uses_one_bounded_approved_operation(monkeypatc
     assert request["json"] == {
         "payload": {"url": "https://www.linkedin.com/company/acme"}
     }
+
+
+def test_structured_company_identity_projects_only_exact_main_profile():
+    payload = _structured_company_payload(
+        name="Truist",
+        website="http://www.truist.com",
+        linkedinUrl=(
+            "https://www.linkedin.com/company/truistfinancialcorporation/"
+        ),
+    )
+    payload["result"]["data"]["element"]["similarOrganizations"] = [{
+        "name": "Wrong Parent",
+        "website": "https://truist.com",
+        "linkedinUrl": (
+            "https://www.linkedin.com/company/truistfinancialcorporation/"
+        ),
+    }]
+
+    assert linkedin_company_size.project_structured_linkedin_company_identity(
+        "truist.com",
+        "https://www.linkedin.com/company/truistfinancialcorporation",
+        payload,
+    ) == {
+        "name": "Truist",
+        "provider": "harvestapi_get_company",
+        "source_field": "name",
+        "url": (
+            "https://www.linkedin.com/company/truistfinancialcorporation"
+        ),
+        "website": "https://truist.com/",
+    }
+
+    payload["result"]["data"]["element"].update(
+        name="Wrong Parent",
+        website="https://wrong.example",
+    )
+    assert linkedin_company_size.project_structured_linkedin_company_identity(
+        "truist.com",
+        "https://www.linkedin.com/company/truistfinancialcorporation",
+        payload,
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("name", "Other Bank"),
+        ("website", "https://other.example/"),
+        ("url", "https://www.linkedin.com/company/other-bank"),
+        ("provider", "other_provider"),
+        ("source_field", "displayName"),
+    ],
+)
+def test_structured_profile_alias_rejects_any_identity_mismatch(field, value):
+    company = _company(linkedin="").model_copy(update={
+        "company_name": "Truist",
+        "company_website": "https://truist.com",
+    })
+    web_identity = lead_scorer._web_identity_receipt(
+        company,
+        {
+            "observed_company_name": "Truist Financial Corporation",
+            "observed_company_website": "https://truist.com",
+            "observed_company_linkedin": (
+                "https://www.linkedin.com/company/truistfinancialcorporation"
+            ),
+        },
+        company_quality=True,
+    )
+    structured = {
+        "name": "Truist",
+        "provider": "harvestapi_get_company",
+        "source_field": "name",
+        "url": "https://www.linkedin.com/company/truistfinancialcorporation",
+        "website": "https://truist.com/",
+    }
+    structured[field] = value
+
+    assert not lead_scorer._structured_profile_alias_identity_receipt(
+        company,
+        web_identity,
+        structured,
+        "truist.com",
+        company_quality=True,
+    )
+
+
+def test_structured_profile_alias_binds_brand_without_submitted_linkedin():
+    company = _company(linkedin="").model_copy(update={
+        "company_name": "Truist",
+        "company_website": "https://truist.com",
+    })
+    web_identity = lead_scorer._web_identity_receipt(
+        company,
+        {
+            "observed_company_name": "Truist Financial Corporation",
+            "observed_company_website": "https://truist.com",
+            "observed_company_linkedin": (
+                "https://www.linkedin.com/company/truistfinancialcorporation"
+            ),
+        },
+        company_quality=True,
+    )
+    structured = {
+        "name": "Truist",
+        "provider": "harvestapi_get_company",
+        "source_field": "name",
+        "url": "https://www.linkedin.com/company/truistfinancialcorporation",
+        "website": "https://truist.com/",
+    }
+
+    assert lead_scorer._alias_unresolved_structured_profile_lookup(
+        web_identity,
+        "truist.com",
+    )["linkedin_company_slug"] == "truistfinancialcorporation"
+    resolved = lead_scorer._structured_profile_alias_identity_receipt(
+        company,
+        web_identity,
+        structured,
+        "truist.com",
+        company_quality=True,
+    )
+    assert resolved["decision"] == COMPANY_FIT_MATCH
+    assert resolved["reason_code"] == "structured_profile_alias_verified"
+    assert not lead_scorer._structured_profile_alias_identity_receipt(
+        company,
+        web_identity,
+        None,
+        "truist.com",
+        company_quality=True,
+    )
 
 
 @pytest.mark.parametrize(
@@ -3026,6 +3157,186 @@ def test_structured_public_stage_scorer_entrypoint_transition(
     assert receipt["dimension_evidence"]["stage"]["web_evidence"] == (
         structured_stage_evidence
     )
+
+
+def test_truist_structured_identity_recovers_full_scorer_entrypoint(monkeypatch):
+    for name, value in scorer_entrypoint.PLACEHOLDER_CREDENTIALS.items():
+        monkeypatch.setenv(name, value)
+    calls = {"web": 0, "structured": 0, "exa": 0}
+    profile_url = (
+        "https://www.linkedin.com/company/truistfinancialcorporation"
+    )
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_unavailable(
+            "website fetch error: homepage response body is unusable",
+            details={
+                "failure_reason_code": "malformed_response",
+                "verified_homepage_transport_domain": "truist.com",
+            },
+        )
+
+    async def provider(**_kwargs):
+        calls["web"] += 1
+        return {
+            "observed_company_name": "Truist Financial Corporation",
+            "observed_company_website": "https://www.truist.com",
+            "observed_company_linkedin": profile_url,
+            "observed_employee_count": 29447,
+            "employee_size_matches": True,
+            "employee_size_evidence_url": profile_url,
+            "employee_size_evidence_quote": "29,447 associated members.",
+            "observed_industry": "Financial Services",
+            "observed_subindustry": "Banking",
+            "industry_matches": True,
+            "industry_activity_role": "supplier_operator",
+            "industry_evidence_url": "https://www.truist.com/about",
+            "industry_evidence_quote": "Truist provides banking services.",
+            "observed_hq_country": "United States",
+            "observed_hq_state": "North Carolina",
+            "geography_matches": True,
+            "geography_evidence_url": "https://www.truist.com/about",
+            "geography_evidence_quote": (
+                "Truist is headquartered in Charlotte, North Carolina."
+            ),
+            "observed_company_stage": "Public",
+            "stage_matches": True,
+            "stage_evidence_url": "https://ir.truist.com/",
+            "stage_evidence_quote": "Truist Financial Corporation NYSE TFC",
+            "attribute_satisfied": None,
+            "required_attribute_evidence_url": "",
+            "required_attribute_evidence_quote": "",
+            "reason": "Independent sources support the company.",
+        }, ""
+
+    async def structured_profile(
+        domain,
+        url,
+        *,
+        diagnostic,
+        public_company_evidence,
+        company_identity_evidence,
+    ):
+        del diagnostic
+        calls["structured"] += 1
+        assert (domain, url) == ("truist.com", profile_url)
+        company_identity_evidence.update({
+            "name": "Truist",
+            "provider": "harvestapi_get_company",
+            "source_field": "name",
+            "url": profile_url,
+            "website": "https://truist.com/",
+        })
+        public_company_evidence.update({
+            "company_type": "Public Company",
+            "provider": "harvestapi_get_company",
+            "source_field": "companyType",
+            "url": profile_url,
+            "website": "https://truist.com/",
+        })
+        return {
+            "employee_count": "10,001+",
+            "provider": "harvestapi_get_company",
+            "source_field": "employeeCountRange",
+            "url": profile_url,
+            "website": "https://truist.com/",
+        }
+
+    async def exa_profile(url, **_kwargs):
+        calls["exa"] += 1
+        return {"outcome": "insufficient_evidence", "url": url}
+
+    async def intent_score(*_args, **_kwargs):
+        return 60.0, 100, "verified", "2026-09-03", 0
+
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_structured_linkedin_company_size",
+        structured_profile,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_current_linkedin_company_size",
+        exa_profile,
+    )
+    monkeypatch.setattr(lead_scorer, "_score_single_intent_signal", intent_score)
+    icp = _icp().model_copy(update={
+        "industry": "Financial Services",
+        "employee_count": "10,001+",
+        "company_stage": "Public",
+        "intent_signals": ["Leadership change"],
+    })
+    company = _competition_company()
+    company.update({
+        "company_name": "Truist",
+        "company_website": "https://www.truist.com/",
+        "company_linkedin": profile_url,
+        "industry": "Financial Services",
+        "employee_count": "10,001+",
+        "company_stage": "Public",
+        "state": "North Carolina",
+    })
+    company["intent_signals"][0].update({
+        "description": "Truist appointed a national brokerage director.",
+        "date": "2026-09-03",
+        "url": (
+            "https://ir.truist.com/2026-09-03-Tory-Sherman-joins-Truist-"
+            "Wealth-as-Wealth-Brokerage-national-director"
+        ),
+    })
+    document = arena_scoring.build_scoring_input(
+        scored_run_id="truist-structured-identity",
+        icp=icp.model_dump(mode="json"),
+        companies=[company],
+        policy=arena_scoring.build_scorer_policy(
+            scoring_adapter_version="qualification_integrity_v2",
+            company_quality=True,
+        ),
+        evaluation_date="2026-09-20",
+    )
+    [company_ref] = company_judgments.build_company_scopes(
+        scoring_input=document,
+        round_id="arena-2026-09-20",
+        network_name="finney",
+        netuid=71,
+        scorer_image_digest="sha256:" + "a" * 64,
+        scorer_image_reference="registry/scorer@sha256:" + "a" * 64,
+        integrity_policy="arena_integrity_v1",
+        company_quality_policy="company_quality_v1",
+    )
+    document["company_judgment_cache"] = {
+        "schema_version": company_judgments.LEASE_SCHEMA_VERSION,
+        "hits": [],
+        "misses": [{
+            "company_index": company_ref["company_index"],
+            "cache_key": company_ref["cache_key"],
+            "company_input_hash": company_ref["company_input_hash"],
+            "authority_slot": 0,
+        }],
+    }
+
+    output = scorer_entrypoint.score_input(document)
+
+    assert "failure" not in output, (output, calls)
+    assert calls == {"web": 1, "structured": 1, "exa": 1}, output
+    receipt = output["breakdowns"][0]["verifier_gate_receipts"][0]
+    assert receipt["decision"] == COMPANY_FIT_MATCH
+    assert receipt["dimension_evidence"]["identity"][
+        "web_identity_receipt"
+    ]["reason_code"] == "structured_profile_alias_verified"
+    assert receipt["company_fit_dimensions"] == {
+        "identity": COMPANY_FIT_MATCH,
+        "employee_size": COMPANY_FIT_MATCH,
+        "industry": COMPANY_FIT_MATCH,
+        "geography": COMPANY_FIT_MATCH,
+        "stage": COMPANY_FIT_MATCH,
+    }
 
 
 @pytest.mark.parametrize("recovers", [True, False])

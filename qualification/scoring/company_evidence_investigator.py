@@ -203,11 +203,21 @@ def _safe_https_url(value: Any) -> str:
 
 
 def _plain_text(value: str) -> str:
+    decoded = html.unescape(value)
+    # Script and style bodies are not visible page evidence. Remove them before
+    # applying the fixed page-text bound so they cannot displace visible text.
+    for tag in ("script", "style"):
+        decoded = re.sub(
+            rf"<{tag}\b[^>]*>.*?</{tag}\s*>",
+            " ",
+            decoded,
+            flags=re.I | re.S,
+        )
     linked_urls = " ".join(
         match.rstrip("'\"<>.,)")
-        for match in re.findall(r"https?://[^\s'\"<>]+", value, flags=re.I)
+        for match in re.findall(r"https?://[^\s'\"<>]+", decoded, flags=re.I)
     )
-    without_markup = re.sub(r"<[^>]+>", " ", html.unescape(value))
+    without_markup = re.sub(r"<[^>]+>", " ", decoded)
     return " ".join((without_markup + " " + linked_urls).split())[:MAX_PAGE_CHARACTERS]
 
 
@@ -238,6 +248,29 @@ def _registrable_domain(value: Any) -> str:
 
 def _first_party_url(url: str, domains: set[str]) -> bool:
     return bool(_registrable_domain(url) in domains)
+
+
+def _independently_bound_first_party_url(
+    url: str,
+    domains: set[str],
+    identity: Mapping[str, Any],
+) -> bool:
+    """Require two independent identity observations to bind a source domain."""
+
+    domain = _registrable_domain(url)
+    return bool(
+        domain
+        and _first_party_url(url, domains)
+        and sum(
+            observed_domain == domain
+            for observed_domain in (
+                identity.get("submitted_domain"),
+                identity.get("observed_domain"),
+                identity.get("verified_domain"),
+            )
+        )
+        >= 2
+    )
 
 
 def _same_domain_name_alias(identity: Mapping[str, Any]) -> bool:
@@ -471,9 +504,20 @@ def _validated_findings(
                     evidence_quote="",
                     reason="submitted quote was not present in fetched source",
                 )
-            elif target in {"stage", "headcount"} and not _quote_names_company(
-                finding["evidence_quote"],
-                stage_attribution_names if target == "stage" else attribution_names,
+            elif (
+                target in {"stage", "headcount"}
+                and not _quote_names_company(
+                    finding["evidence_quote"],
+                    stage_attribution_names if target == "stage" else attribution_names,
+                )
+                and not (
+                    target == "stage"
+                    and _independently_bound_first_party_url(
+                        evidence_url,
+                        first_party_domains,
+                        identity_anchor or {},
+                    )
+                )
             ):
                 finding.update(
                     status="UNPROVEN",
@@ -686,6 +730,9 @@ async def investigate_company_evidence(
         "observed_name": (prior_observations or {}).get("observed_company_name"),
         "observed_domain": _registrable_domain(
             (prior_observations or {}).get("observed_company_website")
+        ),
+        "verified_domain": _registrable_domain(
+            (verified_homepage_identity or {}).get("registrable_dns_domain")
         ),
         "observed_linkedin_slug": linkedin_company_page_slug(
             (prior_observations or {}).get("observed_company_linkedin")

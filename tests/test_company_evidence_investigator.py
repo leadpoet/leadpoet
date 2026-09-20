@@ -425,6 +425,107 @@ def _finding(target: str, **overrides):
     return finding
 
 
+def test_plain_text_removes_nonvisible_blocks_before_clipping():
+    visible_quote = (
+        "2025 Following our Series B, we launched two new products that are "
+        "available today."
+    )
+    raw = (
+        "<html><head>"
+        f"<script>{'hidden-script-content ' * 2000}</script>"
+        f"<style>{'hidden-style-content ' * 2000}</style>"
+        "</head><body>"
+        f"<p>{visible_quote}</p>"
+        "<a href='https://acme.example/news'>News</a>"
+        "</body></html>"
+    )
+
+    text = investigator._plain_text(raw)
+
+    assert visible_quote in text
+    assert "hidden-script-content" not in text
+    assert "hidden-style-content" not in text
+    assert "https://acme.example/news" in text
+    assert len(text) <= investigator.MAX_PAGE_CHARACTERS
+
+
+def test_stage_quote_can_use_independently_bound_first_party_domain():
+    url = "https://acme.example/about"
+    quote = (
+        "2025 Following our Series B, we launched two new products that are "
+        "available today."
+    )
+    finding = _finding(
+        "stage",
+        observed_value="Series B",
+        evidence_url=url,
+        evidence_quote=quote,
+    )
+    bound_identity = {
+        "submitted_domain": "acme.example",
+        "observed_domain": "acme.example",
+        "verified_domain": "acme.example",
+    }
+
+    accepted = _validated_findings(
+        {"findings": [finding]},
+        targets=("stage",),
+        fetched_pages={url: quote},
+        first_party_domains={"acme.example"},
+        identity_names={"acme"},
+        identity_anchor=bound_identity,
+    )
+
+    assert accepted["stage"]["status"] == "VERIFIED"
+    assert accepted["stage"]["evidence_quote"] == quote
+
+    for rejected_url, rejected_domains, rejected_identity in (
+        (
+            "https://news.example/article",
+            {"acme.example"},
+            bound_identity,
+        ),
+        (
+            url,
+            {"acme.example"},
+            {
+                "submitted_domain": "acme.example",
+                "observed_domain": "other.example",
+                "verified_domain": "",
+            },
+        ),
+    ):
+        rejected_finding = {
+            **finding,
+            "evidence_url": rejected_url,
+        }
+        rejected = _validated_findings(
+            {"findings": [rejected_finding]},
+            targets=("stage",),
+            fetched_pages={rejected_url: quote},
+            first_party_domains=rejected_domains,
+            identity_names={"acme"},
+            identity_anchor=rejected_identity,
+        )
+        assert rejected["stage"]["status"] == "UNPROVEN"
+
+    headcount_quote = "We employ 42 people across our offices."
+    rejected_headcount = _validated_findings(
+        {"findings": [_finding(
+            "headcount",
+            observed_value=42,
+            evidence_url=url,
+            evidence_quote=headcount_quote,
+        )]},
+        targets=("headcount",),
+        fetched_pages={url: headcount_quote},
+        first_party_domains={"acme.example"},
+        identity_names={"acme"},
+        identity_anchor=bound_identity,
+    )
+    assert rejected_headcount["headcount"]["status"] == "UNPROVEN"
+
+
 def test_decisive_quote_must_occur_in_fetched_page():
     url = "https://acme.example/investors"
     finding = _finding("stage", evidence_url=url)

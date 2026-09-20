@@ -465,6 +465,14 @@ def _stage1_scores(service: Any, row: Mapping[str, Any]) -> Dict[str, float]:
     # Intermediate scores must not escape before evaluation is published.
     if row.get("status") != "published":
         return {}
+    configuration = row.get("configuration_doc")
+    configuration = configuration if isinstance(configuration, Mapping) else {}
+    per_icp_policy = (
+        configuration.get("sourcing_cost_eligibility_policy")
+        == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+    )
+    published_stage1 = _rankings(row, "stage1_ranking") if per_icp_policy else {}
+    final_rankings = _rankings(row, "final_ranking") if per_icp_policy else {}
     selected: Dict[tuple[str, int], Mapping[str, Any]] = {}
     for run in service._store.list_runs(str(row["round_id"]), stage=1, kind="execute"):
         if run.get("per_icp_score") is None:
@@ -479,11 +487,42 @@ def _stage1_scores(service: Any, row: Mapping[str, Any]) -> Dict[str, float]:
     positions = contracts.stage_positions(1)
     for participant in _participants(row):
         submission_id = str(participant.get("submission_id") or "")
+        is_baseline = bool(
+            participant.get("is_baseline", participant.get("is_king", False))
+        )
+        if per_icp_policy and not is_baseline:
+            published_score = _score(
+                (published_stage1.get(submission_id) or {}).get("stage1_score")
+            )
+            if submission_id and published_score is not None:
+                result[submission_id] = published_score
+            continue
         runs = [selected.get((submission_id, position)) for position in positions]
         if submission_id and all(run is not None for run in runs):
+            values = [
+                float(run["per_icp_score"]) for run in runs if run is not None
+            ]
+            if per_icp_policy:
+                frozen_cost = _cost_projection(
+                    final_rankings.get(submission_id) or {},
+                    sourcing_cost_eligibility_policy=(
+                        contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+                    ),
+                ).get("cost_summary")
+                if not isinstance(frozen_cost, Mapping):
+                    # A per-ICP score without its frozen publication-time cost
+                    # basis would expose the raw score under a different rule.
+                    continue
+                eligibility = {
+                    int(item["icp_position"]): bool(item["eligible"])
+                    for item in frozen_cost["per_icp"]
+                }
+                values = [
+                    value if eligibility[position] else 0.0
+                    for position, value in zip(positions, values)
+                ]
             result[submission_id] = verify.stage_score(
-                [float(run["per_icp_score"]) for run in runs if run is not None],
-                len(positions),
+                values, len(positions),
             )
     return result
 

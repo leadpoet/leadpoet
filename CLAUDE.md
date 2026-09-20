@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: public stage-score cost parity
+
+On 2026-09-20 the user explicitly authorized fixing the confirmed public
+Stage 1 score reporting mismatch, testing it, pushing to main, and deploying.
+Use the same frozen cost basis as the published final score. Preserve historical
+round policies, private disclosure boundaries, raw stored scores, provider costs,
+scoring, promotion rules, and all concurrent work. Authority includes protected
+read-only production checks and the canonical gateway restart with live API
+verification. The separate champion-incentive repair remains owned by its other
+chat. Do not change reward state, rerun models, or rescore historical results.
+This scope ends after deployment and verification.
+
 ## Scoped production authorization: September 20 invalid champion correction
 
 On 2026-09-20 the user explicitly authorized correcting the invalid September 20

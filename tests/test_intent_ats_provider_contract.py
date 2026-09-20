@@ -296,7 +296,7 @@ async def test_greenhouse_decodes_encoded_job_heading_before_body_gate(monkeypat
         ({
             "first_published": "August 20, 2026",
             "updated_at": "2026-09-12T09:00:00-04:00",
-        }, ""),
+        }, "2026-08-20"),
     ],
 )
 async def test_greenhouse_publication_date_uses_only_first_published(

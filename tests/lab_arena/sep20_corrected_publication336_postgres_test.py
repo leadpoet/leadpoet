@@ -18,6 +18,7 @@ from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS
 
 ROUND = rerun332.ROUND
 ARCHIVE = ROUND + "-r337archive"
+SCORE_NAMESPACE = "rerun337"
 TEMPLATE = (
     Path(__file__).parents[2]
     / "scripts/336-arena-2026-09-20-corrected-publication-release.sql.template"
@@ -60,6 +61,7 @@ def _capture_publication(service) -> dict:
 
 def _render(cursor, publication: dict) -> str:
     values = {
+        "__ARCHIVE_ROUND_ID__": ARCHIVE,
         "__ARCHIVE_ROUND_SHA256__": _digest(
             cursor,
             "SELECT to_jsonb(r) FROM public.lab_arena_rounds r WHERE round_id=%s",
@@ -102,6 +104,7 @@ def _render(cursor, publication: dict) -> str:
                 )
             )
         ),
+        "__SCORE_NAMESPACE__": SCORE_NAMESPACE,
     }
     for marker, table, order in (
         ("__SUBMISSIONS_SHA256__", "lab_arena_submissions", "submission_id"),
@@ -194,6 +197,43 @@ def _prepare_scored337(connection, harness, monkeypatch):
         )
         assert cursor.fetchone() == ("scored", 98, 98)
     connection.commit()
+
+
+def _add_superseded_failed_score_attempt(cursor, *, linked=True):
+    cursor.execute(
+        "SELECT run_id FROM public.lab_arena_runs WHERE round_id=%s "
+        "AND kind='score' AND status='accepted' ORDER BY run_id LIMIT 1",
+        (ROUND,),
+    )
+    accepted_run_id = cursor.fetchone()[0]
+    cursor.execute("ALTER TABLE public.lab_arena_runs DISABLE TRIGGER USER")
+    cursor.execute(
+        "UPDATE public.lab_arena_runs SET attempt=2,updated_at=clock_timestamp() "
+        "WHERE run_id=%s RETURNING assignment_id",
+        (accepted_run_id,),
+    )
+    assignment_id = cursor.fetchone()[0]
+    failed_assignment_id = assignment_id if linked else assignment_id.replace(
+        ":score:rerun337", ":orphan:score:rerun337"
+    )
+    cursor.execute(
+        "INSERT INTO public.lab_arena_runs SELECT (jsonb_populate_record("
+        "NULL::public.lab_arena_runs,to_jsonb(failed)||jsonb_build_object("
+        "'run_id',failed.run_id||':failed','assignment_id',%s,'attempt',1,"
+        "'status','failed','terminal_cause','judge_error','result_doc',NULL,"
+        "'claim_request_id',NULL,'claim_request_hash',NULL,'claim_response',NULL,"
+        "'created_at',clock_timestamp(),'updated_at',clock_timestamp()))).* "
+        "FROM public.lab_arena_runs failed WHERE failed.run_id=%s",
+        (failed_assignment_id, accepted_run_id),
+    )
+    cursor.execute("ALTER TABLE public.lab_arena_runs ENABLE TRIGGER USER")
+    cursor.execute(
+        "SELECT count(*),count(*) FILTER(WHERE status='accepted'),"
+        "count(*) FILTER(WHERE status='failed') FROM public.lab_arena_runs "
+        "WHERE round_id=%s AND kind='score' AND assignment_id=%s",
+        (ROUND, assignment_id),
+    )
+    assert cursor.fetchone() == ((2, 1, 1) if linked else (1, 1, 0))
 
 
 def test_changed_decision_publishes_without_rewriting_reward_or_weights(
@@ -319,14 +359,76 @@ def test_template_is_inactive_and_separates_publication_from_reward():
     assert body.count("UPDATE public.lab_arena_rounds SET") == 1
     assert "king_outcome=corrected_outcome,king_hotkey=corrected_hotkey" in body
     assert "INSERT INTO" not in body and "DELETE FROM" not in body
-    assert "assignment_id NOT LIKE '%:score:rerun337'" in body
-    assert "arena-2026-09-20-r337archive" in body
+    assert "assignment_id NOT LIKE '%:score:__SCORE_NAMESPACE__'" in body
+    assert "round_id='__ARCHIVE_ROUND_ID__'" in body
+    assert "accepted_retry.attempt>score_run.attempt" in body
+    assert "count(DISTINCT scored_run_id)" in body
     assert "archived.king_outcome IS DISTINCT FROM '__OLD_KING_OUTCOME__'" in body
     assert "__CORRECTED_KING_DECISION_SHA256__" in body
     assert "DISABLE TRIGGER USER" in body
     assert "CREATE OR REPLACE FUNCTION" not in body
     assert "stable_after IS DISTINCT FROM stable_before" in body
     assert "lab_arena_000_sep20_rejudge332_publication_stop" in body
+
+
+def test_superseded_failed_score_attempt_is_preserved_and_hash_bound(
+    database, tmp_path, monkeypatch
+):
+    psycopg2, dsn = database
+    harness = rerun332.IsolatedHarness(
+        lambda: psycopg2.connect(**dsn), tmp_path, challengers=[], runners=["alpha"]
+    )
+    harness.round_id = ROUND
+    with psycopg2.connect(**dsn) as connection:
+        _prepare_scored337(connection, harness, monkeypatch)
+        publication = _capture_publication(harness.service)
+        with connection.cursor() as cursor:
+            _add_superseded_failed_score_attempt(cursor)
+            rendered = _render(cursor, publication)
+            assert "<>99" in rendered
+            cursor.execute("SAVEPOINT failed_history_hash")
+            cursor.execute("ALTER TABLE public.lab_arena_runs DISABLE TRIGGER USER")
+            cursor.execute(
+                "UPDATE public.lab_arena_runs SET terminal_doc='{}'::jsonb "
+                "WHERE round_id=%s AND kind='score' AND status='failed'",
+                (ROUND,),
+            )
+            cursor.execute("ALTER TABLE public.lab_arena_runs ENABLE TRIGGER USER")
+            with pytest.raises(
+                psycopg2.Error, match="corrected publication preimage differs"
+            ):
+                cursor.execute(rendered)
+            cursor.execute("ROLLBACK TO SAVEPOINT failed_history_hash")
+            cursor.execute(rendered)
+            cursor.execute(
+                "SELECT count(*),count(*) FILTER(WHERE status='accepted'),"
+                "count(*) FILTER(WHERE status='failed') FROM public.lab_arena_runs "
+                "WHERE round_id=%s AND kind='score'",
+                (ROUND,),
+            )
+            assert cursor.fetchone() == (99, 98, 1)
+        connection.commit()
+
+
+def test_failed_score_without_later_accepted_attempt_is_rejected(
+    database, tmp_path, monkeypatch
+):
+    psycopg2, dsn = database
+    harness = rerun332.IsolatedHarness(
+        lambda: psycopg2.connect(**dsn), tmp_path, challengers=[], runners=["alpha"]
+    )
+    harness.round_id = ROUND
+    with psycopg2.connect(**dsn) as connection:
+        _prepare_scored337(connection, harness, monkeypatch)
+        publication = _capture_publication(harness.service)
+        with connection.cursor() as cursor:
+            _add_superseded_failed_score_attempt(cursor, linked=False)
+            rendered = _render(cursor, publication)
+            with pytest.raises(
+                psycopg2.Error, match="corrected publication preimage differs"
+            ):
+                cursor.execute(rendered)
+        connection.rollback()
 
 
 def test_no_king_alignment_keeps_historical_reward_authority(

@@ -87,6 +87,7 @@ def test_leadership_rules_reach_both_prompt_stages() -> None:
 
 def test_advertising_measurement_and_acquisition_completion_reach_both_stages() -> None:
     row = _row()
+    row["_target_signal_text"] = "Launched advertising technology OR completed an acquisition."
     for prompt in (
         intent._build_verification_prompt(row),
         intent._build_final_judge_prompt(row, {"results": [], "statuses": []}),
@@ -97,3 +98,13 @@ def test_advertising_measurement_and_acquisition_completion_reach_both_stages() 
         assert "requires evidence that the transaction closed" in prompt
         assert "court approval" in prompt
         assert "expected future closing do not prove completion" in prompt
+
+
+def test_unrelated_guidance_does_not_displace_source_evidence() -> None:
+    row = _row()
+    for prompt in (
+        intent._build_verification_prompt(row),
+        intent._build_final_judge_prompt(row, {"results": [], "statuses": []}),
+    ):
+        assert "paid campaign" not in prompt
+        assert "requires evidence that the transaction closed" not in prompt

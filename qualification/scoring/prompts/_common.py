@@ -212,19 +212,21 @@ PART_A_BLOCK = """  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
         sales-team expansion.
       * "Company X has a careers page" is NOT the same as "Company X has
         open positions for {role}".
-      * Advertising technology includes tools that measure paid campaign
-        visibility, attribution, or advertising ROI. Such a launch can satisfy
-        an advertising-technology launch target even if the product does not
-        buy or serve ads. Verify the actual capability and all target qualifiers.
-      * A completed acquisition requires evidence that the transaction closed.
-        An agreement, proposed deal, shareholder or court approval, and an
-        expected future closing do not prove completion. If the target instead
-        asks for an announced acquisition, apply that wording as written.
     If miner_claim does not semantically map to target_icp_signal, return
     `contradicted` (the URL is about a different topic than the ICP
     signal asks for).  Do NOT return `wrong_entity` — `wrong_entity` is
     reserved STRICTLY for entity-identity mismatch in PART 0."""
 
+
+ADVERTISING_BLOCK = """      * Advertising technology includes tools that measure paid campaign
+        visibility, attribution, or advertising ROI. Such a launch can satisfy
+        an advertising-technology launch target even if the product does not
+        buy or serve ads. Verify the actual capability and all target qualifiers."""
+
+ACQUISITION_BLOCK = """      * A completed acquisition requires evidence that the transaction closed.
+        An agreement, proposed deal, shareholder or court approval, and an
+        expected future closing do not prove completion. If the target instead
+        asks for an announced acquisition, apply that wording as written."""
 
 MARKET_EXPANSION_BLOCK = """  MARKET_EXPANSION — NEW-MARKET PROOF:
     Apply this block only to a chosen new-market alternative in the actual
@@ -424,6 +426,13 @@ def build_verification_prompt(
     """
     signal = visible_signal(row)
     parts: List[str] = [PART_0_BLOCK, PART_A_BLOCK]
+    # Keep unrelated guidance out of the fixed prompt budget so it does not
+    # displace source evidence. These are interpretation hints, not gates.
+    criterion = str(row.get("_target_signal_text") or "").lower()
+    if any(term in criterion for term in ("advertis", "adtech", "ad tech", "paid campaign")):
+        parts.append(ADVERTISING_BLOCK)
+    if any(term in criterion for term in ("acquisition", "acquire", "merger")):
+        parts.append(ACQUISITION_BLOCK)
     if row.get("_evidence_type") == "MARKET_EXPANSION":
         parts.append(MARKET_EXPANSION_BLOCK)
     if row.get("_evidence_type") in {"FUNDING", "FINANCING"}:

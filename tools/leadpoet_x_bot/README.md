@@ -5,16 +5,15 @@ One Python process, one SQLite file, no third-party packages. Python 3.10+ on Li
 For a direct comment under a configured Leadpoet root post:
 
 1. Match `Poet`, any case or punctuation, plus a small configurable typo list.
-2. Reply **Sending!** directly to that comment.
-3. DM its author:
+2. DM its author:
 
 > Book a quick demo, we’ll define your ICP, and get you 100 free lead credits:
 >
 > https://cal.com/team/leadpoet/chat
 
-4. If X explicitly reports that this recipient cannot receive the DM, reply to the original comment:
+3. Send **one** public reply directly to the original comment. If the DM succeeds, reply **Sending!**. If X explicitly reports that the recipient cannot receive the DM, use this alternative:
 
-> I couldn’t send you a DM. Please open your DMs or DM us first.
+> sending, please open your Dms!
 
 Every action is recorded separately in SQLite before its API call. A restart resumes the next safe step. It does not repeat a confirmed or uncertain action. Live replies and DMs are both disabled by `DRY_RUN=true`.
 
@@ -30,7 +29,7 @@ Matching uses whole words. `Poet`, `poet`, `POET`, `Poet!`, and `Poet, please` m
 
 **Current live-reply restriction:** X's [Manage Posts docs](https://docs.x.com/x-api/posts/manage-tweets/introduction) state that self-serve replies require the recipient to have explicitly summoned the replying account with an @mention or by quoting one of its posts. A bare `Poet` comment is detected, but the public reply can be rejected by X. Ask users to reply `@YOUR_ACTUAL_HANDLE Poet`; confirm posting eligibility on your account before launch. There is no code bypass for an API permission restriction.
 
-**Public reply count:** [X automation rules](https://help.x.com/en/rules-and-policies/x-automation) limit automated public replies to one per interaction. The requested acknowledgement plus a fallback is two public replies when a DM is unavailable. Test this flow in dry run; resolve this policy constraint before enabling live use. The simpler compliant ordering is to try the DM first and send only one public success/failure reply.
+The DM is attempted first. Both delivery outcomes share one persistent public-reply claim, so the bot cannot send both reply messages for the same comment. This follows the one-public-reply limit in [X automation rules](https://help.x.com/en/rules-and-policies/x-automation).
 
 Make the campaign post clear about the automated reply and DM, including a way to opt out. For example: “Reply @YOUR_ACTUAL_HANDLE Poet to request our automated demo link by DM and 100 free lead credits. To opt out, DM us.” Monitor that inbox and add opt-out user IDs to `DENIED_USER_IDS`, then restart the bot. This is a fixed-text bot, not an AI-generated reply bot. It does not automate the DM inbox or retry delivery after a recipient opens their DMs; staff can handle their inbound DM.
 
@@ -104,9 +103,9 @@ sudo systemctl status leadpoet-x-bot
 sudo journalctl -u leadpoet-x-bot -n 100 --no-pager
 ```
 
-Submit a test reply from another account to a configured post. Confirm one dry-run acknowledgement and DM sequence. Restart the service and confirm that none of those actions repeat. Check the service logs after each change. Never run a second host with a separate database for this campaign.
+Submit a test reply from another account to a configured post. Confirm one dry-run DM followed by one public reply. Restart the service and confirm that none of those actions repeat. Check the service logs after each change. Never run a second host with a separate database for this campaign.
 
-After resolving X account access and the public-reply policy above, change **only `DRY_RUN=false`** in `/etc/leadpoet-x-bot.env` and run `sudo systemctl restart leadpoet-x-bot`. Dry-run and live claims/checkpoints are separate: enabling live will process matching replies in the recent-search window, including those previously tested. To stop replies and DMs, set it back to `true` and restart, or stop the service.
+After confirming X account access, change **only `DRY_RUN=false`** in `/etc/leadpoet-x-bot.env` and run `sudo systemctl restart leadpoet-x-bot`. Dry-run and live claims/checkpoints are separate: enabling live will process matching replies in the recent-search window, including those previously tested. To stop replies and DMs, set it back to `true` and restart, or stop the service.
 
 For updates, stop the service, install `bot.py` from the new tested commit, and start it. Retain `/var/lib/leadpoet-x-bot/` across upgrades. Back up the SQLite file while the service is stopped. Never restore an older database after posting: it may forget replies that were sent after the backup. Run only one instance on one local disk; the file lock prevents a second process using the same database.
 
@@ -114,7 +113,7 @@ For updates, stop the service, install `bot.py` from the new tested commit, and 
 
 The bot persists each detected comment and commits a unique action claim before every public reply or DM. A confirmed action records the created post/event ID. It resumes pending steps from SQLite even if search no longer returns the comment. Removing a post from configuration or adding a recipient to the denylist stops their pending work.
 
-A timeout, server error, malformed success, or crash during sending leaves an uncertain claim that is never automatically retried. An uncertain acknowledgement stops the sequence; an uncertain DM does not trigger the open-DMs fallback. This gives **at-most-once actions**, not guaranteed delivery. X's documented write endpoints provide no idempotency key that could guarantee both. Do not clear an uncertain record merely because you cannot find the message immediately. Deduplication is per comment; a new qualifying comment is a new interaction.
+A timeout, server error, malformed success, or crash during sending leaves an uncertain claim that is never automatically retried. An uncertain DM stops the sequence without a public reply. An uncertain public reply is not retried, and the DM is not repeated. This gives **at-most-once actions**, not guaranteed delivery. X's documented write endpoints provide no idempotency key that could guarantee both. Do not clear an uncertain record merely because you cannot find the message immediately. Deduplication is per comment; a new qualifying comment is a new interaction.
 
 Explicit rate-limit rejections are retried after X's reset time/Retry-After. Read failures use backoff. Recipient DM error codes `150` and `349`, or an explicit recipient-unavailable error, enable the fallback. Generic `403`, missing app permissions, invalid credentials, rate limits, and server errors do **not** prove that the recipient closed their DMs. They must not produce that claim. See [X error definitions](https://developer.x.com/en/support/twitter-api/error-troubleshooting). Review failed/unknown/sending action records and logs; fix credentials or campaign permissions as needed. Do not delete processed IDs to force a retry.
 

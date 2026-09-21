@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock, patch, call
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
 
 import bot
@@ -35,14 +35,14 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stderr)
         second = self.run_fixture()
         self.assertEqual(second.returncode, 0, second.stderr)
-        self.assertEqual(first.stderr.count('Dry run would perform'), 13)
+        self.assertEqual(first.stderr.count('Dry run would perform'), 12)
         self.assertNotIn('Dry run would perform', second.stderr)
         # Compare durable state, not just log wording.
         with sqlite3.connect(self.env['STATE_DB']) as db:
             claims = db.execute("SELECT reply_id FROM comments").fetchall()
         self.assertCountEqual(claims, [('101',), ('102',), ('103',), ('104',), ('105',), ('201',)])
         with sqlite3.connect(self.env['STATE_DB']) as db:
-            self.assertEqual(db.execute('SELECT count(*) FROM actions').fetchone()[0], 13)
+            self.assertEqual(db.execute('SELECT count(*) FROM actions').fetchone()[0], 12)
 
     def test_only_configured_parent(self):
         self.env['MONITORED_POST_URLS'] = 'https://x.com/leadpoet/status/999'
@@ -110,7 +110,7 @@ class BotTests(unittest.TestCase):
         self.addCleanup(state.close)
         return bot.Bot(config, self.client, state, now=lambda: self.now)
 
-    def test_live_ack_then_dm_once_after_restart(self):
+    def test_live_dm_then_one_reply_after_restart(self):
         self.new_bot().run_once()
         self.new_bot().run_once()
         self.client.send_public_reply.assert_called_once_with('101', 'Sending!')
@@ -118,22 +118,23 @@ class BotTests(unittest.TestCase):
             'Book a quick demo, we’ll define your ICP, and get you 100 free lead credits:\n\n'
             'https://cal.com/team/leadpoet/chat')
         writes = [c for c in self.client.mock_calls if c[0] in ('send_public_reply', 'send_dm')]
-        self.assertEqual([c[0] for c in writes], ['send_public_reply', 'send_dm'])
+        self.assertEqual([c[0] for c in writes], ['send_dm', 'send_public_reply'])
 
     def test_dm_unavailable_fallback_is_direct_and_once(self):
         self.client.send_dm.return_value = ('unavailable', 'recipient unavailable')
         self.new_bot().run_once()
         self.new_bot().run_once()
-        self.assertEqual(self.client.send_public_reply.call_args_list,
-                         [call('101', 'Sending!'), call('101', self.config.dm_unavailable_reply)])
+        self.client.send_public_reply.assert_called_once_with('101', 'sending, please open your Dms!')
+        writes = [c[0] for c in self.client.mock_calls if c[0] in ('send_public_reply', 'send_dm')]
+        self.assertEqual(writes, ['send_dm', 'send_public_reply'])
         self.client.send_dm.assert_called_once()
 
     def test_uncertain_fallback_is_not_repeated_after_restart(self):
         self.client.send_dm.return_value = ('unavailable', 'recipient unavailable')
-        self.client.send_public_reply.side_effect = [('sent', '500'), ('unknown', 'timeout')]
+        self.client.send_public_reply.return_value = ('unknown', 'timeout')
         self.new_bot().run_once()
         self.new_bot().run_once()
-        self.assertEqual(self.client.send_public_reply.call_count, 2)
+        self.client.send_public_reply.assert_called_once()
         self.client.send_dm.assert_called_once()
 
     def test_removed_post_does_not_resume_pending_dm(self):
@@ -150,20 +151,20 @@ class BotTests(unittest.TestCase):
         self.new_bot().run_once()
         self.new_bot().run_once()
         self.client.send_dm.assert_called_once()
-        self.client.send_public_reply.assert_called_once()
+        self.client.send_public_reply.assert_not_called()
 
     def test_dm_permission_rejection_does_not_blame_recipient(self):
         self.client.send_dm.return_value = ('rejected', 'HTTP 403')
         self.new_bot().run_once()
-        self.client.send_public_reply.assert_called_once()
+        self.client.send_public_reply.assert_not_called()
 
-    def test_ack_success_dm_crash_does_not_duplicate_either(self):
+    def test_dm_crash_never_sends_public_reply_or_duplicate_dm(self):
         self.client.send_dm.side_effect = RuntimeError('simulated crash during DM')
         with self.assertRaises(RuntimeError):
             self.new_bot().run_once()
         self.client.send_dm.side_effect = None
         self.new_bot().run_once()
-        self.client.send_public_reply.assert_called_once()
+        self.client.send_public_reply.assert_not_called()
         self.client.send_dm.assert_called_once()
 
     def test_dm_rate_limit_resumes_without_search_or_ack_repeat(self):
@@ -203,6 +204,26 @@ class BotTests(unittest.TestCase):
         self.now += 601
         self.new_bot().run_once()
         self.new_bot().run_once()
+        self.assertEqual(self.client.send_public_reply.call_count, 2)
+
+    def test_existing_public_reply_blocks_a_second_reply_after_update(self):
+        worker = self.new_bot()
+        worker.store.add_comment('101', '100', '7', self.now)
+        worker.store.claim_action('101', 'ack', self.now)
+        worker.store.set_action('101', 'ack', 'sent', self.now, '500')
+        self.client.send_dm.return_value = ('unavailable', 'recipient unavailable')
+        self.new_bot().run_once()
+        self.new_bot().run_once()
+        self.client.send_dm.assert_called_once()
+        self.client.send_public_reply.assert_not_called()
+
+    def test_public_reply_retry_does_not_repeat_delivered_dm(self):
+        self.client.send_public_reply.side_effect = [('rate_limited', self.now + 600), ('sent', '500')]
+        with self.assertRaises(bot.RateLimitedCycle):
+            self.new_bot().run_once()
+        self.now += 601
+        self.new_bot().run_once()
+        self.client.send_dm.assert_called_once()
         self.assertEqual(self.client.send_public_reply.call_count, 2)
 
     def test_dry_run_does_not_consume_live_claim(self):

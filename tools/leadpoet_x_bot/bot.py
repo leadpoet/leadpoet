@@ -36,7 +36,7 @@ DEFAULT_REPLY_TEXT = (
     "https://cal.com/team/leadpoet/chat"
 )
 DEFAULT_PUBLIC_REPLY = "Sending!"
-DEFAULT_DM_UNAVAILABLE_REPLY = "I couldn’t send you a DM. Please open your DMs or DM us first."
+DEFAULT_DM_UNAVAILABLE_REPLY = "sending, please open your Dms!"
 DEFAULT_POET_ALIASES = ("poett", "poeet", "poat", "poer", "poey", "peot")
 UTC = dt.timezone.utc
 
@@ -762,7 +762,7 @@ class Bot:
         self.log.info("Detected qualifying comment %s under post %s", reply_id, post_id)
         self._process_comment({"reply_id": reply_id, "parent_id": post_id, "author_id": author_id})
 
-    def _run_action(self, comment: Mapping[str, str], action: str) -> str:
+    def _run_action(self, comment: Mapping[str, str], action: str, public_text: str | None = None) -> str:
         reply_id = comment["reply_id"]
         author_id = comment["author_id"]
         if self.stopping:
@@ -785,7 +785,7 @@ class Bot:
             self.log.info("Sending DM for eligible reply %s", reply_id)
             status, detail = self.client.send_dm(author_id, self.config.dm_message)
         else:
-            text = self.config.reply_text if action == "ack" else self.config.dm_unavailable_reply
+            text = public_text if public_text is not None else self.config.reply_text
             self.log.info("Sending %s public reply for eligible reply %s", action, reply_id)
             status, detail = self.client.send_public_reply(reply_id, text)
         finished = self.now()
@@ -808,22 +808,14 @@ class Bot:
         if comment["author_id"] in self.config.denied_user_ids:
             self.store.complete_comment(reply_id, self.now())
             return
-        ack = self._run_action(comment, "ack")
-        if ack == "stopping":
-            return
-        if ack != "sent":
-            self.store.complete_comment(reply_id, self.now())
-            return
-        if self.stopping:
-            return
         dm = self._run_action(comment, "dm")
         if dm == "stopping":
             return
-        if dm == "unavailable":
-            if self.stopping:
-                return
-            self._run_action(comment, "fallback")
-            if self.stopping:
+        if dm in ("sent", "unavailable"):
+            text = self.config.reply_text if dm == "sent" else self.config.dm_unavailable_reply
+            # Both outcomes share one public-action claim. Retain the existing
+            # key so an acknowledgement sent before this update is not repeated.
+            if self._run_action(comment, "ack", public_text=text) == "stopping":
                 return
         self.store.complete_comment(reply_id, self.now())
 

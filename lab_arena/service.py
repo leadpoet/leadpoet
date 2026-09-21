@@ -295,6 +295,7 @@ class RoundDefaults:
     # never raise this authority cap.
     runner_slot_ceiling: int = contracts.RUNNER_SLOT_CEILING
     parallel_twenty_icp_execution: bool = False
+    execution_sequence_from: Optional[str] = None
     checkpoint_deadline_enabled: bool = True
     baseline_hotkey: str = ""
     baseline_source_url: str = DEFAULT_BASELINE_SOURCE_URL
@@ -374,6 +375,13 @@ class ServiceConfig:
             raise ServiceError("runner_slot_ceiling_invalid", 500)
         if not isinstance(self.defaults.parallel_twenty_icp_execution, bool):
             raise ServiceError("parallel_twenty_icp_execution_invalid", 500)
+        if self.defaults.execution_sequence_from is not None:
+            try:
+                activation = _parse_iso(self.defaults.execution_sequence_from)
+                if activation.tzinfo is None:
+                    raise ValueError("missing timezone")
+            except (TypeError, ValueError) as exc:
+                raise ServiceError("execution_sequence_activation_invalid", 500) from exc
         if self.defaults.integrity_from is not None:
             try:
                 activation = datetime.fromisoformat(self.defaults.integrity_from.replace("Z", "+00:00"))
@@ -701,6 +709,9 @@ class ArenaService:
                 self._config.defaults, "parallel_twenty_icp_execution", False
             )
             is True
+            or getattr(
+                self._config.defaults, "execution_sequence_from", None
+            ) is not None
         ):
             try:
                 self._store.parallel_execution_schema()
@@ -893,7 +904,15 @@ class ArenaService:
             "banned_hotkeys": banned_hotkeys,
             "reward_constants": rewards.reward_constants_document(int(defaults.pool_percent)),
         }
-        if defaults.parallel_twenty_icp_execution:
+        baseline_first = (
+            defaults.execution_sequence_from is not None
+            and cutoff >= _parse_iso(defaults.execution_sequence_from)
+        )
+        if baseline_first:
+            document["execution_sequence_policy"] = (
+                contracts.BASELINE_SCORED_FIRST_POLICY
+            )
+        elif defaults.parallel_twenty_icp_execution:
             document["parallel_twenty_icp_execution"] = True
         if defaults.per_icp_cost_policy:
             document["execution_icp_cap_microusd"] = (
@@ -1853,13 +1872,28 @@ class ArenaService:
         if stage not in (1, 2):
             raise ServiceError("stage_invalid", 400)
         participants = list(round_row.get("participants") or [])
-        if stage == 2 and round_row.get("icp_set_date") is None:
+        configuration = round_row.get("configuration_doc") or {}
+        baseline_first = (
+            configuration.get("execution_sequence_policy")
+            == contracts.BASELINE_SCORED_FIRST_POLICY
+        )
+        if baseline_first:
+            participants = [
+                participant
+                for participant in participants
+                if bool(participant.get("is_king")) == (stage == 1)
+            ]
+        elif stage == 2 and round_row.get("icp_set_date") is None:
             finalists = set(str(item) for item in (round_row.get("finalists") or []))
             participants = [participant for participant in participants if participant["submission_id"] in finalists or participant.get("is_king")]
         self.benchmark_icps(round_id)
-        positions = list(contracts.stage_positions(stage))
+        positions = list(
+            contracts.execution_positions(
+                stage, configuration.get("execution_sequence_policy")
+            )
+        )
         rows = [{"submission_id": p["submission_id"], "miner_hotkey": p["miner_hotkey"]} for p in participants]
-        if (round_row.get("configuration_doc") or {}).get(
+        if configuration.get(
             "parallel_twenty_icp_execution"
         ):
             if stage == 1:
@@ -1869,16 +1903,25 @@ class ArenaService:
 
     def stage_is_complete(self, round_id: str, stage: int) -> bool:
         round_row = self._round(round_id)
+        configuration = round_row.get("configuration_doc") or {}
         parallel_twenty = bool(
-            (round_row.get("configuration_doc") or {}).get(
-                "parallel_twenty_icp_execution"
-            )
+            configuration.get("parallel_twenty_icp_execution")
         )
         runs = self._store.list_runs(
             round_id,
             stage=None if parallel_twenty and stage == 1 else stage,
             kind="execute",
         )
+        if (
+            not runs
+            and stage == 2
+            and configuration.get("execution_sequence_policy")
+            == contracts.BASELINE_SCORED_FIRST_POLICY
+        ):
+            return not any(
+                not participant.get("is_king")
+                for participant in round_row.get("participants") or []
+            )
         return bool(runs) and all(run["status"] in ("accepted", "failed") for run in runs)
 
     def close_stage(self, round_id: str, stage: int) -> Dict[str, Any]:
@@ -1901,7 +1944,12 @@ class ArenaService:
         round_row = self._round(round_id)
         self.benchmark_icps(round_id)
         plan = scoring.build_scoring_plan(
-            round_id=round_id, stage=stage, runs=self._store.list_runs(round_id, stage=stage, kind="execute"),
+            round_id=round_id,
+            stage=stage,
+            runs=self._store.list_runs(round_id, stage=stage, kind="execute"),
+            execution_sequence_policy=(round_row.get("configuration_doc") or {}).get(
+                "execution_sequence_policy"
+            ),
         )
         status = "stage%d_closed" % stage
         result = self._store.transition_round(round_id, status, status, {"stage%d_scoring_plan_doc" % stage: plan})
@@ -2548,10 +2596,22 @@ class ArenaService:
                     round_id, CANCEL_REASONS["scoring_incomplete"]
                 )
         if stage == 1:
-            ranking = verify.stage1_ranking(
-                self._score_entries_from_runs(round_row, contracts.stage_positions(1), "stage1_score")
-            )
-            finalists = verify.select_finalists(ranking)
+            if (
+                (round_row.get("configuration_doc") or {}).get(
+                    "execution_sequence_policy"
+                )
+                == contracts.BASELINE_SCORED_FIRST_POLICY
+            ):
+                finalists = sorted(
+                    str(participant["submission_id"])
+                    for participant in round_row.get("participants") or []
+                    if not participant.get("is_king")
+                )
+            else:
+                ranking = verify.stage1_ranking(
+                    self._score_entries_from_runs(round_row, contracts.stage_positions(1), "stage1_score")
+                )
+                finalists = verify.select_finalists(ranking)
             transition = self._store.transition_round(
                 round_id,
                 "stage1_judged",
@@ -2796,9 +2856,13 @@ class ArenaService:
         wanted = set(range(len(icps)) if positions is None else positions)
         selected = self._selected_accepted_execution_runs(runs, submission_id)
         judges = {}
-        for stage in (1, 2):
-            if wanted.intersection(contracts.stage_positions(stage)):
-                judges.update(self._scoring_outputs(round_id, stage))
+        judged_stages = {
+            int(run.get("stage") or 0)
+            for position, run in selected.items()
+            if position in wanted
+        }
+        for stage in judged_stages:
+            judges.update(self._scoring_outputs(round_id, stage))
         counts: Dict[int, int] = {}
         for position in sorted(wanted):
             execution = selected.get(position)
@@ -3014,8 +3078,21 @@ class ArenaService:
         round_row = self._round(round_id)
         if round_row["status"] != "scored":
             return {"status": "stale", "round_status": round_row["status"]}
+        configuration = round_row.get("configuration_doc") or {}
+        baseline_first = (
+            configuration.get("execution_sequence_policy")
+            == contracts.BASELINE_SCORED_FIRST_POLICY
+        )
         stage1_ranking = verify.stage1_ranking(
-            self._score_entries_from_runs(round_row, contracts.stage_positions(1), "stage1_score")
+            self._score_entries_from_runs(
+                round_row,
+                (
+                    range(contracts.BENCHMARK_ICP_COUNT)
+                    if baseline_first
+                    else contracts.stage_positions(1)
+                ),
+                "stage1_score",
+            )
         )
         finalists = list(round_row.get("finalists") or [])
         final_entries = self._score_entries_from_runs(
@@ -3258,11 +3335,20 @@ class ArenaService:
         if len(baseline_ids) != 1 or "" in baseline_ids:
             return False
         baseline_id = next(iter(baseline_ids))
-        expected = {
-            (stage, position)
-            for stage in (1, 2)
-            for position in contracts.stage_positions(stage)
-        }
+        policy = (row.get("configuration_doc") or {}).get(
+            "execution_sequence_policy"
+        )
+        if policy == contracts.BASELINE_SCORED_FIRST_POLICY:
+            expected = {
+                (1, position)
+                for position in contracts.execution_positions(1, policy)
+            }
+        else:
+            expected = {
+                (stage, position)
+                for stage in (1, 2)
+                for position in contracts.execution_positions(stage, policy)
+            }
         accepted_executions: Dict[Tuple[int, int], Mapping[str, Any]] = {}
         for run in self._store.list_runs(
             str(row["round_id"]), kind="execute"
@@ -3468,8 +3554,16 @@ class ArenaService:
             raise ServiceError("declared_parallelism_invalid", 400)
         configuration = round_row["configuration_doc"]
         snapshot = self._benchmark_snapshot()
-        if (configuration.get("parallel_twenty_icp_execution") is True
-                and body.get("proxy_execution_version") != contracts.PROXY_EXECUTION_VERSION):
+        proxy_execution_required = (
+            configuration.get("parallel_twenty_icp_execution") is True
+            or configuration.get("execution_sequence_policy")
+            == contracts.BASELINE_SCORED_FIRST_POLICY
+        )
+        if (
+            proxy_execution_required
+            and body.get("proxy_execution_version")
+            != contracts.PROXY_EXECUTION_VERSION
+        ):
             raise ServiceError("validator_proxy_execution_upgrade_required", 409)
         checkpoint_policy = configuration.get("checkpoint_deadline_policy")
         if checkpoint_policy in contracts.CHECKPOINT_DEADLINE_PROFILES:
@@ -3615,6 +3709,13 @@ class ArenaService:
         )
         if configuration.get("parallel_twenty_icp_execution") is True:
             lease["parallel_twenty_icp_execution"] = True
+        if (
+            configuration.get("execution_sequence_policy")
+            == contracts.BASELINE_SCORED_FIRST_POLICY
+        ):
+            lease["execution_sequence_policy"] = (
+                contracts.BASELINE_SCORED_FIRST_POLICY
+            )
         if (
             configuration.get("sourcing_cost_eligibility_policy")
             == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
@@ -4921,9 +5022,12 @@ class ArenaService:
         }
         if contact_policy.enabled(row.get("configuration_doc") or {}):
             judgments = {}
-            for stage in (1, 2):
-                if public_positions.intersection(contracts.stage_positions(stage)):
-                    judgments.update(self._scoring_outputs(round_id, stage))
+            for stage in {
+                int(run.get("stage") or 0)
+                for run in runs
+                if int(run.get("icp_position") or 0) in public_positions
+            }:
+                judgments.update(self._scoring_outputs(round_id, stage))
             icps = self.evaluation_icps(round_id) if outputs else []
             contacts = {}
             diagnostics = []

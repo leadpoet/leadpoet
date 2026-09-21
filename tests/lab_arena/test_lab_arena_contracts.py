@@ -76,6 +76,14 @@ def test_public_constants_are_the_plan_values():
     assert CHAIN_FINALIZATION_EPOCH_BLOCKS * 12 * c.EPOCHS_PER_REWARD_WEEK == 7 * 24 * 3600
 
 
+def test_baseline_first_execution_positions_are_all_twenty_and_unknown_rejects():
+    expected = tuple(range(c.BENCHMARK_ICP_COUNT))
+    assert c.execution_positions(1, c.BASELINE_SCORED_FIRST_POLICY) == expected
+    assert c.execution_positions(2, c.BASELINE_SCORED_FIRST_POLICY) == expected
+    with pytest.raises(c.ArenaContractError, match="unsupported"):
+        c.execution_positions(1, "future_unknown_policy")
+
+
 def test_strict_document_limits_reject_every_hostile_shape():
     limits = c.StrictLimits(max_depth=2, max_list_items=2, max_object_keys=2, max_string_bytes=4, max_total_bytes=64)
     c.check_strict_document({"a": [1, 2], "b": "abcd"}, limits)

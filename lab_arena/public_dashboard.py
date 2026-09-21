@@ -541,6 +541,7 @@ def _stage1_scores(service: Any, row: Mapping[str, Any]) -> Dict[str, float]:
         return {}
     configuration = row.get("configuration_doc")
     configuration = configuration if isinstance(configuration, Mapping) else {}
+    execution_policy = configuration.get("execution_sequence_policy")
     per_icp_policy = (
         configuration.get("sourcing_cost_eligibility_policy")
         == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
@@ -558,7 +559,7 @@ def _stage1_scores(service: Any, row: Mapping[str, Any]) -> Dict[str, float]:
         if current is None or int(run.get("attempt") or 0) > int(current.get("attempt") or 0):
             selected[key] = run
     result: Dict[str, float] = {}
-    positions = contracts.stage_positions(1)
+    positions = contracts.execution_positions(1, execution_policy)
     for participant in _participants(row):
         submission_id = str(participant.get("submission_id") or "")
         is_baseline = bool(

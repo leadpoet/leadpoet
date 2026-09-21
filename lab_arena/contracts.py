@@ -101,6 +101,7 @@ CHECKPOINT_DEADLINE_PROFILES = {
     ),
 }
 CHECKPOINT_DEADLINE_POLICIES = tuple(CHECKPOINT_DEADLINE_PROFILES)
+BASELINE_SCORED_FIRST_POLICY = "baseline_scored_first_v1"
 # A judge run reads pages and calls several models per company against live
 # providers; it gets its own wall clock, longer than a model's, under the same
 # lease; provider calls refresh the lease while the judge is working.
@@ -118,6 +119,18 @@ def stage_positions(stage: int) -> Tuple[int, ...]:
     if stage == 2:
         return tuple(range(STAGE_1_ICP_COUNT, BENCHMARK_ICP_COUNT))
     raise ArenaContractError("stage must be 1 or 2")
+
+
+def execution_positions(stage: int, policy: Optional[str] = None) -> Tuple[int, ...]:
+    """Return positions assigned in a stage under its frozen sequence policy."""
+
+    if policy == BASELINE_SCORED_FIRST_POLICY:
+        if stage not in (1, 2):
+            raise ArenaContractError("stage must be 1 or 2")
+        return tuple(range(BENCHMARK_ICP_COUNT))
+    if policy is None:
+        return stage_positions(stage)
+    raise ArenaContractError("execution sequence policy is unsupported")
 
 # Signed request timestamp window (section 9.1).
 REQUEST_TIMESTAMP_WINDOW_SECONDS = 300
@@ -760,6 +773,12 @@ ROUND_CONFIGURATION_FIELDS = (
     # New daily rounds can make both ten-ICP execution stages claimable before
     # stage-one scoring. Absence preserves every historical round's schedule.
     F("parallel_twenty_icp_execution", "bool", required=False),
+    F(
+        "execution_sequence_policy",
+        "str",
+        required=False,
+        choices=(BASELINE_SCORED_FIRST_POLICY,),
+    ),
     F("max_attempts_per_assignment", "int", minimum=1, maximum=2),
     F("lease_ttl_seconds", "int", minimum=60),
     F("companies_per_icp", "int", minimum=1, maximum=50),
@@ -873,6 +892,12 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
         and config["benchmark_disclosure_policy"] is None
     ):
         raise ArenaContractError("round benchmark disclosure policy cannot be null")
+    if config.get("execution_sequence_policy") and config.get(
+        "parallel_twenty_icp_execution"
+    ):
+        raise ArenaContractError(
+            "baseline-first execution cannot use parallel twenty execution"
+        )
     if ("network_name" in config) != ("netuid" in config):
         raise ArenaContractError("round network_name and netuid must be supplied together")
     if "network_name" not in config:
@@ -1124,6 +1149,12 @@ SCORING_PLAN_FIELDS = (
     F("schema_version", "str", choices=(SCORING_PLAN_SCHEMA_VERSION,)),
     F("round_id", "str", minimum=6, maximum=64),
     F("stage", "int", minimum=1, maximum=2),
+    F(
+        "execution_sequence_policy",
+        "str",
+        required=False,
+        choices=(BASELINE_SCORED_FIRST_POLICY,),
+    ),
     F("work_items", "list[object]", fields=SCORING_WORK_ITEM_FIELDS, minimum=0, maximum=BENCHMARK_ICP_COUNT * (MAX_CHALLENGERS + 1)),
     F("zero_rows", "list[object]", fields=(
         F("submission_id", "str", minimum=1, maximum=64),
@@ -1135,7 +1166,11 @@ SCORING_PLAN_FIELDS = (
 
 def validate_scoring_plan(document: Any) -> Dict[str, Any]:
     plan = validate_document(document, SCORING_PLAN_FIELDS)
-    positions = set(stage_positions(int(plan["stage"])))
+    positions = set(
+        execution_positions(
+            int(plan["stage"]), plan.get("execution_sequence_policy")
+        )
+    )
     seen_runs: set = set()
     seen_positions: set = set()
     for item in plan["work_items"]:

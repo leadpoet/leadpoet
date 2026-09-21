@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Mapping
 
+from lab_arena import contracts
+
 
 # Leaves time for dispatch, result delivery, and normal sandbox setup in each
 # attempt. Retries consume a full second attempt, not an assumed cheap retry.
@@ -33,11 +35,17 @@ def daily_challenger_capacity(configuration: Mapping[str, Any]) -> int:
     if seconds("submission_cutoff", "publication_deadline") >= 24 * 3600:
         raise ValueError("daily evaluation must finish before the next cutoff")
     parallel_twenty = configuration.get("parallel_twenty_icp_execution") is True
+    execution_policy = configuration.get("execution_sequence_policy")
+    if execution_policy not in (None, contracts.BASELINE_SCORED_FIRST_POLICY):
+        raise ValueError("execution sequence policy is unsupported")
+    baseline_first = execution_policy == contracts.BASELINE_SCORED_FIRST_POLICY
     limits = []
     for stage in (1, 2):
         count = int(configuration["stage_%d_icp_count" % stage])
         if count < 1:
             raise ValueError("daily competition requires ICPs")
+        if baseline_first:
+            count = contracts.BENCHMARK_ICP_COUNT
         close = "stage_%d_close" % stage
         phases = []
         if stage == 1:
@@ -59,5 +67,10 @@ def daily_challenger_capacity(configuration: Mapping[str, Any]) -> int:
             if wave_seconds <= ATTEMPT_OVERHEAD_SECONDS:
                 raise ValueError("daily competition requires a positive run limit")
             waves = max(0, int(seconds(start, end) // wave_seconds))
-            limits.append((waves * slots) // (attempts * assignments_per_participant) - 1)
+            capacity = (waves * slots) // (attempts * assignments_per_participant)
+            if baseline_first and stage == 1:
+                if capacity < 1:
+                    return 0
+            else:
+                limits.append(capacity - (0 if baseline_first else 1))
     return max(0, min(limits))

@@ -111,6 +111,7 @@ CURRENT_SERVICE_MIGRATIONS = POSTGREST_MIGRATIONS + (
     LAB_ARENA_COST_BACKFILL_RETIREMENT_MIGRATION,
     LAB_ARENA_SCORE_PAYER_MIGRATION,
     "326-lab-arena-exhausted-provider-error-isolation.sql",
+    "347-lab-arena-baseline-scored-first.sql",
 )
 
 

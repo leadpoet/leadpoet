@@ -449,6 +449,9 @@ def build_service_from_environment(mode: str):
         company_quality_from=os.environ.get("LAB_ARENA_COMPANY_QUALITY_FROM") or None,
         intent_details_from=os.environ.get("LAB_ARENA_INTENT_DETAILS_FROM") or None,
         benchmark_disclosure_from=os.environ.get("LAB_ARENA_BENCHMARK_DISCLOSURE_FROM") or None,
+        execution_sequence_from=os.environ.get(
+            "LAB_ARENA_EXECUTION_SEQUENCE_FROM"
+        ) or "2026-09-22T00:00:00Z",
     )
 
     # The catalog is organizer-held runtime state. It is not published in a

@@ -143,6 +143,7 @@ def build_scoring_plan(
     round_id: str,
     stage: int,
     runs: Sequence[Mapping[str, Any]],
+    execution_sequence_policy: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Plan from the frozen stage result set.
 
@@ -155,7 +156,7 @@ def build_scoring_plan(
 
     if stage not in (1, 2):
         raise ArenaContractError("stage must be 1 or 2")
-    positions = contracts.stage_positions(stage)
+    positions = contracts.execution_positions(stage, execution_sequence_policy)
     latest: Dict[Tuple[str, int], Mapping[str, Any]] = {}
     accepted: Dict[Tuple[str, int], Mapping[str, Any]] = {}
     for run in runs:
@@ -210,6 +211,8 @@ def build_scoring_plan(
         "work_items": [dict(item) for _, item in sorted(items.items())],
         "zero_rows": sorted(zero_rows, key=lambda row: (row["submission_id"], row["icp_position"])),
     }
+    if execution_sequence_policy is not None:
+        plan["execution_sequence_policy"] = execution_sequence_policy
     return contracts.validate_scoring_plan(plan)
 
 
@@ -552,7 +555,11 @@ def build_stage_scores(
     for row in rows:
         by_submission.setdefault(row["submission_id"], []).append(float(row["per_icp_score"]))
         positions_by_submission.setdefault(row["submission_id"], set()).add(int(row["icp_position"]))
-    expected_positions = set(contracts.stage_positions(stage))
+    expected_positions = set(
+        contracts.execution_positions(
+            stage, validated_plan.get("execution_sequence_policy")
+        )
+    )
     for submission_id, positions in positions_by_submission.items():
         if positions != expected_positions:
             raise ScoringError("submission %s does not cover every stage %d ICP" % (submission_id, stage))

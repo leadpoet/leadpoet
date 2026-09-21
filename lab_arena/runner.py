@@ -2539,7 +2539,12 @@ class AssignmentExecutor:
                     )
                 staged_web_bridge = None
                 staged_codex_module = None
-                if not scoring_run and lease.get("parallel_twenty_icp_execution") is True:
+                proxy_execution = (
+                    lease.get("parallel_twenty_icp_execution") is True
+                    or lease.get("execution_sequence_policy")
+                    == contracts.BASELINE_SCORED_FIRST_POLICY
+                )
+                if not scoring_run and proxy_execution:
                     if config.proxy_worker_pool is None:
                         raise RunnerError("verified proxy worker pool is required")
                     from lab_arena.web_egress import WebEgressServer

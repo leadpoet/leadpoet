@@ -307,6 +307,61 @@ def _published_signature(harness: CostHarness) -> dict:
     }
 
 
+def test_baseline_first_lease_keeps_verified_web_and_codex_runtime(
+    database, tmp_path
+):
+    """The sequence policy changes scheduling, not the trusted execute runtime."""
+
+    psycopg2, dsn = database
+    connect = lambda: psycopg2.connect(**dsn)
+    harness = CostHarness(
+        connect,
+        tmp_path / "baseline-first-runtime",
+        challengers=["BaselineFirstRuntimeCandidate"],
+        runners=["alpha"],
+    )
+    harness.service.config.defaults = replace(
+        harness.service.config.defaults,
+        execution_sequence_from="2000-01-01T00:00:00Z",
+        parallel_twenty_icp_execution=False,
+    )
+    _start_round(harness, day=27, epoch=62_027)
+    harness.clock.advance_to(harness.schedule()["stage_1_start"])
+    assert harness.service.advance_round(harness.round_id)["assignments"] == 20
+
+    evidence = _ExecutionEvidence(harness, expected_high_water=1)
+    harness.sandbox.run_icp = evidence.run_icp
+    runner_label = "baseline-first-runtime-runner"
+    _register_external_validator(harness, runner_label)
+    with TestClient(create_app(harness.service)) as http:
+        runner = _http_runner(
+            harness,
+            http,
+            tmp_path / "baseline-first-runtime-runner",
+            key_label=runner_label,
+            local_capacity=10,
+        )
+        try:
+            with _postgres_lease_clock(harness):
+                lease = runner.claim_one()
+                assert lease["execution_sequence_policy"] == (
+                    contracts.BASELINE_SCORED_FIRST_POLICY
+                )
+                assert "parallel_twenty_icp_execution" not in lease
+                runner._executor.execute(
+                    lease, str(lease["lease_token"]), lease["icp"]
+                )
+        finally:
+            runner.close()
+
+    assert len(evidence.execution_specs) == 1
+    spec = evidence.execution_specs[0]
+    assert spec.web_bridge_path is not None
+    assert spec.codex_module_path is not None
+    assert spec.web_bridge_path.name == "web-egress-bridge.py"
+    assert spec.codex_module_path.name == "lab_arena_codex.py"
+
+
 def _run_published_case(
     connect,
     root: Path,

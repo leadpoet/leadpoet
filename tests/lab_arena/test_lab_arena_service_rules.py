@@ -372,7 +372,7 @@ def test_advance_never_opens_execution_before_submission_cutoff(status):
     ("stage", "cause"),
     [(1, "judge_error"), (2, "judge_error"), (1, "lease_expired")],
 )
-def test_advance_cancels_scoring_when_a_planned_judge_failure_exhausts_retries(
+def test_exhausted_judge_failure_does_not_stop_other_scoring(
     stage, cause
 ):
     work_item_ids = ("execute-failed", "execute-pending")
@@ -400,10 +400,8 @@ def test_advance_cancels_scoring_when_a_planned_judge_failure_exhausts_retries(
 
     result = service._advance_round_locked("arena-2026-09-02")
 
-    assert result == {"status": "cancelled", "round_status": "cancelled"}
-    assert service._store.cancelled == [
-        ("arena-2026-09-02", "scoring_incomplete")
-    ]
+    assert result == {"status": "waiting", "round_status": "stage%d_scoring" % stage}
+    assert service._store.cancelled == []
 
 
 @pytest.mark.parametrize(

@@ -1,5 +1,16 @@
 # Agent Instructions
 
+## Scoped production authorization: September 21 review failure isolation
+
+On 2026-09-21 the user explicitly authorized making terminal review failures
+score only the affected ICP zero after bounded retries or the stage deadline.
+Do not cancel the full daily round or exclude all of a miner's other ICPs for
+that failure. Preserve genuine verification, fixed score denominators, accepted
+receipts, actual costs, frozen sources, historical publications, and runtime
+trust checks. Authority includes narrow source changes, exact migrations,
+pushes, canonical paired restarts, recovery, and production validation. Missing
+or corrupt accepted authority must never produce a positive score.
+
 ## Scoped production authorization: September 21 daily Arena transition
 
 On 2026-09-21 the user authorized verification and narrow repair of the daily

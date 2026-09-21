@@ -2131,56 +2131,6 @@ class ArenaService:
         runs = self._store.list_runs(round_id, stage=stage, kind="score")
         return all(run["status"] in ("accepted", "failed") for run in runs)
 
-    def _scoring_has_exhausted_judge_failure(
-        self,
-        round_row: Mapping[str, Any],
-        stage: int,
-        runs: Sequence[Mapping[str, Any]],
-    ) -> bool:
-        """Return whether a required score can no longer succeed.
-
-        An accepted attempt always wins. An active attempt means the assignment
-        can still succeed. Rows outside the committed plan cannot end a round.
-        """
-
-        plan = self._load_scoring_plan(round_row, stage)
-        runs_by_scored_run: Dict[str, List[Mapping[str, Any]]] = {}
-        planned_run_ids = {
-            str(item["scored_run_id"]) for item in plan["work_items"]
-        }
-        for run in runs:
-            scored_run_id = str(run.get("scored_run_id") or "")
-            if scored_run_id in planned_run_ids:
-                runs_by_scored_run.setdefault(scored_run_id, []).append(run)
-
-        for scored_run_id in planned_run_ids:
-            attempts = runs_by_scored_run.get(scored_run_id, [])
-            if any(run.get("status") == "accepted" for run in attempts):
-                continue
-            if any(
-                run.get("status") not in ("accepted", "failed")
-                for run in attempts
-            ):
-                continue
-            if not attempts:
-                continue
-            latest = max(
-                attempts,
-                key=lambda run: (
-                    int(run.get("stage_generation") or 0),
-                    int(run.get("attempt") or 0),
-                ),
-            )
-            if (
-                int(latest.get("attempt") or 0)
-                >= contracts.MAX_ATTEMPTS_PER_ASSIGNMENT
-                and latest.get("status") == "failed"
-                and str(latest.get("terminal_cause") or "")
-                in contracts.INFRASTRUCTURE_TERMINAL_CAUSES
-            ):
-                return True
-        return False
-
     def close_scoring(self, round_id: str, stage: int) -> Dict[str, Any]:
         return self._store.close_scoring(round_id, stage)
 
@@ -2190,21 +2140,17 @@ class ArenaService:
     ) -> Dict[str, Dict[str, Any]]:
         """Select the score run that counts for each scored execution run."""
 
+        def rank(item: Mapping[str, Any]) -> Tuple[bool, int, int]:
+            return (
+                item["status"] == "accepted",
+                int(item.get("stage_generation") or 0),
+                int(item.get("attempt") or 0),
+            )
+
         chosen: Dict[str, Dict[str, Any]] = {}
         for run in runs:
             current = chosen.get(run["scored_run_id"])
-            if (
-                current is None
-                or (run["status"] == "accepted" and current["status"] != "accepted")
-                or (
-                    run["status"] == current["status"]
-                    and (
-                        int(run.get("stage_generation") or 0), int(run["attempt"])
-                    ) > (
-                        int(current.get("stage_generation") or 0), int(current["attempt"])
-                    )
-                )
-            ):
+            if current is None or rank(run) > rank(current):
                 chosen[run["scored_run_id"]] = dict(run)
         return chosen
 
@@ -2509,8 +2455,7 @@ class ArenaService:
         }
         if len(baseline_ids) != 1:
             raise ServiceError("baseline_submission_invalid", 500)
-        baseline_id = next(iter(baseline_ids))
-        ineligible: set[str] = set()
+        failed_items: Dict[str, str] = {}
         for item in plan["work_items"]:
             scored_run_id = item["scored_run_id"]
             run = chosen.get(scored_run_id)
@@ -2520,25 +2465,25 @@ class ArenaService:
                 )
             if run["status"] == "accepted":
                 continue
-            submission_id = str(item["submission_id"])
             cause = str(run.get("terminal_cause") or "")
-            # Only explicit miner-account failures may exclude one challenger.
-            # Every other scoring gap belongs to the shared judge path.
-            if submission_id == baseline_id or cause not in (
-                "budget_exhausted",
-                "credential_error",
+            if (
+                run["status"] != "failed"
+                or cause not in contracts.TERMINAL_CAUSES
+                or cause == "accepted"
             ):
                 return self._store.cancel_round(
                     round_id, CANCEL_REASONS["scoring_incomplete"]
                 )
-            ineligible.add(submission_id)
+            # The closed stage has finished its bounded retries or deadline.
+            # A failed review cannot qualify this ICP, but must not erase the
+            # independently verified results of other ICPs or participants.
+            failed_items[scored_run_id] = cause
         breakdowns_by_item: Dict[str, List[Dict[str, Any]]] = {}
         judge_executions = 0
         for item in plan["work_items"]:
-            submission_id = str(item["submission_id"])
-            if submission_id in ineligible:
-                continue
             scored_run_id = item["scored_run_id"]
+            if scored_run_id in failed_items:
+                continue
             run = chosen.get(scored_run_id)
             icp = icps[int(item["icp_position"])]
             companies = outputs[scored_run_id]
@@ -2551,24 +2496,21 @@ class ArenaService:
                     round_id, CANCEL_REASONS["scoring_incomplete"]
                 )
             judge_executions += 1
-        if ineligible:
-            breakdowns_by_item = {
-                item["scored_run_id"]: breakdowns_by_item[item["scored_run_id"]]
-                for item in plan["work_items"]
-                if item["submission_id"] not in ineligible
-                and item["scored_run_id"] in breakdowns_by_item
-            }
+        if failed_items:
             plan = {
                 **plan,
                 "work_items": [
-                    item
-                    for item in plan["work_items"]
-                    if item["submission_id"] not in ineligible
+                    item for item in plan["work_items"]
+                    if item["scored_run_id"] not in failed_items
                 ],
-                "zero_rows": [
-                    row
-                    for row in plan["zero_rows"]
-                    if row["submission_id"] not in ineligible
+                "zero_rows": list(plan["zero_rows"]) + [
+                    {
+                        "submission_id": item["submission_id"],
+                        "icp_position": item["icp_position"],
+                        "cause": failed_items[item["scored_run_id"]],
+                    }
+                    for item in plan["work_items"]
+                    if item["scored_run_id"] in failed_items
                 ],
             }
         stage_scores = scoring.build_stage_scores(
@@ -2621,14 +2563,14 @@ class ArenaService:
             return {
                 "status": transition.get("status"),
                 "judge_executions": judge_executions,
-                "ineligible_submissions": sorted(ineligible),
+                "ineligible_submissions": [],
                 "finalists": finalists,
             }
         transition = self._store.transition_round(round_id, "stage2_judged", "scored", {})
         return {
             "status": transition.get("status"),
             "judge_executions": judge_executions,
-            "ineligible_submissions": sorted(ineligible),
+            "ineligible_submissions": [],
         }
 
     def _score_entries_from_runs(
@@ -2869,6 +2811,17 @@ class ArenaService:
             if execution is None:
                 continue
             judge = judges.get(str(execution["run_id"]))
+            if (
+                judge is not None and judge.get("status") == "failed"
+                and judge.get("terminal_cause") in contracts.TERMINAL_CAUSES
+                and judge.get("terminal_cause") != "accepted"
+                and execution.get("per_icp_score") == 0
+                and execution.get("qualification_doc") == {"companies": []}
+            ):
+                # Only the persisted zero from the closed scoring stage can
+                # establish zero qualified companies without an accepted judge.
+                counts[position] = 0
+                continue
             if judge is None or judge.get("status") != "accepted":
                 raise scoring.ScoringError("qualified count requires accepted judgment")
             document = json.loads(self._objects.get_bounded(execution["output_ref"], MAX_OUTPUT_BYTES).decode("utf-8"))
@@ -4328,12 +4281,6 @@ class ArenaService:
                 scoring_runs = self._store.list_runs(
                     round_id, stage=stage, kind="score"
                 )
-                if self._scoring_has_exhausted_judge_failure(
-                    round_row, stage, scoring_runs
-                ):
-                    return self._store.cancel_round(
-                        round_id, CANCEL_REASONS["scoring_incomplete"]
-                    )
                 window = schedule["stage_1_scoring_close" if stage == 1 else "final_scoring_close"]
                 if now >= _parse_iso(window) or all(
                     run["status"] in ("accepted", "failed")

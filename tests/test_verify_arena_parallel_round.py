@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -13,6 +14,39 @@ from scripts import verify_arena_parallel_round as verification
 
 ROUND_ID = "arena-2026-09-14-proxye2e"
 SUBMISSION_ID = "baseline-submission"
+
+
+def test_specialized_shadow_verifier_pins_legacy_twenty_count(monkeypatch):
+    from lab_arena import api, service, wiring
+
+    @dataclass
+    class Defaults:
+        benchmark_icp_count: int = 10
+        promotion_margin: float = 0.5
+        rewards_enabled: bool = True
+        daily_cutoff_hour_utc: int = 0
+        baseline_source_url: str = "example"
+
+    @dataclass
+    class Config:
+        defaults: Defaults
+        mode: str = "live"
+        pinned_round_id: str | None = None
+        reward_signer_factory: object = object()
+        baseline_promoter_factory: object = object()
+        code_reviewer: object = object()
+
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setattr(wiring, "build_service_from_environment", lambda _mode: (SimpleNamespace(config=Config(Defaults())), None))
+    monkeypatch.setattr(service, "ArenaService", lambda config: SimpleNamespace(config=config))
+    monkeypatch.setattr(api, "create_app", lambda _service: "test-app")
+
+    built, app = verification._build_pinned_service(ROUND_ID)
+    assert app == "test-app"
+    assert built.config.defaults.benchmark_icp_count == 20
+    assert built.config.defaults.promotion_margin == 1.0
+    assert built.config.mode == "shadow"
+    assert built.config.pinned_round_id == ROUND_ID
 
 
 def _configuration():

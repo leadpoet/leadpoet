@@ -591,6 +591,7 @@ class Harness:
             banned_hotkeys_source=lambda: list(harness.banned),
             broker_factory=broker_factory,
             defaults=svc.RoundDefaults(
+                benchmark_icp_count=20, promotion_margin=1.0,
                 checkpoint_deadline_enabled=False, runner_slot_ceiling=8,
                 runner_hotkeys=tuple(self.runner_keys), baseline_hotkey=self.baseline_hotkey,
                 baseline_source_url=svc.DEFAULT_BASELINE_SOURCE_URL,

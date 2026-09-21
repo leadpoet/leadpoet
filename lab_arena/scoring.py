@@ -144,6 +144,7 @@ def build_scoring_plan(
     stage: int,
     runs: Sequence[Mapping[str, Any]],
     execution_sequence_policy: Optional[str] = None,
+    configuration: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Plan from the frozen stage result set.
 
@@ -156,7 +157,7 @@ def build_scoring_plan(
 
     if stage not in (1, 2):
         raise ArenaContractError("stage must be 1 or 2")
-    positions = contracts.execution_positions(stage, execution_sequence_policy)
+    positions = contracts.execution_positions(stage, execution_sequence_policy, configuration)
     latest: Dict[Tuple[str, int], Mapping[str, Any]] = {}
     accepted: Dict[Tuple[str, int], Mapping[str, Any]] = {}
     for run in runs:
@@ -213,7 +214,7 @@ def build_scoring_plan(
     }
     if execution_sequence_policy is not None:
         plan["execution_sequence_policy"] = execution_sequence_policy
-    return contracts.validate_scoring_plan(plan)
+    return contracts.validate_scoring_plan(plan, configuration)
 
 
 # ---------------------------------------------------------------------------
@@ -532,10 +533,11 @@ def build_stage_scores(
     icps_by_position: Mapping[int, Mapping[str, Any]],
     outputs_by_run: Mapping[str, Sequence[Mapping[str, Any]]],
     breakdowns_by_item: Mapping[str, Sequence[Mapping[str, Any]]],
+    configuration: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Compute the score rows and mean for one execution stage."""
 
-    validated_plan = contracts.validate_scoring_plan(plan)
+    validated_plan = contracts.validate_scoring_plan(plan, configuration)
     validated_policy = contracts.validate_scorer_policy(policy)
     stage = int(validated_plan["stage"])
     rows: List[Dict[str, Any]] = []
@@ -557,7 +559,7 @@ def build_stage_scores(
         positions_by_submission.setdefault(row["submission_id"], set()).add(int(row["icp_position"]))
     expected_positions = set(
         contracts.execution_positions(
-            stage, validated_plan.get("execution_sequence_policy")
+            stage, validated_plan.get("execution_sequence_policy"), configuration
         )
     )
     for submission_id, positions in positions_by_submission.items():

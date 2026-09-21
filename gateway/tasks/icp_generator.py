@@ -11,7 +11,7 @@ CRITICAL DESIGN:
 4. The canonical ICP payload is hashed before persistence
 
 GENERATION PROCESS:
-1. Generate 20 ICPs — one per industry across 20 distinct industries
+1. Generate the configured number of ICPs, balanced over 20 industries
 2. Use LLM to create realistic, varied prompts
 3. Compute ICP set hash
 4. Store in database
@@ -49,6 +49,22 @@ import pytz
 logger = logging.getLogger(__name__)
 
 
+def configured_benchmark_icp_count() -> int:
+    """Read the next-bank target from Arena's shared count policy."""
+    from lab_arena import contracts
+
+    raw = os.environ.get("LAB_ARENA_BENCHMARK_ICP_COUNT", "").strip()
+    if not raw:
+        return contracts.DEFAULT_BENCHMARK_ICP_COUNT
+    try:
+        count = int(raw)
+    except ValueError as exc:
+        raise ValueError("LAB_ARENA_BENCHMARK_ICP_COUNT must be an integer") from exc
+    if not 2 <= count <= contracts.MAX_BENCHMARK_ICP_COUNT:
+        raise ValueError("LAB_ARENA_BENCHMARK_ICP_COUNT must be between 2 and 100")
+    return count
+
+
 def _rebenchmark_now() -> datetime:
     """Use the attested parity date only inside a complete parity run."""
 
@@ -75,7 +91,7 @@ OPENROUTER_MAX_COMPLETION_TOKENS = 8000
 # Configuration
 # =============================================================================
 
-# Industry distribution for 20 ICPs — exactly one ICP per industry.
+# Industry catalog for the existing 20-ICP bank — exactly one per industry.
 # CRITICAL: Every entry MUST exist in gateway/utils/industry_taxonomy.py
 # (source of truth). Model queries use .lower() for case-insensitive
 # matching with the leads database.
@@ -110,6 +126,24 @@ INDUSTRY_DISTRIBUTION = {
 assert len(INDUSTRY_DISTRIBUTION) == 20 and sum(INDUSTRY_DISTRIBUTION.values()) == 20, (
     "INDUSTRY_DISTRIBUTION must be exactly 20 distinct industries with 1 ICP each"
 )
+
+
+def industry_slots(total_icps: int, *, seed: Optional[int] = None) -> List[str]:
+    """Allocate a bank evenly over the existing industry catalog.
+
+    A 20-ICP bank keeps its historical order. Smaller banks sample distinct
+    industries; larger banks cover all 20 before repeating any industry.
+    """
+    if isinstance(total_icps, bool) or not isinstance(total_icps, int) or total_icps < 1:
+        raise ValueError("total_icps must be a positive integer")
+    industries = list(INDUSTRY_DISTRIBUTION)
+    if total_icps == len(industries):
+        return industries
+    rng = random.Random(seed) if seed is not None else random.SystemRandom()
+    slots: List[str] = []
+    while len(slots) < total_icps:
+        slots.extend(rng.sample(industries, min(total_icps - len(slots), len(industries))))
+    return slots
 
 # Sub-industries per industry
 # CRITICAL: These MUST match values in gateway/utils/industry_taxonomy.py
@@ -340,6 +374,45 @@ def count_international_icps(icps: List[Dict[str, Any]]) -> int:
         if country and country not in ("united states", "usa", "us"):
             count += 1
     return count
+
+
+def generated_bank_error(
+    icps: List[Dict[str, Any]],
+    total_icps: int,
+    expected_distribution: Dict[str, int],
+) -> Optional[str]:
+    """Check the bank's actual count and material variety before persistence."""
+    if len(icps) != total_icps:
+        return "count"
+    actual_distribution = {industry: 0 for industry in expected_distribution}
+    identities = set()
+    markets = set()
+    for icp in icps:
+        if not isinstance(icp, dict):
+            return "item"
+        industry = icp.get("industry")
+        if industry not in actual_distribution:
+            return "industry"
+        actual_distribution[industry] += 1
+        icp_id = icp.get("icp_id")
+        if not icp_id or icp_id in identities:
+            return "duplicate_id"
+        identities.add(icp_id)
+        stage = str(icp.get("company_stage") or "").strip()
+        category = str(icp.get("intent_category") or "").strip().upper()
+        market = (
+            industry,
+            str(icp.get("sub_industry") or "").strip().casefold(),
+            stage,
+            str(icp.get("geography") or "").strip().casefold(),
+            category,
+        )
+        if market in markets:
+            return "duplicate_market"
+        markets.add(market)
+    if actual_distribution != expected_distribution:
+        return "industry_distribution"
+    return None
 
 # Products/Services by industry (what the miner's model should help sell)
 # One entry per industry in INDUSTRY_DISTRIBUTION.
@@ -854,7 +927,7 @@ async def generate_icps_with_openrouter(
 
     Args:
         set_id: Set identifier (YYYYMMDD format) for ICP naming
-        total_icps: Number of ICPs to generate (default 20, one per industry)
+        total_icps: Number of ICPs to generate (default 20).
 
     Returns:
         Tuple of (icps_list, industry_distribution, icp_set_hash)
@@ -867,19 +940,15 @@ async def generate_icps_with_openrouter(
 
     from gateway.utils.industry_taxonomy import INDUSTRY_TAXONOMY
 
-    all_industries = list(INDUSTRY_DISTRIBUTION.keys())
-    if total_icps < 1 or total_icps > len(all_industries):
-        logger.error(
-            "openrouter_icp_count_invalid requested=%d maximum=%d",
-            total_icps,
-            len(all_industries),
-        )
+    try:
+        selected_industries = industry_slots(total_icps)
+    except ValueError:
+        logger.error("openrouter_icp_count_invalid requested=%s", total_icps)
         return None
-    selected_industries = (
-        all_industries
-        if total_icps == len(all_industries)
-        else random.SystemRandom().sample(all_industries, total_icps)
-    )
+    expected_distribution = {
+        industry: selected_industries.count(industry)
+        for industry in dict.fromkeys(selected_industries)
+    }
 
     # Build comprehensive industry->sub_industry mapping from taxonomy
     taxonomy_sub_industries = {}
@@ -895,7 +964,7 @@ async def generate_icps_with_openrouter(
     system_prompt = """You are generating B2B sales-targeting ICPs (Ideal Customer Profiles) for a benchmark. You have real-time web access — USE IT.
 
 YOUR JOB
-Generate exactly {total_icps} ICPs, one per industry from the distribution list. Each ICP must describe a real, currently-existing target market that a salesperson could actually go prospect.
+Generate exactly {total_icps} ICPs, one for each ordered industry slot below. A repeated industry needs a distinct target market. Each ICP must describe a real, currently-existing target market that a salesperson could actually go prospect.
 
 THE ONE RULE THAT MATTERS MOST — REALISM
 Before outputting any ICP, mentally verify: "Can I name at least ONE real, currently-operating company that satisfies ALL the criteria of this ICP — with verifiable recent activity matching the intent signal?"
@@ -923,7 +992,7 @@ Never use job titles, seniority levels, "decision-makers", "executives", or any 
 
 CONSTRAINT LISTS (use ONLY these values)
 
-ALLOWED INDUSTRIES (exactly one ICP per industry, in this order):
+ORDERED INDUSTRY SLOTS (one ICP per slot, in this order; repeated names are intentional):
 {selected_industries}
 
 INTENT SIGNAL — WRITE IT LIKE A REAL SALES-INTELLIGENCE BRIEF (not a generic label):
@@ -1032,7 +1101,7 @@ FINAL CHECK before output (for every ICP):
 4. Are the `product_service` and `required_attribute` specific, descriptive value propositions (like a real sales brief) rather than bare categories or the "offers or provides X" template?
 5. Is each `intent_signal` a specific fulfillment-style sentence naming the behavior and the kind of evidence, rather than a bare label?
 6. Is the geography broad enough that real candidates exist?
-7. Are there exactly {total_icps} ICPs, one per industry in the listed order?
+7. Are there exactly {total_icps} ICPs, one for each listed industry slot in order?
 8. Are EXACTLY {international_target} ICPs international (non-US, from the allowed international list) with `country` matching their geography?
 9. No job titles, no seniority, no contact-level descriptors in the prompts?"""
 
@@ -1045,10 +1114,11 @@ FINAL CHECK before output (for every ICP):
 - Series C+: 3-4 ICPs
 - Private Equity: 1-2 ICPs
 - Public: 2-3 ICPs"""
-        if total_icps == len(all_industries)
+        if total_icps == len(INDUSTRY_DISTRIBUTION)
         else (
             f"Spread the {total_icps} ICPs as evenly as possible across the allowed stages. "
-            "Include early, middle, and later stages, and do not repeat a stage until needed."
+            "Include early, middle, and later stages when the count permits, "
+            "and do not repeat a stage until needed."
         )
     )
     system_prompt = (
@@ -1095,7 +1165,7 @@ Each ICP must also return these structured fields for the people to find at ever
                     # Sonar drifts from JSON format at higher temperatures;
                     # 0.7 keeps it grounded while still varying voice across the 20.
                     "temperature": 0.7,
-                    "max_tokens": OPENROUTER_MAX_COMPLETION_TOKENS,
+                    "max_tokens": max(OPENROUTER_MAX_COMPLETION_TOKENS, total_icps * 400),
                     # Perplexity Sonar does NOT accept `response_format: json_object`;
                     # the prompt explicitly demands JSON-only output instead.
                 }
@@ -1193,15 +1263,8 @@ Each ICP must also return these structured fields for the people to find at ever
                     break
             
             if not industry_normalized:
-                if total_icps == len(all_industries):
-                    logger.warning(
-                        "openrouter_icp_item_repaired index=%d reason=unexpected_industry",
-                        i,
-                    )
-                    industry_normalized = "Software"
-                else:
-                    logger.warning("openrouter_icp_item_invalid index=%d reason=unexpected_industry", i)
-                    continue
+                logger.warning("openrouter_icp_item_invalid index=%d reason=unexpected_industry", i)
+                continue
             
             # Count distribution
             actual_distribution[industry_normalized] += 1
@@ -1292,39 +1355,19 @@ Each ICP must also return these structured fields for the people to find at ever
 
             validated_icps.append(validated_icp)
 
-        # Set is exactly the configured industry count; allow some slack but anything significantly
-        # short of expected count is a bad generation and we fall back.
-        min_acceptable = (
-            total_icps
-            if total_icps < len(all_industries)
-            else max(int(total_icps * 0.9), total_icps - 2)
+        bank_error = generated_bank_error(
+            validated_icps, total_icps, expected_distribution,
         )
-        if len(validated_icps) < min_acceptable:
-            logger.error(f"Only {len(validated_icps)} valid ICPs (expected ~{total_icps}), falling back to template")
-            return None
-        if total_icps < len(all_industries) and (
-            len(validated_icps) != total_icps
-            or any(count != 1 for count in actual_distribution.values())
-        ):
-            logger.error(
-                "openrouter_icp_small_draw_invalid generated=%d requested=%d distinct_industries=%d",
-                len(validated_icps),
-                total_icps,
-                sum(count == 1 for count in actual_distribution.values()),
-            )
+        if bank_error:
+            logger.error("openrouter_icp_bank_invalid reason=%s generated=%d requested=%d", bank_error, len(validated_icps), total_icps)
             return None
         
-        # If the distribution is slightly imperfect, that's OK - the LLM output is approximate
         logger.info(
             "Validated %d ICPs across %d requested industries",
             len(validated_icps),
             len(actual_distribution),
         )
 
-        # International quota (25% of the set, English-speaking markets). The
-        # generation prompt demands the exact count; a short set still ships
-        # (template fallback would be worse) but never silently — the tag
-        # below is the alert hook for drift.
         international_count = count_international_icps(validated_icps)
         if international_count < international_target:
             logger.warning(
@@ -1335,7 +1378,9 @@ Each ICP must also return these structured fields for the people to find at ever
             )
         else:
             logger.info(
-                f"International ICP quota met: {international_count}/{international_target}"
+                "International ICP quota met: %d/%d",
+                international_count,
+                international_target,
             )
 
         # Compute hash
@@ -1633,42 +1678,49 @@ def generate_icp_set(
     contacts_required: bool = False,
 ) -> tuple:
     """
-    Generate a complete ICP set — one ICP per industry across the 20 distinct
-    industries in ``INDUSTRY_DISTRIBUTION``.
+    Generate a complete ICP set balanced across the 20 catalog industries.
 
     Args:
         set_id: Set identifier (YYYYMMDD format)
         total_icps: Number of ICPs to generate (default 20, one per industry).
-            Currently informational — the actual count comes from
-            ``INDUSTRY_DISTRIBUTION`` which is the source of truth for the
-            industry list.
         base_seed: Base seed for reproducibility
 
     Returns:
         Tuple of (icps_list, industry_distribution, icp_set_hash)
     """
+    slots = industry_slots(total_icps, seed=base_seed)
+    actual_distribution = {
+        industry: slots.count(industry) for industry in dict.fromkeys(slots)
+    }
     icps = []
-    icp_counter = 1
-    actual_distribution: Dict[str, int] = {}
-
-    for industry, count in INDUSTRY_DISTRIBUTION.items():
-        actual_distribution[industry] = count
-
-        for _ in range(count):
-            icp_id = f"icp_{set_id}_{icp_counter:03d}"
-
-            seed = None
-            if base_seed is not None:
-                seed = base_seed + icp_counter
-
+    seen_markets = set()
+    for index, industry in enumerate(slots):
+        icp_counter = index + 1
+        for attempt in range(20):
             icp = generate_single_icp(
-                icp_id,
+                f"icp_{set_id}_{icp_counter:03d}",
                 industry,
-                seed,
+                (base_seed + icp_counter + attempt * total_icps)
+                if base_seed is not None else None,
                 contacts_required=contacts_required,
             )
-            icps.append(icp)
-            icp_counter += 1
+            market = (
+                industry,
+                str(icp.get("sub_industry") or "").strip().casefold(),
+                str(icp.get("company_stage") or "").strip(),
+                str(icp.get("geography") or "").strip().casefold(),
+                str(icp.get("intent_category") or "").strip().upper(),
+            )
+            if market not in seen_markets:
+                seen_markets.add(market)
+                break
+        else:
+            raise ValueError("template ICP market could not be made unique")
+        icps.append(icp)
+
+    bank_error = generated_bank_error(icps, total_icps, actual_distribution)
+    if bank_error:
+        raise ValueError(f"template ICP bank invalid: {bank_error}")
 
     if base_seed is not None:
         random.seed(base_seed)
@@ -1805,7 +1857,7 @@ async def activate_icp_set(set_id: int) -> bool:
         return False
 
 
-async def get_active_icp_set() -> Optional[Dict[str, Any]]:
+async def get_active_icp_set(*, strict: bool = False) -> Optional[Dict[str, Any]]:
     """
     Get the currently active ICP set.
     
@@ -1832,8 +1884,60 @@ async def get_active_icp_set() -> Optional[Dict[str, Any]]:
         return None
         
     except Exception as e:
+        if strict:
+            logger.error("active_icp_set_read_failed error_type=%s", type(e).__name__)
+            raise
         logger.error(f"Failed to get active ICP set: {e}")
         return None
+
+
+def frozen_benchmark_icp_count(set_id: int) -> Optional[int]:
+    """Return an open live round's frozen target for this daily bank date.
+
+    Arena binds a round to the UTC date of ``schedule.submission_open``.
+    A database error or contradictory frozen rounds must stop generation;
+    the next-bank environment default is not authority for an open round.
+    """
+    from lab_arena import contracts
+    from lab_arena.store import ArenaStore, PostgrestTransport
+
+    network = os.environ.get("LAB_ARENA_NETWORK", "finney")
+    netuid = int(os.environ.get("LAB_ARENA_NETUID", "71"))
+    origin = os.environ["LAB_ARENA_SUPABASE_URL"]
+    service_key = os.environ["LAB_ARENA_SERVICE_KEY"]
+    store = ArenaStore(PostgrestTransport(origin, service_key=service_key))
+    try:
+        rows = store.list_rounds(
+            status="open", mode="live", network_name=network, netuid=netuid,
+            limit=100, columns="round_id,configuration_doc",
+        )
+    finally:
+        store.close()
+    if not isinstance(rows, list) or len(rows) >= 100:
+        raise ValueError("open Arena round query incomplete")
+    frozen_counts = set()
+    for row in rows:
+        configuration = row.get("configuration_doc")
+        if not isinstance(configuration, dict):
+            raise ValueError("open Arena round configuration missing")
+        if configuration.get("mode") != "live":
+            continue
+        schedule = configuration.get("schedule") or {}
+        submission_open = datetime.fromisoformat(
+            str(schedule["submission_open"]).replace("Z", "+00:00")
+        )
+        if submission_open.tzinfo is None:
+            raise ValueError("open Arena submission date lacks timezone")
+        bank_date = int(submission_open.astimezone(timezone.utc).strftime("%Y%m%d"))
+        if bank_date != set_id:
+            continue
+        frozen_count = contracts.benchmark_icp_count(configuration)
+        if not 2 <= frozen_count <= contracts.MAX_BENCHMARK_ICP_COUNT:
+            raise ValueError("open Arena frozen ICP count invalid")
+        frozen_counts.add(frozen_count)
+    if len(frozen_counts) > 1:
+        raise ValueError("open Arena rounds disagree on daily ICP count")
+    return next(iter(frozen_counts), None)
 
 
 # =============================================================================
@@ -1880,6 +1984,7 @@ async def generate_and_activate_icp_set(
     for_date: Optional[datetime] = None,
     *,
     contacts_required: bool = False,
+    total_icps: Optional[int] = None,
 ) -> Optional[int]:
     """
     Generate and activate a new ICP set using OpenRouter LLM.
@@ -1888,8 +1993,8 @@ async def generate_and_activate_icp_set(
     NO FALLBACK - if OpenRouter fails, returns None and the system will
     automatically retry on the next gateway restart or rotation check.
 
-    Generates exactly ``len(INDUSTRY_DISTRIBUTION)`` ICPs (currently 20, one
-    per industry).
+    Generates the count frozen by an open Arena round for the bank date, or
+    the configured next-bank count when no such round exists.
 
     Args:
         for_date: Optional date to generate for (defaults to today UTC)
@@ -1902,6 +2007,18 @@ async def generate_and_activate_icp_set(
     
     # Compute set_id (based on UTC date)
     set_id = get_set_id_for_date(for_date)
+    try:
+        active_set = await get_active_icp_set(strict=True)
+        if active_set and active_set.get("set_id") == set_id:
+            logger.info("ICP set %d is already active; retaining persisted bank", set_id)
+            return set_id
+        frozen_count = await asyncio.to_thread(frozen_benchmark_icp_count, set_id)
+        target_count = frozen_count if frozen_count is not None else (
+            configured_benchmark_icp_count() if total_icps is None else total_icps
+        )
+    except Exception as exc:
+        logger.error("icp_bank_count_unavailable error_type=%s", type(exc).__name__)
+        return None
     
     # Compute active window (12 AM UTC to 12 AM UTC next day)
     date_utc = for_date.astimezone(timezone.utc)
@@ -1928,8 +2045,7 @@ async def generate_and_activate_icp_set(
         logger.error("   Set OPENROUTER_API_KEY environment variable and restart gateway.")
         return None
     
-    target_count = len(INDUSTRY_DISTRIBUTION)
-    logger.info(f"Generating ICPs with OpenRouter LLM (target {target_count} ICPs, one per industry)...")
+    logger.info("Generating ICPs with OpenRouter LLM (target %d ICPs)...", target_count)
     try:
         result = await generate_icps_with_openrouter(
             set_id,
@@ -1941,6 +2057,10 @@ async def generate_and_activate_icp_set(
             return None
         
         icps, distribution, icp_hash = result
+        bank_error = generated_bank_error(icps, target_count, distribution)
+        if bank_error:
+            logger.error("generated_icp_bank_invalid reason=%s", bank_error)
+            return None
         logger.info(f"✅ OpenRouter generated {len(icps)} ICPs successfully")
 
         # Set-level ICP contract: uniform company goal + stage-size coherence
@@ -2042,7 +2162,8 @@ async def icp_rotation_task():
             logger.info(f"ICP rotation: Need set {today_set_id} (current active: {stale_id}), generating...")
             
             set_id = await generate_and_activate_icp_set(
-                contacts_required=contacts_generation_enabled()
+                contacts_required=contacts_generation_enabled(),
+                total_icps=configured_benchmark_icp_count(),
             )
             
             if set_id:
@@ -2110,5 +2231,6 @@ async def ensure_icp_set_exists():
         logger.info("No active ICP set found, generating one for today...")
     
     return await generate_and_activate_icp_set(
-        contacts_required=contacts_generation_enabled()
+        contacts_required=contacts_generation_enabled(),
+        total_icps=configured_benchmark_icp_count(),
     )

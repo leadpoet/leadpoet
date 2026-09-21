@@ -14,7 +14,7 @@ ATTEMPT_OVERHEAD_SECONDS = 60
 
 
 def daily_challenger_capacity(configuration: Mapping[str, Any]) -> int:
-    """Maximum challengers whose baseline plus all 20 ICPs fit every phase.
+    """Maximum challengers whose baseline plus all configured ICPs fit every phase.
 
     This bounds configured workload. It cannot promise provider uptime or
     replace monitoring that the configured runners are actually available.
@@ -45,7 +45,7 @@ def daily_challenger_capacity(configuration: Mapping[str, Any]) -> int:
         if count < 1:
             raise ValueError("daily competition requires ICPs")
         if baseline_first:
-            count = contracts.BENCHMARK_ICP_COUNT
+            count = contracts.benchmark_icp_count(configuration)
         close = "stage_%d_close" % stage
         phases = []
         if stage == 1:

@@ -284,6 +284,8 @@ class ChainReads(Protocol):
 
 @dataclass
 class RoundDefaults:
+    benchmark_icp_count: int = contracts.DEFAULT_BENCHMARK_ICP_COUNT
+    promotion_margin: float = contracts.DEFAULT_PROMOTION_MARGIN
     execution_cap_microusd: int = DEFAULT_EXECUTION_CAP_MICROUSD
     cost_per_company_microusd: int = DEFAULT_COST_PER_COMPANY_MICROUSD
     execution_icp_cap_microusd: int = DEFAULT_EXECUTION_ICP_CAP_MICROUSD
@@ -365,6 +367,17 @@ class ServiceConfig:
     ] = None
 
     def __post_init__(self) -> None:
+        if (
+            type(self.defaults.benchmark_icp_count) is not int
+            or not 2 <= self.defaults.benchmark_icp_count <= contracts.MAX_BENCHMARK_ICP_COUNT
+        ):
+            raise ServiceError("benchmark_icp_count_invalid", 500)
+        if (
+            isinstance(self.defaults.promotion_margin, bool)
+            or not isinstance(self.defaults.promotion_margin, (int, float))
+            or not 0 <= self.defaults.promotion_margin <= 100
+        ):
+            raise ServiceError("promotion_margin_invalid", 500)
         if (
             isinstance(self.defaults.runner_slot_ceiling, bool)
             or not isinstance(self.defaults.runner_slot_ceiling, int)
@@ -704,6 +717,10 @@ class ArenaService:
             self._store.submission_replacement_schema()
         except ArenaStoreError as exc:
             raise ServiceError("submission_replacement_schema_unavailable", 500) from exc
+        try:
+            self._store.dynamic_benchmark_schema()
+        except ArenaStoreError as exc:
+            raise ServiceError("dynamic_benchmark_schema_unavailable", 500) from exc
         if (
             getattr(
                 self._config.defaults, "parallel_twenty_icp_execution", False
@@ -868,8 +885,9 @@ class ArenaService:
             "netuid": self._config.netuid,
             "rewards_enabled": bool(defaults.rewards_enabled and self._config.mode == "live"),
             "schedule": self.build_schedule(cutoff),
-            "stage_1_icp_count": contracts.STAGE_1_ICP_COUNT,
-            "stage_2_icp_count": contracts.STAGE_2_ICP_COUNT,
+            "stage_1_icp_count": (defaults.benchmark_icp_count + 1) // 2,
+            "stage_2_icp_count": defaults.benchmark_icp_count // 2,
+            "promotion_margin": defaults.promotion_margin,
             "finalist_count": contracts.FINALIST_COUNT,
             "max_challengers": int(defaults.max_challengers),
             "runner_slot_ceiling": int(defaults.runner_slot_ceiling),
@@ -1814,7 +1832,7 @@ class ArenaService:
             except (ValueError, TypeError):
                 contact_bank_valid = False
         if (
-            len(icps) != contracts.BENCHMARK_ICP_COUNT
+            len(icps) != contracts.benchmark_icp_count(round_row.get("configuration_doc"))
             or len(icps) != len(raw_icps)
             or any(not icp_id for icp_id in icp_ids)
             or len(set(icp_ids)) != len(icp_ids)
@@ -1858,7 +1876,7 @@ class ArenaService:
         if document.get("schema_version") != "leadpoet.lab_arena.benchmark.v1" or document.get("round_id") != round_id:
             raise ServiceError("benchmark_data_invalid", 500)
         icps = list(document["icps"])
-        if len(icps) != contracts.BENCHMARK_ICP_COUNT:
+        if len(icps) != contracts.benchmark_icp_count(round_row.get("configuration_doc")):
             raise ServiceError("benchmark_data_invalid", 500)
         return icps
 
@@ -1889,7 +1907,7 @@ class ArenaService:
         self.benchmark_icps(round_id)
         positions = list(
             contracts.execution_positions(
-                stage, configuration.get("execution_sequence_policy")
+                stage, configuration.get("execution_sequence_policy"), configuration
             )
         )
         rows = [{"submission_id": p["submission_id"], "miner_hotkey": p["miner_hotkey"]} for p in participants]
@@ -1950,6 +1968,7 @@ class ArenaService:
             execution_sequence_policy=(round_row.get("configuration_doc") or {}).get(
                 "execution_sequence_policy"
             ),
+            configuration=round_row.get("configuration_doc"),
         )
         status = "stage%d_closed" % stage
         result = self._store.transition_round(round_id, status, status, {"stage%d_scoring_plan_doc" % stage: plan})
@@ -1960,7 +1979,7 @@ class ArenaService:
         if not plan:
             raise ServiceError("scoring_plan_missing", 409)
         try:
-            validated = contracts.validate_scoring_plan(plan)
+            validated = contracts.validate_scoring_plan(plan, round_row.get("configuration_doc"))
         except ArenaContractError as exc:
             raise ServiceError("scoring_plan_invalid", 500) from exc
         if validated["round_id"] != round_row["round_id"] or int(validated["stage"]) != stage:
@@ -2519,6 +2538,7 @@ class ArenaService:
             icps_by_position=dict(enumerate(icps)),
             outputs_by_run=outputs,
             breakdowns_by_item=breakdowns_by_item,
+            configuration=round_row.get("configuration_doc"),
         )
         runs = self._store.list_runs(round_id, stage=stage, kind="execute")
         recorded = self._store.record_run_scores(round_id, stage, scoring.run_scores_for_store(stage_scores, runs))
@@ -2528,7 +2548,7 @@ class ArenaService:
             raise ServiceError("scores_not_recorded:%s" % str(recorded.get("status") or "unknown")[:40], 500)
         if stage == 2:
             final_entries = self._score_entries_from_runs(
-                round_row, range(contracts.BENCHMARK_ICP_COUNT), "final_score"
+                round_row, range(contracts.benchmark_icp_count(round_row.get("configuration_doc"))), "final_score"
             )
             baseline_entry = next(
                 (entry for entry in final_entries if entry["is_king"]), None
@@ -2551,7 +2571,7 @@ class ArenaService:
                 )
             else:
                 ranking = verify.stage1_ranking(
-                    self._score_entries_from_runs(round_row, contracts.stage_positions(1), "stage1_score")
+                    self._score_entries_from_runs(round_row, contracts.stage_positions(1, round_row.get("configuration_doc")), "stage1_score")
                 )
                 finalists = verify.select_finalists(ranking)
             transition = self._store.transition_round(
@@ -2655,7 +2675,7 @@ class ArenaService:
         runs: Sequence[Mapping[str, Any]],
         *, positions: Optional[Sequence[int]] = None,
     ) -> int:
-        """Count unique validated company domains within each of the 20 ICPs."""
+        """Count unique validated company domains within each configured ICP."""
 
         return sum(self._returned_company_counts(
             submission_id, runs, positions=positions
@@ -2917,7 +2937,7 @@ class ArenaService:
                 submission_id,
                 runs,
                 tuple(
-                    range(contracts.BENCHMARK_ICP_COUNT)
+                    range(contracts.benchmark_icp_count(round_row.get("configuration_doc")))
                     if positions is None else positions
                 ),
             )
@@ -2984,7 +3004,7 @@ class ArenaService:
         if integrity.enabled(configuration):
             summary["qualified_company_count"] = qualified
             selected = self._selected_accepted_execution_runs(runs, submission_id)
-            if not any(position in selected for position in (positions if positions is not None else range(contracts.BENCHMARK_ICP_COUNT))):
+            if not any(position in selected for position in (positions if positions is not None else range(contracts.benchmark_icp_count(round_row.get("configuration_doc"))))):
                 return {"cost_summary": summary, "eligible": False, "eligibility_reason": "stored_output_invalid"}
         if execution["inflight_calls"] or judge["inflight_calls"]:
             return {
@@ -3040,16 +3060,16 @@ class ArenaService:
             self._score_entries_from_runs(
                 round_row,
                 (
-                    range(contracts.BENCHMARK_ICP_COUNT)
+                    range(contracts.benchmark_icp_count(round_row.get("configuration_doc")))
                     if baseline_first
-                    else contracts.stage_positions(1)
+                    else contracts.stage_positions(1, configuration)
                 ),
                 "stage1_score",
             )
         )
         finalists = list(round_row.get("finalists") or [])
         final_entries = self._score_entries_from_runs(
-            round_row, range(contracts.BENCHMARK_ICP_COUNT), "final_score"
+            round_row, range(contracts.benchmark_icp_count(round_row.get("configuration_doc"))), "final_score"
         )
         execution_runs = self._store.list_runs(round_id, kind="execute")
         eligibility = {
@@ -3057,7 +3077,7 @@ class ArenaService:
                 round_row,
                 str(entry["submission_id"]),
                 execution_runs,
-                positions=range(contracts.BENCHMARK_ICP_COUNT),
+                positions=range(contracts.benchmark_icp_count(round_row.get("configuration_doc"))),
             )
             for entry in final_entries
         }
@@ -3085,6 +3105,7 @@ class ArenaService:
                 and eligibility[str(entry["submission_id"])]["eligible"]
             ],
             king_entry,
+            configuration=configuration,
         )
         published_at = _iso(self.now())
         final_ranking = verify.final_ranking(effective_final_entries)
@@ -3278,7 +3299,7 @@ class ArenaService:
         return latest
 
     def _baseline_fully_succeeded(self, row: Mapping[str, Any]) -> bool:
-        """Whether all twenty baseline executions and judgments succeeded."""
+        """Whether all configured baseline executions and judgments succeeded."""
 
         baseline_ids = {
             str(participant.get("submission_id") or "")
@@ -3294,13 +3315,13 @@ class ArenaService:
         if policy == contracts.BASELINE_SCORED_FIRST_POLICY:
             expected = {
                 (1, position)
-                for position in contracts.execution_positions(1, policy)
+                for position in contracts.execution_positions(1, policy, row.get("configuration_doc"))
             }
         else:
             expected = {
                 (stage, position)
                 for stage in (1, 2)
-                for position in contracts.execution_positions(stage, policy)
+                for position in contracts.execution_positions(stage, policy, row.get("configuration_doc"))
             }
         accepted_executions: Dict[Tuple[int, int], Mapping[str, Any]] = {}
         for run in self._store.list_runs(
@@ -4543,6 +4564,8 @@ class ArenaService:
         cutoff = (configuration.get("schedule") or {}).get("submission_cutoff")
         return {
             "max_replacement_attempts": 1,
+            "benchmark_icp_count": contracts.benchmark_icp_count(configuration),
+            "promotion_margin": contracts.promotion_margin(configuration),
             **({"submission_replacement_cutoff": (_parse_iso(cutoff) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")} if cutoff else {}),
             "output_schema_version": contact_policy.output_schema(configuration),
             **({"integrity_policy": integrity.POLICY} if integrity.enabled(configuration) else {}),
@@ -4610,7 +4633,8 @@ class ArenaService:
             ],
             "icp_set_date": disclosure["icp_set_date"],
             "public_at": disclosure["public_at"],
-            "public_icp_count": contracts.BENCHMARK_ICP_COUNT,
+            "public_icp_count": contracts.benchmark_icp_count(row.get("configuration_doc")),
+            "benchmark_icp_count": contracts.benchmark_icp_count(row.get("configuration_doc")),
             "private_icp_count": 0,
             "disclosure_policy": disclosure["disclosure_policy"],
         }
@@ -4956,6 +4980,7 @@ class ArenaService:
             "scores": scores,
             "public_icp_status": "ready" if disclosure else "pending",
             "public_icp_count": len(public_positions),
+            "benchmark_icp_count": contracts.benchmark_icp_count(row.get("configuration_doc")),
             "submission_scores": {
                 "stage_1": None if stage1_entry is None else stage1_entry.get("stage1_score"),
                 "final": None if final_entry is None else final_entry.get("final_score"),

@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: dynamic daily benchmark parameters
+
+On 2026-09-21 the user authorized changing future Arena daily benchmarks to
+10 ICPs and a 0.5-point champion promotion margin. Make count-dependent paths
+read each round's frozen configuration so later count changes need only a
+parameter update. Preserve existing frozen rounds, qualification, per-ICP cost
+rules, baseline-first sequencing, disclosure timing, promotion, and weights.
+Authority includes narrow code, exact migrations, provider-backed validation,
+pushes, canonical paired restarts, and dashboard deployment through the
+overnight validation skill. Preserve concurrent work and private ICPs. Do not
+fabricate results or alter completed rounds to prove the change.
+
 ## Scoped production authorization: September 21 review failure isolation
 
 On 2026-09-21 the user explicitly authorized making terminal review failures

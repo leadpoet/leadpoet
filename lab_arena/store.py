@@ -42,6 +42,7 @@ PER_ICP_COST_SCHEMA_VERSION = "leadpoet.lab_arena.per_icp_cost_schema.v1"
 PARALLEL_EXECUTION_SCHEMA_VERSION = (
     "leadpoet.lab_arena.parallel_execution_schema.v1"
 )
+DYNAMIC_BENCHMARK_SCHEMA_VERSION = "leadpoet.lab_arena.dynamic_benchmark_schema.v1"
 RUN_QUOTA_SNAPSHOT_SCHEMA_VERSION = "leadpoet.lab_arena.quota_snapshot.v1"
 SERVICE_ROLE_NAME = "lab_arena_service"
 
@@ -86,6 +87,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_twenty_icp_promotion_schema_v1": (),
     "lab_arena_baseline_cost_eligibility_schema_v1": (),
     "lab_arena_parallel_execution_schema_v1": (),
+    "lab_arena_dynamic_benchmark_schema_v1": (),
     "lab_arena_submission_replacement_schema_v1": (),
     "lab_arena_contact_schema_v1": (),
     "lab_arena_company_quality_schema_v1": (),
@@ -880,6 +882,23 @@ class ArenaStore:
             "max_parallel_icps": 20,
         }:
             raise ArenaStoreError("parallel execution schema mismatch")
+        return result
+
+    def dynamic_benchmark_schema(self) -> Dict[str, Any]:
+        """Require SQL guards for frozen benchmark counts and promotion margin."""
+
+        result = _require_mapping(
+            self._transport.rpc("lab_arena_dynamic_benchmark_schema_v1", {}),
+            "dynamic_benchmark_schema",
+        )
+        if result != {
+            "schema_version": DYNAMIC_BENCHMARK_SCHEMA_VERSION,
+            "version": 353,
+            "max_benchmark_icps": 100,
+            "default_benchmark_icps": 10,
+            "default_promotion_margin": 0.5,
+        }:
+            raise ArenaStoreError("dynamic benchmark schema mismatch")
         return result
 
     # -- accepted weight state ------------------------------------------

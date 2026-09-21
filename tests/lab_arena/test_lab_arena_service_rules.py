@@ -1299,6 +1299,7 @@ def test_round_selection_and_direct_access_are_scoped_to_service_mode():
         {
             "round_id": "live-round", "status": "open", "schedule": {},
             "max_replacement_attempts": 1,
+            "benchmark_icp_count": 20, "promotion_margin": 1.0,
             "output_schema_version": "leadpoet.lab_arena.output.v1",
         }
     ]
@@ -1371,6 +1372,7 @@ def test_runtime_round_pin_rejects_alien_shadow_rounds_and_scopes_discovery():
             "schedule": {"submission_cutoff": "2026-09-08T00:00:00Z"},
             "submission_replacement_cutoff": "2026-09-07T23:00:00Z",
             "max_replacement_attempts": 1,
+            "benchmark_icp_count": 20, "promotion_margin": 1.0,
             "output_schema_version": "leadpoet.lab_arena.output.v1",
         }
     ]
@@ -1740,6 +1742,7 @@ def test_public_views_never_serialize_source_or_private_runtime_fields():
         "schedule": schedule,
         "submission_replacement_cutoff": "2026-09-02T00:00:00Z",
         "max_replacement_attempts": 1,
+            "benchmark_icp_count": 20, "promotion_margin": 1.0,
         "output_schema_version": "leadpoet.lab_arena.output.v1",
     }
     assert current["published_round"] is None
@@ -1839,6 +1842,7 @@ def test_public_results_take_valid_identity_from_the_round_publication():
         "scores": {"stage_1": [], "stage_2": []},
         "public_icp_status": "pending",
         "public_icp_count": 0,
+        "benchmark_icp_count": 20,
         "submission_scores": {"stage_1": None, "final": None},
         "scoring_attribution": {
             "validators": [],

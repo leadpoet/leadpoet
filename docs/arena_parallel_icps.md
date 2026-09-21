@@ -1,10 +1,31 @@
 # Arena parallel ICP execution
 
-Arena can run the twenty ICPs for one model in parallel. The validator uses
+Arena can run the configured ICPs for one model in parallel. The validator uses
 one native host route and one route for each verified Webshare proxy. The
 change affects execution speed and public web egress. It does not change the
 model output contract, scoring, paid provider broker, provider budgets,
 validator identity, or wallet use.
+
+## Daily benchmark settings
+
+New rounds default to 10 ICPs and a champion promotion margin of 0.5 points.
+The gateway accepts `LAB_ARENA_BENCHMARK_ICP_COUNT` (2 to 100) and
+`LAB_ARENA_PROMOTION_MARGIN` (0 to 100). Restart through the normal deployment
+workflow after changing these settings. They apply to newly created rounds.
+Each round stores its own count and margin; existing rounds keep their values.
+The generator also reads an open round's frozen count when its bank is missing.
+
+Baseline and miners use the same committed bank. The final score remains the
+mean of the configured ICP scores, with the existing per-ICP qualification and
+cost rules. Promotion requires a miner score at least baseline plus the stored
+margin. Submission cutoff, ICP disclosure, promotion, and reward timing stay
+unchanged. Historical rounds without a stored margin retain the 1.0 threshold.
+
+Generation allocates the bank across the existing 20-industry catalog. A
+10-ICP bank uses ten different industries; a larger bank covers all industries
+before repeating them. Exact count, industry allocation, and duplicate checks
+run before storage. Stage, geography, and intent diversity also remain in the
+generation prompt; the international-share check reports drift as a warning.
 
 ## Validator configuration
 
@@ -103,11 +124,11 @@ The native coordinator is slot 0. Webshare routes are slots 1 through N. All
 slots use the same validator hotkey. They are sandbox execution slots, not
 extra Bittensor validators or wallet workers.
 
-With sufficient available memory, nine proxies give ten slots, so one model's
-twenty ICPs run as two groups of ten. Nineteen proxies give twenty slots, so
-all twenty can run together. A
-validator can configure more proxies, but one dataset cannot exceed the
-round's frozen limit of twenty. With validators of different sizes, each one
+With sufficient available memory, nine proxies give ten slots, so a ten-ICP
+benchmark fits in one group. A twenty-ICP benchmark needs two groups with
+those same slots. Nineteen proxies give twenty slots. A larger bank uses
+additional groups under the same slot limit. The round freezes its benchmark
+count separately from its concurrency limit. With validators of different sizes, each one
 declares its own smaller local capacity. A larger eligible validator can claim
 a later group when it becomes available, but it cannot raise the frozen round
 limit.

@@ -19,7 +19,7 @@ import sys
 import threading
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
@@ -370,6 +370,54 @@ def _validate_supabase_url(value: str) -> str:
     return value.rstrip("/")
 
 
+def _validated_icp_count(icps: Any) -> int:
+    from lab_arena import contracts
+
+    if not isinstance(icps, list) or not 2 <= len(icps) <= contracts.MAX_BENCHMARK_ICP_COUNT:
+        raise ConfigurationError("current ICP set count is outside the Arena contract")
+    icp_ids = [str(item.get("icp_id") or "").strip() if isinstance(item, Mapping) else "" for item in icps]
+    if any(not value for value in icp_ids) or len(set(icp_ids)) != len(icps):
+        raise ConfigurationError("current ICP identities fail the Arena contract")
+    return len(icps)
+
+
+def _seeded_icp_count(store: Any, set_id: int) -> int:
+    source = store.current_daily_icp_set(set_id)
+    if not isinstance(source, Mapping) or source.get("status") != "ready" or source.get("set_id") != set_id:
+        raise ConfigurationError("isolated current ICP set is unavailable")
+    return _validated_icp_count(source.get("icps"))
+
+
+def _shadow_icp_count_and_resume_row(
+    store: Any,
+    cutoff: datetime,
+    round_id: str,
+    *,
+    resume_round: bool,
+    managed_postgrest: bool,
+) -> tuple[int, Any]:
+    """Use the bank's submission-open date or an existing round's frozen count."""
+    if resume_round:
+        if managed_postgrest:
+            existing_round = store.get_round(round_id)
+            if existing_round is None:
+                raise ConfigurationError("resume target does not exist")
+        else:
+            existing_rounds = store.list_rounds(limit=2)
+            if len(existing_rounds) != 1 or existing_rounds[0].get("round_id") != round_id:
+                raise ConfigurationError("resume target is not the only round in the isolated database")
+            existing_round = existing_rounds[0]
+        from lab_arena import contracts
+
+        configuration = existing_round.get("configuration_doc") or {}
+        try:
+            return contracts.benchmark_icp_count(configuration), existing_round
+        except contracts.ArenaContractError as exc:
+            raise ConfigurationError("resume target has an invalid frozen ICP count") from exc
+    bank_date = (cutoff.astimezone(timezone.utc) - timedelta(days=1)).strftime("%Y%m%d")
+    return _seeded_icp_count(store, int(bank_date)), None
+
+
 def _current_icp_row(secret: Mapping[str, str], set_id: int) -> dict[str, Any]:
     base_url = _validate_supabase_url(secret["SUPABASE_URL"])
     query = urllib.parse.urlencode(
@@ -403,12 +451,9 @@ def _current_icp_row(secret: Mapping[str, str], set_id: int) -> dict[str, Any]:
     if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], Mapping):
         raise ConfigurationError("production current ICP set is not uniquely available")
     row = dict(rows[0])
-    icps = row.get("icps")
-    if row.get("set_id") != set_id or row.get("is_active") is not True or not isinstance(icps, list) or len(icps) != 20:
+    if row.get("set_id") != set_id or row.get("is_active") is not True:
         raise ConfigurationError("production current ICP set fails the Arena contract")
-    icp_ids = [str(item.get("icp_id") or "").strip() if isinstance(item, Mapping) else "" for item in icps]
-    if any(not value for value in icp_ids) or len(set(icp_ids)) != 20:
-        raise ConfigurationError("production current ICP identities fail the Arena contract")
+    _validated_icp_count(row.get("icps"))
     return row
 
 
@@ -449,7 +494,7 @@ def _seed_current(args: argparse.Namespace) -> int:
         raise
     finally:
         connection.close()
-    _json_output(command="seed-current", set_id=set_id, icp_count=20, destination=args.expected_database)
+    _json_output(command="seed-current", set_id=set_id, icp_count=len(row["icps"]), destination=args.expected_database)
     return 0
 
 
@@ -642,7 +687,13 @@ def _serve(args: argparse.Namespace) -> int:
             args.baseline_source_url,
             DEFAULT_BASELINE_SOURCE_URL,
         )
+        seeded_icp_count, existing_round = _shadow_icp_count_and_resume_row(
+            store, cutoff, round_id,
+            resume_round=args.resume_round,
+            managed_postgrest=args.managed_postgrest,
+        )
         defaults = RoundDefaults(
+            benchmark_icp_count=seeded_icp_count,
             execution_cap_microusd=args.execution_cap_usd,
             scoring_cap_microusd=args.scoring_cap_usd,
             runner_hotkeys=(args.runner_hotkey,),
@@ -700,15 +751,6 @@ def _serve(args: argparse.Namespace) -> int:
         if checks.get("schema_version") != EXPECTED_SCHEMA_VERSION:
             raise ConfigurationError("Arena startup did not verify the current schema")
         if args.resume_round:
-            if args.managed_postgrest:
-                existing_round = store.get_round(round_id)
-                if existing_round is None:
-                    raise ConfigurationError("resume target does not exist")
-            else:
-                existing_rounds = store.list_rounds(limit=2)
-                if len(existing_rounds) != 1 or existing_rounds[0].get("round_id") != round_id:
-                    raise ConfigurationError("resume target is not the only round in the isolated database")
-                existing_round = existing_rounds[0]
             existing_configuration = existing_round.get("configuration_doc") or {}
             if not _resume_configuration_matches(
                 existing_configuration,

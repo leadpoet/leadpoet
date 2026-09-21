@@ -177,7 +177,7 @@ def _baseline_scores(
         if (
             isinstance(position, bool)
             or not isinstance(position, int)
-            or position not in range(contracts.BENCHMARK_ICP_COUNT)
+            or position not in range(contracts.benchmark_icp_count(round_row.get("configuration_doc")))
             or run.get("kind", "execute") != "execute"
         ):
             continue
@@ -243,7 +243,7 @@ def baseline_disclosure(
             ),
             None,
         ),
-        "public_positions": list(range(contracts.BENCHMARK_ICP_COUNT)),
+        "public_positions": list(range(contracts.benchmark_icp_count(round_row.get("configuration_doc")))),
         "private_positions": [],
         "baseline_scores": (
             _baseline_scores(round_row, runs)

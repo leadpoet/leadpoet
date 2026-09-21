@@ -20,16 +20,18 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 # Public V1 constants (labarena.md section 1)
 # ---------------------------------------------------------------------------
 
-# Every participant runs all twenty ICPs in two operational batches of ten.
-# FINALIST_COUNT remains only for already-committed historical round contracts.
-# These are the twenty ICPs in the organizer's current daily qualification set.
+# These constants are the historical defaults for callers without a frozen
+# round configuration. A round's stage counts are its count authority.
 STAGE_1_ICP_COUNT = 10
 STAGE_2_ICP_COUNT = 10
 BENCHMARK_ICP_COUNT = STAGE_1_ICP_COUNT + STAGE_2_ICP_COUNT
+DEFAULT_BENCHMARK_ICP_COUNT = 10
+DEFAULT_PROMOTION_MARGIN = 0.5
+MAX_BENCHMARK_ICP_COUNT = 100
 FINALIST_COUNT = 10
 MAX_CHALLENGERS = 256  # one entry per registered miner; each round pins its own admitted ceiling at or below this
 DEFAULT_MAX_CHALLENGERS = 20  # admitted challengers per daily round, excluding the baseline
-RUNNER_SLOT_CEILING = BENCHMARK_ICP_COUNT
+RUNNER_SLOT_CEILING = 20  # independent concurrency cap; larger banks use more waves
 PROXY_EXECUTION_VERSION = "webshare_parallel_v1"
 MAX_ATTEMPTS_PER_ASSIGNMENT = 2
 LAB_ARENA_POOL_PERCENT = 30  # default share of total emissions for the king's pool; LAB_ARENA_POOL_PERCENT overrides it per round
@@ -120,25 +122,79 @@ SCORING_WALL_CLOCK_SECONDS = 900
 LEASE_TTL_SECONDS = 1200
 
 
-def stage_positions(stage: int) -> Tuple[int, ...]:
-    """Return the fixed benchmark positions for one execution stage."""
+def benchmark_icp_count(configuration: Optional[Mapping[str, Any]] = None) -> int:
+    """Return the frozen total, or the historical total without round context."""
 
+    if configuration is None or (
+        "stage_1_icp_count" not in configuration
+        and "stage_2_icp_count" not in configuration
+    ):
+        return BENCHMARK_ICP_COUNT
+    if (
+        "stage_1_icp_count" not in configuration
+        or "stage_2_icp_count" not in configuration
+    ):
+        raise ArenaContractError("round stage ICP counts must be supplied together")
+    first = configuration["stage_1_icp_count"]
+    second = configuration["stage_2_icp_count"]
+    if (
+        type(first) is not int
+        or type(second) is not int
+        or first < 1
+        or second < 1
+        or first + second > MAX_BENCHMARK_ICP_COUNT
+    ):
+        raise ArenaContractError("round stage ICP counts are invalid")
+    return first + second
+
+
+def promotion_margin(configuration: Optional[Mapping[str, Any]] = None) -> float:
+    """Return the round's frozen promotion margin; old rounds use one point."""
+
+    if configuration is None:
+        return 1.0
+    margin = configuration.get("promotion_margin", 1.0)
+    if (
+        isinstance(margin, bool)
+        or not isinstance(margin, (int, float))
+        or not math.isfinite(float(margin))
+        or not 0 <= margin <= 100
+    ):
+        raise ArenaContractError("round promotion margin is invalid")
+    return float(margin)
+
+
+def stage_positions(
+    stage: int, configuration: Optional[Mapping[str, Any]] = None
+) -> Tuple[int, ...]:
+    """Return the positions in one execution stage."""
+
+    total = benchmark_icp_count(configuration)
+    stage_1 = (
+        STAGE_1_ICP_COUNT
+        if configuration is None or "stage_1_icp_count" not in configuration
+        else configuration["stage_1_icp_count"]
+    )
     if stage == 1:
-        return tuple(range(STAGE_1_ICP_COUNT))
+        return tuple(range(stage_1))
     if stage == 2:
-        return tuple(range(STAGE_1_ICP_COUNT, BENCHMARK_ICP_COUNT))
+        return tuple(range(stage_1, total))
     raise ArenaContractError("stage must be 1 or 2")
 
 
-def execution_positions(stage: int, policy: Optional[str] = None) -> Tuple[int, ...]:
+def execution_positions(
+    stage: int,
+    policy: Optional[str] = None,
+    configuration: Optional[Mapping[str, Any]] = None,
+) -> Tuple[int, ...]:
     """Return positions assigned in a stage under its frozen sequence policy."""
 
     if policy == BASELINE_SCORED_FIRST_POLICY:
         if stage not in (1, 2):
             raise ArenaContractError("stage must be 1 or 2")
-        return tuple(range(BENCHMARK_ICP_COUNT))
+        return tuple(range(benchmark_icp_count(configuration)))
     if policy is None:
-        return stage_positions(stage)
+        return stage_positions(stage, configuration)
     raise ArenaContractError("execution sequence policy is unsupported")
 
 # Signed request timestamp window (section 9.1).
@@ -776,6 +832,7 @@ ROUND_CONFIGURATION_FIELDS = (
     F("schedule", "object", fields=STAGE_SCHEDULE_FIELDS),
     F("stage_1_icp_count", "int", minimum=1),
     F("stage_2_icp_count", "int", minimum=1),
+    F("promotion_margin", "float", required=False, minimum=0, maximum=100),
     F("finalist_count", "int", minimum=1),
     F("max_challengers", "int", minimum=1),
     F("runner_slot_ceiling", "int", minimum=1),
@@ -883,6 +940,8 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
         raise ArenaContractError("integrity scorer adapter requires matching round policy")
     if "cost_per_company_microusd" in config and config["cost_per_company_microusd"] is None:
         raise ArenaContractError("round cost-per-company cap cannot be null")
+    if "promotion_margin" in config and config["promotion_margin"] is None:
+        raise ArenaContractError("round promotion margin cannot be null")
     if (
         config.get("sourcing_cost_eligibility_policy")
         == PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
@@ -914,8 +973,7 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
         config["netuid"] = 71
     if not ROUND_ID_RE.match(config["round_id"]):
         raise ArenaContractError("round_id has an invalid shape")
-    if config["stage_1_icp_count"] != STAGE_1_ICP_COUNT or config["stage_2_icp_count"] != STAGE_2_ICP_COUNT:
-        raise ArenaContractError("stage ICP counts are fixed public constants")
+    benchmark_icp_count(config)
     if config["finalist_count"] != FINALIST_COUNT:
         raise ArenaContractError("the finalist count is a fixed public constant")
     if config["max_attempts_per_assignment"] != MAX_ATTEMPTS_PER_ASSIGNMENT:
@@ -1153,7 +1211,7 @@ def validate_scorer_policy(document: Any) -> Dict[str, Any]:
 # One work item per accepted run. Plain row identifiers link it to the output.
 SCORING_WORK_ITEM_FIELDS = (
     F("scored_run_id", "str", minimum=1, maximum=128),
-    F("icp_position", "int", minimum=0, maximum=BENCHMARK_ICP_COUNT - 1),
+    F("icp_position", "int", minimum=0, maximum=MAX_BENCHMARK_ICP_COUNT - 1),
     F("submission_id", "str", minimum=1, maximum=64),
     F("output_ref", "str", minimum=1, maximum=512),
 )
@@ -1168,20 +1226,20 @@ SCORING_PLAN_FIELDS = (
         required=False,
         choices=(BASELINE_SCORED_FIRST_POLICY,),
     ),
-    F("work_items", "list[object]", fields=SCORING_WORK_ITEM_FIELDS, minimum=0, maximum=BENCHMARK_ICP_COUNT * (MAX_CHALLENGERS + 1)),
+    F("work_items", "list[object]", fields=SCORING_WORK_ITEM_FIELDS, minimum=0, maximum=MAX_BENCHMARK_ICP_COUNT * (MAX_CHALLENGERS + 1)),
     F("zero_rows", "list[object]", fields=(
         F("submission_id", "str", minimum=1, maximum=64),
-        F("icp_position", "int", minimum=0, maximum=BENCHMARK_ICP_COUNT - 1),
+        F("icp_position", "int", minimum=0, maximum=MAX_BENCHMARK_ICP_COUNT - 1),
         F("cause", "str", choices=TERMINAL_CAUSES),
-    ), minimum=0, maximum=BENCHMARK_ICP_COUNT * (MAX_CHALLENGERS + 1)),
+    ), minimum=0, maximum=MAX_BENCHMARK_ICP_COUNT * (MAX_CHALLENGERS + 1)),
 )
 
 
-def validate_scoring_plan(document: Any) -> Dict[str, Any]:
+def validate_scoring_plan(document: Any, configuration: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     plan = validate_document(document, SCORING_PLAN_FIELDS)
     positions = set(
         execution_positions(
-            int(plan["stage"]), plan.get("execution_sequence_policy")
+            int(plan["stage"]), plan.get("execution_sequence_policy"), configuration
         )
     )
     seen_runs: set = set()

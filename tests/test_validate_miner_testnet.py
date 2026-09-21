@@ -4,6 +4,7 @@ import importlib.util
 import inspect
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
 import sys
@@ -40,6 +41,78 @@ print(json.dumps({'result':result,'network':config.BITTENSOR_NETWORK,'netuid':co
     assert json.loads(result.stdout.splitlines()[-1]) == {
         "result": [True, "validator"], "network": "finney", "netuid": 71,
     }
+
+
+@pytest.mark.parametrize("count", [10, 15, 20, 30])
+def test_seeded_shadow_round_uses_actual_private_bank_count(count):
+    class Store:
+        def current_daily_icp_set(self, set_id):
+            assert set_id == 20260920
+            return {
+                "status": "ready", "set_id": set_id,
+                "icps": [{"icp_id": f"icp_{index}"} for index in range(count)],
+            }
+
+    assert SCRIPT._seeded_icp_count(Store(), 20260920) == count
+
+
+@pytest.mark.parametrize("icps", [
+    [],
+    [{"icp_id": "one"}],
+    [{"icp_id": "same"}, {"icp_id": "same"}],
+    [{"icp_id": "valid"}, {"icp_id": ""}],
+    [{"icp_id": f"icp_{index}"} for index in range(101)],
+])
+def test_seeded_shadow_round_rejects_invalid_private_bank(icps):
+    with pytest.raises(SCRIPT.ConfigurationError):
+        SCRIPT._validated_icp_count(icps)
+
+
+def test_seeded_shadow_round_fails_when_bank_is_unavailable():
+    class Store:
+        def current_daily_icp_set(self, _set_id):
+            return {"status": "unavailable", "set_id": 20260920}
+
+    with pytest.raises(SCRIPT.ConfigurationError, match="unavailable"):
+        SCRIPT._seeded_icp_count(Store(), 20260920)
+
+
+def test_new_shadow_round_uses_submission_open_bank_date():
+    class Store:
+        def current_daily_icp_set(self, set_id):
+            assert set_id == 20260920  # September 21 cutoff opens September 20.
+            return {
+                "status": "ready", "set_id": set_id,
+                "icps": [{"icp_id": f"icp_{index}"} for index in range(15)],
+            }
+
+    count, existing = SCRIPT._shadow_icp_count_and_resume_row(
+        Store(), datetime(2026, 9, 21, tzinfo=timezone.utc),
+        "arena-2026-09-21-e2e", resume_round=False, managed_postgrest=False,
+    )
+    assert (count, existing) == (15, None)
+
+
+def test_resumed_shadow_round_uses_frozen_count_without_active_bank():
+    row = {
+        "round_id": "arena-2026-09-21-e2e",
+        "configuration_doc": {"stage_1_icp_count": 15, "stage_2_icp_count": 15},
+    }
+
+    class Store:
+        def current_daily_icp_set(self, _set_id):
+            raise AssertionError("resume must not require an active bank")
+
+        def get_round(self, round_id):
+            assert round_id == row["round_id"]
+            return row
+
+    count, existing = SCRIPT._shadow_icp_count_and_resume_row(
+        Store(), datetime(2026, 9, 21, tzinfo=timezone.utc), row["round_id"],
+        resume_round=True, managed_postgrest=True,
+    )
+    assert count == 30
+    assert existing is row
 
 
 def test_database_guard_accepts_only_named_loopback_target():

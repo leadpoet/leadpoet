@@ -115,12 +115,15 @@ def _build_pinned_service(round_id: str):
     if source_mode != "live":
         raise VerificationError("the source environment must be the live gateway environment")
     from lab_arena.api import create_app
+    from lab_arena import contracts
     from lab_arena.service import ArenaService, DEFAULT_BASELINE_SOURCE_URL
     from lab_arena.wiring import build_service_from_environment
 
     built, _unused_app = build_service_from_environment("shadow")
     defaults = replace(
         built.config.defaults,
+        benchmark_icp_count=contracts.BENCHMARK_ICP_COUNT,
+        promotion_margin=1.0,
         rewards_enabled=False,
         daily_cutoff_hour_utc=None,
         baseline_source_url=DEFAULT_BASELINE_SOURCE_URL,

@@ -261,6 +261,28 @@ def _pool_percent_from_environment() -> int:
     return value
 
 
+def _benchmark_icp_count_from_environment() -> int:
+    raw = os.environ.get("LAB_ARENA_BENCHMARK_ICP_COUNT", "").strip()
+    try:
+        value = int(raw) if raw else contracts.DEFAULT_BENCHMARK_ICP_COUNT
+    except ValueError:
+        raise ServiceError("LAB_ARENA_BENCHMARK_ICP_COUNT must be an integer", 500) from None
+    if not 2 <= value <= contracts.MAX_BENCHMARK_ICP_COUNT:
+        raise ServiceError("LAB_ARENA_BENCHMARK_ICP_COUNT must be within 2..100", 500)
+    return value
+
+
+def _promotion_margin_from_environment() -> float:
+    raw = os.environ.get("LAB_ARENA_PROMOTION_MARGIN", "").strip()
+    try:
+        value = float(raw) if raw else contracts.DEFAULT_PROMOTION_MARGIN
+    except ValueError:
+        raise ServiceError("LAB_ARENA_PROMOTION_MARGIN must be a number", 500) from None
+    if not 0 <= value <= 100:
+        raise ServiceError("LAB_ARENA_PROMOTION_MARGIN must be within 0..100", 500)
+    return value
+
+
 def _rewards_enabled_from_environment() -> bool:
     """Freeze LAB_ARENA_REWARDS_ENABLED into each new live round."""
 
@@ -428,6 +450,8 @@ def build_service_from_environment(mode: str):
         # Each eligible validator derives its declaration from its own proxy
         # inventory. The gateway publishes one common maximum for all of them.
         runner_slot_ceiling=contracts.RUNNER_SLOT_CEILING,
+        benchmark_icp_count=_benchmark_icp_count_from_environment(),
+        promotion_margin=_promotion_margin_from_environment(),
         parallel_twenty_icp_execution=True,
         per_icp_cost_policy=True,
         baseline_hotkey=_required("LAB_ARENA_BASELINE_HOTKEY"),

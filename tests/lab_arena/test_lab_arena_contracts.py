@@ -237,8 +237,8 @@ def test_round_configuration_contains_only_plain_public_settings():
     config = c.validate_round_configuration(base_round_configuration())
     assert config == dict(base_round_configuration(), network_name="finney", netuid=71)
     for mutate in (
-        lambda d: d.update(stage_1_icp_count=9),
-        lambda d: d.update(stage_2_icp_count=9),
+        lambda d: d.update(stage_1_icp_count=0),
+        lambda d: d.update(stage_2_icp_count=91),
         lambda d: d.update(finalist_count=9),
         lambda d: d.update(max_challengers=257),
         lambda d: d.update(runner_slot_ceiling=21),

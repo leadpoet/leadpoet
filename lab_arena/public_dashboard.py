@@ -212,7 +212,8 @@ def _cost_bucket(
 
 
 def _cost_projection(
-    ranking: Mapping[str, Any], *, sourcing_cost_eligibility_policy: Any = None
+    ranking: Mapping[str, Any], *, sourcing_cost_eligibility_policy: Any = None,
+    configuration: Optional[Mapping[str, Any]] = None,
 ) -> dict:
     """Allow-list a final cost result; never pass publication fields through."""
 
@@ -254,7 +255,7 @@ def _cost_projection(
         if (
             any(item is None for item in projected_summary.values())
             or not isinstance(raw_rows, list)
-            or len(raw_rows) != contracts.BENCHMARK_ICP_COUNT
+            or len(raw_rows) != contracts.benchmark_icp_count(configuration)
             or execution is None
             or judge is None
         ):
@@ -283,7 +284,7 @@ def _cost_projection(
                 return {}
             rows.append(row)
         if {row["icp_position"] for row in rows} != set(
-            range(contracts.BENCHMARK_ICP_COUNT)
+            range(contracts.benchmark_icp_count(configuration))
         ):
             return {}
         projected_summary.update({
@@ -400,6 +401,7 @@ def _baseline_and_champion(row: Mapping[str, Any]) -> tuple[Optional[dict], Opti
             projected.update(
                 _cost_projection(
                     ranking,
+                    configuration=configuration,
                     sourcing_cost_eligibility_policy=configuration.get(
                         "sourcing_cost_eligibility_policy"
                     ),
@@ -428,6 +430,8 @@ def round_summary(row: Mapping[str, Any]) -> dict:
         promotion_status = "pending"
     return {
         "round_id": str(row.get("round_id") or ""),
+        "benchmark_icp_count": contracts.benchmark_icp_count(configuration),
+        "promotion_margin": contracts.promotion_margin(configuration),
         "status": str(row.get("status") or ""),
         "mode": mode,
         "network_name": network_name,
@@ -559,7 +563,7 @@ def _stage1_scores(service: Any, row: Mapping[str, Any]) -> Dict[str, float]:
         if current is None or int(run.get("attempt") or 0) > int(current.get("attempt") or 0):
             selected[key] = run
     result: Dict[str, float] = {}
-    positions = contracts.execution_positions(1, execution_policy)
+    positions = contracts.execution_positions(1, execution_policy, configuration)
     for participant in _participants(row):
         submission_id = str(participant.get("submission_id") or "")
         is_baseline = bool(
@@ -580,6 +584,7 @@ def _stage1_scores(service: Any, row: Mapping[str, Any]) -> Dict[str, float]:
             if per_icp_policy:
                 frozen_cost = _cost_projection(
                     final_rankings.get(submission_id) or {},
+                    configuration=configuration,
                     sourcing_cost_eligibility_policy=(
                         contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
                     ),
@@ -760,6 +765,7 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
             projected.update(
                 _cost_projection(
                     final,
+                    configuration=configuration,
                     sourcing_cost_eligibility_policy=configuration.get(
                         "sourcing_cost_eligibility_policy"
                     ),

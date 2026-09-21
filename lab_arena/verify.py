@@ -41,11 +41,13 @@ def employee_count_buckets_for_icp(*args, **kwargs):
 from lab_arena.contracts import (
     ArenaContractError,
     BENCHMARK_ICP_COUNT,
+    MAX_BENCHMARK_ICP_COUNT,
     FINALIST_COUNT,
     KING_OUTCOMES,
     STAGE_1_ICP_COUNT,
     TERMINAL_CAUSES,
     document_hash,
+    promotion_margin,
     validate_scorer_policy,
 )
 
@@ -286,9 +288,8 @@ def scored_row(
 
 
 def _require_position(value: Any) -> int:
-    from lab_arena.contracts import BENCHMARK_ICP_COUNT
-    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < BENCHMARK_ICP_COUNT:
-        raise ArenaContractError("icp_position must be within 0..%d" % (BENCHMARK_ICP_COUNT - 1))
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < MAX_BENCHMARK_ICP_COUNT:
+        raise ArenaContractError("icp_position must be within 0..%d" % (MAX_BENCHMARK_ICP_COUNT - 1))
     return value
 
 
@@ -300,8 +301,8 @@ def stage_score(per_icp_scores: Sequence[float], denominator: int) -> float:
     challenger-versus-king tie is a true equality.
     """
 
-    if denominator not in STAGE_DENOMINATORS:
-        raise ArenaContractError("stage denominator must be one of %s" % (STAGE_DENOMINATORS,))
+    if isinstance(denominator, bool) or not isinstance(denominator, int) or not 1 <= denominator <= MAX_BENCHMARK_ICP_COUNT:
+        raise ArenaContractError("stage denominator must be within 1..%d" % MAX_BENCHMARK_ICP_COUNT)
     scores = _require_list(per_icp_scores, "per_icp_scores")
     if len(scores) != denominator:
         raise ArenaContractError("expected exactly %d per-ICP scores, got %d" % (denominator, len(scores)))
@@ -402,16 +403,17 @@ def _decision(outcome: str, king: Optional[Mapping[str, Any]], winner: Optional[
 def king_decision(
     finalists_final_scores: Sequence[Mapping[str, Any]],
     king_entry: Optional[Mapping[str, Any]],
+    configuration: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Choose a miner only when it beats the daily baseline by one point.
+    """Choose a miner only when it meets the frozen baseline margin.
 
     Entries are ``{"submission_id", "hotkey", "final_score"}``
     where ``final_score`` is ``None`` for a participant with no valid
     full daily ICP result. Contenders are challengers with any valid score.
     The highest contender (ties by stable submission ID) is crowned only when
     both it and the organizer baseline have valid scores and the contender's
-    score is at least exactly 1.0 point higher. A smaller margin, no
-    contender, or no valid baseline score records ``no_king``. Decimal score
+    score meets the round's frozen margin (one point for old rounds). A smaller
+    margin, no contender, or no valid baseline score records ``no_king``. Decimal score
     text is compared as exact rational values, so the boundary is
     deterministic. The baseline is a threshold, never a champion.
     """
@@ -440,7 +442,8 @@ def king_decision(
         king["final_score"] is not None
         and best is not None
         and Fraction(repr(best["final_score"]))
-        >= Fraction(repr(king["final_score"])) + PROMOTION_THRESHOLD_POINTS
+        >= Fraction(repr(king["final_score"]))
+        + Fraction(repr(promotion_margin(configuration)))
     ):
         return _decision("crowned", best, best["submission_id"])
     return _decision("no_king", None, None)

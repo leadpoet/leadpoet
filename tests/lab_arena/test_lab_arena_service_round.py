@@ -2264,7 +2264,7 @@ def test_persistent_final_judge_failure_zeros_one_icp_and_publishes(connect, tmp
     )
 
 
-def test_miner_credential_failure_remains_challenger_ineligibility(
+def test_miner_credential_failure_zeros_affected_icps_without_excluding_model(
     connect, tmp_path, monkeypatch
 ):
     harness = Harness(
@@ -2294,7 +2294,7 @@ def test_miner_credential_failure_remains_challenger_ineligibility(
     harness.advance_until("stage1_scored", runners=2)
 
     row = harness.service.store.get_round(harness.round_id)
-    assert failed["submission_id"] not in row["finalists"]
+    assert failed["submission_id"] in row["finalists"]
     score_runs = harness.service.store.list_runs(
         harness.round_id,
         stage=1,
@@ -2311,7 +2311,7 @@ def test_miner_credential_failure_remains_challenger_ineligibility(
         submission_id=failed["submission_id"],
         kind="execute",
     )
-    assert all(run["per_icp_score"] is None for run in execute_runs)
+    assert all(run["per_icp_score"] == 0 for run in execute_runs)
     harness.service.cancel(harness.round_id, sorted(svc.CANCEL_REASONS.values())[0])
 
 

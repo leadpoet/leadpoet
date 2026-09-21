@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 from qualification.scoring import role_batch_check
+from qualification.scoring.competition import _classify_contact_role
 from qualification.scoring.role_batch_check import _coerce_result_id, batch_check
 
 
@@ -67,3 +68,83 @@ def test_coerce_result_id_edges():
     assert _coerce_result_id(True, results) is None
     assert _coerce_result_id(None, results) is None
     assert _coerce_result_id("missing", results) is None
+
+
+@pytest.fixture
+def contact_role_judge(monkeypatch):
+    calls = []
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    def _run(parsed):
+        async def fake_judge_chunk(http, key, target_roles, chunk):
+            calls.append((http, key, target_roles, chunk))
+            return parsed
+
+        monkeypatch.setenv("OPENROUTER_KEY", "test-key")
+        monkeypatch.setattr(role_batch_check.httpx, "AsyncClient", Client)
+        monkeypatch.setattr(role_batch_check, "_judge_chunk", fake_judge_chunk)
+
+        import asyncio
+
+        result = asyncio.run(_classify_contact_role(
+            "Vice President of Customer Growth",
+            ["Vice President of Sales"],
+            "VP",
+            "Owns sales pipeline and customer growth.",
+        ))
+        return result, calls[-1]
+
+    return _run
+
+
+@pytest.mark.parametrize(
+    ("returned_id", "match"),
+    [(1, True), ("1", False)],
+)
+def test_single_contact_role_accepts_exact_numeric_id_echo(
+    contact_role_judge, returned_id, match
+):
+    result, call = contact_role_judge([
+        {"id": returned_id, "match": match, "reason": "bounded decision"}
+    ])
+
+    assert result is match
+    assert call[2] == ["Vice President of Sales"]
+    assert call[3] == [{
+        "id": 1,
+        "role": "Vice President of Customer Growth",
+        "duties": "Owns sales pipeline and customer growth.",
+    }]
+
+
+@pytest.mark.parametrize(
+    "returned_id",
+    [True, 1.0, 2, "contact", "01", None],
+)
+def test_single_contact_role_rejects_malformed_id_echo(
+    contact_role_judge, returned_id
+):
+    with pytest.raises(RuntimeError, match="response unavailable"):
+        contact_role_judge([
+            {"id": returned_id, "match": True, "reason": "bounded decision"}
+        ])
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        [],
+        [{"id": 1, "match": True}, {"id": 1, "match": False}],
+        [{"id": 1}],
+        [{"id": 1, "match": 1}],
+    ],
+)
+def test_single_contact_role_rejects_malformed_rows(contact_role_judge, response):
+    with pytest.raises(RuntimeError, match="response unavailable"):
+        contact_role_judge(response)

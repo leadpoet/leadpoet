@@ -651,18 +651,35 @@ async def _classify_contact_role(
     )
     if not key:
         raise RuntimeError("contact role judge key unavailable")
+    expected_id = 1
     async with role_module.httpx.AsyncClient() as client:
         parsed = await role_module._judge_chunk(
             client,
             key,
             target_roles,
-            [{"id": "contact", "role": actual_role, "duties": duties}],
+            [{"id": expected_id, "role": actual_role, "duties": duties}],
         )
+    returned_id = (
+        parsed[0].get("id")
+        if isinstance(parsed, list)
+        and len(parsed) == 1
+        and isinstance(parsed[0], Mapping)
+        else None
+    )
+    normalized_id = (
+        expected_id
+        if type(returned_id) is int and returned_id == expected_id
+        else (
+            role_module._coerce_result_id(returned_id, {expected_id: False})
+            if type(returned_id) is str and returned_id == str(expected_id)
+            else None
+        )
+    )
     if (
         not isinstance(parsed, list)
         or len(parsed) != 1
         or not isinstance(parsed[0], Mapping)
-        or parsed[0].get("id") != "contact"
+        or normalized_id != expected_id
         or type(parsed[0].get("match")) is not bool
     ):
         raise RuntimeError("contact role judge response unavailable")

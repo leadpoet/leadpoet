@@ -9,7 +9,8 @@ import json
 
 import pytest
 
-from qualification.scoring import contact_verification
+from qualification.scoring import contact_verification, role_batch_check
+from qualification.scoring.competition import _classify_contact_role
 from qualification.scoring.contact_verification import verify_contact
 
 
@@ -928,6 +929,82 @@ def test_semantic_role_judge_outage_is_retryable_unavailable() -> None:
     assert result["contact_verification"]["decision"] == "unavailable"
     assert result["contact_verification"]["reason"] == "contact_role_provider_error"
     assert result["verifier_gate_receipts"][0]["failure_class"] == "contact_provider_error"
+
+
+@pytest.mark.parametrize(
+    ("returned_id", "match", "decision", "reason", "email_calls"),
+    [
+        (1, True, "verified", "contact_verified", 1),
+        ("1", False, "mismatch", "contact_role_not_targeted", 0),
+        ("contact", True, "unavailable", "contact_role_provider_error", 0),
+    ],
+)
+def test_semantic_role_numeric_id_transition_is_bound_and_fail_closed(
+    monkeypatch,
+    returned_id,
+    match,
+    decision,
+    reason,
+    email_calls,
+) -> None:
+    role = "Vice President of Customer Growth"
+    duties = "Owns sales pipeline and customer growth."
+    company = _company(contact=_contact(role=role))
+    profile = _profile(currentPosition={
+        "title": role,
+        "description": duties,
+        "company": {"name": "Acme", "domain": "acme.com"},
+        "isCurrent": True,
+    })
+    requests = []
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict:
+            return {"choices": [{"message": {"content": json.dumps([{
+                "id": returned_id,
+                "match": match,
+                "reason": "bounded decision",
+            }])}}]}
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, **kwargs):
+            requests.append((url, kwargs))
+            return Response()
+
+    monkeypatch.setenv("OPENROUTER_KEY", "test-key")
+    monkeypatch.setattr(role_batch_check.httpx, "AsyncClient", Client)
+    execute = ScriptedExecute(
+        {"zerobounce_validate": [_zero("valid")]} if email_calls else {}
+    )
+
+    result = asyncio.run(verify_contact(
+        company,
+        _icp(),
+        source_evidence=_source(profile),
+        execute=execute,
+        classify_role=_classify_contact_role,
+    ))
+
+    assert len(requests) == 1
+    prompt = requests[0][1]["json"]["messages"][1]["content"]
+    assert "id=1" in prompt
+    assert role in prompt
+    assert duties in prompt
+    assert result["contact_verification"]["decision"] == decision
+    assert result["contact_verification"]["reason"] == reason
+    assert result["contact_qualified"] is (decision == "verified")
+    assert [call[0] for call in execute.calls] == [
+        "zerobounce_validate"
+    ] * email_calls
 
 
 @pytest.mark.parametrize("match", [True, False])

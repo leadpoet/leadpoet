@@ -17,8 +17,6 @@ DECLARE
   v_round public.lab_arena_rounds;
   v_run public.lab_arena_runs;
   v_generation BIGINT;
-  v_baseline_count INTEGER;
-  v_baseline_incomplete INTEGER;
   v_incomplete INTEGER;
   v_next TEXT;
 BEGIN
@@ -66,40 +64,15 @@ BEGIN
       runs.attempt DESC, runs.run_id DESC
   ) AS latest
   WHERE latest.status <> 'accepted';
-  SELECT COUNT(*) INTO v_baseline_count
-  FROM pg_catalog.jsonb_array_elements(COALESCE(v_round.participants, '[]'::JSONB)) AS participant
-  WHERE COALESCE((participant ->> 'is_king')::BOOLEAN, FALSE);
-  SELECT COUNT(*) INTO v_baseline_incomplete FROM (
-    SELECT DISTINCT ON (COALESCE(runs.scored_run_id, runs.assignment_id))
-      COALESCE(runs.scored_run_id, runs.assignment_id) AS scored_run_id,
-      runs.submission_id, runs.status
-    FROM public.lab_arena_runs AS runs
-    WHERE runs.round_id = p_round_id AND runs.stage = p_stage AND runs.kind = 'score'
-    ORDER BY COALESCE(runs.scored_run_id, runs.assignment_id),
-      (runs.status = 'accepted') DESC, runs.stage_generation DESC,
-      runs.attempt DESC, runs.run_id DESC
-  ) AS latest
-  WHERE latest.status <> 'accepted'
-    AND EXISTS (
-      SELECT 1
-      FROM pg_catalog.jsonb_array_elements(COALESCE(v_round.participants, '[]'::JSONB)) AS participant
-      WHERE participant ->> 'submission_id' = latest.submission_id
-        AND COALESCE((participant ->> 'is_king')::BOOLEAN, FALSE)
-    );
-  IF v_incomplete > 0 AND (v_baseline_count <> 1 OR v_baseline_incomplete > 0) THEN
-    v_next := 'cancelled';
-    UPDATE public.lab_arena_rounds
-    SET status = 'cancelled', status_generation = status_generation + 1, stage_generation = v_generation,
-        cancel_reason = 'scoring_incomplete:stage' || p_stage::TEXT || ':' || v_incomplete::TEXT
-    WHERE round_id = p_round_id;
-  ELSE
-    v_next := 'stage' || p_stage::TEXT || '_judged';
-    UPDATE public.lab_arena_rounds
-    SET status = v_next, status_generation = status_generation + 1, stage_generation = v_generation
-    WHERE round_id = p_round_id;
-  END IF;
+  -- Closing a review window is not a round-wide qualification decision.
+  -- The service verifies accepted artifacts and records only failed ICPs as
+  -- zero, preserving every other participant and ICP result.
+  v_next := 'stage' || p_stage::TEXT || '_judged';
+  UPDATE public.lab_arena_rounds
+  SET status = v_next, status_generation = status_generation + 1, stage_generation = v_generation
+  WHERE round_id = p_round_id;
   RETURN pg_catalog.jsonb_build_object(
-    'status', CASE WHEN v_next = 'cancelled' THEN 'cancelled' ELSE 'closed' END,
+    'status', 'closed',
     'round_status', v_next, 'incomplete_assignments', v_incomplete, 'stage_generation', v_generation);
 END;
 $lab_arena_close_scoring$;

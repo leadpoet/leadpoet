@@ -178,7 +178,11 @@ def test_new_round_preserves_45m_default_and_explicit_90m_profile_is_valid():
         "deepline": 200,
         "openrouter": 2000,
     }
-    assert current["scoring_call_quotas"]["openrouter"] == 2000
+    assert current["scoring_call_quotas"] == {
+        "scrapingdog": 2000,
+        "deepline": 2000,
+        "openrouter": 2000,
+    }
     assert current["scoring_cap_microusd"] == 50_000_000
     assert current["scoring_wall_clock_seconds"] == 900
     with pytest.raises(contracts.ArenaContractError):

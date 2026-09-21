@@ -40,7 +40,7 @@ def store(connect):
     transport.close()
 
 
-def _seed_score_run(connect, suffix, scoring_quotas, *, seeded_calls=0):
+def _seed_score_run(connect, suffix, scoring_quotas, *, seeded_calls=None):
     round_id = "arena-2026-09-22-" + suffix
     submission_id = "scoring-quota-" + suffix + "-submission"
     run_id = "scoring-quota-" + suffix + "-run"
@@ -91,16 +91,16 @@ def _seed_score_run(connect, suffix, scoring_quotas, *, seeded_calls=0):
                     LEASE_TOKEN_HASH,
                 ),
             )
-            if seeded_calls:
+            for provider, count in (seeded_calls or {}).items():
                 cursor.execute(
                     "INSERT INTO public.lab_arena_ledger("
                     "entry_kind,miner_hotkey,round_id,submission_id,run_id,"
                     "stage,call_identity,provider,operation_id,funding_source,"
                     "amount_microusd,entry_doc) "
                     "SELECT 'reservation',%s,%s,%s,%s,1,"
-                    "'sha256:' || md5(%s || series::text) || "
-                    "md5('second-' || %s || series::text),"
-                    "'openrouter','openrouter.chat','miner_key',0,'{}'::jsonb "
+                    "'sha256:' || md5(%s || %s || series::text) || "
+                    "md5('second-' || %s || %s || series::text),"
+                    "%s,%s,'miner_key',0,'{}'::jsonb "
                     "FROM generate_series(1,%s) AS series",
                     (
                         miner,
@@ -108,8 +108,16 @@ def _seed_score_run(connect, suffix, scoring_quotas, *, seeded_calls=0):
                         submission_id,
                         run_id,
                         run_id,
+                        provider,
                         run_id,
-                        seeded_calls,
+                        provider,
+                        provider,
+                        {
+                            "openrouter": "openrouter.chat",
+                            "deepline": "deepline.execute",
+                            "scrapingdog": "scrapingdog.scrape",
+                        }[provider],
+                        count,
                     ),
                 )
             cursor.execute("SET session_replication_role=origin")
@@ -122,21 +130,26 @@ def _seed_score_run(connect, suffix, scoring_quotas, *, seeded_calls=0):
     }
 
 
-def _reserve(store, seeded, sequence, amount_microusd=0):
+def _reserve(store, seeded, provider, sequence, amount_microusd=0):
+    operation = {
+        "openrouter": "openrouter.chat",
+        "deepline": "deepline.execute",
+        "scrapingdog": "scrapingdog.scrape",
+    }[provider]
     identity = contracts.provider_call_identity(
         attempt=1,
         assignment_id=seeded["assignment_id"],
         icp_position=0,
         action_sequence=sequence,
-        operation_id="openrouter.chat",
+        operation_id=operation,
         request_hash=sha("%s-%d" % (seeded["run_id"], sequence)),
     )
     return identity, store.reserve_call(
         run_id=seeded["run_id"],
         lease_token_hash=LEASE_TOKEN_HASH,
         call_identity=identity,
-        operation_id="openrouter.chat",
-        provider="openrouter",
+        operation_id=operation,
+        provider=provider,
         funding_source="miner_key",
         amount_microusd=amount_microusd,
         call_doc={},
@@ -150,33 +163,37 @@ def test_frozen_legacy_and_current_scoring_profiles_enforce_exact_boundaries(
         connect,
         "legacy120",
         contracts.LEGACY_SCORING_CALL_QUOTAS_PER_WORK_ITEM,
-        seeded_calls=120,
+        seeded_calls={"scrapingdog": 150, "deepline": 40, "openrouter": 120},
     )
-    _identity, legacy_refusal = _reserve(store, legacy, 121)
-    assert (legacy_refusal["status"], legacy_refusal["reason"]) == (
-        "refused",
-        "per_icp_quota",
-    )
-    assert store.run_quota_snapshot(legacy["run_id"], LEASE_TOKEN_HASH)[
-        "providers"
-    ]["openrouter"] == {
-        "limit": 120,
-        "used": 120,
-        "remaining": 0,
-        "inflight": 120,
-    }
+    for provider, limit in (("scrapingdog", 150), ("deepline", 40), ("openrouter", 120)):
+        _identity, legacy_refusal = _reserve(store, legacy, provider, limit + 1)
+        assert (legacy_refusal["status"], legacy_refusal["reason"]) == (
+            "refused",
+            "per_icp_quota",
+        )
+        assert store.run_quota_snapshot(legacy["run_id"], LEASE_TOKEN_HASH)[
+            "providers"
+        ][provider] == {
+            "limit": limit,
+            "used": limit,
+            "remaining": 0,
+            "inflight": limit,
+        }
 
     current = _seed_score_run(
         connect,
         "current2000",
         contracts.SCORING_CALL_QUOTAS_PER_WORK_ITEM,
-        seeded_calls=120,
+        seeded_calls={"scrapingdog": 150, "deepline": 40, "openrouter": 120},
     )
-    identity, admitted = _reserve(store, current, 121)
-    assert admitted["status"] == "reserved"
-    assert admitted["amount_microusd"] == 0
-    replay_identity, replay = _reserve(store, current, 121)
-    assert replay_identity == identity
+    admitted_identities = {}
+    for provider, old_limit in (("scrapingdog", 150), ("deepline", 40), ("openrouter", 120)):
+        identity, admitted = _reserve(store, current, provider, old_limit + 1)
+        assert admitted["status"] == "reserved"
+        assert admitted["amount_microusd"] == 0
+        admitted_identities[provider] = identity
+    replay_identity, replay = _reserve(store, current, "openrouter", 121)
+    assert replay_identity == admitted_identities["openrouter"]
     assert (replay["status"], replay["idempotent"]) == ("reserved", True)
     connection = connect()
     connection.autocommit = True
@@ -185,41 +202,58 @@ def test_frozen_legacy_and_current_scoring_profiles_enforce_exact_boundaries(
             cursor.execute(
                 "SELECT count(*) FROM public.lab_arena_ledger "
                 "WHERE call_identity=%s",
-                (identity,),
+                (admitted_identities["openrouter"],),
             )
             assert cursor.fetchone() == (1,)
             cursor.execute("SET session_replication_role=replica")
-            cursor.execute(
-                "INSERT INTO public.lab_arena_ledger("
-                "entry_kind,miner_hotkey,round_id,submission_id,run_id,"
-                "stage,call_identity,provider,operation_id,funding_source,"
-                "amount_microusd,entry_doc) "
-                "SELECT 'reservation',runs.miner_hotkey,runs.round_id,"
-                "runs.submission_id,runs.run_id,1,"
-                "'sha256:' || md5(runs.run_id || series::text) || "
-                "md5('tail-' || runs.run_id || series::text),"
-                "'openrouter','openrouter.chat','miner_key',0,'{}'::jsonb "
-                "FROM public.lab_arena_runs AS runs "
-                "CROSS JOIN generate_series(122,2000) AS series "
-                "WHERE runs.run_id=%s",
-                (current["run_id"],),
-            )
+            for provider, old_limit in (
+                ("scrapingdog", 150),
+                ("deepline", 40),
+                ("openrouter", 120),
+            ):
+                cursor.execute(
+                    "INSERT INTO public.lab_arena_ledger("
+                    "entry_kind,miner_hotkey,round_id,submission_id,run_id,"
+                    "stage,call_identity,provider,operation_id,funding_source,"
+                    "amount_microusd,entry_doc) "
+                    "SELECT 'reservation',runs.miner_hotkey,runs.round_id,"
+                    "runs.submission_id,runs.run_id,1,"
+                    "'sha256:' || md5(runs.run_id || %s || series::text) || "
+                    "md5('tail-' || runs.run_id || %s || series::text),"
+                    "%s,%s,'miner_key',0,'{}'::jsonb "
+                    "FROM public.lab_arena_runs AS runs "
+                    "CROSS JOIN generate_series(%s,2000) AS series "
+                    "WHERE runs.run_id=%s",
+                    (
+                        provider,
+                        provider,
+                        provider,
+                        {
+                            "openrouter": "openrouter.chat",
+                            "deepline": "deepline.execute",
+                            "scrapingdog": "scrapingdog.scrape",
+                        }[provider],
+                        old_limit + 2,
+                        current["run_id"],
+                    ),
+                )
             cursor.execute("SET session_replication_role=origin")
     finally:
         connection.close()
-    _identity, current_refusal = _reserve(store, current, 2001)
-    assert (current_refusal["status"], current_refusal["reason"]) == (
-        "refused",
-        "per_icp_quota",
-    )
-    assert store.run_quota_snapshot(current["run_id"], LEASE_TOKEN_HASH)[
-        "providers"
-    ]["openrouter"] == {
-        "limit": 2000,
-        "used": 2000,
-        "remaining": 0,
-        "inflight": 2000,
-    }
+    for provider in ("scrapingdog", "deepline", "openrouter"):
+        _identity, current_refusal = _reserve(store, current, provider, 2001)
+        assert (current_refusal["status"], current_refusal["reason"]) == (
+            "refused",
+            "per_icp_quota",
+        )
+        assert store.run_quota_snapshot(current["run_id"], LEASE_TOKEN_HASH)[
+            "providers"
+        ][provider] == {
+            "limit": 2000,
+            "used": 2000,
+            "remaining": 0,
+            "inflight": 2000,
+        }
 
 
 def test_current_scoring_profile_keeps_fifty_dollar_cap(store, connect):
@@ -228,7 +262,9 @@ def test_current_scoring_profile_keeps_fifty_dollar_cap(store, connect):
         "costcap",
         contracts.SCORING_CALL_QUOTAS_PER_WORK_ITEM,
     )
-    identity, admitted = _reserve(store, current, 1, amount_microusd=50_000_000)
+    identity, admitted = _reserve(
+        store, current, "openrouter", 1, amount_microusd=50_000_000
+    )
     assert (admitted["status"], admitted["amount_microusd"]) == (
         "reserved",
         50_000_000,
@@ -245,5 +281,7 @@ def test_current_scoring_profile_keeps_fifty_dollar_cap(store, connect):
         actual_microusd=50_000_000,
         terminal_response={"status": 200},
     )["status"] == "settled"
-    _identity, refused = _reserve(store, current, 2, amount_microusd=1)
+    _identity, refused = _reserve(
+        store, current, "openrouter", 2, amount_microusd=1
+    )
     assert (refused["status"], refused["reason"]) == ("refused", "money_cap")

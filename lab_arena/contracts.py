@@ -79,8 +79,8 @@ LEGACY_SCORING_CALL_QUOTAS_PER_WORK_ITEM = {
     "openrouter": 120,
 }
 SCORING_CALL_QUOTAS_PER_WORK_ITEM = {
-    "scrapingdog": 150,
-    "deepline": 40,
+    "scrapingdog": 2000,
+    "deepline": 2000,
     "openrouter": 2000,
 }
 SCORING_CALL_QUOTA_PROFILES = (

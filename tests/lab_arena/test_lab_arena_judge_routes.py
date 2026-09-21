@@ -98,7 +98,7 @@ def test_trusted_scorer_mode_strips_placeholder_credentials_and_normal_mode_refu
 
 def test_plain_quotas_and_priced_model_access_keep_judge_models_private_to_scoring_runs():
     assert contracts.CALL_QUOTAS_PER_ICP == {"scrapingdog": 200, "deepline": 200, "openrouter": 2000}
-    assert contracts.SCORING_CALL_QUOTAS_PER_WORK_ITEM == {"scrapingdog": 150, "deepline": 40, "openrouter": 2000}
+    assert contracts.SCORING_CALL_QUOTAS_PER_WORK_ITEM == {"scrapingdog": 2000, "deepline": 2000, "openrouter": 2000}
     assert contracts.ASSIGNMENT_KINDS == ("execute", "score")
     from tests.lab_arena.test_lab_arena_broker import price_table
 

@@ -71,8 +71,8 @@ def test_public_constants_are_the_plan_values():
         "openrouter": 120,
     }
     assert c.SCORING_CALL_QUOTAS_PER_WORK_ITEM == {
-        "scrapingdog": 150,
-        "deepline": 40,
+        "scrapingdog": 2000,
+        "deepline": 2000,
         "openrouter": 2000,
     }
     assert (c.ICP_WALL_CLOCK_SECONDS, c.SCORING_WALL_CLOCK_SECONDS, c.LEASE_TTL_SECONDS) == (300, 900, 1200)
@@ -314,7 +314,11 @@ def test_round_configuration_accepts_only_frozen_scoring_quota_profiles():
         ("openrouter", 1999),
         ("openrouter", 2001),
         ("deepline", 41),
+        ("deepline", 1999),
+        ("deepline", 2001),
         ("scrapingdog", 151),
+        ("scrapingdog", 1999),
+        ("scrapingdog", 2001),
     ):
         invalid = base_round_configuration()
         invalid["scoring_call_quotas"][provider] = quota

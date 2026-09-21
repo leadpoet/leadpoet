@@ -28,7 +28,7 @@ def database():
     )
 
 
-def _seed(connection, *, retry_status: str) -> None:
+def _seed(connection, *, retry_status: str, failed_submission: str = BASELINE) -> None:
     participants = [
         {"submission_id": BASELINE, "miner_hotkey": BASELINE_HOTKEY, "is_king": True},
         {"submission_id": MINER, "miner_hotkey": MINER_HOTKEY, "is_king": False},
@@ -46,6 +46,9 @@ def _seed(connection, *, retry_status: str) -> None:
             "round_id,status,status_generation,stage_generation,configuration_doc,"
             "participants) VALUES (%s,'stage1_scoring',4,4,%s::jsonb,%s::jsonb)",
             (ROUND, json.dumps(configuration), json.dumps(participants)),
+        )
+        failed_hotkey = (
+            BASELINE_HOTKEY if failed_submission == BASELINE else MINER_HOTKEY
         )
         cursor.executemany(
             "INSERT INTO public.lab_arena_submissions("
@@ -95,26 +98,26 @@ def _seed(connection, *, retry_status: str) -> None:
             "%s,5,%s,%s,%s)",
             [
                 (
-                    f"{BASELINE}:score:old:2",
-                    f"{ROUND}:{BASELINE}:1:0:score:old",
+                    f"{failed_submission}:score:old:2",
+                    f"{ROUND}:{failed_submission}:1:0:score:old",
                     ROUND,
-                    BASELINE,
-                    BASELINE_HOTKEY,
+                    failed_submission,
+                    failed_hotkey,
                     2,
                     "failed",
-                    f"{BASELINE}:execute",
+                    f"{failed_submission}:execute",
                     "judge_error",
                     None,
                 ),
                 (
-                    f"{BASELINE}:score:new:1",
-                    f"{ROUND}:{BASELINE}:1:0:score:new",
+                    f"{failed_submission}:score:new:1",
+                    f"{ROUND}:{failed_submission}:1:0:score:new",
                     ROUND,
-                    BASELINE,
-                    BASELINE_HOTKEY,
+                    failed_submission,
+                    failed_hotkey,
                     1,
                     retry_status,
-                    f"{BASELINE}:execute",
+                    f"{failed_submission}:execute",
                     "accepted" if retry_status == "accepted" else "judge_error",
                     "arena/score/accepted.json" if retry_status == "accepted" else None,
                 ),
@@ -162,14 +165,19 @@ def test_accepted_retry_wins_over_old_failure_in_new_namespace(database):
         connection.close()
 
 
-def test_newest_retry_failure_still_cancels(database):
+@pytest.mark.parametrize("failed_submission", (BASELINE, MINER))
+def test_known_retry_failure_becomes_icp_zero_without_cancelling(database, failed_submission):
     psycopg2, dsn = database
     connection = psycopg2.connect(**dsn)
     try:
-        _seed(connection, retry_status="failed")
+        _seed(
+            connection,
+            retry_status="failed",
+            failed_submission=failed_submission,
+        )
         result = _close(connection)
-        assert result["status"] == "cancelled"
-        assert result["round_status"] == "cancelled"
+        assert result["status"] == "closed"
+        assert result["round_status"] == "stage1_judged"
         assert result["incomplete_assignments"] == 1
         with connection.cursor() as cursor:
             cursor.execute(
@@ -177,8 +185,7 @@ def test_newest_retry_failure_still_cancels(database):
                 (ROUND,),
             )
             status, reason = cursor.fetchone()
-            assert status == "cancelled"
-            assert reason == "scoring_incomplete:stage1:1"
+            assert (status, reason) == ("stage1_judged", None)
     finally:
         connection.close()
 

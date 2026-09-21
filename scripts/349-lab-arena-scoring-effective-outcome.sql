@@ -67,6 +67,8 @@ BEGIN
   -- Closing a review window is not a round-wide qualification decision.
   -- The service verifies accepted artifacts and records only failed ICPs as
   -- zero, preserving every other participant and ICP result.
+  -- service still fails closed for missing or malformed accepted evidence
+  -- before recording any stage scores.
   v_next := 'stage' || p_stage::TEXT || '_judged';
   UPDATE public.lab_arena_rounds
   SET status = v_next, status_generation = status_generation + 1, stage_generation = v_generation

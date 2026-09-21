@@ -1,0 +1,4 @@
+.env
+*.sqlite3*
+*.lock
+!test_bot.py

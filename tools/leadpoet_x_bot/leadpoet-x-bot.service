@@ -1,0 +1,26 @@
+[Unit]
+Description=Leadpoet X reply bot
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=leadpoet-x-bot
+Group=leadpoet-x-bot
+WorkingDirectory=/opt/leadpoet-x-bot
+EnvironmentFile=/etc/leadpoet-x-bot.env
+ExecStart=/usr/bin/python3 /opt/leadpoet-x-bot/bot.py
+StateDirectory=leadpoet-x-bot
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

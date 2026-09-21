@@ -2516,10 +2516,30 @@ async def _refresh_linkedin_employee_size_observation(
         invocation_cache["attempted"] = True
         invocation_cache["profile_url"] = profile_url
         fetch_diagnostic: dict[str, str] = {}
-        invocation_cache["evidence"] = await fetch_current_linkedin_company_size(
+        current = await fetch_current_linkedin_company_size(
             profile_url,
             diagnostic=fetch_diagnostic,
         )
+        source_local_failure = (
+            current is None
+            and fetch_diagnostic.get(VERIFIER_FAILURE_REASON_KEY)
+            == SOURCE_BLOCKED_FAILURE_REASON
+        ) or (
+            isinstance(current, Mapping)
+            and current.get("outcome")
+            == CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
+        )
+        if source_local_failure:
+            # One fresh retry can recover a nondeterministic LinkedIn access
+            # wall or incomplete exact-profile crawl. Systemic, malformed, and
+            # unexpected failures are not retried. The existing structured
+            # profile path remains the bounded fallback when this retry fails.
+            fetch_diagnostic = {}
+            current = await fetch_current_linkedin_company_size(
+                profile_url,
+                diagnostic=fetch_diagnostic,
+            )
+        invocation_cache["evidence"] = current
         current = invocation_cache["evidence"]
         if current is None:
             invocation_cache["refresh_outcome"] = "retryable_failure"

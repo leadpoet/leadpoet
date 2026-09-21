@@ -1638,7 +1638,7 @@ def test_structured_company_fetch_without_key_does_not_call_provider(monkeypatch
     ) is None
 
 
-def test_login_wall_failure_allows_existing_retry_to_use_translated_profile(
+def test_login_wall_retries_fresh_profile_inside_existing_invocation(
     monkeypatch,
 ):
     provider_calls = []
@@ -1684,17 +1684,6 @@ Alle 403 medewerkers weergeven
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
 
-    first = asyncio.run(
-        lead_scorer._llm_reverify_company(
-            _company(),
-            _icp().model_copy(update={"employee_count": "501-1,000"}),
-            require_company_fit_dimensions=True,
-            verified_homepage_identity=_homepage_anchor(),
-        )
-    )
-    retryable = scorer_breakdown_has_retryable_infrastructure_failure(
-        {"verifier_gate_receipts": [first.receipt("company_fit")]}
-    )
     result = asyncio.run(
         lead_scorer._llm_reverify_company(
             _company(),
@@ -1704,9 +1693,6 @@ Alle 403 medewerkers weergeven
         )
     )
 
-    assert first.decision == COMPANY_FIT_UNAVAILABLE
-    assert first.details["failure_class"] == "employee_size_verification_failed"
-    assert retryable
     assert result.decision == COMPANY_FIT_MATCH
     assert result.details["dimension_decisions"]["employee_size"] == (
         COMPANY_FIT_MATCH
@@ -1718,11 +1704,119 @@ Alle 403 medewerkers weergeven
         "url": "https://linkedin.com/company/acme",
         "quote": "Bedrijfsgrootte\n501 - 1.000 medewerkers",
     }
-    assert provider_calls == [
-        "lead_scorer_reverify",
-        "lead_scorer_reverify_schema_repair",
-        "lead_scorer_reverify",
+    assert provider_calls == ["lead_scorer_reverify"]
+    assert len(exa_calls) == 2
+    assert pending == []
+
+
+def test_two_source_blocked_profiles_use_existing_structured_fallback(
+    monkeypatch,
+):
+    wall = """Cadastre-se | LinkedIn
+# Cadastre-se no LinkedIn
+E-mail
+Senha (+ de 6 caracteres)
+"""
+    body = {
+        "statuses": [{"status": "success", "source": "crawled"}],
+        "results": [{
+            "url": "https://linkedin.com/company/acme",
+            "text": wall,
+        }],
+    }
+    exa_calls, pending = _install_exa_bodies(monkeypatch, body, body)
+    structured_calls = []
+
+    async def provider(**_kwargs):
+        return _verdict(observed_size=None, size_matches=None), ""
+
+    async def structured(domain, url, **_kwargs):
+        structured_calls.append((domain, url))
+        return {
+            "employee_count": "11-50",
+            "provider": "harvestapi_get_company",
+            "source_field": "employeeCountRange",
+            "url": url,
+            "website": "https://acme.example.com/",
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_structured_linkedin_company_size",
+        structured,
+    )
+
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _company(),
+            _icp(),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_homepage_anchor(),
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert len(exa_calls) == 2
+    assert structured_calls == [
+        ("acme.example.com", "https://www.linkedin.com/company/acme")
     ]
+    assert pending == []
+
+
+def test_fresh_retry_wrong_slug_is_not_accepted(monkeypatch):
+    wall = """Cadastre-se | LinkedIn
+# Cadastre-se no LinkedIn
+E-mail
+Senha (+ de 6 caracteres)
+"""
+    blocked = {
+        "statuses": [{"status": "success", "source": "crawled"}],
+        "results": [{
+            "url": "https://linkedin.com/company/acme",
+            "text": wall,
+        }],
+    }
+    wrong_slug = {
+        "statuses": [{"status": "success", "source": "crawled"}],
+        "results": [{
+            "url": "https://linkedin.com/company/other",
+            "text": "## About\nCompany size 11-50 employees",
+        }],
+    }
+    exa_calls, pending = _install_exa_bodies(monkeypatch, blocked, wrong_slug)
+
+    async def provider(**_kwargs):
+        return _verdict(observed_size=None, size_matches=None), ""
+
+    async def no_structured(*_args, **kwargs):
+        diagnostic = kwargs.get("diagnostic")
+        if diagnostic is not None:
+            diagnostic["failure_reason"] = "source_blocked"
+        return None
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_structured_linkedin_company_size",
+        no_structured,
+    )
+
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _company(),
+            _icp(),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_homepage_anchor(),
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["dimension_decisions"]["employee_size"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
     assert len(exa_calls) == 2
     assert pending == []
 
@@ -1744,7 +1838,7 @@ Senha (+ de 6 caracteres)
             }
         ],
     }
-    exa_calls, pending = _install_exa_bodies(monkeypatch, body)
+    exa_calls, pending = _install_exa_bodies(monkeypatch, body, body)
 
     async def provider(**kwargs):
         provider_calls.append(kwargs["telemetry_purpose"])
@@ -1775,7 +1869,7 @@ Senha (+ de 6 caracteres)
         "lead_scorer_reverify",
         "lead_scorer_reverify_schema_repair",
     ]
-    assert len(exa_calls) == 1
+    assert len(exa_calls) == 2
     assert pending == []
     assert result.details["failure_class"] == (
         "employee_size_verification_failed"
@@ -2453,7 +2547,7 @@ def test_successful_profile_without_size_is_reused_as_insufficient(
         "lead_scorer_reverify",
         "lead_scorer_reverify_schema_repair",
     ]
-    assert fetches == ["https://www.linkedin.com/company/acme"]
+    assert fetches == ["https://www.linkedin.com/company/acme"] * 2
 
 
 def test_repair_reuses_successful_refresh_and_non_linkedin_evidence_is_unchanged(
@@ -2622,7 +2716,7 @@ def test_structured_size_fallback_is_reused_across_sonar_repair(monkeypatch):
         "lead_scorer_reverify",
         "lead_scorer_reverify_schema_repair",
     ]
-    assert exa_fetches == ["https://www.linkedin.com/company/acme"]
+    assert exa_fetches == ["https://www.linkedin.com/company/acme"] * 2
     assert structured_fetches == [
         ("acme.example.com", "https://www.linkedin.com/company/acme")
     ]
@@ -3079,7 +3173,7 @@ def test_state_street_web_identity_reuses_structured_profile_for_size_and_stage(
         decision = result.decision
 
     assert decision == COMPANY_FIT_MATCH, details
-    assert exa_calls == [profile_url]
+    assert exa_calls == [profile_url] * 2
     assert structured_calls == [("statestreet.com", profile_url)]
     assert details["company_fit_dimensions"]["employee_size"] == COMPANY_FIT_MATCH
     assert details["company_fit_dimensions"]["stage"] == COMPANY_FIT_MATCH
@@ -3370,7 +3464,7 @@ def test_truist_structured_identity_recovers_full_scorer_entrypoint(monkeypatch)
     output = scorer_entrypoint.score_input(document)
 
     assert "failure" not in output, (output, calls)
-    assert calls == {"web": 1, "structured": 1, "exa": 1}, output
+    assert calls == {"web": 1, "structured": 1, "exa": 2}, output
     receipt = output["breakdowns"][0]["verifier_gate_receipts"][0]
     assert receipt["decision"] == COMPANY_FIT_MATCH
     assert receipt["dimension_evidence"]["identity"][
@@ -3666,7 +3760,7 @@ def test_size_refresh_reuses_profile_fetched_first_for_public_stage(
     ]
     assert cache["structured_employee_size_applicable"] is True
     assert cache["structured_evidence"]["employee_count"] == "11-50"
-    assert len(exa_calls) == (0 if direct_conflict else 1)
+    assert len(exa_calls) == (0 if direct_conflict else 2)
 
 
 @pytest.mark.parametrize(
@@ -4348,7 +4442,7 @@ def test_structured_provider_failure_remains_retryable_after_exa_insufficient(
     assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert result.details["failure_class"] == "employee_size_verification_failed"
     assert result.details["failure_reason_code"] == "provider_error"
-    assert len(exa_fetches) == 1
+    assert len(exa_fetches) == 2
     assert len(structured_fetches) == 1
 
 

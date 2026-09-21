@@ -41,9 +41,11 @@ LAB_ARENA_WEBSHARE_PROXY_2=http://USER:PASSWORD@PROXY_IP_2:PORT_2
 Use your own [Webshare Proxy Server](https://www.webshare.io/proxy-server)
 datacenter proxies. Select **Username/Password** authentication and **Direct
 Connection** on the Proxy List page. Use the address, port, username and
-password shown on each row. Start with ten different US proxies; rotating
-residential proxies are not needed for this setup. Plan prices and bandwidth
-allowances can change, so check them before purchase.
+password shown on each row. Start with nine different US proxies. The
+coordinator/main validator runs one ICP through its native host route; the nine
+proxies run the other nine ICPs. Rotating residential proxies are not needed
+for this setup. Plan prices and bandwidth allowances can change, so check them
+before purchase.
 
 Use `http://` for Webshare's standard direct endpoints, including when the
 destination is HTTPS. The host opens a CONNECT tunnel and verifies TLS to the
@@ -53,8 +55,8 @@ matches [Webshare's direct connection example](https://apidocs.webshare.io/proxy
 
 Create a private file outside the repository, for example
 `$HOME/.config/leadpoet/validator-proxies.env`, containing the indexed settings
-above, with your own values. Continue through `LAB_ARENA_WEBSHARE_PROXY_10` for
-ten proxies. Quote each URL with single quotes. URL-encode special characters
+above, with your own values. Continue through `LAB_ARENA_WEBSHARE_PROXY_9` for
+nine proxies. Quote each URL with single quotes. URL-encode special characters
 in the username or password, such as `@` as `%40`. Do not paste credentials
 into Discord, Git, shell command arguments, or screenshots.
 

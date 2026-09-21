@@ -51,9 +51,9 @@ def seeded(connect):
     connection = connect()
     connection.autocommit = True
     configuration = {
-        "call_quotas": dict(contracts.CALL_QUOTAS_PER_ICP),
+        "call_quotas": dict(contracts.OPENROUTER_200_CALL_QUOTAS_PER_ICP),
         "scoring_call_quotas": dict(
-            contracts.SCORING_CALL_QUOTAS_PER_WORK_ITEM
+            contracts.LEGACY_SCORING_CALL_QUOTAS_PER_WORK_ITEM
         ),
     }
     legacy_configuration = {

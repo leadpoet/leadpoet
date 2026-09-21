@@ -71,13 +71,22 @@ EXECUTION_CALL_QUOTA_PROFILES = (
     CALL_QUOTAS_PER_ICP,
 )
 # Judge calls made while scoring one work item (one output on one ICP), using
-# the same organizer-supplied provider accounts as bundle execution.
-# Sized from the real judge through the shim (tests/lab_arena/test_lab_arena_real_judge.py):
-# per company about 6 Scrapingdog fetches (homepage, Wayback check, evidence
-# pages), 3 OpenRouter calls, and 1 Deepline contents call, with retry headroom
-# for five companies. Infrastructure and account failures never become a
-# miner score of zero.
-SCORING_CALL_QUOTAS_PER_WORK_ITEM = {"scrapingdog": 150, "deepline": 40, "openrouter": 120}
+# the same organizer-supplied provider accounts as bundle execution. Signed
+# rounds retain the exact quota profile they froze at creation time.
+LEGACY_SCORING_CALL_QUOTAS_PER_WORK_ITEM = {
+    "scrapingdog": 150,
+    "deepline": 40,
+    "openrouter": 120,
+}
+SCORING_CALL_QUOTAS_PER_WORK_ITEM = {
+    "scrapingdog": 150,
+    "deepline": 40,
+    "openrouter": 2000,
+}
+SCORING_CALL_QUOTA_PROFILES = (
+    LEGACY_SCORING_CALL_QUOTAS_PER_WORK_ITEM,
+    SCORING_CALL_QUOTAS_PER_WORK_ITEM,
+)
 # Assignment kinds: a validator either executes a miner's model on one ICP or
 # scores one output on one ICP with the Arena judge.
 ASSIGNMENT_KINDS = ("execute", "score")
@@ -921,7 +930,11 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
         for profile in EXECUTION_CALL_QUOTA_PROFILES
     ):
         raise ArenaContractError("providers and call quotas are fixed public constants")
-    if dict(config["scoring_call_quotas"]) != dict(SCORING_CALL_QUOTAS_PER_WORK_ITEM):
+    scoring_call_quotas = dict(config["scoring_call_quotas"])
+    if not any(
+        scoring_call_quotas == dict(profile)
+        for profile in SCORING_CALL_QUOTA_PROFILES
+    ):
         raise ArenaContractError("scoring call quotas are fixed public constants")
     if not config["scorer_image_reference"].endswith("@" + config["scorer_image_digest"]):
         raise ArenaContractError("scorer image reference must pin the scorer image digest")

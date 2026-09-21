@@ -65,10 +65,15 @@ def test_public_constants_are_the_plan_values():
         "deepline": 30,
         "openrouter": 60,
     }
-    assert c.SCORING_CALL_QUOTAS_PER_WORK_ITEM == {
+    assert c.LEGACY_SCORING_CALL_QUOTAS_PER_WORK_ITEM == {
         "scrapingdog": 150,
         "deepline": 40,
         "openrouter": 120,
+    }
+    assert c.SCORING_CALL_QUOTAS_PER_WORK_ITEM == {
+        "scrapingdog": 150,
+        "deepline": 40,
+        "openrouter": 2000,
     }
     assert (c.ICP_WALL_CLOCK_SECONDS, c.SCORING_WALL_CLOCK_SECONDS, c.LEASE_TTL_SECONDS) == (300, 900, 1200)
     from leadpoet_canonical.chain_source_v2 import CHAIN_FINALIZATION_EPOCH_BLOCKS
@@ -285,6 +290,34 @@ def test_round_configuration_accepts_only_frozen_execute_quota_profiles():
     for provider, quota in (("openrouter", 2001), ("deepline", 201), ("scrapingdog", 201)):
         invalid = base_round_configuration()
         invalid["call_quotas"][provider] = quota
+        with pytest.raises(c.ArenaContractError, match="fixed public constants"):
+            c.validate_round_configuration(invalid)
+
+
+def test_round_configuration_accepts_only_frozen_scoring_quota_profiles():
+    current = c.validate_round_configuration(base_round_configuration())
+    assert current["scoring_call_quotas"] == (
+        c.SCORING_CALL_QUOTAS_PER_WORK_ITEM
+    )
+
+    historical = base_round_configuration()
+    historical["scoring_call_quotas"] = dict(
+        c.LEGACY_SCORING_CALL_QUOTAS_PER_WORK_ITEM
+    )
+    validated = c.validate_round_configuration(historical)
+    assert validated["scoring_call_quotas"] == (
+        c.LEGACY_SCORING_CALL_QUOTAS_PER_WORK_ITEM
+    )
+
+    for provider, quota in (
+        ("openrouter", 121),
+        ("openrouter", 1999),
+        ("openrouter", 2001),
+        ("deepline", 41),
+        ("scrapingdog", 151),
+    ):
+        invalid = base_round_configuration()
+        invalid["scoring_call_quotas"][provider] = quota
         with pytest.raises(c.ArenaContractError, match="fixed public constants"):
             c.validate_round_configuration(invalid)
 

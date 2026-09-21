@@ -15,6 +15,9 @@ from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
 )
+from tests.lab_arena.parallel_twenty_icp_execution_postgres_test import (
+    _verified_test_pool,
+)
 from tests.lab_arena.test_integrity_round import IntegrityHarness
 
 
@@ -54,6 +57,17 @@ def _baseline_first_judge(companies, icp, reference):
     return rows
 
 
+def _enable_verified_proxy_runtime(harness):
+    original_runner = harness.runner
+
+    def runner(index, parallel=4):
+        instance = original_runner(index, parallel)
+        instance._config.proxy_worker_pool = _verified_test_pool(parallel)
+        return instance
+
+    harness.runner = runner
+
+
 def test_baseline_is_fully_scored_before_five_miners_execute_and_publish(
     database, tmp_path, monkeypatch
 ):
@@ -69,6 +83,7 @@ def test_baseline_is_fully_scored_before_five_miners_execute_and_publish(
         per_icp_cost_policy=True,
         rewards_enabled=True,
     )
+    _enable_verified_proxy_runtime(harness)
 
     # The runtime migration is safe to replay after it has already patched
     # the installed integrity, scoring, and transition functions.
@@ -195,6 +210,7 @@ def test_baseline_only_future_round_scores_and_publishes_without_stage_two_runs(
         execution_sequence_from="2000-01-01T00:00:00Z",
         per_icp_cost_policy=True,
     )
+    _enable_verified_proxy_runtime(harness)
     monkeypatch.setattr(fixtures, "deterministic_scorer", _baseline_first_judge)
     assert fixtures._start_round(harness, day=30, epoch=62_030) == 1
 

@@ -480,7 +480,7 @@ BEGIN
       item -> 'judgment_group_miner_hotkeys'))
   FROM pg_catalog.jsonb_array_elements(v_targets) AS item;
 
-  ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER USER;
+  ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER lab_arena_rounds_write_once;
   UPDATE public.lab_arena_rounds
   SET status = 'stage1_scoring',status_generation = 6,stage_generation = 5,
       cancel_reason = NULL,
@@ -490,7 +490,7 @@ BEGIN
         '{scorer_image_reference}',pg_catalog.to_jsonb(v_new_reference),FALSE),
       updated_at = pg_catalog.clock_timestamp()
   WHERE round_id = v_round.round_id;
-  ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER USER;
+  ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER lab_arena_rounds_write_once;
 
   SELECT * INTO v_after FROM public.lab_arena_rounds
   WHERE round_id = v_round.round_id;

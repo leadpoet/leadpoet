@@ -206,7 +206,7 @@ def test_parallel_legacy_path_uses_frozen_stage_split(database, count):
         )
         cursor.execute("SET session_replication_role=origin")
         cursor.execute(
-            "SELECT public.lab_arena_transition_round(" 
+            "SELECT public.lab_arena_transition_round("
             "%s,'stage1_judged','stage1_scored',%s::jsonb)",
             (round_id, json.dumps({"finalists": [miner_id]})),
         )

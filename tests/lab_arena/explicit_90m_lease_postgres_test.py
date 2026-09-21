@@ -183,6 +183,9 @@ def test_exact_6300_lease_reaches_publication_and_old_profile_still_works(
     connect = lambda: psycopg2.connect(**dsn)
 
     (tmp_path / "old").mkdir()
+    monkeypatch.setattr(
+        contracts, "DEFAULT_CHECKPOINT_DEADLINE_POLICY", contracts.CHECKPOINT_DEADLINE_POLICY
+    )
     old = Harness(connect, tmp_path / "old", challengers=[], runners=["alpha"])
     old.service.config.defaults = replace(
         old.service.config.defaults,
@@ -205,13 +208,7 @@ def test_exact_6300_lease_reaches_publication_and_old_profile_still_works(
     assert old.service.store.cancel_round(old.round_id, "operator_abort")["status"] == "cancelled"
 
     monkeypatch.setattr(
-        contracts, "CHECKPOINT_DEADLINE_POLICY", contracts.CHECKPOINT_90M_DEADLINE_POLICY
-    )
-    monkeypatch.setattr(
-        contracts, "CHECKPOINT_WALL_CLOCK_SECONDS", contracts.CHECKPOINT_90M_WALL_CLOCK_SECONDS
-    )
-    monkeypatch.setattr(
-        contracts, "CHECKPOINT_LEASE_TTL_SECONDS", contracts.CHECKPOINT_90M_LEASE_TTL_SECONDS
+        contracts, "DEFAULT_CHECKPOINT_DEADLINE_POLICY", contracts.CHECKPOINT_90M_DEADLINE_POLICY
     )
     (tmp_path / "new").mkdir()
     harness = Harness(connect, tmp_path / "new", challengers=[], runners=["alpha"])

@@ -887,3 +887,11 @@ The user explicitly authorized `$overnight-rebenchmark-validation` on 2026-09-09
 17. Run safe, independent calls together and return concise results. Handle dependent calls, writes, approvals, and failure-sensitive calls separately.
 
 18. Routine handoff: run `git diff --check`; run `python3 -m py_compile` for touched Python files; for Pydantic changes, round-trip JSON; for scoring changes, scan for silent exception sentinels. Ask before adding production dependencies.
+
+## Scoped execution deadline authorization, 2026-09-21
+
+The user authorized a 45-to-60-minute per-ICP execution increase, including
+the narrow Sep22 unstarted-round migration, production sync, and deployment.
+Keep historical 45-minute rounds and their published scores frozen. Keep judge
+time, costs, provider call caps, scoring, and concurrent benchmark-count work
+unchanged. Apply the Sep22 migration only after checking its live preconditions.

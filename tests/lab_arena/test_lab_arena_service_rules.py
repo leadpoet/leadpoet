@@ -2256,11 +2256,13 @@ def test_checkpoint_round_fences_old_validator_claims_before_leasing():
     assert rejected.value.code == "validator_checkpoint_upgrade_required"
     capability = "singular"
     assert service.handle_claim({}) == {"status": "empty"}
-    required_policy = contracts.CHECKPOINT_90M_DEADLINE_POLICY
+    required_policy = contracts.CHECKPOINT_60M_DEADLINE_POLICY
     with pytest.raises(ServiceError) as rejected:
         service.handle_claim({})
     assert rejected.value.code == "validator_checkpoint_upgrade_required"
     capability = "plural"
+    assert service.handle_claim({}) == {"status": "empty"}
+    required_policy = contracts.CHECKPOINT_90M_DEADLINE_POLICY
     assert service.handle_claim({}) == {"status": "empty"}
 
 

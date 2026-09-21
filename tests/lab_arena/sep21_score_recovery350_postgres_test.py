@@ -21,7 +21,7 @@ ROOT = Path(__file__).parents[2]
 MIGRATION = ROOT / "scripts/350-arena-2026-09-21-unresolved-score-recovery.sql"
 ROUND = "arena-2026-09-21"
 OLD_DIGEST = "sha256:088d77919300b6cb210003862ebd5b25608369e8a22478e16bae8e69f6adc1af"
-NEW_DIGEST = "sha256:bbddb94f7c8a45278096589ead0ef352a4b7949a4599f3c90d3d73a65cc21f23"
+NEW_DIGEST = "sha256:33012bf556b6fe46263ecb80183a8d344017b8232f51e95e582ac1ccf67ef1c6"
 RUNNER = hotkey("sep21-score-recovery-runner")
 
 
@@ -36,6 +36,46 @@ def _payload() -> list[dict]:
 
 
 TARGETS = _payload()
+
+
+def _invalidations() -> list[dict]:
+    match = re.search(
+        r"v_invalidations CONSTANT JSONB := \$invalidations\$(.*?)\$invalidations\$::JSONB;",
+        MIGRATION.read_text(encoding="utf-8"),
+        re.DOTALL,
+    )
+    assert match is not None
+    return json.loads(match.group(1))
+
+
+INVALIDATIONS = _invalidations()
+EXPECTED_INVALIDATION_HASHES = {
+    "arena-2026-09-21:baseline-2026-09-21:1:7:score:2":
+        "sha256:9ed7b1bd916e712535aecc3c2b2e83c77a5ae7b83204bce1d8b000246b08d098",
+    "arena-2026-09-21:sub-3c31076fbb4d3e914495fdd5dc0f4799:1:2:score:1":
+        "sha256:eec6cc9f586bde491ce9ce5f29202941560d4c5636504c0e328ac520b5390a5c",
+    "arena-2026-09-21:sub-3c31076fbb4d3e914495fdd5dc0f4799:1:5:score:1":
+        "sha256:35f846aab31d734b2043ec549ffba6af4f0eb2886a34b90a57c6df2eb07f2b74",
+    "arena-2026-09-21:sub-3c31076fbb4d3e914495fdd5dc0f4799:1:8:score:1":
+        "sha256:2c5b8305b38a256653b6e239b4b33406cce0e900ba3143c9f9827dae62fac84a",
+}
+assert {item["run_id"]: item["old_output_hash"] for item in INVALIDATIONS} == EXPECTED_INVALIDATION_HASHES
+INVALIDATION_BY_SCORED = {item["scored_run_id"]: item for item in INVALIDATIONS}
+
+PATRONUS_ACCEPTED = {
+    "arena-2026-09-21:sub-335b9e187d44c6b5905538aaef21f4ef:1:2:score:1": (
+        "arena/arena-2026-09-21/scores/items/arena-2026-09-21:sub-335b9e187d44c6b5905538aaef21f4ef:1:2:score:1.json",
+        "sha256:67944c2c5ca5fb1a20c03257bd0a109b7d2a0aac0eaf487d924e3390c6f51ee6",
+    ),
+    "arena-2026-09-21:sub-a6c72a590f2014449fb6ca7f66e420f8:1:2:score:1": (
+        "arena/arena-2026-09-21/scores/items/arena-2026-09-21:sub-a6c72a590f2014449fb6ca7f66e420f8:1:2:score:1.json",
+        "sha256:9f7616b93be4ae92e41d95f367483a47da15d9665bcb6f6440f11297c9706526",
+    ),
+    "arena-2026-09-21:sub-c99d1357151933192f533043283d8e27:1:2:score:1": (
+        "arena/arena-2026-09-21/scores/items/arena-2026-09-21:sub-a6c72a590f2014449fb6ca7f66e420f8:1:2:score:1.json",
+        "sha256:9f7616b93be4ae92e41d95f367483a47da15d9665bcb6f6440f11297c9706526",
+    ),
+}
 
 
 @pytest.fixture(scope="module")
@@ -130,20 +170,30 @@ def _seed(connection) -> None:
         for item in participants
         if not item["is_king"]
     )
-    for index in range(44):
+    patronus_runs = list(PATRONUS_ACCEPTED)
+    for index in range(40):
         position = index % 10
+        if index < len(patronus_runs):
+            scored_run_id = patronus_runs[index]
+            submission_id = scored_run_id.split(":")[1]
+            output_ref = PATRONUS_ACCEPTED[scored_run_id][0]
+        else:
+            scored_run_id = f"{ROUND}:{filler_submission}:1:{position}:accepted-{index}"
+            submission_id = filler_submission
+            output_ref = f"arena/{ROUND}/outputs/accepted-{index}.json"
         accepted_plan.append({
-            "scored_run_id": f"{ROUND}:{filler_submission}:1:{position}:accepted-{index}",
-            "submission_id": filler_submission,
+            "scored_run_id": scored_run_id,
+            "submission_id": submission_id,
             "icp_position": position,
-            "output_ref": f"arena/{ROUND}/outputs/accepted-{index}.json",
+            "output_ref": output_ref,
         })
     plan = [
         {
             "scored_run_id": item["scored_run_id"],
             "submission_id": item["submission_id"],
             "icp_position": item["icp_position"],
-            "output_ref": f"arena/{ROUND}/outputs/{item['scored_run_id']}.json",
+            "output_ref": INVALIDATION_BY_SCORED.get(item["scored_run_id"], {}).get(
+                "old_output_ref", f"arena/{ROUND}/outputs/{item['scored_run_id']}.json"),
         }
         for item in TARGETS
     ] + accepted_plan
@@ -244,6 +294,28 @@ def _seed(connection) -> None:
         for item in TARGETS:
             assignment = item["latest_run_id"].rsplit(":", 1)[0]
             old_scope = _old_scope(item)
+            invalidation = INVALIDATION_BY_SCORED.get(item["scored_run_id"])
+            if invalidation:
+                cursor.execute(
+                    "INSERT INTO public.lab_arena_runs("
+                    "run_id,assignment_id,round_id,submission_id,miner_hotkey,stage,"
+                    "icp_position,attempt,kind,status,terminal_cause,scored_run_id,"
+                    "stage_generation,output_ref,result_doc,judgment_cache_key,"
+                    "judgment_input_hash,judgment_scope_doc,judgment_group_leader,"
+                    "judgment_group_miner_hotkeys) VALUES ("
+                    "%s,%s,%s,%s,%s,1,%s,%s,'score','accepted','accepted',%s,3,%s,%s::jsonb,%s,%s,%s::jsonb,%s,%s)",
+                    (
+                        item["latest_run_id"], assignment, ROUND,
+                        item["submission_id"], item["miner_hotkey"],
+                        item["icp_position"], item["latest_attempt"],
+                        item["scored_run_id"], invalidation["old_output_ref"],
+                        json.dumps({"terminal_status": "accepted", "fixture_output_hash": invalidation["old_output_hash"]}),
+                        item["old_judgment_cache_key"], item["judgment_input_hash"],
+                        json.dumps(old_scope), item["judgment_group_leader"],
+                        item["judgment_group_miner_hotkeys"],
+                    ),
+                )
+                continue
             if item["latest_attempt"] == 2:
                 cursor.execute(
                     "INSERT INTO public.lab_arena_runs("
@@ -315,7 +387,7 @@ def _seed(connection) -> None:
                     item["submission_id"],
                     participant_by_id[item["submission_id"]]["miner_hotkey"],
                     item["icp_position"], attempt, item["scored_run_id"],
-                    f"arena/{ROUND}/scores/accepted-{index}.json",
+                    item["output_ref"],
                 ),
             )
         cursor.execute(
@@ -353,6 +425,11 @@ def test_recovery_adds_only_new_image_pending_rows_and_preserves_old_evidence(da
     with psycopg2.connect(**dsn) as connection:
         _seed(connection)
         with connection.cursor() as cursor:
+            round_before = _snapshot(
+                cursor,
+                "SELECT to_jsonb(r) FROM public.lab_arena_rounds r WHERE round_id=%s",
+                (ROUND,),
+            )
             old_scores = _snapshot(
                 cursor,
                 "SELECT jsonb_agg(to_jsonb(r) ORDER BY run_id) FROM "
@@ -371,6 +448,12 @@ def test_recovery_adds_only_new_image_pending_rows_and_preserves_old_evidence(da
                 "public.lab_arena_ledger l WHERE round_id=%s",
                 (ROUND,),
             )
+            submissions = _snapshot(
+                cursor,
+                "SELECT jsonb_agg(to_jsonb(s) ORDER BY submission_id) FROM "
+                "public.lab_arena_submissions s WHERE round_id=%s",
+                (ROUND,),
+            )
         _apply(connection)
         with connection.cursor() as cursor:
             cursor.execute(
@@ -382,6 +465,25 @@ def test_recovery_adds_only_new_image_pending_rows_and_preserves_old_evidence(da
             assert cursor.fetchone() == (
                 "stage1_scoring", 6, 5, None, NEW_DIGEST
             )
+            round_after = _snapshot(
+                cursor,
+                "SELECT to_jsonb(r) FROM public.lab_arena_rounds r WHERE round_id=%s",
+                (ROUND,),
+            )
+            for key in ("participants", "benchmark_ref", "evaluation_date",
+                        "icp_set_date", "stage1_scoring_plan_doc",
+                        "confirmation_bank_ref", "confirmation_bank_hash",
+                        "rewards_enabled"):
+                assert round_after[key] == round_before[key]
+            assert round_after["configuration_doc"]["scorer_image_digest"] == NEW_DIGEST
+            assert round_after["configuration_doc"]["scorer_image_reference"].endswith(NEW_DIGEST)
+            assert {key: value for key, value in round_after.items()
+                    if key not in {"status", "status_generation", "stage_generation",
+                                   "cancel_reason", "configuration_doc", "updated_at"}} == {
+                key: value for key, value in round_before.items()
+                if key not in {"status", "status_generation", "stage_generation",
+                               "cancel_reason", "configuration_doc", "updated_at"}
+            }
             cursor.execute(
                 "SELECT count(*),bool_and(status='pending'),"
                 "bool_and(attempt=1),bool_and(stage_generation=5),"
@@ -391,14 +493,46 @@ def test_recovery_adds_only_new_image_pending_rows_and_preserves_old_evidence(da
                 "round_id=%s AND assignment_id LIKE '%%:score:recovery350'",
                 (NEW_DIGEST, ROUND),
             )
-            assert cursor.fetchone() == (15, True, True, True, True, True)
+            assert cursor.fetchone() == (19, True, True, True, True, True)
+            cursor.execute(
+                "SELECT count(*),count(*) FILTER (WHERE status='accepted'),"
+                "count(*) FILTER (WHERE status='failed'),"
+                "count(*) FILTER (WHERE status='failed' AND terminal_cause='judge_error') "
+                "FROM public.lab_arena_runs WHERE round_id=%s AND kind='score' "
+                "AND assignment_id NOT LIKE '%%:score:recovery350'",
+                (ROUND,),
+            )
+            assert cursor.fetchone() == (62, 40, 22, 8)
             cursor.execute(
                 "SELECT jsonb_agg(to_jsonb(r) ORDER BY run_id) FROM "
                 "public.lab_arena_runs r WHERE round_id=%s AND kind='score' "
                 "AND assignment_id NOT LIKE '%%:score:recovery350'",
                 (ROUND,),
             )
-            assert cursor.fetchone()[0] == old_scores
+            after_scores = cursor.fetchone()[0]
+            assert len(after_scores) == len(old_scores) == 62
+            old_by_id = {row["run_id"]: row for row in old_scores}
+            after_by_id = {row["run_id"]: row for row in after_scores}
+            assert set(old_by_id) == set(after_by_id)
+            for run_id, before in old_by_id.items():
+                after = after_by_id[run_id]
+                allowed = {"status", "terminal_cause", "terminal_doc", "updated_at"}
+                if run_id not in {item["run_id"] for item in INVALIDATIONS}:
+                    assert after == before
+                else:
+                    assert {k: v for k, v in after.items() if k not in allowed} == {
+                        k: v for k, v in before.items() if k not in allowed
+                    }
+                    assert after["status"] == "failed"
+                    assert after["terminal_cause"] == "judge_error"
+                    invalidation = next(item for item in INVALIDATIONS if item["run_id"] == run_id)
+                    assert after["output_ref"] == invalidation["old_output_ref"]
+                    assert after["result_doc"]["fixture_output_hash"] == invalidation["old_output_hash"]
+                    assert after["terminal_doc"]["previous_output_hash"] == invalidation["old_output_hash"]
+                    assert after["terminal_doc"]["previous_output_ref"] == invalidation["old_output_ref"]
+                    assert after["terminal_doc"]["migration"] == "350"
+                if run_id in PATRONUS_ACCEPTED:
+                    assert after == before
             assert _snapshot(
                 cursor,
                 "SELECT jsonb_agg(to_jsonb(r) ORDER BY run_id) FROM "
@@ -411,6 +545,18 @@ def test_recovery_adds_only_new_image_pending_rows_and_preserves_old_evidence(da
                 "public.lab_arena_ledger l WHERE round_id=%s",
                 (ROUND,),
             ) == ledger
+            assert _snapshot(
+                cursor,
+                "SELECT jsonb_agg(to_jsonb(s) ORDER BY submission_id) FROM "
+                "public.lab_arena_submissions s WHERE round_id=%s",
+                (ROUND,),
+            ) == submissions
+            cursor.execute(
+                "SELECT tgname,tgenabled FROM pg_trigger "
+                "WHERE tgrelid='public.lab_arena_runs'::regclass "
+                "AND NOT tgisinternal ORDER BY tgname"
+            )
+            assert all(enabled == "O" for _, enabled in cursor.fetchall())
 
 
 def test_recovery_rows_claim_complete_and_replay_without_reset(database):
@@ -453,12 +599,12 @@ def test_recovery_rows_claim_complete_and_replay_without_reset(database):
         )
         assert result["status"] == "accepted"
         completed += 1
-    assert completed == 11  # one call for each new-image cache group
+    assert completed == 15  # eleven unresolved groups plus four reviewed repairs
     rows = [
         row for row in store.list_runs(ROUND, stage=1, kind="score")
         if row["assignment_id"].endswith(":score:recovery350")
     ]
-    assert len(rows) == 15
+    assert len(rows) == 19
     assert all(row["status"] == "accepted" for row in rows)
 
     before = {row["run_id"]: row for row in rows}

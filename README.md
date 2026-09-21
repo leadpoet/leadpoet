@@ -251,7 +251,7 @@ permission while preserving your wallet and state paths. It does not grant
 host permissions or stop weights when scoring cannot start.
 Follow [the normal Arena validator setup](docs/arena_normal_validator_weights.md)
 for local wallet configuration, sandbox setup, restart, and verification.
-Configure your own proxies using the [Webshare setup guide](docs/arena_parallel_icps.md#webshare-setup-for-external-validators).
+Configure your own proxies using the [Webshare setup guide](docs/arena_parallel_icps.md#webshare-setup-for-validators).
 Use `--check-scoring-only` to verify host setup, proxy connections, distinct
 exit IPs and memory capacity without accessing wallets or the chain;
 the separate installed-runtime probe verifies sandbox

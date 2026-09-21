@@ -36,7 +36,7 @@ LAB_ARENA_WEBSHARE_PROXY_1=http://USER:PASSWORD@PROXY_IP_1:PORT_1
 LAB_ARENA_WEBSHARE_PROXY_2=http://USER:PASSWORD@PROXY_IP_2:PORT_2
 ```
 
-### Webshare setup for external validators
+### Webshare setup for validators
 
 Use your own [Webshare Proxy Server](https://www.webshare.io/proxy-server)
 datacenter proxies. Select **Username/Password** authentication and **Direct
@@ -111,9 +111,9 @@ so changes to the existing validator proxy inventory take effect through the
 same canonical restart and readiness sequence.
 
 `LAB_ARENA_MAX_PARALLEL_RUNS` is retired. Configured and verified proxy routes
-determine local capacity. Each validator owns its own proxy profile. External
-validators use the same signed runner and model contract, but do not share
-proxy URLs, wallet processes, or local slot state.
+determine local capacity. Each validator owns its own proxy profile. Validators
+use the same signed runner and model contract, but do not share proxy URLs,
+wallet processes, or local slot state.
 
 The slot formula is:
 

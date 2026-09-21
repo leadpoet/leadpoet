@@ -360,7 +360,7 @@ The validator-only weight access correction needs no additional migration.
 It does require both the updated gateway and updated normal validator client:
 the client now sends a signed POST instead of an unauthenticated GET. Keep
 validator journals and wallets unchanged during the paired update. There is no
-anonymous compatibility fallback. Operators of external validators must also
+anonymous compatibility fallback. Operators of validators must also
 update their client; no new wallet or configuration setting is needed.
 
 The 75,000 scoring stake gate itself needs no additional migration.

@@ -255,8 +255,10 @@ def test_verified_entity_deduplicates_across_domains_and_keeps_subsidiaries(monk
     assert len({row["company_identity_key"] for row in rows if row["company_qualified"]}) == 4
 
 
-@pytest.mark.parametrize("distinct_urls", [False, True])
-def test_repeated_primary_evidence_gets_one_decision_not_a_judging_lottery(monkeypatch, distinct_urls):
+@pytest.mark.parametrize("distinct_urls, expected_calls", [(False, 1), (True, 3)])
+def test_repeated_primary_evidence_keeps_bounded_url_bound_decisions(
+    monkeypatch, distinct_urls, expected_calls,
+):
     calls = []
     async def judge(signal, *args, evidence_signals, **kwargs):
         calls.append(evidence_signals)
@@ -268,8 +270,8 @@ def test_repeated_primary_evidence_gets_one_decision_not_a_judging_lottery(monke
                 "snippet": "Product launch", "matched_icp_signal": 0}
     signals = [dict(evidence, url=evidence["url"] + (str(i) if distinct_urls else "")) for i in range(5)]
     result = asyncio.run(lead_scorer.score_company_competition_intent_signal(_company_model(signals), _icp_model(), integrity_policy=True))
-    assert len(calls) == 1
-    assert len(calls[0]) == (3 if distinct_urls else 1)
+    assert len(calls) == expected_calls
+    assert all(len(items) == 1 for items in calls)
     assert result[1] == 0
     assert not lead_scorer.required_intent_satisfied(result[-1])
 
@@ -412,7 +414,7 @@ def _icp_model() -> ICPPrompt:
     )
 
 
-def test_integrity_judges_combined_evidence_once_per_requested_signal(monkeypatch) -> None:
+def test_integrity_judges_each_bounded_claim_with_only_its_own_url(monkeypatch) -> None:
     calls = []
     async def score_one(signal, *args, verdict_out=None, **kwargs):
         calls.append([item.url for item in kwargs["evidence_signals"]])
@@ -422,19 +424,104 @@ def test_integrity_judges_combined_evidence_once_per_requested_signal(monkeypatc
         return score, 90, "uncertain", None, signal.matched_icp_signal
 
     monkeypatch.setattr(lead_scorer, "_score_single_intent_signal", score_one)
-    company = _company_model([
+    signals = [
         {"source": "news", "description": "primary strong evidence", "url": "https://acme.com/a", "date": None, "snippet": "launch", "matched_icp_signal": 0},
         {"source": "news", "description": "primary backup evidence", "url": "https://acme.com/b", "date": None, "snippet": "launch", "matched_icp_signal": 0},
         {"source": "news", "description": "bonus evidence", "url": "https://acme.com/c", "date": None, "snippet": "hiring", "matched_icp_signal": 1},
-    ])
+    ]
+    company = _company_model(signals)
     result = asyncio.run(lead_scorer.score_company_competition_intent_signal(
         company, _icp_model(), integrity_policy=True
     ))
     assert result[0] == 80.0
     details = result[-1]
-    assert calls == [["https://acme.com/a", "https://acme.com/b"], ["https://acme.com/c"]]
-    assert [row["counted_in_aggregate"] for row in details] == [True, True]
+    assert calls == [
+        ["https://acme.com/a"],
+        ["https://acme.com/b"],
+        ["https://acme.com/c"],
+    ]
+    assert [row["counted_in_aggregate"] for row in details] == [True, False, True]
     assert all(row["raw"] > 0 for row in details)
+
+
+def test_sep21_9fin_funding_claims_survive_orthogonal_first_claim(monkeypatch) -> None:
+    calls = []
+
+    async def score_one(signal, *args, verdict_out=None, evidence_signals, **kwargs):
+        calls.append((signal.description, [item.url for item in evidence_signals]))
+        supported = (
+            "raises €148 million" in signal.description
+            or "raises $170M Series C" in signal.description
+        )
+        if verdict_out is not None:
+            verdict_out.append({
+                "decision": "verified" if supported else "rejected_three_stage",
+                "pipeline_decision": "approve" if supported else "review",
+                "claim_support_verdict": "supported" if supported else "partially_supported",
+            })
+        return (54.0 if supported else 0.0), 90, "in_window", None, 0
+
+    monkeypatch.setattr(lead_scorer, "_score_single_intent_signal", score_one)
+    signals = [
+        {
+            "source": "news",
+            "description": (
+                "The source states: \"Ultimately, whether it's private credit, "
+                "leveraged finance, or investment grade, 9fin should be the only "
+                "platform you need to make sense of debt markets.\""
+            ),
+            "url": (
+                "https://prnewswire.com/news-releases/9fin-launches-comprehensive-"
+                "bdc-watchlist-and-identifies-5-7-billion-of-loans-held-by-bdcs-at-"
+                "risk-302827608.html"
+            ),
+            "date": "2026-07-16",
+            "snippet": "9fin launches a new watchlist.",
+            "matched_icp_signal": 0,
+        },
+        {
+            "source": "news",
+            "description": (
+                "The source states: \"9fin raises €148 million at a €1.1 billion "
+                "valuation for its global debt markets platform | EU-Startups\""
+            ),
+            "url": (
+                "https://eu-startups.com/2026/03/new-unicorn-alert-9fin-raises-e148-"
+                "million-at-a-e1-1-billion-valuation-for-its-global-debt-markets-platform"
+            ),
+            "date": "2026-03-31",
+            "snippet": "9fin raised $170 million in Series C funding.",
+            "matched_icp_signal": 0,
+        },
+        {
+            "source": "news",
+            "description": (
+                "The source states: \"9fin raises $170M Series C at $1.3B valuation "
+                "to scale AI platform for debt markets\""
+            ),
+            "url": (
+                "https://www.prnewswire.com/news-releases/9fin-raises-170m-series-c-"
+                "at-1-3b-valuation-to-scale-ai-platform-for-debt-markets-302729026.html"
+            ),
+            "date": "2026-03-31",
+            "snippet": "9fin raised $170 million in Series C funding.",
+            "matched_icp_signal": 0,
+        },
+    ]
+    company = _company_model(signals)
+    icp = _icp_model().model_copy(update={
+        "intent_signals": ["Announced a funding round in the last 12 months"],
+        "intent_signal_evidence_types": ["FUNDING"],
+    })
+
+    result = asyncio.run(lead_scorer.score_company_competition_intent_signal(
+        company, icp, integrity_policy=True
+    ))
+
+    assert calls == [(row["description"], [row["url"]]) for row in signals]
+    assert result[1] == 54.0
+    assert lead_scorer.required_intent_satisfied(result[-1])
+    assert [row["counted_in_aggregate"] for row in result[-1]] == [False, True, False]
 
 
 def test_integrity_date_policy_accepts_mismatch_in_window_and_rejects_old_event(

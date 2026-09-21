@@ -1088,6 +1088,52 @@ def _canonical_us_state(
     return str(US_STATES.get(text.casefold()) or "")
 
 
+_US_REGION_STATES = {
+    "west coast": frozenset({"California", "Oregon", "Washington"}),
+    "northeast": frozenset({
+        "Connecticut", "Maine", "Massachusetts", "New Hampshire",
+        "Rhode Island", "Vermont", "New Jersey", "New York",
+        "Pennsylvania",
+    }),
+    "midwest": frozenset({
+        "Illinois", "Indiana", "Michigan", "Ohio", "Wisconsin", "Iowa",
+        "Kansas", "Minnesota", "Missouri", "Nebraska", "North Dakota",
+        "South Dakota",
+    }),
+    "south": frozenset({
+        "Delaware", "District of Columbia", "Florida", "Georgia",
+        "Maryland", "North Carolina", "South Carolina", "Virginia",
+        "West Virginia", "Alabama", "Kentucky", "Mississippi",
+        "Tennessee", "Arkansas", "Louisiana", "Oklahoma", "Texas",
+    }),
+    "southwest": frozenset({"Arizona", "New Mexico", "Oklahoma", "Texas"}),
+}
+
+
+def _requested_us_region_states(value: Any) -> frozenset[str]:
+    """Resolve the named US regions emitted by the frozen ICP generator."""
+
+    tokens = {
+        re.sub(r"[^a-z0-9]+", " ", token.casefold()).strip()
+        for token in re.split(
+            r"\s*(?:[,;|/]|\bor\b|\band\b)\s*",
+            str(value or ""),
+            flags=re.I,
+        )
+        if token.strip()
+    }
+    explicit_us = bool(tokens.intersection({
+        "united states", "united states of america", "us", "usa",
+    }))
+    if not explicit_us:
+        return frozenset()
+    return frozenset().union(*(
+        _US_REGION_STATES[token]
+        for token in tokens
+        if token in _US_REGION_STATES
+    ))
+
+
 def _requested_us_states(value: Any) -> frozenset[str]:
     """Return only explicit, unambiguous US state constraints."""
 
@@ -1186,6 +1232,10 @@ def _decision_from_observed_geography(
     requested_states = frozenset().union(
         *(_requested_us_states(value) for value in requested_values)
     )
+    requested_region_states = frozenset().union(
+        *(_requested_us_region_states(value) for value in requested_values)
+    )
+    requested_states = requested_states.union(requested_region_states)
     state_matches = True
     if requested_states:
         observed_state = _canonical_us_state(
@@ -1199,8 +1249,16 @@ def _decision_from_observed_geography(
             not check_country_match(observed, requested).passed
             for requested in requested_values
             if not _requested_us_states(requested)
+            and not _requested_us_region_states(requested)
         )
+    if requested_region_states and not is_united_states(observed):
+        country_matches = False
     canonical_match = state_matches and country_matches
+    if requested_region_states:
+        # Named regions are a deterministic frozen policy. The independently
+        # observed HQ state decides the result; an LLM Boolean cannot erase a
+        # regional mismatch or veto a valid state.
+        return COMPANY_FIT_MATCH if canonical_match else COMPANY_FIT_MISMATCH
     if flag is None or flag is not canonical_match:
         return COMPANY_FIT_UNAVAILABLE
     return COMPANY_FIT_MATCH if canonical_match else COMPANY_FIT_MISMATCH
@@ -3873,7 +3931,7 @@ async def _llm_reverify_company(
             ),
             (
                 "geography_matches: independently find the company's headquarters "
-                f"and test it against {(icp.country or icp.geography)!r}."
+                f"and test it against {(icp.geography or icp.country)!r}."
                 + (
                     " Always return the observed HQ state when the observed HQ "
                     "country is the United States. Use only current headquarters "
@@ -5481,10 +5539,11 @@ async def score_company_competition_intent_signal(
         from gateway.qualification.models import IntentSignal
 
         evidence_groups = [
-            [IntentSignal(**row) for row in group]
+            [IntentSignal(**row)]
             for group in bounded_criterion_evidence([
                 signal.model_dump(mode="json") for signal in company.intent_signals
             ])
+            for row in group
         ]
     else:
         evidence_groups = [[signal] for signal in company.intent_signals]

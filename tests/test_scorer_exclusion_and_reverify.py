@@ -2522,6 +2522,73 @@ def test_web_geography_rejects_state_conflict_and_accepts_state_match():
     assert match.decision == COMPANY_FIT_MATCH
 
 
+@pytest.mark.parametrize(
+    ("geography", "hq_state", "model_flag", "expected"),
+    [
+        ("United States, West Coast", "Texas", True, COMPANY_FIT_MISMATCH),
+        ("United States, South", "California", True, COMPANY_FIT_MISMATCH),
+        ("United States, West Coast", "California", False, COMPANY_FIT_MATCH),
+        ("United States, South", "Texas", False, COMPANY_FIT_MATCH),
+        ("United States, Northeast", "New York", True, COMPANY_FIT_MATCH),
+        ("United States, Midwest", "Illinois", True, COMPANY_FIT_MATCH),
+        ("United States, Southwest", "New Mexico", True, COMPANY_FIT_MATCH),
+    ],
+)
+def test_named_us_region_uses_observed_hq_state_not_model_boolean(
+    geography, hq_state, model_flag, expected,
+):
+    result = _reverify_decision(
+        {
+            "observed_employee_count": "51-200",
+            "employee_size_matches": True,
+            "observed_industry": "Software",
+            "industry_matches": True,
+            "industry_activity_role": "supplier_operator",
+            "industry_evidence_url": "https://evidence.example/industry",
+            "industry_evidence_quote": "Acme supplies software.",
+            "observed_hq_country": "United States",
+            "observed_hq_state": hq_state,
+            "geography_matches": model_flag,
+        },
+        "",
+        "",
+        icp=_icp(country="United States", geography=geography),
+    )
+
+    assert result.details["dimension_decisions"]["geography"] == expected
+    assert result.decision == expected
+
+
+def test_company_fit_prompt_uses_full_geography_before_country(monkeypatch):
+    import qualification.scoring.lead_scorer as scorer
+
+    prompts = []
+
+    async def provider(**kwargs):
+        prompts.append(kwargs["prompt"])
+        return None, "test stop after prompt capture"
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(scorer, "_request_company_reverify_json", provider)
+
+    result = asyncio.run(
+        _llm_reverify_company(
+            _company(),
+            _icp(
+                country="United States",
+                geography="United States, West Coast",
+            ),
+            require_company_fit_dimensions=True,
+            company_quality=True,
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert len(prompts) == 1
+    assert "test it against 'United States, West Coast'" in prompts[0]
+    assert "office, branch, and customer locations do not establish headquarters" in prompts[0]
+
+
 def test_company_identity_does_not_remove_leading_legal_looking_name_terms():
     common = {
         "submitted_website": "https://example.com",

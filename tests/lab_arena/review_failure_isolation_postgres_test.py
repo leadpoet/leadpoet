@@ -77,6 +77,17 @@ def test_baseline_and_miner_review_failures_publish_only_affected_icps_as_zero(
         runs = harness.service.store.list_runs(
             harness.round_id, submission_id=submission_id, kind="score"
         )
+        executions = harness.service.store.list_runs(
+            harness.round_id, submission_id=submission_id, kind="execute"
+        )
+        published = next(
+            entry for entry in row["publication_doc"]["final_ranking"]
+            if entry["submission_id"] == submission_id
+        )
+        costs = {
+            entry["icp_position"]: entry
+            for entry in published["cost_summary"]["per_icp"]
+        }
         for position in failed_positions:
             failures = [run for run in runs if run["icp_position"] == position]
             assert {run["attempt"] for run in failures} == {1, 2}
@@ -84,4 +95,12 @@ def test_baseline_and_miner_review_failures_publish_only_affected_icps_as_zero(
                 run["status"] == "failed" and run["terminal_cause"] == "judge_error"
                 for run in failures
             )
+            execution = next(
+                run for run in executions
+                if run["icp_position"] == position and run["status"] == "accepted"
+            )
+            assert execution["per_icp_score"] == 0
+            assert execution["qualification_doc"] == {"companies": []}
+            assert costs[position]["qualified_company_count"] == 0
+            assert costs[position]["eligible"] is False
     assert_canary_absent(harness, connect)

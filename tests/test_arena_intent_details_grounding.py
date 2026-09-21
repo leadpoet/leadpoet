@@ -231,7 +231,12 @@ def test_all_grounding_and_writing_checks_must_pass(monkeypatch, failed_check):
         assert kwargs["max_retries"] == 0
         assert kwargs["model"] == "anthropic/claude-sonnet-4.5"
         return json.dumps(_review_response(checks, [
-            {"matched_icp_signal": index, "covered": True}
+            {
+                "matched_icp_signal": index,
+                "covered": not (
+                    failed_check == "verified_signals_covered" and index == 1
+                ),
+            }
             for index in (0, 1)
         ]))
 
@@ -240,6 +245,38 @@ def test_all_grounding_and_writing_checks_must_pass(monkeypatch, failed_check):
     assert result["decision"] == ("match" if failed_check is None else "mismatch")
     assert result["checks"] == checks
     assert result["input_hash"].startswith("sha256:")
+
+
+def test_validated_signal_coverage_is_authoritative_over_false_aggregate(
+    monkeypatch,
+):
+    company, icp, results, fit = inputs()
+
+    async def judge(prompt, **kwargs):
+        document = json.loads(prompt)
+        assert [
+            item["matched_icp_signal"]
+            for item in document["verified_signals"]
+        ] == [0]
+        assert len(document["icp"]["intent_signals"]) == 2
+        assert "Return ONLY indexes present in verified_signals" in kwargs[
+            "system_prompt"
+        ]
+        checks = {name: True for name in intent_details._CHECKS}
+        checks["verified_signals_covered"] = False
+        return json.dumps(_review_response(checks, [
+            {"matched_icp_signal": 0, "covered": True},
+        ]))
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(
+        company, icp, results[:1], fit
+    ))
+
+    assert receipt["decision"] == "match"
+    assert receipt["checks"] == {
+        name: True for name in intent_details._CHECKS
+    }
 
 
 def test_review_assesses_original_paragraph_without_requiring_a_copy(monkeypatch):

@@ -102,5 +102,8 @@ def test_baseline_and_miner_review_failures_publish_only_affected_icps_as_zero(
             assert execution["per_icp_score"] == 0
             assert execution["qualification_doc"] == {"companies": []}
             assert costs[position]["qualified_company_count"] == 0
-            assert costs[position]["eligible"] is False
+            # This fixture has free execution. Cost eligibility does not turn
+            # an unverified company into a positive qualification score.
+            assert costs[position]["competition_sourcing_microusd"] == 0
+            assert costs[position]["eligible"] is True
     assert_canary_absent(harness, connect)

@@ -104,11 +104,15 @@ factually supported. Return facts_supported=true, while connects_icp=false and
 natural_paragraph=false if the second sentence gives only generic rubric
 commentary instead of a grounded client-facing explanation.
 For verified_signals_covered, require all distinct supported activities below.
-For EACH distinct matched_icp_signal, return that index once and a covered
-Boolean in signal_coverage. Read the original paragraph directly: covered is
-true only when it states that specific verified activity, including a supported
-paraphrase. Return covered=false when the activity is absent. Do not copy or
-rewrite the paragraph in your response.
+For EACH distinct matched_icp_signal present in verified_signals, return that
+index once and a covered Boolean in signal_coverage.
+Return ONLY indexes present in verified_signals; do not add indexes merely
+because they occur in icp.intent_signals or the Intent Details paragraph. Set
+verified_signals_covered to the logical AND of every returned covered Boolean.
+Read the original paragraph directly: covered is true only when it states that
+specific verified activity, including a supported paraphrase. Return
+covered=false when the activity is absent. Do not copy or rewrite the paragraph
+in your response.
 Generic relevance, product expansion or growth language does not cover a
 distinct office opening, hire, funding or other event. Never treat source
 evidence as if it appeared in the paragraph. Check coverage independently for
@@ -365,8 +369,8 @@ missing review into an accepted paragraph or a terminal company mismatch.
         observed = {item["matched_icp_signal"] for item in coverage}
         if len(coverage) != len(expected) or observed != expected:
             raise ValueError("incomplete signal review")
-        checks["verified_signals_covered"] = (
-            checks["verified_signals_covered"] and all(item["covered"] for item in coverage)
+        checks["verified_signals_covered"] = all(
+            item["covered"] for item in coverage
         )
     except (TypeError, ValueError):
         return {**receipt, "decision": "unavailable", "failure_class": "intent_details_review_unavailable",

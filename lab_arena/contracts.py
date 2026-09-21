@@ -744,12 +744,12 @@ ROUND_CONFIGURATION_FIELDS = (
     F("contact_policy", "str", required=False, choices=("contacts_v1",)),
     F("company_quality_policy", "str", required=False, choices=("company_quality_v1",)),
     F("intent_details_policy", "str", required=False, choices=("intent_details_v1",)),
-    # Optional only for rounds created before delayed benchmark disclosure.
+    # Optional only for rounds created before explicit benchmark disclosure.
     F(
         "benchmark_disclosure_policy",
         "str",
         required=False,
-        choices=("after_scoring_day2_v1",),
+        choices=("after_scoring_day2_v1", "cutoff_public_v1"),
     ),
     F("schedule", "object", fields=STAGE_SCHEDULE_FIELDS),
     F("stage_1_icp_count", "int", minimum=1),

@@ -1,4 +1,4 @@
-"""PostgreSQL journey for integrity scoring with delayed public details."""
+"""PostgreSQL journey for integrity scoring with cutoff-public details."""
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -21,7 +21,7 @@ def database():
     yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
 
 
-def test_integrity_round_finishes_on_day_one_and_reveals_details_on_day_two(
+def test_integrity_round_reveals_committed_details_at_cutoff(
     database, tmp_path, monkeypatch,
 ):
     psycopg2, dsn = database
@@ -63,14 +63,16 @@ def test_integrity_round_finishes_on_day_one_and_reveals_details_on_day_two(
         return rows
 
     monkeypatch.setattr(fixtures, "deterministic_scorer", judge)
-    cutoff = harness.clock.now + timedelta(hours=12)
+    # Submit inside the final review window so the synchronous fixture can
+    # freeze the accepted challenger at cutoff.
+    cutoff = harness.clock.now + timedelta(minutes=30)
     round_id = "arena-2026-11-02-delayint"
     configuration = harness.service.create_round(cutoff, round_id=round_id)
     harness.round_id = round_id
     assert configuration["integrity_policy"] == integrity.POLICY
     assert (
         configuration["benchmark_disclosure_policy"]
-        == icp_disclosure.DELAYED_DISCLOSURE_POLICY
+        == icp_disclosure.CUTOFF_PUBLIC_POLICY
     )
     winner = harness.submit("DelayedWinner", round_id)
 
@@ -98,20 +100,17 @@ def test_integrity_round_finishes_on_day_one_and_reveals_details_on_day_two(
     assert ranking["final_score"] == 80.0
     assert harness.service.public_submission_code(winner)["files"]
 
-    day_one_results = harness.service.public_results(round_id, winner)
-    aggregate_scores = day_one_results["submission_scores"]
+    cutoff_results = harness.service.public_results(round_id, winner)
+    aggregate_scores = cutoff_results["submission_scores"]
     assert aggregate_scores == {"stage_1": 80.0, "final": 80.0}
-    assert day_one_results["public_icp_status"] == "pending"
-    assert day_one_results["public_icp_count"] == 0
-    assert day_one_results["outputs"] == {}
-    assert day_one_results["run_results"] == []
-    assert day_one_results["scores"] == {
-        "stage_1": [],
-        "stage_2": [],
-    }
-    with pytest.raises(svc.ServiceError, match="benchmark_not_public") as hidden:
-        harness.service.public_benchmark(round_id)
-    assert hidden.value.status == 403
+    assert cutoff_results["public_icp_status"] == "ready"
+    assert cutoff_results["public_icp_count"] == contracts.BENCHMARK_ICP_COUNT
+    assert len(cutoff_results["outputs"]) == contracts.BENCHMARK_ICP_COUNT
+    assert len(cutoff_results["run_results"]) == contracts.BENCHMARK_ICP_COUNT
+    assert len(cutoff_results["scores"]["stage_1"]) == contracts.STAGE_1_ICP_COUNT
+    assert len(cutoff_results["scores"]["stage_2"]) == contracts.STAGE_2_ICP_COUNT
+    cutoff_benchmark = harness.service.public_benchmark(round_id)
+    assert cutoff_benchmark["disclosure_policy"] == icp_disclosure.CUTOFF_PUBLIC_POLICY
 
     repository_root = tmp_path / "promotion-repository"
     repository_root.mkdir()
@@ -137,25 +136,18 @@ def test_integrity_round_finishes_on_day_one_and_reveals_details_on_day_two(
         int(day_one_stored["effective_reward_epoch"])
     ) == day_one_stored["reward_basis_doc"]
 
-    # Existing rounds use their frozen policy after a service restart, even
-    # when the new service would no longer opt future rounds into it.
+    # Existing rounds use their frozen policy after a service restart.
     harness.service = harness.build_service()
     restarted_results = harness.service.public_results(round_id, winner)
-    assert restarted_results == day_one_results
+    assert restarted_results == cutoff_results
     assert harness.service.public_submission_code(winner)["files"]
-    with pytest.raises(svc.ServiceError, match="benchmark_not_public"):
-        harness.service.public_benchmark(round_id)
+    assert harness.service.public_benchmark(round_id) == cutoff_benchmark
 
-    reveal_at = scheduled_cutoff + timedelta(hours=24)
-    harness.clock.now = reveal_at - timedelta(microseconds=1)
-    assert harness.service.public_results(round_id, winner) == day_one_results
-    with pytest.raises(svc.ServiceError, match="benchmark_not_public"):
-        harness.service.public_benchmark(round_id)
-
-    harness.clock.now = reveal_at
+    later = scheduled_cutoff + timedelta(hours=24)
+    harness.clock.now = later
     benchmark = harness.service.public_benchmark(round_id)
     assert benchmark["disclosure_policy"] == (
-        icp_disclosure.DELAYED_DISCLOSURE_POLICY
+        icp_disclosure.CUTOFF_PUBLIC_POLICY
     )
     assert len(benchmark["icps"]) == contracts.BENCHMARK_ICP_COUNT
     assert benchmark["private_icp_count"] == 0

@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: September 21 daily Arena transition
+
+On 2026-09-21 the user authorized verification and narrow repair of the daily
+Arena transition through the overnight skill. Confirm today's new private bank,
+the prior day's immutable bank and submissions, latest lab-branch Tyche source,
+and complete genuine baseline scoring and publication. Align ICP and source
+release with the user's explicit cutoff-time schedule, and evaluate the baseline
+before miner models in future daily rounds. Preserve completed work, historical
+published scores, actual costs, verification quality, original Tyche behavior,
+reward and weight integrity, and concurrent changes. Authority includes protected
+inspection, exact committed migrations, push, canonical paired restarts, and live
+verification. Do not buy provider credits without separate payment approval.
+This scope ends when the daily transition and baseline are verified.
+
 ## Scoped production authorization: September 20 company audit fixes
 
 On 2026-09-20 the user authorized the confirmed company, intent, and contact

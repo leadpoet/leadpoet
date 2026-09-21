@@ -1,5 +1,7 @@
-"""Focused checks for the frozen delayed benchmark disclosure policy."""
+"""Focused checks for frozen historical and cutoff disclosure policies."""
 
+import io
+import tarfile
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -110,6 +112,39 @@ def test_delayed_nonopen_round_without_explicit_bank_date_fails_closed():
     assert icp_disclosure.baseline_disclosure(row, [], PUBLIC_AT) is None
 
 
+@pytest.mark.parametrize(
+    "status",
+    ["committed", "stage1", "stage1_scored", "scored", "published", "cancelled"],
+)
+def test_cutoff_public_round_releases_committed_bank_at_exact_cutoff(status):
+    row = _row(status=status, policy=icp_disclosure.CUTOFF_PUBLIC_POLICY)
+
+    assert icp_disclosure.baseline_disclosure(
+        row, [], CUTOFF - timedelta(microseconds=1)
+    ) is None
+    disclosure = icp_disclosure.baseline_disclosure(row, [], CUTOFF)
+
+    assert disclosure is not None
+    assert disclosure["public_at"] == "2026-09-13T00:00:00Z"
+    assert disclosure["disclosure_policy"] == "cutoff_public_v1"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"status": "open"},
+        {"benchmark_ref": None},
+        {"benchmark_ref": ""},
+        {"icp_set_date": None},
+    ],
+)
+def test_cutoff_public_round_never_releases_an_uncommitted_bank(change):
+    row = _row(status="committed", policy=icp_disclosure.CUTOFF_PUBLIC_POLICY)
+    row.update(change)
+
+    assert icp_disclosure.baseline_disclosure(row, [], CUTOFF) is None
+
+
 @pytest.mark.parametrize("policy", [None, "future_policy"])
 def test_unknown_or_null_persisted_policy_fails_closed(policy):
     row = _row(policy=policy)
@@ -210,6 +245,138 @@ def test_source_release_keeps_the_completed_evaluation_cutoff():
     )["available"] is False
 
 
+def _cutoff_source_row(*, status="committed"):
+    row = _row(status=status, policy=icp_disclosure.CUTOFF_PUBLIC_POLICY)
+    row["participants"] = [
+        {"submission_id": "baseline-1", "miner_hotkey": "baseline", "is_king": True},
+        {"submission_id": "selected-1", "miner_hotkey": "miner", "is_king": False},
+    ]
+    # The cutoff policy must not use a later publication projection as its
+    # source-membership authority.
+    row["publication_doc"] = {
+        "participants": [{"submission_id": "unselected-1"}]
+    }
+    return row
+
+
+def _cutoff_submission(submission_id="selected-1", **changes):
+    return {
+        "submission_id": submission_id,
+        "round_id": "arena-2026-09-13",
+        "status": "frozen",
+        "consent": {"public_rerun": True},
+        "source_ref": "arena/source.tar.gz",
+        **changes,
+    }
+
+
+def test_cutoff_source_uses_committed_participants_at_exact_boundary():
+    row = _cutoff_source_row()
+    selected = _cutoff_submission()
+
+    assert source_disclosure.disclosure_status(
+        selected, CUTOFF - timedelta(microseconds=1), round_row=row
+    )["available"] is False
+    disclosure = source_disclosure.disclosure_status(
+        selected, CUTOFF, round_row=row
+    )
+
+    assert disclosure == {
+        "available": True,
+        "available_at": "2026-09-13T00:00:00Z",
+        "url": "/arena/v1/submissions/selected-1/code",
+    }
+    assert source_disclosure.disclosure_status(
+        _cutoff_submission("unselected-1"), CUTOFF, round_row=row
+    )["available"] is False
+
+
+@pytest.mark.parametrize(
+    ("round_change", "submission_change"),
+    [
+        ({"status": "open"}, {}),
+        ({"benchmark_ref": None}, {}),
+        ({}, {"status": "uploading"}),
+        ({}, {"status": "accepted"}),
+        ({}, {"status": "rejected"}),
+        ({}, {"consent": {}}),
+        ({}, {"source_ref": None}),
+        ({}, {"round_id": "arena-2026-09-14"}),
+    ],
+)
+def test_cutoff_source_rejects_open_unfrozen_unconsented_or_wrong_rows(
+    round_change, submission_change
+):
+    row = _cutoff_source_row()
+    row.update(round_change)
+
+    assert source_disclosure.disclosure_status(
+        _cutoff_submission(**submission_change), CUTOFF, round_row=row
+    )["available"] is False
+
+
+def _source_archive():
+    target = io.BytesIO()
+    with tarfile.open(fileobj=target, mode="w:gz") as archive:
+        content = b"def run_icp(icp):\n    return []\n"
+        member = tarfile.TarInfo("harness.py")
+        member.size = len(content)
+        archive.addfile(member, io.BytesIO(content))
+    return target.getvalue()
+
+
+def test_cutoff_policy_is_consistent_across_service_round_bank_and_source_endpoints():
+    row = _cutoff_source_row()
+    source = _cutoff_submission(source_size_bytes=0)
+    payload = _source_archive()
+    source["source_size_bytes"] = len(payload)
+    store = SimpleNamespace(
+        list_runs=lambda *_args, **_kwargs: [
+            {
+                "submission_id": "baseline-1",
+                "icp_position": 0,
+                "kind": "execute",
+                "attempt": 1,
+                "per_icp_score": 99.0,
+            }
+        ],
+        get_submission=lambda submission_id: source
+        if submission_id == source["submission_id"]
+        else None,
+    )
+    objects = SimpleNamespace(
+        get_bounded=lambda reference, _limit: payload
+        if reference == source["source_ref"]
+        else b"",
+    )
+    service = object.__new__(ArenaService)
+    service._round = lambda round_id: row if round_id == row["round_id"] else None
+    service._store = store
+    service._objects = objects
+    service._clock = lambda: CUTOFF
+    service.benchmark_icps = lambda _round_id: [
+        {"icp_id": "icp-%02d" % position}
+        for position in range(contracts.BENCHMARK_ICP_COUNT)
+    ]
+
+    public_round = service.public_round(row["round_id"])
+    benchmark = service.public_benchmark(row["round_id"])
+    preview = service.public_submission_code(source["submission_id"])
+
+    assert [item["submission_id"] for item in public_round["participants"]] == [
+        "baseline-1",
+        "selected-1",
+    ]
+    assert benchmark["disclosure_policy"] == icp_disclosure.CUTOFF_PUBLIC_POLICY
+    assert len(benchmark["icps"]) == contracts.BENCHMARK_ICP_COUNT
+    assert all(icp["baseline_score"] is None for icp in benchmark["icps"])
+    assert preview["files"] == [
+        {"path": "harness.py", "content": "def run_icp(icp):\n    return []\n"}
+    ]
+    with pytest.raises(ServiceError, match="results_not_public"):
+        service.public_results(row["round_id"], source["submission_id"])
+
+
 class _RoundStore:
     def __init__(self):
         self.rows = {}
@@ -266,4 +433,4 @@ def test_activation_only_marks_new_qualifying_rounds_and_existing_config_wins():
     future = service.create_round(
         CUTOFF + timedelta(days=1), round_id="arena-2026-09-14-new"
     )
-    assert future["benchmark_disclosure_policy"] == "after_scoring_day2_v1"
+    assert future["benchmark_disclosure_policy"] == "cutoff_public_v1"

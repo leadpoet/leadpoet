@@ -125,7 +125,7 @@ def test_one_replacement_attempt_per_miner_preserves_fallbacks_and_evaluates_onl
     round_id = "arena-2026-11-01"
     h.round_id = round_id
     configuration = h.service.create_round(datetime.now(timezone.utc) + timedelta(hours=12), round_id=round_id)
-    assert configuration["benchmark_disclosure_policy"] == icp_disclosure.DELAYED_DISCLOSURE_POLICY
+    assert configuration["benchmark_disclosure_policy"] == icp_disclosure.CUTOFF_PUBLIC_POLICY
     expected_freeze = (datetime.fromisoformat(configuration["schedule"]["submission_cutoff"].replace("Z", "+00:00")) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
     public_round = h.service.public_round(round_id)
     public_current = h.service.public_current()["open_round"]
@@ -278,8 +278,24 @@ def test_one_replacement_attempt_per_miner_preserves_fallbacks_and_evaluates_onl
             h.service.store.get_submission(pending["submission_id"])["rejection_rule"]) == (
                 "rejected", "source_upload_incomplete",
             )
-    assert committed["configuration_doc"]["benchmark_disclosure_policy"] == icp_disclosure.DELAYED_DISCLOSURE_POLICY
-    expect_error(lambda: h.service.public_benchmark(round_id), "benchmark_not_public", 403)
+    assert committed["configuration_doc"]["benchmark_disclosure_policy"] == icp_disclosure.CUTOFF_PUBLIC_POLICY
+    cutoff_bank = h.service.public_benchmark(round_id)
+    assert cutoff_bank["disclosure_policy"] == icp_disclosure.CUTOFF_PUBLIC_POLICY
+    assert len(cutoff_bank["icps"]) == contracts.BENCHMARK_ICP_COUNT
+    assert h.service.public_submission_code(b["submission_id"])["files"]
+    for submission_id in discarded:
+        expect_error(
+            lambda submission_id=submission_id: h.service.public_submission_code(
+                submission_id
+            ),
+            "source_not_public",
+            403,
+        )
+    expect_error(
+        lambda: h.service.public_results(round_id, b["submission_id"]),
+        "results_not_public",
+        403,
+    )
 
     for item in committed["participants"]:
         h.flavors.setdefault(item["submission_id"], "PublicBaseline")
@@ -303,10 +319,8 @@ def test_one_replacement_attempt_per_miner_preserves_fallbacks_and_evaluates_onl
     ranking_ids = {item["submission_id"] for item in publication["publication_doc"]["final_ranking"]}
     assert selected_challengers <= ranking_ids
     assert ranking_ids.isdisjoint(discarded)
-    expect_error(lambda: h.service.public_benchmark(round_id), "benchmark_not_public", 403)
-    h.clock.now = datetime.fromisoformat(schedule["submission_cutoff"].replace("Z", "+00:00")) + timedelta(hours=24, seconds=1)
     public = h.service.public_benchmark(round_id)
-    assert public["disclosure_policy"] == icp_disclosure.DELAYED_DISCLOSURE_POLICY
+    assert public["disclosure_policy"] == icp_disclosure.CUTOFF_PUBLIC_POLICY
     assert len(public["icps"]) == contracts.BENCHMARK_ICP_COUNT
     results = h.service.public_results(round_id, b["submission_id"])
     assert len(results["scores"]["stage_1"] + results["scores"]["stage_2"]) == contracts.BENCHMARK_ICP_COUNT

@@ -11,6 +11,7 @@ from lab_arena import contracts
 
 DISCLOSURE_POLICY = "all_20_next_day"
 DELAYED_DISCLOSURE_POLICY = "after_scoring_day2_v1"
+CUTOFF_PUBLIC_POLICY = "cutoff_public_v1"
 
 
 class IcpDisclosureError(ValueError):
@@ -22,7 +23,7 @@ def configured_policy(round_row: Mapping[str, Any]) -> str | None:
     if "benchmark_disclosure_policy" not in configuration:
         return None
     value = configuration.get("benchmark_disclosure_policy")
-    if value != DELAYED_DISCLOSURE_POLICY:
+    if value not in (DELAYED_DISCLOSURE_POLICY, CUTOFF_PUBLIC_POLICY):
         raise IcpDisclosureError("benchmark_disclosure_policy_invalid")
     return value
 
@@ -71,8 +72,9 @@ def _iso(value: datetime) -> str:
 def disclosure_metadata(round_row: Mapping[str, Any]) -> dict | None:
     """Return stable bank and publication dates without inspecting private ICPs.
 
-    New rounds persist ``icp_set_date`` at commitment. Unmarked rounds become
-    public at their exact submission cutoff; delayed rounds add 24 hours.
+    New rounds persist ``icp_set_date`` at commitment. Cutoff-public and
+    unmarked rounds become public at their exact submission cutoff; delayed
+    rounds add 24 hours.
     Legacy rounds have no bank-date marker, so their actual ``evaluation_date``
     advances to the next UTC day without treating the old cutoff as an early
     publication time.
@@ -90,7 +92,7 @@ def disclosure_metadata(round_row: Mapping[str, Any]) -> dict | None:
         and round_row.get("status") == "open"
     )
     if (
-        policy == DELAYED_DISCLOSURE_POLICY
+        policy in (DELAYED_DISCLOSURE_POLICY, CUTOFF_PUBLIC_POLICY)
         and round_row.get("status") != "open"
         and explicit_bank_date is None
     ):
@@ -147,7 +149,10 @@ def source_public_at(round_row: Mapping[str, Any]) -> datetime | None:
     metadata = disclosure_metadata(round_row)
     if metadata is None:
         return None
-    if configured_policy(round_row) == DELAYED_DISCLOSURE_POLICY:
+    if configured_policy(round_row) in (
+        DELAYED_DISCLOSURE_POLICY,
+        CUTOFF_PUBLIC_POLICY,
+    ):
         schedule = (round_row.get("configuration_doc") or {}).get("schedule") or {}
         return _instant(schedule.get("submission_cutoff"))
     return _instant(metadata.get("public_at"))
@@ -220,7 +225,7 @@ def baseline_disclosure(
             and round_row.get("status") == "open"
         )
         or (
-            policy == DELAYED_DISCLOSURE_POLICY
+            policy in (DELAYED_DISCLOSURE_POLICY, CUTOFF_PUBLIC_POLICY)
             and (
                 not isinstance(round_row.get("benchmark_ref"), str)
                 or not round_row.get("benchmark_ref", "").strip()

@@ -948,7 +948,7 @@ class ArenaService:
             )
         ):
             document["benchmark_disclosure_policy"] = (
-                icp_disclosure.DELAYED_DISCLOSURE_POLICY
+                icp_disclosure.CUTOFF_PUBLIC_POLICY
             )
         # Require enough planned capacity to run a competition. Admission uses
         # the explicit challenger limit, not the worst-case retry estimate.

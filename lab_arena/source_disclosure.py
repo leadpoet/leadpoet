@@ -41,21 +41,40 @@ def disclosure_status(
     submission: Mapping[str, Any], now: datetime, *,
     round_row: Mapping[str, Any] | None = None,
 ) -> dict:
-    """Only a completed, published evaluation releases its frozen source.
+    """Release only a selected, frozen source at its round's frozen boundary.
 
-    A late Day 0 submission can be released on Day 1 without waiting another
-    24 hours. Upload age alone never releases an unscored submission.
+    Cutoff-public rounds use their committed participant set. Historical
+    policies keep their publication-document membership and timing. Upload age
+    alone never releases an unselected submission.
     """
     row = round_row or {}
-    publication = row.get("publication_doc") or {}
     submission_id = str(submission.get("submission_id") or "")
-    participant_ids = {
-        str(item.get("submission_id") or "")
-        for item in publication.get("participants") or []
-        if isinstance(item, Mapping)
-    }
-    available_at = _timestamp(row.get("published_at")) if row.get("status") == "published" else None
+    policy = icp_disclosure.configured_policy(row)
     public_at = icp_disclosure.source_public_at(row)
+    if policy == icp_disclosure.CUTOFF_PUBLIC_POLICY:
+        participant_ids = {
+            str(item.get("submission_id") or "")
+            for item in row.get("participants") or []
+            if isinstance(item, Mapping)
+        }
+        committed_bank = (
+            row.get("status") != "open"
+            and isinstance(row.get("benchmark_ref"), str)
+            and bool(row.get("benchmark_ref", "").strip())
+        )
+        available_at = public_at if committed_bank else None
+    else:
+        publication = row.get("publication_doc") or {}
+        participant_ids = {
+            str(item.get("submission_id") or "")
+            for item in publication.get("participants") or []
+            if isinstance(item, Mapping)
+        }
+        available_at = (
+            _timestamp(row.get("published_at"))
+            if row.get("status") == "published"
+            else None
+        )
     # Historical rounds evaluated on their bank's creation day. Their source
     # becomes eligible on the new next-day boundary, not permanently private.
     if row.get("icp_set_date") is None and available_at is not None and public_at is not None:

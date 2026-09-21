@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from lab_arena import contracts, intent_details_policy, runtime, scoring, service as svc, verify
+from lab_arena import contracts, icp_disclosure, intent_details_policy, runtime, scoring, service as svc, verify
 from lab_arena.promotion import GitPromoter
 from lab_arena.contact_evidence import source_key
 from qualification.scoring.arena_integrity import (
@@ -441,9 +441,9 @@ def test_v5_full_contact_round_persists_and_publishes_multi_signal_narrative(
             )
 
 
-@pytest.mark.parametrize("delayed_disclosure", [False, True])
+@pytest.mark.parametrize("cutoff_disclosure", [False, True])
 def test_contact_round_saves_scores_budget_counts_and_public_receipts(
-    database, tmp_path, delayed_disclosure
+    database, tmp_path, cutoff_disclosure
 ) -> None:
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
@@ -457,12 +457,12 @@ def test_contact_round_saves_scores_budget_counts_and_public_receipts(
         harness.service.config.defaults,
         rewards_enabled=True,
         benchmark_disclosure_from=(
-            "2026-01-01T00:00:00Z" if delayed_disclosure else None
+            "2026-01-01T00:00:00Z" if cutoff_disclosure else None
         ),
     )
     round_id = (
-        "arena-2026-12-01-contactsdelay"
-        if delayed_disclosure else "arena-2026-12-01-contacts"
+        "arena-2026-12-01-contactscutoff"
+        if cutoff_disclosure else "arena-2026-12-01-contacts"
     )
     # Begin after the replacement freeze but before submission cutoff so both
     # the service clock and PostgreSQL wall clock admit the code review.
@@ -471,6 +471,11 @@ def test_contact_round_saves_scores_budget_counts_and_public_receipts(
     )
     harness.round_id = round_id
     assert configuration["contact_policy"] == "contacts_v1"
+    if cutoff_disclosure:
+        assert (
+            configuration["benchmark_disclosure_policy"]
+            == icp_disclosure.CUTOFF_PUBLIC_POLICY
+        )
     assert configuration["scorer_policy"]["scoring_adapter_version"] == (
         "qualification_contacts_v3"
     )
@@ -527,21 +532,7 @@ def test_contact_round_saves_scores_budget_counts_and_public_receipts(
     ) == promoted["reward_basis_doc"]
 
     public = harness.service.public_results(round_id, winner)
-    if delayed_disclosure:
-        assert public["outputs"] == {}
-        assert public["contact_verifications"] == {}
-        assert public["run_results"] == []
-        with pytest.raises(svc.ServiceError, match="benchmark_not_public"):
-            harness.service.public_benchmark(round_id)
-        harness.service = harness.build_service()
-        reveal_at = datetime.fromisoformat(
-            configuration["schedule"]["submission_cutoff"].replace("Z", "+00:00")
-        ) + timedelta(hours=24)
-        harness.clock.now = reveal_at - timedelta(microseconds=1)
-        assert harness.service.public_results(round_id, winner) == public
-        harness.clock.now = reveal_at
-        public = harness.service.public_results(round_id, winner)
-        assert len(harness.service.public_benchmark(round_id)["icps"]) == 20
+    assert len(harness.service.public_benchmark(round_id)["icps"]) == 20
     assert len(public["outputs"]) == contracts.BENCHMARK_ICP_COUNT
     assert len(public["contact_verifications"]) == contracts.BENCHMARK_ICP_COUNT
     first_output = next(iter(public["outputs"].values()))

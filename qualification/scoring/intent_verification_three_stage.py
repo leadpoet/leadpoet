@@ -285,6 +285,51 @@ def _visible_page_links(body: str) -> list[tuple[str, str]]:
     return document.links
 
 
+def _same_host_event_links(body: str, source_url: str) -> list[Dict[str, str]]:
+    """Return a bounded set of visible links on the submitted source host.
+
+    These are discovery candidates only. A later source-grounded judge must
+    prove that a selected page describes the same company and event before it
+    can affect qualification or freshness.
+    """
+
+    try:
+        source = urlsplit(source_url)
+    except (TypeError, ValueError):
+        return []
+    source_host = (source.hostname or "").casefold()
+    if not source_host:
+        return []
+    source_key = _normalize_url(source_url)
+    rows: list[Dict[str, str]] = []
+    seen: set[str] = set()
+    for href, label in _visible_page_links(body):
+        title = " ".join(str(label or "").split())[:300]
+        if not title:
+            continue
+        try:
+            candidate = canonical_candidate_prompt_url(
+                urljoin(source_url, str(href or "").strip()),
+                "same_event_link.url",
+            )
+            parsed = urlsplit(candidate)
+        except (TypeError, ValueError):
+            continue
+        if (parsed.hostname or "").casefold() != source_host:
+            continue
+        canonical = urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path, parsed.query, "")
+        )
+        key = _normalize_url(canonical)
+        if key == source_key or key in seen:
+            continue
+        seen.add(key)
+        rows.append({"url": canonical, "label": title})
+        if len(rows) >= 80:
+            break
+    return rows
+
+
 def _careers_link_evidence(body: str, source_url: str) -> tuple[str, int]:
     """Return observed ATS or same-index child links as a bounded prefix."""
 
@@ -1935,6 +1980,7 @@ async def _scrape_sd_hardened(
                 if verdict == "ok":
                     listing_text = ""
                     listing_receipt: Optional[_CareersIndexReceipt] = None
+                    same_host_event_links = _same_host_event_links(body, url)
                     if prefer_dynamic_job_index:
                         listing_text, listing_count = _careers_link_evidence(body, url)
                         linked_board_url = _linked_greenhouse_board_url(
@@ -1998,10 +2044,15 @@ async def _scrape_sd_hardened(
                             ):
                                 continue
                             break
+                    result_meta: Dict[str, Any] = dict(listing_receipt or {})
+                    if same_host_event_links and listing_receipt is None:
+                        result_meta["same_host_event_links"] = (
+                            same_host_event_links
+                        )
                     return {"ok": True, "stage": f"sd:{tier_name}",
                             "content": body[:MAX_SCRAPED_CHARS],
                             "source_publication_date": source_publication_date,
-                            "meta": listing_receipt or {},
+                            "meta": result_meta,
                             "error": None, "stage_history": history}
                 if prefer_dynamic_job_index and tier_name == "dynamic_render":
                     continue
@@ -2910,6 +2961,22 @@ def _build_final_judge_prompt(
         suffix += _verified_company_identity_instructions(
             row, verified_identity_context
         )
+    if row.get("_same_event_resolution") is True:
+        suffix += (
+            "\n\nONE-HOP SAME-EVENT SOURCE RESOLUTION:\n"
+            "The additional URL or URLs were selected only from visible links "
+            "on the exact submitted page. That link relationship is a locator, "
+            "not evidence. Approve only if fetched linked-page text independently "
+            "binds the target company, the exact same event in miner_claim, and "
+            "the target ICP signal. Cite at least one linked URL and an exact "
+            "grounded quote from it. Bind any source_event_date or "
+            "source_publication_date to that same event page. A newer article, "
+            "funding story, category page, or different event must not replace or "
+            "rejuvenate the submitted event. Return contradicted only when exact "
+            "linked-page text disproves the submitted claim or its ICP alignment; "
+            "otherwise use unable_to_verify when same-event identity or date is "
+            "not proved."
+        )
     prompt_row = {**row, "_final_judge_suffix": suffix}
 
     if prompt_row.get("_evidence_type") == "TECHSTACK":
@@ -3183,12 +3250,13 @@ async def _fetch_sd_then_exa(
         else:
             sd = await _scrape_sd_hardened(url)
         if sd.get("ok") and sd.get("content"):
-            listing_receipt = _careers_index_receipt(sd.get("meta"))
-            result_meta = listing_receipt or (
-                {"kind": "lever_job"}
-                if _lever_posting_identity(url) is not None
-                else {}
-            )
+            sd_meta = sd.get("meta")
+            result_meta = dict(sd_meta) if isinstance(sd_meta, Mapping) else {}
+            listing_receipt = _careers_index_receipt(result_meta)
+            if listing_receipt is not None:
+                result_meta.update(listing_receipt)
+            elif _lever_posting_identity(url) is not None:
+                result_meta.setdefault("kind", "lever_job")
             results.append({
                 "url": url, "title": "",
                 "text": sd["content"][:max_chars],
@@ -3504,6 +3572,251 @@ def _supported_medium_needs_clarification(
         and _grounded_exact_text(source_text, item.get("claim"))
         and any(_grounded_exact_text(source_text, quote) for quote in grounded_quotes)
     )
+
+
+_LINK_TOKEN_STOPWORDS = frozenset({
+    "about", "after", "also", "announced", "company", "from", "have",
+    "into", "more", "news", "press", "retail", "source", "states",
+    "that", "their", "this", "today", "with",
+})
+_NAV_LINK_LABELS = frozenset({
+    "about", "about us", "careers", "contact", "contact us", "home",
+    "login", "privacy", "privacy policy", "sign in", "terms",
+})
+_EVENT_MONTH_RE = re.compile(
+    r"\b(January|February|March|April|May|June|July|August|September|"
+    r"October|November|December)\s+(20\d{2})\b",
+    re.IGNORECASE,
+)
+_EVENT_WORD_RE = re.compile(
+    r"\b(?:acquir(?:e[ds]?|ed)|appoint(?:ed|ment)|clos(?:e[ds]?|ed)|"
+    r"complet(?:e[ds]?|ed)|expand(?:ed|s|ing)|found(?:ed|ing)|hire[ds]?|"
+    r"join(?:ed|s|ing)|launch(?:ed|es|ing)?|open(?:ed|s|ing)|rais(?:e[ds]?|ed)|"
+    r"releas(?:e[ds]?|ed)|retir(?:e[ds]?|ed))\b",
+    re.IGNORECASE,
+)
+
+
+def _link_tokens(value: Any) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", str(value or "").casefold())
+        if len(token) >= 4 and token not in _LINK_TOKEN_STOPWORDS
+    }
+
+
+def _same_event_link_candidates(
+    contents: Mapping[str, Any], row: Mapping[str, Any]
+) -> list[Dict[str, str]]:
+    """Find likely event links observed on the exact submitted page.
+
+    Token overlap is only a cost bound. It cannot establish the event or date;
+    the selected pages still go through the normal fetch and final judge.
+    """
+
+    claim_tokens = _link_tokens(row.get("claim")) | _link_tokens(
+        row.get("_target_signal_text")
+    )
+    ranked: list[tuple[int, Dict[str, str]]] = []
+    seen: set[str] = set()
+    for result in contents.get("results") or []:
+        if not isinstance(result, Mapping):
+            continue
+        meta = result.get("meta")
+        links = meta.get("same_host_event_links") if isinstance(meta, Mapping) else None
+        if not isinstance(links, list):
+            continue
+        for link in links:
+            if not isinstance(link, Mapping):
+                continue
+            url = _prompt_exact_url_or_empty(link.get("url"))
+            label = " ".join(str(link.get("label") or "").split())[:300]
+            if not url or not label or label.casefold() in _NAV_LINK_LABELS:
+                continue
+            key = _normalize_url(url)
+            if key in seen:
+                continue
+            score = len(claim_tokens & (_link_tokens(label) | _link_tokens(url)))
+            # Overlap ranks bounded locators only. It is not an eligibility or
+            # evidence rule; the source-grounded judge proves the event.
+            seen.add(key)
+            ranked.append((score, {"url": url, "label": label}))
+    ranked.sort(key=lambda pair: (-pair[0], pair[1]["url"]))
+    return [link for _score, link in ranked[:12]]
+
+
+def _grounded_event_months(
+    item: Mapping[str, Any], source_text: str, submitted_claim: str,
+) -> set[str]:
+    """Return months repeated in the exact submitted claim and grounded quote."""
+
+    if str(item.get("claim") or "") != submitted_claim:
+        return set()
+    months = {
+        name.casefold(): number for number, name in enumerate((
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December",
+        ), start=1)
+    }
+    claim_months: set[str] = set()
+    for match in _EVENT_MONTH_RE.finditer(submitted_claim):
+        context = submitted_claim[
+            max(0, match.start() - 90):match.end() + 90
+        ]
+        if _EVENT_WORD_RE.search(context) is not None:
+            claim_months.add(
+                f"{match.group(2)}-{months[match.group(1).casefold()]:02d}"
+            )
+    if not claim_months or not _grounded_exact_text(source_text, submitted_claim):
+        return set()
+    quote_months: set[str] = set()
+    for value in item.get("supporting_quotes") or []:
+        text = str(value or "").strip(" \t\r\n\"'\u2018\u2019\u201c\u201d")
+        if not text or not _grounded_exact_text(source_text, text):
+            continue
+        for match in _EVENT_MONTH_RE.finditer(text):
+            context = text[max(0, match.start() - 90):match.end() + 90]
+            if _EVENT_WORD_RE.search(context) is None:
+                continue
+            month = months[match.group(1).casefold()]
+            quote_months.add(f"{match.group(2)}-{month:02d}")
+    return claim_months & quote_months
+
+
+def _bind_approximate_event_month(
+    item: Dict[str, Any], source_text: str, submitted_claim: str,
+) -> str:
+    """Prevent newer article metadata from replacing a grounded event month."""
+
+    event_months = _grounded_event_months(
+        item, source_text, submitted_claim
+    )
+    if not event_months:
+        return ""
+    notes = [str(note or "") for note in (item.get("risk_notes") or [])]
+    if any(note.startswith("source_event_date:") for note in notes):
+        return ""
+    notes = [
+        note for note in notes
+        if not note.startswith("source_publication_date:")
+        and not note.startswith("source_event_month:")
+    ]
+    if len(event_months) != 1:
+        notes.append("source_event_date_conflict")
+        item["risk_notes"] = notes
+        return ""
+    month = next(iter(event_months))
+    notes.append(f"source_event_month:{month}")
+    item["risk_notes"] = notes
+    return month
+
+
+def _date_is_grounded_in_text(value: str, source_text: str) -> bool:
+    """Require an exact date tag to have an equivalent source-text form."""
+
+    normalized = _source_publication_date(value)
+    if not normalized:
+        return False
+    parsed = date.fromisoformat(normalized)
+    month = (
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+    )[parsed.month - 1]
+    patterns = (
+        rf"(?<!\d){re.escape(normalized)}(?!\d)",
+        rf"\b{month}\s+0?{parsed.day},\s+{parsed.year}\b",
+        rf"\b{month[:3]}\.?\s+0?{parsed.day},\s+{parsed.year}\b",
+    )
+    return any(re.search(pattern, source_text, re.IGNORECASE) for pattern in patterns)
+
+
+def _same_event_resolution_outcome(
+    verdict: Mapping[str, Any], linked_results: list[Mapping[str, Any]],
+    selected_urls: list[str], *, submitted_claim: str,
+) -> str:
+    """Classify a linked-page judgment as verified, contradicted, or unproven."""
+
+    items = verdict.get("signal_evaluations") or []
+    if not isinstance(items, list) or len(items) != 1:
+        return "unproven"
+    item = items[0]
+    if not isinstance(item, Mapping) or item.get("claim") != submitted_claim:
+        return "unproven"
+    selected = {_normalize_url(url) for url in selected_urls}
+    cited = {
+        _normalize_url(url)
+        for url in (item.get("evidence_urls_used") or [])
+        if str(url or "").strip()
+    }
+    cited_linked = selected & cited
+    if not cited_linked or item.get("same_entity_check") != "pass":
+        return "unproven"
+    linked_text = "\n".join(
+        str(result.get("text") or "")
+        for result in linked_results
+        if _normalize_url(result.get("url") or "") in cited_linked
+    )
+    if item.get("confidence") != "high" or not linked_text.strip():
+        return "unproven"
+    if item.get("signal_status") == "contradicted":
+        quotes = item.get("contradicting_quotes") or []
+        return (
+            "contradicted"
+            if any(_grounded_exact_text(linked_text, quote) for quote in quotes)
+            else "unproven"
+        )
+    if item.get("signal_status") != "supported":
+        return "unproven"
+    quotes = item.get("supporting_quotes") or []
+    if not any(_grounded_exact_text(linked_text, quote) for quote in quotes):
+        return "unproven"
+    grounded_claim_evidence = "\n".join(
+        str(value or "").strip(" \t\r\n\"'\u2018\u2019\u201c\u201d")
+        for value in [item.get("claim"), *quotes]
+        if _grounded_exact_text(linked_text, value)
+    )
+    notes = [str(note or "") for note in (item.get("risk_notes") or [])]
+    event_dates = []
+    claimed_event_date = False
+    for note in notes:
+        if note.startswith("source_event_date:"):
+            claimed_event_date = True
+            value = note.split(":", 1)[1]
+            if _date_is_grounded_in_text(value, grounded_claim_evidence):
+                event_dates.append(value)
+        elif note.startswith("source_event_month:"):
+            claimed_event_date = True
+            value = note.split(":", 1)[1]
+            if re.fullmatch(r"\d{4}-\d{2}", value):
+                try:
+                    parsed = date.fromisoformat(value + "-01")
+                except ValueError:
+                    continue
+                month_name = (
+                    "January", "February", "March", "April", "May", "June",
+                    "July", "August", "September", "October", "November", "December",
+                )[parsed.month - 1]
+                if re.search(
+                    rf"\b{month_name}\s+{parsed.year}\b",
+                    grounded_claim_evidence,
+                    re.IGNORECASE,
+                ):
+                    event_dates.append(value)
+    publication_dates = {
+        str(result.get("source_publication_date") or "")
+        for result in linked_results
+        if _normalize_url(result.get("url") or "") in cited_linked
+        and str(result.get("source_publication_date") or "")
+    }
+    cited_publications = {
+        note.split(":", 1)[1]
+        for note in notes if note.startswith("source_publication_date:")
+    }
+    if claimed_event_date and not event_dates:
+        return "unproven"
+    if event_dates or publication_dates & cited_publications:
+        return "verified"
+    return "unproven"
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -4172,6 +4485,130 @@ async def verify_three_stage(
                 s3_verdict_raw["overall_confidence"] = "high"
     s3_verdict = _apply_guardrails(row, s3_verdict_raw)
     s3_item = ((s3_verdict.get("signal_evaluations") or [{}]) or [{}])[0]
+    _bind_approximate_event_month(s3_item, combined_text, str(row["claim"]))
+    same_event_resolution: Optional[Dict[str, Any]] = None
+    same_event_candidates = _same_event_link_candidates(contents, row)
+    has_grounded_event_date = any(
+        str(note or "").startswith((
+            "source_event_date:", "source_event_month:",
+        ))
+        for note in (s3_item.get("risk_notes") or [])
+    )
+    should_resolve_same_event = bool(
+        integrity_policy
+        and not bundle
+        and not is_hiring_claim
+        and same_event_candidates
+        and s3_item.get("signal_status") == "supported"
+        and s3_item.get("same_entity_check") == "pass"
+        and s3_item.get("claim_matches_miner_date") == "no_date_in_content"
+        and not has_grounded_event_date
+    )
+    if should_resolve_same_event:
+        # The overlap score only bounds transport work. The existing final
+        # source-grounded judge must still prove same company, event, quote,
+        # and date from the fetched page.
+        selected_urls = [
+            candidate["url"] for candidate in same_event_candidates[:1]
+        ]
+        same_event_resolution = {
+            "attempted": True,
+            "status": "unproven",
+            "selected_urls": selected_urls,
+            "reason": "ranked_visible_same_host_links",
+        }
+        if selected_urls:
+            linked_fetched = await _fetch_sd_then_exa(selected_urls)
+            linked_contents = _project_contents_for_prompt(linked_fetched)
+            linked_results = list(linked_contents.get("results") or [])
+            fetched_link_keys = {
+                _normalize_url(item.get("url") or "")
+                for item in linked_results
+                if isinstance(item, Mapping) and str(item.get("text") or "").strip()
+            }
+            fetched_selected_urls = [
+                url for url in selected_urls
+                if _normalize_url(url) in fetched_link_keys
+            ]
+            if fetched_selected_urls:
+                chain_row = {
+                    **row,
+                    "claimed_source_urls": [
+                        *row["claimed_source_urls"], *fetched_selected_urls,
+                    ],
+                    "_same_event_resolution": True,
+                }
+                chain_contents = {
+                    "results": [
+                        *list(contents.get("results") or []), *linked_results,
+                    ],
+                    "statuses": [
+                        *list(contents.get("statuses") or []),
+                        *list(linked_contents.get("statuses") or []),
+                    ],
+                }
+                chain_prompt = _build_final_judge_prompt(
+                    chain_row,
+                    chain_contents,
+                    source_name="submitted source plus same-event linked source",
+                    verified_identity_context=verified_identity_context,
+                )
+                chain_envelope = await _call_openrouter(
+                    client,
+                    stage3_model or STAGE3_MODEL,
+                    chain_prompt,
+                    max_attempts=1,
+                )
+                if not chain_envelope.get("_error"):
+                    chain_verdict = _apply_guardrails(
+                        chain_row, chain_envelope.get("answer") or {}
+                    )
+                    chain_item = (
+                        (chain_verdict.get("signal_evaluations") or [{}])
+                        or [{}]
+                    )[0]
+                    chain_text = "\n".join(
+                        str(item.get("text") or "")
+                        for item in chain_contents["results"]
+                        if isinstance(item, Mapping)
+                    )
+                    _bind_approximate_event_month(
+                        chain_item, chain_text, str(chain_row["claim"])
+                    )
+                    outcome = _same_event_resolution_outcome(
+                        chain_verdict, linked_results, fetched_selected_urls,
+                        submitted_claim=str(chain_row["claim"]),
+                    )
+                    same_event_resolution["status"] = outcome
+                    if outcome in {"verified", "contradicted"}:
+                        row = chain_row
+                        contents = chain_contents
+                        combined_text = chain_text
+                        s3_prompt = chain_prompt
+                        s3_envelope = chain_envelope
+                        s3_verdict = chain_verdict
+                        s3_item = chain_item
+                        cited_link_keys = {
+                            _normalize_url(url)
+                            for url in (s3_item.get("evidence_urls_used") or [])
+                            if _normalize_url(url) in {
+                                _normalize_url(value)
+                                for value in fetched_selected_urls
+                            }
+                        }
+                        source_publication_dates = list(dict.fromkeys(
+                            str(item.get("source_publication_date") or "")
+                            for item in linked_results
+                            if _normalize_url(item.get("url") or "")
+                            in cited_link_keys
+                            and str(item.get("source_publication_date") or "")
+                        ))
+                else:
+                    same_event_resolution["reason"] = (
+                        "judge_error:" + str(chain_envelope.get("_error"))
+                    )[:300]
+            else:
+                same_event_resolution["reason"] = "selected_link_fetch_unproven"
     identity_clarification: Optional[Dict[str, Any]] = None
     evidence_clarification: Optional[Dict[str, Any]] = None
     clarification_kind = None
@@ -4387,6 +4824,11 @@ async def verify_three_stage(
         **(
             {"evidence_clarification": evidence_clarification}
             if evidence_clarification is not None
+            else {}
+        ),
+        **(
+            {"source_resolution": same_event_resolution}
+            if same_event_resolution is not None
             else {}
         ),
     }

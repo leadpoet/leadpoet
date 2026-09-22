@@ -31,7 +31,9 @@ from qualification.scoring.linkedin_company_size import (
 )
 from qualification.scoring.lead_scorer import (
     _employee_size_sources_conflict,
+    _project_investigator_geography,
     _project_investigator_headcount,
+    _project_investigator_industry,
     _refresh_linkedin_employee_size_observation,
     _reverify_decision,
     _stage_quote_supports_observation,
@@ -215,18 +217,12 @@ def test_internal_stage_evidence_requires_absolute_public_url(url):
         CompanyOutput.model_validate(mapped)
 
 
-def test_repaired_stage_gap_gets_one_targeted_investigation(monkeypatch):
+def test_stage_gap_gets_one_targeted_investigation(monkeypatch):
     initial = _complete_verdict(
-        observed_employee_count=None,
-        employee_size_matches=None,
-        employee_size_evidence_url="",
-        employee_size_evidence_quote="",
         observed_company_stage="Public",
         stage_matches=True,
-        stage_evidence_url="https://acme.example/investors",
-        stage_evidence_quote=(
-            "Acme common stock is listed on NASDAQ under ticker ACME."
-        ),
+        stage_evidence_url="https://acme.example/about",
+        stage_evidence_quote="Acme launched its public product.",
     )
     repaired = _complete_verdict(
         observed_company_stage="Public",
@@ -270,7 +266,7 @@ def test_repaired_stage_gap_gets_one_targeted_investigation(monkeypatch):
         )
     )
 
-    assert calls == {"broad": 2, "investigator": 1}
+    assert calls == {"broad": 1, "investigator": 1}
     assert result.decision == COMPANY_FIT_MATCH
     assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MATCH
     receipt = result.details["investigation_receipt"]
@@ -285,10 +281,6 @@ def test_repaired_stage_gap_gets_one_targeted_investigation(monkeypatch):
 
 def test_schema_repair_does_not_get_a_second_targeted_investigation(monkeypatch):
     initial = _complete_verdict(
-        observed_employee_count=None,
-        employee_size_matches=None,
-        employee_size_evidence_url="",
-        employee_size_evidence_quote="",
         observed_company_stage="Public",
         stage_matches=True,
         stage_evidence_url="https://acme.example/about",
@@ -345,7 +337,7 @@ def test_schema_repair_does_not_get_a_second_targeted_investigation(monkeypatch)
         )
     )
 
-    assert calls == {"broad": 2, "investigator": 1}
+    assert calls == {"broad": 1, "investigator": 1}
     assert result.decision == COMPANY_FIT_UNAVAILABLE
 
 
@@ -420,6 +412,11 @@ def _finding(target: str, **overrides):
         "target": target,
         "status": "VERIFIED",
         "observed_value": "Public",
+        "observed_country": "",
+        "observed_state": "",
+        "observed_industry": "",
+        "observed_subindustry": "",
+        "activity_role": "unresolved",
         "evidence_url": "https://acme.example/investors",
         "evidence_quote": "Acme common stock is listed on NASDAQ under ticker ACME.",
         "old_name": "",
@@ -431,6 +428,424 @@ def _finding(target: str, **overrides):
     }
     finding.update(overrides)
     return finding
+
+
+def test_selector_reopens_only_unsupported_industry_semantics():
+    cloudforce = _complete_verdict(
+        observed_industry="Cloud consulting",
+        observed_subindustry="University AI platform",
+        industry_matches=False,
+        industry_activity_role="unresolved",
+        industry_evidence_url="https://gocloudforce.com/education-platform",
+        industry_evidence_quote=(
+            "Cloudforce provides its secure AI platform to universities."
+        ),
+    )
+    disputed = _reverify_decision(
+        cloudforce,
+        "",
+        "",
+        icp=_icp(industry="Education Technology"),
+        company=_company(),
+        company_quality=True,
+    )
+    assert disputed.details["dimension_decisions"]["industry"] == (
+        COMPANY_FIT_MISMATCH
+    )
+    assert _targeted_company_investigation_dimensions(
+        disputed,
+        icp_stage="",
+        employee_size_conflict=False,
+    ) == ("industry",)
+
+    proven_customer = dict(
+        cloudforce,
+        industry_activity_role="customer_user",
+        industry_evidence_quote=(
+            "Acme uses education software supplied by another company."
+        ),
+    )
+    terminal = _reverify_decision(
+        proven_customer,
+        "",
+        "",
+        icp=_icp(industry="Education Technology"),
+        company=_company(),
+        company_quality=True,
+    )
+    assert terminal.details["dimension_decisions"]["industry"] == (
+        COMPANY_FIT_MISMATCH
+    )
+    assert _targeted_company_investigation_dimensions(
+        terminal,
+        icp_stage="",
+        employee_size_conflict=False,
+    ) == ()
+
+
+def test_selector_researches_missing_headcount_and_hq_but_not_proven_region_mismatch():
+    missing_headcount = _reverify_decision(
+        _complete_verdict(
+            observed_employee_count=None,
+            employee_size_matches=None,
+            employee_size_evidence_url="",
+            employee_size_evidence_quote="",
+        ),
+        "",
+        "",
+        icp=_icp(),
+        company=_company(),
+        company_quality=True,
+    )
+    assert _targeted_company_investigation_dimensions(
+        missing_headcount,
+        icp_stage="",
+        employee_size_conflict=False,
+    ) == ("headcount",)
+
+    missing_hq = _reverify_decision(
+        _complete_verdict(
+            observed_hq_country="",
+            observed_hq_state="",
+            geography_matches=None,
+            geography_evidence_url="",
+            geography_evidence_quote="",
+        ),
+        "",
+        "",
+        icp=_icp(),
+        company=_company(),
+        company_quality=True,
+    )
+    assert _targeted_company_investigation_dimensions(
+        missing_hq,
+        icp_stage="",
+        employee_size_conflict=False,
+    ) == ("geography",)
+
+    outside_region = _reverify_decision(
+        _complete_verdict(),
+        "",
+        "",
+        icp=_icp(geography="United States, South"),
+        company=_company(),
+        company_quality=True,
+    )
+    assert outside_region.details["dimension_decisions"]["geography"] == (
+        COMPANY_FIT_MISMATCH
+    )
+    assert _targeted_company_investigation_dimensions(
+        outside_region,
+        icp_stage="",
+        employee_size_conflict=False,
+    ) == ()
+
+
+def test_investigator_activity_and_hq_facts_return_to_deterministic_gates():
+    industry_finding = _finding(
+        "industry",
+        observed_value="Education Technology",
+        observed_industry="Education Technology",
+        observed_subindustry="University AI platform",
+        activity_role="supplier_operator",
+        evidence_url="https://acme.example/platform",
+        evidence_quote="Acme provides an AI education platform to universities.",
+    )
+    repaired_industry = _project_investigator_industry(
+        _complete_verdict(
+            observed_industry="Cloud consulting",
+            observed_subindustry="",
+            industry_matches=False,
+            industry_activity_role="unresolved",
+        ),
+        industry_finding,
+    )
+    industry_result = _reverify_decision(
+        repaired_industry,
+        "",
+        "",
+        icp=_icp(industry="Education Technology"),
+        company=_company(),
+        company_quality=True,
+    )
+    assert industry_result.details["dimension_decisions"]["industry"] == (
+        COMPANY_FIT_MATCH
+    )
+
+    hq_finding = _finding(
+        "geography",
+        observed_value="Maryland, United States",
+        observed_country="United States",
+        observed_state="Maryland",
+        evidence_url="https://acme.example/about",
+        evidence_quote="Acme is headquartered in Maryland, United States.",
+    )
+    northeast_company = _company().model_copy(update={"state": "Maryland"})
+    repaired_hq = _project_investigator_geography(
+        _complete_verdict(
+            observed_hq_country="",
+            observed_hq_state="",
+            geography_matches=None,
+            dimension_evidence={
+                "geography": {
+                    "url": "https://old.example/hq",
+                    "quote": "Old headquarters evidence.",
+                }
+            },
+        ),
+        hq_finding,
+        icp=_icp(geography="United States Northeast"),
+        company=northeast_company,
+        company_quality=True,
+    )
+    assert repaired_hq["geography_matches"] is True
+    assert repaired_hq["dimension_evidence"]["geography"] == {
+        "url": hq_finding["evidence_url"],
+        "quote": hq_finding["evidence_quote"],
+    }
+    assert _reverify_decision(
+        repaired_hq,
+        "",
+        "",
+        icp=_icp(geography="United States Northeast"),
+        company=northeast_company,
+        company_quality=True,
+    ).details["dimension_decisions"]["geography"] == COMPANY_FIT_MATCH
+
+    # An independently proved HQ that contradicts the submitted company state
+    # remains a deterministic mismatch; the investigator cannot erase it.
+    conflicting_submission = _project_investigator_geography(
+        _complete_verdict(
+            observed_hq_country="",
+            observed_hq_state="",
+            geography_matches=None,
+        ),
+        hq_finding,
+        icp=_icp(geography="United States Northeast"),
+        company=_company(),
+        company_quality=True,
+    )
+    assert conflicting_submission["geography_matches"] is True
+    assert _reverify_decision(
+        conflicting_submission,
+        "",
+        "",
+        icp=_icp(geography="United States Northeast"),
+        company=_company(),
+        company_quality=True,
+    ).details["dimension_decisions"]["geography"] == COMPANY_FIT_MISMATCH
+
+
+def test_activity_and_headquarters_findings_require_bound_direct_evidence():
+    industry_url = "https://acme.example/platform"
+    industry_quote = "Acme provides an AI education platform to universities."
+    industry = _finding(
+        "industry",
+        observed_value="Education Technology",
+        observed_industry="Education Technology",
+        observed_subindustry="University AI platform",
+        activity_role="supplier_operator",
+        evidence_url=industry_url,
+        evidence_quote=industry_quote,
+    )
+    accepted = _validated_findings(
+        {"findings": [industry]},
+        targets=("industry",),
+        fetched_pages={industry_url: industry_quote},
+        first_party_domains={"acme.example"},
+        identity_names={"acme"},
+        identity_anchor={
+            "submitted_domain": "acme.example",
+            "observed_domain": "acme.example",
+        },
+    )
+    assert accepted["industry"]["status"] == "VERIFIED"
+
+    customer_claimed_as_supplier = dict(industry, activity_role="customer_user")
+    rejected_customer = _validated_findings(
+        {"findings": [customer_claimed_as_supplier]},
+        targets=("industry",),
+        fetched_pages={industry_url: industry_quote},
+        first_party_domains={"acme.example"},
+        identity_names={"acme"},
+        identity_anchor={
+            "submitted_domain": "acme.example",
+            "observed_domain": "acme.example",
+        },
+    )
+    assert rejected_customer["industry"]["status"] == "UNPROVEN"
+
+    hq_url = "https://acme.example/about"
+    hq = _finding(
+        "geography",
+        observed_value="Maryland, United States",
+        observed_country="United States",
+        observed_state="Maryland",
+        evidence_url=hq_url,
+        evidence_quote="Acme is headquartered in Maryland, United States.",
+    )
+    accepted_hq = _validated_findings(
+        {"findings": [hq]},
+        targets=("geography",),
+        fetched_pages={hq_url: hq["evidence_quote"]},
+        first_party_domains={"acme.example"},
+        identity_names={"acme"},
+        identity_anchor={
+            "submitted_domain": "acme.example",
+            "observed_domain": "acme.example",
+        },
+    )
+    assert accepted_hq["geography"]["status"] == "VERIFIED"
+
+    office = dict(
+        hq,
+        evidence_quote="Acme opened an office in Maryland, United States.",
+    )
+    rejected_office = _validated_findings(
+        {"findings": [office]},
+        targets=("geography",),
+        fetched_pages={hq_url: office["evidence_quote"]},
+        first_party_domains={"acme.example"},
+        identity_names={"acme"},
+        identity_anchor={
+            "submitted_domain": "acme.example",
+            "observed_domain": "acme.example",
+        },
+    )
+    assert rejected_office["geography"]["status"] == "UNPROVEN"
+
+    assert investigator._quote_supports_headquarters(
+        "Acme headquarters: San Francisco, CA 94105.",
+        observed_country="United States",
+        observed_state="California",
+    )
+    assert not investigator._quote_supports_headquarters(
+        "Acme is headquartered in Portland, or it may relocate.",
+        observed_country="United States",
+        observed_state="Oregon",
+    )
+    assert not investigator._quote_supports_headquarters(
+        "Acme is headquartered in Georgia.",
+        observed_country="United States",
+        observed_state="Georgia",
+    )
+    assert investigator._quote_supports_headquarters(
+        "Acme is headquartered in Georgia, United States.",
+        observed_country="United States",
+        observed_state="Georgia",
+    )
+
+
+def test_activity_and_hq_reject_same_name_wrong_domain_and_accept_bound_company():
+    wrong_domain = "https://abec.co.uk/about"
+    wrong_industry = _finding(
+        "industry",
+        observed_value="Manufacturing",
+        observed_industry="Manufacturing",
+        observed_subindustry="Building controls",
+        activity_role="supplier_operator",
+        evidence_url=wrong_domain,
+        evidence_quote="ABEC manufactures building control hardware.",
+    )
+    wrong_hq = _finding(
+        "geography",
+        observed_value="United Kingdom",
+        observed_country="United Kingdom",
+        observed_state="",
+        evidence_url=wrong_domain,
+        evidence_quote="ABEC is headquartered in the United Kingdom.",
+    )
+    abec_anchor = {
+        "submitted_domain": "abec.com",
+        "observed_domain": "abec.co.uk",
+        "verified_domain": "abec.com",
+    }
+    rejected = _validated_findings(
+        {"findings": [wrong_industry, wrong_hq]},
+        targets=("industry", "geography"),
+        fetched_pages={
+            wrong_domain: (
+                f"{wrong_industry['evidence_quote']} {wrong_hq['evidence_quote']}"
+            )
+        },
+        first_party_domains={"abec.com", "abec.co.uk"},
+        identity_names={"abec"},
+        identity_anchor=abec_anchor,
+    )
+    assert rejected["industry"]["status"] == "UNPROVEN"
+    assert rejected["geography"]["status"] == "UNPROVEN"
+
+    cloudforce_url = "https://gocloudforce.com/about"
+    cloudforce_industry = _finding(
+        "industry",
+        observed_value="Education Technology",
+        observed_industry="Education Technology",
+        observed_subindustry="University AI platform",
+        activity_role="supplier_operator",
+        evidence_url=cloudforce_url,
+        evidence_quote=(
+            "Cloudforce provides a secure AI education platform to universities."
+        ),
+    )
+    cloudforce_hq = _finding(
+        "geography",
+        observed_value="Maryland, United States",
+        observed_country="United States",
+        observed_state="Maryland",
+        evidence_url=cloudforce_url,
+        evidence_quote=(
+            "Cloudforce is headquartered in Maryland, United States."
+        ),
+    )
+    accepted = _validated_findings(
+        {"findings": [cloudforce_industry, cloudforce_hq]},
+        targets=("industry", "geography"),
+        fetched_pages={
+            cloudforce_url: (
+                f"{cloudforce_industry['evidence_quote']} "
+                f"{cloudforce_hq['evidence_quote']}"
+            )
+        },
+        first_party_domains={"gocloudforce.com"},
+        identity_names={"cloudforce"},
+        identity_anchor={
+            "submitted_domain": "gocloudforce.com",
+            "observed_domain": "gocloudforce.com",
+        },
+    )
+    assert accepted["industry"]["status"] == "VERIFIED"
+    assert accepted["geography"]["status"] == "VERIFIED"
+
+
+def test_submitted_country_contradiction_precedes_missing_state_evidence():
+    company = _company().model_copy(update={
+        "country": "Canada",
+        "state": "",
+    })
+    verdict = _complete_verdict(
+        observed_hq_country="United States",
+        observed_hq_state="",
+        geography_matches=None,
+        geography_evidence_quote=(
+            "Acme is headquartered in the United States."
+        ),
+    )
+    result = _reverify_decision(
+        verdict,
+        "",
+        "",
+        icp=_icp(geography="United States"),
+        company=company,
+        company_quality=True,
+    )
+    assert result.details["dimension_decisions"]["geography"] == (
+        COMPANY_FIT_MISMATCH
+    )
+    assert _targeted_company_investigation_dimensions(
+        result,
+        icp_stage="",
+        employee_size_conflict=False,
+    ) == ()
 
 
 def test_plain_text_removes_nonvisible_blocks_before_clipping():
@@ -1678,6 +2093,51 @@ def test_headcount_finding_binds_value_and_rejects_scoped_counts():
     )
     assert rejected_value["headcount"]["status"] == "UNPROVEN"
 
+    lower_bound = dict(
+        finding,
+        observed_value=4100,
+        evidence_quote=(
+            "Samsara has more than 4,100 full-time employees company-wide."
+        ),
+    )
+    rejected_lower_bound = _validated_findings(
+        {"findings": [lower_bound]},
+        targets=("headcount",),
+        fetched_pages={url: lower_bound["evidence_quote"]},
+        first_party_domains={"acme.example"},
+        identity_names={"samsara"},
+    )
+    assert rejected_lower_bound["headcount"]["status"] == "UNPROVEN"
+
+    upper_bound = dict(
+        finding,
+        observed_value=4100,
+        evidence_quote="Samsara has up to 4,100 employees company-wide.",
+    )
+    rejected_upper_bound = _validated_findings(
+        {"findings": [upper_bound]},
+        targets=("headcount",),
+        fetched_pages={url: upper_bound["evidence_quote"]},
+        first_party_domains={"acme.example"},
+        identity_names={"samsara"},
+    )
+    assert rejected_upper_bound["headcount"]["status"] == "UNPROVEN"
+
+    for quote in (
+        "Samsara has >4,100 employees company-wide.",
+        "Samsara has 3,000-4,100 employees company-wide.",
+        "Samsara has approximately 4,100 employees company-wide.",
+    ):
+        bounded = dict(finding, observed_value=4100, evidence_quote=quote)
+        rejected = _validated_findings(
+            {"findings": [bounded]},
+            targets=("headcount",),
+            fetched_pages={url: quote},
+            first_party_domains={"acme.example"},
+            identity_names={"samsara"},
+        )
+        assert rejected["headcount"]["status"] == "UNPROVEN"
+
     office_count = dict(
         finding,
         evidence_quote="Acme's London office has 27 employees.",
@@ -1802,6 +2262,10 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
         company_locator={"name": "Acme", "website": "https://acme.example"},
         targets=("stage",),
         requested_stage="Public",
+        requested_industry="Technology",
+        requested_subindustry="Education Technology",
+        requested_product_service="Platforms that enable online learning",
+        requested_attribute="Sells a university learning platform",
     ))
 
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
@@ -1809,6 +2273,14 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
         requests[0]["messages"][1]["content"].split("\n", 1)[1]
     )
     assert input_document["evaluation_date"] == "2026-09-18"
+    assert input_document["requested_industry"] == "Technology"
+    assert input_document["requested_subindustry"] == "Education Technology"
+    assert input_document["requested_product_service"] == (
+        "Platforms that enable online learning"
+    )
+    assert input_document["requested_attribute"] == (
+        "Sells a university learning platform"
+    )
     assert input_document["investigation_limits"] == {
         "reasoning_turns": 8,
         "search_calls": 2,

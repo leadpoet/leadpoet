@@ -184,6 +184,13 @@ PART_A_BLOCK = """  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
         verbatim when the source proves a concrete, material new capability;
         a routine update, relabeling, or unsupported marketing claim is not
         sufficient.
+      * Opening or adding a warehouse, store, office, facility, delivery hub,
+        or geographic location is not by itself a product or major-capability
+        launch. A proved new physical or digital product can qualify. For a
+        PRODUCT_LAUNCH target, require exact source evidence of that new product
+        or other material customer-usable capability. Do not relabel physical
+        expansion, fulfillment capacity, or local availability as product or
+        marketplace functionality.
       * For a leadership-change alternative, do not invent an issuer or
         companywide-restructuring requirement. Unless the target explicitly
         requires a target-company announcement or a companywide change, exact
@@ -396,6 +403,10 @@ ARENA_INTEGRITY_DATE_BLOCK = """ARENA INTEGRITY DATE POLICY (applies to this eva
 - Identify the date of the SAME EVENT established by the exact source. When the
   body states one unambiguous event date, add exactly
   "source_event_date:YYYY-MM-DD" to risk_notes.
+- When the exact submitted claim and an exact supporting source quote both
+  identify that event only by month and year, add exactly
+  "source_event_month:YYYY-MM" instead. Do not invent a day. A later article
+  publication date must not replace that older event month.
 - If no event date is stated and the exact page is clearly the original record
   or announcement of that same event, you may use supplied page/provider
   publication metadata as the event proxy and add exactly

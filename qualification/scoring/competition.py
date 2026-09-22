@@ -639,9 +639,9 @@ def _verified_company_for_contact(
 async def _classify_contact_role(
     actual_role: str,
     target_roles: list[str],
-    _target_seniority: str,
+    target_seniority: str,
     duties: str = "",
-) -> bool:
+) -> bool | dict[str, Any]:
     """Use the existing pinned role judge only for deterministic gray zones."""
     role_module = import_module("qualification.scoring.role_batch_check")
     key = (
@@ -659,16 +659,28 @@ async def _classify_contact_role(
             target_roles,
             [{"id": expected_id, "role": actual_role, "duties": duties}],
         )
-    if (
-        not isinstance(parsed, list)
-        or len(parsed) != 1
-        or not isinstance(parsed[0], Mapping)
-        or type(parsed[0].get("id")) not in (int, str)
-        or str(parsed[0]["id"]) != str(expected_id)
-        or type(parsed[0].get("match")) is not bool
-    ):
-        raise RuntimeError("contact role judge response unavailable")
-    return parsed[0]["match"]
+        if (
+            not isinstance(parsed, list)
+            or len(parsed) != 1
+            or not isinstance(parsed[0], Mapping)
+            or type(parsed[0].get("id")) not in (int, str)
+            or str(parsed[0]["id"]) != str(expected_id)
+            or type(parsed[0].get("match")) is not bool
+        ):
+            raise RuntimeError("contact role judge response unavailable")
+        if parsed[0]["match"] or not duties.strip():
+            return parsed[0]["match"]
+        finding = await role_module.review_role_evidence(
+            client, key, actual_role=actual_role, target_roles=target_roles,
+            target_seniority=target_seniority, duties=duties,
+        )
+        if finding is None:
+            raise RuntimeError("contact role evidence review unavailable")
+        return {
+            "match": finding["status"] == "VERIFIED",
+            "reason": finding["reason"],
+            "evidence_review": finding,
+        }
 
 
 def raw_company_judgment(breakdown: Mapping[str, Any]) -> dict[str, Any]:

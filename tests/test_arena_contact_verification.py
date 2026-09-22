@@ -1216,6 +1216,11 @@ def test_semantic_role_numeric_id_transition_is_bound_and_fail_closed(
 
         @staticmethod
         def json() -> dict:
+            if len(requests) == 2:
+                return {"choices": [{"message": {"content": json.dumps({
+                    "status": "UNPROVEN", "target_role": "",
+                    "evidence_quote": "", "reason": "Function remains ambiguous.",
+                })}}]}
             return {"choices": [{"message": {"content": json.dumps([{
                 "id": returned_id,
                 "match": match,
@@ -1247,7 +1252,7 @@ def test_semantic_role_numeric_id_transition_is_bound_and_fail_closed(
         classify_role=_classify_contact_role,
     ))
 
-    assert len(requests) == 1
+    assert len(requests) == (2 if returned_id == "1" and match is False else 1)
     prompt = requests[0][1]["json"]["messages"][1]["content"]
     assert "id=1" in prompt
     assert role in prompt

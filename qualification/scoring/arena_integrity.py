@@ -7,6 +7,7 @@ is imported only when those hints are projected.
 
 from __future__ import annotations
 
+import calendar
 from dataclasses import dataclass
 from datetime import date
 import re
@@ -31,6 +32,9 @@ _VERIFIED_IDENTITY_SOURCES = frozenset({
 _DATE_NOTE_RE = re.compile(
     r"^(?P<kind>source_event_date|source_publication_date):"
     r"(?P<value>\d{4}-\d{2}-\d{2})$"
+)
+_EVENT_MONTH_NOTE_RE = re.compile(
+    r"^source_event_month:(?P<value>\d{4}-\d{2})$"
 )
 
 
@@ -316,6 +320,7 @@ def source_dates_from_verdict(
     """Read bounded date tags emitted by the Arena-only Stage-3 prompt."""
 
     event_dates: list[str] = []
+    event_months: list[str] = []
     grounded_publications: list[str] = []
     publications: list[str] = []
     for value in publication_dates:
@@ -328,7 +333,18 @@ def source_dates_from_verdict(
         if canonical not in grounded_publications:
             grounded_publications.append(canonical)
     for note in verdict.get("risk_notes") or []:
-        match = _DATE_NOTE_RE.fullmatch(str(note or "").strip())
+        note_text = str(note or "").strip()
+        month_match = _EVENT_MONTH_NOTE_RE.fullmatch(note_text)
+        if month_match is not None:
+            try:
+                date.fromisoformat(month_match.group("value") + "-01")
+            except ValueError:
+                continue
+            canonical_month = month_match.group("value")
+            if canonical_month not in event_months:
+                event_months.append(canonical_month)
+            continue
+        match = _DATE_NOTE_RE.fullmatch(note_text)
         if match is None:
             continue
         try:
@@ -343,11 +359,20 @@ def source_dates_from_verdict(
             and canonical not in publications
         ):
             publications.append(canonical)
-    if len(event_dates) > 1:
+    if len(event_dates) > 1 or len(event_months) > 1:
         # Conflicting event dates cannot be repaired by choosing a newer page
         # publication date. Preserve uncertainty at the independent date gate.
         return None, []
-    return (event_dates[0] if event_dates else None), publications
+    if event_dates and event_months:
+        if event_dates[0][:7] != event_months[0]:
+            return None, []
+        return event_dates[0], publications
+    event_value = (
+        event_dates[0] if event_dates
+        else event_months[0] if event_months
+        else None
+    )
+    return event_value, publications
 
 
 def source_grounded_date_verdict(
@@ -366,7 +391,11 @@ def source_grounded_date_verdict(
 
     candidates: list[tuple[str, str]] = []
     if event_date:
-        candidates.append(("event_date", event_date))
+        candidates.append((
+            "event_month" if re.fullmatch(r"\d{4}-\d{2}", event_date)
+            else "event_date",
+            event_date,
+        ))
     else:
         unique_publications = list(dict.fromkeys(publication_dates))
         if len(unique_publications) == 1:
@@ -374,6 +403,23 @@ def source_grounded_date_verdict(
     if len(candidates) != 1:
         return SourceDateVerdict("uncertain", None, "missing_or_conflicting", None)
     basis, raw = candidates[0]
+    if basis == "event_month":
+        try:
+            year, month = (int(part) for part in raw.split("-", 1))
+            latest = date(year, month, calendar.monthrange(year, month)[1])
+        except (TypeError, ValueError):
+            return SourceDateVerdict("uncertain", None, "invalid_source_date", None)
+        age_days = (evaluated_on - latest).days
+        if age_days > max(1, int(buyer_cap_days)):
+            return SourceDateVerdict(
+                "out_of_window",
+                latest.isoformat(),
+                "event_month_latest_bound",
+                age_days,
+            )
+        return SourceDateVerdict(
+            "uncertain", None, "event_month_overlaps_window", None
+        )
     try:
         grounded = date.fromisoformat(raw)
     except (TypeError, ValueError):

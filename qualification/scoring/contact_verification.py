@@ -717,6 +717,8 @@ async def _role_matches(
         matched = result.get("match") is True or result.get("qualified") is True
         if diagnostics is not None:
             diagnostics.update(match=matched, explanation=_text(result.get("reason"))[:2000])
+            if isinstance(result.get("evidence_review"), Mapping):
+                diagnostics["evidence_review"] = dict(result["evidence_review"])
         return matched
     matched = result is True
     if diagnostics is not None:

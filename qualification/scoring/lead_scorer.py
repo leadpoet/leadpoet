@@ -1180,6 +1180,55 @@ def _requested_us_states(value: Any) -> frozenset[str]:
     return named if named and not non_state_tokens else frozenset()
 
 
+def _canonical_observed_geography_match(
+    verdict: Mapping[str, Any],
+    icp: ICPPrompt,
+    *,
+    company_quality: bool = False,
+) -> Optional[bool]:
+    """Compute region/country fit from observed HQ facts without an LLM flag."""
+
+    observed_value = verdict.get("observed_hq_country")
+    if not isinstance(observed_value, str):
+        return None
+    observed = observed_value.strip()
+    requested_values = list(dict.fromkeys(
+        value
+        for value in (
+            str(icp.country or "").strip(),
+            str(icp.geography or "").strip(),
+        )
+        if value
+    ))
+    if not observed or not requested_values:
+        return None
+    requested_states = frozenset().union(
+        *(_requested_us_states(value) for value in requested_values)
+    )
+    requested_region_states = frozenset().union(
+        *(_requested_us_region_states(value) for value in requested_values)
+    )
+    requested_states = requested_states.union(requested_region_states)
+    state_matches = True
+    if requested_states:
+        observed_state = _canonical_us_state(
+            verdict.get("observed_hq_state"),
+            case_insensitive_abbreviation=company_quality,
+        )
+        if not observed_state:
+            return None
+        state_matches = observed_state in requested_states
+    country_matches = not any(
+        not check_country_match(observed, requested).passed
+        for requested in requested_values
+        if not _requested_us_states(requested)
+        and not _requested_us_region_states(requested)
+    )
+    if requested_region_states and not is_united_states(observed):
+        country_matches = False
+    return state_matches and country_matches
+
+
 def _decision_from_observed_geography(
     verdict: dict,
     icp: ICPPrompt,
@@ -1188,9 +1237,7 @@ def _decision_from_observed_geography(
     company_quality: bool = False,
 ) -> str:
     observed_value = verdict.get("observed_hq_country")
-    if not isinstance(observed_value, str):
-        return COMPANY_FIT_UNAVAILABLE
-    observed = observed_value.strip()
+    observed = observed_value.strip() if isinstance(observed_value, str) else ""
     flag = strict_company_fit_boolean(verdict.get("geography_matches"))
     requested_values = list(dict.fromkeys(
         value
@@ -1229,31 +1276,20 @@ def _decision_from_observed_geography(
                 return COMPANY_FIT_UNAVAILABLE
             if submitted_state != observed_state:
                 return COMPANY_FIT_MISMATCH
-    requested_states = frozenset().union(
-        *(_requested_us_states(value) for value in requested_values)
+    canonical_match = _canonical_observed_geography_match(
+        verdict,
+        icp,
+        company_quality=company_quality,
     )
+    if canonical_match is None:
+        return COMPANY_FIT_UNAVAILABLE
     requested_region_states = frozenset().union(
-        *(_requested_us_region_states(value) for value in requested_values)
+        *(
+            _requested_us_region_states(value)
+            for value in (icp.country, icp.geography)
+            if str(value or "").strip()
+        )
     )
-    requested_states = requested_states.union(requested_region_states)
-    state_matches = True
-    if requested_states:
-        observed_state = _canonical_us_state(
-            verdict.get("observed_hq_state"),
-            case_insensitive_abbreviation=company_quality,
-        )
-        if not observed_state:
-            return COMPANY_FIT_UNAVAILABLE
-        state_matches = observed_state in requested_states
-    country_matches = not any(
-            not check_country_match(observed, requested).passed
-            for requested in requested_values
-            if not _requested_us_states(requested)
-            and not _requested_us_region_states(requested)
-        )
-    if requested_region_states and not is_united_states(observed):
-        country_matches = False
-    canonical_match = state_matches and country_matches
     if requested_region_states:
         # Named regions are a deterministic frozen policy. The independently
         # observed HQ state decides the result; an LLM Boolean cannot erase a
@@ -3106,8 +3142,11 @@ def _reverify_decision(
                 "observed_employee_count",
                 "observed_industry",
                 "observed_subindustry",
+                "industry_matches",
+                "industry_activity_role",
                 "observed_hq_country",
                 "observed_hq_state",
+                "geography_matches",
                 "observed_company_stage",
                 "attribute_evidence",
             )
@@ -3450,12 +3489,18 @@ def _targeted_company_investigation_dimensions(
     icp_stage: str,
     employee_size_conflict: bool,
 ) -> tuple[str, ...]:
-    """Select only disputed stage, rebrand, and headcount dimensions."""
+    """Select only fact gaps and unsupported semantic company disputes."""
 
     details = result.details if isinstance(result.details, Mapping) else {}
     raw_dimensions = details.get("dimension_decisions")
     dimensions = raw_dimensions if isinstance(raw_dimensions, Mapping) else {}
     targets: list[str] = []
+    provider_observations = details.get("provider_observations")
+    observations = (
+        provider_observations
+        if isinstance(provider_observations, Mapping)
+        else {}
+    )
     if (
         icp_stage
         and dimensions.get("stage")
@@ -3488,9 +3533,33 @@ def _targeted_company_investigation_dimensions(
     )
     if not linkedin_primary and (
         employee_size_conflict
-        or dimensions.get("employee_size") == COMPANY_FIT_MISMATCH
+        or dimensions.get("employee_size")
+        in {COMPANY_FIT_MISMATCH, COMPANY_FIT_UNAVAILABLE}
     ):
         targets.append("headcount")
+    dimension_evidence = details.get("dimension_evidence")
+    industry_evidence = (
+        dimension_evidence.get("industry", {})
+        if isinstance(dimension_evidence, Mapping)
+        else {}
+    )
+    unsupported_industry_mismatch = bool(
+        dimensions.get("industry") == COMPANY_FIT_MISMATCH
+        and observations.get("industry_matches") is False
+        and observations.get("industry_activity_role") == "unresolved"
+        and isinstance(industry_evidence, Mapping)
+        and industry_evidence.get("url")
+        and industry_evidence.get("quote")
+    )
+    if (
+        dimensions.get("industry") == COMPANY_FIT_UNAVAILABLE
+        or unsupported_industry_mismatch
+    ):
+        targets.append("industry")
+    # A proven outside-region headquarters remains terminal. Research is used
+    # only when the broad verifier did not establish a usable headquarters.
+    if dimensions.get("geography") == COMPANY_FIT_UNAVAILABLE:
+        targets.append("geography")
     return tuple(targets)
 
 
@@ -3569,6 +3638,90 @@ def _project_investigator_headcount(
         nested_copy["employee_size"] = {"url": url, "quote": quote}
         projected["dimension_evidence"] = nested_copy
     return projected
+
+
+def _project_investigator_industry(
+    verdict: Mapping[str, Any],
+    finding: Optional[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Project one fetched activity fact for the existing semantic gate."""
+
+    projected = dict(verdict)
+    value = finding or {}
+    status = value.get("status")
+    role = _strict_industry_activity_role(value.get("activity_role"))
+    observed_industry = str(value.get("observed_industry") or "").strip()[:200]
+    observed_subindustry = str(
+        value.get("observed_subindustry") or ""
+    ).strip()[:300]
+    url = _valid_web_evidence_url(value.get("evidence_url"))
+    quote = str(value.get("evidence_quote") or "").strip()[:2000]
+    if (
+        status not in {"VERIFIED", "CONTRADICTED"}
+        or role in {None, "unresolved"}
+        or not observed_industry
+        or not url
+        or not quote
+        or (status == "VERIFIED" and role != "supplier_operator")
+    ):
+        return projected
+    projected.update(
+        observed_industry=observed_industry,
+        observed_subindustry=observed_subindustry,
+        industry_matches=status == "VERIFIED",
+        industry_activity_role=role,
+        industry_evidence_url=url,
+        industry_evidence_quote=quote,
+    )
+    nested = verdict.get("dimension_evidence")
+    if isinstance(nested, Mapping):
+        nested_copy = dict(nested)
+        nested_copy["industry"] = {"url": url, "quote": quote}
+        projected["dimension_evidence"] = nested_copy
+    return projected
+
+
+def _project_investigator_geography(
+    verdict: Mapping[str, Any],
+    finding: Optional[Mapping[str, Any]],
+    *,
+    icp: ICPPrompt,
+    company: CompanyOutput,
+    company_quality: bool,
+) -> dict[str, Any]:
+    """Project headquarters facts; deterministic geography still decides fit."""
+
+    projected = dict(verdict)
+    value = finding or {}
+    if value.get("status") not in {"VERIFIED", "CONTRADICTED"}:
+        return projected
+    country = str(value.get("observed_country") or "").strip()[:100]
+    state = str(value.get("observed_state") or "").strip()[:100]
+    url = _valid_web_evidence_url(value.get("evidence_url"))
+    quote = str(value.get("evidence_quote") or "").strip()[:2000]
+    if not country or not url or not quote:
+        return projected
+    candidate = dict(projected)
+    candidate.update(
+        observed_hq_country=country,
+        observed_hq_state=state,
+        geography_evidence_url=url,
+        geography_evidence_quote=quote,
+    )
+    nested = verdict.get("dimension_evidence")
+    if isinstance(nested, Mapping):
+        nested_copy = dict(nested)
+        nested_copy["geography"] = {"url": url, "quote": quote}
+        candidate["dimension_evidence"] = nested_copy
+    canonical_match = _canonical_observed_geography_match(
+        candidate,
+        icp,
+        company_quality=company_quality,
+    )
+    if canonical_match is None:
+        return projected
+    candidate["geography_matches"] = canonical_match
+    return candidate
 
 
 async def _request_company_reverify_json(
@@ -3736,6 +3889,11 @@ async def _run_targeted_company_evidence_investigation(
         targets=investigation_targets,
         requested_stage=icp_stage,
         requested_employee_buckets=sorted(employee_targets),
+        requested_industry=str(icp.industry or ""),
+        requested_subindustry=str(icp.sub_industry or ""),
+        requested_product_service=str(icp.product_service or ""),
+        requested_attribute=str(icp.required_attribute or ""),
+        requested_geography=str(icp.geography or icp.country or ""),
         prior_observations={
             **{
                 key: verdict.get(key)
@@ -3749,6 +3907,17 @@ async def _run_targeted_company_evidence_investigation(
                     "observed_employee_count",
                     "employee_size_evidence_url",
                     "employee_size_evidence_quote",
+                    "observed_industry",
+                    "observed_subindustry",
+                    "industry_matches",
+                    "industry_activity_role",
+                    "industry_evidence_url",
+                    "industry_evidence_quote",
+                    "observed_hq_country",
+                    "observed_hq_state",
+                    "geography_matches",
+                    "geography_evidence_url",
+                    "geography_evidence_quote",
                 )
             },
             **(
@@ -3820,6 +3989,25 @@ async def _run_targeted_company_evidence_investigation(
         ),
         icp=icp,
         existing_conflict=employee_size_conflict,
+    )
+    projected = _project_investigator_industry(
+        projected,
+        (
+            claims.get("industry")
+            if isinstance(claims.get("industry"), Mapping)
+            else None
+        ),
+    )
+    projected = _project_investigator_geography(
+        projected,
+        (
+            claims.get("geography")
+            if isinstance(claims.get("geography"), Mapping)
+            else None
+        ),
+        icp=icp,
+        company=company,
+        company_quality=company_quality,
     )
     rebrand_claim = claims.get("rebrand")
     verified_rebrand_identity = (
@@ -4293,7 +4481,13 @@ async def _llm_reverify_company(
     if not incomplete:
         return result
     investigated_dimensions = {
-        {"stage": "stage", "headcount": "employee_size", "rebrand": "identity"}[target]
+        {
+            "stage": "stage",
+            "headcount": "employee_size",
+            "rebrand": "identity",
+            "industry": "industry",
+            "geography": "geography",
+        }[target]
         for target in investigation_targets
     }
     if investigation_targets and set(incomplete).issubset(investigated_dimensions):

@@ -1,0 +1,1844 @@
+{
+  "cases": [
+    {
+      "company": {
+        "company_linkedin": "https://www.linkedin.com/company/buywander/",
+        "company_name": "Buywander",
+        "company_stage": "Series A",
+        "company_stage_evidence": [
+          {
+            "quote": "Big Finds, Small Prices: Why We Invested in Buywander Skip to content Madrona Search About Team Companies All AI & Intelligent Apps AI-Enabled Biotech Consumer & Marketplace Data & Infrastructure Deep Tech Developer Platforms & Tools Enterprise Apps Security Startup Careers Insights Contact Jobs Search All Madrona News Perspectives Podcasts September 15, 2026 by Scott Jacobson Big Finds, Small Prices: Why We Invested in Buywander Affordability has become the organizing principle of how a huge and growing share of Americans shop. Buywander turns one of retail’s biggest headaches — returns — into a daily treasure hunt for exactly that consumer. We’re proud to lead their Series A. Affordability has quietly become one of the most powerful forces in consumer behavior. After years of cumulative inflation, the average household is spending materially more for the same basket of goods than it did just a few years ago, and “value” has gone from a nice-to-have to the lens through which a large and growing share of Americans now shop. Middle-class purchasing power has been squeezed, tariffs have added fresh uncertainty to the price of new goods, and off-price retailers, warehouse clubs, resale, and refurbished electronics have largely been the beneficiaries. Unlike a recession trade that reverses when the cycle turns, we believe this is a durable, structural shift that will dictate many business and consumer decisions for years to come. What’s changed most is the psychology. Consumers have decided that a scratch on the side of a coffee maker, a dinged box, or last season’s model is a perfectly good reason to pay 70% less — and they no longer feel like they’re settling for it. They feel like they’re winning. Buywander is built for exactly that consumer; the shopper for whom value is the primary lens, and for whom a great deal is a small, real victory in the week. A trillion-dollar supply problem hiding in plain sight The macro shift enabling this is one of retail’s largest and",
+            "url": "https://www.madrona.com/big-finds-small-prices-why-we-invested-in-buywander/"
+          },
+          {
+            "quote": "BuyWander Expands to Salt Lake City with Steep Discounts Online and Local Pick-Up",
+            "url": "https://www.prnewswire.com/news-releases/buywander-expands-to-salt-lake-city-with-steep-discounts-online-and-local-pick-up-302576452.html"
+          },
+          {
+            "quote": "Buywander was built to connect consumers directly to the $1 Trillion of returned products that accumulate across retailers and brands every year. \n\nWe sell quality, inspected retail returns directly to customers for a massive discount to retail price. We help our customers save, get ahead, and hopefully help the planet in the process.",
+            "url": "https://www.linkedin.com/company/buywander/"
+          }
+        ],
+        "company_website": "https://www.buywander.com/",
+        "contact": {
+          "email": "saved-case-01@example.invalid",
+          "email_source": {
+            "provider": "harvestapi",
+            "record_id": "sanitized-record_id-01",
+            "tool": "harvestapi_get_profile"
+          },
+          "full_name": "Winter Francis",
+          "linkedin_url": "https://www.linkedin.com/in/winter-ashcraft-1002567784797392874",
+          "location": {
+            "city": "Salt Lake City",
+            "country": "United States of America",
+            "region": "Utah"
+          },
+          "role": "Front of House Manager (Operations & Growth)"
+        },
+        "country": "United States of America",
+        "employee_count": "201-500",
+        "industry": "Commerce and Shopping",
+        "intent_details": "Buywander's October 7, 2025 opening of a fourth warehouse store expanded its online auction and local-pickup retail returns marketplace, adding another operating hub for returned and overstocked goods. This capability expansion is relevant to how the company surfaces, sells and fulfills products for shoppers and retail partners.",
+        "intent_signals": [
+          {
+            "date": "2025-10-07",
+            "description": "On October 7, 2025, Buywander announced a new Salt Lake City warehouse and expanded marketplace capability.",
+            "matched_icp_signal": 0,
+            "url": "https://www.prnewswire.com/news-releases/buywander-expands-to-salt-lake-city-with-steep-discounts-online-and-local-pick-up-302576452.html"
+          }
+        ],
+        "required_attribute": {
+          "evidence_quote": "BuyWander Expands to Salt Lake City with Steep Discounts Online and Local Pick-Up",
+          "evidence_url": "https://www.prnewswire.com/news-releases/buywander-expands-to-salt-lake-city-with-steep-discounts-online-and-local-pick-up-302576452.html",
+          "explanation": "Buywander sells returned and overstocked products through an online auction marketplace and local warehouse stores.",
+          "passed": true,
+          "text": "Operates a commerce or retail platform that sells products online or enables online selling for merchants."
+        },
+        "state": "Washington"
+      },
+      "icp": {
+        "baseline_score": 0.0,
+        "bonus_intents": [],
+        "company_stage": "Series A",
+        "contact_geography": {
+          "cities": [],
+          "countries": [],
+          "regions": []
+        },
+        "contact_policy": "contacts_v1",
+        "country": "United States",
+        "employee_count": [
+          "11-50",
+          "51-200",
+          "201-500",
+          "501-1,000",
+          "1,001-5,000"
+        ],
+        "excluded_companies": [
+          "shoppable.com"
+        ],
+        "geography": "United States",
+        "icp_id": "icp_20260921_013",
+        "icp_position": 12,
+        "industry": "Commerce and Shopping",
+        "intent_category": "PRODUCT_LAUNCH",
+        "intent_max_age_days": 365,
+        "intent_signal": "Launched a new product or major capability in the last 12 months, per a press release, product page, or changelog.",
+        "intent_signals": [
+          "Launched a new product or major capability in the last 12 months, per a press release, product page, or changelog."
+        ],
+        "max_companies": 5,
+        "product_service": "A commerce platform that helps brands or marketplaces sell products online, manage merchandising, and improve conversion.",
+        "prompt": "Searching for commerce and shopping brands that launched a new product or major capability this year, ideally with a product page or release. Target contacts: Ecommerce Manager, Merchandising Manager, Growth Operations Manager.",
+        "required_attribute": "Operates a commerce or retail platform that sells products online or enables online selling for merchants.",
+        "sub_industry": "E-commerce marketplace and retail technology",
+        "target_roles": [
+          "Ecommerce Manager",
+          "Merchandising Manager",
+          "Growth Operations Manager"
+        ],
+        "target_seniority": ""
+      },
+      "name": "Buywander",
+      "position": 12,
+      "round": "arena-2026-09-22",
+      "submission": "baseline-2026-09-22"
+    },
+    {
+      "company": {
+        "company_linkedin": "https://www.linkedin.com/company/samsara/",
+        "company_name": "Samsara",
+        "company_stage": "Public",
+        "company_stage_evidence": [
+          {
+            "quote": "Samsara (NYSE: IOT) builds with the operators who keep the world moving. Working alongside the drivers, mechanics, dispatchers, and crews behind the world's most complex operations, Samsara turns what they know into technology that makes their work safer and more efficient.\n\nTens of thousands of organizations rely on Samsara across transportation, construction, logistics, manufacturing, field services, government, and more. \n\nBuilt with operators, for operators.",
+            "url": "https://www.linkedin.com/company/samsara/"
+          },
+          {
+            "quote": "Senior Business Operations Manager - Remote - US Skip to main content Careers Departments Locations Benefits Emerging Talent View open roles Careers Departments Locations Benefits Emerging Talent View open roles Back to All Jobs Senior Business Operations Manager Remote - US ID:JR12064 (for internal use only) Apply Now Senior Business Operations Manager Apply Now Samsara's Mission Improve the safety, efficiency, and sustainability of the operations that power the global economy. Who we are Samsara (NYSE: IOT) is the pioneer of the Connected Operations™ Cloud, which is a platform that enables organizations that depend on physical operations to harness Internet of Things (IoT) data to develop actionable insights and improve their operations. At Samsara, we are helping improve the safety, efficiency and sustainability of the physical operations that power our global economy. Representing more than 40% of global GDP, these industries are the infrastructure of our planet, including agriculture, construction, field services, transportation, and manufacturing — and we are excited to help digitally transform their operations at scale. Working at Samsara means you’ll help define the future of physical operations and be on a team that’s shaping an exciting array of product solutions, including Video-Based Safety, Vehicle Telematics, Apps and Driver Workflows, and Equipment Monitoring. As part of a recently public company, you’ll have the autonomy and support to make an impact as we build for the long term. About the role: The Sr. Business Operations Manager is a strategic partner to the leadership of Samsara’s Global Support organization, driving operational excellence and enabling data-informed decision-making at scale. This role sits at the intersection of strategy and execution, supporting senior leadership with the insights, communications, and operational frameworks needed to run and grow the business effectively. This role owns the annual operating plan and the operatin",
+            "url": "https://www.samsara.com/company/careers/roles/8112696?gh_jid=8112696&gh_board=samsara"
+          }
+        ],
+        "company_website": "http://www.samsara.com/",
+        "contact": {
+          "email": "saved-case-02@example.invalid",
+          "email_source": {
+            "provider": "harvestapi",
+            "record_id": "sanitized-record_id-02",
+            "tool": "harvestapi_get_profile"
+          },
+          "full_name": "Karen Lawrence",
+          "linkedin_url": "https://www.linkedin.com/in/karen-lawrence-a6295777",
+          "location": {
+            "city": "Dallas",
+            "country": "United States of America",
+            "region": "Texas"
+          },
+          "role": "Business Operations Manager"
+        },
+        "country": "United States of America",
+        "employee_count": "1001-5000",
+        "industry": "Transportation",
+        "intent_details": "Samsara's live careers page, observed on September 22, 2026, lists a Remote - US Senior Business Operations Manager opening. The role covers operating plans, capacity, headcount, cost models, performance reporting, and operational improvement for its Global Support organization, which is directly relevant to operating and scaling a transportation technology platform serving physical operations.",
+        "intent_signals": [
+          {
+            "date": "2026-09-22",
+            "description": "Samsara's live careers page shows a Remote - US Senior Business Operations Manager opening, observed on September 22, 2026; the role owns operating plans, capacity, headcount, cost models, performance reporting, and operational improvement.",
+            "matched_icp_signal": 0,
+            "url": "https://www.samsara.com/company/careers/roles/8112696?gh_jid=8112696&gh_board=samsara"
+          }
+        ],
+        "required_attribute": {
+          "evidence_quote": "Samsara (NYSE: IOT) builds with the operators who keep the world moving. Working alongside the drivers, mechanics, dispatchers, and crews behind the world's most complex operations, Samsara turns what they know into technology that makes their work safer and more efficient.\n\nTens of thousands of organizations rely on Samsara across transportation, construction, logistics, manufacturing, field services, government, and more. \n\nBuilt with operators, for operators.",
+          "evidence_url": "https://www.linkedin.com/company/samsara/",
+          "explanation": "Samsara's Connected Operations Cloud provides vehicle telematics, driver workflows, equipment monitoring, and operational software for transportation and logistics organizations.",
+          "passed": true,
+          "text": "Operates a transportation or logistics platform used to move freight, manage fleets, or coordinate shipping operations."
+        },
+        "state": "California"
+      },
+      "icp": {
+        "baseline_score": 0.0,
+        "bonus_intents": [],
+        "company_stage": "Public",
+        "contact_geography": {
+          "cities": [],
+          "countries": [],
+          "regions": []
+        },
+        "contact_policy": "contacts_v1",
+        "country": "United States",
+        "employee_count": [
+          "201-500",
+          "501-1,000",
+          "1,001-5,000",
+          "5,001-10,000",
+          "10,001+"
+        ],
+        "excluded_companies": [
+          "fr8technologies.com"
+        ],
+        "geography": "United States",
+        "icp_id": "icp_20260921_020",
+        "icp_position": 19,
+        "industry": "Transportation",
+        "intent_category": "HIRING",
+        "intent_max_age_days": 365,
+        "intent_signal": "Actively hiring for routing, fleet, or operations roles, per current job postings or a careers page.",
+        "intent_signals": [
+          "Actively hiring for routing, fleet, or operations roles, per current job postings or a careers page."
+        ],
+        "max_companies": 5,
+        "product_service": "A transportation platform that helps shippers, carriers, or logistics teams plan routes, manage fleets, and move goods efficiently.",
+        "prompt": "Any transportation companies hiring for routing, fleet, or operations roles right now? Need current openings only. Target contacts: Operations Manager, Fleet Manager, Logistics Manager.",
+        "required_attribute": "Operates a transportation or logistics platform used to move freight, manage fleets, or coordinate shipping operations.",
+        "sub_industry": "Freight and logistics technology",
+        "target_roles": [
+          "Operations Manager",
+          "Fleet Manager",
+          "Logistics Manager"
+        ],
+        "target_seniority": ""
+      },
+      "name": "Samsara",
+      "position": 19,
+      "round": "arena-2026-09-22",
+      "submission": "baseline-2026-09-22"
+    },
+    {
+      "company": {
+        "company_linkedin": "https://www.linkedin.com/company/bayesian-health/",
+        "company_name": "Bayesian Health",
+        "company_stage": "Series A",
+        "company_stage_evidence": [
+          {
+            "quote": "Latest funding Series A $15M · July 2021",
+            "url": "https://venturecapitaltracker.com/startup/bayesian-health"
+          },
+          {
+            "quote": "Bayesian Health Receives First-Ever FDA Clearance for Continuous AI Sepsis Monitoring Accessibility Statement Skip Navigation Resources Investor Relations Journalists Agencies Client Login Send a Release News Products Contact Search Search When typing in this field, a list of search results will appear and be automatically updated as you type. Searching for your content... No results found. Please change your search terms and try again. News in Focus Browse News Releases All News Releases All Public Company English-only News Releases Overview Multimedia Gallery All Multimedia All Photos All Videos Multimedia Gallery Overview Trending Topics All Trending Topics Business & Money Auto & Transportation All Automotive & Transportation Aerospace, Defense Air Freight Airlines & Aviation Automotive Maritime & Shipbuilding Railroads and Intermodal Transportation Supply Chain/Logistics Transportation, Trucking & Railroad Travel Trucking and Road Transportation Auto & Transportation Overview View All Auto & Transportation Business Technology All Business Technology Blockchain Broadcast Tech Computer & Electronics Computer Hardware Computer Software Data Analytics Electronic Commerce Electronic Components Electronic Design Automation Financial Technology High Tech Security Internet Technology Nanotechnology Networks Peripherals Semiconductors Business Technology Overview View All Business Technology Entertain­ment & Media All Entertain­ment & Media Advertising Art Books Entertainment Film and Motion Picture Magazines Music Publishing & Information Services Radio & Podcast Television Entertain­ment & Media Overview View All Entertain­ment & Media Financial Services & Investing All Financial Services & Investing Accounting News & Issues Acquisitions, Mergers and Takeovers Banking & Financial Services Bankruptcy Bond & Stock Ratings Conference Call Announcements Contracts Cryptocurrency Dividends Earnings Earnings Forecasts & Projections Financing Agreements Insurance Investments",
+            "url": "https://www.prnewswire.com/news-releases/bayesian-health-receives-first-ever-fda-clearance-for-continuous-ai-sepsis-monitoring-302769190.html"
+          },
+          {
+            "quote": "Bayesian monitors every patient continuously, surfaces only those who need attention, and gives clinicians the guidance to act, consistently, at scale.",
+            "url": "https://www.bayesianhealth.com/"
+          }
+        ],
+        "company_website": "http://www.bayesianhealth.com/",
+        "contact": {
+          "email": "saved-case-03@example.invalid",
+          "email_source": {
+            "provider": "harvestapi",
+            "record_id": "sanitized-record_id-03",
+            "tool": "harvestapi_get_profile"
+          },
+          "full_name": "Harish Kilaru",
+          "linkedin_url": "https://www.linkedin.com/in/harishkilaru",
+          "location": {
+            "city": "New York",
+            "country": "United States of America",
+            "region": "New York"
+          },
+          "role": "Product Lead"
+        },
+        "country": "United States of America",
+        "employee_count": "11-50",
+        "industry": "Health Care",
+        "intent_details": "On May 12, 2026, Bayesian Health announced FDA clearance for its sepsis flagging device, described as continuous AI sepsis monitoring. The cleared device is directly connected to the company clinical intelligence offering, which continuously analyzes patient records and surfaces risk signals and next steps inside EHR workflows for health systems.",
+        "intent_signals": [
+          {
+            "date": "2026-05-12",
+            "description": "FDA clearance was announced on May 12, 2026.",
+            "matched_icp_signal": 0,
+            "url": "https://www.prnewswire.com/news-releases/bayesian-health-receives-first-ever-fda-clearance-for-continuous-ai-sepsis-monitoring-302769190.html"
+          }
+        ],
+        "required_attribute": {
+          "evidence_quote": "Bayesian monitors every patient continuously, surfaces only those who need attention, and gives clinicians the guidance to act, consistently, at scale.",
+          "evidence_url": "https://www.bayesianhealth.com/",
+          "explanation": "Bayesian Health provides clinical decision support inside EHR workflows.",
+          "passed": true,
+          "text": "Sells a health care technology product or service that supports clinical, operational, or patient workflow management."
+        },
+        "state": "New York"
+      },
+      "icp": {
+        "baseline_score": 0.0,
+        "bonus_intents": [],
+        "company_stage": "Series A",
+        "contact_geography": {
+          "cities": [],
+          "countries": [],
+          "regions": []
+        },
+        "contact_policy": "contacts_v1",
+        "country": "United States",
+        "employee_count": [
+          "11-50",
+          "51-200",
+          "201-500",
+          "501-1,000",
+          "1,001-5,000"
+        ],
+        "excluded_companies": [
+          "pairteam.com"
+        ],
+        "geography": "United States",
+        "icp_id": "icp_20260921_007",
+        "icp_position": 6,
+        "industry": "Health Care",
+        "intent_category": "REGULATORY_CLEARANCE",
+        "intent_max_age_days": 365,
+        "intent_signal": "Received a new regulatory clearance or certification in the last 12 months, per a regulator notice, press release, or company announcement.",
+        "intent_signals": [
+          "Received a new regulatory clearance or certification in the last 12 months, per a regulator notice, press release, or company announcement."
+        ],
+        "max_companies": 5,
+        "product_service": "A health care technology solution that helps providers, patients, or care teams manage clinical or administrative workflows.",
+        "prompt": "I need health care companies that got a new regulatory clearance or certification this year, with the FDA notice or equivalent documentation. Target contacts: Clinical Operations Manager, Healthcare IT Manager, Product Manager.",
+        "required_attribute": "Sells a health care technology product or service that supports clinical, operational, or patient workflow management.",
+        "sub_industry": "Digital health and provider workflow",
+        "target_roles": [
+          "Clinical Operations Manager",
+          "Healthcare IT Manager",
+          "Product Manager"
+        ],
+        "target_seniority": ""
+      },
+      "name": "Bayesian Health",
+      "position": 6,
+      "round": "arena-2026-09-22",
+      "submission": "baseline-2026-09-22"
+    },
+    {
+      "company": {
+        "company_linkedin": "",
+        "company_name": "MontyCloud",
+        "company_stage": "Series B",
+        "company_stage_evidence": [
+          {
+            "quote": "MontyCloud Raises Series B Amid Strong Momentum to Power the Next Era of Autonomous CloudOps - MontyCloud.",
+            "url": "https://montycloud.com/news/montycloud-raises-series-b-amid-strong-momentum-to-power-the-next-era-of-autonomous-cloudops/"
+          }
+        ],
+        "company_website": "https://montycloud.com/",
+        "contact": {
+          "email": "saved-case-04@example.invalid",
+          "email_source": {
+            "provider": "harvestapi",
+            "record_id": "sanitized-record_id-04",
+            "tool": "harvestapi_get_profile"
+          },
+          "full_name": "Emily Furrow, PHR",
+          "linkedin_url": "https://www.linkedin.com/in/emily-furrow-phr-64519995/",
+          "location": {
+            "city": "Mebane",
+            "country": "US",
+            "region": "North Carolina"
+          },
+          "role": "People Operations Manager"
+        },
+        "country": "United States",
+        "employee_count": "51-200",
+        "industry": "Information Technology",
+        "intent_details": "The source reports: \"MontyCloud Secures Series A Funding And Aims To Double Engineering Team in India - Press Network of India\". The activity reported above (opened a new office, delivery center, or regional hub in the last 12 months, per a press release or company...) is a recent operating change at MontyCloud, which is what makes it relevant to an ICP focused on An IT services platform that helps organizations modernize infrastructure, manage cloud environments, and run secure operations.: work of that kind may raise near-term need in that area, though these sources report no purchase decision.",
+        "intent_signals": [
+          {
+            "date": null,
+            "description": "The source states: \"MontyCloud Secures Series A Funding And Aims To Double Engineering Team in India - Press Network of India\"",
+            "matched_icp_signal": 0,
+            "url": "https://www.pninews.com/montycloud-secures-series-a-funding-and-aims-to-double-engineering-team-in-india/"
+          }
+        ],
+        "required_attribute": null,
+        "state": "Washington"
+      },
+      "icp": {
+        "baseline_score": 0.0,
+        "bonus_intents": [],
+        "company_stage": "Series B",
+        "contact_geography": {
+          "cities": [],
+          "countries": [],
+          "regions": []
+        },
+        "contact_policy": "contacts_v1",
+        "country": "United States",
+        "employee_count": [
+          "51-200",
+          "201-500",
+          "501-1,000",
+          "1,001-5,000",
+          "5,001-10,000"
+        ],
+        "excluded_companies": [
+          "zluri.com"
+        ],
+        "geography": "United States, West Coast",
+        "icp_id": "icp_20260921_002",
+        "icp_position": 1,
+        "industry": "Information Technology",
+        "intent_category": "FACILITY_OPENING",
+        "intent_max_age_days": 365,
+        "intent_signal": "Opened a new office, delivery center, or regional hub in the last 12 months, per a press release or company announcement.",
+        "intent_signals": [
+          "Opened a new office, delivery center, or regional hub in the last 12 months, per a press release or company announcement."
+        ],
+        "max_companies": 5,
+        "product_service": "An IT services platform that helps organizations modernize infrastructure, manage cloud environments, and run secure operations.",
+        "prompt": "Hey, gonna need IT firms that opened a new office or delivery hub in the last year, with a press release or company announcement I can point to. Target contacts: IT Services Manager, Client Solutions Manager, Operations Manager.",
+        "required_attribute": "Provides managed IT services or systems integration services for organizations modernizing infrastructure, cloud, and workplace systems.",
+        "sub_industry": "Managed services and systems integration",
+        "target_roles": [
+          "IT Services Manager",
+          "Client Solutions Manager",
+          "Operations Manager"
+        ],
+        "target_seniority": ""
+      },
+      "name": "MontyCloud",
+      "position": 1,
+      "round": "arena-2026-09-22",
+      "submission": "sub-50bf555a7ef22e489fb00b186344a258"
+    },
+    {
+      "company": {
+        "company_linkedin": "",
+        "company_name": "Max Retail",
+        "company_stage": "Series A",
+        "company_stage_evidence": [
+          {
+            "quote": "Max Retail Raises $15M Series A to Help Independent Retailers Participate in the Growing Ecommerce Wave - intelligence360.",
+            "url": "https://www.intelligence360.news/max-retail-raises-15m-series-a-to-help-independent-retailers-participate-in-the-growing-ecommerce-wave/"
+          }
+        ],
+        "company_website": "https://maxretail.com/",
+        "contact": {
+          "email": "saved-case-05@example.invalid",
+          "email_source": {
+            "provider": "harvestapi",
+            "record_id": "sanitized-record_id-05",
+            "tool": "harvestapi_get_profile"
+          },
+          "full_name": "McKenna Zalis",
+          "linkedin_url": "https://www.linkedin.com/in/mckennazalis/",
+          "location": {
+            "city": "West Palm Beach",
+            "country": "US",
+            "region": "Florida"
+          },
+          "role": "Senior Manager, Ecommerce and Growth"
+        },
+        "country": "united states",
+        "employee_count": "11-50",
+        "industry": "Retail",
+        "intent_details": "The source reports: \"Max Retail announces a new point-of-sale integration with RICS Software, helping footwear retailers streamline aged inventory management and recover wholesale costs on unsold merchandise with greater...\". The activity reported above (launched a new product or major capability in the last 12 months, per a press release, product page, or changelog.) is a recent operating change at Max Retail, which is what makes it relevant to an ICP focused on A commerce platform that helps brands or marketplaces sell products online, manage merchandising, and improve conversion.: work of that kind may raise near-term need in that area, though these sources report no purchase decision.",
+        "intent_signals": [
+          {
+            "date": null,
+            "description": "The source states: \"Max Retail announces a new point-of-sale integration with RICS Software, helping footwear retailers streamline aged inventory management and recover wholesale costs on unsold merchandise with greater efficiency.\"",
+            "matched_icp_signal": 0,
+            "url": "https://maxretail.com/press/"
+          }
+        ],
+        "required_attribute": null,
+        "state": "Florida"
+      },
+      "icp": {
+        "baseline_score": 0.0,
+        "bonus_intents": [],
+        "company_stage": "Series A",
+        "contact_geography": {
+          "cities": [],
+          "countries": [],
+          "regions": []
+        },
+        "contact_policy": "contacts_v1",
+        "country": "United States",
+        "employee_count": [
+          "11-50",
+          "51-200",
+          "201-500",
+          "501-1,000",
+          "1,001-5,000"
+        ],
+        "excluded_companies": [
+          "shoppable.com"
+        ],
+        "geography": "United States",
+        "icp_id": "icp_20260921_013",
+        "icp_position": 12,
+        "industry": "Commerce and Shopping",
+        "intent_category": "PRODUCT_LAUNCH",
+        "intent_max_age_days": 365,
+        "intent_signal": "Launched a new product or major capability in the last 12 months, per a press release, product page, or changelog.",
+        "intent_signals": [
+          "Launched a new product or major capability in the last 12 months, per a press release, product page, or changelog."
+        ],
+        "max_companies": 5,
+        "product_service": "A commerce platform that helps brands or marketplaces sell products online, manage merchandising, and improve conversion.",
+        "prompt": "Searching for commerce and shopping brands that launched a new product or major capability this year, ideally with a product page or release. Target contacts: Ecommerce Manager, Merchandising Manager, Growth Operations Manager.",
+        "required_attribute": "Operates a commerce or retail platform that sells products online or enables online selling for merchants.",
+        "sub_industry": "E-commerce marketplace and retail technology",
+        "target_roles": [
+          "Ecommerce Manager",
+          "Merchandising Manager",
+          "Growth Operations Manager"
+        ],
+        "target_seniority": ""
+      },
+      "name": "Max Retail",
+      "position": 12,
+      "round": "arena-2026-09-22",
+      "submission": "sub-50bf555a7ef22e489fb00b186344a258"
+    },
+    {
+      "company": {
+        "company_linkedin": "https://www.linkedin.com/company/dexory",
+        "company_name": "Dexory",
+        "company_stage": "Series C+",
+        "company_stage_evidence": [],
+        "company_website": "https://dexory.com/",
+        "contact": {
+          "email": "saved-case-06@example.invalid",
+          "email_source": {
+            "provider": "harvestapi",
+            "record_id": "sanitized-record_id-06",
+            "tool": "harvestapi_get_profile"
+          },
+          "full_name": "Victoria Cimaz",
+          "linkedin_url": "https://www.linkedin.com/in/victoria-cimaz/",
+          "location": {
+            "city": "London",
+            "country": "United Kingdom",
+            "region": "England"
+          },
+          "role": "Senior Technical Product Manager"
+        },
+        "country": "United Kingdom",
+        "employee_count": "201-500",
+        "industry": "Robotics Engineering",
+        "intent_details": "On February 9, 2026, Dexory launched its next-generation autonomous robot and the Storage Health software feature, adding richer real-time warehouse data, computer-vision inspection, and operational visibility. The combined release is directly relevant to a hardware platform integrating deployed devices, firmware-driven robotics, and cloud-connected software, and may create a need for coordinated product, hardware-operations, and program management.",
+        "intent_signals": [
+          {
+            "date": "2026-02-09",
+            "description": "“Dexory, a provider of real-time warehouse data intelligence, today launched its next-generation autonomous robot and a new software feature, Storage Health.”",
+            "matched_icp_signal": 0,
+            "url": "https://www.automatedwarehouseonline.com/scaling-intelligence-how-new-dexory-tools-drive-data-visibility/"
+          }
+        ],
+        "required_attribute": {
+          "evidence_quote": "Dexory said its DexoryView platform combines autonomous robots, artificial intelligence, and digital twin technology",
+          "evidence_url": "https://www.automatedwarehouseonline.com/scaling-intelligence-how-new-dexory-tools-drive-data-visibility/",
+          "explanation": "The source describes an integrated deployed robotics platform in which autonomous hardware continuously captures warehouse data and feeds it into the DexoryView digital twin, directly supporting the connected-hardware requirement.",
+          "passed": true,
+          "text": "Designs and sells connected hardware products with firmware or cloud-enabled capabilities for real-world deployment."
+        },
+        "state": "Oxfordshire"
+      },
+      "icp": {
+        "baseline_score": 0.0,
+        "bonus_intents": [],
+        "company_stage": "Series C+",
+        "contact_geography": {
+          "cities": [],
+          "countries": [],
+          "regions": []
+        },
+        "contact_policy": "contacts_v1",
+        "country": "United Kingdom",
+        "employee_count": [
+          "201-500",
+          "501-1,000",
+          "1,001-5,000",
+          "5,001-10,000"
+        ],
+        "excluded_companies": [
+          "nothing.tech"
+        ],
+        "geography": "United Kingdom",
+        "icp_id": "icp_20260921_004",
+        "icp_position": 3,
+        "industry": "Hardware",
+        "intent_category": "PRODUCT_LAUNCH",
+        "intent_max_age_days": 365,
+        "intent_signal": "Launched a new product or major capability in the last 12 months, per a press release, product page, or changelog.",
+        "intent_signals": [
+          "Launched a new product or major capability in the last 12 months, per a press release, product page, or changelog."
+        ],
+        "max_companies": 5,
+        "product_service": "A hardware platform that combines devices, firmware, and cloud-connected software for business or consumer use cases.",
+        "prompt": "Search for hardware companies that launched a major new device or platform capability this year, preferably backed by a product announcement or launch page. Target contacts: Product Manager, Hardware Operations Manager, Program Manager.",
+        "required_attribute": "Designs and sells connected hardware products with firmware or cloud-enabled capabilities for real-world deployment.",
+        "sub_industry": "Connected devices and computing hardware",
+        "target_roles": [
+          "Product Manager",
+          "Hardware Operations Manager",
+          "Program Manager"
+        ],
+        "target_seniority": ""
+      },
+      "name": "Dexory",
+      "position": 3,
+      "round": "arena-2026-09-22",
+      "submission": "sub-3ee8f15938990b9139dc5e736e91fe26"
+    },
+    {
+      "company": {
+        "company_linkedin": "",
+        "company_name": "ABEC",
+        "company_stage": "",
+        "company_stage_evidence": [],
+        "company_website": "https://abec.com/",
+        "contact": {
+          "email": "saved-case-07@example.invalid",
+          "email_source": {
+            "provider": "harvestapi",
+            "record_id": "sanitized-record_id-07",
+            "tool": "harvestapi_get_profile"
+          },
+          "full_name": "Siddhesh Parab",
+          "linkedin_url": "https://www.linkedin.com/in/siddhesh-parab/",
+          "location": {
+            "city": "dublin",
+            "country": "IE",
+            "region": "leinster"
+          },
+          "role": "Operations Manager"
+        },
+        "country": "United States",
+        "employee_count": "501-1,000",
+        "industry": "Manufacturing",
+        "intent_details": "The source dated 2026-09-10 reports: “today announced the grand opening of its newest manufacturing facility in Wilson, North Carolina.” The source dated 2026-09-10 reports: “BETHLEHEM, Pa., Sept. 10, 2026 /PRNewswire/ -- ABEC, a global leader in customized solutions and services for biopharmaceutical manufacturing, today announced the grand opening of its newest manufacturing facility in Wilson, North Carolina.” These reported activities connect to the ICP criteria identified by the corresponding submitted signals.",
+        "intent_signals": [
+          {
+            "date": "2026-09-10",
+            "description": "today announced the grand opening of its newest manufacturing facility in Wilson, North Carolina.",
+            "matched_icp_signal": 0,
+            "url": "https://www.prnewswire.com/news-releases/abec-opens-new-manufacturing-facility-in-wilson-north-carolina-302859755.html"
+          },
+          {
+            "date": "2026-09-10",
+            "description": "BETHLEHEM, Pa., Sept. 10, 2026 /PRNewswire/ -- ABEC, a global leader in customized solutions and services for biopharmaceutical manufacturing, today announced the grand opening of its newest manufacturing facility in Wilson, North Carolina.",
+            "matched_icp_signal": 0,
+            "url": "https://www.biospace.com/press-releases/abec-opens-new-manufacturing-facility-in-wilson-north-carolina"
+          }
+        ],
+        "required_attribute": {
+          "evidence_quote": "global leader in customized solutions and services for biopharmaceutical manufacturing",
+          "evidence_url": "https://www.prnewswire.com/news-releases/abec-opens-new-manufacturing-facility-in-wilson-north-carolina-302859755.html",
+          "explanation": "Observed product wording.",
+          "passed": true,
+          "text": "Manufactures industrial or commercial products and operates production, assembly, or distribution facilities."
+        },
+        "state": ""
+      },
+      "icp": {
+        "baseline_score": 0.0,
+        "bonus_intents": [],
+        "company_stage": "Private Equity",
+        "contact_geography": {
+          "cities": [],
+          "countries": [],
+          "regions": []
+        },
+        "contact_policy": "contacts_v1",
+        "country": "United States",
+        "employee_count": [
+          "201-500",
+          "501-1,000",
+          "1,001-5,000",
+          "5,001-10,000"
+        ],
+        "excluded_companies": [
+          "acieta.com"
+        ],
+        "geography": "United States, Midwest",
+        "icp_id": "icp_20260921_012",
+        "icp_position": 11,
+        "industry": "Manufacturing",
+        "intent_category": "FACILITY_OPENING",
+        "intent_max_age_days": 365,
+        "intent_signal": "Opened a new factory, plant, or production facility in the last 12 months, per a press release or local news coverage.",
+        "intent_signals": [
+          "Opened a new factory, plant, or production facility in the last 12 months, per a press release or local news coverage."
+        ],
+        "max_companies": 5,
+        "product_service": "An industrial manufacturing business that produces equipment, components, or finished goods for commercial or industrial buyers.",
+        "prompt": "I need manufacturing companies that opened a new plant or facility in the last 12 months, backed by a company announcement or local coverage. Target contacts: Plant Manager, Operations Manager, Supply Chain Manager.",
+        "required_attribute": "Manufactures industrial or commercial products and operates production, assembly, or distribution facilities.",
+        "sub_industry": "Industrial equipment manufacturing",
+        "target_roles": [
+          "Plant Manager",
+          "Operations Manager",
+          "Supply Chain Manager"
+        ],
+        "target_seniority": ""
+      },
+      "name": "ABEC",
+      "position": 11,
+      "round": "arena-2026-09-22",
+      "submission": "sub-2534fa2a2e04da1f4cb15d9b48a7d198"
+    },
+    {
+      "company": {
+        "company_linkedin": "",
+        "company_name": "Flexport",
+        "company_stage": "",
+        "company_stage_evidence": [],
+        "company_website": "https://flexport.com/",
+        "contact": {
+          "email": "saved-case-08@example.invalid",
+          "email_source": {
+            "provider": "harvestapi",
+            "record_id": "sanitized-record_id-08",
+            "tool": "harvestapi_get_profile"
+          },
+          "full_name": "Esgar Esparza, MS",
+          "linkedin_url": "https://www.linkedin.com/in/esgar-esparza/",
+          "location": {
+            "city": "los angeles",
+            "country": "US",
+            "region": "california"
+          },
+          "role": "Operations Manager"
+        },
+        "country": "United States",
+        "employee_count": "201-500",
+        "industry": "Transportation",
+        "intent_details": "The source dated 2026-07-27 reports: “Flexport's career board lists 149 open positions as of July 2026”. These reported activities connect to the ICP criteria identified by the corresponding submitted signals.",
+        "intent_signals": [
+          {
+            "date": "2026-07-27",
+            "description": "Flexport's career board lists 149 open positions as of July 2026",
+            "matched_icp_signal": 0,
+            "url": "https://zerogtalent.com/blog/inside-flexport-s-hiring-boom-how-to-pass-the-screening-for-149-open-roles"
+          }
+        ],
+        "required_attribute": null,
+        "state": ""
+      },
+      "icp": {
+        "baseline_score": 0.0,
+        "bonus_intents": [],
+        "company_stage": "Public",
+        "contact_geography": {
+          "cities": [],
+          "countries": [],
+          "regions": []
+        },
+        "contact_policy": "contacts_v1",
+        "country": "United States",
+        "employee_count": [
+          "201-500",
+          "501-1,000",
+          "1,001-5,000",
+          "5,001-10,000",
+          "10,001+"
+        ],
+        "excluded_companies": [
+          "fr8technologies.com"
+        ],
+        "geography": "United States",
+        "icp_id": "icp_20260921_020",
+        "icp_position": 19,
+        "industry": "Transportation",
+        "intent_category": "HIRING",
+        "intent_max_age_days": 365,
+        "intent_signal": "Actively hiring for routing, fleet, or operations roles, per current job postings or a careers page.",
+        "intent_signals": [
+          "Actively hiring for routing, fleet, or operations roles, per current job postings or a careers page."
+        ],
+        "max_companies": 5,
+        "product_service": "A transportation platform that helps shippers, carriers, or logistics teams plan routes, manage fleets, and move goods efficiently.",
+        "prompt": "Any transportation companies hiring for routing, fleet, or operations roles right now? Need current openings only. Target contacts: Operations Manager, Fleet Manager, Logistics Manager.",
+        "required_attribute": "Operates a transportation or logistics platform used to move freight, manage fleets, or coordinate shipping operations.",
+        "sub_industry": "Freight and logistics technology",
+        "target_roles": [
+          "Operations Manager",
+          "Fleet Manager",
+          "Logistics Manager"
+        ],
+        "target_seniority": ""
+      },
+      "name": "Flexport",
+      "position": 19,
+      "round": "arena-2026-09-22",
+      "submission": "sub-2534fa2a2e04da1f4cb15d9b48a7d198"
+    },
+    {
+      "company": {
+        "company_linkedin": "",
+        "company_name": "Phia",
+        "company_stage": "Series A",
+        "company_stage_evidence": [
+          {
+            "quote": "Phia Raises $35M Series A to Build the AI Alignment Layer",
+            "url": "https://www.globenewswire.com/news-release/2026/01/27/3226735/0/en/Phia-Raises-35M-Series-A-to-Build-the-AI-Alignment-Layer-for-Commerce.html"
+          },
+          {
+            "quote": "Phia Raises $35 Million Series A | BoF",
+            "url": "https://www.businessoffashion.com/news/technology/phoebe-gates-co-founded-phia-raises-35-million-series-a/"
+          }
+        ],
+        "company_website": "https://phia.com/",
+        "contact": null,
+        "country": "United States",
+        "employee_count": "51-200",
+        "industry": "Commerce and Shopping",
+        "intent_details": "The source dated 2026-01-27 reports: “Phia, the shopping agent launched by co-founders Phoebe Gates and Sophia Kianni in April 2025”. These reported activities connect to the ICP criteria identified by the corresponding submitted signals.",
+        "intent_signals": [
+          {
+            "date": "2026-01-27",
+            "description": "Phia, the shopping agent launched by co-founders Phoebe Gates and Sophia Kianni in April 2025",
+            "matched_icp_signal": 0,
+            "url": "https://www.globenewswire.com/news-release/2026/01/27/3226735/0/en/Phia-Raises-35M-Series-A-to-Build-the-AI-Alignment-Layer-for-Commerce.html"
+          }
+        ],
+        "required_attribute": {
+          "evidence_quote": "Phia, the shopping agent",
+          "evidence_url": "https://www.globenewswire.com/news-release/2026/01/27/3226735/0/en/Phia-Raises-35M-Series-A-to-Build-the-AI-Alignment-Layer-for-Commerce.html",
+          "explanation": "Observed product wording.",
+          "passed": true,
+          "text": "Operates a commerce or retail platform that sells products online or enables online selling for merchants."
+        },
+        "state": ""
+      },
+      "icp": {
+        "baseline_score": 0.0,
+        "bonus_intents": [],
+        "company_stage": "Series A",
+        "contact_geography": {
+          "cities": [],
+          "countries": [],
+          "regions": []
+        },
+        "contact_policy": "contacts_v1",
+        "country": "United States",
+        "employee_count": [
+          "11-50",
+          "51-200",
+          "201-500",
+          "501-1,000",
+          "1,001-5,000"
+        ],
+        "excluded_companies": [
+          "shoppable.com"
+        ],
+        "geography": "United States",
+        "icp_id": "icp_20260921_013",
+        "icp_position": 12,
+        "industry": "Commerce and Shopping",
+        "intent_category": "PRODUCT_LAUNCH",
+        "intent_max_age_days": 365,
+        "intent_signal": "Launched a new product or major capability in the last 12 months, per a press release, product page, or changelog.",
+        "intent_signals": [
+          "Launched a new product or major capability in the last 12 months, per a press release, product page, or changelog."
+        ],
+        "max_companies": 5,
+        "product_service": "A commerce platform that helps brands or marketplaces sell products online, manage merchandising, and improve conversion.",
+        "prompt": "Searching for commerce and shopping brands that launched a new product or major capability this year, ideally with a product page or release. Target contacts: Ecommerce Manager, Merchandising Manager, Growth Operations Manager.",
+        "required_attribute": "Operates a commerce or retail platform that sells products online or enables online selling for merchants.",
+        "sub_industry": "E-commerce marketplace and retail technology",
+        "target_roles": [
+          "Ecommerce Manager",
+          "Merchandising Manager",
+          "Growth Operations Manager"
+        ],
+        "target_seniority": ""
+      },
+      "name": "Phia",
+      "position": 12,
+      "round": "arena-2026-09-22",
+      "submission": "sub-4b632a3a8dcc9526d7ff7c34e7bbd4d0"
+    },
+    {
+      "company": {
+        "company_linkedin": "",
+        "company_name": "Shipday",
+        "company_stage": "Series A",
+        "company_stage_evidence": [
+          {
+            "quote": "Shipday Closes $7 Million Series A, Led by ECP Growth and Ibex Investors, to Empower Small and Medium-Sized Businesses with AI-Powered Last-Mile Delivery Solutions",
+            "url": "https://www.prnewswire.com/news-releases/shipday-closes-7-million-series-a-led-by-ecp-growth-and-ibex-investors-to-empower-small-and-medium-sized-businesses-with-ai-powered-last-mile-delivery-solutions-302617077.html"
+          },
+          {
+            "quote": "Shipday Raises $7M Series A to Expand AI-Powered Delivery Platform for SMBs - VC Tavern",
+            "url": "https://vctavern.com/shipday-raises-7m-series-a-to-expand-ai-powered-delivery-platform-for-smbs/"
+          },
+          {
+            "quote": "Shipday Closes $7 Million Series A, Led by ECP Growth and Ibex Investors, to Empower Small and Medium-Sized Businesses with AI-Powered Last-Mile Delivery Solutions",
+            "url": "https://salestechstar.com/price-optimization-revenue-management/shipday-closes-7-million-series-a-led-by-ecp-growth-and-ibex-investors-to-empower-small-and-medium-sized-businesses-with-ai-powered-last-mile-delivery-solutions/"
+          }
+        ],
+        "company_website": "https://shipday.com/",
+        "contact": null,
+        "country": "United States",
+        "employee_count": "11-50",
+        "industry": "Commerce and Shopping",
+        "intent_details": "The source dated 2025-11-17 reports: “Among these innovations is AgentFlow, Shipday's new AI-powered automation engine that functions as a self-driving operating system for local deliveries.” These reported activities connect to the ICP criteria identified by the corresponding submitted signals.",
+        "intent_signals": [
+          {
+            "date": "2025-11-17",
+            "description": "Among these innovations is AgentFlow, Shipday's new AI-powered automation engine that functions as a self-driving operating system for local deliveries.",
+            "matched_icp_signal": 0,
+            "url": "https://www.prnewswire.com/news-releases/shipday-closes-7-million-series-a-led-by-ecp-growth-and-ibex-investors-to-empower-small-and-medium-sized-businesses-with-ai-powered-last-mile-delivery-solutions-302617077.html"
+          }
+        ],
+        "required_attribute": {
+          "evidence_quote": "Shipday, a global delivery and logistics technology platform serving small and medium-sized businesses",
+          "evidence_url": "https://www.prnewswire.com/news-releases/shipday-closes-7-million-series-a-led-by-ecp-growth-and-ibex-investors-to-empower-small-and-medium-sized-businesses-with-ai-powered-last-mile-delivery-solutions-302617077.html",
+          "explanation": "Observed product wording.",
+          "passed": true,
+          "text": "Operates a commerce or retail platform that sells products online or enables online selling for merchants."
+        },
+        "state": ""
+      },
+      "icp": {
+        "baseline_score": 0.0,
+        "bonus_intents": [],
+        "company_stage": "Series A",
+        "contact_geography": {
+          "cities": [],
+          "countries": [],
+          "regions": []
+        },
+        "contact_policy": "contacts_v1",
+        "country": "United States",
+        "employee_count": [
+          "11-50",
+          "51-200",
+          "201-500",
+          "501-1,000",
+          "1,001-5,000"
+        ],
+        "excluded_companies": [
+          "shoppable.com"
+        ],
+        "geography": "United States",
+        "icp_id": "icp_20260921_013",
+        "icp_position": 12,
+        "industry": "Commerce and Shopping",
+        "intent_category": "PRODUCT_LAUNCH",
+        "intent_max_age_days": 365,
+        "intent_signal": "Launched a new product or major capability in the last 12 months, per a press release, product page, or changelog.",
+        "intent_signals": [
+          "Launched a new product or major capability in the last 12 months, per a press release, product page, or changelog."
+        ],
+        "max_companies": 5,
+        "product_service": "A commerce platform that helps brands or marketplaces sell products online, manage merchandising, and improve conversion.",
+        "prompt": "Searching for commerce and shopping brands that launched a new product or major capability this year, ideally with a product page or release. Target contacts: Ecommerce Manager, Merchandising Manager, Growth Operations Manager.",
+        "required_attribute": "Operates a commerce or retail platform that sells products online or enables online selling for merchants.",
+        "sub_industry": "E-commerce marketplace and retail technology",
+        "target_roles": [
+          "Ecommerce Manager",
+          "Merchandising Manager",
+          "Growth Operations Manager"
+        ],
+        "target_seniority": ""
+      },
+      "name": "Shipday",
+      "position": 12,
+      "round": "arena-2026-09-22",
+      "submission": "sub-4b632a3a8dcc9526d7ff7c34e7bbd4d0"
+    },
+    {
+      "company": {
+        "company_linkedin": "",
+        "company_name": "Cimulate AI",
+        "company_stage": "Series A",
+        "company_stage_evidence": [
+          {
+            "quote": "Cimulate secured $28 million in Series A funding from Spark Capital, Sierra Ventures, Pillar VC, LFX Venture Partners and Commerce Ventures in December 2024.",
+            "url": "https://cimulate.ai/resources/cimulate-overview/"
+          },
+          {
+            "quote": "Cimulate Raises $28 Million in Series A Funding Led by Spark Capital - Cimulate AI",
+            "url": "https://cimulate.ai/press/cimulate-raises-28-million-in-series-a-funding-led-by-spark-capital-to-transform-commerce-with-ai-powered-customergpt/"
+          },
+          {
+            "quote": "AI-driven search startup Cimulate raises $28.5M Series A",
+            "url": "https://www.axios.com/pro/retail-deals/2024/12/18/artificial-intelligence-product-discovery-search-cimulate"
+          }
+        ],
+        "company_website": "https://cimulate.ai/",
+        "contact": null,
+        "country": "United States",
+        "employee_count": "11-50",
+        "industry": "Commerce and Shopping",
+        "intent_details": "The source dated 2025-12-03 reports: “Cimulate, the company pioneering Agentic Commerce through its CommerceGPT platform, today announced a major release that unites the old and new modalities of digital shopping under one AI-native system.” These reported activities connect to the ICP criteria identified by the corresponding submitted signals.",
+        "intent_signals": [
+          {
+            "date": "2025-12-03",
+            "description": "Cimulate, the company pioneering Agentic Commerce through its CommerceGPT platform, today announced a major release that unites the old and new modalities of digital shopping under one AI-native system.",
+            "matched_icp_signal": 0,
+            "url": "https://www.prnewswire.com/news-releases/cimulate-advances-their-commercegpt-to-bridge-old-and-new-eras-of-digital-commerce-302630657.html"
+          }
+        ],
+        "required_attribute": {
+          "evidence_quote": "Commerce GPT is an LLM-based operating system purpose-built to understand shopper intent and drive conversion.",
+          "evidence_url": "https://cimulate.ai/resources/cimulate-overview/",
+          "explanation": "Observed product wording.",
+          "passed": true,
+          "text": "Operates a commerce or retail platform that sells products online or enables online selling for merchants."
+        },
+        "state": ""
+      },
+      "icp": {
+        "baseline_score": 0.0,
+        "bonus_intents": [],
+        "company_stage": "Series A",
+        "contact_geography": {
+          "cities": [],
+          "countries": [],
+          "regions": []
+        },
+        "contact_policy": "contacts_v1",
+        "country": "United States",
+        "employee_count": [
+          "11-50",
+          "51-200",
+          "201-500",
+          "501-1,000",
+          "1,001-5,000"
+        ],
+        "excluded_companies": [
+          "shoppable.com"
+        ],
+        "geography": "United States",
+        "icp_id": "icp_20260921_013",
+        "icp_position": 12,
+        "industry": "Commerce and Shopping",
+        "intent_category": "PRODUCT_LAUNCH",
+        "intent_max_age_days": 365,
+        "intent_signal": "Launched a new product or major capability in the last 12 months, per a press release, product page, or changelog.",
+        "intent_signals": [
+          "Launched a new product or major capability in the last 12 months, per a press release, product page, or changelog."
+        ],
+        "max_companies": 5,
+        "product_service": "A commerce platform that helps brands or marketplaces sell products online, manage merchandising, and improve conversion.",
+        "prompt": "Searching for commerce and shopping brands that launched a new product or major capability this year, ideally with a product page or release. Target contacts: Ecommerce Manager, Merchandising Manager, Growth Operations Manager.",
+        "required_attribute": "Operates a commerce or retail platform that sells products online or enables online selling for merchants.",
+        "sub_industry": "E-commerce marketplace and retail technology",
+        "target_roles": [
+          "Ecommerce Manager",
+          "Merchandising Manager",
+          "Growth Operations Manager"
+        ],
+        "target_seniority": ""
+      },
+      "name": "Cimulate AI",
+      "position": 12,
+      "round": "arena-2026-09-22",
+      "submission": "sub-4b632a3a8dcc9526d7ff7c34e7bbd4d0"
+    },
+    {
+      "company": {
+        "company_linkedin": "",
+        "company_name": "TPG",
+        "company_stage": "",
+        "company_stage_evidence": [],
+        "company_website": "https://tpg.com/",
+        "contact": {
+          "email": "saved-case-12@example.invalid",
+          "email_source": {
+            "provider": "harvestapi",
+            "record_id": "sanitized-record_id-12",
+            "tool": "harvestapi_get_profile"
+          },
+          "full_name": "Jacqui Hawwa",
+          "linkedin_url": "https://www.linkedin.com/in/jacqui-hawwa-2a2552a/",
+          "location": {
+            "city": "san francisco",
+            "country": "US",
+            "region": "california"
+          },
+          "role": "Partner"
+        },
+        "country": "United States",
+        "employee_count": "201-500",
+        "industry": "Real Estate",
+        "intent_details": "The source dated 2026-06-05 reports: “TPG Real Estate (“TPG”) today announced the acquisition of ECHO Realty”. The source dated 2026-06-05 reports: “TPG Real Estate (“TPG”) today announced the acquisition of ECHO Realty (“ECHO”), a full-service owner and operator of best-in-class grocery-anchored retail real estate, in a transaction valued at approximately $2 billion.” These reported activities connect to the ICP criteria identified by the corresponding submitted signals.",
+        "intent_signals": [
+          {
+            "date": "2026-06-05",
+            "description": "TPG Real Estate (“TPG”) today announced the acquisition of ECHO Realty",
+            "matched_icp_signal": 0,
+            "url": "https://www.tpg.com/news-and-insights/tpg-led-investor-group-acquires-grocery-anchored-retail-leader-echo-realty"
+          },
+          {
+            "date": "2026-06-05",
+            "description": "TPG Real Estate (“TPG”) today announced the acquisition of ECHO Realty (“ECHO”), a full-service owner and operator of best-in-class grocery-anchored retail real estate, in a transaction valued at approximately $2 billion.",
+            "matched_icp_signal": 0,
+            "url": "https://www.morningstar.com/news/business-wire/20260604882009/tpg-led-investor-group-acquires-grocery-anchored-retail-leader-echo-realty"
+          }
+        ],
+        "required_attribute": {
+          "evidence_quote": "full-service owner and operator of best-in-class grocery-anchored retail real estate",
+          "evidence_url": "https://www.tpg.com/news-and-insights/tpg-led-investor-group-acquires-grocery-anchored-retail-leader-echo-realty",
+          "explanation": "Observed product wording.",
+          "passed": true,
+          "text": "Acquires, develops, manages, or services commercial real estate assets or portfolios."
+        },
+        "state": ""
+      },
+      "icp": {
+        "baseline_score": 0.0,
+        "bonus_intents": [],
+        "company_stage": "Private Equity",
+        "contact_geography": {
+          "cities": [],
+          "countries": [],
+          "regions": []
+        },
+        "contact_policy": "contacts_v1",
+        "country": "United States",
+        "employee_count": [
+          "201-500",
+          "501-1,000",
+          "1,001-5,000",
+          "5,001-10,000"
+        ],
+        "excluded_companies": [
+          "greystone.com"
+        ],
+        "geography": "United States",
+        "icp_id": "icp_20260921_017",
+        "icp_position": 16,
+        "industry": "Real Estate",
+        "intent_category": "ACQUISITION",
+        "intent_max_age_days": 365,
+        "intent_signal": "Acquired another company in the last 12 months, per a press release or regulatory filing.",
+        "intent_signals": [
+          "Acquired another company in the last 12 months, per a press release or regulatory filing."
+        ],
+        "max_companies": 5,
+        "product_service": "A real estate platform that acquires, develops, manages, or services commercial properties for institutional clients.",
+        "prompt": "Need real estate companies that acquired another business recently, but only if there’s a press release or filing to prove it. Target contacts: Property Operations Manager, Portfolio Manager, Asset Management Manager.",
+        "required_attribute": "Acquires, develops, manages, or services commercial real estate assets or portfolios.",
+        "sub_industry": "Commercial real estate investment and services",
+        "target_roles": [
+          "Property Operations Manager",
+          "Portfolio Manager",
+          "Asset Management Manager"
+        ],
+        "target_seniority": ""
+      },
+      "name": "TPG",
+      "position": 16,
+      "round": "arena-2026-09-22",
+      "submission": "sub-4b632a3a8dcc9526d7ff7c34e7bbd4d0"
+    },
+    {
+      "company": {
+        "company_linkedin": "",
+        "company_name": "HiddenLayer",
+        "company_stage": "Series B",
+        "company_stage_evidence": [
+          {
+            "quote": "HiddenLayer Raises $100M Series B to Advance AI Security",
+            "url": "https://www.hiddenlayer.com/news/hiddenlayer-100m-series-b-ai-security"
+          },
+          {
+            "quote": "HiddenLayer Raises $100M Series B to Advance Trustworthy AI",
+            "url": "https://www.prnewswire.com/news-releases/hiddenlayer-raises-100m-series-b-to-advance-trustworthy-ai-302867783.html"
+          },
+          {
+            "quote": "AI security company HiddenLayer on Wednesday announced raising $100 million in a Series B funding round that brings the total raised by the company to over $155 million.",
+            "url": "https://www.securityweek.com/hiddenlayer-raises-100-million-for-ai-runtime-security/"
+          }
+        ],
+        "company_website": "https://hiddenlayer.com/",
+        "contact": null,
+        "country": "United States",
+        "employee_count": "51-200",
+        "industry": "Privacy and Security",
+        "intent_details": "The source dated 2026-06-29 reports: “HiddenLayer and Cohere partner to help enterprises securely deploy agentic AI with runtime protection against AI-native threats like prompt injection and data leakage.” These reported activities connect to the ICP criteria identified by the corresponding submitted signals.",
+        "intent_signals": [
+          {
+            "date": "2026-06-29",
+            "description": "HiddenLayer and Cohere partner to help enterprises securely deploy agentic AI with runtime protection against AI-native threats like prompt injection and data leakage.",
+            "matched_icp_signal": 0,
+            "url": "https://www.hiddenlayer.com/news/hiddenlayer-and-cohere-collaborate-to-remove-security-barriers-to-enterprise-agentic-ai"
+          }
+        ],
+        "required_attribute": {
+          "evidence_quote": "secures agentic, generative, and predictive AI applications",
+          "evidence_url": "https://www.hiddenlayer.com/news/hiddenlayer-100m-series-b-ai-security",
+          "explanation": "Observed product wording.",
+          "passed": true,
+          "text": "Sells a privacy, security, or compliance platform used to protect sensitive data and control access across systems."
+        },
+        "state": ""
+      },
+      "icp": {
+        "baseline_score": 0.0,
+        "bonus_intents": [],
+        "company_stage": "Series B",
+        "contact_geography": {
+          "cities": [],
+          "countries": [],
+          "regions": []
+        },
+        "contact_policy": "contacts_v1",
+        "country": "United States",
+        "employee_count": [
+          "51-200",
+          "201-500",
+          "501-1,000",
+          "1,001-5,000",
+          "5,001-10,000"
+        ],
+        "excluded_companies": [
+          "threatstack.com"
+        ],
+        "geography": "United States, Northeast",
+        "icp_id": "icp_20260921_006",
+        "icp_position": 5,
+        "industry": "Privacy and Security",
+        "intent_category": "PARTNERSHIP",
+        "intent_max_age_days": 365,
+        "intent_signal": "Announced a strategic partnership in the last 12 months, per a press release or partner announcement.",
+        "intent_signals": [
+          "Announced a strategic partnership in the last 12 months, per a press release or partner announcement."
+        ],
+        "max_companies": 5,
+        "product_service": "A privacy and security platform that helps enterprises protect data, manage access, and satisfy compliance requirements.",
+        "prompt": "Looking for privacy and security companies that announced a strategic partnership in the last year, with a press release or partner page to verify. Target contacts: Security Operations Manager, Cloud Security Manager, Compliance Manager.",
+        "required_attribute": "Sells a privacy, security, or compliance platform used to protect sensitive data and control access across systems.",
+        "sub_industry": "Cloud security and privacy compliance",
+        "target_roles": [
+          "Security Operations Manager",
+          "Cloud Security Manager",
+          "Compliance Manager"
+        ],
+        "target_seniority": ""
+      },
+      "name": "HiddenLayer",
+      "position": 5,
+      "round": "arena-2026-09-22",
+      "submission": "sub-4b632a3a8dcc9526d7ff7c34e7bbd4d0"
+    },
+    {
+      "company": {
+        "company_linkedin": "https://www.linkedin.com/company/kevelapi/",
+        "company_name": "Kevel",
+        "company_stage": "Series B",
+        "company_stage_evidence": [
+          {
+            "quote": "We are excited to announce that Kevel has raised $10M in Series B funding!",
+            "url": "https://www.kevel.com/blog/kevel-series-b"
+          },
+          {
+            "quote": "Kevel is API-first ad technology infrastructure for retailers and commerce media networks building world-class retail media businesses. Kevel's modular, composable platform gives operators full ownership of their ad stack, their data, and their monetisation strategy, with complete transparency across every decisioning layer and pricing that grows with the retailer.\n\nPaired with deep strategic advisory, Kevel enables retailers at every stage of maturity to build, own, and scale ad products and experiences that reflect their business and their ambitions. Trusted by leading commerce and retail media networks across North America, Europe, LATAM, Australia and APAC, Kevel is the infrastructure behind the retailers who set the standard for their category. They shape the market, and they do it with Kevel.\n\nKevel has garnered numerous accolades, most recently awarded as Retail Media Infrastructure/Platform of the Year at the 2026 Drum Award awards for commerce media, Best Overall AdTech Solution at the 2025 Martech Breakthrough Awards and winner of the Best Ecommerce Strategy award at the 2025 Digiday Awards. \n\nLearn more about Kevel and its AI-powered solutions at www.kevel.com.\n\nWikipedia: https://en.wikipedia.org/wiki/Kevel",
+            "url": "https://www.linkedin.com/company/kevelapi/"
+          },
+          {
+            "quote": "Durham, NC — February 25, 2026 — Kevel , the API-first retail media technology company, today announced the launch of its native Adobe Experience Platform (AEP) Destination, enabling retailers, marketplaces, and commerce media platforms to activate first-party audience data in real-time for retail media campaigns.",
+            "url": "https://www.kevel.com/blog/kevel-launches-adobe-experience-platform-destination"
+          }
+        ],
+        "company_website": "https://www.kevel.com/",
+        "contact": {
+          "email": "saved-case-14@example.invalid",
+          "email_source": {
+            "provider": "harvestapi",
+            "record_id": "sanitized-record_id-14",
+            "tool": "harvestapi_get_profile"
+          },
+          "full_name": "Jennifer Choo",
+          "linkedin_url": "https://www.linkedin.com/in/jenniferchoo",
+          "location": {
+            "city": "Netcong",
+            "country": "United States of America",
+            "region": "New Jersey"
+          },
+          "role": "Senior Marketing Director"
+        },
+        "country": "United States of America",
+        "employee_count": "51-200",
+        "industry": "Advertising",
+        "intent_details": "On February 25, 2026, Kevel launched a native Adobe Experience Platform Destination for real-time retail media activation, extending its platform's activation capabilities for commerce-media operators. On June 2, 2026, Scandinavian Airlines selected Kevel to power a digital commerce media network, demonstrating partnership-led expansion of the platform into travel media operations.",
+        "intent_signals": [
+          {
+            "date": "2026-02-25",
+            "description": "Kevel launched a native Adobe Experience Platform Destination for real-time retail media activation.",
+            "matched_icp_signal": 0,
+            "url": "https://www.kevel.com/blog/kevel-launches-adobe-experience-platform-destination"
+          },
+          {
+            "date": "2026-06-02",
+            "description": "Scandinavian Airlines selected Kevel to power a new digital commerce media network.",
+            "matched_icp_signal": 1,
+            "url": "https://www.kevel.com/blog/kevel-partners-with-scandinavian-airlines"
+          }
+        ],
+        "required_attribute": {
+          "evidence_quote": "Kevel is API-first ad technology infrastructure for retailers and commerce media networks building world-class retail media businesses. Kevel's modular, composable platform gives operators full ownership of their ad stack, their data, and their monetisation strategy, with complete transparency across every decisioning layer and pricing that grows with the retailer.\n\nPaired with deep strategic advisory, Kevel enables retailers at every stage of maturity to build, own, and scale ad products and experiences that reflect their business and their ambitions. Trusted by leading commerce and retail media networks across North America, Europe, LATAM, Australia and APAC, Kevel is the infrastructure behind the retailers who set the standard for their category. They shape the market, and they do it with Kevel.\n\nKevel has garnered numerous accolades, most recently awarded as Retail Media Infrastructure/Platform of the Year at the 2026 Drum Award awards for commerce media, Best Overall AdTech Solution at the 2025 Martech Breakthrough Awards and winner of the Best Ecommerce Strategy award at the 2025 Digiday Awards. \n\nLearn more about Kevel and its AI-powered solutions at www.kevel.com.\n\nWikipedia: https://en.wikipedia.org/wiki/Kevel",
+          "evidence_url": "https://www.linkedin.com/company/kevelapi/",
+          "explanation": "Kevel provides API-first advertising technology infrastructure for retailers and commerce media networks.",
+          "passed": true,
+          "text": "Sells advertising technology software or media tools used by brands, agencies, or publishers."
+        },
+        "state": "North Carolina"
+      },
+      "icp": {
+        "baseline_score": 0.0,
+        "bonus_intents": [
+          {
+            "intent_category": "PARTNERSHIP",
+            "intent_max_age_days": 365,
+            "intent_signal": "Announced a strategic partnership in the last 12 months, per a press release or company announcement."
+          }
+        ],
+        "company_stage": "Series B",
+        "contact_geography": {
+          "cities": [],
+          "countries": [],
+          "regions": []
+        },
+        "contact_policy": "contacts_v1",
+        "country": "United States",
+        "employee_count": [
+          "51-200",
+          "201-500",
+          "501-1,000",
+          "1,001-5,000"
+        ],
+        "excluded_companies": [
+          "vistarmedia.com"
+        ],
+        "geography": "United States",
+        "icp_id": "icp_20260920_015",
+        "icp_position": 14,
+        "industry": "Advertising",
+        "intent_category": "PRODUCT_LAUNCH",
+        "intent_max_age_days": 365,
+        "intent_signal": "Launched a new product or major capability in the last 12 months, per a press release, product page, or changelog.",
+        "intent_signals": [
+          "Launched a new product or major capability in the last 12 months, per a press release, product page, or changelog.",
+          "Announced a strategic partnership in the last 12 months, per a press release or company announcement."
+        ],
+        "max_companies": 5,
+        "product_service": "Advertising technology that helps brands, agencies, or publishers manage targeting, activation, and measurement.",
+        "prompt": "need adtech names with a fresh launch and recent partnership news Target contacts: Product Marketing Manager, Ad Operations Manager, Revenue Operations Manager.",
+        "required_attribute": "Sells advertising technology software or media tools used by brands, agencies, or publishers.",
+        "sub_industry": "AdTech Platform",
+        "target_roles": [
+          "Product Marketing Manager",
+          "Ad Operations Manager",
+          "Revenue Operations Manager"
+        ],
+        "target_seniority": ""
+      },
+      "name": "Kevel",
+      "position": 14,
+      "round": "arena-2026-09-21",
+      "submission": "baseline-2026-09-21"
+    },
+    {
+      "company": {
+        "company_linkedin": "",
+        "company_name": "Kong Inc.",
+        "company_stage": "Series C+",
+        "company_stage_evidence": [
+          {
+            "quote": "** SAN FRANCISCO, November 19, 2024** – [Kong Inc](http://www.konoghq.com) Kong Inc., a leading developer of cloud API technologies, today announced it has closed a $175 million in up-round Series E financing, with a mix of primary and secondary transactions at a $2 billion valuation.",
+            "url": "https://konghq.com/company/press-room/press-release/kong-secures-175-million-new-financing"
+          },
+          {
+            "quote": "SAN FRANCISCO, Nov. 19, 2024 /PRNewswire/ -- Kong Inc., a leading developer of cloud API technologies, today announced it has closed a $175 million in up-round Series E financing, with a mix of primary and secondary transactions at a $2 billion valuation.",
+            "url": "https://www.prnewswire.com/news-releases/kong-secures-175-million-new-financing-at-2b-valuation-to-power-the-api-world-302309849.html"
+          },
+          {
+            "quote": "API gateway firm Kong has raised $175 million in a Series E funding round, led by Tiger Global and Balderton, which takes its valuation to $2 billion.",
+            "url": "https://www.thestack.technology/kong-series-e-funding-round/"
+          }
+        ],
+        "company_website": "https://konghq.com/",
+        "contact": {
+          "email": "saved-case-15@example.invalid",
+          "email_source": {
+            "provider": "harvestapi",
+            "record_id": "sanitized-record_id-15",
+            "tool": "harvestapi_get_profile"
+          },
+          "full_name": "Vishal Kishore Omloti",
+          "linkedin_url": "https://www.linkedin.com/in/vishalkishore/",
+          "location": {
+            "city": "bengaluru",
+            "country": "IN",
+            "region": "karnataka"
+          },
+          "role": "Security Engineer"
+        },
+        "country": "United States",
+        "employee_count": "201-500",
+        "industry": "Privacy and Security",
+        "intent_details": "The source dated 2026-09-03 reports: “We're announcing that Kong Gateway now supports FIPS 140-3”. These reported activities connect to the ICP criteria identified by the corresponding submitted signals.",
+        "intent_signals": [
+          {
+            "date": "2026-09-03",
+            "description": "We're announcing that Kong Gateway now supports FIPS 140-3",
+            "matched_icp_signal": 0,
+            "url": "https://konghq.com/blog/product-releases/kong-gateway-supports-fips-140-3"
+          }
+        ],
+        "required_attribute": {
+          "evidence_quote": "Kong Gateway",
+          "evidence_url": "https://konghq.com/blog/product-releases/kong-gateway-supports-fips-140-3",
+          "explanation": "Observed product wording.",
+          "passed": true,
+          "text": "Sells cybersecurity software or security services for enterprise or mid-market customers."
+        },
+        "state": ""
+      },
+      "icp": {
+        "baseline_score": 0.0,
+        "bonus_intents": [
+          {
+            "intent_category": "HIRING",
+            "intent_max_age_days": 90,
+            "intent_signal": "Actively hiring for security engineering, product security, or compliance roles, per current job postings."
+          }
+        ],
+        "company_stage": "Series C+",
+        "contact_geography": {
+          "cities": [],
+          "countries": [],
+          "regions": []
+        },
+        "contact_policy": "contacts_v1",
+        "country": "United States",
+        "employee_count": [
+          "201-500",
+          "501-1,000",
+          "1,001-5,000",
+          "5,001-10,000"
+        ],
+        "excluded_companies": [
+          "spycloud.com"
+        ],
+        "geography": "United States, South",
+        "icp_id": "icp_20260920_006",
+        "icp_position": 5,
+        "industry": "Privacy and Security",
+        "intent_category": "REGULATORY_CLEARANCE",
+        "intent_max_age_days": 365,
+        "intent_signal": "Received a regulatory clearance, certification, or major security assurance update in the last 12 months, per a company announcement or certification listing.",
+        "intent_signals": [
+          "Received a regulatory clearance, certification, or major security assurance update in the last 12 months, per a company announcement or certification listing.",
+          "Actively hiring for security engineering, product security, or compliance roles, per current job postings."
+        ],
+        "max_companies": 5,
+        "product_service": "Security software that helps organizations detect threats, protect systems, and manage risk and compliance.",
+        "prompt": "Looking for security companies with a new certification or recent launch. Target contacts: Security Engineer, IT Security Manager, Compliance Manager.",
+        "required_attribute": "Sells cybersecurity software or security services for enterprise or mid-market customers.",
+        "sub_industry": "Cybersecurity Software",
+        "target_roles": [
+          "Security Engineer",
+          "IT Security Manager",
+          "Compliance Manager"
+        ],
+        "target_seniority": ""
+      },
+      "name": "Kong Inc.",
+      "position": 5,
+      "round": "arena-2026-09-21",
+      "submission": "sub-a6c72a590f2014449fb6ca7f66e420f8"
+    },
+    {
+      "company": {
+        "company_linkedin": "",
+        "company_name": "Fnality International",
+        "company_stage": "Series C+",
+        "company_stage_evidence": [
+          {
+            "quote": "Fnality Raises $136 Million in Series C Funding | Fnality",
+            "url": "https://fnality.com/news/fnality-raises-136-million-in-series-c-funding"
+          },
+          {
+            "quote": "- Fnality secured $136M in Series C funding from a group of major global banks and asset managers",
+            "url": "https://www.coindesk.com/business/2025/09/23/fnality-raises-usd136m-to-expand-blockchain-payment-systems-for-banks"
+          }
+        ],
+        "company_website": "https://fnality.com/",
+        "contact": null,
+        "country": "UK",
+        "employee_count": "51-200",
+        "industry": "Financial Services",
+        "intent_details": "The source dated 2025-09-23 reports: “Fnality, the operator of next generation wholesale payment systems regulated by central banks, today announced that it has raised $136 million (£99.7 million) in a Series C funding round”. The source dated 2025-09-23 reports: “- Fnality secured $136M in Series C funding from a group of major global banks and asset managers”. These reported activities connect to the ICP criteria identified by the corresponding submitted signals.",
+        "intent_signals": [
+          {
+            "date": "2025-09-23",
+            "description": "Fnality, the operator of next generation wholesale payment systems regulated by central banks, today announced that it has raised $136 million (£99.7 million) in a Series C funding round",
+            "matched_icp_signal": 0,
+            "url": "https://fnality.com/news/fnality-raises-136-million-in-series-c-funding"
+          },
+          {
+            "date": "2025-09-23",
+            "description": "- Fnality secured $136M in Series C funding from a group of major global banks and asset managers",
+            "matched_icp_signal": 0,
+            "url": "https://www.coindesk.com/business/2025/09/23/fnality-raises-usd136m-to-expand-blockchain-payment-systems-for-banks"
+          }
+        ],
+        "required_attribute": {
+          "evidence_quote": "Fnality, a fintech firm building tokenized versions of major currencies collateralized by cash held at central banks",
+          "evidence_url": "https://www.coindesk.com/business/2025/09/23/fnality-raises-usd136m-to-expand-blockchain-payment-systems-for-banks",
+          "explanation": "Observed product wording.",
+          "passed": true,
+          "text": "Provides financial services software or infrastructure used by businesses to move money, manage accounts, or automate financial workflows."
+        },
+        "state": ""
+      },
+      "icp": {
+        "baseline_score": 21.0,
+        "bonus_intents": [
+          {
+            "intent_category": "MARKET_EXPANSION",
+            "intent_max_age_days": 365,
+            "intent_signal": "Expanded into a new country or region in the last year, per a press release or company announcement."
+          }
+        ],
+        "company_stage": "Series C+",
+        "contact_geography": {
+          "cities": [],
+          "countries": [],
+          "regions": []
+        },
+        "contact_policy": "contacts_v1",
+        "country": "United Kingdom",
+        "employee_count": [
+          "51-200",
+          "201-500",
+          "501-1,000",
+          "1,001-5,000"
+        ],
+        "excluded_companies": [
+          "primer.io"
+        ],
+        "geography": "United Kingdom",
+        "icp_id": "icp_20260920_009",
+        "icp_position": 8,
+        "industry": "Financial Services",
+        "intent_category": "FUNDING",
+        "intent_max_age_days": 365,
+        "intent_signal": "Announced a funding round in the last 12 months, per a press release, financing database, or news coverage.",
+        "intent_signals": [
+          "Announced a funding round in the last 12 months, per a press release, financing database, or news coverage.",
+          "Expanded into a new country or region in the last year, per a press release or company announcement."
+        ],
+        "max_companies": 5,
+        "product_service": "Financial services software that supports payments, banking workflows, or back-office financial operations.",
+        "prompt": "need fintech names that raised and are expanding product coverage Target contacts: Finance Manager, Operations Manager, Risk Manager.",
+        "required_attribute": "Provides financial services software or infrastructure used by businesses to move money, manage accounts, or automate financial workflows.",
+        "sub_industry": "Fintech Infrastructure",
+        "target_roles": [
+          "Finance Manager",
+          "Operations Manager",
+          "Risk Manager"
+        ],
+        "target_seniority": ""
+      },
+      "name": "Fnality International",
+      "position": 8,
+      "round": "arena-2026-09-21",
+      "submission": "sub-a6c72a590f2014449fb6ca7f66e420f8"
+    },
+    {
+      "company": {
+        "company_linkedin": "",
+        "company_name": "Cloudforce",
+        "company_stage": "Series A",
+        "company_stage_evidence": [
+          {
+            "quote": "NATIONAL HARBOR, Md., Jan. 9, 2026 /PRNewswire/ -- Cloudforce, a Maryland-based frontier AI firm, today announced the closing of a $10 million Series A funding round led by Owl Ventures, the largest EdTech-focused VC fund in the world.",
+            "url": "https://www.prnewswire.com/news-releases/cloudforce-secures-10m-series-a-from-owl-ventures-and-microsoft-to-democratize-safe-equitable-ai-in-education-healthcare-and-beyond-302656775.html"
+          },
+          {
+            "quote": "Cloudforce Raises $10M in Series A Funding",
+            "url": "https://www.finsmes.com/2026/01/cloudforce-raises-10m-in-series-a-funding.html"
+          },
+          {
+            "quote": "📅 January 10, 2026 - Cloudforce, a Maryland-based frontier AI company, has closed a $10 million Series A funding round as demand accelerates for secure, institution-wide generative AI platforms across education, healthcare, and the public sector.",
+            "url": "https://www.whtop.com/news/34529-cloudforce-raises-10m-to-scale-secure-ai-for-institutions"
+          }
+        ],
+        "company_website": "https://gocloudforce.com/",
+        "contact": {
+          "email": "saved-case-17@example.invalid",
+          "email_source": {
+            "provider": "harvestapi",
+            "record_id": "sanitized-record_id-17",
+            "tool": "harvestapi_get_profile"
+          },
+          "full_name": "Chris Maski",
+          "linkedin_url": "https://www.linkedin.com/in/chris-maski/",
+          "location": {
+            "city": "upper marlboro",
+            "country": "US",
+            "region": "maryland"
+          },
+          "role": "Product Infrastructure Manager, nebulaONE"
+        },
+        "country": "United States",
+        "employee_count": "51-200",
+        "industry": "Education",
+        "intent_details": "The source dated 2026-01-09 reports: “Cloudforce, a Maryland-based frontier AI firm, today announced the closing of a $10 million Series A funding round”. The source dated 2026-01-09 reports: “Cloudforce, an AI firm that specializes in the Microsoft cloud ecosystem, has secured $10 million in a Series A funding round led by Owl Ventures, with participation from M12, Microsoft’s Venture Fund.” These reported activities connect to the ICP criteria identified by the corresponding submitted signals.",
+        "intent_signals": [
+          {
+            "date": "2026-01-09",
+            "description": "Cloudforce, a Maryland-based frontier AI firm, today announced the closing of a $10 million Series A funding round",
+            "matched_icp_signal": 0,
+            "url": "https://www.prnewswire.com/news-releases/cloudforce-secures-10m-series-a-from-owl-ventures-and-microsoft-to-democratize-safe-equitable-ai-in-education-healthcare-and-beyond-302656775.html"
+          },
+          {
+            "date": "2026-01-09",
+            "description": "Cloudforce, an AI firm that specializes in the Microsoft cloud ecosystem, has secured $10 million in a Series A funding round led by Owl Ventures, with participation from M12, Microsoft’s Venture Fund.",
+            "matched_icp_signal": 0,
+            "url": "https://cryptobriefing.com/cloudforce-series-a-funding/"
+          }
+        ],
+        "required_attribute": {
+          "evidence_quote": "flagship platform, nebulaONE®",
+          "evidence_url": "https://www.prnewswire.com/news-releases/cloudforce-secures-10m-series-a-from-owl-ventures-and-microsoft-to-democratize-safe-equitable-ai-in-education-healthcare-and-beyond-302656775.html",
+          "explanation": "Observed product wording.",
+          "passed": true,
+          "text": "Sells software or services used by schools, educators, or learners to improve instruction, administration, or outcomes."
+        },
+        "state": ""
+      },
+      "icp": {
+        "baseline_score": 0.0,
+        "bonus_intents": [
+          {
+            "intent_category": "PRODUCT_LAUNCH",
+            "intent_max_age_days": 365,
+            "intent_signal": "Launched a new product or major capability in the last 12 months, per a press release, product page, or changelog."
+          }
+        ],
+        "company_stage": "Series A",
+        "contact_geography": {
+          "cities": [],
+          "countries": [],
+          "regions": []
+        },
+        "contact_policy": "contacts_v1",
+        "country": "United States",
+        "employee_count": [
+          "11-50",
+          "51-200",
+          "201-500",
+          "501-1,000"
+        ],
+        "excluded_companies": [
+          "markerlearning.com"
+        ],
+        "geography": "United States",
+        "icp_id": "icp_20260920_019",
+        "icp_position": 18,
+        "industry": "Education",
+        "intent_category": "FUNDING",
+        "intent_max_age_days": 365,
+        "intent_signal": "Announced a funding round in the last 12 months, per a press release, financing database, or news coverage.",
+        "intent_signals": [
+          "Announced a funding round in the last 12 months, per a press release, financing database, or news coverage.",
+          "Launched a new product or major capability in the last 12 months, per a press release, product page, or changelog."
+        ],
+        "max_companies": 5,
+        "product_service": "Education software and services that help schools, educators, or learners manage instruction, content, or student outcomes.",
+        "prompt": "education companies with a new product or fresh capital, broad list is fine Target contacts: Product Manager, Operations Manager, School Partnerships Manager.",
+        "required_attribute": "Sells software or services used by schools, educators, or learners to improve instruction, administration, or outcomes.",
+        "sub_industry": "EdTech",
+        "target_roles": [
+          "Product Manager",
+          "Operations Manager",
+          "School Partnerships Manager"
+        ],
+        "target_seniority": ""
+      },
+      "name": "Cloudforce",
+      "position": 18,
+      "round": "arena-2026-09-21",
+      "submission": "sub-335b9e187d44c6b5905538aaef21f4ef"
+    },
+    {
+      "company": {
+        "company_linkedin": "",
+        "company_name": "Crusoe",
+        "company_stage": "Series C+",
+        "company_stage_evidence": [],
+        "company_website": "https://crusoe.ai/",
+        "contact": {
+          "email": "saved-case-18@example.invalid",
+          "email_source": {
+            "provider": "harvestapi",
+            "record_id": "sanitized-record_id-18",
+            "tool": "harvestapi_get_profile"
+          },
+          "full_name": "Carol Junsay",
+          "linkedin_url": "https://www.linkedin.com/in/carol-junsay-0a848b43/",
+          "location": {
+            "city": "seattle",
+            "country": "US",
+            "region": "washington"
+          },
+          "role": "Workplace Manager"
+        },
+        "country": "United States",
+        "employee_count": "501-1,000",
+        "industry": "Hardware",
+        "intent_details": "The source dated 2026-09-14 reports: “Crusoe, the AI factory company, today opened its second manufacturing facility in Tulsa, Oklahoma”. The source dated 2026-09-14 reports: “TULSA, Okla., Sept. 14, 2026 (GLOBE NEWSWIRE) -- Crusoe, the AI factory company, today opened its second manufacturing facility in Tulsa, Oklahoma, as it continues to grow the skilled team that builds the equipment powering America’s AI leadership.” These reported activities connect to the ICP criteria identified by the corresponding submitted signals.",
+        "intent_signals": [
+          {
+            "date": "2026-09-14",
+            "description": "Crusoe, the AI factory company, today opened its second manufacturing facility in Tulsa, Oklahoma",
+            "matched_icp_signal": 0,
+            "url": "https://www.crusoe.ai/resources/newsroom/crusoe-opens-second-tulsa-factory-ai-infrastructure"
+          },
+          {
+            "date": "2026-09-14",
+            "description": "TULSA, Okla., Sept. 14, 2026 (GLOBE NEWSWIRE) -- Crusoe, the AI factory company, today opened its second manufacturing facility in Tulsa, Oklahoma, as it continues to grow the skilled team that builds the equipment powering America’s AI leadership.",
+            "matched_icp_signal": 0,
+            "url": "https://www.globenewswire.com/news-release/2026/09/14/3361418/0/en/crusoe-opens-second-tulsa-manufacturing-facility-expanding-production-of-critical-ai-infrastructure-components.html"
+          }
+        ],
+        "required_attribute": {
+          "evidence_quote": "electrical equipment that serves as the foundation for AI innovation",
+          "evidence_url": "https://www.crusoe.ai/resources/newsroom/crusoe-opens-second-tulsa-factory-ai-infrastructure",
+          "explanation": "Observed product wording.",
+          "passed": true,
+          "text": "Designs and ships physical hardware products, and has a recent facility opening, expansion, or manufacturing site announcement."
+        },
+        "state": ""
+      },
+      "icp": {
+        "baseline_score": 0.0,
+        "bonus_intents": [],
+        "company_stage": "Series C+",
+        "contact_geography": {
+          "cities": [],
+          "countries": [],
+          "regions": []
+        },
+        "contact_policy": "contacts_v1",
+        "country": "United States",
+        "employee_count": [
+          "51-200",
+          "201-500",
+          "501-1,000",
+          "1,001-5,000",
+          "5,001-10,000"
+        ],
+        "excluded_companies": [
+          "tractian.com"
+        ],
+        "geography": "United States, South",
+        "icp_id": "icp_20260919_004",
+        "icp_position": 3,
+        "industry": "Hardware",
+        "intent_category": "FACILITY_OPENING",
+        "intent_max_age_days": 365,
+        "intent_signal": "Opened a new facility or office in the last 12 months, with evidence in a press release, local coverage, or company announcement.",
+        "intent_signals": [
+          "Opened a new facility or office in the last 12 months, with evidence in a press release, local coverage, or company announcement."
+        ],
+        "max_companies": 5,
+        "product_service": "Connected hardware and electronic systems that help customers capture, process, or automate real-world operations.",
+        "prompt": "Looking for hardware companies that opened a new facility or expansion site and have a real announcement behind it. Target contacts: Operations Manager, Manufacturing Manager, Supply Chain Manager (['Manager']).",
+        "required_attribute": "Designs and ships physical hardware products, and has a recent facility opening, expansion, or manufacturing site announcement.",
+        "sub_industry": "Connected devices and industrial electronics",
+        "target_roles": [
+          "Operations Manager",
+          "Manufacturing Manager",
+          "Supply Chain Manager"
+        ],
+        "target_seniority": "['Manager']"
+      },
+      "name": "Crusoe",
+      "position": 3,
+      "round": "arena-2026-09-20",
+      "submission": "sub-1e704990611d1fb4167d32f59fbe195b"
+    },
+    {
+      "company": {
+        "company_linkedin": "",
+        "company_name": "Zenskar",
+        "company_stage": "Series A",
+        "company_stage_evidence": [],
+        "company_website": "https://zenskar.com/",
+        "contact": null,
+        "country": "United States",
+        "employee_count": "51-200",
+        "industry": "Software",
+        "intent_details": "The source dated 2026-05-27 reports: “Zenskar's MCP changes how to operate with different tools, including your AI assistants.” These reported activities connect to the ICP criteria identified by the corresponding submitted signals.",
+        "intent_signals": [
+          {
+            "date": "2026-05-27",
+            "description": "Zenskar's MCP changes how to operate with different tools, including your AI assistants.",
+            "matched_icp_signal": 0,
+            "url": "https://www.zenskar.com/blog/zenskar-mcp"
+          }
+        ],
+        "required_attribute": {
+          "evidence_quote": "AI-native billing and revenue automation platform powering Zero-Touch Finance",
+          "evidence_url": "https://www.businesswire.com/news/home/20260416872552/en/Zenskar-Raises-%2415-Million-Series-A-to-Expand-Agentic-Capabilities-for-B2B-Revenue-Automation",
+          "explanation": "Observed product wording.",
+          "passed": true,
+          "text": "Sells a subscription software platform used by business teams to manage workflows, data, or customer operations."
+        },
+        "state": ""
+      },
+      "icp": {
+        "baseline_score": 10.2,
+        "bonus_intents": [],
+        "company_stage": "Series A",
+        "contact_geography": {
+          "cities": [],
+          "countries": [],
+          "regions": []
+        },
+        "contact_policy": "contacts_v1",
+        "country": "United States",
+        "employee_count": [
+          "11-50",
+          "51-200",
+          "201-500",
+          "501-1,000",
+          "1,001-5,000"
+        ],
+        "excluded_companies": [
+          "xenia.team"
+        ],
+        "geography": "United States",
+        "icp_id": "icp_20260919_001",
+        "icp_position": 0,
+        "industry": "Software",
+        "intent_category": "PRODUCT_LAUNCH",
+        "intent_max_age_days": 365,
+        "intent_signal": "Launched a new product or major capability in the last 12 months, with evidence in a press release, product page, or public changelog.",
+        "intent_signals": [
+          "Launched a new product or major capability in the last 12 months, with evidence in a press release, product page, or public changelog."
+        ],
+        "max_companies": 5,
+        "product_service": "A subscription software platform that helps business teams manage workflows, data, and customer operations in one system.",
+        "prompt": "I need software companies that just shipped a major platform capability or product update and have clear proof in a press release, changelog, or product page. Target contacts: Product Operations Manager, RevOps Manager, IT Manager (['Manager']).",
+        "required_attribute": "Sells a subscription software platform used by business teams to manage workflows, data, or customer operations.",
+        "sub_industry": "B2B SaaS operations software",
+        "target_roles": [
+          "Product Operations Manager",
+          "RevOps Manager",
+          "IT Manager"
+        ],
+        "target_seniority": "['Manager']"
+      },
+      "name": "Zenskar",
+      "position": 0,
+      "round": "arena-2026-09-20",
+      "submission": "sub-0bf251718e4bb4e01ce4fab57d448b07"
+    }
+  ],
+  "schema_version": "leadpoet.arena.saved_case_regression.v1",
+  "source": "production scoring artifacts collected 2026-09-22; provider transcripts incomplete"
+}

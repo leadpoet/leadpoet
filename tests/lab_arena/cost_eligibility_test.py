@@ -894,6 +894,13 @@ def _startup_service(
             "replacement_freeze_seconds": 3600,
             "max_replacement_attempts": 1,
         },
+        dynamic_benchmark_schema=lambda: {
+            "schema_version": "leadpoet.lab_arena.dynamic_benchmark_schema.v1",
+            "version": 353,
+            "max_benchmark_icps": 100,
+            "default_benchmark_icps": 10,
+            "default_promotion_margin": 0.5,
+        },
         _transport=transport,
     )
     service._objects = Objects()

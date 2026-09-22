@@ -86,9 +86,14 @@ def contact_role_judge(monkeypatch):
             calls.append((http, key, target_roles, chunk))
             return parsed
 
+        async def unproven_review(*args, **kwargs):
+            return {"status": "UNPROVEN", "reason": "Ambiguous duties.",
+                    "target_role": "", "evidence_quote": ""}
+
         monkeypatch.setenv("OPENROUTER_KEY", "test-key")
         monkeypatch.setattr(role_batch_check.httpx, "AsyncClient", Client)
         monkeypatch.setattr(role_batch_check, "_judge_chunk", fake_judge_chunk)
+        monkeypatch.setattr(role_batch_check, "review_role_evidence", unproven_review)
 
         import asyncio
 
@@ -114,7 +119,7 @@ def test_single_contact_role_accepts_exact_numeric_id_echo(
         {"id": returned_id, "match": match, "reason": "bounded decision"}
     ])
 
-    assert result is match
+    assert (result.get("match") if isinstance(result, dict) else result) is match
     assert call[2] == ["Vice President of Sales"]
     assert call[3] == [{
         "id": 1,

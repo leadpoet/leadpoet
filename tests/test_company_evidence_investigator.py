@@ -989,6 +989,37 @@ def test_decisive_quote_must_occur_in_fetched_page():
 
 
 
+@pytest.mark.parametrize("quote,expected", [
+    (
+        "TPG takes a hands-on approach to private equity investing, leveraging "
+        "deep expertise and operational engagement to transform companies "
+        "through strategic improvements.",
+        "UNPROVEN",
+    ),
+    ("Acme is majority-owned by a private equity firm.", "VERIFIED"),
+    ("Acme received a minority investment from a private equity firm.", "UNPROVEN"),
+])
+def test_stage_investigator_retains_existing_private_equity_ownership_gate(quote, expected):
+    # The first quote is the exact false-positive intermediate finding from
+    # live shadow round verifierf2626, ICP 16. Investing is not ownership.
+    url = "https://tpg.com/our-approach-to-private-equity-investing"
+    proof = _validated_findings(
+        {"findings": [_finding(
+            "stage", observed_value="Private Equity", evidence_url=url,
+            evidence_quote=quote,
+        )]},
+        targets=("stage",), fetched_pages={url: quote},
+        first_party_domains={"tpg.com"}, identity_names={"tpg", "acme"},
+    )["stage"]
+    assert proof["status"] == expected
+    prior = {**_complete_verdict(), "observed_company_stage": None,
+             "stage_matches": None, "stage_evidence_quote": "", "stage_evidence_url": ""}
+    projected = lead_scorer._project_investigator_stage(prior, proof, icp_stage="private equity")
+    assert lead_scorer._decision_from_observed_stage(
+        projected, "private equity", validated_stage_finding=proof,
+    ) == (COMPANY_FIT_MATCH if expected == "VERIFIED" else COMPANY_FIT_UNAVAILABLE)
+
+
 def test_semantic_stage_proof_is_bound_to_the_validated_investigator_finding():
     url = "https://acme.example/investors"
     quote = (

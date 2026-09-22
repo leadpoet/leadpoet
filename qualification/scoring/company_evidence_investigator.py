@@ -91,6 +91,12 @@ location as the headquarters or principal executive office. Do not decide
 whether that location is inside a requested region; the deterministic scorer
 does that after the investigation.
 
+Private Equity stage means current controlling private-equity ownership of
+the investigated company. Being a private-equity investor, managing funds, or
+investing in other companies does not establish this ownership stage. Fetch
+and quote explicit current ownership/control evidence; the existing ownership
+proof gate still applies. Otherwise return UNPROVEN or a proven different stage.
+
 Public stage needs current company-attributed exchange/ticker or current
 listed/traded-share proof. A 'Public Company' label, planned IPO, old listing,
 product launch, or funding total is insufficient. Compare dated rounds,
@@ -683,6 +689,7 @@ def _validated_findings(
                 from qualification.scoring.lead_scorer import (
                     _CANONICAL_COMPANY_STAGES,
                     _normalize_company_stage,
+                    _stage_quote_supports_observation,
                 )
 
                 normalized_stage = _normalize_company_stage(
@@ -694,6 +701,17 @@ def _validated_findings(
                         evidence_url="",
                         evidence_quote="",
                         reason="observed company stage was not canonical",
+                    )
+                elif normalized_stage == "private equity" and not (
+                    _stage_quote_supports_observation(
+                        normalized_stage, finding["evidence_quote"]
+                    )
+                ):
+                    finding.update(
+                        status="UNPROVEN",
+                        evidence_url="",
+                        evidence_quote="",
+                        reason="source quote did not prove current private-equity ownership",
                     )
             elif target == "headcount" and not _quote_supports_headcount(
                 finding["evidence_quote"], finding["observed_value"]

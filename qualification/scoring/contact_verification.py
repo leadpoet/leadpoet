@@ -846,6 +846,8 @@ def _finder_source_mismatch(
     if not isinstance(source_input, Mapping) or response is None:
         return "email_source_reference_invalid"
     claimed_name = _norm_finder_person_name(contact.get("full_name"))
+    if not claimed_name:
+        return "contact_source_person_mismatch"
     names = [
         _norm_finder_person_name(source_input.get(key))
         for key in ("full_name", "fullName")

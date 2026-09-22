@@ -220,6 +220,7 @@ def test_trusted_finder_success_keeps_independent_profile_and_mailbox_proof(
         ("Ada", "Lovelace, LPC", "Ada", "Lovelace"),
         ("Ada", "Lovelace, CA", "Ada", "Lovelace"),
         ("Ada", "Lovelace, PhD, MBA", "Ada", "Lovelace"),
+        ("José", "García, CA", "José", "García"),
     ],
 )
 def test_finder_accepts_only_known_profile_credentials_removed_from_input(
@@ -292,6 +293,31 @@ def test_finder_keeps_person_surnames_and_unrecognized_suffixes_exact(
         "provider": "limadata",
         "tool": "limadata_find_work_email",
         "input": {"full_name": finder_name, "company_domain": "acme.com"},
+        "response": {"toolResponse": {"rawV2": {"email": "ada@acme.com"}}},
+        "call_identity": "broker-123",
+    }
+    execute = ScriptedExecute({})
+
+    result = _run(company=company, source=source, execute=execute)
+
+    assert result["contact_qualified"] is False
+    assert result["contact_verification"]["reason"] == "contact_source_person_mismatch"
+    assert execute.calls == []
+
+
+def test_finder_rejects_claim_that_normalizes_to_empty() -> None:
+    company = _company()
+    company["contact"].update({
+        "full_name": "Dr. , CA",
+        "email_source": {
+            "provider": "limadata", "tool": "limadata_find_work_email",
+            "broker_call_id": "broker-123",
+        },
+    })
+    source = {
+        "provider": "limadata",
+        "tool": "limadata_find_work_email",
+        "input": {"full_name": "Dr. , CA", "company_domain": "acme.com"},
         "response": {"toolResponse": {"rawV2": {"email": "ada@acme.com"}}},
         "call_identity": "broker-123",
     }

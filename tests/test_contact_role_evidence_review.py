@@ -40,7 +40,8 @@ def _transport(monkeypatch, finding, *, initial_match=False, status_code=200):
 
             class Response:
                 def json(self):
-                    return {"choices": [{"message": {"content": json.dumps(payload)}}]}
+                    content = payload if isinstance(payload, str) else json.dumps(payload)
+                    return {"choices": [{"message": {"content": content}}]}
 
             response = Response()
             response.status_code = status_code if len(calls) == 2 else 200
@@ -125,3 +126,57 @@ def test_initial_semantic_match_does_not_spend_another_call(monkeypatch):
     calls = _transport(monkeypatch, _finding(), initial_match=True)
     assert asyncio.run(_classify_contact_role("Product Lead", TARGETS, "", BAYESIAN_DUTIES)) is True
     assert len(calls) == 1
+
+
+# Live round arena-2026-09-22-verifierf2626, score ICP 6, attempt 1,
+# settlement 851810: a valid source-bound finding arrived inside this wrapper.
+LIVE_ROLE_FINDING = {
+    "status": "VERIFIED",
+    "target_role": "Product Manager",
+    "evidence_quote": (
+        "I own all new module development, and I've led deployments at our largest "
+        "customers, including Cleveland Clinic and Mayo Clinic."
+    ),
+    "reason": (
+        "The duties explicitly state ownership of 'all new module development', "
+        "which is a core responsibility of a Product Manager. The title 'Product "
+        "Lead' is consistent with a Product Manager function, and the duties "
+        "demonstrate product ownership and leadership, aligning with the 'Product "
+        "Manager' target role."
+    ),
+}
+
+
+@pytest.mark.parametrize("language", ["json", "JSON", ""])
+def test_live_fenced_role_finding_keeps_bound_evidence(monkeypatch, language):
+    content = f"```{language}\n{json.dumps(LIVE_ROLE_FINDING, indent=2)}\n```"
+    calls = _transport(monkeypatch, content)
+    result = asyncio.run(_classify_contact_role("Product Lead", TARGETS, "", BAYESIAN_DUTIES))
+    assert result["match"] is True
+    assert result["evidence_review"] == LIVE_ROLE_FINDING
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("change", [
+    {"evidence_quote": "Invented ownership evidence"},
+    {"target_role": "Chief Product Officer"},
+    {"status": "CONTRADICTED", "target_role": ""},
+    {"status": "UNPROVEN"},
+])
+def test_fence_does_not_weaken_evidence_binding(monkeypatch, change):
+    content = "```json\n" + json.dumps({**LIVE_ROLE_FINDING, **change}) + "\n```"
+    _transport(monkeypatch, content)
+    result = asyncio.run(_classify_contact_role("Product Lead", TARGETS, "", BAYESIAN_DUTIES))
+    assert result["match"] is False
+
+
+@pytest.mark.parametrize("content", [
+    "```json\n{}\n``` trailing prose",
+    '```json\n{"status": "VERIFIED"}\n{}\n```',
+    '```json\n{"status": "VERIFIED"\n```',
+    "```json\n[]\n```",
+])
+def test_malformed_fenced_review_remains_unavailable(monkeypatch, content):
+    _transport(monkeypatch, content)
+    with pytest.raises(RuntimeError, match="evidence review unavailable"):
+        asyncio.run(_classify_contact_role("Product Lead", TARGETS, "", BAYESIAN_DUTIES))

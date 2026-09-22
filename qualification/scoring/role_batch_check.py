@@ -489,6 +489,12 @@ ROLE RUBRIC:\n""" + _build_prompt(target_roles, [{
             return None
         document = response.json()
         content = document["choices"][0]["message"]["content"]
+        # Providers can wrap the requested object in a Markdown JSON fence.
+        # Accept only the complete wrapper; evidence validation still follows.
+        if isinstance(content, str):
+            fenced = re.fullmatch(r"\s*```(?:json)?\s*(\{[\s\S]*\})\s*```\s*", content, re.I)
+            if fenced:
+                content = fenced.group(1)
         finding = json.loads(content)
     except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError):
         return None

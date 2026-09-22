@@ -134,6 +134,20 @@ def _norm(value: Any) -> str:
     return re.sub(r"[\W_]+", " ", letters.casefold()).strip()
 
 
+def _norm_finder_person_name(value: Any) -> str:
+    """Ignore only the display credentials removed from finder inputs."""
+
+    text = re.sub(r"^Dr\.?\s+", "", _text(value), flags=re.I)
+    text = re.sub(
+        r",\s*(?:(?:Ph\.?D\.?|BCBA(?:-D)?|MBA|MD|MS|RN|LBA|LCSW|LPC|CA)"
+        r"\s*,?\s*)+$",
+        "",
+        text,
+        flags=re.I,
+    ).strip()
+    return _norm(text)
+
+
 def _norm_country(value: Any) -> str:
     try:
         from qualification.contact_models import normalize_country_code
@@ -831,9 +845,9 @@ def _finder_source_mismatch(
     response = source.get("response")
     if not isinstance(source_input, Mapping) or response is None:
         return "email_source_reference_invalid"
-    claimed_name = _norm(contact.get("full_name"))
+    claimed_name = _norm_finder_person_name(contact.get("full_name"))
     names = [
-        _norm(source_input.get(key))
+        _norm_finder_person_name(source_input.get(key))
         for key in ("full_name", "fullName")
         if _text(source_input.get(key))
     ]
@@ -844,7 +858,7 @@ def _finder_source_mismatch(
         first = _text(source_input.get(first_key))
         last = _text(source_input.get(last_key))
         if first or last:
-            names.append(_norm(f"{first} {last}"))
+            names.append(_norm_finder_person_name(f"{first} {last}"))
     linkedin_claim = _canonical_linkedin(contact.get("linkedin_url"))
     handles = [
         _canonical_linkedin(f"https://www.linkedin.com/in/{_text(source_input.get(key)).strip('/')}/")

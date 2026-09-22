@@ -204,6 +204,146 @@ def test_trusted_finder_success_keeps_independent_profile_and_mailbox_proof(
 
 
 @pytest.mark.parametrize(
+    ("profile_first", "profile_last", "finder_first", "finder_last"),
+    [
+        ("Dr. Ada", "Lovelace", "Ada", "Lovelace"),
+        ("Ada", "Lovelace, PhD", "Ada", "Lovelace"),
+        ("Ada", "Lovelace, Ph.D.", "Ada", "Lovelace"),
+        ("Ada", "Lovelace, BCBA", "Ada", "Lovelace"),
+        ("Ada", "Lovelace, BCBA-D", "Ada", "Lovelace"),
+        ("Ada", "Lovelace, MBA", "Ada", "Lovelace"),
+        ("Ada", "Lovelace, MD", "Ada", "Lovelace"),
+        ("Ada", "Lovelace, MS", "Ada", "Lovelace"),
+        ("Ada", "Lovelace, RN", "Ada", "Lovelace"),
+        ("Ada", "Lovelace, LBA", "Ada", "Lovelace"),
+        ("Ada", "Lovelace, LCSW", "Ada", "Lovelace"),
+        ("Ada", "Lovelace, LPC", "Ada", "Lovelace"),
+        ("Ada", "Lovelace, CA", "Ada", "Lovelace"),
+        ("Ada", "Lovelace, PhD, MBA", "Ada", "Lovelace"),
+    ],
+)
+def test_finder_accepts_only_known_profile_credentials_removed_from_input(
+    profile_first, profile_last, finder_first, finder_last
+) -> None:
+    full_name = f"{profile_first} {profile_last}"
+    finder_name = f"{finder_first} {finder_last}"
+    company = _company()
+    company["contact"].update({
+        "full_name": full_name,
+        "email_source": {
+            "provider": "hunter", "tool": "hunter_email_finder",
+            "broker_call_id": "broker-123",
+        },
+    })
+    source = {
+        "provider": "hunter",
+        "tool": "hunter_email_finder",
+        "input": {
+            "first_name": finder_first,
+            "last_name": finder_last,
+            "full_name": finder_name,
+            "domain": "acme.com",
+        },
+        "response": {
+            "status": "completed",
+            "toolResponse": {"rawV2": {"email": "ada@acme.com"}},
+        },
+        "call_identity": "broker-123",
+    }
+    profile = _profile(firstName=profile_first, lastName=profile_last)
+    execute = ScriptedExecute({
+        "harvestapi_get_profile": [_source(profile)["response"]],
+        "zerobounce_validate": [_zero("valid")],
+    })
+
+    result = _run(company=company, source=source, execute=execute)
+
+    assert result["contact_qualified"] is True
+    assert result["contact_verification"]["reason"] == "contact_verified"
+    assert [tool for tool, _ in execute.calls] == [
+        "harvestapi_get_profile", "zerobounce_validate",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("claimed_name", "finder_name"),
+    [
+        ("Ada Byron Lovelace", "Ada Lovelace"),
+        ("Ada Lovelace Jr.", "Ada Lovelace"),
+        ("Ada Lovelace, Jr.", "Ada Lovelace"),
+        ("Ada Lovelace ACCA", "Ada Lovelace"),
+        ("Ada Garcia, Marquez", "Ada Garcia"),
+        ("Ada Lovelace-Smith", "Ada Lovelace"),
+        ("Grace Lovelace, CA", "Ada Lovelace"),
+    ],
+)
+def test_finder_keeps_person_surnames_and_unrecognized_suffixes_exact(
+    claimed_name, finder_name
+) -> None:
+    company = _company()
+    company["contact"].update({
+        "full_name": claimed_name,
+        "email_source": {
+            "provider": "limadata", "tool": "limadata_find_work_email",
+            "broker_call_id": "broker-123",
+        },
+    })
+    source = {
+        "provider": "limadata",
+        "tool": "limadata_find_work_email",
+        "input": {"full_name": finder_name, "company_domain": "acme.com"},
+        "response": {"toolResponse": {"rawV2": {"email": "ada@acme.com"}}},
+        "call_identity": "broker-123",
+    }
+    execute = ScriptedExecute({})
+
+    result = _run(company=company, source=source, execute=execute)
+
+    assert result["contact_qualified"] is False
+    assert result["contact_verification"]["reason"] == "contact_source_person_mismatch"
+    assert execute.calls == []
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ({"input": {"full_name": "Grace Hopper", "company_domain": "acme.com"}}, "contact_source_person_mismatch"),
+        ({"input": {"full_name": "Ada Lovelace", "company_domain": "other.com"}}, "contact_source_company_mismatch"),
+        ({"response": {"toolResponse": {"rawV2": {"email": "other@acme.com"}}}}, "contact_source_email_mismatch"),
+        ({"call_identity": "fabricated"}, "email_source_reference_invalid"),
+    ],
+)
+def test_credential_normalization_keeps_finder_tampering_rejections(
+    change, reason
+) -> None:
+    company = _company()
+    company["contact"].update({
+        "full_name": "Ada Lovelace, CA",
+        "email_source": {
+            "provider": "limadata", "tool": "limadata_find_work_email",
+            "broker_call_id": "broker-123",
+        },
+    })
+    source = {
+        "provider": "limadata",
+        "tool": "limadata_find_work_email",
+        "input": {"full_name": "Ada Lovelace", "company_domain": "acme.com"},
+        "response": {"toolResponse": {"rawV2": {"email": "ada@acme.com"}}},
+        "call_identity": "broker-123",
+        **change,
+    }
+    profile = _profile(lastName="Lovelace, CA")
+    execute = ScriptedExecute({
+        "harvestapi_get_profile": [_source(profile)["response"]],
+    })
+
+    result = _run(company=company, source=source, execute=execute)
+
+    assert result["contact_qualified"] is False
+    assert result["contact_verification"]["reason"] == reason
+
+
+@pytest.mark.parametrize(
     ("change", "reason"),
     [
         ({"input": {"full_name": "Grace Hopper", "company_domain": "acme.com"}}, "contact_source_person_mismatch"),

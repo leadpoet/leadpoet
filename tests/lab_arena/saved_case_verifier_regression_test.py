@@ -514,8 +514,9 @@ def test_saved_false_negative_company_fact_is_recovered_before_later_gate(
     """Recorded raw fields plus curated leaf evidence cross the real adapter.
 
     Complete historical provider transcripts were not retained.  The raw
-    disputed fields above are exact; the added URLs and quotes are the audited
-    primary-source leaf evidence from the September investigation.
+    disputed fields above are exact.  The concise leaf snippets are synthetic,
+    source-equivalent fixtures derived from the audited September evidence;
+    they are not represented as verbatim historical provider output.
     """
 
     _bind_placeholder_credentials(monkeypatch)
@@ -749,20 +750,18 @@ def test_saved_company_negative_control_stays_zero_through_real_adapter(
 
     async def bounded_control_investigator(*, targets, **_kwargs):
         investigation_calls.append(tuple(targets))
-        claims = {}
-        stage_finding = None
+        raw_findings = []
         for target in targets:
             if target == "stage" and dimension == "stage":
-                stage_finding = _finding(
+                raw_findings.append(_finding(
                     "stage",
                     status="CONTRADICTED",
                     observed_value=overrides["observed_company_stage"],
                     evidence_url=overrides["stage_evidence_url"],
                     evidence_quote=overrides["stage_evidence_quote"],
-                )
-                claims[target] = stage_finding
+                ))
             elif target == "geography" and dimension == "geography":
-                claims[target] = _finding(
+                raw_findings.append(_finding(
                     "geography",
                     status="CONTRADICTED",
                     observed_value=(
@@ -773,9 +772,9 @@ def test_saved_company_negative_control_stays_zero_through_real_adapter(
                     observed_state=overrides["observed_hq_state"],
                     evidence_url=overrides["geography_evidence_url"],
                     evidence_quote=overrides["geography_evidence_quote"],
-                )
+                ))
             elif target == "headcount":
-                claims[target] = _finding(
+                raw_findings.append(_finding(
                     "headcount",
                     observed_value=row["company"]["employee_count"],
                     evidence_url=(
@@ -786,14 +785,44 @@ def test_saved_company_negative_control_stays_zero_through_real_adapter(
                         f'{row["name"]} has '
                         f'{row["company"]["employee_count"]} employees company-wide.'
                     ),
-                )
+                ))
             else:
-                claims[target] = _finding(target, status="UNPROVEN")
+                raw_findings.append(_finding(target, status="UNPROVEN"))
+        fetched_pages = {
+            item["evidence_url"]: item["evidence_quote"]
+            for item in raw_findings
+            if item["evidence_url"]
+        }
+        normalized_name = "".join(
+            character for character in row["name"].casefold()
+            if character.isalnum()
+        )
+        claims = company_evidence_investigator._validated_findings(
+            {"findings": raw_findings},
+            targets=tuple(targets),
+            fetched_pages=fetched_pages,
+            first_party_domains={_domain(row["company"]["company_website"])},
+            identity_names={normalized_name},
+            identity_anchor={
+                "submitted_name": row["name"],
+                "submitted_domain": _domain(row["company"]["company_website"]),
+                "submitted_linkedin_slug": _linkedin_slug(row),
+                "observed_name": row["name"],
+                "observed_domain": _domain(row["company"]["company_website"]),
+                "verified_domain": _domain(row["company"]["company_website"]),
+                "observed_linkedin_slug": _linkedin_slug(row),
+            },
+        )
+        assert claims is not None
         result = {
             "claims": claims,
             "failure_reason": "",
         }
-        if stage_finding is not None:
+        stage_finding = claims.get("stage")
+        if (
+            isinstance(stage_finding, dict)
+            and stage_finding.get("status") in {"VERIFIED", "CONTRADICTED"}
+        ):
             result["_validated_stage_finding"] = stage_finding
         return result
 

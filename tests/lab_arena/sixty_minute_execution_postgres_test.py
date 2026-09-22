@@ -33,7 +33,6 @@ ROUND = "arena-2026-09-22"
 def database():
     migrations = CURRENT_SERVICE_MIGRATIONS + (
         "264-lab-arena-codex-cost-reconciliation.sql",
-        "289-lab-arena-per-icp-cost-policy.sql",
         "311-lab-arena-per-icp-closed-billing-reconciliation.sql",
         "312-lab-arena-temporary-hold-admission.sql",
         "314-lab-arena-openrouter-web-search-reservation.sql",

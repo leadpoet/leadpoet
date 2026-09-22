@@ -9,6 +9,7 @@ import pytest
 from lab_arena import broker as broker_module
 from lab_arena import contracts
 from lab_arena.store import ArenaStore, PsycopgTransport
+from tests.lab_arena import dynamic_benchmark_lifecycle_test as dynamic_lifecycle
 from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
@@ -33,7 +34,6 @@ def database():
         CURRENT_SERVICE_MIGRATIONS
         + (
             "264-lab-arena-codex-cost-reconciliation.sql",
-            "289-lab-arena-per-icp-cost-policy.sql",
             "311-lab-arena-per-icp-closed-billing-reconciliation.sql",
             "312-lab-arena-temporary-hold-admission.sql",
             "314-lab-arena-openrouter-web-search-reservation.sql",
@@ -58,6 +58,50 @@ def store(connect):
     transport = PsycopgTransport(connect)
     yield ArenaStore(transport, lease_ttl_seconds=3_600)
     transport.close()
+
+
+def test_late_admission_migrations_preserve_current_round_semantics(connect):
+    signatures = (
+        "public.lab_arena__per_icp_publication_valid(text,jsonb)",
+        "public.lab_arena_icp_cost_eligibility(text,text,integer,integer)",
+        "public.lab_arena_reserve_call(text,text,text,text,text,text,bigint,jsonb,integer)",
+        "public.lab_arena_open_stage(text,smallint,jsonb,integer[])",
+        "public.lab_arena_close_scoring(text,smallint)",
+        "public.lab_arena_close_stage(text,smallint)",
+        "public.lab_arena_close_parallel_execution_v1(text)",
+    )
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT signature, pg_catalog.pg_get_functiondef(signature::regprocedure) "
+            "FROM unnest(%s::text[]) AS signature",
+            (list(signatures),),
+        )
+        definitions = dict(cursor.fetchall())
+
+    publication = definitions[signatures[0]]
+    assert "v_benchmark_count" in publication
+    assert "jsonb_array_length(v_cost -> 'per_icp') <> 20" not in publication
+    assert "FOR v_position IN 0..19 LOOP" not in publication
+    assert "v_score_count <> 20" not in publication
+
+    eligibility = definitions[signatures[1]]
+    assert "stage_1_icp_count" in eligibility
+    assert "stage_2_icp_count" in eligibility
+    assert "p_icp_position NOT BETWEEN 0 AND 19" not in eligibility
+
+    reserve = definitions[signatures[2]]
+    assert "lab_arena_confirmed_cost_admission" in reserve
+    assert "lab_arena_confirmed_score_admission" in reserve
+    assert "baseline_scored_first_v1" in definitions[signatures[3]]
+    assert "(runs.status = 'accepted') DESC" in definitions[signatures[4]]
+    assert "deadline_provider_retry_exhausted" in definitions[signatures[5]]
+    assert "deadline_provider_retry_exhausted" in definitions[signatures[6]]
+
+
+def test_late_admission_migrations_publish_dynamic_ten(connect, tmp_path):
+    dynamic_lifecycle.test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_judge_cost(
+        connect, tmp_path, 10
+    )
 
 
 def _exercise_profile(

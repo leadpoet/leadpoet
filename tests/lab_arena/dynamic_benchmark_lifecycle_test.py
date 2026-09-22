@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import json
 import os
 from dataclasses import replace
@@ -179,7 +180,7 @@ def test_ten_parallel_icps_form_one_execution_wave(connect, tmp_path):
     assert blocked["status"] == "no_pending"
 
 
-@pytest.mark.parametrize("count", [10, 15, 30])
+@pytest.mark.parametrize("count", [5, 10, 15, 20, 30])
 def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_judge_cost(connect, tmp_path, count):
     harness = PerIcpHarness(connect, tmp_path, challengers=["Miner"], runners=["alpha", "beta"])
     harness.service.config.defaults = replace(
@@ -296,6 +297,19 @@ def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_ju
                 (harness.round_id, json.dumps(entry)),
             )
             assert cursor.fetchone()[0] is True
+        malformed = deepcopy(entry)
+        malformed["cost_summary"]["per_icp"].pop()
+        duplicate = deepcopy(entry)
+        duplicate["cost_summary"]["per_icp"][-1] = deepcopy(
+            duplicate["cost_summary"]["per_icp"][0]
+        )
+        for invalid in (malformed, duplicate):
+            with connect() as connection, connection.cursor() as cursor:
+                with pytest.raises(Exception, match="lab_arena_publication_cost_report_mismatch"):
+                    cursor.execute(
+                        "SELECT public.lab_arena__per_icp_publication_valid(%s,%s::jsonb)",
+                        (harness.round_id, json.dumps(invalid)),
+                    )
     public_submissions = harness.service.public_submissions(harness.round_id)["submissions"]
     baseline_public = next(item for item in public_submissions if item["is_baseline"])
     assert baseline_public["stage1_score"] is not None

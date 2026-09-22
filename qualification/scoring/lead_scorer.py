@@ -5474,6 +5474,8 @@ def _normalize_company_stage(value) -> str:
         return "series c+"
     text = re.sub(r"[^a-z0-9]+", " ", text)
     normalized = " ".join(text.split())
+    if normalized in _SERIES_C_PLUS_MATCHING_STAGES:
+        return "series c+"
     if normalized in {
         "private equity",
         "private equity backed",

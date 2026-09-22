@@ -692,6 +692,63 @@ def test_investigator_accepts_semantic_stage_wording_outside_fixed_regex(
 
 
 @pytest.mark.parametrize(
+    "observed",
+    ["Series C", "Series D", "Series E", "Series F", "Series G", "Series H"],
+)
+def test_investigator_canonicalizes_supported_late_series_stages(observed):
+    url = "https://dexory.com/news/funding"
+    quote = f"Dexory completed a {observed} financing round."
+    finding = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            observed_value=observed,
+            evidence_url=url,
+            evidence_quote=quote,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: quote},
+        first_party_domains={"dexory.com"},
+        identity_names={"dexory"},
+    )["stage"]
+
+    assert finding["status"] == "VERIFIED"
+    matching = lead_scorer._project_investigator_stage(
+        _complete_verdict(),
+        finding,
+        icp_stage="series c+",
+    )
+    assert matching["observed_company_stage"] == "series c+"
+    assert matching["stage_matches"] is True
+
+    earlier_stage = lead_scorer._project_investigator_stage(
+        _complete_verdict(),
+        finding,
+        icp_stage="series b",
+    )
+    assert earlier_stage["stage_matches"] is False
+
+
+def test_investigator_still_rejects_nonstage_late_series_wording():
+    url = "https://dexory.com/news/funding"
+    quote = "Dexory describes itself as a late-stage company."
+    finding = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            observed_value="Late stage",
+            evidence_url=url,
+            evidence_quote=quote,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: quote},
+        first_party_domains={"dexory.com"},
+        identity_names={"dexory"},
+    )["stage"]
+
+    assert finding["status"] == "UNPROVEN"
+    assert finding["reason"] == "observed company stage was not canonical"
+
+
+@pytest.mark.parametrize(
     "invalid_receipt",
     [
         None,

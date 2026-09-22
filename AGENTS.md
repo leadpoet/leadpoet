@@ -1,5 +1,16 @@
 # Agent Instructions
 
+## Scoped production authorization: September 22 industry verification fix
+
+On 2026-09-22 the user authorized the narrow fix for Dexory's submitted-industry
+false rejection, regression tests, push to main, scorer-image publication,
+canonical gateway and normal-validator restarts, and live verification.
+Use the existing overnight release procedures and protected operational access.
+Preserve independent company, intent, contact and email checks, cost rules,
+frozen rounds, historical scores, rewards, credentials, and concurrent work.
+Do not rescore or change a historical result to demonstrate the fix. This scope
+ends when the fix is deployed and verified.
+
 ## Scoped production authorization: Tyche sourcing parity
 
 On 2026-09-21 the user authorized narrow fixes for the confirmed Tyche/Arena

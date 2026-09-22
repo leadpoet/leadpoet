@@ -4738,10 +4738,11 @@ async def _verify_company_fit(
 ) -> CompanyFitDecisionResult:
     """One official public/Research Lab company-fit verifier.
 
-    Submitted fields may establish an explicit conflict, but they cannot prove
-    a match. Identity comes from the fetched homepage and final URL. The other
-    dimensions require independent web observations. Every result persists the
-    complete upstream dimension map and uses the upstream aggregate helper.
+    Submitted fields may establish an explicit conflict, except for the
+    submitted industry label, but they cannot prove a match. Identity comes
+    from the fetched homepage and final URL. The other dimensions require
+    independent web observations. Every result persists the complete upstream
+    dimension map and uses the upstream aggregate helper.
     """
 
     stage_required = bool(_normalize_company_stage(icp.company_stage))
@@ -4806,13 +4807,19 @@ async def _verify_company_fit(
             supporting_receipts=supporting_receipts,
         )
 
+    submitted_industry = _industry_evidence_decision(
+        company.industry,
+        company.sub_industry,
+        icp.industry,
+    )
+    # A submitted industry is the miner's classification label, not independent
+    # proof of the company's business activity. A taxonomy disagreement must
+    # defer to the grounded web observation instead of ending verification.
+    if submitted_industry == COMPANY_FIT_MISMATCH:
+        submitted_industry = COMPANY_FIT_UNAVAILABLE
     submitted = {
         "employee_size": _submitted_employee_size_decision(company, icp),
-        "industry": _industry_evidence_decision(
-            company.industry,
-            company.sub_industry,
-            icp.industry,
-        ),
+        "industry": submitted_industry,
         "geography": _submitted_geography_decision(company, icp),
         "stage": _submitted_stage_decision(company, icp),
     }

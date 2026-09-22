@@ -2973,21 +2973,229 @@ def test_arena_scorer_uses_company_fit_verifier_receipt(monkeypatch):
         }
 
 
-def test_official_fit_rejects_proven_industry_conflict_even_in_shadow(monkeypatch):
+def _dexory_company():
+    return CompanyOutput(
+        company_name="Dexory",
+        company_website="https://dexory.com/",
+        company_linkedin="https://www.linkedin.com/company/dexory",
+        industry="Robotics Engineering",
+        employee_count="201-500",
+        company_stage="Series C+",
+        country="United Kingdom",
+        state="Oxfordshire",
+        intent_signals=[
+            {
+                "description": (
+                    "Dexory, a provider of real-time warehouse data intelligence, "
+                    "today launched its next-generation autonomous robot and a new "
+                    "software feature, Storage Health."
+                ),
+                "date": "2026-02-09",
+                "source": "news",
+                "snippet": (
+                    "Dexory, a provider of real-time warehouse data intelligence, "
+                    "today launched its next-generation autonomous robot and a new "
+                    "software feature, Storage Health."
+                ),
+                "url": (
+                    "https://www.automatedwarehouseonline.com/"
+                    "scaling-intelligence-how-new-dexory-tools-drive-data-visibility/"
+                ),
+            }
+        ],
+    )
+
+
+def _dexory_hardware_icp():
+    return ICPPrompt(
+        icp_id="icp_20260921_004",
+        prompt=(
+            "Search for hardware companies that launched a major new device or "
+            "platform capability this year, preferably backed by a product "
+            "announcement or launch page. Target contacts: Product Manager, "
+            "Hardware Operations Manager, Program Manager."
+        ),
+        industry="Hardware",
+        sub_industry="Connected devices and computing hardware",
+        target_roles=[
+            "Product Manager",
+            "Hardware Operations Manager",
+            "Program Manager",
+        ],
+        employee_count="201-500|501-1,000|1,001-5,000|5,001-10,000",
+        company_stage="Series C+",
+        geography="United Kingdom",
+        country="United Kingdom",
+        product_service=(
+            "A hardware platform that combines devices, firmware, and "
+            "cloud-connected software for business or consumer use cases."
+        ),
+        required_attribute=(
+            "Designs and sells connected hardware products with firmware or "
+            "cloud-enabled capabilities for real-world deployment."
+        ),
+        excluded_companies=["nothing.tech"],
+        intent_signals=[
+            "Launched a new product or major capability in the last 12 months, "
+            "per a press release, product page, or changelog."
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    ("observed_industry", "include_industry_grounding", "expected"),
+    [
+        (COMPANY_FIT_MATCH, True, COMPANY_FIT_MATCH),
+        (COMPANY_FIT_MATCH, False, COMPANY_FIT_UNAVAILABLE),
+        (COMPANY_FIT_MISMATCH, True, COMPANY_FIT_MISMATCH),
+        (COMPANY_FIT_UNAVAILABLE, True, COMPANY_FIT_UNAVAILABLE),
+    ],
+)
+def test_dexory_submitted_industry_defers_to_grounded_web_activity(
+    monkeypatch,
+    observed_industry,
+    include_industry_grounding,
+    expected,
+):
+    import qualification.scoring.lead_scorer as scorer
+
+    company = _dexory_company()
+    icp = _dexory_hardware_icp()
+    calls = []
+
+    async def prechecks(*_args, **_kwargs):
+        calls.append("precheck")
+        return company_fit_match()
+
+    async def homepage(*_args, **_kwargs):
+        calls.append("homepage")
+        return company_fit_match(
+            "homepage identity verified",
+            details={
+                "identity": {
+                    "decision": COMPANY_FIT_MATCH,
+                    "submitted_name": "dexory",
+                    "submitted_domain": "dexory.com",
+                    "submitted_linkedin_slug": "dexory",
+                    "observed_name": "dexory",
+                    "observed_domain": "dexory.com",
+                    "observed_linkedin_slug": "dexory",
+                    "evidence_source": "company_homepage",
+                }
+            },
+        )
+
+    async def web(*_args, **kwargs):
+        calls.append("web")
+        assert kwargs["require_company_fit_dimensions"] is True
+        dimension_evidence = {
+            "employee_size": {
+                "url": "https://www.linkedin.com/company/dexory",
+                "quote": "Dexory has 201-500 employees.",
+            },
+            "geography": {
+                "url": "https://dexory.com/about",
+                "quote": "Dexory is headquartered in the United Kingdom.",
+            },
+            "stage": {
+                "url": "https://dexory.com/news",
+                "quote": "Dexory announced its Series C financing.",
+            },
+            "required_attribute": {
+                "url": "https://dexory.com/technology",
+                "quote": "Dexory combines autonomous robots and cloud software.",
+            },
+        }
+        if include_industry_grounding:
+            dimension_evidence["industry"] = {
+                "url": "https://dexory.com/technology",
+                "quote": (
+                    "Dexory designs autonomous warehouse robots connected to "
+                    "its cloud software platform."
+                ),
+            }
+        return company_fit_match(
+            "independent web verification completed",
+            details={
+                "identity_decision": COMPANY_FIT_MATCH,
+                "identity_receipt": {
+                    "decision": COMPANY_FIT_MATCH,
+                    "submitted_name": "dexory",
+                    "submitted_domain": "dexory.com",
+                    "submitted_linkedin_slug": "dexory",
+                    "observed_name": "dexory",
+                    "observed_domain": "dexory.com",
+                    "observed_linkedin_slug": "dexory",
+                    "evidence_source": "company_web_reverification",
+                },
+                "dimension_decisions": {
+                    "employee_size": COMPANY_FIT_MATCH,
+                    "industry": observed_industry,
+                    "geography": COMPANY_FIT_MATCH,
+                    "stage": COMPANY_FIT_MATCH,
+                },
+                "dimension_evidence": dimension_evidence,
+                "required_attribute_decision": COMPANY_FIT_MATCH,
+            },
+        )
+
+    monkeypatch.setattr(scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(scorer, "_llm_reverify_company", web)
+    result = asyncio.run(
+        _verify_company_fit(
+            company,
+            icp,
+            0.0,
+            1.0,
+            set(),
+            require_https_transport=True,
+        )
+    )
+    assert calls == ["precheck", "homepage", "web"]
+    assert result.decision == expected
+    assert result.details["company_fit_dimensions"]["industry"] == expected
+    assert result.details["dimension_evidence"]["industry"][
+        "submitted_decision"
+    ] == COMPANY_FIT_UNAVAILABLE
+
+
+def test_raw_submitted_industry_taxonomy_still_reports_dexory_conflict():
+    assert _industry_evidence_decision(
+        "Robotics Engineering",
+        "",
+        "Hardware",
+    ) == COMPANY_FIT_MISMATCH
+
+
+@pytest.mark.parametrize(
+    ("company_updates", "icp_updates", "conflict_dimension"),
+    [
+        ({"employee_count": "2-10"}, {}, "employee_size"),
+        ({"country": "France"}, {}, "geography"),
+        ({"company_stage": "Seed"}, {"company_stage": "Series C+"}, "stage"),
+    ],
+)
+def test_official_fit_rejects_other_submitted_conflicts_before_web_verification(
+    monkeypatch,
+    company_updates,
+    icp_updates,
+    conflict_dimension,
+):
     import qualification.scoring.lead_scorer as scorer
 
     async def prechecks(*_args, **_kwargs):
         return company_fit_match()
 
     async def must_not_fetch(*_args, **_kwargs):
-        raise AssertionError("explicit industry conflict must stop paid work")
+        raise AssertionError("explicit submitted conflict must stop paid work")
 
     monkeypatch.setattr(scorer, "run_company_zero_checks", prechecks)
     monkeypatch.setattr(scorer, "verify_company_exists", must_not_fetch)
     result = asyncio.run(
         _verify_company_fit(
-            _company().model_copy(update={"industry": "Manufacturing"}),
-            _icp(industry="Software"),
+            _company().model_copy(update=company_updates),
+            _icp(**icp_updates),
             0.0,
             1.0,
             set(),
@@ -2995,6 +3203,6 @@ def test_official_fit_rejects_proven_industry_conflict_even_in_shadow(monkeypatc
         )
     )
     assert result.decision == COMPANY_FIT_MISMATCH
-    assert result.details["company_fit_dimensions"]["industry"] == (
+    assert result.details["company_fit_dimensions"][conflict_dimension] == (
         COMPANY_FIT_MISMATCH
     )

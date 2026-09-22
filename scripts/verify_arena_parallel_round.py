@@ -156,10 +156,6 @@ def _validate_frozen_round(service: Any, row: Mapping[str, Any]) -> None:
         "stage_1_icp_count": contracts.STAGE_1_ICP_COUNT,
         "stage_2_icp_count": contracts.STAGE_2_ICP_COUNT,
         "runner_slot_ceiling": contracts.RUNNER_SLOT_CEILING,
-        "parallel_twenty_icp_execution": True,
-        "benchmark_disclosure_policy": (
-            icp_disclosure.DELAYED_DISCLOSURE_POLICY
-        ),
         "baseline_hotkey": defaults.baseline_hotkey,
         "baseline_source_url": DEFAULT_BASELINE_SOURCE_URL,
         "scorer_image_digest": defaults.scorer_image_digest,
@@ -169,6 +165,17 @@ def _validate_frozen_round(service: Any, row: Mapping[str, Any]) -> None:
     mismatches = sorted(
         name for name, value in expected.items() if configuration.get(name) != value
     )
+    sequence = configuration.get("execution_sequence_policy")
+    if sequence == contracts.BASELINE_SCORED_FIRST_POLICY:
+        if configuration.get("parallel_twenty_icp_execution"):
+            mismatches.append("execution_sequence_policy")
+    elif sequence is not None or configuration.get("parallel_twenty_icp_execution") is not True:
+        mismatches.append("execution_sequence_policy")
+    if configuration.get("benchmark_disclosure_policy") not in {
+        icp_disclosure.DELAYED_DISCLOSURE_POLICY,
+        icp_disclosure.CUTOFF_PUBLIC_POLICY,
+    }:
+        mismatches.append("benchmark_disclosure_policy")
     if row.get("round_id") != service.config.pinned_round_id:
         mismatches.append("pinned_round_id")
     if row.get("champion_submission_id") is not None:
@@ -712,18 +719,15 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
             errors.append("execution_exit_fingerprints")
         if execution_timing["concurrency_high_water_lower_bound"] != 10:
             errors.append("execution_high_water")
-        if (
-            execution_timing["first_batch_concurrency_high_water_lower_bound"]
-            != 10
-        ):
-            errors.append("execution_first_batch_high_water")
-        if (
-            execution_timing["second_batch_concurrency_high_water_lower_bound"]
-            != 10
-        ):
-            errors.append("execution_second_batch_high_water")
-        if not execution_timing["second_batch_started_after_first_finished"]:
-            errors.append("execution_batch_barrier")
+        if configuration.get("parallel_twenty_icp_execution") is True:
+            # The legacy policy requires two isolated ten-ICP waves. Current
+            # baseline-first scheduling refills slots across all twenty ICPs.
+            if execution_timing["first_batch_concurrency_high_water_lower_bound"] != 10:
+                errors.append("execution_first_batch_high_water")
+            if execution_timing["second_batch_concurrency_high_water_lower_bound"] != 10:
+                errors.append("execution_second_batch_high_water")
+            if not execution_timing["second_batch_started_after_first_finished"]:
+                errors.append("execution_batch_barrier")
         if len(final_results) != 1 or final_results[0].get("final_score") is None:
             errors.append("final_aggregate")
         if ledger_funding["all_host"] is not True:
@@ -807,6 +811,7 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
             "parallel_twenty_icp_execution": configuration.get(
                 "parallel_twenty_icp_execution"
             ),
+            "execution_sequence_policy": configuration.get("execution_sequence_policy"),
             "baseline_source_url": configuration.get("baseline_source_url"),
             "scorer_image_reference": configuration.get("scorer_image_reference"),
             "king_outcome": row.get("king_outcome"),

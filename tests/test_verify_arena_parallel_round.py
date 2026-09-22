@@ -591,6 +591,41 @@ def test_round_scope_and_driver_are_strictly_pinned():
         verification._verify_host_funding(service, ROUND_ID, set())
 
 
+def test_current_baseline_first_policy_accepts_cutoff_disclosure():
+    service = Service()
+    configuration = service.store.row["configuration_doc"]
+    configuration.pop("parallel_twenty_icp_execution")
+    configuration["execution_sequence_policy"] = contracts.BASELINE_SCORED_FIRST_POLICY
+    configuration["benchmark_disclosure_policy"] = icp_disclosure.CUTOFF_PUBLIC_POLICY
+    verification._validate_frozen_round(service, service.store.row)
+
+    for run in service.store.runs:
+        if run["kind"] == "execute" and run["icp_position"] == 0:
+            run["result_doc"]["finished_at"] = "2026-09-14T00:00:05Z"
+        elif run["kind"] == "execute" and run["icp_position"] == 10:
+            run["result_doc"]["started_at"] = "2026-09-14T00:00:05Z"
+    document = verification._evidence(service, ROUND_ID)
+    assert "execution_batch_barrier" not in document["proof"]["errors"]
+    assert document["proof"]["complete"] is True, document["proof"]
+    assert document["round"]["execution_sequence_policy"] == contracts.BASELINE_SCORED_FIRST_POLICY
+
+
+@pytest.mark.parametrize("field,value", [
+    ("execution_sequence_policy", "unknown_policy"),
+    ("benchmark_disclosure_policy", "unknown_policy"),
+    ("rewards_enabled", True),
+])
+def test_current_policy_still_rejects_unknown_or_rewarding_configuration(field, value):
+    service = Service()
+    configuration = service.store.row["configuration_doc"]
+    configuration.pop("parallel_twenty_icp_execution")
+    configuration["execution_sequence_policy"] = contracts.BASELINE_SCORED_FIRST_POLICY
+    configuration["benchmark_disclosure_policy"] = icp_disclosure.CUTOFF_PUBLIC_POLICY
+    configuration[field] = value
+    with pytest.raises(verification.VerificationError, match=field):
+        verification._validate_frozen_round(service, service.store.row)
+
+
 @pytest.mark.parametrize(
     "round_id",
     (

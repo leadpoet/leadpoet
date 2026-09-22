@@ -57,6 +57,6 @@ def test_api_envelope_covers_only_the_bounded_native_request(
         "timeout_ms": requested_ms, "action_sequence": 0,
     })
     assert observed == [expected_read_seconds]
-    assert operations.OPERATIONS["openrouter.responses"].timeout_seconds == 300
-    assert runner.MAX_PROVIDER_API_TIMEOUT_SECONDS == 365
+    assert operations.OPERATIONS["openrouter.responses"].timeout_seconds == 600
+    assert runner.MAX_PROVIDER_API_TIMEOUT_SECONDS == 665
     assert operations.OPERATIONS["scrapingdog.scrape"].timeout_seconds == 60

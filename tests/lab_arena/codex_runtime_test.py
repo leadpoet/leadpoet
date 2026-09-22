@@ -1242,9 +1242,9 @@ def test_codex_timeout_layers_use_the_original_absolute_response_deadline(monkey
     operation_id, parameters, timeout_ms = shim.decode_operation_frame(sent[4:4 + size])
     assert operation_id == "openrouter.responses"
     assert parameters == {"model": "openai/gpt-5.6-sol", "input": "hi", "max_output_tokens": 4096}
-    assert timeout_ms == 300_000
-    assert ops.OPERATIONS["openrouter.responses"].timeout_seconds == 300
-    assert runner.MAX_PROVIDER_API_TIMEOUT_SECONDS == 365
+    assert timeout_ms == 600_000
+    assert ops.OPERATIONS["openrouter.responses"].timeout_seconds == 600
+    assert runner.MAX_PROVIDER_API_TIMEOUT_SECONDS == 665
 
     assert "request_max_retries = 0" in config
     assert "stream_max_retries = 0" in config
@@ -1568,6 +1568,36 @@ def test_pinned_codex_failure_does_not_start_another_billable_request(
     assert store.action_sequences == [0]
     call = next(iter(store.calls.values()))
     assert call["kind"] == "uncertain"
+
+
+def test_bridge_worker_broker_chain_uses_the_600_second_responses_timeout(
+    monkeypatch,
+):
+    class SlowCapTransport(FakeTransport):
+        def send(self, **kwargs):
+            assert 300 < kwargs["timeout_seconds"] <= 600
+            return super().send(**kwargs)
+
+    transport = SlowCapTransport([(200, response())])
+    with broker_socket(monkeypatch, transport) as (store, transport, path), \
+            codex.ResponsesBridge(str(path)) as bridge:
+        with httpx.Client(trust_env=False) as client:
+            reply = client.post(
+                bridge.base_url + "/responses",
+                headers={"Authorization": "Bearer " + bridge.token},
+                json={
+                    "model": "openai/gpt-4o-mini",
+                    "input": "hi",
+                    "stream": True,
+                    "store": False,
+                },
+            )
+
+    assert reply.status_code == 200
+    assert "event: response.completed" in reply.text
+    assert len(transport.sent) == len(store.calls) == 1
+    assert transport.sent[0]["timeout"] == pytest.approx(600)
+    assert next(iter(store.calls.values()))["kind"] == "settlement"
 
 
 @pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="set ARENA_TEST_CODEX_BINARY to the complete Codex 0.154.0 package")

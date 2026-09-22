@@ -51,6 +51,7 @@ WEB_OPEN_MAX_BODY_BYTES = 1_048_576
 WEB_OPEN_MAX_OUTPUT_CHARS = TOOL_OUTPUT_TEXT_CHARS
 WEB_OPEN_TIMEOUT_SECONDS = 20.0
 REQUEST_GATE_POLL_SECONDS = 0.05
+OPENROUTER_RESPONSES_TIMEOUT_MILLISECONDS = 600_000
 _INVALID_RESPONSES_ERROR = b'{"error":{"message":"invalid Responses request or reply"}}'
 _BRIDGE_REQUEST_ERROR_CODES = frozenset({
     "hosted_tools_forbidden",
@@ -208,7 +209,7 @@ def _dispatch(
         "schema_version": "leadpoet.lab_arena.operation_frame.v1",
         "operation_id": "openrouter.responses",
         "parameters": parameters,
-        "timeout_ms": 300_000,
+        "timeout_ms": OPENROUTER_RESPONSES_TIMEOUT_MILLISECONDS,
     }, separators=(",", ":"), allow_nan=False).encode()
     if len(payload) > 1_048_576:
         raise CodexRuntimeError("request too large")

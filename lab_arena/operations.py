@@ -64,6 +64,7 @@ FIELD_FORMATS = ("https_url", "iso_date", "domain", "model_id")
 
 OPENROUTER_MAX_OUTPUT_TOKENS = 4096
 OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS = 32_768
+OPENROUTER_RESPONSES_TIMEOUT_SECONDS = 600
 OPENROUTER_MAX_MESSAGES = 128
 # A native Responses history can add reasoning, call, and call-output items
 # for each brokered call. Keep enough top-level history for the 200-call
@@ -1153,7 +1154,7 @@ _OPERATION_LIST = (
         },
         fixed_params={"stream": False, "store": False, "provider": dict(OPENROUTER_STRICT_PROVIDER_POLICY)},
         defaults={"max_output_tokens": OPENROUTER_MAX_OUTPUT_TOKENS},
-        timeout_seconds=300,
+        timeout_seconds=OPENROUTER_RESPONSES_TIMEOUT_SECONDS,
         max_request_bytes=1_000_000,
         max_response_bytes=1_048_576,
         cost_rule={"kind": "openrouter_price_table", "max_output_tokens": OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS},

@@ -61,6 +61,41 @@ def test_gateway_admits_native_depth_and_reserves_the_explicit_output_cap(cap):
         assert len(transport.sent) == 1
 
 
+@pytest.mark.parametrize(
+    ("requested_timeout_ms", "expected_timeout_seconds"),
+    ((450_000, 450), (900_000, 600)),
+)
+def test_responses_transport_accepts_slow_success_once_with_a_600_second_cap(
+    monkeypatch, requested_timeout_ms, expected_timeout_seconds,
+):
+    clock = [1000.0]
+
+    class SlowSuccessTransport(FakeTransport):
+        def send(self, **kwargs):
+            result = super().send(**kwargs)
+            clock[0] += 301.0
+            return result
+
+    monkeypatch.setattr(br.time, "monotonic", lambda: clock[0])
+    transport = SlowSuccessTransport([(200, response())])
+    broker, store, transport = make_broker(transport=transport)
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.responses",
+        parameters=parameters(),
+        timeout_ms=requested_timeout_ms,
+        action_sequence=1,
+    )
+
+    assert result.status == 200
+    assert len(transport.sent) == len(store.calls) == 1
+    assert transport.sent[0]["timeout"] == pytest.approx(
+        expected_timeout_seconds
+    )
+    assert next(iter(store.calls.values()))["kind"] == "settlement"
+
+
 def test_larger_reasoning_allowance_cannot_overdraw_the_budget():
     params = br.normalized_request("openrouter.responses", parameters())
     needed = br.max_openrouter_cost_microusd(price_table(), params["model"], params, max_output_tokens=params["max_output_tokens"])

@@ -116,6 +116,7 @@ CURRENT_SERVICE_MIGRATIONS = POSTGREST_MIGRATIONS + (
     "289-lab-arena-per-icp-cost-policy.sql",
     "292-lab-arena-null-final-score-publication.sql",
     "353-lab-arena-dynamic-benchmark-count.sql",
+    "356-lab-arena-deadline-provider-retry-isolation.sql",
 )
 
 

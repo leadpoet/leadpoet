@@ -633,6 +633,18 @@ def _seniority(value: Any) -> str:
     return "other"
 
 
+def _role_title_seniority_matches(actual: str, target: str) -> Optional[bool]:
+    """Apply known title buckets; leave ambiguous levels for evidence review."""
+    actual_level, target_level = _seniority(actual), _seniority(target)
+    if "other" in {actual_level, target_level}:
+        return None
+    return (
+        actual_level == target_level
+        or (actual_level == "head" and target_level in {"vp", "director"})
+        or (target_level == "head" and actual_level in {"vp", "director"})
+    )
+
+
 def _deterministic_role_match(actual: str, targets: Sequence[str], target_seniority: str) -> Optional[bool]:
     actual_norm = _normalize_title(actual)
     if not actual_norm:
@@ -643,6 +655,8 @@ def _deterministic_role_match(actual: str, targets: Sequence[str], target_senior
     ):
         return False
     if not _target_seniority_matches(actual_norm, target_seniority):
+        return False
+    if targets and all(_role_title_seniority_matches(actual, target) is False for target in targets):
         return False
     for target in targets:
         target_norm = _normalize_title(target)

@@ -180,3 +180,39 @@ def test_malformed_fenced_review_remains_unavailable(monkeypatch, content):
     _transport(monkeypatch, content)
     with pytest.raises(RuntimeError, match="evidence review unavailable"):
         asyncio.run(_classify_contact_role("Product Lead", TARGETS, "", BAYESIAN_DUTIES))
+
+
+@pytest.mark.parametrize("actual,target,expected", [
+    ("Vice President of Strategic Programs", "Program Manager", False),
+    ("VP Product", "Product Manager", False),
+    ("Director of Product", "Product Manager", False),
+    ("Product Manager", "VP Product", False),
+    ("Head of Product", "Product Manager", False),
+    ("Head of Product", "VP Product", True),
+    ("Head of Product", "Director of Product", True),
+    ("VP Product", "Head of Product", True),
+    ("Product Lead", "Product Manager", True),
+])
+def test_evidence_review_cannot_override_known_title_seniority(monkeypatch, actual, target, expected):
+    # The live Amira review incorrectly reasoned that VP is acceptable because
+    # it is higher than Manager. The existing rubric requires the same bucket.
+    calls = _transport(monkeypatch, _finding(
+        target_role=target, reason="A higher seniority level is acceptable.",
+    ))
+    result = asyncio.run(_classify_contact_role(actual, [target], "", BAYESIAN_DUTIES))
+    assert result["match"] is expected
+    if not expected:
+        assert result["evidence_review"]["status"] == "CONTRADICTED"
+    assert len(calls) == 2
+
+
+def test_saved_amira_vp_cannot_pass_manager_only_targets(monkeypatch):
+    calls = _transport(monkeypatch, _finding(target_role="Program Manager"), initial_match=True)
+    matched = asyncio.run(_role_matches(
+        "Vice President of Strategic Programs",
+        ["Learning Technology Manager", "Program Manager", "Operations Manager"],
+        "", _classify_contact_role,
+        "Executive leader for strategic programs, enterprise partnerships, customer adoption, and organizational effectiveness.",
+    ))
+    assert matched is False
+    assert calls == []

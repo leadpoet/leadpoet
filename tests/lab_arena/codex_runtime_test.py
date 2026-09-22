@@ -10,9 +10,11 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.request import Request
 
 import httpx
 import pytest
@@ -464,6 +466,333 @@ def test_live_web_search_is_injected_as_one_bounded_native_server_tool(monkeypat
     assert b'"type":"url_citation"' in result.content
 
 
+def test_standalone_page_fetch_forces_loopback_proxy_and_extracts_visible_text(
+    monkeypatch,
+):
+    private_hits = []
+    proxy_hits = []
+
+    class PrivateHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            private_hits.append(self.path)
+            body = b"PRIVATE_LOOPBACK_CONTENT"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    class ProxyHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            proxy_hits.append(self.path)
+            if self.path.endswith("/private"):
+                self.send_response(302)
+                self.send_header("Location", "http://redirect.example/final")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            body = (
+                b"<html><head><style>HIDDEN_STYLE</style></head>"
+                b"<body><h1>Fixture heading</h1><script>HIDDEN_SCRIPT</script>"
+                b"<p>Visible fixture text.</p></body></html>"
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    private = ThreadingHTTPServer(("127.0.0.1", 0), PrivateHandler)
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), ProxyHandler)
+    threads = [
+        threading.Thread(target=server.serve_forever, daemon=True)
+        for server in (private, proxy)
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        target = "http://127.0.0.1:%d/private" % private.server_port
+        monkeypatch.setenv("NO_PROXY", "*")
+        monkeypatch.setenv(
+            "LAB_ARENA_WEB_PROXY_URL",
+            "http://127.0.0.1:%d" % proxy.server_port,
+        )
+        final_url, lines = codex._fetch_visible_page(
+            target, response_deadline=time.monotonic() + 5,
+        )
+    finally:
+        for server in (private, proxy):
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join(2)
+
+    assert final_url == "http://redirect.example/final"
+    assert proxy_hits == [target, "http://redirect.example/final"]
+    assert private_hits == []
+    assert lines == ["Fixture heading", "Visible fixture text."]
+
+
+def test_standalone_https_request_is_forced_through_loopback_proxy():
+    request = Request("https://public.example/source")
+    handler = codex._LoopbackProxyHandler({
+        "https": "http://127.0.0.1:8123",
+    })
+
+    assert handler.proxy_open(
+        request, "http://127.0.0.1:8123", "https",
+    ) is None
+    assert request.host == "127.0.0.1:8123"
+    assert request._tunnel_host == "public.example"
+
+
+def test_standalone_open_and_find_return_numbered_raw_visible_text(monkeypatch):
+    fetches = []
+
+    def fetch(url, *, response_deadline):
+        fetches.append((url, response_deadline))
+        return "https://public.example/final", [
+            "Heading", "First evidence line", "Needle evidence", "Last line",
+        ]
+
+    monkeypatch.setattr(codex, "_fetch_visible_page", fetch)
+    deadline = time.monotonic() + 5
+    opened = json.loads(codex._standalone_page_output({
+        "commands": {"open": [{
+            "ref_id": "https://public.example/page", "lineno": 0,
+        }]},
+        "settings": {"external_web_access": True},
+    }, response_deadline=deadline))
+    found = json.loads(codex._standalone_page_output({
+        "commands": {"find": [{
+            "ref_id": "https://public.example/page", "pattern": "needle",
+        }]},
+        "settings": {"external_web_access": True},
+    }, response_deadline=deadline))
+
+    assert "Open https://public.example/final" in opened["output"]
+    assert "L1: Heading" in opened["output"]
+    assert "Find 'needle' in https://public.example/final" in found["output"]
+    assert "L3: Needle evidence" in found["output"]
+    assert len(fetches) == 2
+
+
+def test_standalone_open_uses_shared_gate_and_guard(monkeypatch):
+    calls = []
+
+    class Gate:
+        def acquire(self, *, timeout):
+            calls.append(("acquire", timeout))
+            return True
+
+        def release(self):
+            calls.append(("release", None))
+
+    def guard():
+        calls.append(("guard", None))
+        return True
+
+    monkeypatch.setattr(
+        codex, "_fetch_visible_page",
+        lambda url, **_kwargs: (url, ["Visible source text"]),
+    )
+    with codex.ResponsesBridge(
+        "/fixture-worker.sock", web_search="live",
+        request_gate=Gate(), request_guard=guard,
+    ) as bridge, httpx.Client(trust_env=False) as client:
+        result = client.post(
+            bridge.base_url + "/alpha/search",
+            headers={"Authorization": "Bearer " + bridge.token},
+            json={
+                "commands": {"open": [{
+                    "ref_id": "https://public.example/source",
+                }]},
+                "settings": {"external_web_access": True},
+            },
+        )
+
+    assert result.status_code == 200
+    assert "Visible source text" in result.json()["output"]
+    assert [name for name, _value in calls] == ["acquire", "guard", "release"]
+
+
+@pytest.mark.parametrize("commands", [
+    {
+        "search_query": [{"q": "fixture"}],
+        "open": [{"ref_id": "https://public.example/page"}],
+    },
+    {
+        "open": [
+            {"ref_id": "https://public.example/valid"},
+            {"ref_id": "opaque-search-reference"},
+        ],
+    },
+])
+def test_standalone_mixed_or_invalid_page_commands_do_not_fetch(
+    monkeypatch, commands,
+):
+    monkeypatch.setattr(
+        codex, "_fetch_visible_page",
+        lambda *_args, **_kwargs: pytest.fail("invalid command fetched a page"),
+    )
+    result = json.loads(codex._standalone_page_output({
+        "commands": commands,
+        "settings": {"external_web_access": True},
+    }, response_deadline=time.monotonic() + 5))
+
+    assert "No source evidence was retrieved" in result["output"]
+
+
+def test_standalone_search_tool_miss_continues_without_source_claim(monkeypatch):
+    sent = []
+
+    def dispatch(_socket_path, body, **_kwargs):
+        sent.append(body)
+        payload = response(output=[
+            {
+                "id": "ws-miss", "type": "web_search_call",
+                "status": "completed",
+                "action": {"type": "search", "query": "fixture"},
+            },
+            {
+                "id": "msg-miss", "type": "message", "role": "assistant",
+                "status": "completed", "content": [{
+                    "type": "output_text", "text": "Tool error", "annotations": [],
+                }],
+            },
+        ])
+        return 200, json.dumps(payload).encode()
+
+    monkeypatch.setattr(codex, "_dispatch", dispatch)
+    with codex.ResponsesBridge(
+        "/fixture-worker.sock", web_search="live",
+    ) as bridge, httpx.Client(trust_env=False) as client:
+        result = client.post(
+            bridge.base_url + "/alpha/search",
+            headers={"Authorization": "Bearer " + bridge.token},
+            json={
+                "model": "openai/gpt-5.6-luna",
+                "commands": {"search_query": [{"q": "fixture"}]},
+                "settings": {"external_web_access": True},
+                "max_output_tokens": 10_000,
+            },
+        )
+
+    assert result.status_code == 200
+    assert "no cited source results" in result.json()["output"]
+    assert len(sent) == 1
+    assert sent[0]["tool_choice"] == "auto"
+    assert sent[0]["max_output_tokens"] == 4096
+
+
+@pytest.mark.parametrize("document", [
+    [],
+    {"status": "completed", "output": ["not-an-item"]},
+    {
+        "status": "completed",
+        "output": [
+            {"type": "web_search_call", "status": "completed"},
+            {"type": "message", "content": ["not-a-part"]},
+        ],
+    },
+    {
+        "status": "completed",
+        "output": [
+            {"type": "web_search_call", "status": "completed"},
+            {"type": "message", "content": [{
+                "type": "output_text", "text": 3,
+                "annotations": ["not-an-annotation"],
+            }]},
+        ],
+    },
+])
+def test_standalone_malformed_provider_output_becomes_local_tool_miss(document):
+    result = json.loads(codex._standalone_search_output(document))
+
+    assert "No source evidence was retrieved" in result["output"]
+
+
+def test_standalone_search_invalid_token_limit_never_dispatches(monkeypatch):
+    monkeypatch.setattr(
+        codex, "_dispatch",
+        lambda *_args, **_kwargs: pytest.fail("invalid search was dispatched"),
+    )
+    with codex.ResponsesBridge(
+        "/fixture-worker.sock", web_search="live",
+    ) as bridge, httpx.Client(trust_env=False) as client:
+        result = client.post(
+            bridge.base_url + "/alpha/search",
+            headers={"Authorization": "Bearer " + bridge.token},
+            json={
+                "model": "openai/gpt-5.6-luna",
+                "commands": {"search_query": [{"q": "fixture"}]},
+                "max_output_tokens": 0,
+            },
+        )
+
+    assert result.status_code == 400
+    assert result.json()["error"]["code"] == "invalid_output_token_limit"
+
+
+def test_parallel_standalone_search_calls_queue_within_the_session_deadline(
+    monkeypatch,
+):
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    dispatched = []
+
+    def dispatch(_socket_path, body, **_kwargs):
+        dispatched.append(body)
+        if len(dispatched) == 1:
+            first_entered.set()
+            assert release_first.wait(2)
+        return 200, json.dumps(response(output=[
+            {
+                "id": "ws-empty", "type": "web_search_call",
+                "status": "completed",
+                "action": {"type": "search", "query": "fixture"},
+            },
+        ])).encode()
+
+    monkeypatch.setattr(codex, "_dispatch", dispatch)
+    statuses = []
+    with codex.ResponsesBridge(
+        "/fixture-worker.sock", web_search="live",
+        response_deadline=time.monotonic() + 5,
+    ) as bridge:
+        def search(query):
+            with httpx.Client(trust_env=False) as client:
+                result = client.post(
+                    bridge.base_url + "/alpha/search",
+                    headers={"Authorization": "Bearer " + bridge.token},
+                    json={
+                        "model": "openai/gpt-5.6-luna",
+                        "commands": {"search_query": [{"q": query}]},
+                    },
+                )
+                statuses.append(result.status_code)
+
+        first = threading.Thread(target=search, args=("first",))
+        second = threading.Thread(target=search, args=("second",))
+        first.start()
+        assert first_entered.wait(2)
+        second.start()
+        time.sleep(0.05)
+        assert second.is_alive()
+        release_first.set()
+        first.join(2)
+        second.join(2)
+
+    assert sorted(statuses) == [200, 200]
+    assert len(dispatched) == 2
+
+
 @pytest.mark.parametrize("mode", ["disabled", "live"])
 def test_caller_cannot_supply_an_openrouter_hosted_tool(monkeypatch, mode):
     monkeypatch.setattr(
@@ -569,6 +898,143 @@ def test_real_codex_live_web_search_crosses_bridge_with_history_and_citation(
         assert post["tools"][-1]["type"] == "openrouter:web_search"
         assert post["tools"][-1]["parameters"]["engine"] == "native"
         assert post["max_tool_calls"] == codex.WEB_SEARCH_MAX_TOOL_CALLS
+
+
+@pytest.mark.skipif(
+    not os.environ.get("ARENA_TEST_CODEX_BINARY"),
+    reason="set ARENA_TEST_CODEX_BINARY for the real standalone-search proof",
+)
+def test_real_codex_standalone_web_search_crosses_accounted_bridge(
+    monkeypatch, tmp_path,
+):
+    _pin_real_codex(monkeypatch)
+    fetched_pages = []
+
+    def fetch_page(url, *, response_deadline):
+        fetched_pages.append((url, response_deadline))
+        return url, [
+            "Standalone source heading",
+            "EXACT_STANDALONE_OPEN_RESULT from raw visible page text.",
+        ]
+
+    monkeypatch.setattr(codex, "_fetch_visible_page", fetch_page)
+
+    class StandaloneSearchTransport(FakeTransport):
+        def __init__(self):
+            super().__init__()
+            self.requests = []
+
+        def send(self, **kwargs):
+            body = json.loads(kwargs["body"])
+            self.requests.append(body)
+            search_adapter = (
+                body.get("tool_choice") == "auto"
+                and isinstance(body.get("input"), str)
+                and "Execute the supplied web search" in body.get("instructions", "")
+            )
+            if len(self.requests) == 1:
+                assert any(
+                    item.get("type") == "additional_tools"
+                    and "web" in json.dumps(item.get("tools"))
+                    for item in body["input"]
+                )
+                output = [{
+                    "type": "custom_tool_call", "id": "ct-search",
+                    "call_id": "call-standalone-search", "name": "exec",
+                    "namespace": "functions", "status": "completed",
+                    "input": (
+                        "const searched = await tools.web__run({"
+                        "search_query: [{q: 'standalone executor proof'}]"
+                        "});"
+                        "const opened = await tools.web__run({"
+                        "open: [{ref_id: "
+                        "'https://example.com/standalone-source'}]"
+                        "});"
+                        "text(JSON.stringify({searched, opened}));"
+                    ),
+                }]
+            elif search_adapter:
+                assert body["tools"] == [{
+                    "type": "openrouter:web_search",
+                    "parameters": {
+                        "engine": "native",
+                        "max_uses": codex.WEB_SEARCH_MAX_TOOL_CALLS,
+                        "max_total_results": codex.WEB_SEARCH_MAX_TOTAL_RESULTS,
+                    },
+                }]
+                assert body["max_tool_calls"] == codex.WEB_SEARCH_MAX_TOOL_CALLS
+                assert "standalone executor proof" in body["input"]
+                output = [
+                    {
+                        "id": "ws-standalone", "type": "web_search_call",
+                        "status": "completed", "action": {
+                            "type": "search",
+                            "query": "standalone executor proof",
+                        },
+                    },
+                    {
+                        "id": "msg-standalone", "type": "message",
+                        "role": "assistant", "status": "completed",
+                        "content": [{
+                            "type": "output_text",
+                            "text": "EXACT_STANDALONE_SEARCH_RESULT",
+                            "annotations": [{
+                                "type": "url_citation",
+                                "url": "https://example.com/standalone-source",
+                                "title": "Standalone source",
+                                "start_index": 0,
+                                "end_index": 30,
+                            }],
+                        }],
+                    },
+                ]
+            else:
+                assert any(
+                    item.get("type") == "custom_tool_call_output"
+                    and "EXACT_STANDALONE_SEARCH_RESULT"
+                    in json.dumps(item.get("output"))
+                    and "EXACT_STANDALONE_OPEN_RESULT"
+                    in json.dumps(item.get("output"))
+                    and "https://example.com/standalone-source"
+                    in json.dumps(item.get("output"))
+                    for item in body["input"]
+                )
+                output = [{
+                    "id": "msg-final", "type": "message",
+                    "role": "assistant", "status": "completed",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "ARENA_STANDALONE_SEARCH_OK",
+                        "annotations": [],
+                    }],
+                }]
+            self.responses.append((200, response(
+                model=body["model"], id="standalone-%d" % len(self.requests),
+                output=output,
+            )))
+            return super().send(**kwargs)
+
+    transport = StandaloneSearchTransport()
+    with broker_socket(
+        monkeypatch, transport,
+        priced_models=("openai/gpt-5.6-luna",),
+    ) as (store, transport, _path):
+        result = codex.run(
+            "Use tools.web__run from code mode, then report its exact result.",
+            model="openai/gpt-5.6-luna", cwd=tmp_path,
+            timeout_seconds=60, web_search="live",
+        )
+
+    assert "ARENA_STANDALONE_SEARCH_OK" in result
+    assert len(transport.requests) == len(store.calls) == 3
+    assert sum(
+        isinstance(body.get("input"), str)
+        and "Execute the supplied web search" in body.get("instructions", "")
+        for body in transport.requests
+    ) == 1
+    assert len(fetched_pages) == 1
+    assert fetched_pages[0][0] == "https://example.com/standalone-source"
+    assert all(call["kind"] == "settlement" for call in store.calls.values())
 
 
 def test_responses_budget_refusal_and_incomplete_billing(monkeypatch):

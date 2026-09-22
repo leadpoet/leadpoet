@@ -1937,6 +1937,36 @@ def _web_identity_receipt(
                 evidence_source="company_homepage",
                 company_quality=company_quality,
             )
+    verified_root_child_domains: Optional[tuple[str, str, str]] = None
+    if isinstance(verified_homepage_transport_domain, str):
+        try:
+            transport_domain = normalize_host(verified_homepage_transport_domain)
+            submitted_domain = normalize_host(receipt_submitted_domain)
+            observed_domain = normalize_host(receipt_observed_domain)
+        except (NormalizationError, TypeError):
+            pass
+        else:
+            root = transport_domain.ascii_host
+            submitted = submitted_domain.ascii_host
+            observed = observed_domain.ascii_host
+            if (
+                root
+                and not transport_domain.is_private_suffix
+                and root == transport_domain.registrable_domain
+                and submitted_domain.registrable_domain == root
+                and observed_domain.registrable_domain == root
+                and (
+                    (
+                        submitted == root
+                        and is_label_subdomain(observed, root)
+                    )
+                    or (
+                        observed == root
+                        and is_label_subdomain(submitted, root)
+                    )
+                )
+            ):
+                verified_root_child_domains = (submitted, observed, root)
     if (
         receipt.get("decision") == COMPANY_FIT_MISMATCH
         and receipt.get("reason_code") == "identity_mismatch"
@@ -1944,39 +1974,20 @@ def _web_identity_receipt(
         and receipt.get("submitted_linkedin_slug")
         and receipt.get("submitted_linkedin_slug")
         == receipt.get("observed_linkedin_slug")
-        and isinstance(verified_homepage_transport_domain, str)
-        and verified_homepage_transport_domain
-        == receipt.get("submitted_domain")
+        and verified_root_child_domains is not None
     ):
-        try:
-            submitted_domain = normalize_host(receipt["submitted_domain"])
-            observed_domain = normalize_host(receipt["observed_domain"])
-        except (NormalizationError, TypeError):
-            pass
-        else:
-            if (
-                not submitted_domain.is_private_suffix
-                and submitted_domain.ascii_host
-                == submitted_domain.registrable_domain
-                == verified_homepage_transport_domain
-                and observed_domain.registrable_domain
-                == submitted_domain.registrable_domain
-                and is_label_subdomain(
-                    observed_domain.ascii_host,
-                    submitted_domain.ascii_host,
-                )
-            ):
-                receipt.update(
-                    decision=COMPANY_FIT_MATCH,
-                    reason_code="verifier_accepted",
-                    raw_observed_domain=observed_domain.ascii_host,
-                    observed_domain=submitted_domain.ascii_host,
-                    verified_homepage_transport_domain=(
-                        verified_homepage_transport_domain
-                    ),
-                    raw_observed_website=observed_values["website"],
-                )
-                return receipt
+        submitted_domain, observed_domain, transport_domain = (
+            verified_root_child_domains
+        )
+        receipt.update(
+            decision=COMPANY_FIT_MATCH,
+            reason_code="verifier_accepted",
+            raw_observed_domain=observed_domain,
+            observed_domain=submitted_domain,
+            verified_homepage_transport_domain=transport_domain,
+            raw_observed_website=observed_values["website"],
+        )
+        return receipt
     if (
         verified_anchor_receipt.get("decision") == COMPANY_FIT_MATCH
         and isinstance(verified_homepage_identity, Mapping)

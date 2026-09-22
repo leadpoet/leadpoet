@@ -1,5 +1,16 @@
 # Agent Instructions
 
+## Scoped production authorization: Tyche sourcing parity
+
+On 2026-09-21 the user authorized narrow fixes for the confirmed Tyche/Arena
+email-source, native web-tool connection, and company-verification defects.
+Authority includes source sync, bounded paid tests with public ICPs, isolated
+full validator/service tests, pushes, scorer publication, canonical paired
+gateway/validator restarts, and live verification. Preserve Tyche's research
+workflow, genuine qualification, confirmed-cost accounting, existing positive
+publications, frozen rounds, rewards, credentials, and concurrent work. Do not
+reset a published baseline or change scores to demonstrate improvement.
+
 ## Scoped production authorization: dynamic daily benchmark parameters
 
 On 2026-09-21 the user authorized changing future Arena daily benchmarks to

@@ -32,8 +32,17 @@ PROVIDER_ATTEMPTS = 2
 BOUNCEBAN_POLL_ATTEMPTS = 3
 BOUNCEBAN_POLL_DELAYS_SECONDS = (1.0, 2.0, 4.0)
 
-_SUPPORTED_SOURCE_PROVIDER = "harvestapi"
-_SUPPORTED_SOURCE_TOOL = "harvestapi_get_profile"
+_HARVEST_SOURCE = ("harvestapi", "harvestapi_get_profile")
+_FINDER_SOURCES = frozenset(
+    {
+        ("datagma", "datagma_find_email"),
+        ("hunter", "hunter_email_finder"),
+        ("leadmagic", "leadmagic_email_finder"),
+        ("limadata", "limadata_find_work_email"),
+    }
+)
+_SUPPORTED_SOURCES = _FINDER_SOURCES | {_HARVEST_SOURCE}
+_SUPPORTED_SOURCE_TOOL = _HARVEST_SOURCE[1]
 _GENERIC_MAILBOXES = frozenset(
     {
         "admin",
@@ -799,6 +808,82 @@ def _extract_emails(profile: Mapping[str, Any]) -> set[str]:
     return emails
 
 
+def _finder_emails(response: Any) -> set[str]:
+    """Extract only the documented scalar email from a finder response."""
+
+    raw = _unwrap_data(response)
+    if not isinstance(raw, Mapping):
+        return set()
+    email = raw.get("email")
+    return {
+        email.strip().casefold()
+    } if isinstance(email, str) and "@" in email else set()
+
+
+def _finder_source_mismatch(
+    contact: Mapping[str, Any],
+    company: Any,
+    source: Mapping[str, Any],
+) -> str:
+    """Bind one trusted finder reply to this exact person, company, and email."""
+
+    source_input = source.get("input")
+    response = source.get("response")
+    if not isinstance(source_input, Mapping) or response is None:
+        return "email_source_reference_invalid"
+    claimed_name = _norm(contact.get("full_name"))
+    names = [
+        _norm(source_input.get(key))
+        for key in ("full_name", "fullName")
+        if _text(source_input.get(key))
+    ]
+    for first_key, last_key in (
+        ("first_name", "last_name"),
+        ("firstName", "lastName"),
+    ):
+        first = _text(source_input.get(first_key))
+        last = _text(source_input.get(last_key))
+        if first or last:
+            names.append(_norm(f"{first} {last}"))
+    linkedin_claim = _canonical_linkedin(contact.get("linkedin_url"))
+    handles = [
+        _canonical_linkedin(f"https://www.linkedin.com/in/{_text(source_input.get(key)).strip('/')}/")
+        for key in ("linkedin_handle", "linkedInSlug")
+        if _text(source_input.get(key))
+    ]
+    if not (names or handles) or any(name != claimed_name for name in names) or any(
+        handle != linkedin_claim for handle in handles
+    ):
+        return "contact_source_person_mismatch"
+
+    expected = _company_identifiers(company)
+    domains = [
+        _registrable_domain(source_input.get(key))
+        for key in ("domain", "company_domain", "companyDomain")
+        if _text(source_input.get(key))
+    ]
+    company_names = [
+        _norm_company_name(source_input.get(key))
+        for key in ("company", "company_name", "companyName")
+        if _text(source_input.get(key))
+    ]
+    company_bound = bool(domains or company_names)
+    if (
+        not company_bound
+        or any(not value or value != expected["domain"] for value in domains)
+        or any(not value or value != expected["name"] for value in company_names)
+    ):
+        return "contact_source_company_mismatch"
+    email = _text(contact.get("email")).casefold()
+    if (
+        email not in _finder_emails(response)
+        or not expected["domain"]
+        or _registrable_domain(email.rpartition("@")[2]) != expected["domain"]
+    ):
+        return "contact_source_email_mismatch"
+    return ""
+
+
 def contact_source_semantics(
     source: Any,
     *,
@@ -821,7 +906,34 @@ def contact_source_semantics(
             "invalid": True,
             "reason": _text(source.get("reason")),
         }
+    provider = _norm(source.get("provider"))
+    tool = _norm(source.get("tool")).replace(" ", "_")
     response = source.get("response")
+    source_input = source.get("input") if isinstance(source.get("input"), Mapping) else {}
+    if (provider, tool) in _FINDER_SOURCES:
+        emails = sorted(_finder_emails(response))
+        response_semantics = (
+            {"emails": emails}
+            if emails
+            else {"state": "missing_email" if response is not None else "missing"}
+        )
+        projected = {
+            "provider": source.get("provider"),
+            "tool": source.get("tool"),
+            "input": {
+                key: source_input.get(key)
+                for key in (
+                    "company", "companyDomain", "companyName", "company_domain",
+                    "company_name", "domain", "firstName", "first_name",
+                    "fullName", "full_name", "lastName", "last_name",
+                    "linkedInSlug", "linkedin_handle",
+                )
+                if source_input.get(key) is not None
+            },
+            "response": response_semantics,
+        }
+    else:
+        projected = None
     profiles = _profile_candidates(_unwrap_data(response))
     projected_profiles = []
     for profile in profiles[:25]:
@@ -857,17 +969,17 @@ def contact_source_semantics(
         response_semantics = {"state": "not_found"}
     else:
         response_semantics = {"state": "malformed"}
-    source_input = source.get("input") if isinstance(source.get("input"), Mapping) else {}
-    projected = {
-        "provider": source.get("provider"),
-        "tool": source.get("tool"),
-        "input": {
-            key: source_input.get(key)
-            for key in ("url", "publicIdentifier", "profileId", "findEmail")
-            if source_input.get(key) is not None
-        },
-        "response": response_semantics,
-    }
+    if projected is None:
+        projected = {
+            "provider": source.get("provider"),
+            "tool": source.get("tool"),
+            "input": {
+                key: source_input.get(key)
+                for key in ("url", "publicIdentifier", "profileId", "findEmail")
+                if source_input.get(key) is not None
+            },
+            "response": response_semantics,
+        }
     raw_identity = source.get("call_identity")
     identity = raw_identity if isinstance(raw_identity, Mapping) else {}
     reference_identity = {}
@@ -1096,9 +1208,11 @@ def _source_timestamp(source: Mapping[str, Any]) -> str:
 
 def _source_reference_matches(contact: Mapping[str, Any], source: Mapping[str, Any], profile: Mapping[str, Any]) -> bool:
     attribution = contact.get("email_source") if isinstance(contact.get("email_source"), Mapping) else {}
-    if _norm(attribution.get("provider")) != _SUPPORTED_SOURCE_PROVIDER:
-        return False
-    if _norm(attribution.get("tool")).replace(" ", "_") != _SUPPORTED_SOURCE_TOOL:
+    source_pair = (
+        _norm(attribution.get("provider")),
+        _norm(attribution.get("tool")).replace(" ", "_"),
+    )
+    if source_pair not in _SUPPORTED_SOURCES:
         return False
     raw_identity = source.get("call_identity")
     identity = raw_identity if isinstance(raw_identity, Mapping) else {}
@@ -1112,6 +1226,8 @@ def _source_reference_matches(contact: Mapping[str, Any], source: Mapping[str, A
     if broker_claim and broker_claim != broker_actual:
         return False
     record_claim = _text(attribution.get("record_id"))
+    if source_pair in _FINDER_SOURCES:
+        return bool(broker_claim and broker_claim == broker_actual and not record_claim)
     identity_record = _text(identity.get("record_id"))
     profile_record = _text(
         profile.get("recordId") or profile.get("record_id") or profile.get("id")
@@ -1163,14 +1279,36 @@ async def verify_contact(
 
     provider = _norm(source_evidence.get("provider"))
     tool = _norm(source_evidence.get("tool")).replace(" ", "_")
-    if provider != _SUPPORTED_SOURCE_PROVIDER or tool != _SUPPORTED_SOURCE_TOOL:
+    source_pair = (provider, tool)
+    if source_pair not in _SUPPORTED_SOURCES:
         subchecks["source"] = {"status": "fail", "reason": "contact_source_unsupported"}
         return _result(contact, "mismatch", "contact_source_unsupported", subchecks=subchecks)
 
     runner = execute or _default_execute
     response = source_evidence.get("response")
     try:
-        if response is None:
+        if source_pair in _FINDER_SOURCES:
+            finder_reason = _finder_source_mismatch(
+                contact, company, source_evidence
+            )
+            evidence_hashes["source"] = _hash(response)
+            if finder_reason:
+                subchecks["source"] = {"status": "fail", "reason": finder_reason}
+                return _result(
+                    contact,
+                    "mismatch",
+                    finder_reason,
+                    subchecks=subchecks,
+                    evidence_hashes=evidence_hashes,
+                    evidence_timestamps=evidence_timestamps,
+                )
+            response = await _call(
+                runner,
+                _SUPPORTED_SOURCE_TOOL,
+                {"url": contact["linkedin_url"], "findEmail": "false"},
+            )
+            evidence_hashes["profile"] = _hash(response)
+        elif response is None:
             source_input = source_evidence.get("input") if isinstance(source_evidence.get("input"), Mapping) else {}
             linked = _text(
                 source_input.get("url")
@@ -1187,7 +1325,8 @@ async def verify_contact(
                 payload["url"] = linked
             payload["findEmail"] = "true"
             response = await _call(runner, _SUPPORTED_SOURCE_TOOL, payload)
-        evidence_hashes["source"] = _hash(response)
+        if source_pair == _HARVEST_SOURCE:
+            evidence_hashes["source"] = _hash(response)
         timestamp = _source_timestamp(source_evidence)
         if timestamp:
             evidence_timestamps["source"] = timestamp
@@ -1305,7 +1444,7 @@ async def verify_contact(
     if location_status == "unknown":
         return _result(contact, "unverified", location_reason, subchecks=subchecks, evidence_hashes=evidence_hashes, evidence_timestamps=evidence_timestamps)
 
-    if email not in _extract_emails(profile):
+    if source_pair == _HARVEST_SOURCE and email not in _extract_emails(profile):
         subchecks["email_attribution"] = {"status": "fail", "reason": "contact_email_mismatch"}
         return _result(contact, "mismatch", "contact_email_mismatch", subchecks=subchecks, evidence_hashes=evidence_hashes, evidence_timestamps=evidence_timestamps)
     subchecks["email_attribution"] = {"status": "pass", "reason": "contact_email_attributed"}

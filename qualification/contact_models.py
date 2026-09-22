@@ -14,7 +14,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 # reviewed contract change; miner output cannot name an arbitrary tool.
 CONTACT_SOURCE_REGISTRY = frozenset(
     {
+        ("datagma", "datagma_find_email"),
         ("harvestapi", "harvestapi_get_profile"),
+        ("hunter", "hunter_email_finder"),
+        ("leadmagic", "leadmagic_email_finder"),
+        ("limadata", "limadata_find_work_email"),
     }
 )
 

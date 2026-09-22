@@ -393,7 +393,7 @@ def score_work_item(
                     failed[0]
                 )
                 last_error = ScoringError(
-                    "judge reported an infrastructure failure: %s"
+                    "judge reported a retryable verifier failure: %s"
                     % str(failed[0].get("failure_reason") or "")[:200],
                     failure_reason=last_failure_reason,
                 )
@@ -458,7 +458,7 @@ def score_work_item(
         if failed:
             last_failure_reason = _retryable_breakdown_failure_reason(failed[0])
             last_error = ScoringError(
-                "judge reported an infrastructure failure: %s"
+                "judge reported a retryable verifier failure: %s"
                 % str(failed[0].get("failure_reason") or "")[:200],
                 failure_reason=last_failure_reason,
             )

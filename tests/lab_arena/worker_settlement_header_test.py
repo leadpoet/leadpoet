@@ -59,7 +59,11 @@ def response_document(*, body=None, headers=None, call=None):
 )
 def test_settlement_header_requires_exact_bound_deepline_call(change):
     document = response_document(
-        headers={"X-LeadPoet-Settled-MicroUSD": "999"}, call=change
+        headers={
+            "X-LeadPoet-Settled-MicroUSD": "999",
+            "X-LeadPoet-Call-Identity": "sha256:" + "f" * 64,
+        },
+        call=change,
     )
 
     headers = runner.WorkerSocketServer._socket_response_headers(
@@ -69,7 +73,19 @@ def test_settlement_header_requires_exact_bound_deepline_call(change):
     assert runner.SETTLED_MICROUSD_HEADER not in {
         str(name).lower() for name in headers
     }
-    assert headers == {"content-type": "application/json"}
+    identity_bound = not set(change) & {
+        "operation_id", "provider", "action_sequence", "call_identity"
+    }
+    if identity_bound:
+        assert headers == {
+            "content-type": "application/json",
+            runner.CALL_IDENTITY_HEADER: IDENTITY,
+        }
+    else:
+        assert runner.CALL_IDENTITY_HEADER not in {
+            str(name).lower() for name in headers
+        }
+        assert headers == {"content-type": "application/json"}
 
 
 @pytest.mark.parametrize(
@@ -83,20 +99,29 @@ def test_settlement_header_requires_exact_bound_deepline_call(change):
 )
 def test_settlement_header_does_not_compete_with_billing_or_malformed_body(body):
     document = response_document(
-        body=body, headers={runner.SETTLED_MICROUSD_HEADER.upper(): "999"}
+        body=body, headers={
+            runner.SETTLED_MICROUSD_HEADER.upper(): "999",
+            runner.CALL_IDENTITY_HEADER.upper(): "sha256:" + "f" * 64,
+        }
     )
 
     headers = runner.WorkerSocketServer._socket_response_headers(
         document, OPERATION, 0
     )
 
-    assert headers == {"content-type": "application/json"}
+    assert headers == {
+        "content-type": "application/json",
+        runner.CALL_IDENTITY_HEADER: IDENTITY,
+    }
 
 
 def test_non_deepline_response_strips_spoof_without_parsing_body():
     document = response_document(
         body=b"not-json",
-        headers={"X-LeadPoet-Settled-MicroUSD": "999"},
+        headers={
+            "X-LeadPoet-Settled-MicroUSD": "999",
+            "X-LeadPoet-Call-Identity": "sha256:" + "f" * 64,
+        },
     )
 
     headers = runner.WorkerSocketServer._socket_response_headers(
@@ -116,6 +141,7 @@ def test_settlement_header_allows_null_or_empty_billing_mapping(billing):
     )
 
     assert headers[runner.SETTLED_MICROUSD_HEADER] == "12003"
+    assert headers[runner.CALL_IDENTITY_HEADER] == IDENTITY
 
 
 def _recv_exact(connection: socket.socket, size: int) -> bytes:
@@ -142,6 +168,8 @@ def test_real_worker_socket_replaces_spoof_and_preserves_three_key_envelope():
                 headers={
                     "X-LeadPoet-Settled-MicroUSD": "999",
                     "x-LEADPOET-settled-microusd": "998",
+                    "X-LeadPoet-Call-Identity": "sha256:" + "f" * 64,
+                    "x-LEADPOET-call-identity": "sha256:" + "e" * 64,
                 },
                 call={
                     "action_sequence": frame["action_sequence"],
@@ -171,6 +199,7 @@ def test_real_worker_socket_replaces_spoof_and_preserves_three_key_envelope():
     assert set(response) == {"status", "headers", "body_b64"}
     assert response["headers"] == {
         "content-type": "application/json",
+        runner.CALL_IDENTITY_HEADER: IDENTITY,
         runner.SETTLED_MICROUSD_HEADER: "0",
     }
     assert base64.b64decode(response["body_b64"], validate=True) == original_body
@@ -182,7 +211,10 @@ def test_plain_http_bridge_strips_reserved_header_without_adding_proof(tmp_path)
     class Api:
         def provider(self, _run_id, _lease_token, frame):
             return response_document(
-                headers={"X-LeadPoet-Settled-MicroUSD": "999"},
+                headers={
+                    "X-LeadPoet-Settled-MicroUSD": "999",
+                    "X-LeadPoet-Call-Identity": "sha256:" + "f" * 64,
+                },
                 call={"action_sequence": frame["action_sequence"]},
             )
 
@@ -200,6 +232,9 @@ def test_plain_http_bridge_strips_reserved_header_without_adding_proof(tmp_path)
 
     assert status == 200
     assert runner.SETTLED_MICROUSD_HEADER not in {
+        name.lower() for name in headers
+    }
+    assert runner.CALL_IDENTITY_HEADER not in {
         name.lower() for name in headers
     }
     assert json.loads(body)["results"]

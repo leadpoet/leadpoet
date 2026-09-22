@@ -663,7 +663,8 @@ def test_complete_unproven_industry_scores_zero_without_arena_retry(
         "lead_scorer_reverify_schema_repair",
     ]
     assert profile_fetches == [
-        "https://www.linkedin.com/company/strandtx"
+        "https://www.linkedin.com/company/strandtx",
+        "https://www.linkedin.com/company/strandtx",
     ]
     assert breakdown["final_score"] == 0.0
     assert receipt["decision"] == "unavailable"
@@ -884,7 +885,10 @@ def test_linkedin_refresh_timeout_keeps_arena_retry(monkeypatch):
     companies = [_company().model_dump(mode="json")]
     with pytest.raises(
         arena_scoring.ScoringError,
-        match="independent employee-size verification failed",
+        match=(
+            "retryable verifier failure:.*"
+            "independent employee-size verification failed"
+        ),
     ):
         arena_scoring.score_work_item(
             {"scored_run_id": "linkedin-timeout"},
@@ -981,7 +985,10 @@ def test_exact_profile_without_size_accepts_zero_after_invalid_repair_guess(
         "lead_scorer_reverify",
         "lead_scorer_reverify_schema_repair",
     ]
-    assert fetches == ["https://www.linkedin.com/company/strandtx"]
+    assert fetches == [
+        "https://www.linkedin.com/company/strandtx",
+        "https://www.linkedin.com/company/strandtx",
+    ]
     assert breakdown["final_score"] == 0.0
     assert receipt["decision"] == "unavailable"
     assert receipt["failure_class"] == "insufficient_fit_evidence"

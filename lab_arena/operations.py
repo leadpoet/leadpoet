@@ -492,6 +492,10 @@ DEEPLINE_TOOLS = (
     "harvestapi_get_company",
     "harvestapi_get_profile",
     "harvestapi_search_leads",
+    "hunter_email_finder",
+    "limadata_find_work_email",
+    "datagma_find_email",
+    "leadmagic_email_finder",
     "zerobounce_validate",
     "bounceban_verify_single",
     "bounceban_get_single_status",
@@ -520,6 +524,10 @@ DEEPLINE_TOOL_PROVIDERS: Mapping[str, str] = MappingProxyType({
     "harvestapi_get_company": "harvestapi",
     "harvestapi_get_profile": "harvestapi",
     "harvestapi_search_leads": "harvestapi",
+    "hunter_email_finder": "hunter",
+    "limadata_find_work_email": "limadata",
+    "datagma_find_email": "datagma",
+    "leadmagic_email_finder": "leadmagic",
     "zerobounce_validate": "zerobounce",
     "bounceban_verify_single": "bounceban",
     "bounceban_get_single_status": "bounceban",
@@ -530,6 +538,22 @@ DEEPLINE_TOOL_PROVIDERS: Mapping[str, str] = MappingProxyType({
     "predictleads_company_job_openings": "predictleads",
     "predictleads_company_news_events": "predictleads",
     "twitterapi_tweets_by_ids": "twitterapi",
+})
+CONTACT_FINDER_INPUT_SCHEMA_VERSION = "leadpoet.lab_arena.contact_finder_input.v1"
+DEEPLINE_CONTACT_FINDER_IDENTITY_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType({
+    "hunter_email_finder": (
+        "company", "domain", "first_name", "full_name", "last_name",
+        "linkedin_handle",
+    ),
+    "limadata_find_work_email": ("company_domain", "full_name"),
+    "datagma_find_email": (
+        "companyDomain", "companyName", "company_domain", "company_name",
+        "domain", "firstName", "first_name", "fullName", "full_name",
+        "lastName", "last_name", "linkedInSlug",
+    ),
+    "leadmagic_email_finder": (
+        "company_domain", "company_name", "domain", "first_name", "last_name",
+    ),
 })
 # Asks Deepline for the provider's raw response under result.data instead of a
 # normalized view; captured from the official client and verified live.

@@ -41,8 +41,9 @@ PLACEHOLDER_PATTERNS: List[str] = [
     "tbd", "todo", "fixme", "testing", "aaa", "bbb", "ccc",
 ]
 
-# Suspicious characters that shouldn't appear in professional data
-SUSPICIOUS_CHAR_PATTERN = re.compile(r'[<>{}|\\\^~`\[\]]')
+# Markup and template delimiters that should not appear in company names.
+# A vertical bar is a common separator in legitimate display names.
+SUSPICIOUS_CHAR_PATTERN = re.compile(r'[<>{}\\\^~`\[\]]')
 
 
 # =============================================================================

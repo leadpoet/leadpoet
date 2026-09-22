@@ -107,6 +107,7 @@ MAX_WORKER_CONNECTIONS = 8
 WORKER_SOCKET_READ_TIMEOUT_SECONDS = 10.0
 TEMPORARY_HOLD_RETRY_SECONDS = 1.0
 SETTLED_MICROUSD_HEADER = "x-leadpoet-settled-microusd"
+CALL_IDENTITY_HEADER = "x-leadpoet-call-identity"
 MAX_JUDGE_DIAGNOSTIC_CHARS = scoring.MAX_FAILURE_DETAIL_CHARS
 _DIAGNOSTIC_URL_QUERY_RE = re.compile(
     r"(?i)\b([a-z][a-z0-9+.-]*://[^\s?#]+)\?[^\s#]*"
@@ -2007,18 +2008,32 @@ class WorkerSocketServer:
     def _socket_response_headers(
         document: Mapping[str, Any], operation_id: str, action_sequence: int
     ) -> Dict[str, Any]:
-        """Add one internal settlement proof after removing untrusted copies."""
+        """Add host-bound call proofs after removing untrusted copies."""
 
         headers = {
             name: value
             for name, value in dict(document["headers"]).items()
             if not (
                 isinstance(name, str)
-                and name.lower() == SETTLED_MICROUSD_HEADER
+                and name.lower() in (
+                    SETTLED_MICROUSD_HEADER, CALL_IDENTITY_HEADER
+                )
             )
         }
         if operation_id != "deepline.execute":
             return headers
+        call = document.get("call")
+        if not (
+            isinstance(call, Mapping)
+            and call.get("operation_id") == operation_id
+            and call.get("provider") == "deepline"
+            and type(call.get("action_sequence")) is int
+            and call.get("action_sequence") == action_sequence
+            and isinstance(call.get("call_identity"), str)
+            and contracts.SHA256_RE.fullmatch(call["call_identity"]) is not None
+        ):
+            return headers
+        headers[CALL_IDENTITY_HEADER] = call["call_identity"]
         try:
             body = json.loads(
                 base64.b64decode(str(document["body_b64"]), validate=True)
@@ -2032,18 +2047,10 @@ class WorkerSocketServer:
             billing is None or isinstance(billing, Mapping) and not billing
         ):
             return headers
-        call = document.get("call")
         if not (
-            isinstance(call, Mapping)
-            and call.get("operation_id") == operation_id
-            and call.get("provider") == "deepline"
-            and type(call.get("action_sequence")) is int
-            and call.get("action_sequence") == action_sequence
-            and call.get("outcome") == "settled"
+            call.get("outcome") == "settled"
             and type(call.get("actual_microusd")) is int
             and call.get("actual_microusd") >= 0
-            and isinstance(call.get("call_identity"), str)
-            and contracts.SHA256_RE.fullmatch(call["call_identity"]) is not None
         ):
             return headers
         headers[SETTLED_MICROUSD_HEADER] = str(call["actual_microusd"])
@@ -2076,7 +2083,11 @@ class WorkerSocketServer:
         )
         if error:
             return shim.encode_worker_error(error)
-        return contracts.canonical_json({"status": document["status"], "headers": document["headers"], "body_b64": document["body_b64"]}).encode("utf-8")
+        return contracts.canonical_json({
+            "status": document["status"],
+            "headers": document["headers"],
+            "body_b64": document["body_b64"],
+        }).encode("utf-8")
 
     def handle_http(
         self,
@@ -2107,7 +2118,11 @@ class WorkerSocketServer:
             str(name): str(value)
             for name, value in dict(document.get("headers") or {}).items()
             if str(name).lower()
-            not in (operations.TRUSTED_RESPONSE_URL_HEADER, SETTLED_MICROUSD_HEADER)
+            not in (
+                operations.TRUSTED_RESPONSE_URL_HEADER,
+                SETTLED_MICROUSD_HEADER,
+                CALL_IDENTITY_HEADER,
+            )
         }
         try:
             payload = base64.b64decode(str(document["body_b64"]), validate=True)

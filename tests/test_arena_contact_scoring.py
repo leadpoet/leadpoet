@@ -557,6 +557,52 @@ def test_contact_effective_input_hashes_semantics_and_excludes_unused_metadata()
     )
 
 
+def test_contact_finder_cache_hash_binds_input_and_returned_email() -> None:
+    company = _company()
+    company["contact"]["email_source"].update(
+        provider="hunter", tool="hunter_email_finder"
+    )
+    evidence = {
+        "broker-1": {
+            "provider": "hunter",
+            "tool": "hunter_email_finder",
+            "input": {
+                "first_name": "Ada",
+                "last_name": "Lovelace",
+                "domain": "acme.com",
+            },
+            "response": {
+                "status": "completed",
+                "toolResponse": {"rawV2": {"data": {"email": "ada@acme.com"}}},
+            },
+            "call_identity": "broker-1",
+            "observed_at": "2026-09-11T12:00:00Z",
+        }
+    }
+    first = effective_competition_input(
+        [company], _icp(), contacts_required=True, contact_source_evidence=evidence
+    )
+    metadata_changed = deepcopy(evidence)
+    metadata_changed["broker-1"]["observed_at"] = "2030-01-01T00:00:00Z"
+    metadata_changed["broker-1"]["response"]["billing"] = {"credits": 999}
+    assert first == effective_competition_input(
+        [company], _icp(), contacts_required=True,
+        contact_source_evidence=metadata_changed,
+    )
+    for mutation in ("person", "company", "email"):
+        changed = deepcopy(evidence)
+        if mutation == "person":
+            changed["broker-1"]["input"]["first_name"] = "Grace"
+        elif mutation == "company":
+            changed["broker-1"]["input"]["domain"] = "other.example"
+        else:
+            changed["broker-1"]["response"]["toolResponse"]["rawV2"]["data"]["email"] = "other@acme.com"
+        assert first != effective_competition_input(
+            [company], _icp(), contacts_required=True,
+            contact_source_evidence=changed,
+        )
+
+
 def test_invalid_contact_cache_hash_also_excludes_broker_metadata() -> None:
     first = _company(contact={"email_source": {"broker_call_id": "call-one"}})
     second = _company(contact={"email_source": {"broker_call_id": "call-two"}})

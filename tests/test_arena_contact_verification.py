@@ -148,6 +148,93 @@ def _zero(status: str) -> dict:
     return {"status": "completed", "result": {"data": {"status": status}}}
 
 
+@pytest.mark.parametrize(
+    ("provider", "tool", "source_input", "raw"),
+    [
+        (
+            "hunter", "hunter_email_finder",
+            {"first_name": "Ada", "last_name": "Lovelace", "domain": "acme.com"},
+            {"data": {"email": "ada@acme.com"}},
+        ),
+        (
+            "limadata", "limadata_find_work_email",
+            {"full_name": "Ada Lovelace", "company_domain": "acme.com"},
+            {"email": "ada@acme.com"},
+        ),
+        (
+            "datagma", "datagma_find_email",
+            {"fullName": "Ada Lovelace", "companyDomain": "acme.com"},
+            {"email": "ada@acme.com", "status": "Valid"},
+        ),
+        (
+            "leadmagic", "leadmagic_email_finder",
+            {"first_name": "Ada", "last_name": "Lovelace", "domain": "acme.com"},
+            {"email": "ada@acme.com", "status": "valid"},
+        ),
+    ],
+)
+def test_trusted_finder_success_keeps_independent_profile_and_mailbox_proof(
+    provider, tool, source_input, raw
+) -> None:
+    company = _company()
+    company["contact"]["email_source"] = {
+        "provider": provider, "tool": tool, "broker_call_id": "broker-123"
+    }
+    source = {
+        "provider": provider,
+        "tool": tool,
+        "input": source_input,
+        "response": {"status": "completed", "toolResponse": {"rawV2": raw}},
+        "call_identity": "broker-123",
+    }
+    execute = ScriptedExecute({
+        "harvestapi_get_profile": [_source()["response"]],
+        "zerobounce_validate": [_zero("valid")],
+    })
+
+    result = _run(company=company, source=source, execute=execute)
+
+    assert result["contact_qualified"] is True
+    assert execute.calls == [
+        ("harvestapi_get_profile", {
+            "url": company["contact"]["linkedin_url"], "findEmail": "false"
+        }),
+        ("zerobounce_validate", {"email": "ada@acme.com"}),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ({"input": {"full_name": "Grace Hopper", "company_domain": "acme.com"}}, "contact_source_person_mismatch"),
+        ({"input": {"full_name": "Ada Lovelace", "company_domain": "other.com"}}, "contact_source_company_mismatch"),
+        ({"response": {"toolResponse": {"rawV2": {"email": "other@acme.com"}}}}, "contact_source_email_mismatch"),
+        ({"call_identity": "fabricated"}, "email_source_reference_invalid"),
+    ],
+)
+def test_finder_rejects_wrong_identity_domain_email_or_call_metadata(change, reason) -> None:
+    company = _company()
+    company["contact"]["email_source"] = {
+        "provider": "limadata", "tool": "limadata_find_work_email",
+        "broker_call_id": "broker-123",
+    }
+    source = {
+        "provider": "limadata", "tool": "limadata_find_work_email",
+        "input": {"full_name": "Ada Lovelace", "company_domain": "acme.com"},
+        "response": {"toolResponse": {"rawV2": {"email": "ada@acme.com"}}},
+        "call_identity": "broker-123",
+        **change,
+    }
+    execute = ScriptedExecute({
+        "harvestapi_get_profile": [_source()["response"]],
+    })
+
+    result = _run(company=company, source=source, execute=execute)
+
+    assert result["contact_qualified"] is False
+    assert result["contact_verification"]["reason"] == reason
+
+
 def test_non_latin_names_remain_distinct_during_identity_verification() -> None:
     source = _source(_profile(firstName="张", lastName="三"))
     valid = _run(

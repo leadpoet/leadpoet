@@ -172,6 +172,32 @@ def _company(industry: str = "Food & Beverages", sub: str = "") -> CompanyOutput
     )
 
 
+def test_company_display_name_allows_vertical_bar_separator() -> None:
+    company = _company().model_copy(
+        update={"company_name": "Aster Labs | Material Hub"}
+    )
+
+    assert pre_checks._check_company_data_quality(company) == (True, None)
+
+
+@pytest.mark.parametrize(
+    "delimiter",
+    ["<", ">", "{", "}", "\\", "^", "~", "`", "[", "]"],
+)
+def test_company_display_name_still_rejects_template_delimiters(delimiter) -> None:
+    company = _company().model_copy(
+        update={"company_name": f"Aster Labs {delimiter} Material Hub"}
+    )
+
+    passed, reason = pre_checks._check_company_data_quality(company)
+
+    assert passed is False
+    assert reason == (
+        "company_name contains suspicious characters: "
+        f"{company.company_name!r}"
+    )
+
+
 def _icp(industry: str = "Software") -> ICPPrompt:
     return ICPPrompt(
         icp_id="icp-test-1",

@@ -2798,6 +2798,25 @@ class Broker:
             key: value for key, value in request_accounting.items()
             if key not in ("deepline_request_id", "credential_fingerprint")
         })
+        contact_finder_binding = {}
+        if effective_operation.provider == "deepline":
+            finder_tool = effective_normalized.get("tool")
+            identity_fields = operations.DEEPLINE_CONTACT_FINDER_IDENTITY_FIELDS.get(
+                finder_tool, ()
+            )
+            if identity_fields:
+                # Keep the validated identity input on the immutable host
+                # receipt. A model-authored claim cannot replace this binding.
+                finder_payload = effective_normalized["payload"]
+                contact_finder_binding["contact_finder_input"] = {
+                    "schema_version": "leadpoet.lab_arena.contact_finder_input.v1",
+                    "tool": finder_tool,
+                    "payload": {
+                        key: finder_payload[key] for key in identity_fields
+                        if isinstance(finder_payload.get(key), str)
+                        and finder_payload[key].strip()
+                    },
+                }
         reservation_arguments = dict(
             run_id=context.run_id,
             lease_token_hash=context.lease_token_hash,
@@ -2806,7 +2825,7 @@ class Broker:
             provider=effective_operation.provider,
             funding_source=funding_source,
             amount_microusd=amount,
-            call_doc={"request_hash": request_hash, "base_call_identity": base_call_identity, "provider_attempt": provider_attempt, "action_sequence": action_sequence, "max_output_tokens": max_output_tokens, **request_accounting, **({"reserve_remaining_budget": True} if reserve_remaining_budget else {}), **(route.summary() if route else {})},
+            call_doc={"request_hash": request_hash, "base_call_identity": base_call_identity, "provider_attempt": provider_attempt, "action_sequence": action_sequence, "max_output_tokens": max_output_tokens, **request_accounting, **contact_finder_binding, **({"reserve_remaining_budget": True} if reserve_remaining_budget else {}), **(route.summary() if route else {})},
             lease_ttl_seconds=self._lease_ttl_seconds,
         )
         operation_timeout_seconds = min(

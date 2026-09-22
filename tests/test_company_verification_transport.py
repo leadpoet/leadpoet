@@ -1015,6 +1015,31 @@ def test_verified_root_transport_binds_exact_web_identity_on_child_subdomain(
     )
 
 
+def test_verified_root_transport_binds_exact_child_identity_to_observed_root():
+    company = _academy_company(website="https://careers.academy.com/")
+    receipt = _web_identity_receipt(
+        company,
+        {
+            "observed_company_name": "Academy Sports + Outdoors, Inc.",
+            "observed_company_website": "https://academy.com/",
+            "observed_company_linkedin": (
+                "https://www.linkedin.com/company/academy-sports-and-outdoors/"
+            ),
+        },
+        verified_homepage_transport_domain="academy.com",
+        company_quality=True,
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_MATCH
+    assert receipt["observed_domain"] == "careers.academy.com"
+    assert receipt["raw_observed_domain"] == "academy.com"
+    assert receipt["raw_observed_website"] == "https://academy.com/"
+    assert company_quality_receipt_matches_claim(
+        receipt,
+        company.model_dump(mode="json"),
+    )
+
+
 @pytest.mark.parametrize(
     ("company", "observed_name", "observed_website", "observed_linkedin", "transport"),
     [
@@ -1052,6 +1077,44 @@ def test_verified_root_transport_binds_exact_web_identity_on_child_subdomain(
             "https://corporate.academy.com/",
             "https://www.linkedin.com/company/academy-sports-and-outdoors/",
             "academy.com",
+        ),
+        (
+            _academy_company(website="https://careers.academy.com/"),
+            "Academy Sports + Outdoors",
+            "https://academy.com/",
+            "https://www.linkedin.com/company/different-academy/",
+            "academy.com",
+        ),
+        (
+            _academy_company(website="https://careers.academy.com/"),
+            "Different Academy",
+            "https://academy.com/",
+            "https://www.linkedin.com/company/academy-sports-and-outdoors/",
+            "academy.com",
+        ),
+        (
+            _academy_company(website="https://careers.academy.com/"),
+            "Academy Sports + Outdoors",
+            "https://academy.example/",
+            "https://www.linkedin.com/company/academy-sports-and-outdoors/",
+            "academy.com",
+        ),
+        (
+            _academy_company(website="https://careers.academy.com.evil.test/"),
+            "Academy Sports + Outdoors",
+            "https://academy.com/",
+            "https://www.linkedin.com/company/academy-sports-and-outdoors/",
+            "academy.com",
+        ),
+        (
+            _academy_company(
+                website="https://tenant.github.io/",
+                linkedin="https://www.linkedin.com/company/academy/",
+            ),
+            "Academy Sports + Outdoors",
+            "https://github.io/",
+            "https://www.linkedin.com/company/academy/",
+            "github.io",
         ),
         (
             _academy_company(website="https://academy.github.io/"),

@@ -36,6 +36,39 @@ def ledger():
     ]
 
 
+def finder_ledger(*, entry_kind="settlement", call_succeeded=True):
+    body = {"status": "completed", "toolResponse": {"rawV2": {
+        "email": "jane@example.com",
+    }}}
+    scope = {
+        "run_id": "execution-1", "call_identity": "sha256:finder",
+        "provider": "deepline", "operation_id": "deepline.execute",
+    }
+    return [
+        {**scope, "entry_kind": "reservation", "entry_doc": {
+            "tool": "limadata_find_work_email",
+            "contact_finder_input": {
+                "schema_version": operations.CONTACT_FINDER_INPUT_SCHEMA_VERSION,
+                "tool": "limadata_find_work_email",
+                "payload": {"full_name": "Jane Doe", "company_domain": "example.com"},
+            },
+        }},
+        {**scope, "entry_kind": entry_kind, "terminal_response": {
+            "status": 200, "call_succeeded": call_succeeded,
+            "body_b64": base64.b64encode(json.dumps(body).encode()).decode(),
+        }, "created_at": "2026-09-11T12:00:00Z"},
+    ]
+
+
+def finder_contact():
+    claim = contact()
+    claim["email_source"] = {
+        "provider": "limadata", "tool": "limadata_find_work_email",
+        "broker_call_id": "sha256:finder",
+    }
+    return claim
+
+
 def _settlement(call_id, *, profile_id, linkedin_url, email):
     body = {"status": "completed", "result": {"data": {"element": {
         "id": profile_id, "linkedinUrl": linkedin_url, "email": email,
@@ -58,6 +91,41 @@ def test_scoped_broker_evidence_is_gateway_constructed():
     assert store.calls == [{"run_id": "execution-1", "call_identity": "sha256:abc"}]
     assert result["sha256:abc"]["response"]["result"]["data"]["element"]["id"] == "profile-1"
     assert "forged" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("entry_kind", ["settlement", "uncertain"])
+def test_finder_evidence_uses_sealed_input_and_keeps_success_with_delayed_cost(entry_kind):
+    source = contact_evidence.resolve_sources(
+        Store(finder_ledger(entry_kind=entry_kind)),
+        {"run_id": "execution-1"},
+        [{"contact": finder_contact()}],
+    )["sha256:finder"]
+
+    assert source["input"] == {
+        "full_name": "Jane Doe", "company_domain": "example.com"
+    }
+    assert source["response"]["toolResponse"]["rawV2"]["email"] == "jane@example.com"
+    assert source["call_identity"] == "sha256:finder"
+
+
+@pytest.mark.parametrize("mutation", ["missing", "wrong_tool", "extra_field", "failed"])
+def test_finder_evidence_rejects_unsealed_or_failed_metadata(mutation):
+    rows = finder_ledger(entry_kind="uncertain")
+    sealed = rows[0]["entry_doc"]["contact_finder_input"]
+    if mutation == "missing":
+        rows[0]["entry_doc"].pop("contact_finder_input")
+    elif mutation == "wrong_tool":
+        sealed["tool"] = "hunter_email_finder"
+    elif mutation == "extra_field":
+        sealed["payload"]["email"] = "jane@example.com"
+    else:
+        rows[1]["terminal_response"]["call_succeeded"] = False
+
+    result = contact_evidence.resolve_sources(
+        Store(rows), {"run_id": "execution-1"},
+        [{"contact": finder_contact()}],
+    )
+    assert result["sha256:finder"] == contact_evidence.INVALID_REFERENCE
 
 
 @pytest.mark.parametrize("mutation", ["other_run", "other_tool", "no_settlement", "http_error", "bad_body"])

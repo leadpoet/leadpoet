@@ -1481,6 +1481,42 @@ def test_deepline_call_uses_the_host_key_and_settles():
     assert json.loads(sent["body"]) == {"provider": "exa", "operation": "exa_search", "payload": {"query": "fintech"}}
     assert sent["headers"]["x-deepline-execute-response-intent"] == "raw"
     assert store.calls[call["call_identity"]]["provider"] == "deepline"
+    assert "contact_finder_input" not in store.calls[call["call_identity"]]["call_doc"]
+
+
+@pytest.mark.parametrize("tool,payload", [
+    ("hunter_email_finder", {"domain": "example.com", "first_name": "Sam", "last_name": "Lee", "max_duration": 10}),
+    ("limadata_find_work_email", {"company_domain": "example.com", "full_name": "Sam Lee"}),
+    ("datagma_find_email", {"companyDomain": "example.com", "fullName": "Sam Lee"}),
+    ("leadmagic_email_finder", {"domain": "example.com", "first_name": "Sam", "last_name": "Lee"}),
+])
+def test_email_finder_receipt_seals_validated_identity_input(tool, payload):
+    broker, store, transport = make_broker(transport=FakeTransport([
+        (200, {"email": "sam@example.com", "billing": {"credits": 0.1}}),
+    ]))
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": tool, "payload": payload},
+        action_sequence=0, timeout_ms=5000,
+    )
+    assert result.status == 200
+    receipt = store.calls[result.call["call_identity"]]["call_doc"]
+    assert receipt["contact_finder_input"] == {
+        "schema_version": "leadpoet.lab_arena.contact_finder_input.v1",
+        "tool": tool,
+        "payload": {key: value for key, value in payload.items() if key != "max_duration"},
+    }
+    assert "contact_finder_input" not in result.call
+    assert len(transport.sent) == 1
+
+    # Exact replays reuse the durable receipt and do not buy another lookup.
+    replay = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": tool, "payload": payload},
+        action_sequence=0, timeout_ms=5000,
+    )
+    assert replay.call["call_identity"] == result.call["call_identity"]
+    assert len(transport.sent) == 1
 
 
 @pytest.mark.parametrize(

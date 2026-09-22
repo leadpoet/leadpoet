@@ -736,8 +736,29 @@ def test_standalone_search_invalid_token_limit_never_dispatches(monkeypatch):
             },
         )
 
-    assert result.status_code == 400
-    assert result.json()["error"]["code"] == "invalid_output_token_limit"
+    assert result.status_code == 200
+    assert "No source evidence was retrieved" in result.json()["output"]
+
+
+@pytest.mark.parametrize("commands", [
+    {"search_query": [{"q": "   "}]},
+    {"click": [{"ref_id": "https://example.com", "id": 1}]},
+])
+def test_standalone_unsupported_command_is_a_nonfatal_tool_miss(monkeypatch, commands):
+    monkeypatch.setattr(
+        codex, "_dispatch",
+        lambda *_args, **_kwargs: pytest.fail("invalid search was dispatched"),
+    )
+    with codex.ResponsesBridge(
+        "/fixture-worker.sock", web_search="live",
+    ) as bridge, httpx.Client(trust_env=False) as client:
+        result = client.post(
+            bridge.base_url + "/alpha/search",
+            headers={"Authorization": "Bearer " + bridge.token},
+            json={"model": "openai/gpt-5.6-luna", "commands": commands},
+        )
+    assert result.status_code == 200
+    assert "No source evidence was retrieved" in result.json()["output"]
 
 
 def test_parallel_standalone_search_calls_queue_within_the_session_deadline(
@@ -943,6 +964,9 @@ def test_real_codex_standalone_web_search_crosses_accounted_bridge(
                     "call_id": "call-standalone-search", "name": "exec",
                     "namespace": "functions", "status": "completed",
                     "input": (
+                        "const missed = await tools.web__run({"
+                        "search_query: [{q: '   '}]"
+                        "});"
                         "const searched = await tools.web__run({"
                         "search_query: [{q: 'standalone executor proof'}]"
                         "});"
@@ -950,7 +974,7 @@ def test_real_codex_standalone_web_search_crosses_accounted_bridge(
                         "open: [{ref_id: "
                         "'https://example.com/standalone-source'}]"
                         "});"
-                        "text(JSON.stringify({searched, opened}));"
+                        "text(JSON.stringify({missed, searched, opened}));"
                     ),
                 }]
             elif search_adapter:
@@ -991,6 +1015,8 @@ def test_real_codex_standalone_web_search_crosses_accounted_bridge(
             else:
                 assert any(
                     item.get("type") == "custom_tool_call_output"
+                    and "No source evidence was retrieved"
+                    in json.dumps(item.get("output"))
                     and "EXACT_STANDALONE_SEARCH_RESULT"
                     in json.dumps(item.get("output"))
                     and "EXACT_STANDALONE_OPEN_RESULT"

@@ -874,7 +874,16 @@ class ResponsesBridge:
                     else:
                         self.reply(status, response)
                 except _BridgeRequestError as exc:
-                    self.reply(400, _invalid_responses_error(exc.code))
+                    if standalone_search and exc.code in {
+                        "invalid_web_search_tool", "invalid_output_token_limit",
+                        "live_web_search_required", "web_search_unavailable",
+                    }:
+                        # Codex's standalone client treats HTTP errors as fatal
+                        # to the model turn. A normal tool miss must remain a
+                        # tool result so research can use another valid query.
+                        self.reply(200, b'{"output":"The web command could not be executed. No source evidence was retrieved."}')
+                    else:
+                        self.reply(400, _invalid_responses_error(exc.code))
                 except (ValueError, TypeError, KeyError):
                     self.reply(400, _INVALID_RESPONSES_ERROR)
                 except (OSError, CodexRuntimeError):

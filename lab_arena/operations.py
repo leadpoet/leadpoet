@@ -1528,7 +1528,7 @@ def validate_operation_request(operation_id: str, parameters: Any) -> Dict[str, 
 
 
 def _validate_responses(parameters: Mapping[str, Any]) -> None:
-    """Stateless text, local tools, and one bounded native web-search tool."""
+    """Stateless text, local tools, and one bounded hosted web-search tool."""
 
     text = FieldSpec("str", max_length=OPENROUTER_MAX_CONTENT_CHARS)
     identifier = FieldSpec("str", required=True, min_length=1, max_length=256)
@@ -1567,7 +1567,7 @@ def _validate_responses(parameters: Mapping[str, Any]) -> None:
                     ),
                     "parameters": FieldSpec("object", required=True, fields={
                         "engine": FieldSpec(
-                            "str", required=True, choices=("native",),
+                            "str", required=True, choices=("native", "exa"),
                         ),
                         "max_uses": FieldSpec(
                             "int", required=True, minimum=1,

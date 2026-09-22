@@ -550,11 +550,31 @@ def _standalone_search_output(document: Any) -> bytes:
     if not isinstance(document, dict):
         return b'{"output":"The web lookup returned an invalid result. No source evidence was retrieved."}'
     output = document.get("output")
+    def completed_search_item(item: Any) -> bool:
+        if not isinstance(item, dict) or item.get("status") != "completed":
+            return False
+        if item.get("type") == "web_search_call":
+            return True
+        if item.get("type") != "openrouter:web_search":
+            return False
+        action = item.get("action")
+        sources = action.get("sources") if isinstance(action, dict) else None
+        return (
+            isinstance(action, dict)
+            and action.get("type") == "search"
+            and isinstance(sources, list)
+            and any(
+                isinstance(source, dict)
+                and source.get("type") == "url"
+                and isinstance(source.get("url"), str)
+                and source["url"].startswith(("https://", "http://"))
+                for source in sources
+            )
+        )
+
     completed_search = (
         document.get("status") == "completed" and isinstance(output, list)
-        and any(item.get("type") == "web_search_call"
-                and item.get("status") == "completed"
-                for item in output if isinstance(item, dict))
+        and any(completed_search_item(item) for item in output)
     )
     if not completed_search:
         return b'{"output":"The web lookup did not complete. No source evidence was retrieved."}'
@@ -819,7 +839,7 @@ class ResponsesBridge:
                         replacement = {
                             "type": "openrouter:web_search",
                             "parameters": {
-                                "engine": "native",
+                                "engine": "exa" if standalone_search else "native",
                                 "max_uses": WEB_SEARCH_MAX_TOOL_CALLS,
                                 "max_total_results": WEB_SEARCH_MAX_TOTAL_RESULTS,
                             },

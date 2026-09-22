@@ -132,6 +132,28 @@ def test_bounded_native_web_search_tool_history_and_citations_are_preserved():
     assert normalized["input"] == items
 
 
+def test_bounded_exa_web_search_tool_is_accepted():
+    web_tool = {
+        "type": "openrouter:web_search",
+        "parameters": {
+            "engine": "exa",
+            "max_uses": operations.OPENROUTER_WEB_SEARCH_MAX_TOOL_CALLS,
+            "max_total_results": operations.OPENROUTER_WEB_SEARCH_MAX_TOTAL_RESULTS,
+        },
+    }
+    params = {
+        "model": "openai/gpt-5.6-luna", "input": "Search",
+        "tools": [web_tool],
+        "max_tool_calls": operations.OPENROUTER_WEB_SEARCH_MAX_TOOL_CALLS,
+    }
+
+    normalized = operations.validate_operation_request(
+        "openrouter.responses", params,
+    )
+
+    assert normalized["tools"] == [web_tool]
+
+
 @pytest.mark.parametrize("action", [
     {"type": "open_page", "url": "http://example.com/page"},
     {

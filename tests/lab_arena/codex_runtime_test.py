@@ -687,8 +687,91 @@ def test_standalone_search_tool_miss_continues_without_source_claim(monkeypatch)
     assert result.status_code == 200
     assert "no cited source results" in result.json()["output"]
     assert len(sent) == 1
+    assert sent[0]["tools"] == [{
+        "type": "openrouter:web_search",
+        "parameters": {
+            "engine": "exa",
+            "max_uses": codex.WEB_SEARCH_MAX_TOOL_CALLS,
+            "max_total_results": codex.WEB_SEARCH_MAX_TOTAL_RESULTS,
+        },
+    }]
     assert sent[0]["tool_choice"] == "auto"
     assert sent[0]["max_output_tokens"] == 4096
+
+
+def test_standalone_exa_search_returns_only_structured_citations():
+    document = response(output=[
+        {
+            "id": "st_tmp_fixture", "type": "openrouter:web_search",
+            "status": "completed", "action": {
+                "type": "search", "query": "fixture company series a",
+                "sources": [
+                    {"type": "url", "url": "https://example.com/series-a"},
+                    {"type": "url", "url": "https://news.example/fixture"},
+                ],
+            },
+        },
+        {
+            "id": "msg-exa", "type": "message", "role": "assistant",
+            "status": "completed", "content": [{
+                "type": "output_text",
+                "text": "Fixture raised a Series A.",
+                "annotations": [{
+                    "type": "url_citation",
+                    "url": "https://example.com/series-a",
+                    "title": "Fixture Series A", "start_index": 0,
+                    "end_index": 27,
+                }],
+            }],
+        },
+    ])
+
+    result = json.loads(codex._standalone_search_output(document))["output"]
+
+    assert "Fixture raised a Series A." in result
+    assert "https://example.com/series-a" in result
+    assert "open each source URL" in result
+
+
+@pytest.mark.parametrize("document", [
+    response(output=[
+        {
+            "id": "st_tmp_empty", "type": "openrouter:web_search",
+            "status": "completed", "action": {
+                "type": "search", "query": "fixture", "sources": [],
+            },
+        },
+        {
+            "id": "msg-empty", "type": "message", "role": "assistant",
+            "status": "completed", "content": [{
+                "type": "output_text", "text": "https://example.com/spoof",
+                "annotations": [],
+            }],
+        },
+    ]),
+    response(output=[
+        {
+            "id": "st_tmp_plain", "type": "openrouter:web_search",
+            "status": "completed", "action": {
+                "type": "search", "query": "fixture", "sources": [{
+                    "type": "url", "url": "https://example.com/source",
+                }],
+            },
+        },
+        {
+            "id": "msg-plain", "type": "message", "role": "assistant",
+            "status": "completed", "content": [{
+                "type": "output_text", "text": "https://example.com/spoof",
+                "annotations": [],
+            }],
+        },
+    ]),
+])
+def test_standalone_exa_miss_or_plain_url_is_not_source_evidence(document):
+    result = json.loads(codex._standalone_search_output(document))["output"]
+
+    assert "No source evidence was retrieved" in result
+    assert "https://example.com/spoof" not in result
 
 
 @pytest.mark.parametrize("document", [
@@ -710,6 +793,13 @@ def test_standalone_search_tool_miss_continues_without_source_claim(monkeypatch)
                 "annotations": ["not-an-annotation"],
             }]},
         ],
+    },
+    {
+        "status": "completed",
+        "output": [{
+            "type": "openrouter:web_search", "status": "completed",
+            "action": "not-an-action",
+        }],
     },
 ])
 def test_standalone_malformed_provider_output_becomes_local_tool_miss(document):
@@ -981,7 +1071,7 @@ def test_real_codex_standalone_web_search_crosses_accounted_bridge(
                 assert body["tools"] == [{
                     "type": "openrouter:web_search",
                     "parameters": {
-                        "engine": "native",
+                        "engine": "exa",
                         "max_uses": codex.WEB_SEARCH_MAX_TOOL_CALLS,
                         "max_total_results": codex.WEB_SEARCH_MAX_TOTAL_RESULTS,
                     },
@@ -990,10 +1080,14 @@ def test_real_codex_standalone_web_search_crosses_accounted_bridge(
                 assert "standalone executor proof" in body["input"]
                 output = [
                     {
-                        "id": "ws-standalone", "type": "web_search_call",
+                        "id": "ws-standalone", "type": "openrouter:web_search",
                         "status": "completed", "action": {
                             "type": "search",
                             "query": "standalone executor proof",
+                            "sources": [{
+                                "type": "url",
+                                "url": "https://example.com/standalone-source",
+                            }],
                         },
                     },
                     {

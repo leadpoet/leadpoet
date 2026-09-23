@@ -1756,8 +1756,13 @@ def _grounded_exact_text(source_text: str, quote: Any) -> bool:
     marks around a copied sentence are formatting, not part of its evidence.
     """
 
-    normalized_source = " ".join(str(source_text or "").casefold().split())
-    normalized_quote = " ".join(str(quote or "").casefold().split())
+    # Fetchers can return Markdown while reviewers quote its visible text.
+    # Remove only ordinary link destinations; retain every visible word.
+    link_markup = r"(?<!!)\[([^\]\n]+)\]\(https?://[^\s()]+\)"
+    visible_source = re.sub(link_markup, r"\1", str(source_text or ""))
+    visible_quote = re.sub(link_markup, r"\1", str(quote or ""))
+    normalized_source = " ".join(visible_source.casefold().split())
+    normalized_quote = " ".join(visible_quote.casefold().split())
     wrappers = {'"': '"', "'": "'", "“": "”", "‘": "’"}
     if (
         len(normalized_quote) > 1
@@ -2555,6 +2560,7 @@ async def _scrape_linkedin_job(url: str) -> Dict[str, Any]:
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 STAGE1_MODEL = os.environ.get("INTENT_THREE_STAGE_S1_MODEL", "perplexity/sonar")
 STAGE3_MODEL = os.environ.get("INTENT_THREE_STAGE_S3_MODEL", "perplexity/sonar-pro")
+ARENA_EVIDENCE_MODEL = "openai/gpt-6-luna"
 TIMEOUT_SECONDS = 180
 SCRAPE_TIMEOUT = 60
 
@@ -3011,6 +3017,14 @@ def _build_final_judge_prompt(
         prompt = _prompts_default.build_final_judge_prompt(
             prompt_row, contents, source_name
         )
+    if row.get("_integrity_policy"):
+        prompt = (
+            "Assess the submitted event, not whether the model copied the input sentence. "
+            "Use the supplied source body to decide entity, event support and ICP fit. "
+            "Keep factual support separate from freshness; report the date of that event only. "
+            "Never substitute another event of the same company or import facts from memory.\n\n"
+            + prompt
+        )
     return prompt
 
 
@@ -3382,6 +3396,10 @@ async def _call_openrouter(
             "zdr": True,
         },
     }
+    if model == ARENA_EVIDENCE_MODEL:
+        body.pop("temperature", None)
+        body["reasoning"] = {"effort": "low"}
+        body["max_tokens"] = 4096
     request_reasoning = include_reasoning_default()
     reasoning_dropped = False
     if request_reasoning:
@@ -3737,12 +3755,49 @@ def _date_is_grounded_in_text(value: str, source_text: str) -> bool:
         "January", "February", "March", "April", "May", "June",
         "July", "August", "September", "October", "November", "December",
     )[parsed.month - 1]
+    abbreviated_month = "Sept?" if parsed.month == 9 else month[:3]
     patterns = (
         rf"(?<!\d){re.escape(normalized)}(?!\d)",
         rf"\b{month}\s+0?{parsed.day},\s+{parsed.year}\b",
-        rf"\b{month[:3]}\.?\s+0?{parsed.day},\s+{parsed.year}\b",
+        rf"\b{abbreviated_month}\.?\s+0?{parsed.day},\s+{parsed.year}\b",
+        rf"\b0?{parsed.day}\s+{month}\s+{parsed.year}\b",
+        rf"\b0?{parsed.day}\s+{abbreviated_month}\.?\s+{parsed.year}\b",
     )
     return any(re.search(pattern, source_text, re.IGNORECASE) for pattern in patterns)
+
+
+def _has_grounded_source_event_date(
+    item: Mapping[str, Any], source_text: str,
+) -> bool:
+    """Return whether a judge date note has a literal fetched-source basis."""
+
+    for raw_note in item.get("risk_notes") or []:
+        note = str(raw_note or "").strip()
+        prefix, _, value = note.partition(":")
+        if prefix == "source_event_date" and _date_is_grounded_in_text(
+            value, source_text
+        ):
+            return True
+        if prefix != "source_event_month" or not re.fullmatch(
+            r"\d{4}-\d{2}", value
+        ):
+            continue
+        try:
+            parsed = date.fromisoformat(value + "-01")
+        except ValueError:
+            continue
+        month = (
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December",
+        )[parsed.month - 1]
+        abbreviated_month = "Sept?" if parsed.month == 9 else month[:3]
+        if re.search(rf"(?<!\d){re.escape(value)}(?!\d)", source_text) or re.search(
+            rf"\b(?:{month}|{abbreviated_month}\.?)\s+{parsed.year}\b",
+            source_text,
+            re.IGNORECASE,
+        ):
+            return True
+    return False
 
 
 def _same_event_resolution_outcome(
@@ -3884,7 +3939,7 @@ async def verify_three_stage(
     buyer_max_age_days: Optional[int] = None,
     evidence_bundle: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """3-stage intent verification (sonar -> SD/Exa -> sonar-pro).
+    """Intent verification using fetched evidence and a source-grounded judge.
 
     Pipeline:
       1. Stage 1 sonar verdict, skipped in source-grounded mode.
@@ -3892,7 +3947,7 @@ async def verify_three_stage(
       3. Pre-LLM company-name-in-scrape check on the fetched content.
          If the company name isn't anywhere in any fetched page, short-
          circuit as wrong_entity (no sonar-pro call).
-      4. Stage 3 sonar-pro final verdict on the fetched content.
+      4. Final verdict on fetched content; social author checks retain search.
 
     Returns:
         client_ready (bool): True iff the FINAL pipeline decision is
@@ -4407,14 +4462,23 @@ async def verify_three_stage(
                 },
             }
 
-    # ── STAGE 3: sonar-pro final judge ─────────────────────────────
+    # Social author and podcast guest checks still need Sonar's search.
+    # Other Arena reviews use the tested fetched-evidence role.
+    selected_stage3_model = stage3_model or (
+        os.environ.get("ARENA_INTENT_EVIDENCE_MODEL", ARENA_EVIDENCE_MODEL)
+        if integrity_policy and row.get("_evidence_type") not in {
+            "SOCIAL_POSTING", "PODCAST_APPEARANCE",
+        }
+        else STAGE3_MODEL
+    )
+    # ── STAGE 3: source-grounded final judge ───────────────────────
     s3_prompt = _build_final_judge_prompt(
         row,
         contents,
         verified_identity_context=verified_identity_context,
     )
     s3_envelope = await _call_openrouter(
-        client, stage3_model or STAGE3_MODEL, s3_prompt
+        client, selected_stage3_model, s3_prompt
     )
     if bundle and not s3_envelope.get("_error"):
         evaluations = (s3_envelope.get("answer") or {}).get("signal_evaluations")
@@ -4429,7 +4493,7 @@ async def verify_three_stage(
             "scrape": {"statuses": contents.get("statuses") or [],
                        "result_count": len(contents.get("results") or [])},
             "stage3": {
-                "model": stage3_model or STAGE3_MODEL,
+                "model": selected_stage3_model,
                 "status": "llm_error",
                 "confidence": None,
                 "decision": "unavailable",
@@ -4517,20 +4581,21 @@ async def verify_three_stage(
     _bind_approximate_event_month(s3_item, combined_text, str(row["claim"]))
     same_event_resolution: Optional[Dict[str, Any]] = None
     same_event_candidates = _same_event_link_candidates(contents, row)
-    has_grounded_event_date = any(
-        str(note or "").startswith((
-            "source_event_date:", "source_event_month:",
-        ))
-        for note in (s3_item.get("risk_notes") or [])
+    has_grounded_event_date = (
+        _has_grounded_source_event_date(s3_item, combined_text)
+        if integrity_policy
+        else False
     )
     should_resolve_same_event = bool(
         integrity_policy
         and len(bundle) <= 1
         and not is_hiring_claim
         and same_event_candidates
-        and s3_item.get("signal_status") == "supported"
+        and s3_item.get("signal_status") in {
+            "supported", "partially_supported", "unable_to_verify",
+        }
         and s3_item.get("same_entity_check") == "pass"
-        and s3_item.get("claim_matches_miner_date") == "no_date_in_content"
+        and not s3_item.get("contradicting_quotes")
         and not has_grounded_event_date
     )
     if should_resolve_same_event:
@@ -4584,7 +4649,7 @@ async def verify_three_stage(
                 )
                 chain_envelope = await _call_openrouter(
                     client,
-                    stage3_model or STAGE3_MODEL,
+                    selected_stage3_model,
                     chain_prompt,
                     max_attempts=1,
                 )
@@ -4684,7 +4749,7 @@ async def verify_three_stage(
         clarification_prompt = s3_prompt + "\n\n" + clarification_instruction
         clarification_envelope = await _call_openrouter(
             client,
-            stage3_model or STAGE3_MODEL,
+            selected_stage3_model,
             clarification_prompt,
             max_attempts=1,
         )
@@ -4702,7 +4767,7 @@ async def verify_three_stage(
                     "result_count": len(contents.get("results") or []),
                 },
                 "stage3": {
-                    "model": stage3_model or STAGE3_MODEL,
+                    "model": selected_stage3_model,
                     "status": "llm_error",
                     "confidence": None,
                     "decision": "unavailable",

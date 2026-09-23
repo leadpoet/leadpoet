@@ -27,6 +27,7 @@ DEFAULT_JUDGE_MODELS = {
     "company_fit_reverification": "perplexity/sonar",
     "intent_signal_judge": "anthropic/claude-sonnet-4.5",
     "intent_three_stage_stage3": "perplexity/sonar-pro",
+    "intent_fetched_evidence": "openai/gpt-6-luna",
     "role_batch_check": "google/gemini-2.5-flash",
 }
 CREDENTIAL_ENV_NAMES = (
@@ -115,7 +116,17 @@ def apply_policy_to_environment(
     """
 
     validated = contracts.validate_scorer_policy(policy)
-    for name, value in validated["env_bindings"].items():
+    bindings = dict(validated["env_bindings"])
+    # A new image can serve an older round. Preserve its frozen reviewer.
+    models = validated["judge_models"]
+    evidence_model = models.get("intent_fetched_evidence") or models.get(
+        "intent_three_stage_stage3"
+    )
+    if evidence_model:
+        if bindings.get("ARENA_INTENT_EVIDENCE_MODEL", evidence_model) != evidence_model:
+            raise ScorerPolicyConflict("evidence reviewer conflicts with the frozen model policy")
+        bindings["ARENA_INTENT_EVIDENCE_MODEL"] = evidence_model
+    for name, value in bindings.items():
         existing = environ.get(name)
         if existing is not None and existing != value:
             raise ScorerPolicyConflict("environment %s conflicts with the scorer policy" % name)
@@ -126,7 +137,7 @@ def apply_policy_to_environment(
         existing = environ.get(name)
         if existing is not None and existing != secret:
             raise ScorerPolicyConflict("environment %s conflicts with the Arena scoring credential" % name)
-    for name, value in validated["env_bindings"].items():
+    for name, value in bindings.items():
         environ[name] = value
     for name in CREDENTIAL_ENV_NAMES:
         environ[name] = credentials[name]

@@ -47,7 +47,7 @@ async def _verify(monkeypatch, response, *, text=CLAIM, soft=True, fetch_ok=True
     async def review(_client, model, prompt, **_kwargs):
         events.append("review")
         if soft:
-            assert model == intent.STAGE3_MODEL
+            assert model == intent.ARENA_EVIDENCE_MODEL
             assert text in prompt
         return response
 

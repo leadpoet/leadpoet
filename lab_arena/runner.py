@@ -45,6 +45,7 @@ from lab_arena import contracts, images, lab_arena_checkpoint, leased_images, op
 from lab_arena.contracts import ArenaContractError
 from lab_arena.output import (
     OutputInvalid,
+    SUPPORTED_OUTPUT_SCHEMA_VERSIONS,
     output_document_from_bytes,
     output_invalid_reason,
 )
@@ -175,6 +176,7 @@ _KNOWN_CLAIM_DENIAL_CODES = frozenset(
         "runner_stake_below_minimum",
         "runner_validator_authority_unavailable",
         "runner_validator_required",
+        "validator_output_schema_upgrade_required",
         "validator_checkpoint_upgrade_required",
         "signature_invalid",
     }
@@ -2974,6 +2976,9 @@ class Runner:
             hotkey=config.identity.hotkey,
             body={"declared_parallelism": capacity,
                   "proxy_execution_version": contracts.PROXY_EXECUTION_VERSION,
+                  "output_schema_versions": sorted(
+                      SUPPORTED_OUTPUT_SCHEMA_VERSIONS
+                  ),
                   # The singular field keeps compatibility with a 45-minute
                   # service. New services use the full supported profile list.
                   "checkpoint_deadline_policy": contracts.CHECKPOINT_DEADLINE_POLICY,

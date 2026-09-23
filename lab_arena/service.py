@@ -3531,6 +3531,23 @@ class ArenaService:
         if isinstance(declared, bool) or not isinstance(declared, int) or declared < 1:
             raise ServiceError("declared_parallelism_invalid", 400)
         configuration = round_row["configuration_doc"]
+        required_output_schema = contact_policy.output_schema(configuration)
+        if (
+            required_output_schema
+            == intent_details_policy.COMPANY_ONLY_OUTPUT_SCHEMA
+        ):
+            advertised_output_schemas = body.get("output_schema_versions")
+            if (
+                not isinstance(advertised_output_schemas, list)
+                or any(
+                    not isinstance(schema, str)
+                    for schema in advertised_output_schemas
+                )
+                or required_output_schema not in advertised_output_schemas
+            ):
+                raise ServiceError(
+                    "validator_output_schema_upgrade_required", 409
+                )
         snapshot = self._benchmark_snapshot()
         proxy_execution_required = (
             configuration.get("parallel_twenty_icp_execution") is True

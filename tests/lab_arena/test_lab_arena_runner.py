@@ -705,6 +705,11 @@ def test_run_once_respects_max_claims_and_images_export_once(tmp_path):
         == list(contracts.CHECKPOINT_DEADLINE_POLICIES)
         for c in api.claims
     )
+    assert all(
+        c["body"]["output_schema_versions"]
+        == sorted(rn.SUPPORTED_OUTPUT_SCHEMA_VERSIONS)
+        for c in api.claims
+    )
 
 
 def test_run_once_refills_a_slot_before_a_slow_lease_finishes(tmp_path):

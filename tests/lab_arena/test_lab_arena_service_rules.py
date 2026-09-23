@@ -9,7 +9,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from lab_arena import contracts, rewards, scoring, signing, source_bundle
+from lab_arena import (
+    contracts,
+    intent_details_policy,
+    output,
+    rewards,
+    scoring,
+    signing,
+    source_bundle,
+)
 from lab_arena.output import validate_output_document
 from lab_arena.service import ArenaService, S3ObjectStore, ServiceError, _parse_iso
 from lab_arena.store import ArenaStoreError, hash_lease_token
@@ -2173,6 +2181,7 @@ def _runner_claim_service(*, registered, role, configured=False):
     service._store = SimpleNamespace(
         claim_assignment=lambda **_kwargs: {"status": "empty"},
         recover_claim_response=lambda **_kwargs: None,
+        list_submissions=lambda *_args, **_kwargs: [],
     )
     service._config = SimpleNamespace(
         chain=chain,
@@ -2223,6 +2232,115 @@ def test_claim_accepts_eligible_validator_absent_from_runner_configuration():
     )
 
     assert service.handle_claim({}) == {"status": "empty"}
+
+
+@pytest.mark.parametrize(
+    "advertised_output_schemas",
+    [None, [intent_details_policy.OUTPUT_SCHEMA]],
+    ids=["missing", "unsupported"],
+)
+def test_company_only_v6_round_fences_stale_validator_before_leasing(
+    advertised_output_schemas,
+):
+    service = _runner_claim_service(
+        registered=True, role="validator", configured=False
+    )
+    original = service._request_round
+    allocated = []
+
+    def company_only_round(*args, **kwargs):
+        validated, round_row = original(*args, **kwargs)
+        if advertised_output_schemas is not None:
+            validated["body"] = {
+                **validated["body"],
+                "output_schema_versions": advertised_output_schemas,
+            }
+        round_row["configuration_doc"] = {
+            **round_row["configuration_doc"],
+            "integrity_policy": "arena_integrity_v1",
+            "intent_details_policy": intent_details_policy.POLICY,
+        }
+        return validated, round_row
+
+    service._request_round = company_only_round
+    service._store.claim_assignment = lambda **kwargs: (
+        allocated.append(kwargs) or {"status": "empty"}
+    )
+
+    with pytest.raises(ServiceError) as rejected:
+        service.handle_claim({})
+
+    assert rejected.value.code == "validator_output_schema_upgrade_required"
+    assert rejected.value.status == 409
+    assert allocated == []
+
+
+def test_company_only_v6_round_accepts_upgraded_eligible_validator():
+    service = _runner_claim_service(
+        registered=True, role="validator", configured=False
+    )
+    original = service._request_round
+    allocated = []
+
+    def company_only_round(*args, **kwargs):
+        validated, round_row = original(*args, **kwargs)
+        validated["body"] = {
+            **validated["body"],
+            "output_schema_versions": sorted(
+                output.SUPPORTED_OUTPUT_SCHEMA_VERSIONS
+            ),
+        }
+        round_row["configuration_doc"] = {
+            **round_row["configuration_doc"],
+            "integrity_policy": "arena_integrity_v1",
+            "intent_details_policy": intent_details_policy.POLICY,
+        }
+        return validated, round_row
+
+    service._request_round = company_only_round
+    service._store.claim_assignment = lambda **kwargs: (
+        allocated.append(kwargs) or {"status": "empty"}
+    )
+
+    assert service.handle_claim({}) == {"status": "empty"}
+    assert len(allocated) == 1
+
+
+@pytest.mark.parametrize(
+    "legacy_policy",
+    [
+        {},
+        {
+            "integrity_policy": "arena_integrity_v1",
+            "contact_policy": "contacts_v1",
+            "intent_details_policy": intent_details_policy.POLICY,
+        },
+    ],
+)
+def test_legacy_output_rounds_keep_accepting_claims_without_capability(
+    legacy_policy,
+):
+    service = _runner_claim_service(
+        registered=True, role="validator", configured=False
+    )
+    original = service._request_round
+    allocated = []
+
+    def legacy_round(*args, **kwargs):
+        validated, round_row = original(*args, **kwargs)
+        round_row["configuration_doc"] = {
+            **round_row["configuration_doc"],
+            **legacy_policy,
+        }
+        return validated, round_row
+
+    service._request_round = legacy_round
+    service._store.claim_assignment = lambda **kwargs: (
+        allocated.append(kwargs) or {"status": "empty"}
+    )
+
+    assert service.handle_claim({}) == {"status": "empty"}
+    assert len(allocated) == 1
 
 
 def test_checkpoint_round_fences_old_validator_claims_before_leasing():

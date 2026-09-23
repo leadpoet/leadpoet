@@ -90,9 +90,14 @@ def test_models_roundtrip_raw_new_claims_and_contacts():
     assert contact_policy.output_schema({"company_quality_policy": quality_policy.POLICY, "contact_policy": contact_policy.POLICY}) == quality_policy.CONTACT_OUTPUT_SCHEMA
 
 
-def test_intent_details_policy_selects_v5_without_enabling_other_gates():
+def test_intent_details_policy_selects_v6_without_enabling_other_gates():
     marker = {"intent_details_policy": intent_details_policy.POLICY}
-    assert contact_policy.output_schema(marker) == intent_details_policy.OUTPUT_SCHEMA
+    assert contact_policy.output_schema(marker) == (
+        intent_details_policy.COMPANY_ONLY_OUTPUT_SCHEMA
+    )
+    assert contact_policy.output_schema(
+        {**marker, "contact_policy": contact_policy.POLICY}
+    ) == intent_details_policy.OUTPUT_SCHEMA
     assert not contact_policy.enabled(marker)
     assert not quality_policy.enabled(marker)
 

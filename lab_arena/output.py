@@ -23,6 +23,7 @@ SUPPORTED_OUTPUT_SCHEMA_VERSIONS = frozenset(
         "leadpoet.lab_arena.output.v3",
         "leadpoet.lab_arena.output.v4",
         "leadpoet.lab_arena.output.v5",
+        "leadpoet.lab_arena.output.v6",
     }
 )
 
@@ -64,11 +65,32 @@ def validate_companies(
     """Validate companies with the shared public competition model."""
 
     try:
+        validation_schema = schema_version
+        if schema_version == "leadpoet.lab_arena.output.v6":
+            # V6 freezes the V5 company and intent requirements while removing
+            # its optional contact claim. Ignore that one legacy field without
+            # validating it so contact data cannot affect acceptance or score;
+            # the V5 model still rejects every other unknown company field.
+            if isinstance(companies, list):
+                companies = [
+                    {
+                        key: value
+                        for key, value in company.items()
+                        if key != "contact"
+                    }
+                    if isinstance(company, Mapping)
+                    else company
+                    for company in companies
+                ]
+            validation_schema = "leadpoet.lab_arena.output.v5"
         rows = validate_public_companies(
             companies,
             max_companies=MAX_COMPANIES,
-            schema_version=schema_version,
+            schema_version=validation_schema,
         )
+        if schema_version == "leadpoet.lab_arena.output.v6":
+            for row in rows:
+                row.pop("contact", None)
     except (TypeError, ValueError) as exc:
         raise OutputInvalid("companies fail the public output contract") from exc
     if require_intent_dates and any(

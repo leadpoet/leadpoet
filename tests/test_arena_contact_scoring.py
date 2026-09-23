@@ -9,7 +9,6 @@ import pytest
 
 from qualification.scoring import contact_verification, lead_scorer
 from qualification.scoring.competition import (
-    CompetitionScorerInputError,
     CompetitionCompanyScorer,
     count_penalizable_false_positives,
     effective_competition_input,
@@ -467,8 +466,9 @@ def test_legacy_effective_input_is_unchanged_when_contact_mode_is_off() -> None:
     assert implicit["icp"]["target_roles"] == []
     assert implicit["icp"]["target_seniority"] == ""
 
-    with pytest.raises(CompetitionScorerInputError):
-        effective_competition_input([_company()], _icp())
+    # A legacy contact claim is explicitly ignored when contact mode is off.
+    # It cannot change the company judge input or create a contact gate.
+    assert effective_competition_input([_company()], _icp()) == implicit
 
 
 def test_contact_effective_input_hashes_semantics_and_excludes_unused_metadata() -> None:

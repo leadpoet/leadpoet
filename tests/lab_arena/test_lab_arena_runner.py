@@ -268,7 +268,7 @@ def test_accepted_run_bridges_provider_calls_and_returns_a_small_result(tmp_path
     assert runner_.abandoned == 0
 
 
-def test_v5_lease_announces_and_accepts_only_the_simplified_output(tmp_path):
+def test_v6_lease_announces_and_accepts_only_company_intent_output(tmp_path):
     run_lease = lease()
     run_lease.update({
         "integrity_policy": "arena_integrity_v1",
@@ -283,14 +283,16 @@ def test_v5_lease_announces_and_accepts_only_the_simplified_output(tmp_path):
     rn.Runner(make_config(tmp_path, api, sandbox)).run_once()
 
     document = sandbox.input_documents[0]
-    assert document["output_schema_version"] == intent_details_policy.OUTPUT_SCHEMA
+    assert document["output_schema_version"] == (
+        intent_details_policy.COMPANY_ONLY_OUTPUT_SCHEMA
+    )
     assert document["icp"]["intent_details_policy"] == (
         intent_details_policy.POLICY
     )
     completion = api.completions[0]["body"]
     assert completion["result"]["terminal_status"] == "accepted"
     assert completion["output"]["schema_version"] == (
-        intent_details_policy.OUTPUT_SCHEMA
+        intent_details_policy.COMPANY_ONLY_OUTPUT_SCHEMA
     )
     assert completion["output"]["companies"][0]["intent_signals"][0] == {
         "matched_icp_signal": 0,

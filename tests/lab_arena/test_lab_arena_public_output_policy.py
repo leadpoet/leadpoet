@@ -71,7 +71,7 @@ def _missing_round():
         ({"integrity_policy": "arena_integrity_v1", "contact_policy": "contacts_v1"}, "leadpoet.lab_arena.output.v2"),
         ({"integrity_policy": "arena_integrity_v1", "company_quality_policy": "company_quality_v1"}, "leadpoet.lab_arena.output.v3"),
         ({"integrity_policy": "arena_integrity_v1", "contact_policy": "contacts_v1", "company_quality_policy": "company_quality_v1"}, "leadpoet.lab_arena.output.v4"),
-        ({"integrity_policy": "arena_integrity_v1", "intent_details_policy": "intent_details_v1"}, "leadpoet.lab_arena.output.v5"),
+        ({"integrity_policy": "arena_integrity_v1", "intent_details_policy": "intent_details_v1"}, "leadpoet.lab_arena.output.v6"),
         ({"integrity_policy": "arena_integrity_v1", "contact_policy": "contacts_v1", "company_quality_policy": "company_quality_v1", "intent_details_policy": "intent_details_v1"}, "leadpoet.lab_arena.output.v5"),
     ],
 )

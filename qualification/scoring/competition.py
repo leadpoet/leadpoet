@@ -267,11 +267,10 @@ def _normalized_company(
     company_quality: bool = False,
 ) -> dict[str, Any]:
     try:
-        # V2 carries a contact claim which the independent contact gate owns.
-        # The legacy company judge remains contact-blind and extra-forbidding.
+        # Contact-bearing historical schemas are scored by an independent
+        # contact gate. The company judge is contact-blind in every mode.
         company_input = dict(company)
-        if contacts_required:
-            company_input.pop("contact", None)
+        company_input.pop("contact", None)
         simplified_intent = "intent_details" in company_input
         if simplified_intent:
             from qualification.competition_models import CompetitionCompanyV5

@@ -17,7 +17,7 @@ from tests.lab_arena.test_lab_arena_runner import (
     ({"contact_policy": "contacts_v1"}, 2),
     ({"company_quality_policy": "company_quality_v1"}, 3),
     ({"company_quality_policy": "company_quality_v1", "contact_policy": "contacts_v1"}, 4),
-    ({"intent_details_policy": "intent_details_v1"}, 5),
+    ({"intent_details_policy": "intent_details_v1"}, 6),
     ({"intent_details_policy": "intent_details_v1", "contact_policy": "contacts_v1"}, 5),
 ])
 def test_round_schema_reaches_actual_harness_and_matches_validation(

@@ -43,6 +43,10 @@ PRICE_TABLE_SCHEMA_VERSION = "leadpoet.lab_arena.openrouter_price_table.v1"
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_GENERATION_URL = "https://openrouter.ai/api/v1/generation?id="
 OPENROUTER_LUNA_RESPONSES_MODEL = "openai/gpt-5.6-luna"
+OPENROUTER_GPT6_LUNA_RESPONSES_MODEL = "openai/gpt-6-luna"
+OPENROUTER_REGIONAL_LUNA_RESPONSES_MODELS = frozenset(
+    (OPENROUTER_LUNA_RESPONSES_MODEL, OPENROUTER_GPT6_LUNA_RESPONSES_MODEL)
+)
 # Luna's price ceilings use the regional endpoint price at 1.10x the model
 # catalog row. Prompt-cache writes are 1.25x its ordinary prompt price. The
 # bounded host policy reserves that larger input-token ceiling because Responses
@@ -56,6 +60,10 @@ OPENROUTER_LUNA_CACHE_WRITE_PRICE_MULTIPLIER = Decimal("1.25")
 OPENROUTER_LUNA_LONG_CONTEXT_MIN_PROMPT_TOKENS = 272_000
 OPENROUTER_LUNA_LONG_CONTEXT_PROMPT_PRICE = Decimal("0.0000004")
 OPENROUTER_LUNA_LONG_CONTEXT_COMPLETION_PRICE = Decimal("0.0000018")
+# GPT-6 Luna has its own published 272k-token tier. These catalog prices are
+# converted to the verified Azure US/EU endpoint ceiling below.
+OPENROUTER_GPT6_LUNA_LONG_CONTEXT_PROMPT_PRICE = Decimal("0.0000002")
+OPENROUTER_GPT6_LUNA_LONG_CONTEXT_COMPLETION_PRICE = Decimal("0.00000075")
 OPENROUTER_PRICE_PER_MILLION = Decimal("1000000")
 OPENROUTER_NATIVE_WEB_SEARCH_RESERVATION_USD_PER_CALL = Decimal("0.01")
 DEEPLINE_BILLING_LEDGER_URL = "https://code.deepline.com/api/v2/billing/ledger"
@@ -686,7 +694,7 @@ def _openrouter_host_route(
     if (
         kind != "execute"
         or operation_id != "openrouter.responses"
-        or model != OPENROUTER_LUNA_RESPONSES_MODEL
+        or model not in OPENROUTER_REGIONAL_LUNA_RESPONSES_MODELS
     ):
         return None
     regional = {
@@ -694,19 +702,22 @@ def _openrouter_host_route(
         * OPENROUTER_LUNA_REGIONAL_PRICE_MULTIPLIER
         for component in PRICED_COMPONENTS
     }
-    if (
-        bounded_input_tokens(parameters)
-        >= OPENROUTER_LUNA_LONG_CONTEXT_MIN_PROMPT_TOKENS
-    ):
+    if bounded_input_tokens(parameters) >= OPENROUTER_LUNA_LONG_CONTEXT_MIN_PROMPT_TOKENS:
+        if model == OPENROUTER_GPT6_LUNA_RESPONSES_MODEL:
+            long_prompt_price = OPENROUTER_GPT6_LUNA_LONG_CONTEXT_PROMPT_PRICE
+            long_completion_price = (
+                OPENROUTER_GPT6_LUNA_LONG_CONTEXT_COMPLETION_PRICE
+            )
+        else:
+            long_prompt_price = OPENROUTER_LUNA_LONG_CONTEXT_PROMPT_PRICE
+            long_completion_price = OPENROUTER_LUNA_LONG_CONTEXT_COMPLETION_PRICE
         regional["prompt"] = max(
             regional["prompt"],
-            OPENROUTER_LUNA_LONG_CONTEXT_PROMPT_PRICE
-            * OPENROUTER_LUNA_REGIONAL_PRICE_MULTIPLIER,
+            long_prompt_price * OPENROUTER_LUNA_REGIONAL_PRICE_MULTIPLIER,
         )
         regional["completion"] = max(
             regional["completion"],
-            OPENROUTER_LUNA_LONG_CONTEXT_COMPLETION_PRICE
-            * OPENROUTER_LUNA_REGIONAL_PRICE_MULTIPLIER,
+            long_completion_price * OPENROUTER_LUNA_REGIONAL_PRICE_MULTIPLIER,
         )
     regional["prompt"] *= OPENROUTER_LUNA_CACHE_WRITE_PRICE_MULTIPLIER
     max_completion_price = (
@@ -3269,18 +3280,19 @@ class Broker:
                     # from an unqualified account-level 429. It does not prove
                     # zero cost; retry authority is added only after the exact
                     # call identity is durably marked uncertain below.
+                    response_model = effective_normalized.get("model")
                     openrouter_completed_rate_limit_proven = (
                         getattr(context, "kind", "execute") == "execute"
                         and effective_operation_id == "openrouter.responses"
                         and funding_source in ("host", "miner_key")
-                        and effective_normalized.get("model")
-                        == OPENROUTER_LUNA_RESPONSES_MODEL
+                        and response_model
+                        in OPENROUTER_REGIONAL_LUNA_RESPONSES_MODELS
                         and openrouter_host_route is not None
                         and amount == 0
                         and openrouter_canonical_response_error
                         and _openrouter_completed_rate_limit_retryable(
                             raw_document,
-                            model=OPENROUTER_LUNA_RESPONSES_MODEL,
+                            model=response_model,
                             generation_id=openrouter_generation_id,
                             credential_fingerprint=provider_credential_fingerprint,
                         )

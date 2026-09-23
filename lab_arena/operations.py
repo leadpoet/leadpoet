@@ -2023,7 +2023,10 @@ def build_outbound_request(
                 or (
                     set(policy) != policy_fields
                     and (
-                        normalized.get("model") != "openai/gpt-5.6-luna"
+                        normalized.get("model") not in {
+                            "openai/gpt-5.6-luna",
+                            "openai/gpt-6-luna",
+                        }
                         or (
                             policy.get("order") != ["azure/us"]
                             and policy.get("only")

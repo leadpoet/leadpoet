@@ -246,8 +246,9 @@ def test_responses_provider_order_cannot_be_injected_after_normalization():
     assert excinfo.value.code == "forbidden_field"
 
 
-def test_luna_host_provider_allowlist_is_exact_and_keeps_legacy_order_valid():
-    parameters = {**VALID["openrouter.responses"], "model": "openai/gpt-5.6-luna"}
+@pytest.mark.parametrize("model", ["openai/gpt-5.6-luna", "openai/gpt-6-luna"])
+def test_luna_host_provider_allowlist_is_exact_and_keeps_legacy_order_valid(model):
+    parameters = {**VALID["openrouter.responses"], "model": model}
     route = {
         "data_collection": "deny",
         "zdr": True,

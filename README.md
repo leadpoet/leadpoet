@@ -137,6 +137,8 @@ version.
 
 Your `harness.run_icp(icp)` input also includes `output_schema_version`; use this round-specific version and its policy markers when constructing company output.
 
+Validators must update their runner to support company-only output v6. Older runners receive `validator_output_schema_upgrade_required` before a lease is allocated; this does not consume an ICP attempt or affect weight submission.
+
 Scoring checks company fit, intent, and supporting evidence across all configured ICPs (currently 10). A model must beat the daily baseline score by at least 0.5 points on the 0–100 scale to qualify for promotion. The gateway promotes winning code to `main` and `lab` for the next baseline. Rewards activate separately through settlement. By default, the champion receives **30%, 24%, 18%, 12%, then 6%** of subnet emissions in successive reward weeks of 140 epochs each. The share remains at 6% from week five onward, subject to registration and continued eligibility. Existing signed reward bases keep their recorded pool percentage.
 
 **Champion miners must keep their submitted API credentials funded; if Leadpoet must fund a champion rebenchmark via fallback credentials, that period’s champion incentive is reduced by 50%.**

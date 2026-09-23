@@ -16,10 +16,12 @@ from lab_arena import contracts, runtime, shim
 from lab_arena import runner as rn
 from tests.lab_arena.test_lab_arena_broker import (
     CONTEXT,
+    GPT6_LUNA_RESPONSES,
     HOST_KEYS,
     LUNA_RESPONSES,
     FakeTransport,
     ZeroReservationLedgerStore,
+    gpt6_luna_price_table,
     luna_price_table,
     make_broker,
 )
@@ -675,37 +677,49 @@ def test_worker_retries_luna_throttle_with_same_bounded_host_policy(
 
 
 @pytest.mark.parametrize(
-    ("funding_source", "champion_credential_retry", "metadata"),
+    ("funding_source", "champion_credential_retry", "include_metadata"),
     [
-        (
-            "host",
-            False,
-            {
-                "requested": br.OPENROUTER_LUNA_RESPONSES_MODEL,
-                "is_byok": False,
-                "attempt": 1,
-                "pipeline": [],
-                "attempts": [{"status": 429}],
-            },
-        ),
-        (
-            "miner_key",
-            False,
-            {
-                "requested": br.OPENROUTER_LUNA_RESPONSES_MODEL,
-                "is_byok": False,
-                "attempt": 1,
-                "pipeline": [],
-                "attempts": [{"status": 429}],
-            },
-        ),
-        ("miner_key", True, None),
+        ("host", False, True),
+        ("miner_key", False, True),
+        ("miner_key", True, False),
     ],
     ids=("host", "miner", "promoted-champion-null-metadata"),
 )
+@pytest.mark.parametrize(
+    ("model", "parameters", "table_factory"),
+    [
+        (
+            br.OPENROUTER_LUNA_RESPONSES_MODEL,
+            LUNA_RESPONSES,
+            luna_price_table,
+        ),
+        (
+            br.OPENROUTER_GPT6_LUNA_RESPONSES_MODEL,
+            GPT6_LUNA_RESPONSES,
+            gpt6_luna_price_table,
+        ),
+    ],
+    ids=("gpt-5.6-luna", "gpt-6-luna"),
+)
 def test_completed_luna_throttle_has_same_recovery_and_late_cost_for_each_funder(
-    monkeypatch, tmp_path, funding_source, champion_credential_retry, metadata
+    monkeypatch,
+    tmp_path,
+    funding_source,
+    champion_credential_retry,
+    include_metadata,
+    model,
+    parameters,
+    table_factory,
 ):
+    metadata = None
+    if include_metadata:
+        metadata = {
+            "requested": model,
+            "is_byok": False,
+            "attempt": 1,
+            "pipeline": [],
+            "attempts": [{"status": 429}],
+        }
     failed = {
         "id": "gen-failed-429-parity",
         "object": "response",
@@ -720,7 +734,7 @@ def test_completed_luna_throttle_has_same_recovery_and_late_cost_for_each_funder
         "id": "gen-completed-parity",
         "object": "response",
         "status": "completed",
-        "model": br.OPENROUTER_LUNA_RESPONSES_MODEL,
+        "model": model,
         "error": None,
         "output": [],
         "usage": {"cost": "0.00025"},
@@ -742,7 +756,7 @@ def test_completed_luna_throttle_has_same_recovery_and_late_cost_for_each_funder
             marked.append((context, provider, evidence)) or {"status": "marked"}
         ),
     )
-    broker._price_table = luna_price_table()
+    broker._price_table = table_factory()
 
     class BrokerApi:
         def __init__(self):
@@ -757,7 +771,7 @@ def test_completed_luna_throttle_has_same_recovery_and_late_cost_for_each_funder
     event = install_clock(monkeypatch, worker)
 
     error, result = worker._dispatch(
-        "openrouter.responses", LUNA_RESPONSES, 300_000
+        "openrouter.responses", parameters, 300_000
     )
 
     assert error is None and result["status"] == 200

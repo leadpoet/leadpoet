@@ -63,6 +63,19 @@ def luna_price_table():
     return br.validate_price_table(table)
 
 
+def gpt6_luna_price_table():
+    table = price_table()
+    table["models"][br.OPENROUTER_GPT6_LUNA_RESPONSES_MODEL] = {
+        "prompt": "0.0000001",
+        "completion": "0.0000005",
+        "request": "0",
+        "image": "0",
+        "web_search": "0.01",
+        "internal_reasoning": "0",
+    }
+    return br.validate_price_table(table)
+
+
 class FakeLedgerStore:
     """In-memory model of the section 7.5 ledger functions and their statuses."""
 
@@ -1447,6 +1460,11 @@ LUNA_RESPONSES = {
     "max_output_tokens": 256,
     "prompt_cache_key": "arena-luna-route-test",
 }
+GPT6_LUNA_RESPONSES = {
+    **LUNA_RESPONSES,
+    "model": br.OPENROUTER_GPT6_LUNA_RESPONSES_MODEL,
+    "prompt_cache_key": "arena-gpt6-luna-route-test",
+}
 
 
 def test_persistent_reservation_store_unavailable_propagates_after_one_readback():
@@ -2145,6 +2163,47 @@ def test_luna_responses_uses_two_region_zdr_fallback_and_reserves_its_price_ceil
     assert store.calls[result.call["call_identity"]]["actual"] == 250
 
 
+def test_gpt6_luna_responses_uses_verified_regional_prices_and_privacy_route():
+    payload = {
+        "id": "gen-gpt6-luna-regional",
+        "model": br.OPENROUTER_GPT6_LUNA_RESPONSES_MODEL,
+        "output": [],
+        "usage": {"cost": "0.00012"},
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, payload)])
+    )
+    table = gpt6_luna_price_table()
+    broker._price_table = table
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.responses",
+        parameters=GPT6_LUNA_RESPONSES,
+        action_sequence=0,
+        timeout_ms=300_000,
+    )
+
+    assert result.status == 200
+    assert result.call["actual_microusd"] == 120
+    body = json.loads(transport.sent[0]["body"])
+    assert body["provider"] == {
+        "allow_fallbacks": True,
+        "data_collection": "deny",
+        "zdr": True,
+        "only": ["azure/us", "azure/eu"],
+        "max_price": {"prompt": 0.1375, "completion": 0.55, "request": 0},
+    }
+    base_reserve = br.max_openrouter_cost_microusd(
+        table,
+        br.OPENROUTER_GPT6_LUNA_RESPONSES_MODEL,
+        GPT6_LUNA_RESPONSES,
+        max_output_tokens=GPT6_LUNA_RESPONSES["max_output_tokens"],
+    )
+    assert result.call["reserved_microusd"] > base_reserve
+    assert store.calls[result.call["call_identity"]]["actual"] == 120
+
+
 @pytest.mark.parametrize(
     "kind,operation_id,model",
     [
@@ -2260,6 +2319,111 @@ def test_luna_host_policy_long_context_tier_boundary(
     )
     assert route is not None
     assert route.provider_policy["max_price"] == expected_max_price
+
+
+@pytest.mark.parametrize(
+    "bounded_tokens,expected_max_price",
+    [
+        (271_999, {"prompt": 0.1375, "completion": 0.55, "request": 0}),
+        (272_000, {"prompt": 0.275, "completion": 0.825, "request": 0}),
+    ],
+)
+def test_gpt6_luna_host_policy_uses_its_published_long_context_tier(
+    monkeypatch, bounded_tokens, expected_max_price
+):
+    monkeypatch.setattr(br, "bounded_input_tokens", lambda _parameters: bounded_tokens)
+    route = br._openrouter_host_route(
+        kind="execute",
+        operation_id="openrouter.responses",
+        model=br.OPENROUTER_GPT6_LUNA_RESPONSES_MODEL,
+        pricing=gpt6_luna_price_table()["models"][
+            br.OPENROUTER_GPT6_LUNA_RESPONSES_MODEL
+        ],
+        parameters=GPT6_LUNA_RESPONSES,
+    )
+    assert route is not None
+    assert route.provider_policy["max_price"] == expected_max_price
+
+
+def test_gpt6_completed_failed_429_is_durably_retryable(monkeypatch):
+    payload = {
+        "id": "gen-gpt6-failed-429",
+        "object": "response",
+        "status": "failed",
+        "error_type": "rate_limit_exceeded",
+        "error": {
+            "code": "rate_limit_exceeded",
+            "message": "temporarily rate-limited upstream",
+        },
+        "output": [],
+        "usage": None,
+        "openrouter_metadata": None,
+    }
+    monkeypatch.setattr(br, "_openrouter_generation_readback", lambda **_kwargs: None)
+    store = ZeroReservationLedgerStore()
+    broker, _store, transport = make_broker(
+        store=store,
+        transport=FakeTransport([(200, payload)]),
+    )
+    broker._price_table = gpt6_luna_price_table()
+
+    result = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.responses",
+        parameters=GPT6_LUNA_RESPONSES,
+        action_sequence=0,
+        timeout_ms=300_000,
+    )
+    replay = broker.execute(
+        CONTEXT,
+        operation_id="openrouter.responses",
+        parameters=GPT6_LUNA_RESPONSES,
+        action_sequence=0,
+        timeout_ms=300_000,
+    )
+
+    assert result.status == 502
+    assert result.call["completed_rate_limit_retryable"] is True
+    assert result.call["outcome"] == "uncertain"
+    assert result.call["reserved_microusd"] == 0
+    assert "actual_microusd" not in result.call
+    assert replay.status == 409
+    assert replay.call["outcome"] == "uncertain"
+    assert replay.call["error_code"] == "call_uncertain"
+    assert "actual_microusd" not in replay.call
+    assert "completed_rate_limit_retryable" not in replay.call
+    assert store.log == ["reserve", "dispatch", "uncertain", "reserve"]
+    assert len(transport.sent) == 1
+    request = json.loads(transport.sent[0]["body"])
+    assert request["provider"]["only"] == ["azure/us", "azure/eu"]
+    assert request["provider"]["allow_fallbacks"] is True
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"status": "completed"},
+        {"output": [{"type": "message", "status": "completed"}]},
+    ],
+    ids=("not_failed", "nonempty_output"),
+)
+def test_gpt6_completed_429_retry_proof_rejects_nonterminal_shape(change):
+    document = {
+        "status": "failed",
+        "error_type": "rate_limit_exceeded",
+        "error": {"code": "rate_limit_exceeded", "message": "limited"},
+        "output": [],
+        "usage": None,
+        "openrouter_metadata": None,
+        **change,
+    }
+
+    assert br._openrouter_completed_rate_limit_retryable(
+        document,
+        model=br.OPENROUTER_GPT6_LUNA_RESPONSES_MODEL,
+        generation_id="gen-gpt6-failed-429",
+        credential_fingerprint="sha256:" + "a" * 64,
+    ) is False
 
 
 def test_luna_regional_unproved_provider_failure_keeps_full_reservation():

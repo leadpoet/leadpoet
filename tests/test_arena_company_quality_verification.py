@@ -128,7 +128,7 @@ def _run_quality_verifier(
     url: str = "https://acme.com/news/product",
     text: str = "We launched a new workflow product.",
 ) -> tuple[dict, AsyncMock]:
-    replies = [_verdict(url), stage_three]
+    replies = [stage_three]
     if clarification is not None:
         replies.append(clarification)
     call = AsyncMock(side_effect=replies)
@@ -166,14 +166,14 @@ def test_verified_official_source_allows_grounded_first_person(monkeypatch):
 
     assert result["client_ready"] is True
     assert result["company_check"] is True
-    assert call.await_count == 2
+    assert call.await_count == 1
     assert all(
         "grounded first-person wording" in invocation.args[2].casefold()
         for invocation in call.await_args_list
     )
 
 
-def test_legacy_verifier_includes_supplied_identity_in_both_judge_prompts(
+def test_legacy_verifier_includes_supplied_identity_in_source_grounded_judge_prompt(
     monkeypatch,
 ):
     url = (
@@ -188,11 +188,7 @@ def test_legacy_verifier_includes_supplied_identity_in_both_judge_prompts(
         "Leal Therapeutics, Inc. announced a second close of $30 million of "
         "its Series A financing."
     ]
-    stage_one = _verdict(url)
-    stage_one["answer"]["signal_evaluations"][0]["claim"] = (
-        "Leal Therapeutics announced a $30 million Series A second close."
-    )
-    calls = AsyncMock(side_effect=[stage_one, stage_three])
+    calls = AsyncMock(return_value=stage_three)
     fetch = AsyncMock(return_value={
         "results": [{
             "url": url,
@@ -239,7 +235,7 @@ def test_legacy_verifier_includes_supplied_identity_in_both_judge_prompts(
     ))
 
     assert result["client_ready"] is True
-    assert calls.await_count == 2
+    assert calls.await_count == 1
     identity = (
         '<verified_company_identity>{"canonical_name":"lealtherapeutics",'
         '"company_domain":"lealtx.com",'
@@ -249,22 +245,21 @@ def test_legacy_verifier_includes_supplied_identity_in_both_judge_prompts(
     assert all(identity in call.args[2] for call in calls.await_args_list)
 
 
-def test_legacy_euno_receipt_without_linkedin_is_present_in_both_prompts(
+def test_legacy_euno_receipt_without_linkedin_is_present_in_source_grounded_prompt(
     monkeypatch,
 ):
     url = (
         "https://thenextweb.com/news/"
         "euno-raises-23m-series-a-n47-ai-agent-context-platform"
     )
-    stage_one = _verdict(url)
     stage_three = _verdict(url)
-    for envelope in (stage_one, stage_three):
+    for envelope in (stage_three,):
         evaluation = envelope["answer"]["signal_evaluations"][0]
         evaluation["claim"] = "Euno raised a $23 million Series A."
         evaluation["supporting_quotes"] = [
             "Euno has raised a $23m Series A led by N47."
         ]
-    calls = AsyncMock(side_effect=[stage_one, stage_three])
+    calls = AsyncMock(return_value=stage_three)
     fetch = AsyncMock(return_value={
         "results": [{
             "url": url,
@@ -306,7 +301,7 @@ def test_legacy_euno_receipt_without_linkedin_is_present_in_both_prompts(
     ))
 
     assert result["client_ready"] is True
-    assert calls.await_count == 2
+    assert calls.await_count == 1
     identity = (
         '<verified_company_identity>{"canonical_name":"euno",'
         '"company_domain":"euno.ai","linkedin_company_slug":""}'
@@ -317,7 +312,7 @@ def test_legacy_euno_receipt_without_linkedin_is_present_in_both_prompts(
 
 def test_legacy_verifier_without_identity_preserves_prior_prompt(monkeypatch):
     url = "https://news.example.com/acme-product"
-    calls = AsyncMock(side_effect=[_verdict(url), _verdict(url)])
+    calls = AsyncMock(return_value=_verdict(url))
     fetch = AsyncMock(return_value={
         "results": [{
             "url": url,
@@ -349,7 +344,7 @@ def test_legacy_verifier_without_identity_preserves_prior_prompt(monkeypatch):
     ))
 
     assert result["client_ready"] is True
-    assert calls.await_count == 2
+    assert calls.await_count == 1
     assert all(
         "<verified_company_identity>" not in call.args[2]
         for call in calls.await_args_list
@@ -416,7 +411,7 @@ def test_supported_high_with_unclear_identity_gets_one_clarification(monkeypatch
         "resolved": False,
         "provider_error": False,
     }
-    assert call.await_count == 3
+    assert call.await_count == 2
     assert call.await_args_list[-1].kwargs["max_attempts"] == 1
 
 
@@ -432,7 +427,7 @@ def test_quality_identity_ambiguity_is_rejected(monkeypatch):
     assert result["client_ready"] is False
     assert result["decision"] == "review"
     assert result["rejection_reason"] == "stage3_identity_unresolved"
-    assert call.await_count == 3
+    assert call.await_count == 2
 
 
 def test_identity_clarification_provider_failure_stays_retryable(monkeypatch):
@@ -447,7 +442,7 @@ def test_identity_clarification_provider_failure_stays_retryable(monkeypatch):
     assert result["decision"] == "unavailable"
     assert result["stage3"]["status"] == "llm_error"
     assert result["identity_clarification"]["provider_error"] is True
-    assert call.await_count == 3
+    assert call.await_count == 2
 
 
 def test_company_quality_never_uses_submitted_domain_without_verified_receipt(

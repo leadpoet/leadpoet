@@ -101,8 +101,6 @@ async def _run(
 
     async def call_openrouter(_client, _model, prompt):
         prompts.append(prompt)
-        if len(prompts) == 1:
-            return _verdict(claim, "unable_to_verify", "")
         return _verdict(claim, stage3_status, quote)
 
     monkeypatch.setattr(intent, "_fetch_sd_then_exa", fetch)
@@ -137,10 +135,10 @@ async def test_senior_division_chair_retirement_reaches_supported_stage3(
         quote=REAL_QUOTE,
     )
 
-    assert len(prompts) == 2
-    assert REAL_PARAGRAPH in prompts[1]
-    assert "retirement of a senior division or function leader" in prompts[1]
-    assert "`Announced` does not by itself require" in prompts[1]
+    assert len(prompts) == 1
+    assert REAL_PARAGRAPH in prompts[0]
+    assert "retirement of a senior division or function leader" in prompts[0]
+    assert "`Announced` does not by itself require" in prompts[0]
     assert result["client_ready"] is True
     assert result["decision"] == "approve"
     assert result["stage3"]["status"] == "supported"
@@ -182,7 +180,7 @@ async def test_name_biography_and_explicit_first_party_cases_do_not_autoapprove(
         stage3_status="contradicted",
     )
 
-    assert len(prompts) == 2
+    assert len(prompts) == 1
     assert result["client_ready"] is False
     assert result["decision"] == "reject"
     assert result["rejection_reason"] == "stage3_contradicted"

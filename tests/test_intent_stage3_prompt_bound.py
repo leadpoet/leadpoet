@@ -160,19 +160,6 @@ def test_long_evidence_still_requires_stage3_terminal_verdict():
 
     async def call_openrouter(_client, _model, prompt):
         prompts.append(prompt)
-        if len(prompts) == 1:
-            return {
-                "answer": {
-                    "signal_evaluations": [{
-                        "signal_status": "unable_to_verify",
-                        "verification_mode": "source_grounded",
-                        "same_entity_check": "pass",
-                        "confidence": "medium",
-                    }]
-                },
-                "model": "perplexity/sonar",
-                "usage": {},
-            }
         operations.validate_operation_request(
             "openrouter.chat", _openrouter_parameters(prompt)
         )
@@ -218,8 +205,8 @@ def test_long_evidence_still_requires_stage3_terminal_verdict():
             stage1_soft_reject=True,
         ))
 
-    assert len(prompts) == 2
-    assert len(prompts[1]) <= operations.OPENROUTER_MAX_CONTENT_CHARS
+    assert len(prompts) == 1
+    assert len(prompts[0]) <= operations.OPENROUTER_MAX_CONTENT_CHARS
     assert result["decision"] == "reject"
     assert result["rejection_reason"] == "stage3_contradicted"
 
@@ -283,22 +270,10 @@ def _exact_ats_result(
     target_signal=TARGET_ICP_SIGNAL,
     contents=None,
 ):
-    stage1 = {
-        "answer": {
-            "signal_evaluations": [{
-                "signal_status": "unable_to_verify",
-                "verification_mode": "source_grounded",
-                "same_entity_check": "unclear",
-                "confidence": "medium",
-            }]
-        },
-        "model": "perplexity/sonar",
-        "usage": {},
-    }
     with mock.patch.object(
         intent,
         "_call_openrouter",
-        mock.AsyncMock(side_effect=[stage1, stage3_verdict]),
+        mock.AsyncMock(return_value=stage3_verdict),
     ), mock.patch.object(
         intent,
         "_fetch_sd_then_exa",
@@ -443,19 +418,6 @@ def test_full_verifier_budgets_verified_identity_and_exact_ats_suffixes(
         operations.validate_operation_request(
             "openrouter.chat", _openrouter_parameters(prompt)
         )
-        if len(prompts) == 1:
-            return {
-                "answer": {
-                    "signal_evaluations": [{
-                        "signal_status": "unable_to_verify",
-                        "verification_mode": "source_grounded",
-                        "same_entity_check": "pass",
-                        "confidence": "medium",
-                    }]
-                },
-                "model": "perplexity/sonar",
-                "usage": {},
-            }
         return {
             "answer": {
                 "overall_verdict": "qualified",
@@ -500,8 +462,8 @@ def test_full_verifier_budgets_verified_identity_and_exact_ats_suffixes(
             evidence_bundle=evidence_bundle,
         ))
 
-    assert len(prompts) == 2
-    stage3_prompt = prompts[1]
+    assert len(prompts) == 1
+    stage3_prompt = prompts[0]
     assert len(stage3_prompt) <= operations.OPENROUTER_MAX_CONTENT_CHARS
     assert "COMPANY IDENTITY ATTRIBUTION" in stage3_prompt
     assert _common._SOURCE_OMISSION_MARKER.strip() in stage3_prompt

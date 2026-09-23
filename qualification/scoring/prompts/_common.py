@@ -365,7 +365,11 @@ FINAL_JUDGE_RULES_BLOCK = """Final judge rules:
 - If content contradicts miner_claim, return contradicted.
 - If content is about another company/person, return wrong_entity.
 - evidence_urls_used must contain only exact supplied source URLs whose
-  extracted content supports or contradicts the claim."""
+  extracted content supports or contradicts the claim.
+- The claim field is a faithful summary, not a quotation. supporting_quotes
+  and contradicting_quotes must be complete, continuous copied source spans.
+  Do not paraphrase, join distant fragments, or insert ellipses in quotes.
+  Include the date-bearing event sentence when reporting an event date."""
 
 
 MINER_DATE_CHECK_BLOCK = """Miner-date consistency check (set claim_matches_miner_date) — STEP BY STEP:
@@ -398,6 +402,9 @@ ARENA_INTEGRITY_DATE_BLOCK = """ARENA INTEGRITY DATE POLICY (applies to this eva
 - Judge claim support and dates independently. signal_status describes only
   whether the exact source supports the claim and target ICP signal. A harmless
   mismatch with miner_signal_date must not change a supported signal_status.
+- Missing dates alone do not make a supported event unable_to_verify. Return
+  supported for proven content and no_date_in_content when no date is known;
+  the caller separately enforces freshness after bounded evidence recovery.
 - claim_matches_miner_date records consistency only; it is never itself a
   reason to reject otherwise supported evidence.
 - Identify the date of the SAME EVENT established by the exact source. When the
@@ -510,6 +517,11 @@ def build_final_judge_prompt(
             if row.get("_integrity_policy") is True
             else ""
         )
+        date_block = (
+            integrity_block
+            if row.get("_integrity_policy") is True
+            else MINER_DATE_CHECK_BLOCK
+        )
         return f"""{verification}
 
 {source_name} exact supplied source extraction:
@@ -519,7 +531,7 @@ Today's date: {today_str}
 
 {FINAL_JUDGE_RULES_BLOCK}
 
-{MINER_DATE_CHECK_BLOCK}{integrity_block}{combined_block}{final_suffix}"""
+{date_block}{combined_block}{final_suffix}"""
 
     results = list(contents.get("results") or [])
     if not results:

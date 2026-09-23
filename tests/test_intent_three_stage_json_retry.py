@@ -212,10 +212,8 @@ def test_proven_wrong_entity_and_content_mismatch_remain_terminal(monkeypatch):
 
 def test_exhausted_stage_three_contradiction_is_unavailable(monkeypatch):
     _install_call_fakes(monkeypatch)
-    stage_one = _verdict(status="supported", same_entity="pass")
     contradictory = _verdict(status="wrong_entity", same_entity="unclear")
     client = _Client([
-        _Response(_completion(json.dumps(stage_one))),
         *[
             _Response(_completion(json.dumps(contradictory)))
             for _ in range(3)
@@ -249,7 +247,7 @@ def test_exhausted_stage_three_contradiction_is_unavailable(monkeypatch):
         stage1_soft_reject=True,
     ))
 
-    assert client.calls == 4
+    assert client.calls == 3
     assert result["client_ready"] is False
     assert result["decision"] == "unavailable"
     assert result["rejection_reason"] == (
@@ -283,22 +281,11 @@ def test_verifier_fails_closed_without_raising_after_malformed_json(monkeypatch)
     assert result["stage1"]["status"] == "llm_error"
 
 
-def test_stage_one_and_three_prompts_project_identity_and_frame_source_as_untrusted(
+def test_source_grounded_prompt_projects_identity_and_frames_source_as_untrusted(
     monkeypatch,
 ):
     _install_call_fakes(monkeypatch)
     source_url = "https://news.example/exact-article?edition=1"
-    stage_one = {
-        "signal_evaluations": [
-            {
-                "signal_status": "partially_supported",
-                "confidence": "medium",
-                "same_entity_check": "unclear",
-                "verification_mode": "source_grounded",
-                "evidence_urls_used": [source_url],
-            }
-        ]
-    }
     stage_three = {
         "signal_evaluations": [
             {
@@ -313,7 +300,6 @@ def test_stage_one_and_three_prompts_project_identity_and_frame_source_as_untrus
     }
     client = _Client(
         [
-            _Response(_completion(json.dumps(stage_one))),
             _Response(_completion(json.dumps(stage_three))),
         ]
     )
@@ -356,7 +342,7 @@ def test_stage_one_and_three_prompts_project_identity_and_frame_source_as_untrus
     )
 
     assert result["client_ready"] is True
-    assert len(client.requests) == 2
+    assert len(client.requests) == 1
     messages_by_call = [
         request["kwargs"]["json"]["messages"]
         for request in client.requests
@@ -376,5 +362,4 @@ def test_stage_one_and_three_prompts_project_identity_and_frame_source_as_untrus
         # The exact validated evidence URL remains available for the citation
         # join; it is data-framed by the system instruction, not an identity.
         assert source_url in prompt
-    assert malicious_page_instruction not in messages_by_call[0][1]["content"]
-    assert malicious_page_instruction in messages_by_call[1][1]["content"]
+    assert malicious_page_instruction in messages_by_call[0][1]["content"]

@@ -139,9 +139,10 @@ async def test_generic_fetch_preserves_observed_same_host_links(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_max_retail_index_follows_only_selected_same_event_link(monkeypatch):
+@pytest.mark.parametrize("with_bundle", [False, True])
+@pytest.mark.parametrize("summarized", [False, True])
+async def test_max_retail_index_follows_only_selected_same_event_link(monkeypatch, with_bundle, summarized):
     calls = AsyncMock(side_effect=[
-        _stage1_review(),
         _verdict(
             claim=MAX_CLAIM,
             url=MAX_INDEX,
@@ -149,10 +150,10 @@ async def test_max_retail_index_follows_only_selected_same_event_link(monkeypatc
             risk_notes=["source_publication_date:2024-06-05"],
         ),
         _verdict(
-            claim=MAX_CLAIM,
+            claim=("Max Retail released its RICS point-of-sale integration." if summarized else MAX_CLAIM),
             url=MAX_EVENT,
-            quote=MAX_QUOTE,
-            risk_notes=["source_publication_date:2026-03-03"],
+            quote=f"“{MAX_QUOTE}”" if summarized else MAX_QUOTE,
+            risk_notes=["same_event_as_submitted:verified", "source_event_date:2026-03-03"],
         ),
     ])
 
@@ -192,6 +193,10 @@ async def test_max_retail_index_follows_only_selected_same_event_link(monkeypatc
         company_linkedin="",
         company_website="https://maxretail.com/",
         source_url=MAX_INDEX,
+        evidence_bundle=([{
+            "url": MAX_INDEX, "description": MAX_CLAIM, "snippet": MAX_CLAIM,
+            "date": None,
+        }] if with_bundle else None),
         miner_claim=MAX_CLAIM,
         target_signal_text=(
             "Launched a new product or major capability in the last 12 months."
@@ -211,16 +216,15 @@ async def test_max_retail_index_follows_only_selected_same_event_link(monkeypatc
     }
     assert result["source_publication_dates"] == ["2026-03-03"]
     assert result["verified_source_context"][0]["url"] == MAX_EVENT
-    assert calls.await_count == 3
+    assert calls.await_count == 2
     assert "ONE-HOP SAME-EVENT SOURCE RESOLUTION" in (
-        calls.await_args_list[2].args[2]
+        calls.await_args_list[1].args[2]
     )
 
 
 @pytest.mark.asyncio
 async def test_unproven_link_fetch_preserves_original_stale_date(monkeypatch):
     calls = AsyncMock(side_effect=[
-        _stage1_review(),
         _verdict(
             claim=MAX_CLAIM,
             url=MAX_INDEX,
@@ -283,7 +287,7 @@ async def test_unproven_link_fetch_preserves_original_stale_date(monkeypatch):
     )
     assert freshness.verdict == "out_of_window"
     assert freshness.authoritative_date == "2024-06-05"
-    assert calls.await_count == 2
+    assert calls.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -294,7 +298,6 @@ async def test_phia_older_event_month_overrides_newer_article_metadata(monkeypat
         "Sophia Kianni in April 2025"
     )
     calls = AsyncMock(side_effect=[
-        _stage1_review(),
         _verdict(
             claim=claim,
             url=source,
@@ -332,7 +335,7 @@ async def test_phia_older_event_month_overrides_newer_article_metadata(monkeypat
 
     item = result["verdict"]["signal_evaluations"][0]
     assert item["risk_notes"] == ["source_event_month:2025-04"]
-    assert "source_event_month:YYYY-MM" in calls.await_args_list[1].args[2]
+    assert "source_event_month:YYYY-MM" in calls.await_args_list[0].args[2]
     event, publications = source_dates_from_verdict(
         item, result["source_publication_dates"]
     )
@@ -371,7 +374,6 @@ async def test_nonmatching_event_controls_remain_rejected(
 ):
     source = "https://example.test/submitted-event"
     calls = AsyncMock(side_effect=[
-        _stage1_review(),
         _verdict(
             claim=claim,
             url=source,
@@ -408,7 +410,7 @@ async def test_nonmatching_event_controls_remain_rejected(
     assert result["client_ready"] is False
     assert result["decision"] == "reject"
     assert result["rejection_reason"] == "stage3_contradicted"
-    assert calls.await_count == 2
+    assert calls.await_count == 1
     if company == "Buywander":
         assert "warehouse, store, office, facility" in calls.await_args_list[0].args[2]
 
@@ -500,3 +502,71 @@ def test_same_entity_newer_event_cannot_replace_the_submitted_claim():
         verdict, [{"url": url, "text": quote}], [url],
         submitted_claim="Acme launched Original Copilot.",
     ) == "unproven"
+
+
+@pytest.mark.parametrize("wrapper", ['"{}"', "'{}'", '“{}”', '‘{}’', '{}'])
+def test_copied_quote_wrappers_are_formatting(wrapper):
+    text = "Acme launched Control Copilot on March 3, 2026."
+    assert verifier._grounded_exact_text(text, wrapper.format(text))
+
+
+@pytest.mark.parametrize("quote", [
+    "Acme launched Control Copilot on March 4, 2026.",
+    "Acme ... Control Copilot on March 3, 2026.",
+    "Control Copilot launched Acme on March 3, 2026.",
+    '""', "", "Acme launched Control Copilot",
+])
+def test_quote_recovery_does_not_invent_or_remove_source_words(quote):
+    text = "Acme has not launched Control Copilot on March 3, 2026."
+    assert not verifier._grounded_exact_text(text, quote)
+
+
+def test_linked_review_can_summarize_explicitly_verified_same_event():
+    url = "https://acme.test/release"
+    text = "On March 3, 2026, Acme launched Control Copilot for policy automation."
+    verdict = _verdict(
+        claim="Acme released its policy automation product, Control Copilot.",
+        url=url, quote=f'“{text}”',
+        risk_notes=["same_event_as_submitted:verified", "source_event_date:2026-03-03"],
+    )["answer"]
+    assert verifier._same_event_resolution_outcome(
+        verdict, [{"url": url, "text": text}], [url],
+        submitted_claim="Acme launched Control Copilot.",
+    ) == "verified"
+
+
+@pytest.mark.parametrize("mutation", [
+    {"signal_id": "another-signal"},
+    {"same_entity_check": "fail"},
+    {"signal_status": "partially_supported"},
+    {"confidence": "medium"},
+    {"unsupported_parts": ["The claimed product was not launched."]},
+    {"contradicting_quotes": ["Launch is planned, not completed."]},
+    {"evidence_urls_used": ["https://unrelated.test/other-event"]},
+    {"risk_notes": ["same_event_as_submitted:verified", "source_event_date:2026-03-04"]},
+])
+def test_linked_review_still_requires_signal_entity_event_source_and_date(mutation):
+    url = "https://acme.test/release"
+    text = "On March 3, 2026, Acme launched Control Copilot for policy automation."
+    verdict = _verdict(
+        claim="Acme released Control Copilot for policy automation.",
+        url=url, quote=text,
+        risk_notes=["same_event_as_submitted:verified", "source_event_date:2026-03-03"],
+    )["answer"]
+    verdict["signal_evaluations"][0].update(mutation)
+    assert verifier._same_event_resolution_outcome(
+        verdict, [{"url": url, "text": text}], [url],
+        submitted_claim="Acme launched Control Copilot.",
+    ) == "unproven"
+
+
+def test_supported_medium_summary_can_reach_clarification_not_acceptance():
+    source = "Acme launched Control Copilot for policy automation."
+    verdict = _verdict(
+        claim="Acme released a policy automation product.",
+        url="https://acme.test/release", quote=source,
+    )["answer"]
+    item = verdict["signal_evaluations"][0]
+    verdict["overall_confidence"] = item["confidence"] = "medium"
+    assert verifier._supported_medium_needs_clarification(verdict, item, source)
+    assert verifier._decision(verdict, company_quality=True) == "review"

@@ -14,7 +14,7 @@ import logging
 import unicodedata
 from datetime import date, datetime
 from typing import Any, Set, Optional, Tuple, List, Mapping, Sequence
-from urllib.parse import unquote, urlparse, urlsplit
+from urllib.parse import urlparse, urlsplit
 
 from gateway.qualification.config import CONFIG
 from gateway.qualification.models import (
@@ -2274,6 +2274,30 @@ def _without_employee_size_observation(verdict: Mapping[str, Any]) -> dict[str, 
     return projected
 
 
+def _linkedin_company_evidence_slug(value: Any) -> str:
+    """Return the strict company slug from a profile or company subpage."""
+
+    root_slug = linkedin_company_page_slug(value)
+    if root_slug:
+        return root_slug
+    if not is_linkedin_evidence_url(value):
+        return ""
+    try:
+        canonical = canonical_candidate_prompt_url(
+            value,
+            "employee_size_evidence_url",
+        )
+        parsed = urlsplit(canonical)
+    except (TypeError, ValueError):
+        return ""
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 2 or parts[0].casefold() != "company":
+        return ""
+    return linkedin_company_page_slug(
+        f"https://www.linkedin.com/company/{parts[1]}"
+    )
+
+
 def _structured_employee_size_decision(
     evidence: Any,
     icp: ICPPrompt,
@@ -2577,7 +2601,7 @@ async def _refresh_linkedin_employee_size_observation(
             return dict(verdict)
     unavailable = _without_employee_size_observation(verdict)
     if not evidence_slug:
-        evidence_slug = linkedin_company_page_slug(evidence_url)
+        evidence_slug = _linkedin_company_evidence_slug(evidence_url)
     if not evidence_slug:
         if invocation_cache.get("refresh_outcome") != "retryable_failure":
             invocation_cache["refresh_outcome"] = (

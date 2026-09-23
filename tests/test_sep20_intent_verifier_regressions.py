@@ -47,19 +47,6 @@ def _signal_verdict(*, confidence: str, unsupported_parts=None) -> dict:
     }
 
 
-def _stage1_review() -> dict:
-    return {
-        "answer": {
-            "signal_evaluations": [{
-                "signal_status": "unable_to_verify",
-                "verification_mode": "source_grounded",
-                "same_entity_check": "unclear",
-                "confidence": "medium",
-            }],
-        },
-        "model": "test-stage1",
-        "usage": {},
-    }
 
 
 def _mind_style_inputs():
@@ -190,7 +177,8 @@ async def test_exact_dated_quote_accepts_empty_diagnostic_only_when_supported(
         ({"unsupported_parts": ["launch timing"]}, False),
         ({"same_entity_check": "unclear"}, False),
         ({"supporting_quotes": ["Text absent from the source."]}, False),
-        ({"claim": "Acme launched a capability absent from the source."}, False),
+        # Claim prose need not be copied verbatim to request a clarification.
+        ({"claim": "Acme launched a capability absent from the source."}, True),
         ({"signal_status": "partially_supported"}, False),
     ],
 )
@@ -207,7 +195,7 @@ def test_medium_supported_clarification_requires_coherent_exact_evidence(
 
 
 async def _verify_with_verdicts(monkeypatch, *verdicts):
-    call = AsyncMock(side_effect=[_stage1_review(), *verdicts])
+    call = AsyncMock(side_effect=verdicts)
     fetch = AsyncMock(return_value={
         "results": [{
             "url": SOURCE_URL,
@@ -242,10 +230,10 @@ async def test_exact_supported_medium_gets_one_bounded_clarification(monkeypatch
         _signal_verdict(confidence="high"),
     )
 
-    assert call.await_count == 3
-    assert call.await_args_list[2].kwargs["max_attempts"] == 1
+    assert call.await_count == 2
+    assert call.await_args_list[1].kwargs["max_attempts"] == 1
     assert "ONE BOUNDED EVIDENCE-CONFIDENCE CLARIFICATION" in (
-        call.await_args_list[2].args[2]
+        call.await_args_list[1].args[2]
     )
     assert result["decision"] == "approve"
     assert result["client_ready"] is True
@@ -265,7 +253,7 @@ async def test_unresolved_medium_clarification_stays_fail_closed(monkeypatch):
         _signal_verdict(confidence="medium"),
     )
 
-    assert call.await_count == 3
+    assert call.await_count == 2
     assert result["decision"] == "review"
     assert result["client_ready"] is False
     assert result["rejection_reason"] == "stage3_review"
@@ -283,7 +271,7 @@ async def test_medium_verdict_with_unsupported_part_does_not_get_clarification(
         ),
     )
 
-    assert call.await_count == 2
+    assert call.await_count == 1
     assert result["decision"] == "review"
     assert result["client_ready"] is False
     assert "evidence_clarification" not in result
@@ -299,7 +287,7 @@ async def test_supported_medium_clarification_provider_error_is_unavailable(
         {"_error": "http_503"},
     )
 
-    assert call.await_count == 3
+    assert call.await_count == 2
     assert result["decision"] == "unavailable"
     assert result["client_ready"] is False
     assert result["rejection_reason"] == (

@@ -94,10 +94,7 @@ def test_verified_context_stays_bound_from_score_receipt_to_review(
     """Canonical equivalents survive; a different resource never crosses gates."""
 
     signal = _signal()
-    provider = AsyncMock(side_effect=[
-        _provider_answer("unable_to_verify"),
-        _provider_answer("supported"),
-    ])
+    provider = AsyncMock(return_value=_provider_answer("supported"))
     fetch = AsyncMock(return_value={
         "results": [{
             "url": fetched_url,
@@ -130,7 +127,7 @@ def test_verified_context_stays_bound_from_score_receipt_to_review(
     assert fetch.await_count == 1
     verdict = verdicts[-1]
     if not context_expected:
-        assert provider.await_count == 1
+        assert provider.await_count == 0
         assert score == 0.0
         assert confidence == 0
         assert date_status == "verified"
@@ -141,7 +138,7 @@ def test_verified_context_stays_bound_from_score_receipt_to_review(
         assert "verified_source_context" not in verdict["verification_trace"]
         return
 
-    assert provider.await_count == 2
+    assert provider.await_count == 1
     assert score == 54.0
     assert confidence == 90
     assert date_status == "in_window"

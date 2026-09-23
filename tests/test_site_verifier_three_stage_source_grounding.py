@@ -138,6 +138,7 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
             )
         return result, call, fetch
 
+
     def test_guardrail_rejects_same_domain_different_evidence_path(self):
         supplied = "https://news.example/exact-article"
         verdict = supported("https://news.example/different-article")
@@ -153,10 +154,9 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_exact_official_domain_can_establish_entity_but_not_claim(self):
         url = "https://advario.com/news/terminal-project"
-        stage_one = supported(url)
         stage_three = contradicted(url)
         stage_three["answer"]["signal_evaluations"][0]["same_entity_check"] = "pass"
-        call = AsyncMock(side_effect=[stage_one, stage_three])
+        call = AsyncMock(return_value=stage_three)
         fetch = AsyncMock(return_value={
             "results": [{
                 "url": url,
@@ -184,7 +184,8 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["company_check"])
         self.assertFalse(result["client_ready"])
         self.assertEqual(result["rejection_reason"], "stage3_contradicted")
-        self.assertEqual(call.await_count, 2)
+        self.assertEqual(call.await_count, 1)
+
 
     async def test_domain_absence_defers_to_stage_three_entity_authority(self):
         url = "https://news.example/terminal-project"
@@ -193,7 +194,7 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
             signal_status="wrong_entity",
             same_entity_check="fail",
         )
-        call = AsyncMock(side_effect=[supported(url), stage_three])
+        call = AsyncMock(return_value=stage_three)
         fetch = AsyncMock(return_value={
             "results": [{
                 "url": url,
@@ -224,7 +225,8 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
             result["rejection_reason"],
             "stage3_wrong_entity",
         )
-        self.assertEqual(call.await_count, 2)
+        self.assertEqual(call.await_count, 1)
+
 
     async def test_exa_retries_only_a_transient_fetch_without_changing_evidence(self):
         calls = 0
@@ -664,7 +666,7 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stage_three_provider_error_is_unavailable_not_a_false_rejection(self):
         url = "https://news.example/acme-funding"
-        call = AsyncMock(side_effect=[supported(url), {"_error": "http_403"}])
+        call = AsyncMock(return_value={"_error": "http_403"})
         fetch = AsyncMock(return_value={
             "results": [{
                 "url": url,
@@ -698,7 +700,8 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["decision"], "unavailable")
         self.assertEqual(result["stage3"]["status"], "llm_error")
 
-    async def test_stage_one_approval_cannot_bypass_a_failed_evidence_fetch(self):
+
+    async def test_source_grounded_mode_cannot_bypass_a_failed_evidence_fetch(self):
         url = "https://news.example/acme-funding"
         status_cases = (
             [{"source": "scrapingdog", "stage": "timeout"},
@@ -728,7 +731,7 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
                         miner_signal_date="2026-07-01",
                         stage1_soft_reject=True,
                     )
-                self.assertEqual(call.await_count, 1)
+                self.assertEqual(call.await_count, 0)
                 fetch.assert_awaited_once_with([url])
                 self.assertFalse(result["client_ready"])
                 self.assertEqual(result["decision"], "unavailable")
@@ -737,6 +740,7 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
                     result["verdict"]["signal_evaluations"][0]["signal_status"],
                     "unable_to_verify",
                 )
+
 
     async def test_confirmed_source_absence_is_semantic_not_infrastructure(self):
         url = "https://news.example/acme-funding"
@@ -757,7 +761,7 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
         }]
         result, call, _fetch = await self._verify_empty_fetch(url, statuses)
 
-        self.assertEqual(call.await_count, 1)
+        self.assertEqual(call.await_count, 0)
         self.assertFalse(result["client_ready"])
         self.assertEqual(result["decision"], "reject")
         self.assertEqual(result["rejection_reason"], "evidence_not_found")
@@ -818,7 +822,7 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stage_three_makes_the_terminal_decision_from_fetched_content(self):
         url = "https://news.example/acme-funding"
-        call = AsyncMock(side_effect=[supported(url), supported(url)])
+        call = AsyncMock(return_value=supported(url))
         fetch = AsyncMock(return_value={
             "results": [{"url": url, "title": "Acme funding", "text": "Acme raised a Series B on July 1, 2026."}],
             "statuses": [{"source": "exa_fallback", "stage": "ok"}],
@@ -838,14 +842,15 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
                 miner_signal_date="2026-07-01",
                 stage1_soft_reject=True,
             )
-        self.assertEqual(call.await_count, 2)
+        self.assertEqual(call.await_count, 1)
         self.assertTrue(result["client_ready"])
         self.assertEqual(result["scrape"]["result_count"], 1)
-        self.assertEqual(result["stage1"]["original_decision"], "approve")
+        self.assertEqual(result["stage1"]["status"], "skipped_source_grounded")
 
-    async def test_source_grounded_proof_can_overturn_only_a_blind_stage_one_reject(self):
+
+    async def test_source_grounded_proof_needs_no_blind_stage_one_verdict(self):
         url = "https://news.example/acme-product-launch"
-        call = AsyncMock(side_effect=[contradicted(url), supported(url)])
+        call = AsyncMock(return_value=supported(url))
         fetch = AsyncMock(return_value={
             "results": [{
                 "url": url,
@@ -871,6 +876,6 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
                 stage1_soft_reject=True,
             )
         self.assertTrue(result["client_ready"])
-        self.assertEqual(result["stage1"]["original_decision"], "reject")
+        self.assertEqual(result["stage1"]["status"], "skipped_source_grounded")
         self.assertEqual(result["stage3"]["decision"], "approve")
         self.assertTrue(result["company_check"])

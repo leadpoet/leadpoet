@@ -124,8 +124,6 @@ async def test_full_verifier_recovers_rendered_first_party_job_listings(
 
     async def call_openrouter(_client, _model, prompt):
         prompts.append(prompt)
-        if len(prompts) == 1:
-            return _verdict(source_url, "unable_to_verify")
         return _verdict(source_url, "supported", role)
 
     monkeypatch.setenv("SCRAPINGDOG_API_KEY", "test")
@@ -154,9 +152,9 @@ async def test_full_verifier_recovers_rendered_first_party_job_listings(
 
     assert result["client_ready"] is True
     assert result["decision"] == "approve"
-    assert len(prompts) == 2
-    assert role in prompts[1]
-    assert len(prompts[1]) < intent.MAX_SCRAPED_CHARS
+    assert len(prompts) == 1
+    assert role in prompts[0]
+    assert len(prompts[0]) < intent.MAX_SCRAPED_CHARS
     assert len(client.calls) == 1
     assert result["job_publisher_relationship"] == "verified"
     assert result["verified_job_source_urls"] == [source_url]
@@ -169,11 +167,11 @@ async def test_full_verifier_recovers_rendered_first_party_job_listings(
     if label == "synoptek":
         assert (
             "Network Administrator | Las Vegas, United States | August 18"
-            in prompts[1]
+            in prompts[0]
         )
         assert (
             "Salesforce Functional Consultant | Glendale, United States | August 17"
-            in prompts[1]
+            in prompts[0]
         )
 
 
@@ -208,8 +206,6 @@ async def test_synoptek_unproved_exact_count_stays_rejected(monkeypatch):
 
     async def call_openrouter(_client, _model, prompt):
         prompts.append(prompt)
-        if len(prompts) == 1:
-            return _verdict(source_url, "unable_to_verify")
         return _verdict(source_url, "partially_supported")
 
     monkeypatch.setenv("SCRAPINGDOG_API_KEY", "test")
@@ -232,7 +228,7 @@ async def test_synoptek_unproved_exact_count_stays_rejected(monkeypatch):
         integrity_policy=True,
     )
 
-    assert len(prompts) == 2
+    assert len(prompts) == 1
     assert result["client_ready"] is False
     assert result["decision"] == "review"
     assert result["rejection_reason"] == "stage3_review"
@@ -280,8 +276,6 @@ async def test_first_party_linked_greenhouse_root_enumerates_bound_jobs(
 
     async def call_openrouter(_client, _model, prompt):
         prompts.append(prompt)
-        if len(prompts) == 1:
-            return _verdict(source_url, "unable_to_verify")
         return _verdict(
             source_url,
             "supported",
@@ -319,9 +313,9 @@ async def test_first_party_linked_greenhouse_root_enumerates_bound_jobs(
         ),
         "dynamic": "false",
     }
-    assert "Remote, United States" in prompts[1]
-    assert "2026-09-18T10:30:00-07:00" in prompts[1]
-    assert "Irvine, California" in prompts[1]
+    assert "Remote, United States" in prompts[0]
+    assert "2026-09-18T10:30:00-07:00" in prompts[0]
+    assert "Irvine, California" in prompts[0]
 
 
 @pytest.mark.asyncio
@@ -385,8 +379,6 @@ async def test_first_party_listing_receipt_does_not_autoapprove(monkeypatch):
 
     async def call_openrouter(_client, _model, prompt):
         prompts.append(prompt)
-        if len(prompts) == 1:
-            return _verdict(source_url, "unable_to_verify")
         return _verdict(source_url, "contradicted")
 
     monkeypatch.setenv("SCRAPINGDOG_API_KEY", "test")
@@ -408,7 +400,7 @@ async def test_first_party_listing_receipt_does_not_autoapprove(monkeypatch):
         verified_company_identity=_identity("Trace3", "trace3.com"),
     )
 
-    assert len(prompts) == 2
+    assert len(prompts) == 1
     assert result["client_ready"] is False
     assert result["decision"] == "reject"
     assert result["rejection_reason"] == "stage3_contradicted"
@@ -479,7 +471,7 @@ async def test_first_party_careers_page_without_job_links_stops_before_stage3(
         verified_company_identity=_identity("Trace3", "trace3.com"),
     )
 
-    assert len(prompts) == 1
+    assert len(prompts) == 0
     assert len(client.calls) == 2
     assert result["rejection_reason"] == "job_body_not_in_fetched_content"
 
@@ -529,7 +521,7 @@ async def test_unverified_careers_domain_cannot_supply_listing_receipt(
         verified_company_identity=verified_identity,
     )
 
-    assert len(prompts) == 1
+    assert len(prompts) == 0
     assert len(client.calls) == 1
     assert result["rejection_reason"] == "job_body_not_in_fetched_content"
 
@@ -585,8 +577,6 @@ async def test_full_verifier_preserves_visible_cards_after_dynamic_failure(
 
     async def call_openrouter(_client, _model, prompt):
         prompts.append(prompt)
-        if len(prompts) == 1:
-            return _verdict(source_url, "unable_to_verify")
         return _verdict(
             source_url,
             "supported",
@@ -625,15 +615,15 @@ async def test_full_verifier_preserves_visible_cards_after_dynamic_failure(
 
     assert result["client_ready"] is True, result
     assert result["decision"] == "approve"
-    assert len(prompts) == 2
-    assert "Dedicated Support Engineer Managed Services Full-Time" in prompts[1]
-    assert "Sr. Help Desk Technician IT Service Desk Full-Time" in prompts[1]
-    assert "Technical Account Manager Managed Services Full-Time" in prompts[1]
-    assert "Fake Script Role" not in prompts[1]
-    assert "Fake Template Role" not in prompts[1]
-    assert "Careers index noise" not in prompts[1]
-    assert "Unrelated navigation noise" not in prompts[1]
-    assert len(prompts[1]) < intent.MAX_SCRAPED_CHARS
+    assert len(prompts) == 1
+    assert "Dedicated Support Engineer Managed Services Full-Time" in prompts[0]
+    assert "Sr. Help Desk Technician IT Service Desk Full-Time" in prompts[0]
+    assert "Technical Account Manager Managed Services Full-Time" in prompts[0]
+    assert "Fake Script Role" not in prompts[0]
+    assert "Fake Template Role" not in prompts[0]
+    assert "Careers index noise" not in prompts[0]
+    assert "Unrelated navigation noise" not in prompts[0]
+    assert len(prompts[0]) < intent.MAX_SCRAPED_CHARS
     assert len(client.calls) == 2
     assert result["job_publisher_relationship"] == "verified"
 

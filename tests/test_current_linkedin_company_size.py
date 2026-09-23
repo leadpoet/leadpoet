@@ -1104,6 +1104,97 @@ def test_current_profile_replaces_stale_linkedin_match_or_mismatch(
     assert fetches == ["https://www.linkedin.com/company/acme"]
 
 
+@pytest.mark.parametrize("company_subpath", ["life", "life/culture", "future-tab"])
+def test_company_subpage_refreshes_canonical_company_size_field(
+    monkeypatch,
+    company_subpath,
+):
+    fetches = []
+
+    async def provider(**_kwargs):
+        verdict = _verdict(
+            observed_size="201-500",
+            size_matches=False,
+            employee_url=(
+                f"https://www.linkedin.com/company/acme/{company_subpath}"
+            ),
+        )
+        verdict["employee_size_evidence_quote"] = (
+            "View all 275 employees associated with Acme"
+        )
+        return verdict, ""
+
+    async def fetch(url, **_kwargs):
+        fetches.append(url)
+        return {
+            "employee_count": "11-50",
+            "url": url,
+            "quote": "Company size 11-50 employees",
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", fetch)
+
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _company(),
+            _icp(),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_homepage_anchor(),
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert fetches == ["https://www.linkedin.com/company/acme"]
+    assert result.details["dimension_evidence"]["employee_size"] == {
+        "url": "https://www.linkedin.com/company/acme",
+        "quote": "Company size 11-50 employees",
+    }
+
+
+@pytest.mark.parametrize(
+    "employee_url",
+    [
+        "https://www.linkedin.com/company/other/life",
+        "https://www.linkedin.com/company/acme%2Flife/culture",
+        "https://www.linkedin.com/in/acme/life",
+    ],
+)
+def test_company_subpage_cannot_bypass_company_identity_binding(
+    monkeypatch,
+    employee_url,
+):
+    fetches = []
+
+    async def provider(**_kwargs):
+        return _verdict(employee_url=employee_url), ""
+
+    async def fetch(url, **_kwargs):
+        fetches.append(url)
+        return {
+            "employee_count": "11-50",
+            "url": url,
+            "quote": "Company size 11-50 employees",
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", fetch)
+
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _company(),
+            _icp(),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_homepage_anchor(),
+        )
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert fetches == []
+
+
 @pytest.mark.parametrize(
     ("employee_range", "expected"),
     [

@@ -302,9 +302,9 @@ def test_combined_verifier_fetches_all_sources_and_issues_one_final_judgment(mon
     result = asyncio.run(run())
     assert result["client_ready"] is True
     assert fetches == [urls]
-    assert len(calls) == 2  # One advisory pass, one source-grounded terminal pass.
-    assert "COMBINED CRITERION EVIDENCE" in calls[1]
-    assert all(url in calls[1] for url in urls)
+    assert len(calls) == 1  # Only the source-grounded terminal pass.
+    assert "COMBINED CRITERION EVIDENCE" in calls[0]
+    assert all(url in calls[0] for url in urls)
     assert result["source_publication_dates"] == ["2026-08-01"]
 
 
@@ -996,7 +996,7 @@ def test_incomplete_bundle_does_not_judge_only_the_available_source(monkeypatch)
     assert result["decision"] == "unavailable"
     assert result["rejection_reason"] == "evidence_fetch_failed"
     assert result["scrape"]["result_count"] == 1
-    assert judge.await_count == 1  # Only the advisory pass; no partial terminal verdict.
+    assert judge.await_count == 0  # No partial terminal verdict or advisory call.
 
 
 @pytest.mark.parametrize("cite_closed", [True, False])
@@ -1113,7 +1113,7 @@ def test_combined_evidence_preserves_confirmed_absence_semantics(monkeypatch, al
     ))
     assert result["decision"] == ("reject" if all_absent else "approve")
     assert result["rejection_reason"] == ("evidence_not_found" if all_absent else "")
-    assert judge.await_count == (1 if all_absent else 2)
+    assert judge.await_count == (0 if all_absent else 1)
 
 
 def test_integrity_rejects_multiple_verdicts_for_one_criterion(monkeypatch):

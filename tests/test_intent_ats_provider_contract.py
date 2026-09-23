@@ -230,19 +230,6 @@ async def _run_greenhouse_verification(monkeypatch, payload, stage3_status):
 
     async def call_openrouter(_client, _model, prompt):
         prompts.append(prompt)
-        if len(prompts) == 1:
-            return {
-                "answer": {
-                    "signal_evaluations": [{
-                        "signal_status": "unable_to_verify",
-                        "verification_mode": "source_grounded",
-                        "same_entity_check": "unclear",
-                        "confidence": "medium",
-                    }],
-                },
-                "model": "perplexity/sonar",
-                "usage": {},
-            }
         return _verdict(stage3_status)
 
     monkeypatch.setenv("SCRAPINGDOG_API_KEY", "test-runtime-handle")
@@ -318,8 +305,8 @@ async def test_encoded_greenhouse_job_reaches_stage3(monkeypatch):
         monkeypatch, _encoded_greenhouse_payload(), "supported"
     )
 
-    assert len(prompts) == 2
-    assert "What You'll Do" in json.dumps(prompts[1])
+    assert len(prompts) == 1
+    assert "What You'll Do" in json.dumps(prompts[0])
     assert client.calls == 1
     assert result["stage3"]["status"] == "supported"
     assert result["decision"] == "approve"
@@ -332,7 +319,7 @@ async def test_encoded_greenhouse_job_still_obeys_negative_stage3(monkeypatch):
         monkeypatch, _encoded_greenhouse_payload(), "contradicted"
     )
 
-    assert len(prompts) == 2
+    assert len(prompts) == 1
     assert client.calls == 1
     assert result["stage3"]["status"] == "contradicted"
     assert result["decision"] == "reject"
@@ -376,7 +363,7 @@ async def test_greenhouse_shell_still_stops_before_stage3(monkeypatch):
         monkeypatch, payload, "supported"
     )
 
-    assert len(prompts) == 1
+    assert len(prompts) == 0
     assert client.calls == 1
     assert result["stage3"] is None
     assert result["decision"] == "reject"

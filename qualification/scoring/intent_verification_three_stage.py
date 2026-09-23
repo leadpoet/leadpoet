@@ -1750,10 +1750,20 @@ def _exact_ats_result_binds_company(
 
 
 def _grounded_exact_text(source_text: str, quote: Any) -> bool:
-    """Whether one nonempty quote is an exact whitespace-normalized span."""
+    """Match source text, ignoring whitespace and optional quotation wrappers.
+
+    Do not accept paraphrases, omitted words, or reordered fragments. Quotation
+    marks around a copied sentence are formatting, not part of its evidence.
+    """
 
     normalized_source = " ".join(str(source_text or "").casefold().split())
     normalized_quote = " ".join(str(quote or "").casefold().split())
+    wrappers = {'"': '"', "'": "'", "“": "”", "‘": "’"}
+    if (
+        len(normalized_quote) > 1
+        and wrappers.get(normalized_quote[0]) == normalized_quote[-1]
+    ):
+        normalized_quote = normalized_quote[1:-1].strip()
     return bool(normalized_quote and normalized_quote in normalized_source)
 
 
@@ -2975,7 +2985,13 @@ def _build_final_judge_prompt(
             "rejuvenate the submitted event. Return contradicted only when exact "
             "linked-page text disproves the submitted claim or its ICP alignment; "
             "otherwise use unable_to_verify when same-event identity or date is "
-            "not proved."
+            "not proved. Return the input signal_id. If the linked text proves "
+            "the original submitted event (not just another event of the same "
+            "company), add same_event_as_submitted:verified to risk_notes. "
+            "The claim field may summarize that event; copied wording is not "
+            "proof of event identity. Include an unabridged supporting quote "
+            "that binds the event and its date. Do not shorten quotes with "
+            "ellipses or borrow a date from another event on the page."
         )
     prompt_row = {**row, "_final_judge_suffix": suffix}
 
@@ -3569,7 +3585,6 @@ def _supported_medium_needs_clarification(
         and item.get("evidence_urls_used")
         and not item.get("unsupported_parts")
         and not item.get("contradicting_quotes")
-        and _grounded_exact_text(source_text, item.get("claim"))
         and any(_grounded_exact_text(source_text, quote) for quote in grounded_quotes)
     )
 
@@ -3740,7 +3755,18 @@ def _same_event_resolution_outcome(
     if not isinstance(items, list) or len(items) != 1:
         return "unproven"
     item = items[0]
-    if not isinstance(item, Mapping) or item.get("claim") != submitted_claim:
+    if (
+        not isinstance(item, Mapping)
+        or item.get("verification_mode") != "source_grounded"
+        or item.get("signal_id") != "signal-1"
+    ):
+        return "unproven"
+    # The model may faithfully summarize the submitted event. Bind that
+    # assessment to the input signal, not to a byte-for-byte echoed sentence.
+    if item.get("claim") != submitted_claim and not (
+        item.get("signal_id") == "signal-1"
+        and "same_event_as_submitted:verified" in (item.get("risk_notes") or [])
+    ):
         return "unproven"
     selected = {_normalize_url(url) for url in selected_urls}
     cited = {
@@ -3766,6 +3792,8 @@ def _same_event_resolution_outcome(
             else "unproven"
         )
     if item.get("signal_status") != "supported":
+        return "unproven"
+    if item.get("unsupported_parts") or item.get("contradicting_quotes"):
         return "unproven"
     quotes = item.get("supporting_quotes") or []
     if not any(_grounded_exact_text(linked_text, quote) for quote in quotes):
@@ -3859,7 +3887,7 @@ async def verify_three_stage(
     """3-stage intent verification (sonar -> SD/Exa -> sonar-pro).
 
     Pipeline:
-      1. Stage 1 sonar verdict.  In source-grounded mode this is advisory.
+      1. Stage 1 sonar verdict, skipped in source-grounded mode.
       2. Fetch supplied URLs via SD (hardened) with Exa fallback.
       3. Pre-LLM company-name-in-scrape check on the fetched content.
          If the company name isn't anywhere in any fetched page, short-
@@ -4021,25 +4049,39 @@ async def verify_three_stage(
         )
 
     # ── STAGE 1: sonar first-pass ──────────────────────────────────
-    s1_prompt = _build_verification_prompt(row)
-    if verified_identity_context:
-        s1_prompt += _verified_company_identity_instructions(
-            row, verified_identity_context
-        )
-    s1_envelope = await _call_openrouter(
-        client, stage1_model or STAGE1_MODEL, s1_prompt
-    )
-    if s1_envelope.get("_error"):
+    if stage1_soft_reject:
+        # This path always decides from fetched source content. A blind
+        # first-pass verdict cannot change that decision, so do not buy it.
         stage1_info = {
-            "model": stage1_model or STAGE1_MODEL,
-            "status": "llm_error",
+            "model": None,
+            "status": "skipped_source_grounded",
             "confidence": None,
-            "decision": "review" if stage1_soft_reject else "reject",
+            "decision": "review",
             "same_entity_check": None,
             "usage": {},
-            "error": s1_envelope.get("_error"),
         }
-        if not stage1_soft_reject:
+        s1_verdict = {}
+        s1_item = {}
+        s1_decision = "review"
+    else:
+        s1_prompt = _build_verification_prompt(row)
+        if verified_identity_context:
+            s1_prompt += _verified_company_identity_instructions(
+                row, verified_identity_context
+            )
+        s1_envelope = await _call_openrouter(
+            client, stage1_model or STAGE1_MODEL, s1_prompt
+        )
+        if s1_envelope.get("_error"):
+            stage1_info = {
+                "model": stage1_model or STAGE1_MODEL,
+                "status": "llm_error",
+                "confidence": None,
+                "decision": "reject",
+                "same_entity_check": None,
+                "usage": {},
+                "error": s1_envelope.get("_error"),
+            }
             return {
                 "client_ready": False,
                 "decision": "unavailable",
@@ -4049,10 +4091,6 @@ async def verify_three_stage(
                 "stage3": None,
                 "company_check": None,
             }
-        s1_verdict = {}
-        s1_item = {}
-        s1_decision = "review"
-    else:
         s1_verdict_raw = (s1_envelope.get("answer") or {})
         s1_verdict = _apply_guardrails(row, s1_verdict_raw)
         s1_item = ((s1_verdict.get("signal_evaluations") or [{}]) or [{}])[0]
@@ -4111,15 +4149,6 @@ async def verify_three_stage(
                 "company_check": None,
                 "verdict": s1_verdict,
             }
-    elif stage1_soft_reject:
-        # The independent publication verifier must make its terminal decision
-        # from the supplied page, not Stage 1's blind web search. Preserve the
-        # first-pass verdict for diagnostics and always continue to fetch.
-        stage1_info["original_decision"] = s1_decision
-        stage1_info["decision"] = "review"
-        if s1_item.get("signal_status"):
-            stage1_info["source_fetch_required_after"] = s1_item.get("signal_status")
-
     # ── STAGE 2: SD-primary + Exa-fallback fetch ───────────────────
     if not row["claimed_source_urls"]:
         return {
@@ -4496,7 +4525,7 @@ async def verify_three_stage(
     )
     should_resolve_same_event = bool(
         integrity_policy
-        and not bundle
+        and len(bundle) <= 1
         and not is_hiring_claim
         and same_event_candidates
         and s3_item.get("signal_status") == "supported"

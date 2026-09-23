@@ -391,6 +391,78 @@ def test_published_evidence_requires_all_configured_outputs_scores_and_costs():
     assert "execute_accepted_uniqueness" in incomplete["proof"]["errors"]
 
 
+def _provider_cost_row(service, kind):
+    return next(
+        row for row in service.store.costs["providers"] if row["kind"] == kind
+    )
+
+
+@pytest.mark.parametrize("kind", ("execute", "score"))
+def test_current_cost_proof_keeps_terminal_failed_uncertainty_as_audit_evidence(
+    kind,
+):
+    service = Service()
+    service.store.row["configuration_doc"]["sourcing_cost_eligibility_policy"] = (
+        contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+    )
+    provider = _provider_cost_row(service, kind)
+    provider["call_count"] += 1
+    provider["uncertain_calls"] = 1
+
+    document = verification._evidence(service, ROUND_ID)
+
+    assert document["proof"] == {"complete": True, "errors": []}
+    assert document["ledger"][0]["totals"][kind]["uncertain_calls"] == 1
+    assert document["ledger"][0]["totals"][kind][
+        "reserved_or_uncertain_microusd"
+    ] == 0
+    assert document["ledger"][0]["totals"][kind][
+        "success_unresolved_calls"
+    ] == 0
+
+
+@pytest.mark.parametrize("kind", ("execute", "score"))
+def test_legacy_cost_proof_still_rejects_terminal_uncertainty(kind):
+    service = Service()
+    provider = _provider_cost_row(service, kind)
+    provider["call_count"] += 1
+    provider["uncertain_calls"] = 1
+
+    document = verification._evidence(service, ROUND_ID)
+
+    assert "open_costs" in document["proof"]["errors"]
+
+
+@pytest.mark.parametrize("kind", ("execute", "score"))
+@pytest.mark.parametrize(
+    "blocked_state",
+    (
+        {"inflight_calls": 1},
+        {"uncertain_calls": 1, "success_unresolved_calls": 1},
+        {"uncertain_calls": 1, "success_unresolved_microusd": 1},
+        {"uncertain_calls": 1, "reserved_or_uncertain_microusd": 1},
+    ),
+    ids=(
+        "active-call",
+        "possible-success-call",
+        "possible-success-amount",
+        "nonzero-hold",
+    ),
+)
+def test_current_cost_proof_rejects_open_or_potentially_billable_state(
+    kind, blocked_state,
+):
+    service = Service()
+    service.store.row["configuration_doc"]["sourcing_cost_eligibility_policy"] = (
+        contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+    )
+    _provider_cost_row(service, kind).update(blocked_state)
+
+    document = verification._evidence(service, ROUND_ID)
+
+    assert "open_costs" in document["proof"]["errors"]
+
+
 def test_pre_disclosure_evidence_requires_pending_public_projection_and_private_objects():
     service = Service()
     service.current_time = datetime(2026, 9, 15, 12, tzinfo=timezone.utc)

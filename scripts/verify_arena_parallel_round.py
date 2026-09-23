@@ -814,16 +814,23 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
                     errors.append(kind + "_paid_calls")
                 if int((raw.get(kind) or {}).get("settled_microusd") or 0) < 1:
                     errors.append(kind + "_paid_cost")
+            open_cost_fields = (
+                "inflight_calls",
+                "reserved_or_uncertain_microusd",
+                "success_unresolved_calls",
+                "success_unresolved_microusd",
+            )
+            if (
+                configuration.get("sourcing_cost_eligibility_policy")
+                != contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+            ):
+                open_cost_fields += ("uncertain_calls",)
+            # Current-policy failed-call uncertainty remains audit metadata;
+            # active work and possibly successful unresolved calls still block.
             if any(
                 int((raw.get(kind) or {}).get(field) or 0)
                 for kind in ("execute", "score")
-                for field in (
-                    "inflight_calls",
-                    "uncertain_calls",
-                    "reserved_or_uncertain_microusd",
-                    "success_unresolved_calls",
-                    "success_unresolved_microusd",
-                )
+                for field in open_cost_fields
             ):
                 errors.append("open_costs")
         else:

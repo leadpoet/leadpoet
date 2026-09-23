@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one paid, reward-disabled production shadow round for all twenty ICPs.
+"""Run one paid, reward-disabled production shadow round for one frozen bank.
 
 The process owns one explicit round id.  It serves the normal Arena API on
 loopback for a production validator and advances only that round.  It never
@@ -115,15 +115,12 @@ def _build_pinned_service(round_id: str):
     if source_mode != "live":
         raise VerificationError("the source environment must be the live gateway environment")
     from lab_arena.api import create_app
-    from lab_arena import contracts
     from lab_arena.service import ArenaService, DEFAULT_BASELINE_SOURCE_URL
     from lab_arena.wiring import build_service_from_environment
 
     built, _unused_app = build_service_from_environment("shadow")
     defaults = replace(
         built.config.defaults,
-        benchmark_icp_count=contracts.BENCHMARK_ICP_COUNT,
-        promotion_margin=1.0,
         rewards_enabled=False,
         daily_cutoff_hour_utc=None,
         baseline_source_url=DEFAULT_BASELINE_SOURCE_URL,
@@ -147,15 +144,17 @@ def _validate_frozen_round(service: Any, row: Mapping[str, Any]) -> None:
 
     configuration = row.get("configuration_doc") or {}
     defaults = service.config.defaults
+    benchmark_icp_count = int(defaults.benchmark_icp_count)
     expected = {
         "round_id": row.get("round_id"),
         "mode": "shadow",
         "network_name": service.config.network_name,
         "netuid": service.config.netuid,
         "rewards_enabled": False,
-        "stage_1_icp_count": contracts.STAGE_1_ICP_COUNT,
-        "stage_2_icp_count": contracts.STAGE_2_ICP_COUNT,
-        "runner_slot_ceiling": contracts.RUNNER_SLOT_CEILING,
+        "stage_1_icp_count": (benchmark_icp_count + 1) // 2,
+        "stage_2_icp_count": benchmark_icp_count // 2,
+        "promotion_margin": float(defaults.promotion_margin),
+        "runner_slot_ceiling": int(defaults.runner_slot_ceiling),
         "baseline_hotkey": defaults.baseline_hotkey,
         "baseline_source_url": DEFAULT_BASELINE_SOURCE_URL,
         "scorer_image_digest": defaults.scorer_image_digest,
@@ -530,6 +529,7 @@ def _durable_output_counts(
             "verified_count": 0,
             "stored_hash_count": 0,
             "invalid_count": 0,
+            "contact_field_count": 0,
         },
         "score": {
             "accepted_count": 0,
@@ -560,6 +560,13 @@ def _durable_output_counts(
                 if contracts.document_hash(document) != stored_hash:
                     raise ValueError("accepted output hash does not match")
             if kind == "execute":
+                raw_companies = document.get("companies")
+                if isinstance(raw_companies, list):
+                    counts[kind]["contact_field_count"] += sum(
+                        "contact" in company
+                        for company in raw_companies
+                        if isinstance(company, Mapping)
+                    )
                 validate_output_document(
                     document,
                     expected_schema_version=contact_policy.output_schema(configuration),
@@ -678,8 +685,9 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
 
     errors = []
     if row.get("status") == "published":
-        expected_positions = list(range(contracts.BENCHMARK_ICP_COUNT))
-        expected_assignments = len(participants) * contracts.BENCHMARK_ICP_COUNT
+        benchmark_icp_count = contracts.benchmark_icp_count(configuration)
+        expected_positions = list(range(benchmark_icp_count))
+        expected_assignments = len(participants) * benchmark_icp_count
         if len(participants) != 1:
             errors.append("participant_count")
         for name, counts in (("execute", execution), ("score", scoring_runs)):
@@ -713,11 +721,18 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
             or execution_timing["runner_hotkeys"][0] not in configured_runners
         ):
             errors.append("execution_runner_identity")
-        if execution_timing["worker_slots"] != list(range(10)):
+        expected_parallelism = min(
+            benchmark_icp_count,
+            int(configuration.get("runner_slot_ceiling") or 0),
+        )
+        if execution_timing["worker_slots"] != list(range(expected_parallelism)):
             errors.append("execution_worker_slots")
-        if execution_timing["exit_fingerprint_count"] != 10:
+        if execution_timing["exit_fingerprint_count"] != expected_parallelism:
             errors.append("execution_exit_fingerprints")
-        if execution_timing["concurrency_high_water_lower_bound"] != 10:
+        if (
+            execution_timing["concurrency_high_water_lower_bound"]
+            != expected_parallelism
+        ):
             errors.append("execution_high_water")
         if configuration.get("parallel_twenty_icp_execution") is True:
             # The legacy policy requires two isolated ten-ICP waves. Current
@@ -744,16 +759,33 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
                 or durable.get("invalid_count") != 0
             ):
                 errors.append("durable_" + kind + "_outputs")
+        contacts_enabled = contact_policy.enabled(configuration)
+        if (
+            not contacts_enabled
+            and int((durable_outputs or {}).get("execute", {}).get(
+                "contact_field_count", 0
+            ))
+        ):
+            errors.append("company_only_output_contains_contacts")
         if disclosure is not None:
             if (
                 public_outputs is None
                 or public_outputs["public_icp_status"] != "ready"
                 or public_outputs["public_icp_count"]
-                != contracts.BENCHMARK_ICP_COUNT
-                or public_outputs["output_count"] != contracts.BENCHMARK_ICP_COUNT
+                != benchmark_icp_count
+                or public_outputs["output_count"] != benchmark_icp_count
                 or public_outputs["scored_positions"] != expected_positions
             ):
                 errors.append("public_outputs")
+            if (
+                public_outputs["contact_verifications_present"]
+                is not contacts_enabled
+                or (
+                    not contacts_enabled
+                    and public_outputs["contact_verification_count"] != 0
+                )
+            ):
+                errors.append("contact_publication_contract")
         elif (
             public_outputs is None
             or public_outputs["public_icp_status"] != "pending"
@@ -765,8 +797,8 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
             or public_outputs["scored_positions"]
             or public_outputs["contact_verification_count"] != 0
             or (
-                contact_policy.enabled(configuration)
-                and not public_outputs["contact_verifications_present"]
+                public_outputs["contact_verifications_present"]
+                is not contacts_enabled
             )
         ):
             errors.append("public_outputs_pending_contract")

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lab_arena import contact_policy, contracts, icp_disclosure, scoring
+from lab_arena import contracts, icp_disclosure, intent_details_policy, scoring
 from lab_arena.service import DEFAULT_BASELINE_SOURCE_URL
 from scripts import verify_arena_parallel_round as verification
 
@@ -16,13 +16,14 @@ ROUND_ID = "arena-2026-09-14-proxye2e"
 SUBMISSION_ID = "baseline-submission"
 
 
-def test_specialized_shadow_verifier_pins_legacy_twenty_count(monkeypatch):
+def test_specialized_shadow_verifier_preserves_current_count_and_margin(monkeypatch):
     from lab_arena import api, service, wiring
 
     @dataclass
     class Defaults:
         benchmark_icp_count: int = 10
         promotion_margin: float = 0.5
+        runner_slot_ceiling: int = 10
         rewards_enabled: bool = True
         daily_cutoff_hour_utc: int = 0
         baseline_source_url: str = "example"
@@ -43,38 +44,46 @@ def test_specialized_shadow_verifier_pins_legacy_twenty_count(monkeypatch):
 
     built, app = verification._build_pinned_service(ROUND_ID)
     assert app == "test-app"
-    assert built.config.defaults.benchmark_icp_count == 20
-    assert built.config.defaults.promotion_margin == 1.0
+    assert built.config.defaults.benchmark_icp_count == 10
+    assert built.config.defaults.promotion_margin == 0.5
     assert built.config.mode == "shadow"
     assert built.config.pinned_round_id == ROUND_ID
 
 
-def _configuration():
-    return {
+def _configuration(*, count=10, parallel=False):
+    configuration = {
         "round_id": ROUND_ID,
         "mode": "shadow",
         "network_name": "finney",
         "netuid": 71,
         "rewards_enabled": False,
-        "stage_1_icp_count": 10,
-        "stage_2_icp_count": 10,
-        "runner_slot_ceiling": 20,
-        "parallel_twenty_icp_execution": True,
+        "stage_1_icp_count": (count + 1) // 2,
+        "stage_2_icp_count": count // 2,
+        "promotion_margin": 0.5,
+        "runner_slot_ceiling": 10,
         "baseline_hotkey": "baseline-hotkey",
         "baseline_source_url": DEFAULT_BASELINE_SOURCE_URL,
         "scorer_image_digest": "sha256:" + "a" * 64,
         "scorer_image_reference": "registry.example/scorer@sha256:" + "a" * 64,
         "runner_hotkeys": ["runner-hotkey"],
         "benchmark_disclosure_policy": icp_disclosure.DELAYED_DISCLOSURE_POLICY,
-        "contact_policy": contact_policy.POLICY,
+        "integrity_policy": "arena_integrity_v1",
+        "intent_details_policy": intent_details_policy.POLICY,
         "schedule": {
             "submission_open": "2026-09-14T00:00:00Z",
             "submission_cutoff": "2026-09-15T00:00:00Z",
         },
     }
+    if parallel:
+        configuration["parallel_twenty_icp_execution"] = True
+    else:
+        configuration["execution_sequence_policy"] = (
+            contracts.BASELINE_SCORED_FIRST_POLICY
+        )
+    return configuration
 
 
-def _provider_cost(kind, amount):
+def _provider_cost(kind, amount, count):
     return {
         "kind": kind,
         "provider": "openrouter",
@@ -83,18 +92,18 @@ def _provider_cost(kind, amount):
         "inflight_calls": 0,
         "uncertain_calls": 0,
         "refused_calls": 0,
-        "call_count": 20,
+        "call_count": count,
         "successful_microusd": amount,
-        "successful_calls": 20,
+        "successful_calls": count,
         "success_unresolved_microusd": 0,
         "success_unresolved_calls": 0,
     }
 
 
 class Store:
-    def __init__(self):
-        execution_cost = _provider_cost("execute", 123)
-        score_cost = _provider_cost("score", 456)
+    def __init__(self, *, count=10, parallel=False):
+        execution_cost = _provider_cost("execute", 123, count)
+        score_cost = _provider_cost("score", 456, count)
         self.row = {
             "round_id": ROUND_ID,
             "status": "published",
@@ -105,7 +114,7 @@ class Store:
             "icp_set_date": "2026-09-14",
             "evaluation_date": "2026-09-15",
             "benchmark_ref": "arena/benchmarks/2026-09-14.json",
-            "configuration_doc": _configuration(),
+            "configuration_doc": _configuration(count=count, parallel=parallel),
             "participants": [
                 {
                     "submission_id": SUBMISSION_ID,
@@ -135,7 +144,7 @@ class Store:
         }
         self.runs = []
         for kind in ("execute", "score"):
-            for position in range(20):
+            for position in range(count):
                 if kind == "execute":
                     wave = 0 if position < 10 else 10
                     resource_summary = {
@@ -206,8 +215,8 @@ class Store:
 
 
 class Service:
-    def __init__(self):
-        self.store = Store()
+    def __init__(self, *, count=10, parallel=False):
+        self.store = Store(count=count, parallel=parallel)
         self.current_time = datetime(2026, 9, 16, tzinfo=timezone.utc)
         self.object_get_calls = 0
         self._objects = SimpleNamespace(get_bounded=self._get_bounded)
@@ -215,7 +224,7 @@ class Service:
         for run in self.store.runs:
             if run["kind"] == "execute":
                 document = {
-                    "schema_version": contact_policy.OUTPUT_SCHEMA,
+                    "schema_version": intent_details_policy.COMPANY_ONLY_OUTPUT_SCHEMA,
                     "companies": [],
                 }
             else:
@@ -239,6 +248,9 @@ class Service:
                     "registry.example/scorer@sha256:" + "a" * 64
                 ),
                 runner_hotkeys=("runner-hotkey",),
+                benchmark_icp_count=count,
+                promotion_margin=0.5,
+                runner_slot_ceiling=10,
             ),
         )
         self.calls = []
@@ -265,23 +277,31 @@ class Service:
                 "scores": {"stage_1": [], "stage_2": []},
                 "public_icp_status": "pending",
                 "public_icp_count": 0,
-                "contact_verifications": {},
                 "submission_scores": {"stage_1": 76.0, "final": 77.5},
             }
+        stage_one_count = int(
+            self.store.row["configuration_doc"]["stage_1_icp_count"]
+        )
         return {
-            "outputs": {"run-%d" % position: {"companies": []} for position in range(20)},
-            "run_results": [{} for _position in range(20)],
+            "outputs": {
+                "run-%d" % position: {"companies": []}
+                for position in range(len(self.store.runs) // 2)
+            },
+            "run_results": [{} for _position in range(len(self.store.runs) // 2)],
             "scores": {
                 "stage_1": [
-                    {"icp_position": position} for position in range(10)
+                    {"icp_position": position}
+                    for position in range(stage_one_count)
                 ],
                 "stage_2": [
-                    {"icp_position": position} for position in range(10, 20)
+                    {"icp_position": position}
+                    for position in range(
+                        stage_one_count, len(self.store.runs) // 2
+                    )
                 ],
             },
             "public_icp_status": "ready",
-            "public_icp_count": 20,
-            "contact_verifications": {},
+            "public_icp_count": len(self.store.runs) // 2,
             "submission_scores": {"stage_1": 76.0, "final": 77.5},
         }
 
@@ -294,19 +314,19 @@ class Service:
         return {"status": "none"}
 
 
-def test_published_evidence_requires_all_twenty_unique_outputs_scores_and_costs():
+def test_published_evidence_requires_all_configured_outputs_scores_and_costs():
     service = Service()
 
     document = verification._evidence(service, ROUND_ID)
 
     assert document["proof"] == {"complete": True, "errors": []}
-    assert document["execution"]["assignment_count"] == 20
-    assert document["execution"]["accepted_output_ref_count"] == 20
-    assert document["execution"]["scored_assignment_count"] == 20
-    assert document["scoring"]["assignment_count"] == 20
-    assert document["scoring"]["accepted_output_ref_count"] == 20
+    assert document["execution"]["assignment_count"] == 10
+    assert document["execution"]["accepted_output_ref_count"] == 10
+    assert document["execution"]["scored_assignment_count"] == 10
+    assert document["scoring"]["assignment_count"] == 10
+    assert document["scoring"]["accepted_output_ref_count"] == 10
     assert document["execution_timing"] == {
-        "accepted_interval_count": 20,
+        "accepted_interval_count": 10,
         "invalid_result_count": 0,
         "failed_attempt_interval_count": 0,
         "invalid_failed_attempt_interval_count": 0,
@@ -317,23 +337,24 @@ def test_published_evidence_requires_all_twenty_unique_outputs_scores_and_costs(
         "physical_concurrency_evidence": "operator_sandbox_pid_observations_required",
         "concurrency_high_water_lower_bound": 10,
         "first_batch_concurrency_high_water_lower_bound": 10,
-        "second_batch_concurrency_high_water_lower_bound": 10,
+        "second_batch_concurrency_high_water_lower_bound": 0,
         "first_batch_latest_finish": "2026-09-14T00:00:10Z",
-        "second_batch_earliest_start": "2026-09-14T00:00:10Z",
-        "second_batch_started_after_first_finished": True,
+        "second_batch_earliest_start": None,
+        "second_batch_started_after_first_finished": False,
     }
-    assert document["public_result"]["output_count"] == 20
+    assert document["public_result"]["output_count"] == 10
     assert document["durable_outputs"] == {
         "execute": {
-            "accepted_count": 20,
-            "verified_count": 20,
+            "accepted_count": 10,
+            "verified_count": 10,
             "stored_hash_count": 0,
             "invalid_count": 0,
+            "contact_field_count": 0,
         },
         "score": {
-            "accepted_count": 20,
-            "verified_count": 20,
-            "stored_hash_count": 20,
+            "accepted_count": 10,
+            "verified_count": 10,
+            "stored_hash_count": 10,
             "invalid_count": 0,
         },
     }
@@ -343,7 +364,7 @@ def test_published_evidence_requires_all_twenty_unique_outputs_scores_and_costs(
         "policy": icp_disclosure.DELAYED_DISCLOSURE_POLICY,
     }
     assert document["ledger_funding"] == {
-        "entry_count": 40,
+        "entry_count": 20,
         "sources": ["host"],
         "all_host": True,
     }
@@ -351,16 +372,16 @@ def test_published_evidence_requires_all_twenty_unique_outputs_scores_and_costs(
         "execute": {
             **{field: 0 for field in verification.LEDGER_FIELDS},
             "settled_microusd": 123,
-            "call_count": 20,
+            "call_count": 10,
             "successful_microusd": 123,
-            "successful_calls": 20,
+            "successful_calls": 10,
         },
         "score": {
             **{field: 0 for field in verification.LEDGER_FIELDS},
             "settled_microusd": 456,
-            "call_count": 20,
+            "call_count": 10,
             "successful_microusd": 456,
-            "successful_calls": 20,
+            "successful_calls": 10,
         },
     }
 
@@ -390,12 +411,12 @@ def test_pre_disclosure_evidence_requires_pending_public_projection_and_private_
         "scored_positions": [],
         "public_icp_status": "pending",
         "public_icp_count": 0,
-        "contact_verifications_present": True,
+        "contact_verifications_present": False,
         "contact_verification_count": 0,
         "submission_scores": {"stage_1": 76.0, "final": 77.5},
     }
-    assert document["durable_outputs"]["execute"]["verified_count"] == 20
-    assert document["durable_outputs"]["score"]["verified_count"] == 20
+    assert document["durable_outputs"]["execute"]["verified_count"] == 10
+    assert document["durable_outputs"]["score"]["verified_count"] == 10
 
     original = service.public_results
 
@@ -438,9 +459,9 @@ def test_durable_objects_are_read_only_at_terminal_state_and_cached_by_identity(
 
     service.store.row["status"] = "published"
     verification._evidence(service, ROUND_ID)
-    assert service.object_get_calls == 40
+    assert service.object_get_calls == 20
     verification._evidence(service, ROUND_ID)
-    assert service.object_get_calls == 40
+    assert service.object_get_calls == 20
 
 
 def test_published_evidence_rejects_an_invalid_durable_score_object():
@@ -451,16 +472,58 @@ def test_published_evidence_rejects_an_invalid_durable_score_object():
     document = verification._evidence(service, ROUND_ID)
 
     assert document["durable_outputs"]["score"] == {
-        "accepted_count": 20,
-        "verified_count": 19,
-        "stored_hash_count": 20,
+        "accepted_count": 10,
+        "verified_count": 9,
+        "stored_hash_count": 10,
         "invalid_count": 1,
     }
     assert "durable_score_outputs" in document["proof"]["errors"]
 
 
-def test_published_evidence_rejects_early_second_batch_and_wrong_high_water():
+def test_company_only_evidence_checks_raw_durable_contact_fields():
     service = Service()
+    execution = next(
+        run for run in service.store.runs if run["kind"] == "execute"
+    )
+    service.object_documents[execution["output_ref"]] = json.dumps(
+        {
+            "schema_version": intent_details_policy.COMPANY_ONLY_OUTPUT_SCHEMA,
+            "companies": [
+                {
+                    "company_name": "Acme",
+                    "company_website": "https://acme.example.com/",
+                    "company_linkedin": "https://linkedin.com/company/acme",
+                    "industry": "Software",
+                    "employee_count": "51-200",
+                    "company_stage": "Series A",
+                    "country": "United States",
+                    "state": "CA",
+                    "intent_details": "Acme announced a product launch.",
+                    "intent_signals": [
+                        {
+                            "matched_icp_signal": 0,
+                            "description": "Product launch",
+                            "date": "2026-09-01",
+                            "url": "https://acme.example.com/launch",
+                        }
+                    ],
+                    "company_stage_evidence": [],
+                    "required_attribute": None,
+                    "contact": "discarded by V6 normalization",
+                }
+            ],
+        }
+    ).encode()
+
+    document = verification._evidence(service, ROUND_ID)
+
+    assert document["durable_outputs"]["execute"]["verified_count"] == 10
+    assert document["durable_outputs"]["execute"]["contact_field_count"] == 1
+    assert "company_only_output_contains_contacts" in document["proof"]["errors"]
+
+
+def test_published_evidence_rejects_early_second_batch_and_wrong_high_water():
+    service = Service(count=20, parallel=True)
     execution = [run for run in service.store.runs if run["kind"] == "execute"]
     execution[9]["result_doc"]["started_at"] = "2026-09-14T00:00:09Z"
     execution[10]["result_doc"]["started_at"] = "2026-09-14T00:00:09Z"
@@ -473,7 +536,7 @@ def test_published_evidence_rejects_early_second_batch_and_wrong_high_water():
 
 
 def test_published_evidence_rejects_sequential_first_batch_before_parallel_second():
-    service = Service()
+    service = Service(count=20, parallel=True)
     execution = [run for run in service.store.runs if run["kind"] == "execute"]
     for position in range(10):
         execution[position]["result_doc"]["started_at"] = (
@@ -496,7 +559,7 @@ def test_published_evidence_rejects_sequential_first_batch_before_parallel_secon
 
 
 def test_failed_initial_attempt_keeps_real_first_wave_overlap_in_proof():
-    service = Service()
+    service = Service(count=20, parallel=True)
     execution = [run for run in service.store.runs if run["kind"] == "execute"]
     accepted_retry = execution[0]
     accepted_retry["result_doc"]["started_at"] = "2026-09-14T00:00:10Z"
@@ -533,7 +596,7 @@ def test_failed_initial_attempt_keeps_real_first_wave_overlap_in_proof():
 
 
 def test_failed_second_batch_attempt_cannot_hide_an_early_batch_start():
-    service = Service()
+    service = Service(count=20, parallel=True)
     accepted_second = next(
         run
         for run in service.store.runs
@@ -579,7 +642,7 @@ def test_round_scope_and_driver_are_strictly_pinned():
     ]
     verified = set()
     verification._verify_host_funding(service, ROUND_ID, verified)
-    assert len(verified) == 40
+    assert len(verified) == 20
 
     service.store.row["configuration_doc"]["mode"] = "live"
     with pytest.raises(verification.VerificationError, match="mode"):
@@ -594,7 +657,7 @@ def test_round_scope_and_driver_are_strictly_pinned():
 def test_current_baseline_first_policy_accepts_cutoff_disclosure():
     service = Service()
     configuration = service.store.row["configuration_doc"]
-    configuration.pop("parallel_twenty_icp_execution")
+    configuration.pop("parallel_twenty_icp_execution", None)
     configuration["execution_sequence_policy"] = contracts.BASELINE_SCORED_FIRST_POLICY
     configuration["benchmark_disclosure_policy"] = icp_disclosure.CUTOFF_PUBLIC_POLICY
     verification._validate_frozen_round(service, service.store.row)
@@ -618,7 +681,7 @@ def test_current_baseline_first_policy_accepts_cutoff_disclosure():
 def test_current_policy_still_rejects_unknown_or_rewarding_configuration(field, value):
     service = Service()
     configuration = service.store.row["configuration_doc"]
-    configuration.pop("parallel_twenty_icp_execution")
+    configuration.pop("parallel_twenty_icp_execution", None)
     configuration["execution_sequence_policy"] = contracts.BASELINE_SCORED_FIRST_POLICY
     configuration["benchmark_disclosure_policy"] = icp_disclosure.CUTOFF_PUBLIC_POLICY
     configuration[field] = value

@@ -712,7 +712,7 @@ def _serve(args: argparse.Namespace) -> int:
             daily_cutoff_hour_utc=None,
             rewards_enabled=False,
             integrity_from=os.environ.get("LAB_ARENA_INTEGRITY_FROM") or None,
-            contacts_from=os.environ.get("LAB_ARENA_CONTACTS_FROM") or None,
+            contacts_from=None,
             company_quality_from=os.environ.get("LAB_ARENA_COMPANY_QUALITY_FROM") or None,
             benchmark_disclosure_from=os.environ.get("LAB_ARENA_BENCHMARK_DISCLOSURE_FROM") or None,
         )

@@ -75,8 +75,8 @@ def test_contact_icp_model_round_trips_structured_geography() -> None:
 
 def test_template_contact_requirements_are_coherent_and_do_not_copy_hq() -> None:
     legacy = icp_generator.generate_single_icp("legacy", "Software", seed=7)
-    assert legacy["target_roles"] == []
-    assert legacy["target_seniority"] == ""
+    assert "target_roles" not in legacy
+    assert "target_seniority" not in legacy
     assert "contact_geography" not in legacy
 
     contact_icp = icp_generator.generate_single_icp(
@@ -205,7 +205,7 @@ def test_generated_contact_seniority_never_rejects_an_explicit_role(
     )
 
 
-def test_legacy_canonicalization_does_not_repair_contact_fields() -> None:
+def test_company_only_canonicalization_removes_contact_fields() -> None:
     source = _icp("Head of Revenue Operations")
     source["target_seniority"] = "VP+"
 
@@ -215,8 +215,8 @@ def test_legacy_canonicalization_does_not_repair_contact_fields() -> None:
         sub_industry="SaaS",
     )
 
-    assert generated["target_roles"] == ["Head of Revenue Operations"]
-    assert generated["target_seniority"] == "VP+"
+    assert "target_roles" not in generated
+    assert "target_seniority" not in generated
     assert generated["prompt"] == source["prompt"]
 
 
@@ -259,6 +259,22 @@ def test_contact_generation_prompt_keeps_natural_prompt_company_only(
 
 
 @pytest.mark.parametrize("value", ["1", "true", "YES", "on"])
-def test_contact_generation_environment_opt_in(monkeypatch, value: str) -> None:
+def test_retired_contact_generation_environment_cannot_reenable(monkeypatch, value: str) -> None:
     monkeypatch.setenv("LAB_ARENA_CONTACTS_GENERATION_ENABLED", value)
-    assert icp_generator.contacts_generation_enabled()
+    assert not icp_generator.contacts_generation_enabled()
+
+
+def test_company_only_projection_strips_only_canonical_contact_tail():
+    original = _icp()
+    original["contact_policy"] = "contacts_v1"
+    company_prompt = original["prompt"]
+    original["prompt"] += " Target contacts: VP Engineering."
+    projected = integrity.agent_visible_icp(original)
+    assert projected["prompt"] == company_prompt
+    assert not ({"contact_policy", "target_roles", "target_seniority", "contact_geography"} & projected.keys())
+    for field in ("employee_count", "company_stage", "required_attribute", "intent_signals"):
+        assert projected[field] == original[field]
+    assert original["prompt"].endswith("Target contacts: VP Engineering.")
+    historical = integrity.agent_visible_icp(original, contacts_required=True)
+    assert historical["prompt"] == original["prompt"]
+    assert historical["target_roles"] == original["target_roles"]

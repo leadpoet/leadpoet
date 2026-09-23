@@ -20,7 +20,8 @@ MAX_RECENT_ROUND_LIMIT = 100
 
 
 def company_diagnostic(
-    breakdown: Mapping[str, Any], company: Mapping[str, Any], *, icp_position: int
+    breakdown: Mapping[str, Any], company: Mapping[str, Any], *, icp_position: int,
+    contacts_required: bool = True
 ) -> dict:
     """Project accepted checks only; never publish verifier prose or evidence."""
 
@@ -64,6 +65,16 @@ def company_diagnostic(
     checks["intent_details"] = states.get(
         gates.get("intent_details", {}).get("decision"), "not_evaluated"
     )
+    result = {
+        "icp_position": icp_position,
+        "company_index": breakdown["company_index"],
+        "company_name": str(company.get("company_name") or "")[:200],
+        "qualified": breakdown.get("company_qualified") is True,
+        "duplicate_company": breakdown.get("duplicate_company") is True,
+        "checks": checks,
+    }
+    if not contacts_required:
+        return result
     contact = breakdown.get("contact_verification") or {}
     checks["contact"] = states.get(contact.get("decision"), "unavailable")
     subchecks = contact.get("subchecks") or {}
@@ -79,16 +90,11 @@ def company_diagnostic(
     ), None)
     if contact.get("reason") == "contact_claim_invalid":
         contact_failure = "claim"
-    return {
-        "icp_position": icp_position,
-        "company_index": breakdown["company_index"],
-        "company_name": str(company.get("company_name") or "")[:200],
-        "qualified": breakdown.get("company_qualified") is True,
-        "duplicate_company": breakdown.get("duplicate_company") is True,
-        "missing_contact": company.get("contact") is None,
-        "checks": checks,
-        "contact_failure": contact_failure,
-    }
+    result.update(
+        missing_contact=company.get("contact") is None,
+        contact_failure=contact_failure,
+    )
+    return result
 
 
 _COST_REASONS = frozenset(

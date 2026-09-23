@@ -667,14 +667,8 @@ def _employee_count_display(value: Any) -> str:
 
 
 def contacts_generation_enabled() -> bool:
-    """Return the explicit operator opt-in for newly generated contact ICPs."""
-
-    return os.getenv("LAB_ARENA_CONTACTS_GENERATION_ENABLED", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    """Current Arena generates company/account ICPs only."""
+    return False
 
 
 _CONTACT_ROLES_BY_INDUSTRY = {
@@ -900,6 +894,9 @@ def canonicalize_generated_icp(
     )
     normalized.pop("employee_count_buckets", None)
     normalized.pop("employee_counts", None)
+    if not contacts_required:
+        from lab_arena.integrity import company_only_icp
+        normalized = company_only_icp(normalized)
     return normalized
 
 

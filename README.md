@@ -119,12 +119,12 @@ The output below shows the exact supported fields. It is a format example, not a
 </details>
 
 Rounds that announce `intent_details_policy: "intent_details_v1"` use output
-schema v5. They require one plain company-level `intent_details` paragraph and
+schema v6 for current company-only rounds (v5 for historical contact rounds). They require one plain company-level `intent_details` paragraph and
 do not accept the older `fit_summary`, `fit_evidence_urls`, signal `why_now`, or
 signal `snippet` fields. The scorer verifies the paragraph against the
 independently verified signals before the company can receive credit.
 
-Rounds that announce `contact_policy: "contacts_v1"` also require one contact per company: name, role, LinkedIn profile, location, email, and its provider source. The independent verifier accepts provider-attributed **valid or catch-all** emails. A failed contact gives that company zero credit. See the [contact output and verification contract](docs/arena-contacts.md). Historical rounds keep their frozen v1-v4 output contract.
+The current competition discovers companies/accounts only. Contacts, roles, emails, and contact verification are not required and do not affect scoring. Optional legacy contact data is ignored. Historical contact rounds retain their frozen output and verification contract; see the [historical contact contract](docs/arena-contacts.md).
 
 Rounds that announce `company_quality_policy: "company_quality_v1"` require a matching company LinkedIn URL and the headquarters state for U.S. companies. They share individual verification judgments and account for the fraction of requested companies that qualify within each buyer request. Missing new details zero only the affected company. See [company quality, scoring and activation](docs/arena-company-quality.md).
 
@@ -137,15 +137,13 @@ version.
 
 Your `harness.run_icp(icp)` input also includes `output_schema_version`; use this round-specific version and its policy markers when constructing company output.
 
-Scoring checks company fit, intent, and supporting evidence across all 20 ICPs. A model must beat the daily baseline score by at least 1.0 point on the 0–100 scale to qualify for promotion. The gateway promotes winning code to `main` and `lab` for the next baseline. Rewards activate separately through settlement. By default, the champion receives **30%, 24%, 18%, 12%, then 6%** of subnet emissions in successive reward weeks of 140 epochs each. The share remains at 6% from week five onward, subject to registration and continued eligibility. Existing signed reward bases keep their recorded pool percentage.
+Scoring checks company fit, intent, and supporting evidence across all configured ICPs (currently 10). A model must beat the daily baseline score by at least 0.5 points on the 0–100 scale to qualify for promotion. The gateway promotes winning code to `main` and `lab` for the next baseline. Rewards activate separately through settlement. By default, the champion receives **30%, 24%, 18%, 12%, then 6%** of subnet emissions in successive reward weeks of 140 epochs each. The share remains at 6% from week five onward, subject to registration and continued eligibility. Existing signed reward bases keep their recorded pool percentage.
 
 **Champion miners must keep their submitted API credentials funded; if Leadpoet must fund a champion rebenchmark via fallback credentials, that period’s champion incentive is reduced by 50%.**
 
-The sourcing budget is **$80 across OpenRouter, Scrapingdog, and Deepline combined** for all 20 ICPs, including retries. To qualify for promotion, sourcing must also cost no more than **$0.80 per verified, qualified company**. In contact rounds, this means a **qualified company/contact pair**; missing or failed contacts add no allowance. Each qualified company identity counts once per ICP. Independent judging has a separate default **$50 allowance per submitted model**, also charged through the miner's credentials. Full-code review is an additional OpenRouter charge, recorded separately from sourcing and judging.
+Each ICP has a **$4 sourcing limit across OpenRouter, Scrapingdog, and Deepline combined**, including retries. An admitted call can finish above the limit; later paid sourcing calls then stop for that ICP. Only confirmed charges consume admission budget. Pending bills and temporary monetary holds do not block research.
 
-The gateway reserves money before calls and blocks further paid calls when the allowance is exhausted. All actual provider charges, including charged failures, remain in billing and spending protection. A provider that bills after execution can exceed its reservation; the full charge is still recorded.
-
-New rounds announce `sourcing_cost_eligibility_policy: successful_calls_v1`. For promotion eligibility, only successful sourcing calls count toward the sourcing and per-company cost limits. Successful empty responses count, and a successful call still counts if the submitted model later crashes or discards its answer. Failed calls are excluded from this competition cost, even when the provider charges for them. Successful sourcing calls with unresolved charges still require billing recovery. Uncertain judge billing alone does not disqualify complete, valid scoring. Existing rounds retain the cost rules with which they were created.
+After company verification, each ICP can spend up to **$0.80 per verified, qualified company** on successful sourcing calls. Duplicate or unqualified companies add no allowance. An ICP over that cost allowance contributes zero; other ICPs still count. Independent judging has a separate default **$50 allowance per submitted model**, using the same credential selection but excluded from sourcing spend and eligibility. Full-code review is also recorded separately. Historical rounds retain their frozen cost rules. See the [cost accounting details](docs/arena-score-integrity.md).
 
 ## Submit a model
 
@@ -187,7 +185,7 @@ under the same coldkey may each submit. Each round admits up to 20 challengers,
 plus the baseline. Track admission, scoring, per-ICP results, and champion
 status on the [dashboard](https://subnet71.com).
 
-Once the round's ICPs are public, open a submission and expand an ICP to see each company's recorded checks, including missing contacts, failed checks, and checks that were not evaluated.
+Once the round's ICPs are public, open a submission and expand an ICP to see each company's recorded checks, including company-fit, intent, failed checks, and checks that were not evaluated.
 
 ## Public input example
 

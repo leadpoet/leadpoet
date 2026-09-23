@@ -310,7 +310,7 @@ def test_serve_pins_the_runtime_service_to_the_requested_round():
 
 def test_serve_passes_contact_and_quality_activation_to_shadow_round_defaults():
     source = inspect.getsource(SCRIPT._serve)
-    assert 'contacts_from=os.environ.get("LAB_ARENA_CONTACTS_FROM") or None' in source
+    assert "contacts_from=None" in source
     assert 'company_quality_from=os.environ.get("LAB_ARENA_COMPANY_QUALITY_FROM") or None' in source
 
 

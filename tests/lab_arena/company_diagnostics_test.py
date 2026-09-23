@@ -129,3 +129,19 @@ def test_unpublished_results_remain_private(monkeypatch):
     with pytest.raises(ServiceError, match="results_not_public"):
         service.public_results("round", "miner")
     assert reads == []
+
+
+def test_company_only_diagnostics_have_no_contact_or_email_checks(monkeypatch):
+    service, reads, row = _service(monkeypatch)
+    row["configuration_doc"].pop("contact_policy")
+    row["configuration_doc"]["integrity_policy"] = "arena_integrity_v1"
+    result = service.public_results("round", "miner")
+    assert reads == ["output-0"]
+    assert "contact_verifications" not in result
+    diagnostic = result["company_diagnostics"][0]
+    assert "missing_contact" not in diagnostic
+    assert "contact_failure" not in diagnostic
+    assert "contact" not in diagnostic["checks"]
+    assert "email" not in diagnostic["checks"]
+    assert diagnostic["checks"]["identity"] == "passed"
+    assert diagnostic["checks"]["intent"] == "not_evaluated"

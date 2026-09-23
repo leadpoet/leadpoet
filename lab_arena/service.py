@@ -4996,7 +4996,9 @@ class ArenaService:
                 public_positions,
             ),
         }
-        if contact_policy.enabled(row.get("configuration_doc") or {}):
+        if (contact_policy.enabled(row.get("configuration_doc") or {})
+                or integrity.enabled(row.get("configuration_doc") or {})):
+            contacts_required = contact_policy.enabled(row.get("configuration_doc") or {})
             judgments = {}
             for stage in {
                 int(run.get("stage") or 0)
@@ -5018,20 +5020,26 @@ class ArenaService:
                         policy=row["configuration_doc"]["scorer_policy"],
                     )
                 except scoring.ScoringError as exc:
-                    raise ServiceError("public_contact_verification_unavailable", 503) from exc
-                contacts[run_id] = [
-                    {key: value for key, value in verify.redact_breakdown(item).items()
-                     if key in {"company_index", "company_qualified", "contact_qualified", "contact_identity_key", "email_status", "contact_verification"}}
-                    for item in breakdowns
-                ]
+                    raise ServiceError(
+                        "public_contact_verification_unavailable" if contacts_required
+                        else "public_company_verification_unavailable", 503
+                    ) from exc
+                if contacts_required:
+                    contacts[run_id] = [
+                        {key: value for key, value in verify.redact_breakdown(item).items()
+                         if key in {"company_index", "company_qualified", "contact_qualified", "contact_identity_key", "email_status", "contact_verification"}}
+                        for item in breakdowns
+                    ]
                 diagnostics.extend(
                     public_dashboard.company_diagnostic(
                         item,
                         outputs[run_id]["companies"][item["company_index"]],
                         icp_position=int(run["icp_position"]),
+                        contacts_required=contacts_required,
                     )
                     for item in breakdowns
                 )
-            result["contact_verifications"] = contacts
+            if contacts_required:
+                result["contact_verifications"] = contacts
             result["company_diagnostics"] = diagnostics
         return result

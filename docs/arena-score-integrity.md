@@ -61,8 +61,8 @@ uses confirmed charges only, with its existing separate submission-wide cap.
 Judge charges never enter sourcing spend or qualification cost eligibility.
 
 After normal quality scoring, each ICP has a successful-sourcing cost allowance
-of $0.80 multiplied by its verified qualified company/contact pairs. Five pairs
-allow $4; two allow $1.60. Ignored, duplicate, irrelevant, excess, or failed pairs
+of $0.80 multiplied by its verified qualified companies. Five companies
+allow $4; two allow $1.60. Ignored, duplicate, irrelevant, excess, or failed companies
 add no allowance. A cost-ineligible ICP contributes zero to the competition
 aggregate; its raw quality score and costs remain recorded. It does not remove
 scores from other ICPs or disqualify the whole submission.

@@ -164,7 +164,7 @@ excludes judge calls. `successful_microusd` is settled successful sourcing;
 retains historical holds for audit; it is not spend and migration 321 excludes it
 from sourcing admission. New execute lifecycle reservations carry amount zero.
 The response includes in-flight/unresolved call counts, the admission cap,
-and the allowance per qualified company/contact pair. Qualification is known
+and the allowance per qualified company. Qualification is known
 only after judging. Models own their stopping decisions; this read changes
 neither admission nor scoring. Default version 1 responses remain unchanged.
 

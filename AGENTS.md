@@ -1,5 +1,21 @@
 # Agent Instructions
 
+## Scoped production authorization: September 24 company-only Arena
+
+On 2026-09-23 the user explicitly authorized removing contact requirements,
+verification, agentic contact review, gates, and penalties from current Arena
+competition rounds, starting with the unstarted September 24 benchmark.
+Preserve all company/account quality, ICP fit, intent evidence, Why Now,
+confirmed per-ICP costs, daily counts, promotion, reward and weight rules,
+original company ICP constraints, historical frozen results, and concurrent work.
+Authority includes champion adapter changes, exact committed migrations for the
+open unstarted round, provider-backed baseline/miner tests, pushes, scorer image
+publication, scoped configuration updates, and canonical paired restarts through
+`$overnight-rebenchmark-validation`. Keep historical contact contracts only where
+needed to read and validate existing frozen artifacts. Do not reset completed
+rounds, fabricate scores, or mutate another task's active execution. This scope
+ends when the September 24 company-only production flow is verified end to end.
+
 ## Scoped production authorization: September 22 industry verification fix
 
 On 2026-09-22 the user authorized the narrow fix for Dexory's submitted-industry

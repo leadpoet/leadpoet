@@ -1,6 +1,11 @@
-# Arena contacts
+# Historical Arena contacts
 
-New rounds can opt into `contact_policy: "contacts_v1"`. This requires
+Contacts were retired from new competition rounds starting September 24, 2026.
+Current intent-details rounds use contact-free output v6. This document describes
+frozen historical contracts only; the production generator and new-round wiring
+do not activate contacts. Optional legacy contact output is ignored in v6.
+
+Historical rounds could opt into `contact_policy: "contacts_v1"`. This requires
 `arena_integrity_v1`, the `qualification_contacts_v3` scorer, and output schema
 `leadpoet.lab_arena.output.v2`. The gateway freezes these choices into the round.
 Existing rounds keep their original schemas and scoring.

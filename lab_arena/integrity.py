@@ -66,11 +66,30 @@ def _bounded_string_list(
     return result
 
 
+def company_only_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove retired buyer requirements without changing company criteria.
+
+    Old generated banks have one canonical contact sentence appended to the
+    company prompt. Keep the original stored bank intact and omit that sentence
+    when it is consumed by a company-only round.
+    """
+    result = dict(icp)
+    if result.get("contact_policy") == CONTACT_POLICY:
+        prompt = result.get("prompt")
+        if isinstance(prompt, str):
+            result["prompt"] = prompt.partition(" Target contacts:")[0].rstrip()
+    for key in CONTACT_ICP_FIELDS | {"contact_policy"}:
+        result.pop(key, None)
+    return result
+
+
 def agent_visible_icp(
     icp: Mapping[str, Any], *, contacts_required: bool = False
 ) -> dict[str, Any]:
     if not isinstance(icp, Mapping):
         raise ValueError("ICP must be an object")
+    if not contacts_required:
+        icp = company_only_icp(icp)
     result = {}
     for key in ICP_FIELDS:
         if key not in icp:

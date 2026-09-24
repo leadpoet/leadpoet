@@ -231,6 +231,8 @@ ADVERTISING_BLOCK = """      * Advertising technology includes tools that measur
         buy or serve ads. Verify the actual capability and all target qualifiers."""
 
 ACQUISITION_BLOCK = """      * A completed acquisition requires evidence that the transaction completed.
+        An ICP criterion saying `acquired another company` requires completion.
+        An `announced` claim from the miner must not weaken that requirement.
         Unambiguous current-state evidence that the buyer now owns or controls
         the target, including the target operating as part of the buyer or
         active post-acquisition integration, proves completion even if the

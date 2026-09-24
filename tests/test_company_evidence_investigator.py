@@ -341,6 +341,159 @@ def test_investigator_hydrates_only_matching_failed_attribute_source():
     assert "https://different.example/news" not in cache
 
 
+def test_hydrated_attribute_source_matches_only_exact_safe_final_url():
+    requested_url = (
+        "https://www.businesswire.com/news/home/20260915525333/en/"
+        "TypeSafe-AI-Emerges-From-Stealth-With-$40M-in-Funding"
+    )
+    final_url = requested_url.replace("$40M", "%2440M")
+    source_text = "TypeSafe AI emerged from stealth with $40 million."
+
+    def cache_entry(*, observed_final_url=final_url, trusted=True):
+        return {
+            "status": "fetched",
+            "final_url": observed_final_url,
+            "text": source_text,
+            **(
+                {lead_scorer._INVESTIGATOR_HYDRATED_SOURCE: True}
+                if trusted
+                else {}
+            ),
+        }
+
+    trusted = cache_entry()
+    assert lead_scorer._hydrated_required_attribute_source_for_final_url(
+        {requested_url: trusted},
+        final_url,
+    ) is trusted
+    assert lead_scorer._hydrated_required_attribute_source_for_final_url(
+        {f"{requested_url}?view=one": cache_entry(
+            observed_final_url=f"{final_url}?view=two"
+        )},
+        f"{final_url}?view=two",
+    ) is None
+    assert lead_scorer._hydrated_required_attribute_source_for_final_url(
+        {requested_url: trusted},
+        final_url.replace("/news/", "/news%2F"),
+    ) is None
+    assert lead_scorer._hydrated_required_attribute_source_for_final_url(
+        {requested_url: trusted},
+        f"{final_url}%23details",
+    ) is None
+    other_host = final_url.replace("www.businesswire.com", "news.example.com")
+    assert lead_scorer._hydrated_required_attribute_source_for_final_url(
+        {requested_url: cache_entry(observed_final_url=other_host)},
+        other_host,
+    ) is None
+    assert lead_scorer._hydrated_required_attribute_source_for_final_url(
+        {requested_url: cache_entry(trusted=False)},
+        final_url,
+    ) is None
+
+
+@pytest.mark.parametrize("exact_status", ["missing", "source_unavailable"])
+def test_grounding_reuses_trusted_server_observed_final_url(
+    monkeypatch,
+    exact_status,
+):
+    requested_url = (
+        "https://www.businesswire.com/news/home/20260915525333/en/"
+        "TypeSafe-AI-Emerges-From-Stealth-With-$40M-in-Funding"
+    )
+    cited_url = requested_url.replace("$40M", "%2440M")
+    quote = (
+        "TypeSafe AI, a frontier AI lab, today emerged from stealth with "
+        "$40 million in seed funding led by DCVC."
+    )
+    cache = {
+        requested_url: {
+            "status": "fetched",
+            "final_url": cited_url,
+            "text": quote,
+            lead_scorer._INVESTIGATOR_HYDRATED_SOURCE: True,
+        }
+    }
+    if exact_status == "source_unavailable":
+        cache[cited_url] = {
+            "status": "source_unavailable",
+            "final_url": "",
+            "text": "",
+        }
+    verdict = _complete_verdict(
+        attribute_satisfied=True,
+        required_attribute_evidence_url=cited_url,
+        required_attribute_evidence_quote=quote,
+    )
+    source_fetch = AsyncMock(side_effect=AssertionError("must not refetch"))
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", source_fetch)
+
+    grounded, repair = asyncio.run(
+        lead_scorer._ground_required_attribute_evidence(
+            verdict,
+            active_attribute=True,
+            source_cache=cache,
+        )
+    )
+
+    receipt = grounded[lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING]
+    assert grounded["attribute_satisfied"] is True
+    assert receipt["status"] == "grounded"
+    assert receipt["cache_hit"] is True
+    assert receipt["source_url_sha256"] == hashlib.sha256(
+        cited_url.encode("utf-8")
+    ).hexdigest()
+    assert receipt["final_url_sha256"] == hashlib.sha256(
+        cited_url.encode("utf-8")
+    ).hexdigest()
+    assert source_fetch.await_count == 0
+    assert set(cache) == (
+        {requested_url, cited_url}
+        if exact_status == "source_unavailable"
+        else {requested_url}
+    )
+    assert quote not in str(receipt)
+    assert repair == {}
+
+
+def test_grounding_does_not_override_exact_fetched_quote_absent_entry():
+    requested_url = "https://www.businesswire.com/news/typesafe-$40m"
+    cited_url = requested_url.replace("$40m", "%2440m")
+    quote = "TypeSafe AI raised $40 million in seed funding."
+    exact_text = "This exact fetched body does not contain the submitted quote."
+    cache = {
+        requested_url: {
+            "status": "fetched",
+            "final_url": cited_url,
+            "text": quote,
+            lead_scorer._INVESTIGATOR_HYDRATED_SOURCE: True,
+        },
+        cited_url: {
+            "status": "fetched",
+            "final_url": cited_url,
+            "text": exact_text,
+        },
+    }
+    verdict = _complete_verdict(
+        attribute_satisfied=True,
+        required_attribute_evidence_url=cited_url,
+        required_attribute_evidence_quote=quote,
+    )
+
+    grounded, repair = asyncio.run(
+        lead_scorer._ground_required_attribute_evidence(
+            verdict,
+            active_attribute=True,
+            source_cache=cache,
+        )
+    )
+
+    receipt = grounded[lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING]
+    assert grounded["attribute_satisfied"] is None
+    assert receipt["status"] == "quote_absent"
+    assert receipt["cache_hit"] is True
+    assert repair == {"url": cited_url, "text": exact_text}
+
+
 def test_model_cannot_supply_private_fetched_pages():
     finding = _finding("stage")
     injected = {"https://evil.example": {"text": "invented source"}}
@@ -707,11 +860,12 @@ def test_typesafe_investigator_fetch_repairs_same_attribute_source_only(
     repaired_quote,
     expected_decision,
 ):
-    source_url = (
+    requested_source_url = (
         "https://www.businesswire.com/news/home/20260915525333/en/"
         "TypeSafe-AI-Emerges-From-Stealth-With-$40M-in-Funding-With-New-"
         "Model-for-Composable-AI"
     )
+    cited_source_url = requested_source_url.replace("$40M", "%2440M")
     source_text = (
         "TypeSafe AI, a frontier AI lab building machine-native, composable "
         "AI, today emerged from stealth with $40 million in seed funding led "
@@ -725,7 +879,7 @@ def test_typesafe_investigator_fetch_repairs_same_attribute_source_only(
     stage_finding = _finding(
         "stage",
         observed_value="Seed",
-        evidence_url=source_url,
+        evidence_url=requested_source_url,
         evidence_quote=(
             "TypeSafe AI, a frontier AI lab building machine-native, "
             "composable AI, today emerged from stealth with $40 million in "
@@ -733,7 +887,7 @@ def test_typesafe_investigator_fetch_repairs_same_attribute_source_only(
         ),
     )
 
-    def verdict(attribute_quote):
+    def verdict(attribute_quote, attribute_url):
         return _complete_verdict(
             observed_company_name="TypeSafe AI",
             observed_company_website="https://typesafe.ai",
@@ -742,16 +896,16 @@ def test_typesafe_investigator_fetch_repairs_same_attribute_source_only(
             ),
             observed_company_stage="Seed",
             stage_matches=True,
-            stage_evidence_url=source_url,
+            stage_evidence_url=requested_source_url,
             stage_evidence_quote="TypeSafe launched a public product.",
             attribute_satisfied=True,
-            required_attribute_evidence_url=source_url,
+            required_attribute_evidence_url=attribute_url,
             required_attribute_evidence_quote=attribute_quote,
         )
 
     responses = [
-        verdict(stage_finding["evidence_quote"]),
-        verdict(repaired_quote),
+        verdict(stage_finding["evidence_quote"], requested_source_url),
+        verdict(repaired_quote, cited_source_url),
     ]
     prompts = []
 
@@ -773,7 +927,10 @@ def test_typesafe_investigator_fetch_repairs_same_attribute_source_only(
                 "fetch_calls": 1,
             },
             investigator.PRIVATE_FETCHED_PAGES_KEY: {
-                source_url: {"final_url": source_url, "text": source_text}
+                requested_source_url: {
+                    "final_url": cited_source_url,
+                    "text": source_text,
+                }
             },
         }
 
@@ -1434,6 +1591,77 @@ def test_plain_text_extracts_realpage_article_before_navigation_cap():
     assert not _stage_quote_supports_observation("public", exact_quote)
     assert exact["stage"]["status"] == "VERIFIED"
     assert hidden["stage"]["status"] == "UNPROVEN"
+
+
+def test_plain_text_exposes_realpage_link_labels_as_exact_quote_surface(
+    monkeypatch,
+):
+    quote = (
+        "RealPage, Inc., a leading provider of AI-enabled software and data "
+        "analytics to the real estate industry, today announced it has "
+        "completed its acquisition of Cherre, a real estate data intelligence "
+        "company trusted by institutional owners, investment managers, and "
+        "operators worldwide."
+    )
+    retained_article = (
+        "Realpage Newsroom Combination connects property-level operations with "
+        "institutional portfolio intelligence. RICHARDSON, TX and NEW YORK, "
+        "NY - [RealPage, Inc](https://www.realpage.com/)., a leading provider "
+        "of AI-enabled software and data analytics to the real estate industry, "
+        "today announced it has completed its acquisition of "
+        "[Cherre](https://cherre.com/), a real estate data intelligence company "
+        "trusted by institutional owners, investment managers, and operators "
+        "worldwide."
+    )
+    raw = """<html><body><article>
+      <a href="https://www.realpage.com/">RealPage, Inc</a>., a leading provider
+      acquired <a href="https://cherre.com/">Cherre</a>.
+    </article></body></html>"""
+    monkeypatch.setattr(
+        investigator,
+        "extract_article_body",
+        lambda _value: retained_article,
+    )
+
+    text = investigator._plain_text(raw)
+
+    assert investigator._quote_occurs(quote, text)
+    assert quote in investigator._visible_quote_surface(text)
+    assert "https://www.realpage.com/" in text
+    assert "https://cherre.com/" in text
+    assert not investigator._quote_occurs("https://www.realpage.com/", text)
+    assert not investigator._quote_occurs(
+        "operators worldwide. https://www.realpage.com/",
+        text,
+    )
+    assert len(text) <= investigator.MAX_PAGE_CHARACTERS
+
+
+def test_visible_markdown_projection_does_not_join_invalid_link_prose():
+    ordinary = "Ordinary nonlink prose remains unchanged."
+    unsafe = (
+        "Company [did not](javascript:alert(1)) acquire Target. "
+        "Company [might not](https://broken.example/path acquire Target."
+    )
+
+    assert investigator._visible_markdown_link_label_surface(ordinary) == ordinary
+    projected = investigator._visible_markdown_link_label_surface(unsafe)
+    assert projected == unsafe
+    assert not investigator._quote_occurs("Company acquire Target.", projected)
+
+
+def test_literal_identity_link_marker_fails_closed_for_later_quote():
+    fetched = (
+        "Visible evidence before marker. "
+        f"{investigator._IDENTITY_LINK_CONTEXT_MARKER} "
+        "Claim appearing after literal marker."
+    )
+
+    assert investigator._quote_occurs("Visible evidence before marker.", fetched)
+    assert not investigator._quote_occurs(
+        "Claim appearing after literal marker.",
+        fetched,
+    )
 
 
 def test_realpage_semantic_rejection_exposes_earlier_private_equity_proof():

@@ -90,6 +90,30 @@ def _mind_style_inputs():
     return company, icp, signal_results, {}
 
 
+def _unit_grounding(document, *, facts_supported):
+    source_index, values = next(iter(
+        intent_details._bound_evidence_sources(document).items()
+    ))
+    quote = values[0][:intent_details._MAX_UNIT_EVIDENCE_QUOTE_LENGTH]
+    return [
+        {
+            "unit_id": unit["unit_id"],
+            "contains_factual_claim": True,
+            "status": (
+                "UNPROVEN"
+                if not facts_supported and unit["unit_id"] == 0
+                else "VERIFIED"
+            ),
+            "evidence": (
+                []
+                if not facts_supported and unit["unit_id"] == 0
+                else [{"source_index": source_index, "quote": quote}]
+            ),
+        }
+        for unit in document["intent_details_units"]
+    ]
+
+
 def test_review_evidence_surfaces_strict_first_party_body_dateline():
     company, icp, signal_results, fit = _mind_style_inputs()
 
@@ -98,7 +122,9 @@ def test_review_evidence_surfaces_strict_first_party_body_dateline():
     context = evidence["verified_signals"][0]["source_context"][0]
     assert context["source_body_dateline_dates"] == ["2026-03-12"]
     assert CLAIM in context["text"]
-    assert "source dated 2026-03-12" in evidence["intent_details"]
+    assert "source dated 2026-03-12" in " ".join(
+        unit["text"] for unit in evidence["intent_details_units"]
+    )
     assert "concrete factual clause" in intent_details._SYSTEM
 
 
@@ -112,8 +138,17 @@ async def test_exact_dated_quote_requires_concrete_diagnostic_when_rejected(
         "signal_coverage": [{"matched_icp_signal": 0, "covered": True}],
     }
 
-    async def judge(*_args, **_kwargs):
-        return json.dumps(response)
+    async def judge(prompt, **_kwargs):
+        document = json.loads(prompt)
+        grounding = _unit_grounding(document, facts_supported=True)
+        grounding[1].update({
+            "status": "UNPROVEN",
+            "evidence": [],
+        })
+        return json.dumps({
+            **response,
+            "unit_grounding": grounding,
+        })
 
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     receipt = await intent_details.review_intent_details(*_mind_style_inputs())
@@ -138,8 +173,17 @@ async def test_exact_dated_quote_preserves_grounded_factual_rejection(
     }
     assert response["unsupported_factual_clause"] in paragraph
 
-    async def judge(*_args, **_kwargs):
-        return json.dumps(response)
+    async def judge(prompt, **_kwargs):
+        document = json.loads(prompt)
+        grounding = _unit_grounding(document, facts_supported=True)
+        grounding[1].update({
+            "status": "UNPROVEN",
+            "evidence": [],
+        })
+        return json.dumps({
+            **response,
+            "unit_grounding": grounding,
+        })
 
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     receipt = await intent_details.review_intent_details(*_mind_style_inputs())
@@ -160,8 +204,14 @@ async def test_exact_dated_quote_accepts_empty_diagnostic_only_when_supported(
         "signal_coverage": [{"matched_icp_signal": 0, "covered": True}],
     }
 
-    async def judge(*_args, **_kwargs):
-        return json.dumps(response)
+    async def judge(prompt, **_kwargs):
+        document = json.loads(prompt)
+        return json.dumps({
+            **response,
+            "unit_grounding": _unit_grounding(
+                document, facts_supported=True,
+            ),
+        })
 
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     receipt = await intent_details.review_intent_details(*_mind_style_inputs())

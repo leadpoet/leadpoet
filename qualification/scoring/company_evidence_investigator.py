@@ -56,6 +56,13 @@ ADMISSION_DEADLINE_SECONDS = 110.0
 BROKER_SETTLEMENT_TIMEOUT_SECONDS = 125.0
 TARGETS = frozenset({"stage", "rebrand", "headcount", "industry", "geography"})
 STATUSES = frozenset({"VERIFIED", "CONTRADICTED", "UNPROVEN"})
+_IDENTITY_LINK_CONTEXT_MARKER = (
+    "[[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]]"
+)
+_VISIBLE_MARKDOWN_LINK_RE = re.compile(
+    r"\[([^\[\]\r\n]+)\]\((https?://[^\s()<>'\"]+)\)",
+    flags=re.IGNORECASE,
+)
 
 _SYSTEM_PROMPT = """You are a bounded company evidence investigator.
 Investigate only the requested stage, rebrand, headcount, industry/activity,
@@ -74,6 +81,8 @@ toward the three-page limit. Otherwise use fetch_page before citing a URL. A
 VERIFIED or CONTRADICTED finding needs a short direct quote from that fetched
 page. Bind each quote to the URL whose fetched text contains those exact words;
 never combine a quote from one page with another page's URL.
+URLs after [[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]] are identity
+context only. Never include that marker or those URL strings in a quote.
 
 You have at most 8 reasoning turns, 2 searches, and 3 page fetches across all
 requested targets. Prioritize official company investor-relations pages for
@@ -299,6 +308,21 @@ def _safe_https_url(value: Any) -> str:
     return value
 
 
+def _visible_markdown_link_label_surface(value: str) -> str:
+    """Project complete visible HTTP(S) Markdown links to their labels."""
+
+    return _VISIBLE_MARKDOWN_LINK_RE.sub(
+        lambda match: match.group(1),
+        value,
+    )
+
+
+def _visible_quote_surface(value: str) -> str:
+    """Exclude server-retained identity link targets from quote grounding."""
+
+    return value.partition(_IDENTITY_LINK_CONTEXT_MARKER)[0]
+
+
 def _plain_text(value: str) -> str:
     linked_urls = " ".join(
         match.rstrip("'\"<>.,)")
@@ -320,7 +344,11 @@ def _plain_text(value: str) -> str:
             flags=re.I | re.S,
         )
     without_markup = re.sub(r"<[^>]+>", " ", decoded)
-    return " ".join((without_markup + " " + linked_urls).split())[:MAX_PAGE_CHARACTERS]
+    visible_quote_text = _visible_markdown_link_label_surface(without_markup)
+    combined = visible_quote_text
+    if linked_urls:
+        combined += f" {_IDENTITY_LINK_CONTEXT_MARKER} {linked_urls}"
+    return " ".join(combined.split())[:MAX_PAGE_CHARACTERS]
 
 
 def _validated_prefetched_pages(
@@ -381,14 +409,16 @@ def _quote_occurs(quote: Any, fetched_text: str) -> bool:
     normalized_quote = _normalized_span(quote)
     return bool(
         8 <= len(normalized_quote) <= 2000
-        and normalized_quote in _normalized_span(fetched_text)
+        and normalized_quote in _normalized_span(
+            _visible_quote_surface(fetched_text)
+        )
     )
 
 
 def _source_context_for_quote(quote: str, fetched_text: str) -> str:
     """Return bounded nearby fetched text for a model-authored quote correction."""
 
-    surface_page = _surface_span(fetched_text)
+    surface_page = _surface_span(_visible_quote_surface(fetched_text))
     fragments = set()
     for ellipsis_fragment in re.split(
         r"\s*(?:\.{3}|\u2026)\s*", _surface_span(quote)

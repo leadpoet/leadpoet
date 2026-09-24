@@ -26,6 +26,10 @@ _CHECKS = (
     "facts_supported", "verified_signals_covered", "relevance_grounded",
     "connects_icp", "natural_paragraph",
 )
+_MAX_STATEMENT_UNITS = 6
+_MAX_UNIT_EVIDENCE_BINDINGS = 2
+_MAX_UNIT_EVIDENCE_QUOTE_LENGTH = 100
+_UNIT_STATUSES = ("VERIFIED", "CONTRADICTED", "UNPROVEN")
 _RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {
@@ -46,10 +50,42 @@ _RESPONSE_FORMAT = {
                         "required": ["matched_icp_signal", "covered"],
                     },
                 },
+                "unit_grounding": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": _MAX_STATEMENT_UNITS,
+                    "items": {
+                        "type": "object", "additionalProperties": False,
+                        "properties": {
+                            "unit_id": {"type": "integer", "minimum": 0},
+                            "contains_factual_claim": {"type": "boolean"},
+                            "status": {"type": "string", "enum": list(_UNIT_STATUSES)},
+                            "evidence": {
+                                "type": "array",
+                                "maxItems": _MAX_UNIT_EVIDENCE_BINDINGS,
+                                "items": {
+                                    "type": "object", "additionalProperties": False,
+                                    "properties": {
+                                        "source_index": {"type": "integer", "minimum": 0},
+                                        "quote": {
+                                            "type": "string", "minLength": 1,
+                                            "maxLength": _MAX_UNIT_EVIDENCE_QUOTE_LENGTH,
+                                        },
+                                    },
+                                    "required": ["source_index", "quote"],
+                                },
+                            },
+                        },
+                        "required": [
+                            "unit_id", "contains_factual_claim", "status", "evidence",
+                        ],
+                    },
+                },
             },
             "required": [
                 *_CHECKS,
                 "signal_coverage",
+                "unit_grounding",
                 "unsupported_factual_clause",
                 "unsupported_factual_reason",
             ],
@@ -141,7 +177,34 @@ independently: a factual defect makes facts_supported false, but does not by
 itself make signal coverage, relevance, ICP connection or paragraph structure
 false. Require natural prose, not headings, bullet lists, field labels or
 internal scoring commentary. Return only the requested Boolean checks and
-signal_coverage and the two factual-diagnostic strings.
+signal_coverage, unit_grounding, and the two factual-diagnostic strings.
+
+The original paragraph is supplied as ordered intent_details_units. Review
+every unit exactly once and return its unit_id. The units are lossless ordered
+parts of one paragraph, not independent claims; read them together and do not
+change the writing or evidence standard because of a unit boundary. Set
+contains_factual_claim=true when the unit makes any concrete factual assertion.
+A clearly conditional commercial implication with no new asserted fact can be
+marked contains_factual_claim=false. For a factual unit, VERIFIED means every
+factual clause in that unit is supported. Use CONTRADICTED when admitted
+evidence conflicts with a clause and UNPROVEN when admitted evidence does not
+establish a clause. Do not omit a unit
+or a clause because another clause in the same unit is supported.
+
+For each VERIFIED factual unit, return one or two evidence bindings. For each
+CONTRADICTED factual unit, bind the conflicting evidence. An UNPROVEN unit may
+bind evidence for its supported parts. A unit with no factual claim must be
+VERIFIED and may bind the verified premise for its conditional implication.
+Each source_index must be one shown in the supplied trusted evidence,
+and each quote must be a continuous exact excerpt of at most 100 characters
+from that indexed evidence. It may quote a structured authoritative date or
+date-basis value exposed by that evidence. Never cite a URL, ICP text, submitted
+claim context, or the paragraph itself. The paragraph may paraphrase its source;
+only the returned evidence quote must be an exact source span.
+
+facts_supported must equal the logical AND of all factual unit statuses being
+VERIFIED. When it is false, unsupported_factual_clause must occur inside a
+factual non-VERIFIED unit as well as in the original paragraph.
 """
 _NON_QUALIFYING_SYSTEM_APPENDIX = """
 
@@ -171,6 +234,120 @@ def _texts(value: Any, *, maximum: int, length: int) -> list[str]:
         item[:length] for item in value[:maximum]
         if isinstance(item, str) and item.strip()
     ))
+
+
+def _statement_units(paragraph: str) -> list[dict[str, Any]]:
+    """Split one normalized paragraph into at most six lossless review units."""
+
+    parts = re.split(
+        r"(?<=[.!?][\"'\u2019\u201d])\s+|(?<=[.!?])\s+",
+        paragraph,
+    )
+    if len(parts) > _MAX_STATEMENT_UNITS:
+        buckets: list[list[str]] = [[] for _ in range(_MAX_STATEMENT_UNITS)]
+        for index, part in enumerate(parts):
+            bucket = min(
+                index * _MAX_STATEMENT_UNITS // len(parts),
+                _MAX_STATEMENT_UNITS - 1,
+            )
+            buckets[bucket].append(part)
+        parts = [" ".join(bucket) for bucket in buckets if bucket]
+    if not parts or " ".join(parts) != paragraph:
+        raise ValueError("Intent Details statement segmentation is not lossless")
+    return [{"unit_id": index, "text": part} for index, part in enumerate(parts)]
+
+
+def _trusted_evidence_containers(
+    document: Mapping[str, Any],
+) -> list[tuple[dict[str, Any], list[str]]]:
+    """Return containers and only their independently admitted evidence text."""
+
+    containers: list[tuple[dict[str, Any], list[str]]] = []
+    for raw_signal in document.get("verified_signals") or []:
+        if not isinstance(raw_signal, dict):
+            continue
+        signal_values = _texts(
+            raw_signal.get("supporting_quotes"), maximum=36, length=2_000,
+        )
+        signal_values.extend(
+            value for value in (
+                raw_signal.get("authoritative_date"),
+                raw_signal.get("authoritative_date_basis"),
+            )
+            if isinstance(value, str) and value
+        )
+        if signal_values:
+            containers.append((raw_signal, signal_values))
+        for raw_context in raw_signal.get("source_context") or []:
+            if not isinstance(raw_context, dict):
+                continue
+            context_values = [
+                value for value in (
+                    raw_context.get("text"),
+                    raw_context.get("source_publication_date"),
+                )
+                if isinstance(value, str) and value
+            ]
+            context_values.extend(_texts(
+                raw_context.get("source_body_dateline_dates"),
+                maximum=20,
+                length=10,
+            ))
+            if context_values:
+                containers.append((raw_context, context_values))
+    for raw_finding in document.get("non_qualifying_signals") or []:
+        if not isinstance(raw_finding, dict):
+            continue
+        finding_values = _texts(
+            raw_finding.get("supporting_quotes"), maximum=2, length=700,
+        ) + _texts(
+            raw_finding.get("contradicting_quotes"), maximum=2, length=700,
+        )
+        if finding_values:
+            containers.append((raw_finding, finding_values))
+    company_evidence = document.get("verified_company_evidence") or {}
+    if isinstance(company_evidence, Mapping):
+        for raw_evidence in company_evidence.values():
+            if not isinstance(raw_evidence, dict):
+                continue
+            evidence_values = [
+                raw_evidence[key]
+                for key in ("quote", "evidence_quote")
+                if isinstance(raw_evidence.get(key), str)
+                and raw_evidence[key]
+            ]
+            if evidence_values:
+                containers.append((raw_evidence, evidence_values))
+    return containers
+
+
+def _index_trusted_evidence(document: Mapping[str, Any]) -> None:
+    for source_index, (container, _values) in enumerate(
+        _trusted_evidence_containers(document)
+    ):
+        container["source_index"] = source_index
+
+
+def _bound_evidence_sources(document: Mapping[str, Any]) -> dict[int, list[str]]:
+    sources: dict[int, list[str]] = {}
+    for container, values in _trusted_evidence_containers(document):
+        source_index = container.get("source_index")
+        if (
+            type(source_index) is not int
+            or source_index < 0
+            or source_index in sources
+        ):
+            raise ValueError("invalid Intent Details evidence source index")
+        sources[source_index] = values
+    return sources
+
+
+def _quote_is_bound(quote: str, evidence_values: Sequence[str]) -> bool:
+    normalized_quote = " ".join(quote.split())
+    return bool(normalized_quote) and any(
+        normalized_quote in " ".join(value.split())
+        for value in evidence_values
+    )
 
 
 _MONTHS = {
@@ -366,8 +543,9 @@ def review_evidence(
             if key in {"url", "quote", "evidence_url", "evidence_quote"}
             and isinstance(value, str) and value
         }
+    paragraph = validate_intent_details_text(company.intent_details)
     document = {
-        "intent_details": validate_intent_details_text(company.intent_details),
+        "intent_details_units": _statement_units(paragraph),
         "company": {"name": company.company_name, "website": company.company_website},
         "icp": {
             "prompt": icp.prompt, "product_service": icp.product_service,
@@ -380,6 +558,7 @@ def review_evidence(
         ),
         "verified_company_evidence": company_facts,
     }
+    _index_trusted_evidence(document)
     # Keep the existing review bound. Extra source context must not make a
     # previously valid review request too large.
     for item in reversed(verified):
@@ -394,6 +573,87 @@ def review_evidence(
     if len(json.dumps(document, ensure_ascii=False)) > 48_000:
         raise ValueError("Intent Details review evidence exceeds its bound")
     return document
+
+
+def _validate_unit_grounding(
+    grounding: Any,
+    document: Mapping[str, Any],
+) -> tuple[bool, list[str], bool]:
+    units = document.get("intent_details_units")
+    if not isinstance(units, list):
+        raise ValueError("missing Intent Details statement units")
+    expected_units = {
+        unit["unit_id"]: unit["text"]
+        for unit in units
+        if isinstance(unit, dict)
+        and type(unit.get("unit_id")) is int
+        and isinstance(unit.get("text"), str)
+    }
+    if len(expected_units) != len(units) or not isinstance(grounding, list):
+        raise ValueError("invalid Intent Details statement units")
+    if len(grounding) != len(expected_units):
+        raise ValueError("incomplete Intent Details unit grounding")
+
+    sources = _bound_evidence_sources(document)
+    observed_ids: set[int] = set()
+    all_factual_units_verified = True
+    any_factual_claim = False
+    non_verified_units: list[str] = []
+    for item in grounding:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {
+                "unit_id", "contains_factual_claim", "status", "evidence"
+            }
+            or type(item["unit_id"]) is not int
+            or item["unit_id"] not in expected_units
+            or item["unit_id"] in observed_ids
+            or type(item["contains_factual_claim"]) is not bool
+            or item["status"] not in _UNIT_STATUSES
+            or not isinstance(item["evidence"], list)
+            or len(item["evidence"]) > _MAX_UNIT_EVIDENCE_BINDINGS
+        ):
+            raise ValueError("invalid Intent Details unit grounding")
+        observed_ids.add(item["unit_id"])
+
+        bindings = item["evidence"]
+        observed_bindings: set[tuple[int, str]] = set()
+        for binding in bindings:
+            if (
+                not isinstance(binding, dict)
+                or set(binding) != {"source_index", "quote"}
+                or type(binding["source_index"]) is not int
+                or binding["source_index"] not in sources
+                or not isinstance(binding["quote"], str)
+                or not binding["quote"].strip()
+                or len(binding["quote"]) > _MAX_UNIT_EVIDENCE_QUOTE_LENGTH
+                or (binding["source_index"], binding["quote"])
+                in observed_bindings
+                or not _quote_is_bound(
+                    binding["quote"], sources[binding["source_index"]]
+                )
+            ):
+                raise ValueError("unbound Intent Details unit evidence")
+            observed_bindings.add(
+                (binding["source_index"], binding["quote"])
+            )
+
+        factual = item["contains_factual_claim"]
+        status = item["status"]
+        if not factual:
+            if status != "VERIFIED":
+                raise ValueError("non-factual unit has a factual verdict")
+            continue
+        any_factual_claim = True
+        if status in {"VERIFIED", "CONTRADICTED"} and not bindings:
+            raise ValueError("grounded factual unit lacks evidence")
+        if status != "VERIFIED":
+            all_factual_units_verified = False
+            non_verified_units.append(expected_units[item["unit_id"]])
+
+    if observed_ids != set(expected_units):
+        raise ValueError("incomplete Intent Details unit grounding")
+    return all_factual_units_verified, non_verified_units, any_factual_claim
 
 
 async def review_intent_details(
@@ -441,11 +701,19 @@ missing review into an accepted paragraph or a terminal company mismatch.
             "unsupported_factual_clause", "unsupported_factual_reason"
         }
         if not isinstance(checks, dict) or set(checks) != {
-            *_CHECKS, "signal_coverage", *diagnostic_keys
+            *_CHECKS, "signal_coverage", "unit_grounding", *diagnostic_keys
         } or any(
             type(checks[name]) is not bool for name in _CHECKS
         ):
             raise ValueError("invalid Intent Details review")
+        unit_grounding = checks.pop("unit_grounding")
+        (
+            unit_facts_supported,
+            non_verified_units,
+            any_factual_claim,
+        ) = _validate_unit_grounding(unit_grounding, document)
+        if checks["facts_supported"] is not unit_facts_supported:
+            raise ValueError("factual aggregate conflicts with unit grounding")
         unsupported_clause = checks.pop("unsupported_factual_clause")
         unsupported_reason = checks.pop("unsupported_factual_reason")
         if (
@@ -456,9 +724,10 @@ missing review into an accepted paragraph or a terminal company mismatch.
         ):
             raise ValueError("invalid factual diagnostic")
         normalized_clause = " ".join(unsupported_clause.casefold().split())
-        normalized_paragraph = " ".join(
-            document["intent_details"].casefold().split()
+        paragraph = " ".join(
+            unit["text"] for unit in document["intent_details_units"]
         )
+        normalized_paragraph = " ".join(paragraph.casefold().split())
         if checks["facts_supported"]:
             if unsupported_clause.strip() or unsupported_reason.strip():
                 raise ValueError("supported facts cannot carry an unsupported clause")
@@ -466,8 +735,14 @@ missing review into an accepted paragraph or a terminal company mismatch.
             not unsupported_clause.strip()
             or not unsupported_reason.strip()
             or normalized_clause not in normalized_paragraph
+            or not any(
+                normalized_clause in " ".join(unit.casefold().split())
+                for unit in non_verified_units
+            )
         ):
-            raise ValueError("unsupported facts require one exact grounded clause")
+            raise ValueError(
+                "unsupported facts require one exact non-verified unit clause"
+            )
         coverage = checks.pop("signal_coverage")
         if not isinstance(coverage, list) or any(
             not isinstance(item, dict)
@@ -484,6 +759,10 @@ missing review into an accepted paragraph or a terminal company mismatch.
         checks["verified_signals_covered"] = all(
             item["covered"] for item in coverage
         )
+        if expected and checks["verified_signals_covered"] and not any_factual_claim:
+            raise ValueError(
+                "covered verified signals require a factual paragraph unit"
+            )
     except (TypeError, ValueError):
         return {**receipt, "decision": "unavailable", "failure_class": "intent_details_review_unavailable",
                 "failure_reason_code": "malformed_response"}

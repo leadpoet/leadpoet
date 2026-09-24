@@ -32,20 +32,6 @@ FISERV_PARAGRAPH = (
     "need to coordinate and optimize the core banking and money-movement workflows "
     "Fiserv delivers."
 )
-FISERV_REVIEW = {
-    "facts_supported": True,
-    "connects_icp": True,
-    "natural_paragraph": True,
-    "relevance_grounded": True,
-    "signal_coverage": [{
-        "matched_icp_signal": 0,
-        "covered": True,
-    }],
-    "verified_signals_covered": True,
-    "unsupported_factual_clause": "",
-    "unsupported_factual_reason": "",
-}
-
 INTEGRATED_CONNECTION_PARAGRAPH = (
     "Relevant to the ICP's focus on reporting software expansion, Acme launched "
     "a reporting platform on September 1, 2026, which could expand the workflows "
@@ -58,11 +44,38 @@ NO_CONNECTION_PARAGRAPH = (
 )
 
 
-def _review_response(checks, coverage):
+def _unit_grounding(document, *, facts_supported=True):
+    source_index, values = next(iter(
+        intent_details._bound_evidence_sources(document).items()
+    ))
+    quote = values[0][:intent_details._MAX_UNIT_EVIDENCE_QUOTE_LENGTH]
+    return [
+        {
+            "unit_id": unit["unit_id"],
+            "contains_factual_claim": True,
+            "status": (
+                "UNPROVEN"
+                if not facts_supported and unit["unit_id"] == 0
+                else "VERIFIED"
+            ),
+            "evidence": (
+                []
+                if not facts_supported and unit["unit_id"] == 0
+                else [{"source_index": source_index, "quote": quote}]
+            ),
+        }
+        for unit in document["intent_details_units"]
+    ]
+
+
+def _review_response(checks, coverage, document):
     facts_supported = checks["facts_supported"]
     return {
         **checks,
         "signal_coverage": coverage,
+        "unit_grounding": _unit_grounding(
+            document, facts_supported=facts_supported,
+        ),
         "unsupported_factual_clause": (
             "Acme launched a reporting platform on September 1, 2026"
             if not facts_supported else ""
@@ -191,6 +204,7 @@ def test_review_keeps_non_qualifying_findings_separate_from_verified_coverage():
         "unsupported_parts": [
             "The submitted source does not support a Berlin opening."
         ],
+        "source_index": 2,
     }]
     assert result["verified_company_evidence"]["industry"]["quote"] == "Acme provides reporting software."
 
@@ -257,7 +271,10 @@ def test_review_keeps_fetched_context_missing_from_selected_signal_quotes():
         "url": "https://unrelated.example/", "text": "UNRELATED SOURCE",
     }]
     result = intent_details.review_evidence(company, icp, results, fit)
-    assert result["verified_signals"][0]["source_context"] == [source]
+    assert result["verified_signals"][0]["source_context"] == [{
+        **source,
+        "source_index": 1,
+    }]
     assert "UNRELATED SOURCE" not in json.dumps(result)
     assert "platform integrates" not in str(result["verified_signals"][0]["supporting_quotes"])
 
@@ -310,7 +327,9 @@ def test_all_grounding_and_writing_checks_must_pass(monkeypatch, failed_check):
 
     async def judge(prompt, **kwargs):
         document = json.loads(prompt)
-        assert document["intent_details"] == PARAGRAPH
+        assert " ".join(
+            unit["text"] for unit in document["intent_details_units"]
+        ) == PARAGRAPH
         assert len(document["verified_signals"]) == 2
         assert "untrusted JSON data" in kwargs["system_prompt"]
         assert kwargs["max_retries"] == 0
@@ -323,7 +342,7 @@ def test_all_grounding_and_writing_checks_must_pass(monkeypatch, failed_check):
                 ),
             }
             for index in (0, 1)
-        ]))
+        ], document))
 
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     result = asyncio.run(intent_details.review_intent_details(company, icp, results, fit))
@@ -337,11 +356,12 @@ def test_review_without_non_qualifying_context_keeps_original_system_prompt(
 ):
     company, icp, results, fit = inputs()
     assert hashlib.sha256(intent_details._SYSTEM.encode()).hexdigest() == (
-        "82f5539d50ebcc8e3c9c11f9696d0c3a92f833617f21ed12fefc2eb005866955"
+        "fba083b7c546835b0340fced3ef0694c619ddccde8f529a4f42ab6ab20688bec"
     )
     assert "A valid primary signal supports only the facts" in intent_details._SYSTEM
     assert "API inputs or outputs" in intent_details._SYSTEM
     assert "Equivalent supporting\nwording is sufficient" in intent_details._SYSTEM
+    assert "Review\nevery unit exactly once" in intent_details._SYSTEM
 
     calls = []
     expected_document = intent_details.review_evidence(
@@ -350,7 +370,8 @@ def test_review_without_non_qualifying_context_keeps_original_system_prompt(
 
     async def judge(prompt, **kwargs):
         calls.append((prompt, kwargs))
-        assert json.loads(prompt) == expected_document
+        document = json.loads(prompt)
+        assert document == expected_document
         assert kwargs["system_prompt"] == intent_details._SYSTEM
         assert intent_details._NON_QUALIFYING_SYSTEM_APPENDIX not in kwargs[
             "system_prompt"
@@ -363,7 +384,7 @@ def test_review_without_non_qualifying_context_keeps_original_system_prompt(
             [
                 {"matched_icp_signal": 0, "covered": True},
                 {"matched_icp_signal": 1, "covered": True},
-            ],
+            ], document,
         ))
 
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
@@ -411,12 +432,23 @@ def test_levanta_shaped_contradicted_claim_reaches_factual_review(monkeypatch):
         assert "zero or rejected signal is not by itself" in kwargs[
             "system_prompt"
         ]
+        unit_grounding = _unit_grounding(document, facts_supported=False)
+        unit_grounding[0].update({
+            "status": "CONTRADICTED",
+            "evidence": [{
+                "source_index": finding["source_index"],
+                "quote": finding["contradicting_quotes"][0][
+                    :intent_details._MAX_UNIT_EVIDENCE_QUOTE_LENGTH
+                ],
+            }],
+        })
         return json.dumps({
             **checks,
             "signal_coverage": [
                 {"matched_icp_signal": 0, "covered": True},
                 {"matched_icp_signal": 1, "covered": True},
             ],
+            "unit_grounding": unit_grounding,
             "unsupported_factual_clause": (
                 "Levanta released new research showing that creators are "
                 "routing commerce through its platform."
@@ -442,13 +474,14 @@ def test_omitted_non_qualifying_claim_does_not_fail_a_good_paragraph(monkeypatch
     )
 
     async def judge(prompt, **_kwargs):
-        assert json.loads(prompt)["non_qualifying_signals"]
+        document = json.loads(prompt)
+        assert document["non_qualifying_signals"]
         return json.dumps(_review_response(
             {name: True for name in intent_details._CHECKS},
             [
                 {"matched_icp_signal": 0, "covered": True},
                 {"matched_icp_signal": 1, "covered": True},
-            ],
+            ], document,
         ))
 
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
@@ -476,7 +509,8 @@ def test_true_but_nonqualifying_fact_is_not_automatically_false(monkeypatch):
     )
 
     async def judge(prompt, **_kwargs):
-        finding = json.loads(prompt)["non_qualifying_signals"][0]
+        document = json.loads(prompt)
+        finding = document["non_qualifying_signals"][0]
         assert finding["verifier_status"] == "contradicted"
         assert finding["supporting_quotes"] == [
             "Acme published a research study."
@@ -486,7 +520,7 @@ def test_true_but_nonqualifying_fact_is_not_automatically_false(monkeypatch):
             [
                 {"matched_icp_signal": 0, "covered": True},
                 {"matched_icp_signal": 1, "covered": True},
-            ],
+            ], document,
         ))
 
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
@@ -517,7 +551,7 @@ def test_validated_signal_coverage_is_authoritative_over_false_aggregate(
         checks["verified_signals_covered"] = False
         return json.dumps(_review_response(checks, [
             {"matched_icp_signal": 0, "covered": True},
-        ]))
+        ], document))
 
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     receipt = asyncio.run(intent_details.review_intent_details(
@@ -536,13 +570,18 @@ def test_review_assesses_original_paragraph_without_requiring_a_copy(monkeypatch
     prompts = []
 
     async def judge(prompt, **kwargs):
+        document = json.loads(prompt)
         schema = kwargs["response_format"]["json_schema"]["schema"]
         coverage_schema = schema["properties"]["signal_coverage"]["items"]
         assert coverage_schema["properties"]["covered"] == {"type": "boolean"}
         assert "paragraph_quote" not in coverage_schema["properties"]
         assert "Read the original paragraph directly" in kwargs["system_prompt"]
         prompts.append(prompt)
-        return json.dumps(FISERV_REVIEW)
+        return json.dumps(_review_response(
+            {name: True for name in intent_details._CHECKS},
+            [{"matched_icp_signal": 0, "covered": True}],
+            document,
+        ))
 
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     receipt = asyncio.run(intent_details.review_intent_details(
@@ -553,7 +592,10 @@ def test_review_assesses_original_paragraph_without_requiring_a_copy(monkeypatch
     assert receipt["checks"] == {
         name: True for name in intent_details._CHECKS
     }
-    assert json.loads(prompts[0])["intent_details"] == FISERV_PARAGRAPH
+    assert " ".join(
+        unit["text"]
+        for unit in json.loads(prompts[0])["intent_details_units"]
+    ) == FISERV_PARAGRAPH
     assert "Paul Todd’s" in prompts[0]
     assert receipt["input_hash"] == (
         "sha256:" + hashlib.sha256(prompts[0].encode("utf-8")).hexdigest()
@@ -566,7 +608,8 @@ def test_grounded_icp_connection_does_not_require_a_separate_final_sentence(
     company, icp, results, fit = inputs()
     company.intent_details = INTEGRATED_CONNECTION_PARAGRAPH
 
-    async def judge(*_args, **_kwargs):
+    async def judge(prompt, **_kwargs):
+        document = json.loads(prompt)
         return json.dumps(_review_response(
             {name: True for name in intent_details._CHECKS},
             [
@@ -578,7 +621,7 @@ def test_grounded_icp_connection_does_not_require_a_separate_final_sentence(
                     "matched_icp_signal": 1,
                     "covered": True,
                 },
-            ],
+            ], document,
         ))
 
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
@@ -619,13 +662,14 @@ def test_review_projects_factual_and_icp_connection_checks_independently(
     company.intent_details = paragraph
     checks = {name: name != failed_check for name in intent_details._CHECKS}
 
-    async def judge(*_args, **_kwargs):
+    async def judge(prompt, **_kwargs):
+        document = json.loads(prompt)
         return json.dumps(_review_response(
             checks,
             [
                 {"matched_icp_signal": index, "covered": True}
                 for index in (0, 1)
-            ],
+            ], document,
         ))
 
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
@@ -675,9 +719,10 @@ def test_provider_error_retains_retry_without_leaking_exception(monkeypatch):
      {"matched_icp_signal": 1, "paragraph_quote": PARAGRAPH}],
 ])
 def test_incomplete_or_malformed_coverage_is_retryable(monkeypatch, coverage):
-    async def judge(*args, **kwargs):
+    async def judge(prompt, **_kwargs):
+        document = json.loads(prompt)
         return json.dumps(_review_response(
-            {name: True for name in intent_details._CHECKS}, coverage
+            {name: True for name in intent_details._CHECKS}, coverage, document
         ))
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     receipt = asyncio.run(intent_details.review_intent_details(*inputs()))
@@ -689,12 +734,13 @@ def test_incomplete_or_malformed_coverage_is_retryable(monkeypatch, coverage):
 
 
 def test_a_missing_activity_remains_a_terminal_mismatch(monkeypatch):
-    async def judge(*args, **kwargs):
+    async def judge(prompt, **_kwargs):
+        document = json.loads(prompt)
         return json.dumps(_review_response(
             {name: True for name in intent_details._CHECKS}, [
                                {"matched_icp_signal": 0, "covered": True},
                                {"matched_icp_signal": 1, "covered": False},
-                           ]))
+                           ], document))
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     receipt = asyncio.run(intent_details.review_intent_details(*inputs()))
     assert receipt["decision"] == "mismatch"

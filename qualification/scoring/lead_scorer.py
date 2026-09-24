@@ -1791,6 +1791,50 @@ def _hydrated_required_attribute_repair_source(
     return {}
 
 
+def _hydrated_required_attribute_source_for_final_url(
+    source_cache: Mapping[str, Mapping[str, Any]],
+    cited_url: str,
+) -> Optional[Mapping[str, Any]]:
+    """Find one trusted fetch whose server-observed final URL was cited."""
+
+    for request_url, entry in source_cache.items():
+        if (
+            not isinstance(entry, Mapping)
+            or entry.get(_INVESTIGATOR_HYDRATED_SOURCE) is not True
+            or entry.get("status") != "fetched"
+        ):
+            continue
+        raw_final_url = entry.get("final_url")
+        source_text = entry.get("text")
+        if (
+            not isinstance(raw_final_url, str)
+            or not isinstance(source_text, str)
+            or not source_text
+            or len(source_text) > MAX_PAGE_CHARACTERS
+        ):
+            continue
+        try:
+            safe_request_url = public_http_url(request_url)
+            safe_final_url = public_http_url(raw_final_url)
+            request_parts = urlsplit(safe_request_url)
+            final_parts = urlsplit(safe_final_url)
+            same_origin = (
+                request_parts.scheme == final_parts.scheme == "https"
+                and request_parts.hostname == final_parts.hostname
+                and (request_parts.port or 443) == (final_parts.port or 443)
+            )
+        except (TypeError, ValueError):
+            continue
+        if (
+            safe_request_url == request_url
+            and safe_final_url == raw_final_url == cited_url
+            and same_origin
+            and request_parts.query == final_parts.query
+        ):
+            return entry
+    return None
+
+
 async def _ground_required_attribute_evidence(
     verdict: Mapping[str, Any],
     *,
@@ -1831,7 +1875,22 @@ async def _ground_required_attribute_evidence(
         return grounded, {}
 
     cache_hit = canonical_url in source_cache
-    if not cache_hit and len(source_cache) >= _MAX_REQUIRED_ATTRIBUTE_SOURCE_URLS:
+    entry = source_cache.get(canonical_url)
+    if (
+        not cache_hit
+        or (
+            isinstance(entry, Mapping)
+            and entry.get("status") == "source_unavailable"
+        )
+    ):
+        hydrated_entry = _hydrated_required_attribute_source_for_final_url(
+            source_cache,
+            canonical_url,
+        )
+        if hydrated_entry is not None:
+            entry = hydrated_entry
+            cache_hit = True
+    if entry is None and len(source_cache) >= _MAX_REQUIRED_ATTRIBUTE_SOURCE_URLS:
         grounded[_REQUIRED_ATTRIBUTE_GROUNDING] = (
             _required_attribute_source_receipt(
                 status="url_limit",
@@ -1841,8 +1900,8 @@ async def _ground_required_attribute_evidence(
         )
         _clear_required_attribute_evidence(grounded)
         return grounded, {}
-    if not cache_hit:
-        entry: dict[str, Any] = {
+    if entry is None:
+        fetched_entry: dict[str, Any] = {
             "status": "source_unavailable",
             "final_url": "",
             "text": "",
@@ -1858,13 +1917,13 @@ async def _ground_required_attribute_evidence(
             safe_final_url = public_http_url(final_url)
             plain_text = _plain_text(html_text)
             if status == 200 and safe_final_url and plain_text:
-                entry = {
+                fetched_entry = {
                     "status": "fetched",
                     "final_url": safe_final_url,
                     "text": plain_text,
                 }
             else:
-                entry[VERIFIER_FAILURE_DETAIL_KEY] = (
+                fetched_entry[VERIFIER_FAILURE_DETAIL_KEY] = (
                     SOURCE_BLOCKED_FAILURE_REASON
                 )
         except (
@@ -1873,9 +1932,11 @@ async def _ground_required_attribute_evidence(
             TypeError,
             ValueError,
         ):
-            entry[VERIFIER_FAILURE_DETAIL_KEY] = PROVIDER_ERROR_FAILURE_REASON
-        source_cache[canonical_url] = entry
-    entry = source_cache[canonical_url]
+            fetched_entry[VERIFIER_FAILURE_DETAIL_KEY] = (
+                PROVIDER_ERROR_FAILURE_REASON
+            )
+        source_cache[canonical_url] = fetched_entry
+        entry = fetched_entry
     final_url = str(entry.get("final_url") or "")
     source_text = str(entry.get("text") or "")
     if entry.get("status") == "fetched" and _quote_occurs(quote, source_text):

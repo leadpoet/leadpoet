@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import errno
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import gzip
@@ -1216,6 +1215,7 @@ def test_binary_requirement_install_retries_timeout_with_a_clean_target(
         if "pip" not in command:
             return type("Result", (), {"returncode": 0})()
         pip_calls += 1
+        assert Path(kwargs["stderr"].name).parent == Path(kwargs["env"]["TMPDIR"])
         install_target = Path(command[command.index("--target") + 1])
         if pip_calls == 1:
             (install_target / "partial.py").write_text("partial\n", encoding="utf-8")
@@ -1241,11 +1241,7 @@ def test_binary_requirement_install_retries_timeout_with_a_clean_target(
             "timeout",
         ),
         (
-            lambda _command, _timeout: OSError(errno.ENETUNREACH, "private detail"),
-            "network_error",
-        ),
-        (
-            lambda _command, _timeout: OSError(errno.ENOENT, "private detail"),
+            lambda _command, _timeout: OSError("private detail"),
             "installer_error",
         ),
     ),
@@ -1277,6 +1273,68 @@ def test_binary_requirement_install_classifies_persistent_transient_failure(
     assert capsys.readouterr().err == ""
 
 
+def test_binary_requirement_install_retries_known_pip_network_failure(
+    tmp_path, monkeypatch
+):
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("pydantic-ai==1.0.0\n", encoding="utf-8")
+    target = tmp_path / "deps"
+    target.mkdir()
+    pip_calls = 0
+
+    def run(command, **kwargs):
+        nonlocal pip_calls
+        if "pip" not in command:
+            return type("Result", (), {"returncode": 0})()
+        pip_calls += 1
+        install_target = Path(command[command.index("--target") + 1])
+        if pip_calls == 1:
+            kwargs["stderr"].write(b"NewConnectionError('connection failed')\n")
+            (install_target / "partial.py").write_text("partial\n", encoding="utf-8")
+            return type("Result", (), {"returncode": 1})()
+        assert not (install_target / "partial.py").exists()
+        (install_target / "installed.py").write_text("complete\n", encoding="utf-8")
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(rn.subprocess, "run", run)
+
+    rn.install_binary_requirements(requirements, target)
+
+    assert pip_calls == 2
+    assert (target / "installed.py").is_file()
+    assert not (target / "partial.py").exists()
+
+
+def test_binary_requirement_install_exhausts_known_pip_network_failure_safely(
+    tmp_path, monkeypatch, capsys
+):
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("pydantic-ai==1.0.0\n", encoding="utf-8")
+    target = tmp_path / "deps"
+    target.mkdir()
+    pip_calls = 0
+
+    def run(command, **kwargs):
+        nonlocal pip_calls
+        if "pip" not in command:
+            return type("Result", (), {"returncode": 0})()
+        pip_calls += 1
+        kwargs["stderr"].write(
+            b"secret=do-not-log NewConnectionError('connection failed')\n"
+        )
+        return type("Result", (), {"returncode": 1})()
+
+    monkeypatch.setattr(rn.subprocess, "run", run)
+
+    with pytest.raises(rn.DependencyInstallInfrastructureError) as raised:
+        rn.install_binary_requirements(requirements, target)
+
+    assert pip_calls == 2
+    assert raised.value.failure_kind == "network_error"
+    assert not any(target.iterdir())
+    assert capsys.readouterr().err == ""
+
+
 def test_binary_requirement_install_does_not_retry_unknown_pip_failure(
     tmp_path, monkeypatch
 ):
@@ -1290,6 +1348,7 @@ def test_binary_requirement_install_does_not_retry_unknown_pip_failure(
         nonlocal pip_calls
         if "pip" in command:
             pip_calls += 1
+            _kwargs["stderr"].write(b"No matching distribution found\n")
             return type("Result", (), {"returncode": 1})()
         return type("Result", (), {"returncode": 0})()
 
@@ -1331,8 +1390,9 @@ def test_submitted_dependency_failure_is_a_model_error_not_an_abandoned_lease(
     assert api.completions[0]["body"]["output"] is None
 
 
+@pytest.mark.parametrize("stderr_fails", (False, True))
 def test_persistent_dependency_infrastructure_failure_is_provider_error(
-    tmp_path, capsys
+    tmp_path, capsys, monkeypatch, stderr_fails
 ):
     payload = _source_archive_with_requirements("pydantic-ai==1.0.0\n")
     run_lease = lease()
@@ -1352,6 +1412,10 @@ def test_persistent_dependency_infrastructure_failure_is_provider_error(
         dependency_installer=fail_dependency,
     )
     runner_ = rn.Runner(config)
+    if stderr_fails:
+        failed_stderr = Mock()
+        failed_stderr.write.side_effect = OSError("diagnostic sink failed")
+        monkeypatch.setattr(rn.sys, "stderr", failed_stderr)
 
     assert runner_.run_once() == 1
     assert runner_.abandoned == 0
@@ -1364,10 +1428,11 @@ def test_persistent_dependency_infrastructure_failure_is_provider_error(
         "reason": "provider_error",
     }
     assert api.completions[0]["body"]["output"] is None
-    assert capsys.readouterr().err == (
-        "Lab Arena dependency installation failure: "
-        "run_id=r1 failure_kind=network_error\n"
-    )
+    if not stderr_fails:
+        assert capsys.readouterr().err == (
+            "Lab Arena dependency installation failure: "
+            "run_id=r1 failure_kind=network_error\n"
+        )
 
 
 def test_http_source_download_uses_the_existing_lease_header_and_a_byte_cap():

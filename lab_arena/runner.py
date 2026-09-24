@@ -13,7 +13,6 @@ credential, and never chooses a miner or ICP.
 from __future__ import annotations
 
 import base64
-import errno
 import hashlib
 import http.server
 import json
@@ -105,20 +104,14 @@ MAX_DEPENDENCY_BYTES = 512 * 1024 * 1024
 MAX_DEPENDENCY_FILES = 20_000
 DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 300
 DEPENDENCY_MOUNT_TIMEOUT_SECONDS = 30
-_DEPENDENCY_INSTALL_NETWORK_ERRNOS = frozenset(
-    value
-    for value in (
-        getattr(errno, "ECONNABORTED", None),
-        getattr(errno, "ECONNREFUSED", None),
-        getattr(errno, "ECONNRESET", None),
-        getattr(errno, "EHOSTDOWN", None),
-        getattr(errno, "EHOSTUNREACH", None),
-        getattr(errno, "ENETDOWN", None),
-        getattr(errno, "ENETRESET", None),
-        getattr(errno, "ENETUNREACH", None),
-        getattr(errno, "ETIMEDOUT", None),
-    )
-    if value is not None
+_DEPENDENCY_INSTALL_STDERR_TAIL_BYTES = 8 * 1024
+_DEPENDENCY_INSTALL_NETWORK_MARKERS = (
+    b"ConnectTimeoutError(",
+    b"NetworkConnectionError(",
+    b"NetworkConnectionError:",
+    b"NewConnectionError(",
+    b"ProxyError(",
+    b"ReadTimeoutError(",
 )
 MAX_WORKER_CONNECTIONS = 8
 WORKER_SOCKET_READ_TIMEOUT_SECONDS = 10.0
@@ -244,26 +237,20 @@ class DependencyInstallInfrastructureError(RunnerError):
 def _dependency_install_failure_kind(
     failure: OSError | subprocess.TimeoutExpired,
 ) -> str:
-    if isinstance(failure, subprocess.TimeoutExpired):
-        return "timeout"
-    if failure.errno in _DEPENDENCY_INSTALL_NETWORK_ERRNOS:
-        return "network_error"
-    return "installer_error"
+    return "timeout" if isinstance(failure, subprocess.TimeoutExpired) else "installer_error"
 
 
-def _log_dependency_install_failure(run_id: str, failure_kind: str) -> None:
-    safe_run_id = _safe_judge_diagnostic_text(run_id, max_chars=128) or "-"
-    safe_failure_kind = (
-        failure_kind
-        if failure_kind in ("timeout", "network_error", "installer_error")
-        else "installer_error"
-    )
-    print(
-        "Lab Arena dependency installation failure: "
-        f"run_id={safe_run_id} failure_kind={safe_failure_kind}",
-        file=sys.stderr,
-        flush=True,
-    )
+def _pip_stderr_has_network_marker(path: Path) -> bool:
+    try:
+        with path.open("rb") as captured:
+            captured.seek(0, os.SEEK_END)
+            captured.seek(
+                max(0, captured.tell() - _DEPENDENCY_INSTALL_STDERR_TAIL_BYTES)
+            )
+            tail = captured.read(_DEPENDENCY_INSTALL_STDERR_TAIL_BYTES)
+    except OSError:
+        return False
+    return any(marker in tail for marker in _DEPENDENCY_INSTALL_NETWORK_MARKERS)
 
 
 def _safe_judge_diagnostic_text(
@@ -1205,15 +1192,17 @@ def install_binary_requirements(requirements_path: Path, target_dir: Path) -> No
                             "installer_error"
                         ) from exc
             try:
-                result = subprocess.run(
-                    command,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    env=environment,
-                    timeout=DEPENDENCY_INSTALL_TIMEOUT_SECONDS,
-                    check=False,
-                )
+                stderr_path = temporary / "pip-stderr.log"
+                with stderr_path.open("wb") as captured_stderr:
+                    result = subprocess.run(
+                        command,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=captured_stderr,
+                        env=environment,
+                        timeout=DEPENDENCY_INSTALL_TIMEOUT_SECONDS,
+                        check=False,
+                    )
             except (OSError, subprocess.TimeoutExpired) as exc:
                 if install_attempt == 0:
                     continue
@@ -1221,9 +1210,13 @@ def install_binary_requirements(requirements_path: Path, target_dir: Path) -> No
                     _dependency_install_failure_kind(exc)
                 ) from exc
             if result.returncode != 0:
-                # pip has no distinct exit code for network failures. Keep an
-                # unclassified child-process failure attributed to the source.
-                raise AgentDependencyError("binary dependency installation failed")
+                if not _pip_stderr_has_network_marker(stderr_path):
+                    # pip maps its installation and network exceptions to the
+                    # same exit code. Unclassified failures remain source-owned.
+                    raise AgentDependencyError("binary dependency installation failed")
+                if install_attempt == 0:
+                    continue
+                raise DependencyInstallInfrastructureError("network_error")
             break
         _lock_down_dependency_tree(install_target)
         for child in install_target.iterdir():
@@ -2890,7 +2883,18 @@ class AssignmentExecutor:
                 "error_class": "provider_unavailable",
                 "reason": "provider_error",
             }
-            _log_dependency_install_failure(str(lease["run_id"]), exc.failure_kind)
+            safe_run_id = (
+                _safe_judge_diagnostic_text(lease["run_id"], max_chars=128) or "-"
+            )
+            try:
+                print(
+                    "Lab Arena dependency installation failure: "
+                    f"run_id={safe_run_id} failure_kind={exc.failure_kind}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            except (OSError, ValueError):
+                pass
         except AgentDependencyError:
             if scoring_run:  # the trusted scorer has no submitted dependency tree
                 raise

@@ -2999,7 +2999,15 @@ def _build_final_judge_prompt(
             "that binds the event and its date. Do not shorten quotes with "
             "ellipses or borrow a date from another event on the page."
         )
-    prompt_row = {**row, "_final_judge_suffix": suffix}
+    prefix = ""
+    if row.get("_integrity_policy"):
+        prefix = (
+            "Assess the submitted event, not whether the model copied the input sentence. "
+            "Use the supplied source body to decide entity, event support and ICP fit. "
+            "Keep factual support separate from freshness; report the date of that event only. "
+            "Never substitute another event of the same company or import facts from memory.\n\n"
+        )
+    prompt_row = {**row, "_final_judge_suffix": suffix, "_final_judge_prefix": prefix}
 
     if prompt_row.get("_evidence_type") == "TECHSTACK":
         prompt = _prompts_techstack.build_final_judge_prompt(
@@ -3016,14 +3024,6 @@ def _build_final_judge_prompt(
     else:
         prompt = _prompts_default.build_final_judge_prompt(
             prompt_row, contents, source_name
-        )
-    if row.get("_integrity_policy"):
-        prompt = (
-            "Assess the submitted event, not whether the model copied the input sentence. "
-            "Use the supplied source body to decide entity, event support and ICP fit. "
-            "Keep factual support separate from freshness; report the date of that event only. "
-            "Never substitute another event of the same company or import facts from memory.\n\n"
-            + prompt
         )
     return prompt
 
@@ -3340,6 +3340,29 @@ async def _fetch_sd_then_exa(
 # ─────────────────────────────────────────────────────────────────────
 # OpenRouter call with 429 retry / fail-soft
 # ─────────────────────────────────────────────────────────────────────
+_OPENROUTER_USER_MESSAGE_MAX_CHARS = 31_000
+_STRUCTURED_VERDICT_CORRECTION = """
+
+STRUCTURED VERDICT CORRECTION:
+Your previous answer returned signal_status=wrong_entity without
+same_entity_check=fail. Those fields contradict each other. Re-evaluate the
+exact evidence and return one fresh schema-valid verdict. Use wrong_entity
+only for a definitive entity mismatch and pair it with same_entity_check=fail.
+If entity identity passes, choose the claim status independently under the
+signal status rules. If identity is unclear, use unable_to_verify. Do not infer
+or copy a status from the previous answer's explanation.
+"""
+
+
+def _openrouter_user_messages(prompt: str) -> list[Dict[str, str]]:
+    """Split one ordered prompt below the broker's per-message limit."""
+
+    return [
+        {"role": "user", "content": prompt[offset:offset + _OPENROUTER_USER_MESSAGE_MAX_CHARS]}
+        for offset in range(0, len(prompt), _OPENROUTER_USER_MESSAGE_MAX_CHARS)
+    ]
+
+
 def _structured_verdict_error(answer: Mapping[str, Any]) -> str:
     """Return an error for a contradictory model-owned verdict pair.
 
@@ -3381,7 +3404,7 @@ async def _call_openrouter(
         "temperature": 0,
         "messages": [
             {"role": "system", "content": _SYS_MESSAGE},
-            {"role": "user", "content": prompt},
+            *_openrouter_user_messages(prompt),
         ],
         "response_format": {
             "type": "json_schema",
@@ -3495,17 +3518,12 @@ async def _call_openrouter(
                         "_error": "inconsistent_structured_verdict",
                         "provider_usage": provider_usage,
                     }
-                body["messages"][1]["content"] = prompt + """
-
-STRUCTURED VERDICT CORRECTION:
-Your previous answer returned signal_status=wrong_entity without
-same_entity_check=fail. Those fields contradict each other. Re-evaluate the
-exact evidence and return one fresh schema-valid verdict. Use wrong_entity
-only for a definitive entity mismatch and pair it with same_entity_check=fail.
-If entity identity passes, choose the claim status independently under the
-signal status rules. If identity is unclear, use unable_to_verify. Do not infer
-or copy a status from the previous answer's explanation.
-"""
+                body["messages"] = [
+                    {"role": "system", "content": _SYS_MESSAGE},
+                    *_openrouter_user_messages(
+                        prompt + _STRUCTURED_VERDICT_CORRECTION
+                    ),
+                ]
                 await asyncio.sleep(1)
                 continue
             return {

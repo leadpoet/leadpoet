@@ -363,3 +363,21 @@ def test_source_grounded_prompt_projects_identity_and_frames_source_as_untrusted
         # join; it is data-framed by the system instruction, not an identity.
         assert source_url in prompt
     assert malicious_page_instruction in messages_by_call[0][1]["content"]
+
+
+def test_long_prompt_correction_preserves_all_evidence_and_transport_bounds(monkeypatch):
+    from lab_arena import operations
+    _install_call_fakes(monkeypatch)
+    contradictory = _verdict(status="wrong_entity", same_entity="unclear")
+    repaired = _verdict(status="supported", same_entity="pass")
+    client = _Client([
+        _Response(_completion(json.dumps(contradictory))),
+        _Response(_completion(json.dumps(repaired))),
+    ])
+    prompt = "Exact source evidence. " * 4000
+    result = asyncio.run(verifier._call_openrouter(client, "test/model", prompt))
+    assert result["answer"] == repaired
+    assert client.calls == 2
+    payload = client.requests[-1]["kwargs"]["json"]
+    assert "".join(m["content"] for m in payload["messages"][1:]) == prompt + verifier._STRUCTURED_VERDICT_CORRECTION
+    operations.validate_operation_request("openrouter.chat", payload)

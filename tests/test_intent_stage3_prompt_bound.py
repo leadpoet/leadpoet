@@ -1,6 +1,7 @@
 """Regression tests for the native OpenRouter Stage-3 message bound."""
 
 import asyncio
+import json
 from unittest import mock
 
 import pytest
@@ -51,7 +52,7 @@ def _openrouter_parameters(prompt):
         "temperature": 0,
         "messages": [
             {"role": "system", "content": intent._SYS_MESSAGE},
-            {"role": "user", "content": prompt},
+            *intent._openrouter_user_messages(prompt),
         ],
         "response_format": {
             "type": "json_schema",
@@ -88,14 +89,15 @@ def test_conversion_sized_prompt_preserves_required_context_and_validates():
         },
     )
 
-    assert len(prompt) <= operations.OPENROUTER_MAX_CONTENT_CHARS
+    assert len(prompt) <= _common.FINAL_JUDGE_PROMPT_MAX_CHARS
     assert SOURCE_URL in prompt
     assert CLAIM in prompt
     assert TARGET_ICP_SIGNAL in prompt
     assert SIGNAL_DATE in prompt
     assert "SOURCE-START" in prompt
     assert "SOURCE-END Applications are closed" in prompt
-    assert _common._SOURCE_OMISSION_MARKER.strip() in prompt
+    assert body in prompt
+    assert _common._SOURCE_OMISSION_MARKER.strip() not in prompt
     assert "MODEL-OWNED EXACT HIRING EMPLOYER BINDING" in prompt
     assert "Use only the exact source extraction above" in prompt
     operations.validate_operation_request(
@@ -111,7 +113,7 @@ def test_three_long_sources_each_keep_url_and_both_ends():
             "title": f"Source {index}",
             "text": (
                 f"SOURCE-{index}-START\n"
-                + (f"source-{index}-body " * 1_500)
+                + (f"source-{index}-body " * 4_000)
                 + f"\nSOURCE-{index}-END"
             ),
         })
@@ -120,7 +122,7 @@ def test_three_long_sources_each_keep_url_and_both_ends():
         _row(), {"results": sources, "statuses": []}
     )
 
-    assert len(prompt) <= operations.OPENROUTER_MAX_CONTENT_CHARS
+    assert len(prompt) <= _common.FINAL_JUDGE_PROMPT_MAX_CHARS
     for index, source in enumerate(sources):
         assert source["url"] in prompt
         assert f"SOURCE-{index}-START" in prompt
@@ -206,7 +208,7 @@ def test_long_evidence_still_requires_stage3_terminal_verdict():
         ))
 
     assert len(prompts) == 1
-    assert len(prompts[0]) <= operations.OPENROUTER_MAX_CONTENT_CHARS
+    assert len(prompts[0]) <= _common.FINAL_JUDGE_PROMPT_MAX_CHARS
     assert result["decision"] == "reject"
     assert result["rejection_reason"] == "stage3_contradicted"
 
@@ -365,7 +367,7 @@ def test_integrity_bundle_and_exact_binding_preserve_prompt_bound(source_count):
     sources = [{"url": item["url"], "text": _long_job_body()}
                for item in row["_evidence_bundle"]]
     prompt = intent._build_final_judge_prompt(row, {"results": sources, "statuses": []})
-    assert len(prompt) <= operations.OPENROUTER_MAX_CONTENT_CHARS
+    assert len(prompt) <= _common.FINAL_JUDGE_PROMPT_MAX_CHARS
     assert "COMBINED CRITERION EVIDENCE" in prompt
     assert prompt.count("SOURCE-START") == source_count
     assert prompt.count("SOURCE-END Applications are closed") == source_count
@@ -464,11 +466,45 @@ def test_full_verifier_budgets_verified_identity_and_exact_ats_suffixes(
 
     assert len(prompts) == 1
     stage3_prompt = prompts[0]
-    assert len(stage3_prompt) <= operations.OPENROUTER_MAX_CONTENT_CHARS
+    assert len(stage3_prompt) <= _common.FINAL_JUDGE_PROMPT_MAX_CHARS
     assert "COMPANY IDENTITY ATTRIBUTION" in stage3_prompt
-    assert _common._SOURCE_OMISSION_MARKER.strip() in stage3_prompt
+    if source_count > 1:
+        assert _common._SOURCE_OMISSION_MARKER.strip() in stage3_prompt
+    else:
+        assert body[:_common.MAX_SCRAPED_CHARS] in stage3_prompt
     assert (
         "MODEL-OWNED EXACT HIRING EMPLOYER BINDING" in stage3_prompt
     ) is exact_ats
     assert result["company_check"] is True
     assert result["decision"] == "approve"
+
+
+def test_single_bounded_page_keeps_its_middle_event_date():
+    body = "INTRO " * 5000 + "Example completed its funding in March 2026." + " FOOTER" * 4200
+    assert len(body) <= _common.MAX_SCRAPED_CHARS
+    prompt = intent._build_final_judge_prompt(_row(), {
+        "results": [{"url": SOURCE_URL, "title": "Case study", "text": body}],
+        "statuses": [],
+    })
+    assert body in prompt
+    messages = intent._openrouter_user_messages(prompt)
+    assert len(messages) > 1
+    assert "".join(message["content"] for message in messages) == prompt
+    assert all(len(message["content"]) < operations.OPENROUTER_MAX_CONTENT_CHARS for message in messages)
+    operations.validate_operation_request("openrouter.chat", _openrouter_parameters(prompt))
+
+
+def test_unicode_prompt_transport_stays_bounded_without_losing_text():
+    prompt = "資料😀" * (_common.FINAL_JUDGE_PROMPT_MAX_CHARS // 3)
+    parameters = _openrouter_parameters(prompt)
+    assert "".join(m["content"] for m in parameters["messages"][1:]) == prompt
+    assert len(json.dumps(parameters).encode()) < 1_000_000
+    operations.validate_operation_request("openrouter.chat", parameters)
+
+
+def test_completed_acquisition_rule_accepts_current_control_but_not_future_deals():
+    rule = _common.ACQUISITION_BLOCK
+    assert "buyer now owns or controls" in rule
+    assert "active post-acquisition integration" in rule
+    assert "expected future closing do" in rule
+    assert "not prove completion" in rule

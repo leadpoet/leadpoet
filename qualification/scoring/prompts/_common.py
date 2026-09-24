@@ -21,14 +21,14 @@ from typing import Any, Dict, Iterable, List
 # way around).  Keep these two values in sync.
 MAX_SCRAPED_CHARS = 60_000
 
-# The Arena broker accepts at most 32,000 characters in one OpenRouter
-# message. Leave headroom below that hard limit. The verifier dispatcher puts
-# its trusted final instructions in ``_final_judge_suffix`` so this builder can
-# budget them with the fixed prompt. Source text and overlong page-title
-# metadata are the only lossy fields:
+# The final prompt is split into ordered OpenRouter user messages by the
+# verifier dispatcher. Keep the complete prompt well below the broker's 1 MB
+# request limit while allowing one source's existing 60,000-character scrape
+# cap to reach the judge intact. Source text and overlong page-title metadata
+# are the only lossy fields:
 # identity, claim, date, requested ICP signal, exact URLs, and the decision
 # rules remain complete.
-FINAL_JUDGE_PROMPT_MAX_CHARS = 31_000
+FINAL_JUDGE_PROMPT_MAX_CHARS = 95_000
 _LONG_SOURCE_TITLE_MAX_CHARS = 500
 _SOURCE_OMISSION_MARKER = "\n...[source text omitted to fit verifier transport]...\n"
 
@@ -230,10 +230,14 @@ ADVERTISING_BLOCK = """      * Advertising technology includes tools that measur
         an advertising-technology launch target even if the product does not
         buy or serve ads. Verify the actual capability and all target qualifiers."""
 
-ACQUISITION_BLOCK = """      * A completed acquisition requires evidence that the transaction closed.
-        An agreement, proposed deal, shareholder or court approval, and an
-        expected future closing do not prove completion. If the target instead
-        asks for an announced acquisition, apply that wording as written."""
+ACQUISITION_BLOCK = """      * A completed acquisition requires evidence that the transaction completed.
+        Unambiguous current-state evidence that the buyer now owns or controls
+        the target, including the target operating as part of the buyer or
+        active post-acquisition integration, proves completion even if the
+        source does not use the literal word `closed`. An agreement, proposed
+        deal, shareholder or court approval, and an expected future closing do
+        not prove completion. If the target instead asks for an announced
+        acquisition, apply that wording as written."""
 
 MARKET_EXPANSION_BLOCK = """  MARKET_EXPANSION — NEW-MARKET PROOF:
     Apply this block only to a chosen new-market alternative in the actual
@@ -522,7 +526,8 @@ def build_final_judge_prompt(
             if row.get("_integrity_policy") is True
             else MINER_DATE_CHECK_BLOCK
         )
-        return f"""{verification}
+        prefix = row.get("_final_judge_prefix") or ""
+        return f"""{prefix}{verification}
 
 {source_name} exact supplied source extraction:
 {chr(10).join(blocks)}

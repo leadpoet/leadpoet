@@ -933,6 +933,12 @@ def _validated_findings(
                 elif not _quote_names_compatible_venture_stage(
                     normalized_stage,
                     finding["evidence_quote"],
+                ) and not _quote_names_compatible_venture_stage(
+                    normalized_stage,
+                    _source_context_for_quote(
+                        finding["evidence_quote"],
+                        fetched_text,
+                    ),
                 ):
                     finding.update(
                         status="UNPROVEN",

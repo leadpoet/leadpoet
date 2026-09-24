@@ -1887,6 +1887,87 @@ def test_multiverse_amount_only_stage_fails_but_named_series_d_passes():
     assert named_finding["status"] == "VERIFIED"
 
 
+def test_common_wealth_amount_quote_uses_only_bounded_series_a_context():
+    url = (
+        "https://www.newswire.ca/news-releases/common-wealth-raises-12-million-"
+        "series-a-to-expand-retirement-security-for-canadians-836585010.html"
+    )
+    quote = (
+        "Common Wealth, Canada's fastest-growing group retirement provider, "
+        "today announced $12 million CAD in new equity financing"
+    )
+    retained_opening = (
+        "Common Wealth Raises $12 Million Series A to Expand Retirement "
+        "Security for Canadians Accessibility Statement Skip Navigation "
+        "News provided by Common Wealth Pension Services Inc. Apr 13, 2026, "
+        "07:00 ET Canadian-owned retirement fintech accelerates growth among "
+        "small and mid-sized employers. TORONTO, April 13, 2026 /CNW/ - "
+    )
+    local_page = f"{retained_opening}{quote}. The round includes new investors."
+
+    finding = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            observed_value="Series A",
+            evidence_url=url,
+            evidence_quote=quote,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: local_page},
+        first_party_domains={"commonwealthretirement.com"},
+        identity_names={"commonwealth"},
+    )["stage"]
+
+    assert not investigator._quote_names_compatible_venture_stage(
+        "series a", quote
+    )
+    assert "Series A" in investigator._source_context_for_quote(quote, local_page)
+    assert finding["status"] == "VERIFIED"
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        (
+            "Common Wealth Raises $12 Million Series B. "
+            "Common Wealth, Canada's fastest-growing group retirement "
+            "provider, today announced $12 million CAD in new equity financing."
+        ),
+        (
+            "Common Wealth completed a Series A. "
+            + ("distant filler " * 100)
+            + "Common Wealth, Canada's fastest-growing group retirement "
+            "provider, today announced $12 million CAD in new equity financing."
+        ),
+    ],
+)
+def test_venture_stage_context_rejects_different_or_distant_round(page):
+    url = "https://news.example/common-wealth-financing"
+    quote = (
+        "Common Wealth, Canada's fastest-growing group retirement provider, "
+        "today announced $12 million CAD in new equity financing"
+    )
+    context = investigator._source_context_for_quote(quote, page)
+    finding = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            observed_value="Series A",
+            evidence_url=url,
+            evidence_quote=quote,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: page},
+        first_party_domains={"commonwealthretirement.com"},
+        identity_names={"commonwealth"},
+    )["stage"]
+
+    assert "series a" not in context.casefold()
+    assert finding["status"] == "UNPROVEN"
+    assert finding["reason"] == (
+        "source quote did not name the submitted venture stage"
+    )
+
+
 @pytest.mark.parametrize(
     ("normalized_stage", "quote", "expected"),
     [

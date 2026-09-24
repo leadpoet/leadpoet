@@ -3357,6 +3357,66 @@ def test_same_domain_alias_requires_matching_linkedin_slug_and_unproven_is_retry
     )
 
 
+def _completed_same_domain_unproven_rebrand_receipt(**updates):
+    receipt = {
+        "decision": COMPANY_FIT_UNAVAILABLE,
+        "reason_code": "rebrand_continuity_unproven",
+        "evidence_source": "company_web_reverification",
+        "submitted_name": "dbs",
+        "submitted_domain": "dbs.com",
+        "submitted_linkedin_slug": "",
+        "observed_name": "dbsbankltd",
+        "observed_domain": "dbs.com",
+        "observed_linkedin_slug": "dbs-bank",
+    }
+    receipt.update(updates)
+    return receipt
+
+
+def test_completed_same_domain_unproven_rebrand_is_insufficient_evidence():
+    receipt = _completed_same_domain_unproven_rebrand_receipt()
+
+    assert lead_scorer._is_same_domain_unproven_web_identity(receipt)
+    assert lead_scorer._has_explicitly_unproven_fit_dimensions(
+        {},
+        ("identity",),
+        identity_receipt=receipt,
+    )
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"observed_domain": "dbs.com.sg"},
+        {"observed_linkedin_slug": ""},
+        {"submitted_linkedin_slug": "dbs", "observed_linkedin_slug": "dbs-bank"},
+        {"observed_name": "dbs"},
+        {"evidence_source": "company_homepage"},
+        {"reason_code": "identity_provider_error"},
+        {"observed_name": ""},
+    ],
+)
+def test_incomplete_or_unbound_unproven_rebrand_stays_retryable(updates):
+    receipt = _completed_same_domain_unproven_rebrand_receipt(**updates)
+
+    assert not lead_scorer._is_same_domain_unproven_web_identity(receipt)
+    assert not lead_scorer._has_explicitly_unproven_fit_dimensions(
+        {},
+        ("identity",),
+        identity_receipt=receipt,
+    )
+
+
+@pytest.mark.parametrize("receipt", [None, {}, {"decision": "unavailable"}])
+def test_empty_or_malformed_identity_receipt_stays_retryable(receipt):
+    assert not lead_scorer._is_same_domain_unproven_web_identity(receipt)
+    assert not lead_scorer._has_explicitly_unproven_fit_dimensions(
+        {},
+        ("identity",),
+        identity_receipt=receipt,
+    )
+
+
 def test_rebrand_proof_cannot_bind_an_unrelated_linkedin_company():
     company = _company(
         name="Wayground formerly Quizizz",
@@ -3610,7 +3670,7 @@ def test_arena_conflict_check_collects_structured_size_without_replacing_direct_
     calls = []
 
     async def fake_fetch(
-        domain, profile_url, *, diagnostic, public_company_evidence
+        domain, profile_url, *, diagnostic, public_company_evidence, **_kwargs
     ):
         del diagnostic, public_company_evidence
         calls.append((domain, profile_url))
@@ -5204,6 +5264,165 @@ def test_targeted_stage_classification_through_lab_scorer(
     assert receipt["company_fit_dimensions"]["stage"] == (
         COMPANY_FIT_UNAVAILABLE
     )
+
+
+def test_completed_same_domain_alias_is_terminal_zero_through_lab_scorer(
+    monkeypatch,
+):
+    verdict = _complete_verdict(
+        observed_company_name="DBS Bank Ltd",
+        observed_company_website="https://www.dbs.com/",
+        observed_company_linkedin="https://www.linkedin.com/company/dbs-bank",
+        observed_industry="Financial Services",
+        observed_subindustry="Banking",
+        industry_evidence_url="https://www.dbs.com/about-us/default.page",
+        industry_evidence_quote="DBS is a leading financial services group in Asia.",
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url="https://www.dbs.com/investors/fixed-income/overview",
+        stage_evidence_quote="DBS Group Holdings Ltd is listed in Singapore.",
+    )
+    calls = {"broad": 0, "investigator": 0, "good": 0}
+
+    async def prechecks(*_args, **_kwargs):
+        return lead_scorer.company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return lead_scorer.company_fit_match(
+            "homepage identity verified",
+            details={
+                "identity": {
+                    "decision": COMPANY_FIT_MATCH,
+                    "evidence_source": "company_homepage",
+                    "observed_name": "dbs",
+                    "observed_domain": "dbs.com",
+                    "observed_linkedin_slug": "dbs-bank",
+                },
+                "verified_homepage_transport_domain": "dbs.com",
+            },
+        )
+
+    async def broad_provider(**_kwargs):
+        calls["broad"] += 1
+        return dict(verdict), ""
+
+    async def no_profile_fetch(*_args, **_kwargs):
+        return None
+
+    async def preserve_broad_employee_observation(value, *_args, **_kwargs):
+        return value
+
+    async def bounded_investigation(*, targets, **_kwargs):
+        calls["investigator"] += 1
+        assert targets == ("stage", "rebrand")
+        stage_finding = _finding(
+            "stage",
+            status="VERIFIED",
+            observed_value="Public",
+            evidence_url="https://www.dbs.com/investors/fixed-income/overview",
+            evidence_quote="DBS Group Holdings Ltd is listed in Singapore.",
+            reason="The cited parent is publicly listed.",
+        )
+        return {
+            "claims": {
+                "stage": stage_finding,
+                "rebrand": _finding(
+                    "rebrand",
+                    status="UNPROVEN",
+                    observed_value="",
+                    evidence_url="",
+                    evidence_quote="",
+                    reason=(
+                        "The same-domain names could not be bound to one legal "
+                        "issuer."
+                    ),
+                )
+            },
+            "failure_reason": "",
+            "_validated_stage_finding": stage_finding,
+        }
+
+    original_score_company = lead_scorer.score_company_competition_intent
+
+    async def score_company(**kwargs):
+        if kwargs["company"].company_name == "DBS":
+            return await original_score_company(**kwargs)
+        calls["good"] += 1
+        return lead_scorer.LeadScoreBreakdown(
+            icp_fit=0,
+            decision_maker=0,
+            intent_signal_raw=77,
+            time_decay_multiplier=1,
+            intent_signal_final=77,
+            cost_penalty=0,
+            time_penalty=0,
+            final_score=77,
+        )
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(
+        lead_scorer, "_request_company_reverify_json", broad_provider
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "_fetch_structured_linkedin_profile_once",
+        no_profile_fetch,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "_refresh_linkedin_employee_size_observation",
+        preserve_broad_employee_observation,
+    )
+    monkeypatch.setattr(
+        lead_scorer, "investigate_company_evidence", bounded_investigation
+    )
+    monkeypatch.setattr(
+        lead_scorer, "score_company_competition_intent", score_company
+    )
+
+    scorer = arena_scoring.lab_scorer(
+        arena_scoring.build_scorer_policy(
+            scoring_adapter_version="qualification_integrity_v2"
+        )
+    )
+    dbs = {
+        **_competition_company(),
+        "company_name": "DBS",
+        "company_website": "https://www.dbs.com/",
+        "company_linkedin": "",
+        "industry": "Financial Services",
+        "company_stage": "Public",
+    }
+    accepted = arena_scoring.score_work_item(
+        {"scored_run_id": "same-domain-unproven-alias"},
+        icp=_icp(
+            industry="Financial Services",
+            sub_industry="Banking",
+            product_service="banking",
+            company_stage="Public",
+            intent_signals=["Announced a completed funding event"],
+        ).model_dump(mode="json"),
+        companies=[dbs, _competition_company()],
+        scorer=scorer,
+        max_retries=3,
+    )
+
+    assert calls == {"broad": 1, "investigator": 1, "good": 1}
+    assert [row["final_score"] for row in accepted] == [0.0, 77.0]
+    dbs_result = accepted[0]
+    receipt = dbs_result["verifier_gate_receipts"][0]
+    assert receipt["decision"] == COMPANY_FIT_UNAVAILABLE
+    assert receipt["failure_class"] == "insufficient_fit_evidence"
+    assert receipt["company_fit_dimensions"]["identity"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+    assert receipt["company_fit_dimensions"]["stage"] == COMPANY_FIT_MATCH
+    assert receipt["dimension_evidence"]["identity"][
+        "web_identity_receipt"
+    ]["reason_code"] == "rebrand_continuity_unproven"
+    assert dbs_result["company_qualified"] is False
 
 
 @pytest.mark.parametrize("reject_submission", [False, True])

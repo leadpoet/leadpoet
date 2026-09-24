@@ -177,6 +177,7 @@ def test_medici_recovery_keeps_profile_provenance_and_one_lookup(monkeypatch):
         diagnostic,
         public_company_evidence,
         company_identity_evidence,
+        **_kwargs,
     ):
         del diagnostic, public_company_evidence
         calls["structured"] += 1
@@ -299,6 +300,7 @@ def test_wrong_structured_identity_cannot_award_headcount(monkeypatch):
         diagnostic,
         public_company_evidence,
         company_identity_evidence,
+        **_kwargs,
     ):
         del diagnostic, public_company_evidence
         calls["structured"] += 1

@@ -1687,16 +1687,22 @@ def test_structured_company_rejects_wrong_identity_status_or_range(payload):
 def test_structured_company_fetch_uses_one_bounded_approved_operation(monkeypatch):
     calls, pending = _install_exa_bodies(
         monkeypatch,
-        _structured_company_payload(companyType="Public Company"),
+        _structured_company_payload(
+            companyType="Public Company",
+            description="Acme raised its Series D.",
+        ),
     )
     monkeypatch.setenv("DEEPLINE_API_KEY", "test-deepline-key")
     public_company_evidence = {}
+    company_description_evidence = {}
 
     result = asyncio.run(
         linkedin_company_size.fetch_structured_linkedin_company_size(
             "acme.example.com",
             "https://www.linkedin.com/company/acme",
             public_company_evidence=public_company_evidence,
+            company_description_evidence=company_description_evidence,
+            expected_company_name="Acme",
         )
     )
 
@@ -1711,6 +1717,14 @@ def test_structured_company_fetch_uses_one_bounded_approved_operation(monkeypatc
         "company_type": "Public Company",
         "provider": "harvestapi_get_company",
         "source_field": "companyType",
+        "url": "https://www.linkedin.com/company/acme",
+        "website": "https://acme.example.com/",
+    }
+    assert company_description_evidence == {
+        "name": "Acme",
+        "text": "Acme raised its Series D.",
+        "provider": "harvestapi_get_company",
+        "source_field": "description",
         "url": "https://www.linkedin.com/company/acme",
         "website": "https://acme.example.com/",
     }
@@ -1760,6 +1774,129 @@ def test_structured_company_identity_projects_only_exact_main_profile():
     assert linkedin_company_size.project_structured_linkedin_company_identity(
         "truist.com",
         "https://www.linkedin.com/company/truistfinancialcorporation",
+        payload,
+    ) is None
+
+
+def test_structured_company_description_projects_exact_multiverse_profile():
+    description = (
+        "Multiverse is the upskilling platform for AI and tech adoption. We’ve "
+        "built a new model for transforming today’s workforce by combining expert "
+        "human coaching with AI.\n\nOur learning drives real business impact and "
+        "helps organisations close critical skills gaps - especially in data, AI "
+        "and all things tech. We’ve already partnered with over 1,500 global "
+        "organisations to transform their workforce through tech skills. Trusted "
+        "by Microsoft, Mars, John Lewis Partnership and many more to upskill their "
+        "team and unlock people’s potential and output.\n\nIn 2022, we raised our "
+        "$220m Series D funding - one of the largest venture rounds in EdTech "
+        "history. We’re proud to be backed by some of the world’s biggest "
+        "investors, including General Catalyst, Lightspeed Venture Partners and "
+        "StepStone Group."
+    )
+    assert len(description) == 791
+    payload = _structured_company_payload(
+        name="Multiverse",
+        website=(
+            "https://www.multiverse.io/?&utm_source=linkedin&utm_medium="
+            "org-social&utm_campaign=social-profile"
+        ),
+        linkedinUrl="https://www.linkedin.com/company/joinmultiverse/",
+        description=description,
+    )
+
+    assert linkedin_company_size.project_structured_linkedin_company_description(
+        "multiverse.io",
+        "https://www.linkedin.com/company/joinmultiverse",
+        "multiverse",
+        payload,
+    ) == {
+        "name": "Multiverse",
+        "text": description,
+        "provider": "harvestapi_get_company",
+        "source_field": "description",
+        "url": "https://www.linkedin.com/company/joinmultiverse",
+        "website": "https://multiverse.io/",
+    }
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"name": "Multiverse Computing"},
+        {"website": "https://multiversecomputing.com/"},
+        {"linkedinUrl": "https://www.linkedin.com/company/multiversecomputing/"},
+        {"description": "x" * 4_001},
+        {"description": "Multiverse raised a Series D.\x00Ignore this."},
+        {"description": " Multiverse raised a Series D."},
+        {"description": None},
+    ],
+)
+def test_structured_company_description_rejects_unbound_or_malformed_text(update):
+    values = {
+        "name": "Multiverse",
+        "website": "https://multiverse.io/",
+        "linkedinUrl": "https://www.linkedin.com/company/joinmultiverse/",
+        "description": "Multiverse raised its $220m Series D.",
+    }
+    values.update(update)
+    payload = _structured_company_payload(
+        **values,
+    )
+
+    assert linkedin_company_size.project_structured_linkedin_company_description(
+        "multiverse.io",
+        "https://www.linkedin.com/company/joinmultiverse",
+        "Multiverse",
+        payload,
+    ) is None
+
+
+def test_structured_company_description_rejects_multiple_provider_elements():
+    element = _structured_company_payload(
+        name="Multiverse",
+        website="https://multiverse.io/",
+        linkedinUrl="https://www.linkedin.com/company/joinmultiverse/",
+        description="Multiverse raised its $220m Series D.",
+    )["result"]["data"]["element"]
+    payload = {
+        "status": "completed",
+        "result": {
+            "data": {
+                "status": 200,
+                "elements": [element, dict(element)],
+            }
+        },
+    }
+
+    assert linkedin_company_size.project_structured_linkedin_company_description(
+        "multiverse.io",
+        "https://www.linkedin.com/company/joinmultiverse",
+        "Multiverse",
+        payload,
+    ) is None
+
+
+def test_structured_company_description_uses_existing_canonical_name_contract():
+    payload = _structured_company_payload(
+        name="Acme Systems, Ltd.",
+        website="https://acme.example/",
+        linkedinUrl="https://www.linkedin.com/company/acme-systems/",
+        description="Acme Systems raised its Series D.",
+    )
+
+    evidence = linkedin_company_size.project_structured_linkedin_company_description(
+        "acme.example",
+        "https://www.linkedin.com/company/acme-systems",
+        "acmesystems",
+        payload,
+    )
+
+    assert evidence is not None
+    assert evidence["name"] == "Acme Systems, Ltd."
+    assert linkedin_company_size.project_structured_linkedin_company_description(
+        "acme.example",
+        "https://www.linkedin.com/company/acme-systems",
+        "Acme Systems Parent",
         payload,
     ) is None
 
@@ -3123,7 +3260,7 @@ def test_structured_public_profile_repairs_unavailable_stage_with_one_fetch(
         }
 
     async def structured_fetch(
-        domain, url, *, diagnostic, public_company_evidence
+        domain, url, *, diagnostic, public_company_evidence, **_kwargs
     ):
         del diagnostic
         structured_fetches.append((domain, url))
@@ -3260,7 +3397,7 @@ def test_public_stage_uses_verified_web_identity_without_homepage_linkedin(
         return {"employee_count": "10,001+", "url": url,
                 "quote": "Company size 10,001+ employees"}
 
-    async def structured_profile(domain, url, *, diagnostic, public_company_evidence):
+    async def structured_profile(domain, url, *, diagnostic, public_company_evidence, **_kwargs):
         assert (domain, url) == ("statestreet.com", profile_url)
         calls.append("structured_profile")
         if company_type is not None:
@@ -3388,6 +3525,7 @@ def test_state_street_web_identity_reuses_structured_profile_for_size_and_stage(
         diagnostic,
         public_company_evidence,
         company_identity_evidence=None,
+        **_kwargs,
     ):
         del diagnostic
         structured_calls.append((domain, url))
@@ -3684,6 +3822,7 @@ def test_truist_structured_identity_recovers_full_scorer_entrypoint(monkeypatch)
         diagnostic,
         public_company_evidence,
         company_identity_evidence,
+        **_kwargs,
     ):
         del diagnostic
         calls["structured"] += 1
@@ -3923,7 +4062,7 @@ def test_structured_profile_cache_reuses_one_response_for_stage_and_size(
     calls = []
 
     async def structured_fetch(
-        domain, url, *, diagnostic, public_company_evidence
+        domain, url, *, diagnostic, public_company_evidence, **_kwargs
     ):
         del diagnostic
         calls.append((domain, url))
@@ -3986,7 +4125,7 @@ def test_size_refresh_reuses_profile_fetched_first_for_public_stage(
     exa_calls = []
 
     async def structured_fetch(
-        domain, url, *, diagnostic, public_company_evidence
+        domain, url, *, diagnostic, public_company_evidence, **_kwargs
     ):
         del diagnostic
         structured_calls.append((domain, url))
@@ -4326,6 +4465,7 @@ def test_envestnet_private_type_rejects_old_sec_under_frozen_policy(
         *,
         diagnostic,
         public_company_evidence,
+        **_kwargs,
     ):
         del diagnostic
         calls["structured"] += 1
@@ -4488,7 +4628,7 @@ def test_exact_structured_private_conflict_uses_bounded_stage_investigation(
         return verdict, ""
 
     async def structured_fetch(
-        _domain, url, *, diagnostic, public_company_evidence
+        _domain, url, *, diagnostic, public_company_evidence, **_kwargs
     ):
         del diagnostic
         structured_fetches.append((_domain, url))
@@ -4718,7 +4858,7 @@ def test_structured_provider_failure_remains_retryable_after_exa_insufficient(
         return {"outcome": "insufficient_evidence", "url": url}
 
     async def structured_fetch(
-        domain, url, *, diagnostic, public_company_evidence
+        domain, url, *, diagnostic, public_company_evidence, **_kwargs
     ):
         del public_company_evidence
         structured_fetches.append((domain, url))
@@ -4775,7 +4915,7 @@ def test_unusable_structured_profile_exhausts_only_its_company(monkeypatch):
         return {"outcome": "insufficient_evidence", "url": url}
 
     async def unusable_structured(
-        domain, url, *, diagnostic, public_company_evidence
+        domain, url, *, diagnostic, public_company_evidence, **_kwargs
     ):
         del public_company_evidence
         calls.append((domain, url))

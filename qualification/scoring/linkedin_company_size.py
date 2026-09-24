@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import re
+import unicodedata
 from typing import Any, Literal, Mapping, Optional, TypedDict, Union
 from urllib.parse import urlsplit
 
@@ -17,6 +18,7 @@ from leadpoet_verifier.identity.normalization import (
     normalize_host,
 )
 from qualification.employee_buckets import LINKEDIN_EMPLOYEE_BUCKETS
+from qualification.scoring.company_fit_decision import _company_name
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +33,7 @@ STRUCTURED_PROFILE_PROVIDER = "harvestapi_get_company"
 STRUCTURED_PROFILE_SOURCE_FIELD = "employeeCountRange"
 STRUCTURED_PROFILE_COMPANY_TYPE_SOURCE_FIELD = "companyType"
 STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD = "name"
+STRUCTURED_PROFILE_DESCRIPTION_SOURCE_FIELD = "description"
 STRUCTURED_PROFILE_PUBLIC_COMPANY_TYPE = "Public Company"
 STRUCTURED_PROFILE_PRIVATE_COMPANY_TYPE = "Privately Held"
 CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE: Literal[
@@ -152,6 +155,15 @@ class StructuredLinkedInPublicCompanyEvidence(TypedDict):
 
 class StructuredLinkedInCompanyIdentityEvidence(TypedDict):
     name: str
+    provider: str
+    source_field: str
+    url: str
+    website: str
+
+
+class StructuredLinkedInCompanyDescriptionEvidence(TypedDict):
+    name: str
+    text: str
     provider: str
     source_field: str
     url: str
@@ -437,6 +449,52 @@ def project_structured_linkedin_company_identity(
     }
 
 
+def project_structured_linkedin_company_description(
+    requested_domain: str,
+    requested_profile_url: str,
+    expected_company_name: str,
+    payload: Any,
+) -> Optional[StructuredLinkedInCompanyDescriptionEvidence]:
+    """Project one bounded description for an exact structured identity."""
+
+    identity = project_structured_linkedin_company_identity(
+        requested_domain,
+        requested_profile_url,
+        payload,
+    )
+    elements = _structured_company_elements(payload)
+    normalized_expected_name = _company_name(expected_company_name)
+    normalized_observed_name = _company_name((identity or {}).get("name"))
+    if (
+        identity is None
+        or len(elements) != 1
+        or not normalized_expected_name
+        or normalized_observed_name != normalized_expected_name
+    ):
+        return None
+    description = elements[0].get("description")
+    if (
+        not isinstance(description, str)
+        or not description
+        or description != description.strip()
+        or len(description) > PROFILE_MAX_CHARACTERS
+        or any(
+            unicodedata.category(character).startswith("C")
+            and character not in "\t\n\r"
+            for character in description
+        )
+    ):
+        return None
+    return {
+        "name": identity["name"],
+        "text": description,
+        "provider": STRUCTURED_PROFILE_PROVIDER,
+        "source_field": STRUCTURED_PROFILE_DESCRIPTION_SOURCE_FIELD,
+        "url": identity["url"],
+        "website": identity["website"],
+    }
+
+
 def project_structured_linkedin_public_company(
     requested_domain: str,
     requested_profile_url: str,
@@ -500,6 +558,8 @@ async def fetch_structured_linkedin_company_size(
     diagnostic: Optional[dict[str, str]] = None,
     public_company_evidence: Optional[dict[str, str]] = None,
     company_identity_evidence: Optional[dict[str, str]] = None,
+    company_description_evidence: Optional[dict[str, str]] = None,
+    expected_company_name: str = "",
 ) -> Optional[StructuredLinkedInCompanySizeEvidence]:
     """Fetch one profile and project size plus optional company-type evidence."""
 
@@ -557,6 +617,17 @@ async def fetch_structured_linkedin_company_size(
     )
     if company_identity_evidence is not None and identity_evidence is not None:
         company_identity_evidence.update(identity_evidence)
+    description_evidence = project_structured_linkedin_company_description(
+        domain,
+        canonical_profile,
+        expected_company_name,
+        body,
+    )
+    if (
+        company_description_evidence is not None
+        and description_evidence is not None
+    ):
+        company_description_evidence.update(description_evidence)
     evidence = project_structured_linkedin_company_size(
         domain,
         canonical_profile,

@@ -11,9 +11,13 @@ from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
     COMPANY_FIT_MISMATCH,
     COMPANY_FIT_UNAVAILABLE,
+    company_fit_match,
     company_fit_unavailable,
 )
 from qualification.scoring.competition import (
+    COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS,
+    REQUIRED_ATTRIBUTE_QUOTE_ABSENT_FAILURE_CLASS,
+    scorer_breakdown_has_company_local_verification_failure,
     scorer_breakdown_has_retryable_infrastructure_failure,
 )
 
@@ -403,7 +407,7 @@ def test_required_attribute_source_outage_is_unavailable_and_cached(monkeypatch)
     })
 
 
-def test_repeated_ungrounded_attribute_quote_is_insufficient_fit_evidence(
+def test_repeated_ungrounded_attribute_quote_is_retryable_company_local(
     monkeypatch,
 ):
     source_url = "https://example.com/announcement"
@@ -433,7 +437,9 @@ def test_repeated_ungrounded_attribute_quote_is_insufficient_fit_evidence(
     assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert provider.await_count == 2
     assert fetch.await_count == 1
-    assert result.details["failure_class"] == "insufficient_fit_evidence"
+    assert result.details["failure_class"] == (
+        REQUIRED_ATTRIBUTE_QUOTE_ABSENT_FAILURE_CLASS
+    )
     assert "failure_reason_code" not in result.details
     assert result.details["required_attribute_grounding"]["status"] == (
         "quote_absent"
@@ -442,9 +448,9 @@ def test_repeated_ungrounded_attribute_quote_is_insufficient_fit_evidence(
         "url": "",
         "quote": "",
     }
-    assert not scorer_breakdown_has_retryable_infrastructure_failure({
-        "verifier_gate_receipts": [result.receipt("company_fit")],
-    })
+    breakdown = {"verifier_gate_receipts": [result.receipt("company_fit")]}
+    assert scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
+    assert scorer_breakdown_has_company_local_verification_failure(breakdown)
 
 
 def _complete_attribute_verdict(source_url):
@@ -620,52 +626,245 @@ def test_required_attribute_request_failures_remain_retryable(
     })
 
 
-def test_score_work_item_preserves_other_companies_with_insufficient_quote():
-    calls = []
-    companies = [
+def _quote_absent_web_result(identity_decision):
+    return company_fit_unavailable(
+        "required attribute quote absent after repair",
+        details={
+            "identity_decision": identity_decision,
+            "identity_receipt": {
+                "decision": identity_decision,
+                "reason_code": (
+                    "identity_not_proven"
+                    if identity_decision == COMPANY_FIT_UNAVAILABLE
+                    else ""
+                ),
+                "evidence_source": "company_web_reverification",
+                "submitted_name": "example company",
+                "submitted_domain": "example.com",
+                "submitted_linkedin_slug": "",
+                "observed_name": "example company",
+                "observed_domain": "example.com",
+                "observed_linkedin_slug": "",
+            },
+            "dimension_decisions": {
+                "employee_size": COMPANY_FIT_MATCH,
+                "industry": COMPANY_FIT_MATCH,
+                "geography": COMPANY_FIT_MATCH,
+                "stage": COMPANY_FIT_MATCH,
+            },
+            "dimension_evidence": {
+                dimension: {
+                    "url": f"https://example.com/{dimension}",
+                    "quote": f"Example Company {dimension} evidence.",
+                }
+                for dimension in ("employee_size", "industry", "geography")
+            } | {"required_attribute": {"url": "", "quote": ""}},
+            "required_attribute_decision": COMPANY_FIT_UNAVAILABLE,
+            "required_attribute_grounding": {"status": "quote_absent"},
+            "failure_class": REQUIRED_ATTRIBUTE_QUOTE_ABSENT_FAILURE_CLASS,
+        },
+    )
+
+
+def test_full_company_fit_receipt_preserves_quote_absent_class(monkeypatch):
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_match("homepage identity verified")
+
+    async def web(*_args, **_kwargs):
+        return _quote_absent_web_result(COMPANY_FIT_MATCH)
+
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(lead_scorer, "_llm_reverify_company", web)
+
+    result = asyncio.run(lead_scorer._verify_company_fit(
+        _company(),
+        _icp(company_stage="", required_attribute="Completed an acquisition."),
+        0.0,
+        0.0,
+        set(),
+        require_https_transport=True,
+    ))
+    receipt = result.receipt("company_fit")
+    breakdown = {"verifier_gate_receipts": [receipt]}
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert receipt["failure_class"] == (
+        REQUIRED_ATTRIBUTE_QUOTE_ABSENT_FAILURE_CLASS
+    )
+    assert scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
+    assert scorer_breakdown_has_company_local_verification_failure(breakdown)
+
+
+def test_full_company_fit_drops_quote_class_for_retryable_homepage(monkeypatch):
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_unavailable("website returned HTTP 502")
+
+    async def web(*_args, **_kwargs):
+        return _quote_absent_web_result(COMPANY_FIT_UNAVAILABLE)
+
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(lead_scorer, "_llm_reverify_company", web)
+
+    result = asyncio.run(lead_scorer._verify_company_fit(
+        _company(),
+        _icp(company_stage="", required_attribute="Completed an acquisition."),
+        0.0,
+        0.0,
+        set(),
+        require_https_transport=True,
+    ))
+    receipt = result.receipt("company_fit")
+    breakdown = {"verifier_gate_receipts": [receipt]}
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert receipt.get("failure_class") != (
+        REQUIRED_ATTRIBUTE_QUOTE_ABSENT_FAILURE_CLASS
+    )
+    assert scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
+    assert not scorer_breakdown_has_company_local_verification_failure(breakdown)
+
+
+def _score_work_item_companies():
+    return [
         {"company_name": name, "employee_count": "201-500"}
         for name in ("Accepted One", "Just Ice Tea", "Accepted Two")
     ]
 
+
+def _scored_breakdown(score):
+    return {
+        "final_score": score,
+        "verifier_gate_receipts": [
+            {"gate": "company_fit", "decision": "match"}
+        ],
+    }
+
+
+def _quote_absent_breakdown():
+    return {
+        "final_score": 0.0,
+        "failure_reason": (
+            "Company fit unavailable: unproven dimensions: required_attribute"
+        ),
+        "verifier_gate_receipts": [{
+            "gate": "company_fit",
+            "decision": "unavailable",
+            "failure_class": REQUIRED_ATTRIBUTE_QUOTE_ABSENT_FAILURE_CLASS,
+        }],
+    }
+
+
+def test_score_work_item_recovers_quote_absent_company_on_outer_retry():
+    calls = []
+
     def scorer(invoked, _icp_value, _is_reference_model):
-        calls.append([company["company_name"] for company in invoked])
-        return [
-            {
-                "final_score": 40.0,
-                "verifier_gate_receipts": [
-                    {"gate": "company_fit", "decision": "match"}
-                ],
-            },
-            {
-                "final_score": 0.0,
-                "failure_reason": (
-                    "Company fit unavailable: unproven dimensions: "
-                    "required_attribute"
-                ),
-                "verifier_gate_receipts": [{
-                    "gate": "company_fit",
-                    "decision": "unavailable",
-                    "failure_class": "insufficient_fit_evidence",
-                }],
-            },
-            {
-                "final_score": 55.0,
-                "verifier_gate_receipts": [
-                    {"gate": "company_fit", "decision": "match"}
-                ],
-            },
-        ]
+        names = [company["company_name"] for company in invoked]
+        calls.append(names)
+        if len(calls) == 1:
+            return [
+                _scored_breakdown(40.0),
+                _quote_absent_breakdown(),
+                _scored_breakdown(55.0),
+            ]
+        assert names == ["Just Ice Tea"]
+        return [_scored_breakdown(54.0)]
 
     result = arena_scoring.score_work_item(
-        {"scored_run_id": "quote-absent-company-zero"},
+        {"scored_run_id": "quote-absent-recovers"},
         icp={"employee_count": ["201-500"], "max_companies": 3},
-        companies=companies,
+        companies=_score_work_item_companies(),
         scorer=scorer,
         max_retries=3,
     )
 
-    assert calls == [["Accepted One", "Just Ice Tea", "Accepted Two"]]
+    assert calls == [
+        ["Accepted One", "Just Ice Tea", "Accepted Two"],
+        ["Just Ice Tea"],
+    ]
+    assert [row["final_score"] for row in result] == [40.0, 54.0, 55.0]
+
+
+def test_score_work_item_exhausts_only_persistent_quote_absent_company():
+    calls = []
+
+    def scorer(invoked, _icp_value, _is_reference_model):
+        names = [company["company_name"] for company in invoked]
+        calls.append(names)
+        if len(calls) == 1:
+            return [
+                _scored_breakdown(40.0),
+                _quote_absent_breakdown(),
+                _scored_breakdown(55.0),
+            ]
+        assert names == ["Just Ice Tea"]
+        return [_quote_absent_breakdown()]
+
+    result = arena_scoring.score_work_item(
+        {"scored_run_id": "quote-absent-exhausted"},
+        icp={"employee_count": ["201-500"], "max_companies": 3},
+        companies=_score_work_item_companies(),
+        scorer=scorer,
+        max_retries=3,
+    )
+
+    assert calls == [
+        ["Accepted One", "Just Ice Tea", "Accepted Two"],
+        ["Just Ice Tea"],
+        ["Just Ice Tea"],
+    ]
     assert [row["final_score"] for row in result] == [40.0, 0.0, 55.0]
+    assert result[1]["verifier_gate_receipts"][0]["failure_class"] == (
+        COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS
+    )
+    assert not scorer_breakdown_has_retryable_infrastructure_failure(result[1])
+
+
+def test_score_work_item_mixed_provider_failure_still_errors():
+    calls = []
+
+    def scorer(invoked, _icp_value, _is_reference_model):
+        names = [company["company_name"] for company in invoked]
+        calls.append(names)
+        rows = []
+        for name in names:
+            if name == "Accepted One":
+                rows.append(_scored_breakdown(40.0))
+            elif name == "Just Ice Tea":
+                rows.append(_quote_absent_breakdown())
+            else:
+                rows.append({
+                    "final_score": 0.0,
+                    "failure_reason": "Company fit unavailable: provider HTTP 502",
+                    "verifier_gate_receipts": [{
+                        "gate": "company_fit",
+                        "decision": "unavailable",
+                        "failure_reason_code": "provider_error",
+                    }],
+                })
+        return rows
+
+    with pytest.raises(arena_scoring.ScoringError):
+        arena_scoring.score_work_item(
+            {"scored_run_id": "quote-absent-with-provider-failure"},
+            icp={"employee_count": ["201-500"], "max_companies": 3},
+            companies=_score_work_item_companies(),
+            scorer=scorer,
+            max_retries=3,
+        )
+
+    assert calls == [
+        ["Accepted One", "Just Ice Tea", "Accepted Two"],
+        ["Just Ice Tea", "Accepted Two"],
+        ["Just Ice Tea", "Accepted Two"],
+    ]
 
 
 def test_required_attribute_grounding_cache_bounds_distinct_urls():

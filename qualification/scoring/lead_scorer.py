@@ -86,6 +86,7 @@ from qualification.scoring.arena_integrity import (
     verified_identity_receipt,
 )
 from qualification.scoring.competition import (
+    REQUIRED_ATTRIBUTE_QUOTE_ABSENT_FAILURE_CLASS,
     intent_unavailability_requires_retry,
 )
 from leadpoet_verifier.identity.normalization import (
@@ -5044,7 +5045,7 @@ async def _llm_reverify_company(
         for dimension in repaired_incomplete
         if dimension != "required_attribute"
     )
-    quote_absent_is_insufficient_evidence = bool(
+    quote_absent_is_company_local = bool(
         repaired_result.decision == COMPANY_FIT_UNAVAILABLE
         and "required_attribute" in repaired_incomplete
         and isinstance(required_attribute_grounding, Mapping)
@@ -5075,13 +5076,13 @@ async def _llm_reverify_company(
             )
         )
     )
-    if quote_absent_is_insufficient_evidence:
+    if quote_absent_is_company_local:
         return company_fit_unavailable(
             repaired_result.reason,
             details={
                 **repaired_result.details,
                 "failure_class": (
-                    INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS
+                    REQUIRED_ATTRIBUTE_QUOTE_ABSENT_FAILURE_CLASS
                 ),
             },
         )
@@ -5613,10 +5614,14 @@ async def _verify_company_fit(
         in {
             EMPLOYEE_SIZE_VERIFICATION_FAILURE_CLASS,
             INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS,
+            REQUIRED_ATTRIBUTE_QUOTE_ABSENT_FAILURE_CLASS,
         }
         and not (
             candidate_failure_class
-            == INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS
+            in {
+                INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS,
+                REQUIRED_ATTRIBUTE_QUOTE_ABSENT_FAILURE_CLASS,
+            }
             and web_identity_decision == COMPANY_FIT_UNAVAILABLE
             and _homepage_identity_has_retryable_failure(identity)
         )

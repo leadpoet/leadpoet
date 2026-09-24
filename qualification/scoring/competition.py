@@ -50,6 +50,9 @@ _PENALIZABLE_FAILURE_MARKERS = (
 _NEVER_PENALIZE_MARKERS = ("error", "timeout", "provider", "429")
 _MODEL_CONTRACT_INCOMPATIBLE_FAILURE_CLASS = "model_contract_incompatible"
 COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS = "company_verification_exhausted"
+REQUIRED_ATTRIBUTE_QUOTE_ABSENT_FAILURE_CLASS = (
+    "required_attribute_quote_absent"
+)
 _NON_RETRYABLE_UNAVAILABLE_FAILURE_CLASSES = frozenset({
     "insufficient_fit_evidence",
     _MODEL_CONTRACT_INCOMPATIBLE_FAILURE_CLASS,
@@ -1227,6 +1230,13 @@ def scorer_breakdown_has_company_local_verification_failure(
                 continue
             if (
                 receipt.get("gate") == "company_fit"
+                and failure_class
+                == REQUIRED_ATTRIBUTE_QUOTE_ABSENT_FAILURE_CLASS
+            ):
+                source_local = True
+                continue
+            if (
+                receipt.get("gate") == "company_fit"
                 and receipt.get("failure_reason_code")
                 == _SOURCE_LOCAL_FAILURE_REASON
             ):
@@ -1339,7 +1349,12 @@ def terminal_company_verification_breakdown(
         elif (
             receipt.get("gate") == "company_fit"
             and receipt.get("decision") == "unavailable"
-            and receipt.get("failure_reason_code") == _SOURCE_LOCAL_FAILURE_REASON
+            and (
+                receipt.get("failure_reason_code")
+                == _SOURCE_LOCAL_FAILURE_REASON
+                or receipt.get("failure_class")
+                == REQUIRED_ATTRIBUTE_QUOTE_ABSENT_FAILURE_CLASS
+            )
         ):
             receipt["failure_class"] = COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS
             marked = True

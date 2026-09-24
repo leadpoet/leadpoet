@@ -132,7 +132,10 @@ preference or guesswork.
 
 Use submit_findings when research is complete. If deterministic validation
 rejects it and returns feedback, correct it within the remaining limits and
-resubmit. Return one finding for every requested target and no other target.
+resubmit. A quote must be one continuous, exact span from its fetched page;
+never join separate passages or insert an ellipsis. UNPROVEN must have empty
+evidence_url and evidence_quote fields. Return one finding for every requested
+target and no other target.
 VERIFIED means the requested claim is proven. CONTRADICTED means a different
 current value is proven. UNPROVEN means the evidence is absent, ambiguous,
 stale, scoped incorrectly, or conflicting."""
@@ -854,6 +857,23 @@ def _unproven_findings(
     }
 
 
+def _submitted_finding_rejection(
+    submitted: Mapping[str, Any], finding: Mapping[str, Any]
+) -> Optional[str]:
+    status = submitted.get("status")
+    if status == "UNPROVEN" and any(
+        str(submitted.get(field) or "").strip()
+        for field in ("evidence_url", "evidence_quote")
+    ):
+        return "UNPROVEN must have empty evidence_url and evidence_quote fields"
+    if (
+        status in {"VERIFIED", "CONTRADICTED"}
+        and finding.get("status") == "UNPROVEN"
+    ):
+        return str(finding.get("reason") or "deterministic evidence validation failed")[:300]
+    return None
+
+
 async def investigate_company_evidence(
     *,
     company_locator: Mapping[str, Any],
@@ -969,7 +989,11 @@ async def investigate_company_evidence(
     timeout = aiohttp.ClientTimeout(total=BROKER_SETTLEMENT_TIMEOUT_SECONDS)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            for _turn in range(MAX_REASONING_TURNS):
+            final_correction_pending = False
+            for _turn in range(MAX_REASONING_TURNS + 1):
+                correction_turn = _turn == MAX_REASONING_TURNS
+                if correction_turn and not final_correction_pending:
+                    break
                 # Do not cancel a paid request after admission. Stop admitting
                 # the next request when the shared per-company deadline passed;
                 # an admitted request settles under the broker's own bound.
@@ -985,7 +1009,7 @@ async def investigate_company_evidence(
                             "fetch_calls": fetch_calls,
                         },
                     }
-                force_submit = _turn == MAX_REASONING_TURNS - 1
+                force_submit = _turn >= MAX_REASONING_TURNS - 1
                 status, body = await _post_json(
                     session,
                     "https://openrouter.ai/api/v1/chat/completions",
@@ -1009,6 +1033,7 @@ async def investigate_company_evidence(
                                 },
                             }
                             for tool in _tools(requested_targets)
+                            if not correction_turn or tool["name"] == "submit_findings"
                         ],
                         "tool_choice": (
                             {
@@ -1054,6 +1079,8 @@ async def investigate_company_evidence(
                 call_type = call.get("type")
                 name = function.get("name")
                 raw_arguments = function.get("arguments")
+                if correction_turn and name != "submit_findings":
+                    raise ValueError("reasoning_final_correction_must_submit")
                 if (
                     not isinstance(call_id, str)
                     or not call_id
@@ -1086,34 +1113,44 @@ async def investigate_company_evidence(
                     )
                     if claims is None:
                         raise ValueError("reasoning_findings_malformed")
-                    submitted_statuses = {
-                        item.get("target"): item.get("status")
+                    submitted_findings = {
+                        item.get("target"): item
                         for item in arguments["findings"]
                         if isinstance(item, Mapping)
                     }
                     rejected = [
-                        {
-                            "target": target,
-                            "reason": str(finding.get("reason") or "")[:300],
-                        }
+                        {"target": target, "reason": reason}
                         for target, finding in claims.items()
-                        if submitted_statuses.get(target)
-                        in {"VERIFIED", "CONTRADICTED"}
-                        and finding.get("status") == "UNPROVEN"
+                        if (
+                            reason := _submitted_finding_rejection(
+                                submitted_findings.get(target, {}), finding
+                            )
+                        )
                     ]
-                    if rejected and not force_submit:
+                    if rejected and not correction_turn:
+                        final_correction_pending = force_submit
                         tool_result = {
                             "ok": False,
                             "error": "deterministic_evidence_validation_failed",
                             "rejected_findings": rejected,
                             "instruction": (
-                                "Never repeat a rejected quote. Fetch another useful "
-                                "source while budget remains, or submit UNPROVEN. "
-                                "Use fetched source text and submit one complete finding "
-                                "for every requested target. Do not paraphrase."
+                                "Never repeat a rejected quote. Use one exact continuous "
+                                "company-bound span from a fetched page; do not paraphrase, "
+                                "join passages, or insert ellipses. VERIFIED and "
+                                "CONTRADICTED require that exact quote and its fetched URL. "
+                                "UNPROVEN requires empty evidence_url and evidence_quote. "
+                                + (
+                                    "This is the single final submit-only correction; "
+                                    "do not search or fetch. "
+                                    if force_submit
+                                    else "Fetch another useful source while budget remains. "
+                                )
+                                + "Submit one complete finding for every requested target."
                             ),
                         }
                     else:
+                        for item in rejected:
+                            claims[item["target"]]["reason"] = item["reason"]
                         stage_finding = claims.get("stage") or {}
                         return {
                             "claims": claims,

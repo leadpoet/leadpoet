@@ -2522,6 +2522,154 @@ def test_agent_unproven_historical_listing_remains_unproven(monkeypatch):
     }
 
 
+def test_final_unproven_with_evidence_gets_one_submit_only_correction(monkeypatch):
+    url = "https://news.example/acme-seed"
+    quote = "Acme Raises $40 Million Seed Funding At $200 Million Valuation"
+    reasoning_requests = []
+    provider_searches = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        arena_operations.validate_operation_request("openrouter.chat", payload)
+        reasoning_requests.append(payload)
+        turn = len(reasoning_requests)
+        if turn == 1:
+            name, arguments = "fetch_page", {"url": url}
+        elif turn < investigator.MAX_REASONING_TURNS:
+            name, arguments = "search_web", {"query": f"Acme source {turn}"}
+        else:
+            name, arguments = "submit_findings", {
+                "findings": [_finding(
+                    "stage",
+                    status=(
+                        "UNPROVEN"
+                        if turn == investigator.MAX_REASONING_TURNS
+                        else "VERIFIED"
+                    ),
+                    observed_value="Seed",
+                    evidence_url=url,
+                    evidence_quote=quote,
+                    reason="The exact quote names Acme and Seed Funding.",
+                )]
+            }
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{turn}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_fetch(_session, requested_url):
+        return {"ok": True, "url": requested_url, "text": quote}
+
+    async def fake_search(_session, query, *, key):
+        del key
+        provider_searches.append(query)
+        return {"results": [], "notice": "discovery_only_not_evidence"}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("stage",),
+        requested_stage="Seed",
+    ))
+
+    assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["claims"]["stage"]["evidence_quote"] == quote
+    assert result["usage"] == {
+        "reasoning_turns": investigator.MAX_REASONING_TURNS + 1,
+        "search_calls": investigator.MAX_SEARCH_CALLS,
+        "fetch_calls": 1,
+    }
+    assert len(provider_searches) == investigator.MAX_SEARCH_CALLS
+    assert len(reasoning_requests) == investigator.MAX_REASONING_TURNS + 1
+    correction_feedback = json.loads(
+        reasoning_requests[-1]["messages"][-1]["content"]
+    )
+    assert correction_feedback["rejected_findings"] == [{
+        "target": "stage",
+        "reason": "UNPROVEN must have empty evidence_url and evidence_quote fields",
+    }]
+    assert "single final submit-only correction" in correction_feedback["instruction"]
+    assert "exact continuous company-bound span" in correction_feedback["instruction"]
+    assert {
+        tool["function"]["name"] for tool in reasoning_requests[-1]["tools"]
+    } == {"submit_findings"}
+
+
+def test_final_noncontiguous_quote_correction_stays_unproven(monkeypatch):
+    url = "https://acme.example/acquisition"
+    page = (
+        "Acme completed its acquisition by Example Capital. "
+        "Acme is now a privately held company."
+    )
+    joined_quote = (
+        "Acme completed its acquisition by Example Capital. ... "
+        "Acme is now a privately held company."
+    )
+    reasoning_requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        arena_operations.validate_operation_request("openrouter.chat", payload)
+        reasoning_requests.append(payload)
+        turn = len(reasoning_requests)
+        if turn == 1:
+            name, arguments = "fetch_page", {"url": url}
+        else:
+            name, arguments = "submit_findings", {
+                "findings": [_finding(
+                    "stage",
+                    observed_value="Private Equity",
+                    evidence_url=url,
+                    evidence_quote=joined_quote,
+                )]
+            }
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{turn}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_fetch(_session, requested_url):
+        return {"ok": True, "url": requested_url, "text": page}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 2)
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("stage",),
+        requested_stage="Private Equity",
+    ))
+
+    assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["claims"]["stage"]["reason"] == (
+        "submitted quote was not present in fetched source"
+    )
+    assert result["claims"]["stage"]["evidence_url"] == ""
+    assert result["_validated_stage_finding"] == {}
+    assert result["usage"] == {
+        "reasoning_turns": 3,
+        "search_calls": 0,
+        "fetch_calls": 1,
+    }
+    assert len(reasoning_requests) == 3
+    assert "do not paraphrase, join passages, or insert ellipses" in json.loads(
+        reasoning_requests[-1]["messages"][-1]["content"]
+    )["instruction"]
+    assert {
+        tool["function"]["name"] for tool in reasoning_requests[-1]["tools"]
+    } == {"submit_findings"}
+
+
 def test_required_tool_turn_does_not_interpret_provider_prose(monkeypatch):
     requests = []
 
@@ -2784,3 +2932,68 @@ def test_targeted_stage_classification_through_lab_scorer(
     assert receipt["company_fit_dimensions"]["stage"] == (
         COMPANY_FIT_UNAVAILABLE
     )
+
+
+@pytest.mark.parametrize("reject_submission", [False, True])
+def test_extra_turn_is_only_a_rejected_submission_correction(monkeypatch, reject_submission):
+    calls = []
+    searches = []
+    async def fake_post(_session, _url, *, headers, payload):
+        calls.append(payload)
+        if reject_submission and len(calls) == 1:
+            name, args = "submit_findings", {"findings": [_finding("stage")]}
+        else:
+            name, args = "search_web", {"query": "Acme stage"}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(len(calls)), "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)},
+        }]}}]}
+    async def fake_search(*args, **kwargs):
+        searches.append(1)
+        return {"results": []}
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 1)
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("stage",),
+    ))
+    assert len(calls) == (2 if reject_submission else 1)
+    assert len(searches) == (0 if reject_submission else 1)
+    assert result["failure_reason"] == MALFORMED_RESPONSE_FAILURE_REASON
+    assert result["claims"] == {}
+
+
+def test_final_invalid_target_does_not_erase_independent_valid_stage(monkeypatch):
+    quote = "Acme common stock is listed on NASDAQ under ticker ACME."
+    calls = []
+    async def fake_post(_session, _url, *, headers, payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            name, args = "fetch_page", {"url": "https://acme.example/investors"}
+        else:
+            name, args = "submit_findings", {"findings": [
+                _finding("stage"),
+                _finding("industry", evidence_quote="Acme invented a claim absent from the page."),
+            ]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(len(calls)), "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)},
+        }]}}]}
+    async def fake_fetch(_session, url):
+        return {"ok": True, "url": url, "text": quote}
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 2)
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("stage", "industry"), requested_stage="Public",
+    ))
+    assert len(calls) == 3
+    assert result["claims"]["industry"]["status"] == "UNPROVEN"
+    assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["_validated_stage_finding"] == result["claims"]["stage"]

@@ -25,34 +25,235 @@ except ImportError:
 class _VisibleHTMLTextParser(HTMLParser):
     """Collect page-visible text while excluding executable or fallback markup."""
 
-    _HIDDEN_ELEMENTS = frozenset({"script", "style", "template", "noscript"})
+    _HIDDEN_ELEMENTS = frozenset({
+        "aside", "footer", "nav", "noscript", "script", "style", "template",
+    })
+    _VOID_ELEMENTS = frozenset({
+        "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+        "meta", "param", "source", "track", "wbr",
+    })
+    _NON_ARTICLE_PREFIXES = (
+        "blog-index", "blog-posts-grid", "entry-related", "recommend-",
+        "recommended", "related-", "related_",
+    )
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        hidden_classes: frozenset[str] = frozenset(),
+        hidden_ids: frozenset[str] = frozenset(),
+    ) -> None:
         super().__init__(convert_charrefs=True)
+        self._hidden_classes = hidden_classes
+        self._hidden_ids = hidden_ids
+        self._stack: list[tuple[str, bool]] = []
         self._hidden_depth = 0
-        self.parts = []
+        self._heading_depth: Optional[int] = None
+        self._saw_heading = False
+        self.parts: list[str] = []
+        self.heading_parts: list[str] = []
+
+    @staticmethod
+    def _attribute_map(attrs: Any) -> Dict[str, str]:
+        return {
+            str(key or "").casefold(): str(value or "")
+            for key, value in attrs
+        }
+
+    def _is_hidden(self, tag: str, attrs: Any) -> bool:
+        values = self._attribute_map(attrs)
+        classes = frozenset(values.get("class", "").casefold().split())
+        element_id = values.get("id", "").casefold()
+        style = re.sub(r"\s+", "", values.get("style", "").casefold())
+        semantic_values = classes | ({element_id} if element_id else set())
+        return bool(
+            tag in self._HIDDEN_ELEMENTS
+            or "hidden" in values
+            or values.get("aria-hidden", "").strip().casefold() in {"true", "1"}
+            or "display:none" in style
+            or "visibility:hidden" in style
+            or classes & self._hidden_classes
+            or element_id in self._hidden_ids
+            or any(
+                value == "related"
+                or any(
+                    value.startswith(prefix)
+                    for prefix in self._NON_ARTICLE_PREFIXES
+                )
+                for value in semantic_values
+            )
+        )
 
     def handle_starttag(self, tag: str, attrs: Any) -> None:
-        if tag.lower() in self._HIDDEN_ELEMENTS:
+        lowered = tag.casefold()
+        if lowered in self._VOID_ELEMENTS:
+            return
+        hidden = self._is_hidden(lowered, attrs)
+        self._stack.append((lowered, hidden))
+        if hidden:
             self._hidden_depth += 1
+        if (
+            lowered == "h1"
+            and not self._hidden_depth
+            and self._heading_depth is None
+            and not self._saw_heading
+        ):
+            self._heading_depth = len(self._stack)
+            self._saw_heading = True
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() in self._HIDDEN_ELEMENTS and self._hidden_depth:
-            self._hidden_depth -= 1
+        lowered = tag.casefold()
+        if lowered in self._VOID_ELEMENTS:
+            return
+        match = next(
+            (
+                index for index in range(len(self._stack) - 1, -1, -1)
+                if self._stack[index][0] == lowered
+            ),
+            None,
+        )
+        if match is None:
+            return
+        popped = self._stack[match:]
+        del self._stack[match:]
+        self._hidden_depth -= sum(hidden for _tag, hidden in popped)
+        self._hidden_depth = max(0, self._hidden_depth)
+        if self._heading_depth is not None and len(self._stack) < self._heading_depth:
+            self._heading_depth = None
 
     def handle_data(self, data: str) -> None:
         if not self._hidden_depth:
             self.parts.append(data)
+            if self._heading_depth is not None:
+                self.heading_parts.append(data)
 
 
-def _visible_html_text(content: str) -> str:
-    parser = _VisibleHTMLTextParser()
+_CSS_HIDDEN_DECLARATION_RE = re.compile(
+    r"(?:display\s*:\s*none|visibility\s*:\s*hidden)",
+    re.IGNORECASE,
+)
+
+
+def _css_hidden_selectors(content: str) -> tuple[frozenset[str], frozenset[str]]:
+    """Return simple class and ID selectors hidden by inline page CSS."""
+
+    classes: set[str] = set()
+    ids: set[str] = set()
+    for style in re.findall(
+        r"<style\b[^>]*>(.*?)</style\s*>", content, re.IGNORECASE | re.DOTALL
+    ):
+        depth = 0
+        selector_start = 0
+        declaration_start = 0
+        for position, character in enumerate(style):
+            if character == "{":
+                if depth == 0:
+                    selectors = style[selector_start:position]
+                    declaration_start = position + 1
+                depth += 1
+                continue
+            if character != "}" or depth == 0:
+                continue
+            depth -= 1
+            if depth != 0:
+                continue
+            declarations = style[declaration_start:position]
+            selector_start = position + 1
+            # Conditional at-rules contain nested blocks. Their declarations
+            # depend on a viewport or browser capability, so do not infer them.
+            if "{" in declarations:
+                continue
+            if _CSS_HIDDEN_DECLARATION_RE.search(declarations) is None:
+                continue
+            for selector in selectors.split(","):
+                class_match = re.fullmatch(
+                    r"\s*\.([A-Za-z_][A-Za-z0-9_-]*)\s*", selector
+                )
+                if class_match is not None:
+                    classes.add(class_match.group(1).casefold())
+                    continue
+                id_match = re.fullmatch(
+                    r"\s*#([A-Za-z_][A-Za-z0-9_-]*)\s*", selector
+                )
+                if id_match is not None:
+                    ids.add(id_match.group(1).casefold())
+    return frozenset(classes), frozenset(ids)
+
+
+def _visible_html_document(content: str) -> tuple[str, str]:
+    """Return visible page text and its first visible H1, if present."""
+
+    hidden_classes, hidden_ids = _css_hidden_selectors(content)
+    parser = _VisibleHTMLTextParser(
+        hidden_classes=hidden_classes,
+        hidden_ids=hidden_ids,
+    )
     try:
         parser.feed(content)
         parser.close()
     except Exception:
-        return ""
-    return " ".join(" ".join(parser.parts).split())
+        return "", ""
+    text = " ".join(" ".join(parser.parts).split())
+    heading = " ".join(" ".join(parser.heading_parts).split())
+    return text, heading
+
+
+def _visible_html_text(content: str) -> str:
+    return _visible_html_document(content)[0]
+
+
+_HEADING_STOPWORDS = frozenset({
+    "about", "after", "company", "from", "into", "news", "that", "the",
+    "their", "this", "with",
+})
+
+
+def _extraction_matches_primary_heading(heading: str, body: str) -> bool:
+    """Return whether extracted content still represents the page's main H1."""
+
+    if heading and len(body) - len(heading) < 200:
+        return False
+    heading_tokens = {
+        token
+        for token in re.findall(r"[a-z0-9]+", heading.casefold())
+        if len(token) >= 4 and token not in _HEADING_STOPWORDS
+    }
+    if len(heading_tokens) < 3:
+        return True
+    body_tokens = set(re.findall(r"[a-z0-9]+", body.casefold()))
+    return len(heading_tokens & body_tokens) / len(heading_tokens) >= 0.5
+
+
+def _normalized_visible_evidence(value: str) -> str:
+    """Normalize extractor link markup and layout for visible-text binding."""
+
+    without_link_targets = re.sub(
+        r"\[([^\]]+)\]\([^\s)]+(?:\s+[^)]*)?\)",
+        r"\1",
+        str(value or ""),
+    )
+    return " ".join(re.findall(r"[a-z0-9]+", without_link_targets.casefold()))
+
+
+def _extraction_is_visible(visible_document: str, body: str) -> bool:
+    """Bind every ordered extractor span to sanitized visible page text."""
+
+    visible = _normalized_visible_evidence(visible_document)
+    raw_segments = re.split(r"(?<=[.!?])\s+|[\r\n]+", str(body or ""))
+    segments = [
+        normalized
+        for segment in raw_segments
+        if (normalized := _normalized_visible_evidence(segment))
+    ]
+    if not visible or not segments:
+        return False
+    cursor = 0
+    for segment in segments:
+        position = visible.find(segment, cursor)
+        if position < 0:
+            return False
+        cursor = position + len(segment)
+    return True
 
 
 def extract_article_body(content: str, *, min_body_chars: int = 200) -> str:
@@ -74,6 +275,7 @@ def extract_article_body(content: str, *, min_body_chars: int = 200) -> str:
     # markdown/text inputs.
     if "<html" not in content[:2000].lower() and "<body" not in content[:2000].lower() and "<div" not in content[:5000].lower():
         return content
+    visible_document, primary_heading = _visible_html_document(content)
     if _TRAFILATURA_AVAILABLE:
         try:
             body = _trafilatura.extract(
@@ -87,8 +289,14 @@ def extract_article_body(content: str, *, min_body_chars: int = 200) -> str:
         except Exception:
             body = None
         if body and len(body) >= min_body_chars:
-            return body
-    return _visible_html_text(content)
+            if (
+                _extraction_matches_primary_heading(primary_heading, body)
+                and _extraction_is_visible(visible_document, body)
+            ):
+                return body
+            if len(visible_document) >= min_body_chars:
+                return visible_document
+    return visible_document
 
 
 GENERIC_INTENT_PATTERNS = [

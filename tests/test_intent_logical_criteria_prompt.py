@@ -95,9 +95,11 @@ def test_advertising_measurement_and_acquisition_completion_reach_both_stages() 
         assert "paid campaign" in prompt
         assert "visibility, attribution, or advertising ROI" in prompt
         assert "even if the product does not" in prompt
-        assert "requires evidence that the transaction closed" in prompt
+        assert "requires evidence that the transaction completed" in prompt
+        assert "buyer now owns or controls" in prompt
         assert "court approval" in prompt
-        assert "expected future closing do not prove completion" in prompt
+        assert "expected future closing do" in prompt
+        assert "not prove completion" in prompt
 
 
 def test_unrelated_guidance_does_not_displace_source_evidence() -> None:

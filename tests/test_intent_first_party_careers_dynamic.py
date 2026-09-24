@@ -572,7 +572,7 @@ async def test_full_verifier_preserves_visible_cards_after_dynamic_failure(
             return (
                 "Live openings. Review responsibilities and apply now. "
                 "Senior Consultant Consulting Full-Time. "
-                + "Current careers information. " * 20
+                + "Current public careers information. " * 20
             )
 
     async def call_openrouter(_client, _model, prompt):

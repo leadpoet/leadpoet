@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import threading
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -73,6 +74,10 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--round-id", required=True)
         command.add_argument("--environment-file", type=Path, required=True)
         command.add_argument(
+            "--replay-published-round",
+            help="replay accepted nonempty outputs from a published round dated today; no fresh sourcing",
+        )
+        command.add_argument(
             "--status-file",
             type=Path,
             help="atomic JSON evidence path; defaults to /tmp/<round-id>.json",
@@ -108,7 +113,244 @@ def _validate_round_id(round_id: str) -> str:
     return str(round_id)
 
 
-def _build_pinned_service(round_id: str):
+def _saved_output_replay(built: Any, source_round_id: str, round_id: str) -> dict[str, Any]:
+    """Read immutable accepted inputs for a new, explicitly labelled shadow run."""
+
+    from lab_arena import contact_policy, contracts, integrity, source_bundle
+    from lab_arena.output import MAX_OUTPUT_BYTES, validate_output_document
+
+    if contracts.ROUND_ID_RE.fullmatch(str(source_round_id or "")) is None:
+        raise VerificationError("replay source round id is invalid")
+    try:
+        datetime.strptime(str(source_round_id)[:16], "arena-%Y-%m-%d")
+    except ValueError as exc:
+        raise VerificationError("replay source round date is invalid") from exc
+    source_round_id = str(source_round_id)
+    source = built.store.get_round(source_round_id)
+    source_config = (source or {}).get("configuration_doc") or {}
+    resumed_target = built.store.get_round(round_id)
+    resume_is_bound_shadow = bool(
+        resumed_target
+        and resumed_target.get("round_id") == round_id
+        and (resumed_target.get("configuration_doc") or {}).get("mode") == "shadow"
+    )
+    if (
+        not source or source.get("status") != "published"
+        or source_round_id == round_id
+        or (
+            str(source.get("evaluation_date")) != _utc_now().date().isoformat()
+            and not resume_is_bound_shadow
+        )
+        or source_config.get("network_name") != built.config.network_name
+        or source_config.get("netuid") != built.config.netuid
+        or contact_policy.enabled(source_config)
+    ):
+        raise VerificationError("replay requires a published company-only round from today's evaluation date and network")
+    try:
+        source_count = contracts.benchmark_icp_count(source_config)
+        source_schema = contact_policy.output_schema(source_config)
+    except (TypeError, ValueError) as exc:
+        raise VerificationError("replay source policy is invalid") from exc
+    benchmark = json.loads(built._objects.get(source["benchmark_ref"]))
+    benchmark_icps = benchmark.get("icps")
+    if (
+        benchmark.get("round_id") != source_round_id
+        or not isinstance(benchmark_icps, list)
+        or len(benchmark_icps) != source_count
+    ):
+        raise VerificationError("replay benchmark identity is invalid")
+    participants = list(source.get("participants") or [])
+    participant_ids = [
+        str(participant.get("submission_id") or "")
+        for participant in participants
+        if isinstance(participant, Mapping)
+    ]
+    if (
+        not participant_ids
+        or len(participant_ids) != len(participants)
+        or any(not submission_id for submission_id in participant_ids)
+        or len(set(participant_ids)) != len(participant_ids)
+    ):
+        raise VerificationError("replay source participant scope is invalid")
+    participant_id_set = set(participant_ids)
+    outputs: dict[str, Any] = {}
+    icps = []
+    origins = []
+    seen = set()
+    accepted = []
+    failed_attempt_count = 0
+    failed_origins = set()
+    for run in built.store.list_runs(source_round_id):
+        if run.get("kind") != "execute":
+            continue
+        submission_id = str(run.get("submission_id") or "")
+        if submission_id not in participant_id_set:
+            continue
+        position = run.get("icp_position")
+        if (
+            isinstance(position, bool)
+            or not isinstance(position, int)
+            or position < 0
+            or position >= source_count
+        ):
+            raise VerificationError("replay source position is invalid")
+        origin = (submission_id, position)
+        if run.get("status") == "failed":
+            failed_attempt_count += 1
+            failed_origins.add(origin)
+            continue
+        if run.get("status") != "accepted":
+            continue
+        if origin in seen:
+            raise VerificationError("replay source has duplicate accepted assignments")
+        seen.add(origin)
+        accepted.append((submission_id, position, run))
+    expected_origins = {
+        (submission_id, position)
+        for submission_id in participant_ids
+        for position in range(source_count)
+    }
+    omitted_failed_origins = expected_origins - seen
+    if not omitted_failed_origins.issubset(failed_origins):
+        raise VerificationError("replay source assignments are not terminal")
+    accepted.sort(key=lambda item: (item[0], item[1]))
+    empty_output_count = 0
+    for submission_id, source_position, run in accepted:
+        document = json.loads(built._objects.get_bounded(run["output_ref"], MAX_OUTPUT_BYTES))
+        validated = validate_output_document(
+            document,
+            expected_schema_version=source_schema,
+            require_intent_dates=not integrity.enabled(source_config),
+        )
+        stored_output_hash = run.get("output_hash")
+        output_hash = contracts.document_hash(document)
+        if (
+            validated != document
+            or (
+                stored_output_hash not in (None, "")
+                and (
+                    not isinstance(stored_output_hash, str)
+                    or contracts.SHA256_RE.fullmatch(stored_output_hash) is None
+                    or stored_output_hash != output_hash
+                )
+            )
+        ):
+            raise VerificationError("replay source output hash differs")
+        if not document["companies"]:
+            empty_output_count += 1
+            continue
+        position = len(icps)
+        original_icp = benchmark_icps[source_position]
+        if not isinstance(original_icp, Mapping):
+            raise VerificationError("replay source ICP is invalid")
+        icp = dict(original_icp, icp_id=f"{round_id}:replay:{position}")
+        icps.append(icp)
+        outputs[icp["icp_id"]] = document["companies"]
+        origins.append({
+            "position": position,
+            "source_round": source_round_id,
+            "source_run_id": run["run_id"],
+            "source_submission_id": submission_id,
+            "source_icp_position": source_position,
+            "source_output_hash": output_hash,
+            "source_stored_output_hash_present": bool(stored_output_hash),
+            "target_output_hash": output_hash,
+            "original_icp_hash": contracts.document_hash({
+                key: value for key, value in original_icp.items() if key != "icp_id"
+            }),
+            "companies_hash": contracts.document_hash(document["companies"]),
+            "company_count": len(document["companies"]),
+        })
+    if not 2 <= len(icps) <= contracts.MAX_BENCHMARK_ICP_COUNT:
+        raise VerificationError("replay nonempty assignment count is unsupported")
+    input_hash = contracts.document_hash({"icps": icps, "outputs": outputs})
+    with tempfile.TemporaryDirectory(prefix="arena-saved-output-replay-") as temporary:
+        directory = Path(temporary) / "source"
+        directory.mkdir()
+        (directory / "LICENSE").write_bytes((ROOT / "LICENSE").read_bytes())
+        (directory / "outputs.json").write_text(contracts.canonical_json(outputs))
+        (directory / "harness.py").write_text(
+            '"""Saved-output replay only. This harness performs no sourcing."""\n'
+            'import json\nfrom pathlib import Path\n'
+            'def run_icp(icp):\n'
+            '    saved = json.loads(Path(__file__).with_name("outputs.json").read_text())\n'
+            '    return saved[icp["icp_id"]]\n'
+        )
+        archive = Path(temporary) / "source.tar.gz"
+        source_bundle.write_source_archive(directory, archive)
+        payload = archive.read_bytes()
+        source_bundle.validate_source_archive(payload)
+    archive_hash = contracts.hash_bytes(payload)
+    source_url = (
+        "https://arena.invalid/saved-output-replay/"
+        f"{archive_hash.removeprefix('sha256:')}.tar.gz"
+    )
+    return {
+        "icps": icps, "archive": payload, "source_url": source_url,
+        "evidence": {
+            "source_round": source_round_id,
+            "input_hash": input_hash,
+            "archive_hash": archive_hash,
+            "archive_size_bytes": len(payload),
+            "evaluation_date": source["evaluation_date"],
+            "output_schema_version": source_schema,
+            "source_benchmark_icp_count": source_count,
+            "source_participant_count": len(participant_ids),
+            "source_accepted_output_count": len(accepted),
+            "omitted_failed_assignment_count": len(omitted_failed_origins),
+            "source_failed_attempt_count": failed_attempt_count,
+            "omitted_empty_output_count": empty_output_count,
+            "source_contributor_count": len({
+                item["source_submission_id"] for item in origins
+            }),
+            "replayed_group_count": len(origins),
+            "replayed_company_count": sum(item["company_count"] for item in origins),
+            "selection_scope": "all_published_participant_accepted_nonempty_execute_outputs",
+            "origins": origins,
+        },
+    }
+
+
+def _validate_replay_source_archive(
+    service: Any, round_id: str, *, required: bool
+) -> None:
+    """Refuse an orphaned or resumed baseline archive with different bytes."""
+
+    from lab_arena import contracts, source_bundle
+
+    replay = getattr(service, "_saved_output_replay", None)
+    if replay is None:
+        return
+    submission_id = "baseline-%s" % round_id.removeprefix("arena-")
+    source_ref = "arena/%s/sources/%s.tar.gz" % (round_id, submission_id)
+    try:
+        payload = service._objects.get_bounded(
+            source_ref, source_bundle.MAX_SOURCE_ARCHIVE_BYTES
+        )
+    except Exception as exc:
+        if required:
+            raise VerificationError("replay source archive is unavailable") from exc
+        response = getattr(exc, "response", {})
+        error = response.get("Error", {}) if isinstance(response, Mapping) else {}
+        metadata = (
+            response.get("ResponseMetadata", {})
+            if isinstance(response, Mapping)
+            else {}
+        )
+        code = str(error.get("Code") or "") if isinstance(error, Mapping) else ""
+        status = metadata.get("HTTPStatusCode") if isinstance(metadata, Mapping) else None
+        if (
+            code not in {"NoSuchKey", "NotFound", "404"}
+            and status != 404
+            and "object store has no object at" not in str(exc)
+        ):
+            raise VerificationError("replay source archive could not be verified") from exc
+        return
+    if contracts.hash_bytes(payload) != replay["archive_hash"]:
+        raise VerificationError("replay source archive differs")
+
+
+def _build_pinned_service(round_id: str, *, replay_published_round: str | None = None):
     """Use production dependencies with a process-local shadow ownership gate."""
 
     source_mode = os.environ.get("LAB_ARENA_MODE", "").strip().lower()
@@ -119,11 +361,16 @@ def _build_pinned_service(round_id: str):
     from lab_arena.wiring import build_service_from_environment
 
     built, _unused_app = build_service_from_environment("shadow")
+    replay = (
+        _saved_output_replay(built, replay_published_round, round_id)
+        if replay_published_round else None
+    )
     defaults = replace(
         built.config.defaults,
         rewards_enabled=False,
         daily_cutoff_hour_utc=None,
-        baseline_source_url=DEFAULT_BASELINE_SOURCE_URL,
+        baseline_source_url=replay["source_url"] if replay else DEFAULT_BASELINE_SOURCE_URL,
+        **({"benchmark_icp_count": len(replay["icps"])} if replay else {}),
     )
     config = replace(
         built.config,
@@ -134,12 +381,28 @@ def _build_pinned_service(round_id: str):
         baseline_promoter_factory=None,
         code_reviewer=None,
     )
+    if replay:
+        def replay_archive(url: str, maximum: int) -> bytes:
+            if url != replay["source_url"] or len(replay["archive"]) > maximum:
+                raise VerificationError("replay archive scope is invalid")
+            return replay["archive"]
+
+        config = replace(
+            config,
+            baseline_source_fetcher=replay_archive,
+            daily_icp_source=lambda *, set_id, active_at: {
+                "status": "ready", "set_id": set_id, "icps": replay["icps"],
+            },
+        )
     service = ArenaService(config)
+    if replay:
+        service._saved_output_replay = replay["evidence"]
+        _validate_replay_source_archive(service, round_id, required=False)
     return service, create_app(service)
 
 
 def _validate_frozen_round(service: Any, row: Mapping[str, Any]) -> None:
-    from lab_arena import contracts, icp_disclosure
+    from lab_arena import contact_policy, contracts, icp_disclosure
     from lab_arena.service import DEFAULT_BASELINE_SOURCE_URL
 
     configuration = row.get("configuration_doc") or {}
@@ -156,7 +419,7 @@ def _validate_frozen_round(service: Any, row: Mapping[str, Any]) -> None:
         "promotion_margin": float(defaults.promotion_margin),
         "runner_slot_ceiling": int(defaults.runner_slot_ceiling),
         "baseline_hotkey": defaults.baseline_hotkey,
-        "baseline_source_url": DEFAULT_BASELINE_SOURCE_URL,
+        "baseline_source_url": defaults.baseline_source_url,
         "scorer_image_digest": defaults.scorer_image_digest,
         "scorer_image_reference": defaults.scorer_image_reference,
         "runner_hotkeys": list(defaults.runner_hotkeys),
@@ -188,6 +451,23 @@ def _validate_frozen_round(service: Any, row: Mapping[str, Any]) -> None:
         or participants[0].get("miner_hotkey") != defaults.baseline_hotkey
     ):
         mismatches.append("baseline_only_participants")
+    replay = getattr(service, "_saved_output_replay", None)
+    if replay is not None:
+        try:
+            contacts_enabled = contact_policy.enabled(configuration)
+            output_schema = contact_policy.output_schema(configuration)
+        except (TypeError, ValueError):
+            contacts_enabled = True
+            output_schema = ""
+        if contacts_enabled:
+            mismatches.append("replay_company_only_policy")
+        if output_schema != replay["output_schema_version"]:
+            mismatches.append("replay_output_schema")
+        _validate_replay_source_archive(
+            service,
+            str(row.get("round_id") or ""),
+            required=row.get("status") != "open" or bool(participants),
+        )
     if mismatches:
         raise VerificationError(
             "existing round is incompatible: " + ",".join(sorted(set(mismatches)))
@@ -588,13 +868,14 @@ def _durable_output_counts(
 
 
 def _evidence(service: Any, round_id: str) -> dict[str, Any]:
-    from lab_arena import contact_policy, contracts, icp_disclosure
+    from lab_arena import contact_policy, contracts, icp_disclosure, integrity
 
     row = service.store.get_round(round_id)
     if row is None:
         raise VerificationError("round does not exist")
     _validate_frozen_round(service, row)
     configuration = row.get("configuration_doc") or {}
+    replay = getattr(service, "_saved_output_replay", None)
     participants = list(row.get("participants") or [])
     runs = service.store.list_runs(round_id) if participants else []
     execution = _run_counts(runs, "execute")
@@ -725,16 +1006,16 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
             benchmark_icp_count,
             int(configuration.get("runner_slot_ceiling") or 0),
         )
-        if execution_timing["worker_slots"] != list(range(expected_parallelism)):
+        if not replay and execution_timing["worker_slots"] != list(range(expected_parallelism)):
             errors.append("execution_worker_slots")
-        if execution_timing["exit_fingerprint_count"] != expected_parallelism:
+        if not replay and execution_timing["exit_fingerprint_count"] != expected_parallelism:
             errors.append("execution_exit_fingerprints")
         if (
-            execution_timing["concurrency_high_water_lower_bound"]
+            not replay and execution_timing["concurrency_high_water_lower_bound"]
             != expected_parallelism
         ):
             errors.append("execution_high_water")
-        if configuration.get("parallel_twenty_icp_execution") is True:
+        if not replay and configuration.get("parallel_twenty_icp_execution") is True:
             # The legacy policy requires two isolated ten-ICP waves. Current
             # baseline-first scheduling refills slots across all twenty ICPs.
             if execution_timing["first_batch_concurrency_high_water_lower_bound"] != 10:
@@ -810,9 +1091,14 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
                     (raw.get(kind) or {}).get("settled_microusd") or 0
                 ):
                     errors.append(kind + "_settled_cost")
-                if int((raw.get(kind) or {}).get("call_count") or 0) < 1:
+                if replay and kind == "execute" and any(
+                    int((raw.get(kind) or {}).get(field) or 0)
+                    for field in LEDGER_FIELDS
+                ):
+                    errors.append("replay_execute_provider_use")
+                if (not replay or kind == "score") and int((raw.get(kind) or {}).get("call_count") or 0) < 1:
                     errors.append(kind + "_paid_calls")
-                if int((raw.get(kind) or {}).get("settled_microusd") or 0) < 1:
+                if (not replay or kind == "score") and int((raw.get(kind) or {}).get("settled_microusd") or 0) < 1:
                     errors.append(kind + "_paid_cost")
             open_cost_fields = (
                 "inflight_calls",
@@ -835,9 +1121,79 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
                 errors.append("open_costs")
         else:
             errors.append("cost_aggregate")
+        if replay:
+            from lab_arena.output import MAX_OUTPUT_BYTES, validate_output_document
+
+            benchmark = json.loads(service._objects.get(row["benchmark_ref"]))
+            expected = {item["position"]: item for item in replay["origins"]}
+            if str(row.get("evaluation_date")) != str(replay["evaluation_date"]):
+                errors.append("replay_evaluation_date")
+            if (
+                benchmark.get("round_id") != round_id
+                or not isinstance(benchmark.get("icps"), list)
+                or len(benchmark.get("icps") or []) != len(expected)
+                or sorted(expected) != list(range(len(expected)))
+                or replay.get("replayed_group_count") != len(expected)
+            ):
+                errors.append("replay_benchmark_changed")
+            for accepted in runs:
+                if accepted.get("kind") != "execute" or accepted.get("status") != "accepted":
+                    continue
+                position = accepted.get("icp_position")
+                if (
+                    isinstance(position, bool)
+                    or not isinstance(position, int)
+                    or position not in expected
+                    or not isinstance(benchmark.get("icps"), list)
+                    or position < 0
+                    or position >= len(benchmark["icps"])
+                ):
+                    errors.append("replay_input_changed")
+                    continue
+                try:
+                    document = json.loads(
+                        service._objects.get_bounded(
+                            accepted["output_ref"], MAX_OUTPUT_BYTES
+                        )
+                    )
+                    validated = validate_output_document(
+                        document,
+                        expected_schema_version=replay["output_schema_version"],
+                        require_intent_dates=not integrity.enabled(configuration),
+                    )
+                except Exception:
+                    errors.append("replay_output_changed")
+                    continue
+                document_hash = contracts.document_hash(document)
+                stored_output_hash = accepted.get("output_hash")
+                if (
+                    validated != document
+                    or document_hash != expected[position]["target_output_hash"]
+                    or contracts.document_hash(document["companies"])
+                    != expected[position]["companies_hash"]
+                    or (
+                        stored_output_hash not in (None, "")
+                        and (
+                            not isinstance(stored_output_hash, str)
+                            or contracts.SHA256_RE.fullmatch(stored_output_hash) is None
+                            or stored_output_hash != document_hash
+                        )
+                    )
+                ):
+                    errors.append("replay_output_changed")
+                icp = benchmark["icps"][position]
+                if (
+                    not isinstance(icp, Mapping)
+                    or contracts.document_hash(
+                        {key: value for key, value in icp.items() if key != "icp_id"}
+                    )
+                    != expected[position]["original_icp_hash"]
+                ):
+                    errors.append("replay_input_changed")
 
     return {
         "schema_version": ARTIFACT_SCHEMA_VERSION,
+        **({"saved_output_replay": replay} if replay else {}),
         "observed_at": _utc_now().isoformat().replace("+00:00", "Z"),
         "round": {
             "round_id": round_id,
@@ -1031,7 +1387,9 @@ def main(argv: list[str] | None = None) -> int:
 
         load_scoped_environment(args.environment_file)
         args.round_id = _validate_round_id(args.round_id)
-        service, app = _build_pinned_service(args.round_id)
+        service, app = _build_pinned_service(
+            args.round_id, replay_published_round=args.replay_published_round
+        )
         checks = service.startup_checks()
         print(
             json.dumps(

@@ -577,10 +577,11 @@ def test_saved_false_negative_company_fact_is_recovered_before_later_gate(
     assert len(calls) == 1
     assert finding["target"] in calls[0]
     # Recovery only clears the disputed company fact.  The controlled missing
-    # intent page still fails later in the unchanged scoring path.
+    # intent page still fails later in the unchanged scoring path. Missing or
+    # insufficient evidence is unproven, not a contradiction.
     assert result["intent_signal_raw"] == 0.0
     assert result["intent_signals_detail"][0]["claim_support_verdict"] == (
-        "contradicted"
+        "unable_to_verify"
     )
 
 

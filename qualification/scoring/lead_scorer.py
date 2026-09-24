@@ -66,6 +66,7 @@ from qualification.scoring.company_fit_decision import (
     strict_company_fit_boolean,
 )
 from qualification.scoring.company_evidence_investigator import (
+    MAX_SUBMITTED_SOURCE_URLS,
     _plain_text,
     _quote_occurs,
     _same_domain_name_alias,
@@ -1861,9 +1862,29 @@ def _web_identity_receipt(
     receipt_observed_domain = str(receipt.get("observed_domain") or "").casefold()
     receipt_submitted_slug = str(receipt.get("submitted_linkedin_slug") or "").casefold()
     receipt_observed_slug = str(receipt.get("observed_linkedin_slug") or "").casefold()
+    verified_alias_anchor = (
+        verified_homepage_identity
+        if isinstance(verified_homepage_identity, Mapping)
+        else {}
+    )
+    verified_alias_name = str(
+        verified_alias_anchor.get("normalized_name") or ""
+    ).casefold()
+    verified_alias_domain = str(
+        verified_alias_anchor.get("registrable_dns_domain") or ""
+    ).casefold()
+    verified_alias_slug = str(
+        verified_alias_anchor.get("linkedin_company_slug") or ""
+    ).casefold()
+    alias_anchor = {
+        **receipt,
+        "verified_name": verified_alias_name,
+        "verified_domain": verified_alias_domain,
+        "verified_linkedin_slug": verified_alias_slug,
+    }
     same_domain_name_alias = bool(
         receipt.get("evidence_source") == "company_web_reverification"
-        and _same_domain_name_alias(receipt)
+        and _same_domain_name_alias(alias_anchor)
     )
     if (
         receipt.get("decision") != COMPANY_FIT_MATCH
@@ -1880,7 +1901,12 @@ def _web_identity_receipt(
         old_domain = str(rebrand.get("old_domain") or "").casefold()
         new_domain = str(rebrand.get("new_domain") or "").casefold()
         shared_slug = str(rebrand.get("shared_linkedin_slug") or "").casefold()
-        submitted_slug = receipt_submitted_slug
+        submitted_slug = receipt_submitted_slug or (
+            verified_alias_slug
+            if verified_alias_name == submitted_raw_name
+            and verified_alias_domain == receipt_submitted_domain
+            else ""
+        )
         observed_slug = receipt_observed_slug
         def _name_binds_rebrand(value: str) -> bool:
             return bool(
@@ -1919,7 +1945,11 @@ def _web_identity_receipt(
         if names_bind and (cross_domain_binds or same_domain_binds) and linkedin_binds:
             receipt.update(
                 decision=COMPANY_FIT_MATCH,
-                reason_code="verified_rebrand_continuity",
+                reason_code=(
+                    "verified_same_domain_alias"
+                    if same_domain_binds
+                    else "verified_rebrand_continuity"
+                ),
                 rebrand_evidence_url=str(rebrand.get("evidence_url") or ""),
                 rebrand_evidence_quote=str(rebrand.get("evidence_quote") or "")[:2000],
                 verified_old_name=str(rebrand.get("old_name") or "")[:200],
@@ -3882,6 +3912,35 @@ async def _run_targeted_company_evidence_investigation(
         if "stage" in investigation_targets
         else []
     )
+    submitted_source_urls: list[str] = []
+    source_candidates = [
+        *(item.get("url") for item in stage_evidence),
+        *(signal.url for signal in company.intent_signals),
+        *(
+            [company.required_attribute.evidence_url]
+            if company.required_attribute is not None
+            else []
+        ),
+        *company.fit_evidence_urls,
+        company.company_website,
+    ]
+    for candidate in source_candidates:
+        safe_url = _valid_web_evidence_url(candidate)
+        if not safe_url:
+            continue
+        parsed = urlsplit(safe_url)
+        if (
+            parsed.scheme.casefold() != "https"
+            or parsed.fragment
+            or parsed.username is not None
+            or parsed.password is not None
+            or (parsed.port is not None and parsed.port != 443)
+            or safe_url in submitted_source_urls
+        ):
+            continue
+        submitted_source_urls.append(safe_url)
+        if len(submitted_source_urls) >= MAX_SUBMITTED_SOURCE_URLS:
+            break
     structured_private_stage_evidence = (
         dict(structured_public_company_evidence)
         if "stage" in investigation_targets
@@ -3947,6 +4006,11 @@ async def _run_targeted_company_evidence_investigation(
             **(
                 {"untrusted_company_stage_evidence": stage_evidence}
                 if stage_evidence
+                else {}
+            ),
+            **(
+                {"submitted_source_urls": submitted_source_urls}
+                if submitted_source_urls
                 else {}
             ),
             **(
@@ -4169,14 +4233,18 @@ async def _llm_reverify_company(
             (
                 "geography_matches: independently find the company's headquarters "
                 f"and test it against {(icp.geography or icp.country)!r}."
-                + (
-                    " Always return the observed HQ state when the observed HQ "
-                    "country is the United States. Use only current headquarters "
-                    "evidence; incorporation, job, office, branch, and customer "
-                    "locations do not establish headquarters."
-                    if company_quality
-                    else ""
-                )
+                " Always return the observed HQ state when the observed HQ "
+                "country is the United States. Bind current headquarters to the "
+                "same company entity. Incorporation, announcement datelines, "
+                "factories, warehouses, jobs, regional offices, branches, and "
+                "customer locations do not establish headquarters. If independent "
+                "sources disagree, distinguish source dates, an explicit HQ move, "
+                "and parent or subsidiary identities before selecting a location. "
+                "Do not choose the location that fits the ICP. If the conflict "
+                "cannot be resolved, leave the disputed observed_hq_country or "
+                "observed_hq_state empty, return geography_matches=null, and describe "
+                "the conflicting evidence so the bounded investigator can resolve "
+                "the headquarters fact."
             ),
         ])
     if icp_attribute:

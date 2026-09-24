@@ -241,6 +241,31 @@ ACQUISITION_BLOCK = """      * A completed acquisition requires evidence that th
         not prove completion. If the target instead asks for an announced
         acquisition, apply that wording as written."""
 
+
+PARTNERSHIP_BLOCK = """      * Apply this block only to a chosen partnership alternative in the actual
+        target ICP text. The PARTNERSHIP category label must not add a
+        partnership requirement to a separate acquisition, product-launch, or
+        other OR alternative. A strategic-partnership target requires positive evidence
+        that the target company entered a partnership, alliance, joint venture, or
+        comparable collaborative commercial arrangement. An acquisition,
+        takeover, purchase agreement, or other ownership transaction alone is
+        not a partnership, even when the source calls it strategic, describes
+        future collaboration, or the target ICP does not explicitly exclude
+        acquisitions. Apply an OR alternative only when the exact source proves
+        that separate requested event type."""
+
+
+FACILITY_OPENING_BLOCK = """      * Apply this block only to a chosen facility-opening alternative in the
+        actual target ICP text. The FACILITY_OPENING category label must not
+        turn a requested plan, construction start, expansion, or other OR
+        alternative into a completed-opening requirement. A facility-opening
+        target requires positive evidence that the facility
+        opened or began operations. Selecting a site, announcing plans, seeking
+        approval, starting construction, holding a groundbreaking, or giving an
+        expected completion date does not prove an opening. Apply this boundary
+        even when the planned facility is material or construction is underway."""
+
+
 MARKET_EXPANSION_BLOCK = """  MARKET_EXPANSION — NEW-MARKET PROOF:
     Apply this block only to a chosen new-market alternative in the actual
     target ICP text. The MARKET_EXPANSION category label must not add a
@@ -457,6 +482,19 @@ def build_verification_prompt(
         parts.append(ADVERTISING_BLOCK)
     if any(term in criterion for term in ("acquisition", "acquire", "merger")):
         parts.append(ACQUISITION_BLOCK)
+    if any(term in criterion for term in (
+        "partnership", "partnered", "alliance", "joint venture",
+    )):
+        parts.append(PARTNERSHIP_BLOCK)
+    if (
+        any(term in criterion for term in (
+            "facility", "plant", "production site",
+        ))
+        and any(term in criterion for term in (
+            "opened", "opening", "began operations",
+        ))
+    ):
+        parts.append(FACILITY_OPENING_BLOCK)
     if row.get("_evidence_type") == "MARKET_EXPANSION":
         parts.append(MARKET_EXPANSION_BLOCK)
     if row.get("_evidence_type") in {"FUNDING", "FINANCING"}:

@@ -14,6 +14,201 @@ from scripts import verify_arena_parallel_round as verification
 
 ROUND_ID = "arena-2026-09-14-proxye2e"
 SUBMISSION_ID = "baseline-submission"
+REPLAY_SOURCE_ROUND_ID = "arena-2026-09-24"
+REPLAY_TARGET_ROUND_ID = "arena-2026-09-24-replay"
+
+
+def _replay_company(name: str, index: int) -> dict:
+    slug = name.casefold().replace(" ", "-")
+    return {
+        "company_name": name,
+        "company_website": f"https://{slug}.example.com/",
+        "company_linkedin": f"https://linkedin.com/company/{slug}",
+        "industry": "Software",
+        "employee_count": "51-200",
+        "company_stage": "Series A",
+        "country": "United States",
+        "state": "CA",
+        "intent_details": f"{name} announced a product launch.",
+        "intent_signals": [
+            {
+                "matched_icp_signal": 0,
+                "description": "Product launch",
+                "date": "2026-09-%02d" % (index + 1),
+                "url": f"https://{slug}.example.com/launch",
+            }
+        ],
+        "company_stage_evidence": [],
+        "required_attribute": None,
+    }
+
+
+def _replay_source_fixture(monkeypatch):
+    source_configuration = {
+        "network_name": "finney",
+        "netuid": 71,
+        "stage_1_icp_count": 1,
+        "stage_2_icp_count": 1,
+        "integrity_policy": "arena_integrity_v1",
+        "intent_details_policy": intent_details_policy.POLICY,
+    }
+    participant_ids = ("source-a", "source-b", "source-c")
+    source = {
+        "round_id": REPLAY_SOURCE_ROUND_ID,
+        "status": "published",
+        "evaluation_date": "2026-09-24",
+        "benchmark_ref": "arena/source/benchmark.json",
+        "configuration_doc": source_configuration,
+        "participants": [
+            {"submission_id": submission_id}
+            for submission_id in participant_ids
+        ],
+    }
+    benchmark = {
+        "round_id": REPLAY_SOURCE_ROUND_ID,
+        "icps": [
+            {"icp_id": "source-0", "prompt": "First ICP"},
+            {"icp_id": "source-1", "prompt": "Second ICP"},
+        ],
+    }
+    documents = {}
+    runs = []
+    groups = {
+        ("source-a", 0): [_replay_company("Acme", 0)],
+        ("source-a", 1): [],
+        ("source-b", 0): [_replay_company("Beta", 1)],
+        ("source-b", 1): [_replay_company("Cedar", 2)],
+    }
+    for submission_id in participant_ids[:2]:
+        for position in range(2):
+            output_ref = f"arena/source/{submission_id}/{position}.json"
+            document = {
+                "schema_version": intent_details_policy.COMPANY_ONLY_OUTPUT_SCHEMA,
+                "companies": groups[(submission_id, position)],
+            }
+            documents[output_ref] = json.dumps(document).encode()
+            runs.append(
+                {
+                    "kind": "execute",
+                    "status": "accepted",
+                    "submission_id": submission_id,
+                    "icp_position": position,
+                    "run_id": f"{submission_id}:{position}",
+                    "output_ref": output_ref,
+                    "output_hash": "",
+                }
+            )
+    for position in range(2):
+        runs.append(
+            {
+                "kind": "execute",
+                "status": "failed",
+                "submission_id": "source-c",
+                "icp_position": position,
+                "run_id": f"source-c:{position}",
+            }
+        )
+    documents[source["benchmark_ref"]] = json.dumps(benchmark).encode()
+
+    class SourceStore:
+        def get_round(self, round_id):
+            return source if round_id == REPLAY_SOURCE_ROUND_ID else None
+
+        def list_runs(self, round_id):
+            assert round_id == REPLAY_SOURCE_ROUND_ID
+            return list(runs)
+
+    def get(ref):
+        return documents[ref]
+
+    def get_bounded(ref, maximum):
+        value = documents[ref]
+        assert len(value) <= maximum
+        return value
+
+    monkeypatch.setattr(
+        verification,
+        "_utc_now",
+        lambda: datetime(2026, 9, 24, tzinfo=timezone.utc),
+    )
+    built = SimpleNamespace(
+        store=SourceStore(),
+        _objects=SimpleNamespace(get=get, get_bounded=get_bounded),
+        config=SimpleNamespace(network_name="finney", netuid=71),
+    )
+    return built, runs, documents
+
+
+def test_saved_output_replay_binds_all_published_nonempty_groups_and_archive(monkeypatch):
+    built, _runs, _documents = _replay_source_fixture(monkeypatch)
+
+    first = verification._saved_output_replay(
+        built, REPLAY_SOURCE_ROUND_ID, REPLAY_TARGET_ROUND_ID
+    )
+    second = verification._saved_output_replay(
+        built, REPLAY_SOURCE_ROUND_ID, REPLAY_TARGET_ROUND_ID
+    )
+
+    assert first["archive"] == second["archive"]
+    assert first["source_url"].endswith(
+        first["evidence"]["archive_hash"].removeprefix("sha256:") + ".tar.gz"
+    )
+    assert first["evidence"] | {
+        "origins": [],
+    } == {
+        "source_round": REPLAY_SOURCE_ROUND_ID,
+        "input_hash": first["evidence"]["input_hash"],
+        "archive_hash": contracts.hash_bytes(first["archive"]),
+        "archive_size_bytes": len(first["archive"]),
+        "evaluation_date": "2026-09-24",
+        "output_schema_version": intent_details_policy.COMPANY_ONLY_OUTPUT_SCHEMA,
+        "source_benchmark_icp_count": 2,
+        "source_participant_count": 3,
+        "source_accepted_output_count": 4,
+        "omitted_failed_assignment_count": 2,
+        "source_failed_attempt_count": 2,
+        "omitted_empty_output_count": 1,
+        "source_contributor_count": 2,
+        "replayed_group_count": 3,
+        "replayed_company_count": 3,
+        "selection_scope": "all_published_participant_accepted_nonempty_execute_outputs",
+        "origins": [],
+    }
+    assert [origin["source_submission_id"] for origin in first["evidence"]["origins"]] == [
+        "source-a",
+        "source-b",
+        "source-b",
+    ]
+    assert all(
+        origin["source_output_hash"] == origin["target_output_hash"]
+        and origin["source_stored_output_hash_present"] is False
+        for origin in first["evidence"]["origins"]
+    )
+
+
+def test_saved_output_replay_rejects_noncanonical_or_mismatched_source_hash(monkeypatch):
+    built, runs, documents = _replay_source_fixture(monkeypatch)
+    first = runs[0]
+    document = json.loads(documents[first["output_ref"]])
+    document["companies"][0]["contact"] = "removed by V6 normalization"
+    documents[first["output_ref"]] = json.dumps(document).encode()
+
+    with pytest.raises(verification.VerificationError, match="output hash"):
+        verification._saved_output_replay(
+            built, REPLAY_SOURCE_ROUND_ID, REPLAY_TARGET_ROUND_ID
+        )
+
+    documents[first["output_ref"]] = json.dumps(
+        {
+            "schema_version": intent_details_policy.COMPANY_ONLY_OUTPUT_SCHEMA,
+            "companies": [_replay_company("Acme", 0)],
+        }
+    ).encode()
+    first["output_hash"] = "sha256:" + "0" * 64
+    with pytest.raises(verification.VerificationError, match="output hash"):
+        verification._saved_output_replay(
+            built, REPLAY_SOURCE_ROUND_ID, REPLAY_TARGET_ROUND_ID
+        )
 
 
 def test_specialized_shadow_verifier_preserves_current_count_and_margin(monkeypatch):
@@ -312,6 +507,132 @@ class Service:
     def reconcile_closed_provider_costs(self):
         self.calls.append(("reconcile", ROUND_ID))
         return {"status": "none"}
+
+
+def _replay_target_service() -> Service:
+    service = Service(count=2)
+    archive = b"deterministic replay archive"
+    archive_hash = contracts.hash_bytes(archive)
+    source_url = (
+        "https://arena.invalid/saved-output-replay/"
+        f"{archive_hash.removeprefix('sha256:')}.tar.gz"
+    )
+    service.store.row["configuration_doc"]["baseline_source_url"] = source_url
+    service.config.defaults.baseline_source_url = source_url
+    service.store.row["publication_doc"]["final_ranking"][0]["cost_summary"][
+        "execution"
+    ]["settled_microusd"] = 0
+    execute_cost = _provider_cost_row(service, "execute")
+    execute_cost.update({field: 0 for field in verification.LEDGER_FIELDS})
+    benchmark = {
+        "round_id": ROUND_ID,
+        "icps": [
+            {"icp_id": f"{ROUND_ID}:replay:{position}", "prompt": f"Replay {position}"}
+            for position in range(2)
+        ],
+    }
+    service.object_documents[service.store.row["benchmark_ref"]] = json.dumps(
+        benchmark
+    ).encode()
+    source_ref = (
+        f"arena/{ROUND_ID}/sources/"
+        f"baseline-{ROUND_ID.removeprefix('arena-')}.tar.gz"
+    )
+    service.object_documents[source_ref] = archive
+    origins = []
+    for position, run in enumerate(
+        row for row in service.store.runs if row["kind"] == "execute"
+    ):
+        companies = [_replay_company("Target %d" % position, position)]
+        document = {
+            "schema_version": intent_details_policy.COMPANY_ONLY_OUTPUT_SCHEMA,
+            "companies": companies,
+        }
+        service.object_documents[run["output_ref"]] = json.dumps(document).encode()
+        document_hash = contracts.document_hash(document)
+        run["output_hash"] = ""
+        origins.append(
+            {
+                "position": position,
+                "source_round": REPLAY_SOURCE_ROUND_ID,
+                "source_run_id": f"source:{position}",
+                "source_submission_id": "source-a",
+                "source_icp_position": position,
+                "source_output_hash": document_hash,
+                "source_stored_output_hash_present": False,
+                "target_output_hash": document_hash,
+                "original_icp_hash": contracts.document_hash(
+                    {"prompt": f"Replay {position}"}
+                ),
+                "companies_hash": contracts.document_hash(companies),
+                "company_count": 1,
+            }
+        )
+    service._objects = SimpleNamespace(
+        get=lambda ref: service.object_documents[ref],
+        get_bounded=service._get_bounded,
+    )
+    service._saved_output_replay = {
+        "source_round": REPLAY_SOURCE_ROUND_ID,
+        "input_hash": "sha256:" + "1" * 64,
+        "archive_hash": archive_hash,
+        "archive_size_bytes": len(archive),
+        "evaluation_date": service.store.row["evaluation_date"],
+        "output_schema_version": intent_details_policy.COMPANY_ONLY_OUTPUT_SCHEMA,
+        "source_benchmark_icp_count": 2,
+        "source_participant_count": 1,
+        "source_accepted_output_count": 2,
+        "omitted_failed_assignment_count": 0,
+        "source_failed_attempt_count": 0,
+        "omitted_empty_output_count": 0,
+        "source_contributor_count": 1,
+        "replayed_group_count": 2,
+        "replayed_company_count": 2,
+        "selection_scope": "all_published_participant_accepted_nonempty_execute_outputs",
+        "origins": origins,
+    }
+    return service
+
+
+def test_replay_evidence_requires_exact_outputs_and_zero_execute_provider_use():
+    service = _replay_target_service()
+
+    document = verification._evidence(service, ROUND_ID)
+
+    assert document["proof"] == {"complete": True, "errors": []}
+    assert document["saved_output_replay"]["replayed_group_count"] == 2
+    assert document["durable_outputs"]["execute"]["stored_hash_count"] == 0
+
+    charged = _replay_target_service()
+    _provider_cost_row(charged, "execute")["call_count"] = 1
+    charged_document = verification._evidence(charged, ROUND_ID)
+    assert "replay_execute_provider_use" in charged_document["proof"]["errors"]
+
+    changed = _replay_target_service()
+    changed._saved_output_replay["origins"][0]["target_output_hash"] = (
+        "sha256:" + "0" * 64
+    )
+    changed_document = verification._evidence(changed, ROUND_ID)
+    assert "replay_output_changed" in changed_document["proof"]["errors"]
+
+
+def test_replay_resume_rejects_archive_or_output_schema_mismatch():
+    service = _replay_target_service()
+    source_ref = (
+        f"arena/{ROUND_ID}/sources/"
+        f"baseline-{ROUND_ID.removeprefix('arena-')}.tar.gz"
+    )
+    service.object_documents[source_ref] = b"different archive"
+
+    with pytest.raises(verification.VerificationError, match="archive differs"):
+        verification._validate_frozen_round(service, service.store.row)
+
+    schema_changed = _replay_target_service()
+    schema_changed._saved_output_replay["output_schema_version"] = (
+        intent_details_policy.OUTPUT_SCHEMA
+    )
+    with pytest.raises(verification.VerificationError, match="replay_output_schema"):
+        verification._validate_frozen_round(schema_changed, schema_changed.store.row)
 
 
 def test_published_evidence_requires_all_configured_outputs_scores_and_costs():

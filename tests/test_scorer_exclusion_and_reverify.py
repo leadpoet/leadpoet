@@ -2599,7 +2599,8 @@ def test_named_us_region_uses_observed_hq_state_not_model_boolean(
     assert result.decision == expected
 
 
-def test_company_fit_prompt_uses_full_geography_before_country(monkeypatch):
+@pytest.mark.parametrize("company_quality", [False, True])
+def test_company_fit_prompt_uses_full_geography_before_country(monkeypatch, company_quality):
     import qualification.scoring.lead_scorer as scorer
 
     prompts = []
@@ -2619,14 +2620,18 @@ def test_company_fit_prompt_uses_full_geography_before_country(monkeypatch):
                 geography="United States, West Coast",
             ),
             require_company_fit_dimensions=True,
-            company_quality=True,
+            company_quality=company_quality,
         )
     )
 
     assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert len(prompts) == 1
     assert "test it against 'United States, West Coast'" in prompts[0]
-    assert "office, branch, and customer locations do not establish headquarters" in prompts[0]
+    assert "customer locations do not establish headquarters" in prompts[0]
+    assert "factories, warehouses" in prompts[0]
+    assert "parent or subsidiary identities" in prompts[0]
+    assert "Do not choose the location that fits the ICP" in prompts[0]
+    assert "observed_hq_state empty" in prompts[0]
 
 
 def test_company_identity_does_not_remove_leading_legal_looking_name_terms():

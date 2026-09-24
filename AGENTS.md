@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: audited bounded verifier improvements
+
+On 2026-09-24 the user authorized the narrow evidence-handling and semantic
+verification fixes from the September 23 Arena score audit, rigorous saved-case
+and real Arena scoring tests, push, scorer-image publication, and canonical
+gateway/normal-validator deployment through the overnight operational skills.
+Reuse the existing bounded investigator. Preserve deterministic qualification,
+date windows, regions, numeric ranges, exclusions, scoring, budgets, separate
+verifier costs, brokered credentials, frozen historical results, rewards,
+weights, and concurrent work. Use isolated validation of saved baseline/miner
+outputs; do not overwrite completed production scores. No Research Lab or new
+verifier architecture is authorized. This scope ends after the changes are live
+and their scoring behavior is verified end to end.
+
 ## Scoped production authorization: champion audit Arena fixes
 
 On 2026-09-24 the user authorized the narrow Arena-side fixes identified by

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import date
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -193,6 +194,12 @@ def test_v5_stage_evidence_reaches_only_untrusted_investigator_observations(
     assert captured["prior_observations"]["untrusted_company_stage_evidence"] == (
         public["company_stage_evidence"]
     )
+    assert captured["prior_observations"]["submitted_source_urls"] == [
+        "https://acme.example/news/series-b",
+        "https://news.example/acme-financing",
+        "https://news.example/acme",
+        "https://acme.example/",
+    ]
     assert "company_stage_evidence" not in captured["company_locator"]
     assert "Fetch a relevant saved URL before using it" in investigator._SYSTEM_PROMPT
 
@@ -988,6 +995,323 @@ def test_decisive_quote_must_occur_in_fetched_page():
     assert locator_snippet_only["stage"]["status"] == "UNPROVEN"
 
 
+@pytest.mark.parametrize(
+    ("company_name", "url", "page", "first_quote", "corrected_quote", "stage"),
+    [
+        (
+            "TypeSafe AI",
+            "https://news.example/typesafe-seed",
+            (
+                "TypeSafe AI emerged from stealth in September 2026. The company "
+                "completed a $40 million Seed financing round led by DCVC."
+            ),
+            "The company completed a $40 million Seed financing round led by DCVC.",
+            (
+                "TypeSafe AI emerged from stealth in September 2026. The company "
+                "completed a $40 million Seed financing round led by DCVC."
+            ),
+            "Seed",
+        ),
+        (
+            "RealPage",
+            "https://www.realpage.com/news/thoma-bravo-completes-acquisition-of-realpage/",
+            (
+                "RealPage was acquired by Thoma Bravo, a leading private equity "
+                "firm focused on software. RealPage became privately held."
+            ),
+            (
+                "RealPage was acquired by Thoma Bravo ... RealPage became "
+                "privately held."
+            ),
+            (
+                "RealPage was acquired by Thoma Bravo, a leading private equity "
+                "firm focused on software. RealPage became privately held."
+            ),
+            "Private Equity",
+        ),
+    ],
+)
+def test_audited_stage_quotes_get_source_context_then_exact_correction(
+    monkeypatch, company_name, url, page, first_quote, corrected_quote, stage
+):
+    """Controlled audit-shaped excerpts test repair, not a live source verdict."""
+    requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        turn = len(requests)
+        if turn == 1:
+            name, arguments = "fetch_page", {"url": url}
+        elif turn == 2:
+            name, arguments = "submit_findings", {
+                "findings": [_finding(
+                    "stage",
+                    observed_value=stage,
+                    evidence_url=url,
+                    evidence_quote=first_quote,
+                )]
+            }
+        else:
+            name, arguments = "submit_findings", {
+                "findings": [_finding(
+                    "stage",
+                    observed_value=stage,
+                    evidence_url=url,
+                    evidence_quote=corrected_quote,
+                )]
+            }
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{turn}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_fetch(_session, requested_url):
+        return {"ok": True, "url": requested_url, "text": page}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": company_name, "website": f"https://{company_name.casefold().replace(' ', '')}.example"},
+        targets=("stage",),
+        requested_stage=stage,
+    ))
+
+    assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["claims"]["stage"]["evidence_quote"] == corrected_quote
+    correction = json.loads(requests[2]["messages"][-1]["content"])
+    rejected = correction["rejected_findings"][0]
+    assert rejected["source_url"] == url
+    assert company_name.casefold() in rejected["source_context"]
+    assert "already fetched page" in correction["instruction"]
+
+
+def test_dbs_same_domain_legal_alias_does_not_bind_parent_public_stage():
+    alias_url = "https://www.dbs.com/default.page"
+    alias_quote = 'DBS Bank Ltd ("DBS Bank") is headquartered in Singapore.'
+    parent_url = "https://links.sgx.com/dbs-group"
+    parent_quote = (
+        "DBS Group Holdings Ltd shares are listed and traded on the Singapore "
+        "Exchange under stock code D05."
+    )
+    anchor = {
+        "submitted_name": "DBS",
+        "submitted_domain": "dbs.com",
+        "submitted_linkedin_slug": "",
+        "observed_name": "DBS Bank",
+        "observed_domain": "dbs.com",
+        "observed_linkedin_slug": "dbs-bank",
+        "verified_name": "DBS",
+        "verified_domain": "dbs.com",
+        "verified_linkedin_slug": "dbs-bank",
+    }
+    alias = _finding(
+        "rebrand",
+        observed_value="DBS",
+        evidence_url=alias_url,
+        evidence_quote=alias_quote,
+        old_name="DBS Bank",
+        new_name="DBS",
+        old_domain="dbs.com",
+        new_domain="dbs.com",
+        shared_linkedin_slug="dbs-bank",
+    )
+    stage = _finding(
+        "stage",
+        observed_value="Public",
+        evidence_url=parent_url,
+        evidence_quote=parent_quote,
+    )
+
+    result = _validated_findings(
+        {"findings": [stage, alias]},
+        targets=("stage", "rebrand"),
+        fetched_pages={alias_url: alias_quote, parent_url: parent_quote},
+        first_party_domains={"dbs.com"},
+        identity_names={"dbs", "dbsbank"},
+        identity_anchor=anchor,
+    )
+
+    assert result["rebrand"]["status"] == "VERIFIED"
+    assert result["stage"]["status"] == "UNPROVEN"
+    assert result["stage"]["reason"] == (
+        "source quote did not identify the investigated company"
+    )
+
+    company = _company(
+        name="DBS",
+        website="https://dbs.com/",
+        linkedin="",
+    )
+    verdict = _complete_verdict(
+        observed_company_name="DBS Bank",
+        observed_company_website="https://dbs.com",
+        observed_company_linkedin="https://www.linkedin.com/company/dbs-bank",
+    )
+    projected = _reverify_decision(
+        verdict,
+        "",
+        "",
+        icp=_icp(company_stage=""),
+        company=company,
+        verified_homepage_identity={
+            "normalized_name": "dbs",
+            "registrable_dns_domain": "dbs.com",
+            "linkedin_company_slug": "dbs-bank",
+        },
+        verified_homepage_transport_domain="dbs.com",
+        verified_rebrand_identity=result["rebrand"],
+        company_quality=True,
+    )
+    assert projected.decision == COMPANY_FIT_MATCH
+    assert projected.details["identity_receipt"]["reason_code"] == (
+        "verified_same_domain_alias"
+    )
+
+
+def test_acculon_submitted_opening_page_is_first_stage_source(monkeypatch):
+    opening_url = (
+        "https://www.acculonenergy.com/resources/"
+        "acculon-energy-announces-opening-of-new-2gwh-battery-manufacturing-"
+        "facility-in-mason-ohio"
+    )
+    company_values = _company(
+        name="Acculon Energy",
+        website="https://acculonenergy.com/",
+        linkedin="",
+    ).model_dump(mode="json")
+    company_values.update({
+        "company_stage": "Series A",
+        "intent_signals": [{
+            "description": "Acculon Energy opened its Mason battery facility.",
+            "source": "news",
+            "url": opening_url,
+            "date": "2026-04-21",
+            "snippet": "The opening followed a Series A investment.",
+        }],
+    })
+    company = CompanyOutput.model_validate(company_values)
+    captured = {}
+
+    async def capture_investigation(**kwargs):
+        captured.update(kwargs)
+        return {"claims": {}, "failure_reason": ""}
+
+    monkeypatch.setattr(
+        lead_scorer, "investigate_company_evidence", capture_investigation
+    )
+    asyncio.run(lead_scorer._run_targeted_company_evidence_investigation(
+        company=company,
+        icp=_icp(company_stage="Series A"),
+        verdict=_complete_verdict(
+            observed_company_stage="",
+            stage_matches=None,
+            stage_evidence_url="",
+            stage_evidence_quote="",
+        ),
+        investigation_targets=("stage",),
+        icp_attribute="",
+        icp_stage="Series A",
+        verified_identity={},
+        verified_transport_domain="acculonenergy.com",
+        structured_employee_size_evidence=None,
+        structured_public_company_evidence=None,
+        employee_size_conflict=False,
+        company_quality=True,
+    ))
+
+    assert captured["prior_observations"]["submitted_source_urls"][0] == opening_url
+
+
+def test_fiuu_parent_listing_stays_an_explicit_unproven_stage_control():
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+    result = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            status="UNPROVEN",
+            observed_value=None,
+            evidence_url="",
+            evidence_quote="",
+            reason="Razer's listing does not establish that subsidiary Fiuu is public.",
+        )]},
+        targets=("stage",),
+        fetched_pages={},
+        first_party_domains={"fiuu.com"},
+        identity_names={"fiuu"},
+    )
+
+    assert result["stage"]["status"] == "UNPROVEN"
+    assert "Never inherit Public or another stage" in prompt
+
+
+def test_rebel_headquarters_conflict_requires_dates_or_move_evidence():
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+
+    assert "source dates or explicit move evidence" in prompt
+    assert "return UNPROVEN" in prompt
+    assert "A factory opening cannot prove an HQ move" in prompt
+
+
+@pytest.mark.parametrize(
+    ("name", "domain", "quote", "country", "state", "expected"),
+    [
+        (
+            "Foundation Alloy", "foundationalloy.com",
+            "Foundation Alloy is headquartered in Woburn, Massachusetts, United States.",
+            "United States", "Massachusetts", "CONTRADICTED",
+        ),
+        (
+            "Visa", "visa.com",
+            "Visa Inc. is headquartered in Foster City, California, United States.",
+            "United States", "California", "CONTRADICTED",
+        ),
+        (
+            "JCB", "global.jcb",
+            "JCB Co., Ltd. is headquartered in Tokyo, Japan.",
+            "Japan", "", "CONTRADICTED",
+        ),
+        (
+            "Nucleus RadioPharma", "nucleusrad.com",
+            "Nucleus RadioPharma opened a manufacturing facility in Rochester, Minnesota.",
+            "United States", "Minnesota", "UNPROVEN",
+        ),
+    ],
+)
+def test_audited_headquarters_controls_require_actual_hq_language(
+    name, domain, quote, country, state, expected
+):
+    url = f"https://{domain}/company"
+    key = re.sub(r"[^a-z0-9]+", "", name.casefold())
+    finding = _finding(
+        "geography",
+        status="CONTRADICTED",
+        observed_value=country,
+        observed_country=country,
+        observed_state=state,
+        evidence_url=url,
+        evidence_quote=quote,
+    )
+    result = _validated_findings(
+        {"findings": [finding]},
+        targets=("geography",),
+        fetched_pages={url: quote},
+        first_party_domains={domain},
+        identity_names={key},
+        identity_anchor={
+            "submitted_domain": domain,
+            "observed_domain": domain,
+            "submitted_name": name,
+            "observed_name": name,
+        },
+    )
+
+    assert result["geography"]["status"] == expected
+
+
 
 @pytest.mark.parametrize("quote,expected", [
     (
@@ -1534,7 +1858,7 @@ def test_same_domain_alias_flows_from_selector_through_evidence_to_identity():
     )
     assert projected.decision == COMPANY_FIT_MATCH
     assert projected.details["identity_receipt"]["reason_code"] == (
-        "verified_rebrand_continuity"
+        "verified_same_domain_alias"
     )
 
 
@@ -1545,6 +1869,11 @@ def test_same_domain_alias_flows_from_selector_through_evidence_to_identity():
             "https://acme.example/legal-name",
             "Acme and Northstar Systems LLC use the same website.",
             "Acme and Northstar Systems LLC use the same website.",
+        ),
+        (
+            "https://acme.example/legal-name",
+            'Northstar Systems LLC ("Northstar") uses the Acme website.',
+            'Northstar Systems LLC ("Northstar") uses the Acme website.',
         ),
         (
             "https://acme.example/legal-name",
@@ -2593,6 +2922,8 @@ def test_final_unproven_with_evidence_gets_one_submit_only_correction(monkeypatc
     assert correction_feedback["rejected_findings"] == [{
         "target": "stage",
         "reason": "UNPROVEN must have empty evidence_url and evidence_quote fields",
+        "source_url": url,
+        "source_context": quote.casefold(),
     }]
     assert "single final submit-only correction" in correction_feedback["instruction"]
     assert "exact continuous company-bound span" in correction_feedback["instruction"]

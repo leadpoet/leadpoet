@@ -39,9 +39,13 @@ def test_article_extraction_preserves_link_target(monkeypatch):
         raising=False,
     )
 
-    extracted = verification_helpers.extract_article_body(
-        "<html><body>" + ("Article content " * 20) + "</body></html>"
-    )
+    extracted = verification_helpers.extract_article_body("""<html><body><article>
+      <p>Company profile: <a href="https://acme.example/about">Acme</a>.
+      Verified article body. Verified article body. Verified article body.
+      Verified article body. Verified article body. Verified article body.
+      Verified article body. Verified article body. Verified article body.
+      Verified article body.</p>
+    </article></body></html>""")
 
     assert "https://acme.example/about" in extracted
 
@@ -67,8 +71,8 @@ def test_final_judge_keeps_link_while_applying_transport_prompt_bound():
     )[0]
 
     assert len(prompt) <= _common.FINAL_JUDGE_PROMPT_MAX_CHARS
-    assert len(projected) < _common.MAX_SCRAPED_CHARS
-    assert _common._SOURCE_OMISSION_MARKER.strip() in projected
+    assert len(projected) == _common.MAX_SCRAPED_CHARS
+    assert _common._SOURCE_OMISSION_MARKER.strip() not in projected
     assert "https://acme.example/about" in projected
 
 

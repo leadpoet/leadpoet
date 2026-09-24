@@ -52,6 +52,13 @@ WEB_OPEN_MAX_OUTPUT_CHARS = TOOL_OUTPUT_TEXT_CHARS
 WEB_OPEN_TIMEOUT_SECONDS = 20.0
 REQUEST_GATE_POLL_SECONDS = 0.05
 OPENROUTER_RESPONSES_TIMEOUT_MILLISECONDS = 600_000
+# The runner's provider API timeout adds budget admission (20 seconds), billing
+# reconciliation (30 seconds), and transport grace (15 seconds) after the
+# operation timeout.  This bridge is copied into the sandbox without the
+# lab_arena package, so a contract test couples this total to those constants.
+PROVIDER_API_HOST_OVERHEAD_MILLISECONDS = 65_000
+# Leave enough time to carry the settled worker response back to Codex.
+BRIDGE_RESPONSE_MARGIN_MILLISECONDS = 2_000
 _INVALID_RESPONSES_ERROR = b'{"error":{"message":"invalid Responses request or reply"}}'
 _BRIDGE_REQUEST_ERROR_CODES = frozenset({
     "hosted_tools_forbidden",
@@ -152,6 +159,21 @@ def _remaining_seconds(response_deadline: float) -> float:
     return remaining
 
 
+def _responses_operation_timeout_milliseconds(response_deadline: float) -> int:
+    remaining_milliseconds = math.floor(
+        _remaining_seconds(response_deadline) * 1000
+    )
+    timeout_milliseconds = min(
+        OPENROUTER_RESPONSES_TIMEOUT_MILLISECONDS,
+        remaining_milliseconds
+        - PROVIDER_API_HOST_OVERHEAD_MILLISECONDS
+        - BRIDGE_RESPONSE_MARGIN_MILLISECONDS,
+    )
+    if timeout_milliseconds < 1:
+        raise CodexRuntimeError("Codex response deadline reached")
+    return timeout_milliseconds
+
+
 def _receive(
     connection: socket.socket,
     size: int,
@@ -205,11 +227,14 @@ def _dispatch(
 ) -> tuple[int, bytes]:
     if response_deadline is None:
         response_deadline = time.monotonic() + DEFAULT_IDLE_WAIT_SECONDS
+    operation_timeout_milliseconds = _responses_operation_timeout_milliseconds(
+        response_deadline
+    )
     payload = json.dumps({
         "schema_version": "leadpoet.lab_arena.operation_frame.v1",
         "operation_id": "openrouter.responses",
         "parameters": parameters,
-        "timeout_ms": OPENROUTER_RESPONSES_TIMEOUT_MILLISECONDS,
+        "timeout_ms": operation_timeout_milliseconds,
     }, separators=(",", ":"), allow_nan=False).encode()
     if len(payload) > 1_048_576:
         raise CodexRuntimeError("request too large")

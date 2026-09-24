@@ -1194,12 +1194,22 @@ def test_session_isolates_login_and_provider_keys(monkeypatch, scrapingdog_value
     assert not home.exists()
 
 
-def test_codex_timeout_layers_use_the_original_absolute_response_deadline(monkeypatch):
+@pytest.mark.parametrize(
+    ("remaining_seconds", "expected_operation_milliseconds", "expected_api_seconds"),
+    ((500.0, 433_000, 498.0), (667.0, 600_000, 665.0)),
+)
+def test_codex_timeout_layers_use_the_original_absolute_response_deadline(
+    monkeypatch,
+    remaining_seconds,
+    expected_operation_milliseconds,
+    expected_api_seconds,
+):
     monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", "/worker.sock")
     monkeypatch.setenv("LAB_ARENA_WEB_EGRESS_SOCKET", "/egress.sock")
     monkeypatch.setattr(codex.time, "monotonic", lambda: 100.0)
     with codex.session(
-        model="openai/gpt-5.6-sol", response_deadline=125.0
+        model="openai/gpt-5.6-sol",
+        response_deadline=100.0 + remaining_seconds,
     ) as environment:
         config = (Path(environment["CODEX_HOME"]) / "config.toml").read_text()
 
@@ -1217,7 +1227,7 @@ def test_codex_timeout_layers_use_the_original_absolute_response_deadline(monkey
             return None
 
         def settimeout(self, timeout):
-            assert timeout == 25.0
+            assert timeout == remaining_seconds
 
         def connect(self, _path):
             pass
@@ -1236,19 +1246,76 @@ def test_codex_timeout_layers_use_the_original_absolute_response_deadline(monkey
     assert codex._dispatch(
         "/worker.sock",
         {"model": "openai/gpt-5.6-sol", "input": "hi"},
-        response_deadline=125.0,
+        response_deadline=100.0 + remaining_seconds,
     ) == (200, b"{}")
     size = int.from_bytes(sent[:4], "big")
     operation_id, parameters, timeout_ms = shim.decode_operation_frame(sent[4:4 + size])
     assert operation_id == "openrouter.responses"
     assert parameters == {"model": "openai/gpt-5.6-sol", "input": "hi", "max_output_tokens": 4096}
-    assert timeout_ms == 600_000
+    assert timeout_ms == expected_operation_milliseconds
     assert ops.OPERATIONS["openrouter.responses"].timeout_seconds == 600
     assert runner.MAX_PROVIDER_API_TIMEOUT_SECONDS == 665
+    assert codex.PROVIDER_API_HOST_OVERHEAD_MILLISECONDS == 1000 * int(
+        ops.BUDGET_ADMISSION_MAX_SECONDS
+        + ops.PROVIDER_BILLING_RECONCILIATION_SECONDS
+        + ops.PROVIDER_API_TIMEOUT_GRACE_SECONDS
+    )
+
+    api_timeouts = []
+
+    class Client:
+        def post(self, _url, **kwargs):
+            api_timeouts.append(kwargs["timeout"].read)
+
+            class Response:
+                status_code = 200
+
+                @staticmethod
+                def json():
+                    return {"status": "ok"}
+
+            return Response()
+
+    runner.HttpArenaApiClient("http://localhost", client=Client()).provider(
+        "run-1",
+        "a" * 64,
+        {
+            "operation_id": "openrouter.responses",
+            "parameters": {},
+            "timeout_ms": timeout_ms,
+            "action_sequence": 0,
+        },
+    )
+    assert api_timeouts == [expected_api_seconds]
+    assert expected_api_seconds + (
+        codex.BRIDGE_RESPONSE_MARGIN_MILLISECONDS / 1000
+    ) <= remaining_seconds
 
     assert "request_max_retries = 0" in config
     assert "stream_max_retries = 0" in config
-    assert "stream_idle_timeout_ms = 25000" in config
+    assert "stream_idle_timeout_ms = %d" % int(remaining_seconds * 1000) in config
+
+
+@pytest.mark.parametrize("remaining_seconds", (67.0, 66.999))
+def test_codex_deadline_margin_refuses_before_worker_connect(
+    monkeypatch, remaining_seconds,
+):
+    socket_calls = []
+    monkeypatch.setattr(codex.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(
+        codex.socket,
+        "socket",
+        lambda *_args: socket_calls.append(True),
+    )
+
+    with pytest.raises(codex.CodexRuntimeError, match="response deadline"):
+        codex._dispatch(
+            "/worker.sock",
+            {"model": "openai/gpt-5.6-sol", "input": "hi"},
+            response_deadline=100.0 + remaining_seconds,
+        )
+
+    assert socket_calls == []
 
 
 def test_codex_client_cancellation_half_closes_and_drains_worker_request(monkeypatch):
@@ -1292,7 +1359,7 @@ def test_codex_client_cancellation_half_closes_and_drains_worker_request(monkeyp
     assert codex._dispatch(
         "/worker.sock",
         {"model": "openai/gpt-5.6-sol", "input": "hi"},
-        response_deadline=125.0,
+        response_deadline=800.0,
         cancel_requested=lambda: cancelled[0],
     ) == (200, b"{}")
     assert shutdowns == [socket.SHUT_WR]

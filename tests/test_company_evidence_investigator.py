@@ -127,7 +127,12 @@ def test_investigator_prompt_preserves_equity_stage_across_later_debt():
     ) in prompt
     assert (
         "A later completed priced-equity round, controlling acquisition, or "
-        "IPO/listing event can supersede it"
+        "IPO/listing event involving ownership of the investigated company "
+        "can supersede it"
+    ) in prompt
+    assert (
+        "the investigated company buying another business does not make the "
+        "buyer Acquired and does not supersede the buyer's funding stage."
     ) in prompt
     assert (
         "a later Series C, controlling acquisition, or IPO can contradict "

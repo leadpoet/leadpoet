@@ -126,7 +126,11 @@ than the highest label found. For a Series stage, compare completed
 priced-equity rounds and use the latest completed priced-equity round. A later
 loan, debt facility, or grant does not by itself supersede that equity stage.
 A later completed priced-equity round, controlling acquisition, or IPO/listing
-event can supersede it and must be evaluated chronologically. Thus a later
+event involving ownership of the investigated company can supersede it and
+must be evaluated chronologically. Identify the buyer and target explicitly:
+the investigated company buying another business does not make the buyer
+Acquired and does not supersede the buyer's funding stage. Only an acquisition
+OF the investigated company can do that. Thus a later
 Series C, controlling acquisition, or IPO can contradict an earlier Series B;
 later debt alone cannot. Conflicting labels without chronology are UNPROVEN.
 When prior observations contain exact structured `Privately Held` company-type

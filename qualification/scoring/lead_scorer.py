@@ -824,21 +824,19 @@ def _bound_public_supersession_supports_company(
     return False
 
 
-def _acquired_stage_quote_supports_company(
-    company: Optional[CompanyOutput],
-    observed_company_name: Any,
+def _acquired_stage_quote_supports_names(
+    company_names: Sequence[Any],
     quote: str,
 ) -> bool:
-    """Require completed acquisition/current-parent proof for this exact entity."""
+    """Require completed acquisition/current-parent proof for named entities."""
 
-    if company is None or not isinstance(quote, str) or not quote.strip():
+    if not isinstance(quote, str) or not quote.strip():
         return False
     if _ACQUISITION_NO_LONGER_CURRENT_RE.search(quote):
         return False
-    names = [company.company_name, observed_company_name]
     normalized_names = {
         tuple(re.findall(r"[a-z0-9]+", str(name or "").casefold()))
-        for name in names
+        for name in company_names
     }
     normalized_names = {
         name for name in normalized_names if name and len("".join(name)) >= 4
@@ -875,6 +873,21 @@ def _acquired_stage_quote_supports_company(
             ):
                 return True
     return False
+
+
+def _acquired_stage_quote_supports_company(
+    company: Optional[CompanyOutput],
+    observed_company_name: Any,
+    quote: str,
+) -> bool:
+    """Require completed acquisition/current-parent proof for this exact entity."""
+
+    if company is None:
+        return False
+    return _acquired_stage_quote_supports_names(
+        (company.company_name, observed_company_name),
+        quote,
+    )
 
 
 def _first_party_ownership_conflicts_with_stage(

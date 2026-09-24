@@ -2275,6 +2275,170 @@ def test_investigator_stage_keeps_other_recipient_control():
     assert finding["status"] == "UNPROVEN"
 
 
+@pytest.mark.parametrize(
+    ("quote", "identity_names", "expected"),
+    [
+        (
+            "Acme has been acquired by Parent Corp and is now part of its platform.",
+            {"acme"},
+            "VERIFIED",
+        ),
+        (
+            "Acme announced its acquisition of BetterCloud, a SaaS platform.",
+            {"acme"},
+            "UNPROVEN",
+        ),
+        (
+            "Acme announced that OtherCo has been acquired by Parent Corp.",
+            {"acme"},
+            "UNPROVEN",
+        ),
+        (
+            "Acme will be acquired by Parent Corp if regulators approve the deal.",
+            {"acme"},
+            "UNPROVEN",
+        ),
+        (
+            "Parent Corp acquired a minority interest in Acme.",
+            {"acme"},
+            "UNPROVEN",
+        ),
+    ],
+)
+def test_investigator_acquired_stage_requires_company_as_completed_target(
+    quote, identity_names, expected
+):
+    url = "https://acme.example/acquisition"
+    finding = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            observed_value="Acquired",
+            evidence_url=url,
+            evidence_quote=quote,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: quote},
+        first_party_domains={"acme.example"},
+        identity_names=identity_names,
+    )["stage"]
+
+    assert finding["status"] == expected
+    assert lead_scorer._acquired_stage_quote_supports_names(
+        tuple(identity_names), quote
+    ) is lead_scorer._acquired_stage_quote_supports_company(
+        _company(), "Acme", quote
+    )
+    if expected == "UNPROVEN":
+        assert finding["reason"] == (
+            "source quote did not prove the investigated company was the "
+            "completed acquisition target"
+        )
+
+
+def test_corestack_buyer_quote_is_rejected_before_submitted_series_b_fetch(
+    monkeypatch,
+):
+    acquisition_url = "https://corestack.io/news/corestack-acquires-bettercloud"
+    series_b_url = "https://corestack.io/news/corestack-series-b"
+    buyer_quote = (
+        "CoreStack, the global authority in cloud governance, today announced "
+        "its acquisition of BetterCloud, the leading SaaS management platform."
+    )
+    series_b_quote = (
+        "CoreStack Closes $30 Million Series B Financing Round Led by Avatar "
+        "Growth Capital."
+    )
+    requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        turn = len(requests)
+        if turn == 1:
+            name, arguments = "submit_findings", {
+                "findings": [_finding(
+                    "stage",
+                    status="CONTRADICTED",
+                    observed_value="Acquired",
+                    evidence_url=acquisition_url,
+                    evidence_quote=buyer_quote,
+                )]
+            }
+        elif turn == 2:
+            name, arguments = "fetch_page", {"url": series_b_url}
+        else:
+            name, arguments = "submit_findings", {
+                "findings": [_finding(
+                    "stage",
+                    observed_value="Series B",
+                    evidence_url=series_b_url,
+                    evidence_quote=series_b_quote,
+                )]
+            }
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{turn}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_fetch(_session, requested_url):
+        assert requested_url == series_b_url
+        return {
+            "ok": True,
+            "url": requested_url,
+            "final_url": requested_url,
+            "text": series_b_quote,
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "CoreStack",
+            "website": "https://corestack.io/",
+            "linkedin": "https://www.linkedin.com/company/corestack/",
+        },
+        targets=("stage",),
+        requested_stage="Series B",
+        prior_observations={
+            "submitted_source_urls": [acquisition_url, series_b_url]
+        },
+        verified_homepage_identity={
+            "normalized_name": "CoreStack",
+            "registrable_dns_domain": "corestack.io",
+            "linkedin_company_slug": "corestack",
+        },
+        prefetched_pages={
+            acquisition_url: {
+                "final_url": acquisition_url,
+                "text": buyer_quote,
+            }
+        },
+    ))
+
+    assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["claims"]["stage"]["observed_value"] == "Series B"
+    assert result["claims"]["stage"]["evidence_quote"] == series_b_quote
+    assert result["usage"] == {
+        "reasoning_turns": 3,
+        "search_calls": 0,
+        "fetch_calls": 1,
+    }
+    rejection = json.loads(requests[1]["messages"][-1]["content"])
+    assert rejection["rejected_findings"] == [{
+        "target": "stage",
+        "reason": (
+            "source quote did not prove the investigated company was the "
+            "completed acquisition target"
+        ),
+        "source_url": acquisition_url,
+        "source_context": buyer_quote,
+    }]
+
+
 def test_investigator_can_accept_semantic_acculon_retrospective_receipt():
     url = "https://www.acculonenergy.com/resources/facility-opening"
     quote = (

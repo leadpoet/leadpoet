@@ -935,6 +935,7 @@ def _validated_findings(
                 # canonical stage vocabulary and imports this investigator.
                 from qualification.scoring.lead_scorer import (
                     _CANONICAL_COMPANY_STAGES,
+                    _acquired_stage_quote_supports_names,
                     _normalize_company_stage,
                     _stage_quote_supports_observation,
                 )
@@ -959,6 +960,21 @@ def _validated_findings(
                         evidence_url="",
                         evidence_quote="",
                         reason="source quote did not prove current private-equity ownership",
+                    )
+                elif normalized_stage == "acquired" and not (
+                    _acquired_stage_quote_supports_names(
+                        tuple(stage_attribution_names),
+                        finding["evidence_quote"],
+                    )
+                ):
+                    finding.update(
+                        status="UNPROVEN",
+                        evidence_url="",
+                        evidence_quote="",
+                        reason=(
+                            "source quote did not prove the investigated company "
+                            "was the completed acquisition target"
+                        ),
                     )
                 elif not _quote_names_compatible_venture_stage(
                     normalized_stage,

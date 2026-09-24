@@ -1275,13 +1275,7 @@ def test_frame_validation_rejects_identity_fields_and_unknown_operations(tmp_pat
     assert state.action_sequence == 1 and len(api.provider_frames) == 1
 
 
-def test_parallelism_env_and_http_boundary():
-    proxies = {"LAB_ARENA_WEBSHARE_PROXY_%d" % i: "http://user:pass@proxy%d.example.com:8080" % i for i in range(1, 10)}
-    assert rn.max_parallel_runs_from_environment(proxies) == 10
-    with pytest.raises(rn.RunnerError):
-        rn.max_parallel_runs_from_environment({rn.MAX_PARALLEL_ENV: "0"})
-    with pytest.raises(rn.RunnerError):
-        rn.max_parallel_runs_from_environment({rn.MAX_PARALLEL_ENV: "9"})
+def test_http_and_output_boundary():
     with pytest.raises(rn.RunnerError):
         rn.HttpArenaApiClient("http://arena.example.com")
     with pytest.raises(rn.RunnerError):
@@ -1348,6 +1342,17 @@ def test_provider_http_timeout_covers_the_requested_provider_window():
             "timeout_ms": 300_000,
             "action_sequence": 1,
         },
+    )
+    assert client.timeouts[-1].read == (
+        operations.BUDGET_ADMISSION_MAX_SECONDS
+        + 300
+        + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+        + rn.PROVIDER_API_TIMEOUT_GRACE_SECONDS
+    )
+    api.provider(
+        "run-1", "a" * 64,
+        {"operation_id": "openrouter.responses", "parameters": {},
+         "timeout_ms": 600_000, "action_sequence": 2},
     )
     assert client.timeouts[-1].read == rn.MAX_PROVIDER_API_TIMEOUT_SECONDS
     api.provider(

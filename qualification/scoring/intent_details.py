@@ -18,6 +18,10 @@ from qualification.intent_details import validate_intent_details_text
 
 REVIEW_MODEL = "anthropic/claude-sonnet-4.5"  # Existing pinned intent_signal_judge.
 REVIEW_TIMEOUT_SECONDS = 45
+# Supplement the authoritative verified evidence without consuming its fixed
+# source-context budget. The paragraph remains responsible for grounding every
+# fact in positive evidence even when more non-qualifying attempts exist.
+_NON_QUALIFYING_CONTEXT_MAX_ITEMS = 3
 _CHECKS = (
     "facts_supported", "verified_signals_covered", "relevance_grounded",
     "connects_icp", "natural_paragraph",
@@ -131,6 +135,21 @@ false. Require natural prose, not headings, bullet lists, field labels or
 internal scoring commentary. Return only the requested Boolean checks and
 signal_coverage and the two factual-diagnostic strings.
 """
+_NON_QUALIFYING_SYSTEM_APPENDIX = """
+
+ADDITIONAL NON-QUALIFYING SIGNAL CONTEXT:
+The non_qualifying_signals section contains bounded source-grounded findings for
+submitted signals that did not score. A zero or rejected signal is not by itself
+proof that every factual statement about it is false. Its supporting_quotes can
+still support the narrower facts they state, even when the activity did not
+satisfy the ICP. But a paragraph assertion that the independent finding marks
+contradicted, wrong_entity, or unsupported is not supported. Set
+facts_supported=false when the paragraph asserts such a claim. Do not require
+the paragraph to mention non-qualifying signals, and do not count them under
+verified_signals_covered. This section is supplemental bounded context, not an
+exhaustive list of every rejected attempt. Its omission of a claim is not
+positive support for that claim.
+"""
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -183,10 +202,85 @@ def review_evidence(
 ) -> dict[str, Any]:
     """Project verified observations and bounded text from their fetched sources."""
     verified = []
+    non_qualifying = []
     for result in signal_results:
-        if not isinstance(result, Mapping) or float(result.get("after_decay") or 0) <= 0:
+        if not isinstance(result, Mapping):
             continue
         verdict = _mapping(result.get("judge_verdict"))
+        if float(result.get("after_decay") or 0) <= 0:
+            trace = _mapping(verdict.get("verification_trace"))
+            evaluations = _mapping(trace.get("intent_verdict")).get(
+                "signal_evaluations"
+            )
+            if (
+                verdict.get("client_ready") is False
+                and isinstance(evaluations, list)
+                and len(non_qualifying) < _NON_QUALIFYING_CONTEXT_MAX_ITEMS
+            ):
+                declared_urls = _texts(
+                    result.get("evidence_urls"), maximum=3, length=2_048
+                )
+                for raw_evaluation in evaluations[:2]:
+                    evaluation = _mapping(raw_evaluation)
+                    status = evaluation.get("signal_status")
+                    if (
+                        evaluation.get("verification_mode") != "source_grounded"
+                        or status not in {
+                            "supported", "partially_supported", "contradicted",
+                            "wrong_entity",
+                        }
+                        or len(non_qualifying) >= _NON_QUALIFYING_CONTEXT_MAX_ITEMS
+                    ):
+                        continue
+                    used_urls = [
+                        url for url in _texts(
+                            evaluation.get("evidence_urls_used"),
+                            maximum=2,
+                            length=2_048,
+                        )
+                        if url in declared_urls
+                    ]
+                    if not used_urls:
+                        continue
+                    index = result.get("matched_icp_signal")
+                    non_qualifying.append({
+                        "matched_icp_signal": (
+                            index if type(index) is int and index >= 0 else None
+                        ),
+                        "verifier_status": status,
+                        "same_entity_check": (
+                            evaluation.get("same_entity_check")
+                            if evaluation.get("same_entity_check")
+                            in {"pass", "fail", "unclear"}
+                            else ""
+                        ),
+                        "source_urls": [url[:512] for url in used_urls],
+                        "submitted_claim_context": _texts(
+                            [
+                                signal.description
+                                for signal in company.intent_signals
+                                if signal.url in used_urls
+                            ],
+                            maximum=2,
+                            length=700,
+                        ),
+                        "supporting_quotes": _texts(
+                            evaluation.get("supporting_quotes"),
+                            maximum=2,
+                            length=700,
+                        ),
+                        "contradicting_quotes": _texts(
+                            evaluation.get("contradicting_quotes"),
+                            maximum=2,
+                            length=700,
+                        ),
+                        "unsupported_parts": _texts(
+                            evaluation.get("unsupported_parts"),
+                            maximum=3,
+                            length=400,
+                        ),
+                    })
+            continue
         if verdict.get("decision") != "verified" or verdict.get("client_ready") is not True:
             raise ValueError("positive signal lacks a terminal verified receipt")
         trace = _mapping(verdict.get("verification_trace"))
@@ -272,6 +366,10 @@ def review_evidence(
             "intent_signals": list(icp.intent_signals),
         },
         "verified_signals": verified,
+        **(
+            {"non_qualifying_signals": non_qualifying}
+            if non_qualifying else {}
+        ),
         "verified_company_evidence": company_facts,
     }
     # Keep the existing review bound. Extra source context must not make a
@@ -313,9 +411,15 @@ missing review into an accepted paragraph or a terminal company mismatch.
                 "failure_reason_code": "malformed_response"}
     receipt["input_hash"] = "sha256:" + hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     try:
+        system_prompt = _SYSTEM + (
+            _NON_QUALIFYING_SYSTEM_APPENDIX
+            if document.get("non_qualifying_signals")
+            else ""
+        )
         response = await asyncio.wait_for(
             openrouter_chat(prompt, model=REVIEW_MODEL, max_retries=0,
-                            system_prompt=_SYSTEM, response_format=_RESPONSE_FORMAT,
+                            system_prompt=system_prompt,
+                            response_format=_RESPONSE_FORMAT,
                             max_tokens=800),
             timeout=REVIEW_TIMEOUT_SECONDS,
         )

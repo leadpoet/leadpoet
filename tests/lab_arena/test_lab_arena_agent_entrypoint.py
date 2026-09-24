@@ -58,6 +58,49 @@ def test_entrypoint_forwards_and_restores_the_company_limit(tmp_path, monkeypatc
     assert os.environ["LAB_ARENA_COMPANY_LIMIT"] == "4"
 
 
+def test_normal_empty_return_retracts_an_earlier_checkpoint(tmp_path, monkeypatch):
+    source, input_path, output_path = _paths(
+        tmp_path,
+        "import os\n"
+        "from pathlib import Path\n"
+        "from lab_arena_checkpoint import write\n"
+        "def run_icp(icp):\n"
+        "    write([{'company_name': 'provisional'}], "
+        "output_path=Path(os.environ['LAB_ARENA_OUTPUT_PATH']))\n"
+        "    return []\n",
+    )
+    monkeypatch.setenv("LAB_ARENA_OUTPUT_PATH", str(output_path))
+
+    agent_entrypoint.run(
+        source_dir=source, input_path=input_path, output_path=output_path
+    )
+
+    assert json.loads(output_path.read_text(encoding="utf-8")) == {"companies": []}
+
+
+def test_exception_after_checkpoint_preserves_checkpoint(tmp_path, monkeypatch):
+    source, input_path, output_path = _paths(
+        tmp_path,
+        "import os\n"
+        "from pathlib import Path\n"
+        "from lab_arena_checkpoint import write\n"
+        "def run_icp(icp):\n"
+        "    write([{'company_name': 'provisional'}], "
+        "output_path=Path(os.environ['LAB_ARENA_OUTPUT_PATH']))\n"
+        "    raise RuntimeError('later research failed')\n",
+    )
+    monkeypatch.setenv("LAB_ARENA_OUTPUT_PATH", str(output_path))
+
+    with pytest.raises(RuntimeError, match="later research failed"):
+        agent_entrypoint.run(
+            source_dir=source, input_path=input_path, output_path=output_path
+        )
+
+    assert json.loads(output_path.read_text(encoding="utf-8")) == {
+        "companies": [{"company_name": "provisional"}]
+    }
+
+
 @pytest.mark.parametrize("company_limit", [True, 0, 6, "2"])
 def test_entrypoint_rejects_an_invalid_company_limit(tmp_path, company_limit):
     source, input_path, output_path = _paths(

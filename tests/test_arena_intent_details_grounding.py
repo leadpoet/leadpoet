@@ -337,14 +337,27 @@ def test_review_without_non_qualifying_context_keeps_original_system_prompt(
 ):
     company, icp, results, fit = inputs()
     assert hashlib.sha256(intent_details._SYSTEM.encode()).hexdigest() == (
-        "387e8fe7f424b4d7e07c7bafb762956fbacae78a2606c0a2d8175175ca6d544d"
+        "82f5539d50ebcc8e3c9c11f9696d0c3a92f833617f21ed12fefc2eb005866955"
+    )
+    assert "A valid primary signal supports only the facts" in intent_details._SYSTEM
+    assert "API inputs or outputs" in intent_details._SYSTEM
+    assert "Equivalent supporting\nwording is sufficient" in intent_details._SYSTEM
+
+    calls = []
+    expected_document = intent_details.review_evidence(
+        company, icp, results, fit
     )
 
-    async def judge(_prompt, **kwargs):
+    async def judge(prompt, **kwargs):
+        calls.append((prompt, kwargs))
+        assert json.loads(prompt) == expected_document
         assert kwargs["system_prompt"] == intent_details._SYSTEM
         assert intent_details._NON_QUALIFYING_SYSTEM_APPENDIX not in kwargs[
             "system_prompt"
         ]
+        assert kwargs["response_format"] == intent_details._RESPONSE_FORMAT
+        assert kwargs["max_retries"] == 0
+        assert kwargs["max_tokens"] == 800
         return json.dumps(_review_response(
             {name: True for name in intent_details._CHECKS},
             [
@@ -359,6 +372,7 @@ def test_review_without_non_qualifying_context_keeps_original_system_prompt(
     ))
 
     assert receipt["decision"] == "match"
+    assert len(calls) == 1
 
 
 def test_levanta_shaped_contradicted_claim_reaches_factual_review(monkeypatch):

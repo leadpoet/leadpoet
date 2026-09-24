@@ -222,7 +222,14 @@ def _tools(targets: Sequence[str]) -> list[dict[str, Any]]:
                                     ],
                                 },
                                 "evidence_url": {"type": "string"},
-                                "evidence_quote": {"type": "string"},
+                                "evidence_quote": {
+                                    "type": "string",
+                                    "description": (
+                                        "For VERIFIED or CONTRADICTED, copy one "
+                                        "continuous substring exactly from fetch_page "
+                                        "text. Never insert ... or …."
+                                    ),
+                                },
                                 "old_name": {"type": "string"},
                                 "new_name": {"type": "string"},
                                 "old_domain": {"type": "string"},
@@ -294,10 +301,14 @@ def _plain_text(value: str) -> str:
     return " ".join((without_markup + " " + linked_urls).split())[:MAX_PAGE_CHARACTERS]
 
 
-def _normalized_span(value: Any) -> str:
+def _surface_span(value: Any) -> str:
     if not isinstance(value, str):
         return ""
-    return " ".join(unicodedata.normalize("NFKC", html.unescape(value)).split()).casefold()
+    return " ".join(unicodedata.normalize("NFKC", html.unescape(value)).split())
+
+
+def _normalized_span(value: Any) -> str:
+    return _surface_span(value).casefold()
 
 
 def _quote_occurs(quote: Any, fetched_text: str) -> bool:
@@ -311,12 +322,12 @@ def _quote_occurs(quote: Any, fetched_text: str) -> bool:
 def _source_context_for_quote(quote: str, fetched_text: str) -> str:
     """Return bounded nearby fetched text for a model-authored quote correction."""
 
-    normalized_page = _normalized_span(fetched_text)
+    surface_page = _surface_span(fetched_text)
     fragments = sorted(
         (
             fragment.strip()
             for fragment in re.split(
-                r"\s*(?:\.{3}|\u2026)\s*", _normalized_span(quote)
+                r"\s*(?:\.{3}|\u2026)\s*", _surface_span(quote)
             )
             if len(fragment.strip()) >= 8
         ),
@@ -324,12 +335,13 @@ def _source_context_for_quote(quote: str, fetched_text: str) -> str:
         reverse=True,
     )
     for fragment in fragments:
-        start = normalized_page.find(fragment)
-        if start < 0:
+        match = re.search(re.escape(fragment), surface_page, flags=re.I)
+        if match is None:
             continue
+        start = match.start()
         context_start = max(0, start - 500)
-        context_end = min(len(normalized_page), start + len(fragment) + 500)
-        return normalized_page[context_start:context_end]
+        context_end = min(len(surface_page), match.end() + 500)
+        return surface_page[context_start:context_end]
     return ""
 
 
@@ -979,6 +991,15 @@ def _submitted_finding_rejection(
         status in {"VERIFIED", "CONTRADICTED"}
         and finding.get("status") == "UNPROVEN"
     ):
+        if (
+            finding.get("reason")
+            == "submitted quote was not present in fetched source"
+            and re.search(r"\.{3}|\u2026", str(submitted.get("evidence_quote") or ""))
+        ):
+            return (
+                "submitted quote contains a prohibited ellipsis instead of one "
+                "continuous fetched-page span"
+            )
         return str(finding.get("reason") or "deterministic evidence validation failed")[:300]
     return None
 

@@ -1000,15 +1000,23 @@ def test_decisive_quote_must_occur_in_fetched_page():
     [
         (
             "TypeSafe AI",
-            "https://news.example/typesafe-seed",
             (
-                "TypeSafe AI emerged from stealth in September 2026. The company "
-                "completed a $40 million Seed financing round led by DCVC."
+                "https://dealroom.co/news/151032-typesafe-exits-stealth-with-"
+                "40m-seed-to-build-ai-for-software-not-people/"
             ),
-            "The company completed a $40 million Seed financing round led by DCVC.",
             (
-                "TypeSafe AI emerged from stealth in September 2026. The company "
-                "completed a $40 million Seed financing round led by DCVC."
+                "TypeSafe AI Dealroom has a profile for this one. Try Dealroom → , "
+                "a San Francisco frontier AI lab, has emerged from stealth with "
+                "US$25.9M seed round led by DCVC ."
+            ),
+            (
+                "TypeSafe AI... has emerged from stealth with US$25.9M seed round "
+                "led by DCVC ."
+            ),
+            (
+                "TypeSafe AI Dealroom has a profile for this one. Try Dealroom → , "
+                "a San Francisco frontier AI lab, has emerged from stealth with "
+                "US$25.9M seed round led by DCVC ."
             ),
             "Seed",
         ),
@@ -1086,8 +1094,28 @@ def test_audited_stage_quotes_get_source_context_then_exact_correction(
     correction = json.loads(requests[2]["messages"][-1]["content"])
     rejected = correction["rejected_findings"][0]
     assert rejected["source_url"] == url
-    assert company_name.casefold() in rejected["source_context"]
+    assert company_name in rejected["source_context"]
+    assert corrected_quote in rejected["source_context"]
+    if "..." in first_quote or "…" in first_quote:
+        assert rejected["reason"] == (
+            "submitted quote contains a prohibited ellipsis instead of one "
+            "continuous fetched-page span"
+        )
     assert "already fetched page" in correction["instruction"]
+
+
+def test_submit_tool_requires_one_exact_continuous_quote_span():
+    submit = next(
+        tool
+        for tool in investigator._tools(("stage",))
+        if tool["name"] == "submit_findings"
+    )
+    description = submit["parameters"]["properties"]["findings"]["items"][
+        "properties"
+    ]["evidence_quote"]["description"]
+
+    assert "continuous substring exactly from fetch_page text" in description
+    assert "Never insert ... or …" in description
 
 
 def test_dbs_same_domain_legal_alias_does_not_bind_parent_public_stage():
@@ -2923,7 +2951,7 @@ def test_final_unproven_with_evidence_gets_one_submit_only_correction(monkeypatc
         "target": "stage",
         "reason": "UNPROVEN must have empty evidence_url and evidence_quote fields",
         "source_url": url,
-        "source_context": quote.casefold(),
+        "source_context": quote,
     }]
     assert "single final submit-only correction" in correction_feedback["instruction"]
     assert "exact continuous company-bound span" in correction_feedback["instruction"]
@@ -2983,7 +3011,8 @@ def test_final_noncontiguous_quote_correction_stays_unproven(monkeypatch):
 
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
     assert result["claims"]["stage"]["reason"] == (
-        "submitted quote was not present in fetched source"
+        "submitted quote contains a prohibited ellipsis instead of one "
+        "continuous fetched-page span"
     )
     assert result["claims"]["stage"]["evidence_url"] == ""
     assert result["_validated_stage_finding"] == {}

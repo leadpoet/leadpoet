@@ -311,7 +311,10 @@ def test_oxpay_positive_control_source_and_rule_reach_final_prompt() -> None:
 def test_corestack_completion_guidance_reaches_both_prompts() -> None:
     row = _row(
         company="CoreStack",
-        claim="CoreStack acquired BetterCloud.",
+        claim=(
+            "CoreStack announced its acquisition of BetterCloud on March 31, "
+            "2026."
+        ),
         target="Acquired another company in the last 365 days.",
         source_url=(
             "https://www.corestack.io/blog/"
@@ -321,15 +324,47 @@ def test_corestack_completion_guidance_reaches_both_prompts() -> None:
         evidence_type="ACQUISITION",
     )
     source_text = (
-        "CoreStack and BetterCloud now provide services to over 2,000 customers. "
-        "BetterCloud is part of CoreStack, and its new president will lead "
-        "post-acquisition integration efforts."
+        "CoreStack today announced its acquisition of BetterCloud. Together, "
+        "CoreStack and BetterCloud provide services to over 2,000 customers. "
+        "In a strategic move to accelerate post-acquisition synergies, a "
+        "CoreStack executive will spearhead the integration efforts and lead "
+        "BetterCloud into its next chapter as part of CoreStack."
     )
 
-    for prompt in _prompts(row, source_text):
+    stage_one, stage_three = _prompts(row, source_text)
+    for prompt in (stage_one, stage_three):
+        assert "scan the entire\n        exact supplied source" in prompt
+        assert "same-event current-state evidence" in prompt
         assert "buyer now owns or controls" in prompt
         assert "active post-acquisition integration" in prompt
+        assert "headline or lead says `announced`" in prompt
+    assert source_text in stage_three
+    assert "post-acquisition synergies" in stage_three
+    assert "next chapter as part of CoreStack" in stage_three
+
+
+def test_acquisition_completion_rule_keeps_proposed_future_deal_negative() -> None:
+    row = _row(
+        company="Example Buyer",
+        claim="Example Buyer announced an agreement to acquire Example Target.",
+        target="Acquired another company in the last 365 days.",
+        source_url="https://example.com/news/proposed-acquisition",
+        evidence_type="ACQUISITION",
+    )
+    source_text = (
+        "Example Buyer signed a proposed acquisition agreement. The companies "
+        "plan future integration and collaboration if the transaction closes "
+        "in 2027."
+    )
+
+    stage_one, stage_three = _prompts(row, source_text)
+    for prompt in (stage_one, stage_three):
+        assert "word `integration` alone" in prompt
+        assert "unspecified\n        integration plan" in prompt
+        assert "future collaboration" in prompt
+        assert "a proposed deal" in prompt
         assert "expected future closing do\n        not prove completion" in prompt
+    assert source_text in stage_three
 
 
 def test_faith_negative_control_rule_reaches_both_prompts() -> None:

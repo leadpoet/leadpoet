@@ -233,11 +233,15 @@ ADVERTISING_BLOCK = """      * Advertising technology includes tools that measur
 ACQUISITION_BLOCK = """      * A completed acquisition requires evidence that the transaction completed.
         An ICP criterion saying `acquired another company` requires completion.
         An `announced` claim from the miner must not weaken that requirement.
+        Before treating an acquisition as announcement-only, scan the entire
+        exact supplied source for same-event current-state evidence.
         Unambiguous current-state evidence that the buyer now owns or controls
         the target, including the target operating as part of the buyer or
         active post-acquisition integration, proves completion even if the
-        source does not use the literal word `closed`. An agreement, proposed
-        deal, shareholder or court approval, and an expected future closing do
+        headline or lead says `announced` and the source does not use the
+        literal word `closed`. The word `integration` alone, an unspecified
+        integration plan, future collaboration, an agreement, a proposed deal,
+        shareholder or court approval, and an expected future closing do
         not prove completion. If the target instead asks for an announced
         acquisition, apply that wording as written."""
 

@@ -223,15 +223,21 @@ class RunnerError(RuntimeError):
 class AgentDependencyError(RunnerError):
     """The submitted dependency declaration cannot run in the Arena."""
 
+    def __init__(self, message: str, *, detail: str = "") -> None:
+        super().__init__(message)
+        # Keep only bounded, redacted operator detail, never raw pip output.
+        self.diagnostic_detail = _safe_judge_diagnostic_text(detail or message)
+
 
 class DependencyInstallInfrastructureError(RunnerError):
     """The host could not complete a submitted dependency installation."""
 
-    def __init__(self, failure_kind: str) -> None:
+    def __init__(self, failure_kind: str, *, detail: str = "") -> None:
         if failure_kind not in ("timeout", "network_error", "installer_error"):
             raise ValueError("dependency install failure kind is invalid")
         super().__init__("dependency installation infrastructure failure")
         self.failure_kind = failure_kind
+        self.diagnostic_detail = _safe_judge_diagnostic_text(detail or failure_kind)
 
 
 def _dependency_install_failure_kind(
@@ -240,17 +246,34 @@ def _dependency_install_failure_kind(
     return "timeout" if isinstance(failure, subprocess.TimeoutExpired) else "installer_error"
 
 
-def _pip_stderr_has_network_marker(path: Path) -> bool:
+def _pip_stderr_tail(path: Path) -> bytes:
     try:
         with path.open("rb") as captured:
             captured.seek(0, os.SEEK_END)
             captured.seek(
                 max(0, captured.tell() - _DEPENDENCY_INSTALL_STDERR_TAIL_BYTES)
             )
-            tail = captured.read(_DEPENDENCY_INSTALL_STDERR_TAIL_BYTES)
+            return captured.read(_DEPENDENCY_INSTALL_STDERR_TAIL_BYTES)
     except OSError:
-        return False
+        return b""
+
+
+def _pip_stderr_has_network_marker(path: Path) -> bool:
+    tail = _pip_stderr_tail(path)
     return any(marker in tail for marker in _DEPENDENCY_INSTALL_NETWORK_MARKERS)
+
+
+def _pip_failure_detail(path: Path) -> str:
+    tail = _pip_stderr_tail(path)
+    if len(tail) == _DEPENDENCY_INSTALL_STDERR_TAIL_BYTES:
+        # Drop a possibly partial first line: its credential label may be cut.
+        tail = tail.partition(b"\n")[2]
+    redacted = _safe_judge_diagnostic_text(
+        tail.decode("utf-8", errors="replace"),
+        max_chars=_DEPENDENCY_INSTALL_STDERR_TAIL_BYTES,
+    )
+    # The final error normally follows pip's resolver/progress messages.
+    return redacted[-MAX_JUDGE_DIAGNOSTIC_CHARS:]
 
 
 def _safe_judge_diagnostic_text(
@@ -290,6 +313,29 @@ def _log_judge_failure(
         file=sys.stderr,
         flush=True,
     )
+
+
+def _log_dependency_failure(
+    run_id: str,
+    failure: AgentDependencyError | DependencyInstallInfrastructureError,
+) -> None:
+    safe_run_id = _safe_judge_diagnostic_text(run_id, max_chars=128) or "-"
+    kind = (
+        failure.failure_kind
+        if isinstance(failure, DependencyInstallInfrastructureError)
+        else "source_error"
+    )
+    try:
+        print(
+            "Lab Arena dependency installation failure: "
+            f"run_id={safe_run_id} stage=dependency_install "
+            f"failure_kind={kind} detail={failure.diagnostic_detail}",
+            file=sys.stderr,
+            flush=True,
+        )
+    except Exception:
+        # Private diagnostics cannot change completion, cleanup, or retries.
+        pass
 
 
 def _execution_diagnostic_from_stderr(stderr: Any) -> Optional[Dict[str, Any]]:
@@ -1207,16 +1253,22 @@ def install_binary_requirements(requirements_path: Path, target_dir: Path) -> No
                 if install_attempt == 0:
                     continue
                 raise DependencyInstallInfrastructureError(
-                    _dependency_install_failure_kind(exc)
+                    _dependency_install_failure_kind(exc),
+                    detail=_pip_failure_detail(stderr_path),
                 ) from exc
             if result.returncode != 0:
                 if not _pip_stderr_has_network_marker(stderr_path):
                     # pip maps its installation and network exceptions to the
                     # same exit code. Unclassified failures remain source-owned.
-                    raise AgentDependencyError("binary dependency installation failed")
+                    raise AgentDependencyError(
+                        "binary dependency installation failed",
+                        detail=_pip_failure_detail(stderr_path),
+                    )
                 if install_attempt == 0:
                     continue
-                raise DependencyInstallInfrastructureError("network_error")
+                raise DependencyInstallInfrastructureError(
+                    "network_error", detail=_pip_failure_detail(stderr_path)
+                )
             break
         _lock_down_dependency_tree(install_target)
         for child in install_target.iterdir():
@@ -2883,23 +2935,13 @@ class AssignmentExecutor:
                 "error_class": "provider_unavailable",
                 "reason": "provider_error",
             }
-            safe_run_id = (
-                _safe_judge_diagnostic_text(lease["run_id"], max_chars=128) or "-"
-            )
-            try:
-                print(
-                    "Lab Arena dependency installation failure: "
-                    f"run_id={safe_run_id} failure_kind={exc.failure_kind}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-            except (OSError, ValueError):
-                pass
-        except AgentDependencyError:
+            _log_dependency_failure(str(lease["run_id"]), exc)
+        except AgentDependencyError as exc:
             if scoring_run:  # the trusted scorer has no submitted dependency tree
                 raise
             terminal = "model_error"
             output_document = None
+            _log_dependency_failure(str(lease["run_id"]), exc)
         finally:
             server.stop()
             shutil.rmtree(run_dir, ignore_errors=True)

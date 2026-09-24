@@ -48,6 +48,8 @@ MAX_SEARCH_RESULTS = 5
 MAX_PAGE_CHARACTERS = 24_000
 MAX_SUBMITTED_SOURCE_URLS = 8
 PRIVATE_FETCHED_PAGES_KEY = "_server_fetched_pages"
+REJECTED_QUOTE_CONTEXT_BEFORE_CHARACTERS = 1_000
+REJECTED_QUOTE_CONTEXT_AFTER_CHARACTERS = 500
 ADMISSION_DEADLINE_SECONDS = 110.0
 # OpenRouter chat is broker-bounded at 120 seconds. Add only local framing
 # tolerance. A request admitted before the deadline is allowed to settle.
@@ -351,8 +353,14 @@ def _source_context_for_quote(quote: str, fetched_text: str) -> str:
         if match is None:
             continue
         start = match.start()
-        context_start = max(0, start - 500)
-        context_end = min(len(surface_page), match.end() + 500)
+        context_start = max(
+            0,
+            start - REJECTED_QUOTE_CONTEXT_BEFORE_CHARACTERS,
+        )
+        context_end = min(
+            len(surface_page),
+            match.end() + REJECTED_QUOTE_CONTEXT_AFTER_CHARACTERS,
+        )
         return surface_page[context_start:context_end]
     return ""
 

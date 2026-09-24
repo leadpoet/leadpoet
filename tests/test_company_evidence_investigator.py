@@ -1247,6 +1247,92 @@ def test_plain_text_extracts_realpage_article_before_navigation_cap():
     assert hidden["stage"]["status"] == "UNPROVEN"
 
 
+def test_realpage_semantic_rejection_exposes_earlier_private_equity_proof():
+    """The exact retained c137 article order needs 1,000 chars of lookback."""
+
+    url = (
+        "https://www.realpage.com/news/"
+        "thoma-bravo-completes-acquisition-of-realpage/"
+    )
+    completed_acquisition_quote = (
+        "RealPage, Inc. (NASDAQ: RP), a leading global provider of software "
+        "and data analytics to the real estate industry, today announced the "
+        "completion of its acquisition by Thoma Bravo, a leading private "
+        "equity investment firm focused on the software sector, in an all-cash "
+        "transaction that valued RealPage at approximately $10.2 billion, "
+        "including net debt."
+    )
+    delisting_quote = (
+        "With the completion of the acquisition, RealPage becomes a "
+        "privately-held company, and its common stock ceased trading and will "
+        "no longer be listed on the Nasdaq stock exchange."
+    )
+    retained_main_body = " ".join((
+        "RICHARDSON, Texas & San Francisco, CA –",
+        completed_acquisition_quote,
+        (
+            "The acquisition was previously announced on December 21, 2020, "
+            "and RealPage’s stockholders voted their shares in favor of the "
+            "transaction on March 8, 2021."
+        ),
+        (
+            "Upon the completion of the acquisition, RealPage shareholders "
+            "were entitled to receive $88.75 in cash per share."
+        ),
+        (
+            "The price per share represents a 30.8 percent premium to the "
+            "company’s closing share price of $67.83 on December 18, 2020, "
+            "and a premium of 36.5 percent over RealPage’s 30-day "
+            "volume-weighted average share price through December 18, 2020."
+        ),
+        delisting_quote,
+        (
+            "The closing of this transaction represents a new chapter in the "
+            "RealPage journey."
+        ),
+    ))
+    submitted = _finding(
+        "stage",
+        observed_value="Private Equity",
+        evidence_url=url,
+        evidence_quote=delisting_quote,
+    )
+    finding = _validated_findings(
+        {"findings": [submitted]},
+        targets=("stage",),
+        fetched_pages={url: retained_main_body},
+        first_party_domains={"realpage.com"},
+        identity_names={"realpageinc"},
+        identity_anchor={
+            "submitted_domain": "realpage.com",
+            "observed_domain": "realpage.com",
+        },
+    )["stage"]
+
+    assert finding["status"] == "UNPROVEN"
+    assert finding["reason"] == (
+        "source quote did not prove current private-equity ownership"
+    )
+    context = investigator._source_context_for_quote(
+        delisting_quote,
+        retained_main_body,
+    )
+    assert completed_acquisition_quote in context
+    assert len(context) <= (
+        investigator.REJECTED_QUOTE_CONTEXT_BEFORE_CHARACTERS
+        + len(delisting_quote)
+        + investigator.REJECTED_QUOTE_CONTEXT_AFTER_CHARACTERS
+    )
+    assert _stage_quote_supports_observation(
+        "private equity",
+        completed_acquisition_quote,
+    )
+    assert not _stage_quote_supports_observation(
+        "private equity",
+        delisting_quote,
+    )
+
+
 @pytest.mark.parametrize(
     "quote",
     [

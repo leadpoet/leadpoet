@@ -46,12 +46,13 @@ class _VisibleHTMLTextParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self._hidden_classes = hidden_classes
         self._hidden_ids = hidden_ids
-        self._stack: list[tuple[str, bool]] = []
+        self._stack: list[tuple[str, bool, int]] = []
         self._hidden_depth = 0
         self._heading_depth: Optional[int] = None
         self._saw_heading = False
         self.parts: list[str] = []
         self.heading_parts: list[str] = []
+        self.heading_prefix_parts: list[str] = []
         self.links: list[str] = []
 
     @staticmethod
@@ -90,7 +91,7 @@ class _VisibleHTMLTextParser(HTMLParser):
         if lowered in self._VOID_ELEMENTS:
             return
         hidden = self._is_hidden(lowered, attrs)
-        self._stack.append((lowered, hidden))
+        self._stack.append((lowered, hidden, len(self.parts)))
         if hidden:
             self._hidden_depth += 1
         if lowered == "a" and not self._hidden_depth:
@@ -103,6 +104,21 @@ class _VisibleHTMLTextParser(HTMLParser):
             and self._heading_depth is None
             and not self._saw_heading
         ):
+            last_text_index = next(
+                (
+                    index
+                    for index in range(len(self.parts) - 1, -1, -1)
+                    if self.parts[index].strip()
+                ),
+                None,
+            )
+            if last_text_index is not None:
+                for _tag, _hidden, part_start in reversed(self._stack[:-1]):
+                    if part_start <= last_text_index:
+                        self.heading_prefix_parts = self.parts[
+                            part_start:last_text_index + 1
+                        ]
+                        break
             self._heading_depth = len(self._stack)
             self._saw_heading = True
 
@@ -121,7 +137,7 @@ class _VisibleHTMLTextParser(HTMLParser):
             return
         popped = self._stack[match:]
         del self._stack[match:]
-        self._hidden_depth -= sum(hidden for _tag, hidden in popped)
+        self._hidden_depth -= sum(hidden for _tag, hidden, _start in popped)
         self._hidden_depth = max(0, self._hidden_depth)
         if self._heading_depth is not None and len(self._stack) < self._heading_depth:
             self._heading_depth = None
@@ -185,8 +201,8 @@ def _css_hidden_selectors(content: str) -> tuple[frozenset[str], frozenset[str]]
     return frozenset(classes), frozenset(ids)
 
 
-def _visible_html_document(content: str) -> tuple[str, str]:
-    """Return visible page text and its first visible H1, if present."""
+def _visible_html_document(content: str) -> tuple[str, str, str]:
+    """Return visible page text, its first H1, and local pre-H1 context."""
 
     hidden_classes, hidden_ids = _css_hidden_selectors(content)
     parser = _VisibleHTMLTextParser(
@@ -197,10 +213,15 @@ def _visible_html_document(content: str) -> tuple[str, str]:
         parser.feed(content)
         parser.close()
     except Exception:
-        return "", ""
+        return "", "", ""
     text = " ".join(" ".join(parser.parts).split())
     heading = " ".join(" ".join(parser.heading_parts).split())
-    return text, heading
+    heading_prefix = " ".join(" ".join(parser.heading_prefix_parts).split())
+    if len(heading_prefix) > 500:
+        heading_prefix = heading_prefix[-500:]
+        if " " in heading_prefix:
+            heading_prefix = heading_prefix.split(" ", 1)[1]
+    return text, heading, heading_prefix
 
 
 def _visible_html_text(content: str) -> str:
@@ -298,7 +319,9 @@ def extract_article_body(content: str, *, min_body_chars: int = 200) -> str:
     # markdown/text inputs.
     if "<html" not in content[:2000].lower() and "<body" not in content[:2000].lower() and "<div" not in content[:5000].lower():
         return content
-    visible_document, primary_heading = _visible_html_document(content)
+    visible_document, primary_heading, heading_prefix = _visible_html_document(
+        content
+    )
     if _TRAFILATURA_AVAILABLE:
         try:
             body = _trafilatura.extract(
@@ -316,6 +339,15 @@ def extract_article_body(content: str, *, min_body_chars: int = 200) -> str:
                 _extraction_matches_primary_heading(primary_heading, body)
                 and _extraction_is_visible(visible_document, body)
             ):
+                normalized_prefix = _normalized_visible_evidence(heading_prefix)
+                if (
+                    normalized_prefix
+                    and normalized_prefix
+                    not in _normalized_visible_evidence(body)
+                ):
+                    body_with_prefix = f"{heading_prefix}\n{body}"
+                    if _extraction_is_visible(visible_document, body_with_prefix):
+                        return body_with_prefix
                 return body
             if len(visible_document) >= min_body_chars:
                 return visible_document

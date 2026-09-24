@@ -130,3 +130,165 @@ def test_failed_trafilatura_uses_same_visible_text_fallback(monkeypatch):
 
     assert "appointment of Tory Sherman" in extracted
     assert "SCRIPT-BUDGET-NOISE" not in extracted
+
+
+def test_valid_extraction_keeps_local_context_at_actual_h1(monkeypatch):
+    article_body = (
+        "Acculon Energy Announces Opening of New 2GWh Battery Manufacturing "
+        "Facility in Mason, Ohio\n"
+        "Acculon Energy today announced the opening of its operating battery "
+        "manufacturing facility in Mason, Ohio. The plant has 2 GWh of annual "
+        "capacity and two automated production lines. " * 4
+    )
+
+    class _ArticleWithoutHeaderContext:
+        @staticmethod
+        def extract(_content, **_kwargs):
+            return article_body
+
+    html = f"""<html><head>
+      <title>Acculon Energy Announces Opening of New 2GWh Battery Manufacturing
+      Facility in Mason, Ohio</title>
+    </head><body>
+      <div>Unrelated archive date: January 3, 2024.</div>
+      <nav>Navigation updated February 2, 2025.</nav>
+      <main><article>
+        <div class="feature-resource_copy">
+          <div class="feature-resourece_label-wrapper">
+            <span hidden>Hidden revision: March 30, 2026.</span>
+            <span>News</span><span>April 21, 2026</span>
+          </div>
+          <h1>Acculon Energy Announces Opening of New 2GWh Battery Manufacturing
+          Facility in Mason, Ohio</h1>
+        </div>
+        <p>{article_body}</p>
+      </article></main>
+      <section class="related-articles">Related story: May 18, 2026.</section>
+    </body></html>"""
+    monkeypatch.setattr(verification_helpers, "_TRAFILATURA_AVAILABLE", True)
+    monkeypatch.setattr(
+        verification_helpers,
+        "_trafilatura",
+        _ArticleWithoutHeaderContext,
+        raising=False,
+    )
+
+    extracted = verification_helpers.extract_article_body(html)
+
+    assert extracted.startswith("News April 21, 2026\n")
+    assert extracted.endswith(article_body)
+    assert extracted.count("April 21, 2026") == 1
+    assert "January 3, 2024" not in extracted
+    assert "February 2, 2025" not in extracted
+    assert "March 30, 2026" not in extracted
+    assert "May 18, 2026" not in extracted
+
+
+def test_h1_context_is_bounded_and_existing_context_is_not_duplicated(
+    monkeypatch,
+):
+    heading = "Acme Opens Its Operating Plant"
+    raw_context = "START-TO-TRIM " + "OLD-LOCAL-CONTEXT " * 80 + (
+        "News April 21, 2026"
+    )
+    bounded_context = raw_context[-500:]
+    bounded_context = bounded_context.split(" ", 1)[1]
+    article_body = (
+        f"{bounded_context}\n"
+        f"{heading}\n"
+        + "Acme opened its operating plant and began production that day. " * 5
+    )
+
+    class _ArticleWithHeaderContext:
+        @staticmethod
+        def extract(_content, **_kwargs):
+            return article_body
+
+    html = f"""<html><body><main><article><header>
+      <div>{raw_context}</div>
+      <h1>{heading}</h1>
+    </header><p>{article_body}</p></article></main></body></html>"""
+    monkeypatch.setattr(verification_helpers, "_TRAFILATURA_AVAILABLE", True)
+    monkeypatch.setattr(
+        verification_helpers,
+        "_trafilatura",
+        _ArticleWithHeaderContext,
+        raising=False,
+    )
+
+    _visible, _heading, local_context = (
+        verification_helpers._visible_html_document(html)
+    )
+    extracted = verification_helpers.extract_article_body(html)
+
+    assert len(local_context) <= 500
+    assert local_context.endswith("News April 21, 2026")
+    assert "START-TO-TRIM" not in local_context
+    assert extracted == article_body
+    assert extracted.count("April 21, 2026") == 1
+
+
+def test_h1_context_crosses_nested_empty_wrappers_without_global_text():
+    html = """<html><body>
+      <div>Unrelated archive date: January 3, 2024.</div>
+      <article><header><time>April 21, 2026</time>
+        <div><div>   <h1>Acme Opens Its Operating Plant</h1></div></div>
+      </header></article>
+    </body></html>"""
+
+    _visible, heading, local_context = (
+        verification_helpers._visible_html_document(html)
+    )
+
+    assert heading == "Acme Opens Its Operating Plant"
+    assert local_context == "April 21, 2026"
+
+
+def test_visible_competing_h1_dates_remain_text_not_publication_metadata(
+    monkeypatch,
+):
+    heading = "Acme Opens Its Operating Plant"
+    article_body = (
+        f"{heading}\n"
+        + "Acme opened its operating plant and began production that day. " * 5
+    )
+
+    class _ArticleWithoutHeaderContext:
+        @staticmethod
+        def extract(_content, **_kwargs):
+            return article_body
+
+    source_url = "https://example.test/news/acme-opens-plant"
+    html = f"""<html><head><script type="application/ld+json">{{
+      "@type":"NewsArticle", "datePublished":"2026-05-18",
+      "mainEntityOfPage":null
+    }}</script></head><body><main><article><header>
+      <div>Event date April 21, 2026. Updated May 18, 2026.</div>
+      <h1>{heading}</h1>
+    </header><p>{article_body}</p></article></main></body></html>"""
+    monkeypatch.setattr(verification_helpers, "_TRAFILATURA_AVAILABLE", True)
+    monkeypatch.setattr(
+        verification_helpers,
+        "_trafilatura",
+        _ArticleWithoutHeaderContext,
+        raising=False,
+    )
+
+    extracted = verification_helpers.extract_article_body(html)
+
+    assert extracted.startswith(
+        "Event date April 21, 2026. Updated May 18, 2026.\n"
+    )
+    assert intent._published_date_from_html(html, source_url) == ""
+
+    conflicting_metadata = html.replace(
+        '"mainEntityOfPage":null',
+        f'"mainEntityOfPage":{{"@id":"{source_url}"}}',
+    ).replace(
+        "</head>",
+        '<meta property="article:published_time" '
+        'content="2026-04-21"></head>',
+    )
+    assert intent._published_date_from_html(
+        conflicting_metadata, source_url
+    ) == ""

@@ -17,6 +17,7 @@ results can reach 100 regardless of the number of requested intent criteria.
 Preserve verification, qualification, raw evidence, relative per-ICP scoring,
 existing deductions, cost eligibility, promotion, rewards and weights. Authority
 includes exact committed migration of the open unstarted September 25 round,
+canonical aggregate precision alignment in the publication integrity guard,
 local and real saved-output scoring validation, push, scorer-image publication
 if needed, and canonical paired gateway/normal-validator deployment. Preserve
 published historical scores and concurrent work. Use the existing runner,

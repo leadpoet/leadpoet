@@ -12,7 +12,9 @@ SERVICE_ENV="${VALIDATOR_SERVICE_ENV:-/home/ec2-user/.config/leadpoet/arena-vali
 SERVICE="${VALIDATOR_SERVICE_NAME:-leadpoet-arena-validator.service}"
 UNIT_PATH="${VALIDATOR_SERVICE_UNIT_PATH:-/etc/systemd/system/$SERVICE}"
 PYTHON="${VALIDATOR_PYTHON_BIN:-/home/ec2-user/arena-validator-venv311/bin/python3}"
-READY_TIMEOUT="${VALIDATOR_READY_TIMEOUT_SECONDS:-90}"
+# Leave room for supervised retries when the public chain RPC is rate limited.
+# Every retry still passes the full readiness check and ten-second PID stability.
+READY_TIMEOUT="${VALIDATOR_READY_TIMEOUT_SECONDS:-300}"
 STOP_TIMEOUT="${VALIDATOR_STOP_TIMEOUT_SECONDS:-9300}"
 LOCK_FILE="${VALIDATOR_RESTART_LOCK_FILE:-/home/ec2-user/.config/leadpoet/arena-validator-restart.lock}"
 TARGET_REQUEST="${VALIDATOR_DEPLOY_COMMIT:-origin/main}"

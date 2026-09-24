@@ -351,6 +351,49 @@ printf '%s' "$ACTIVATED"
     assert "waiting for supervised systemd retries" in result.stderr
 
 
+@pytest.mark.parametrize(
+    ("ready_after", "expected_success"),
+    ((100, True), (280, True), (295, False), (1000, False)),
+)
+def test_default_startup_window_covers_rate_limited_retries(
+    ready_after, expected_success
+):
+    text = SCRIPT.read_text()
+    timeout_setting = next(
+        line for line in text.splitlines() if line.startswith("READY_TIMEOUT=")
+    )
+    start = text.index('if ! sudo systemctl start "$SERVICE"; then')
+    end = text.index('\necho "SUCCESS:', start)
+    program = f"""set -euo pipefail
+unset VALIDATOR_READY_TIMEOUT_SECONDS
+{timeout_setting}
+SERVICE=validator.service
+SECONDS=0
+ACTIVATED=0
+fail() {{ echo "$*" >&2; exit 1; }}
+sudo() {{
+  if [ "$2" = start ]; then return 1; fi
+  if [ "$2" = show ]; then
+    if [ "$SECONDS" -ge {ready_after} ]; then echo 314; else echo 0; fi
+    return 0
+  fi
+  if [ "$2" = is-active ]; then [ "$SECONDS" -ge {ready_after} ]; return; fi
+  return 1
+}}
+sleep() {{ SECONDS=$((SECONDS + 2)); }}
+{text[start:end]}
+printf '%s' "$ACTIVATED"
+"""
+    result = subprocess.run(
+        ["bash", "-c", program], text=True, capture_output=True, timeout=5
+    )
+    assert (result.returncode == 0) is expected_success, result.stderr
+    if expected_success:
+        assert result.stdout == "1"
+    else:
+        assert "normal Arena validator did not remain ready" in result.stderr
+
+
 def test_failed_start_and_exhausted_readiness_window_remains_fail_closed():
     text = SCRIPT.read_text()
     start = text.index('if ! sudo systemctl start "$SERVICE"; then')

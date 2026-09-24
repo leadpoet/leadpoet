@@ -186,11 +186,16 @@ PART_A_BLOCK = """  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
         sufficient.
       * Opening or adding a warehouse, store, office, facility, delivery hub,
         or geographic location is not by itself a product or major-capability
-        launch. A proved new physical or digital product can qualify. For a
-        PRODUCT_LAUNCH target, require exact source evidence of that new product
-        or other material customer-usable capability. Do not relabel physical
-        expansion, fulfillment capacity, or local availability as product or
-        marketplace functionality.
+        launch. `PRODUCT_LAUNCH` is only an evidence category; it does not add
+        an alternative to target_icp_signal. Require each claim to semantically
+        satisfy one actual requested alternative, with exact source evidence;
+        do not require literal word overlap. A new physical or digital product,
+        SKU, category, or assortment can qualify when the target asks for that
+        kind of launch. When the target instead asks for a new customer-usable
+        capability, storefront or store format, or retail channel, adding
+        merchandise to an existing catalog or marketplace does not by itself
+        satisfy it. Do not relabel physical expansion, fulfillment capacity,
+        or local availability as product or marketplace functionality.
       * For a leadership-change alternative, do not invent an issuer or
         companywide-restructuring requirement. Unless the target explicitly
         requires a target-company announcement or a companywide change, exact

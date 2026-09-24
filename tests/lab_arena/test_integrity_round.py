@@ -85,7 +85,8 @@ class IntegrityHarness(fixtures.Harness):
 
     def build_service(self):
         service = super().build_service()
-        service._config.defaults = replace(service._config.defaults, integrity_from="2026-01-01T00:00:00Z")
+        # These fixtures exercise the original frozen integrity policy.
+        service._config.defaults = replace(service._config.defaults, integrity_from="2026-01-01T00:00:00Z", normalize_intent_scale=False)
         def metagraph(*, finalized=True):
             assert finalized
             hotkeys = tuple(key.ss58_address for key in fixtures.KEYS.values())

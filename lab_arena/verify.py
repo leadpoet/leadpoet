@@ -42,6 +42,8 @@ from lab_arena.contracts import (
     ArenaContractError,
     BENCHMARK_ICP_COUNT,
     MAX_BENCHMARK_ICP_COUNT,
+    SCORE_NORMALIZATION_BINDING,
+    AVAILABLE_INTENT_CAP_NORMALIZATION,
     FINALIST_COUNT,
     KING_OUTCOMES,
     STAGE_1_ICP_COUNT,
@@ -196,6 +198,9 @@ def per_icp_score(
     the breakdowns multiplied by the policy points. The evaluator's default
     per-ICP mean is never used. Company-quality rounds also multiply by the
     fraction of requested companies that qualify.
+    New rounds then express that net score as a percentage of the raw intent
+    cap available from the ICP's requested criteria. Historical policies have
+    no normalization binding and retain their original arithmetic.
     """
 
     validated_policy = validate_scorer_policy(policy)
@@ -222,6 +227,11 @@ def per_icp_score(
             for row in rows[:goal]
         )
         result["per_icp_score"] *= qualified / goal
+    if validated_policy["env_bindings"].get(SCORE_NORMALIZATION_BINDING) == AVAILABLE_INTENT_CAP_NORMALIZATION:
+        cap = _evaluator().available_intent_score_cap(icp)
+        result["per_icp_score"] = min(100.0, float(
+            Fraction(str(result["per_icp_score"])) * 100 / Fraction(str(cap))
+        ))
     return dict(result)
 
 

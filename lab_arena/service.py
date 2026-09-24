@@ -315,6 +315,9 @@ class RoundDefaults:
     contacts_from: Optional[str] = None
     company_quality_from: Optional[str] = None
     intent_details_from: Optional[str] = None
+    # Frozen only into newly created integrity rounds. Existing rounds keep
+    # their original policy, including after a gateway restart.
+    normalize_intent_scale: bool = True
     benchmark_disclosure_from: Optional[str] = None
     min_submission_hours: int = 6
     # The king's pool as a percent of total emissions (LAB_ARENA_POOL_PERCENT).
@@ -982,6 +985,12 @@ class ArenaService:
                 company_quality=quality_policy.enabled(document),
                 intent_details=True,
             )
+        if defaults.normalize_intent_scale and integrity.enabled(document):
+            document["scorer_policy"] = dict(document["scorer_policy"], env_bindings={
+                **document["scorer_policy"]["env_bindings"],
+                contracts.SCORE_NORMALIZATION_BINDING:
+                    contracts.AVAILABLE_INTENT_CAP_NORMALIZATION,
+            })
         if (
             defaults.benchmark_disclosure_from is not None
             and cutoff >= icp_disclosure.parse_activation(

@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: reachable Arena score scale
+
+On 2026-09-24 the user authorized the narrow Arena normalization fix so perfect
+results can reach 100 regardless of the number of requested intent criteria.
+Preserve verification, qualification, raw evidence, relative per-ICP scoring,
+existing deductions, cost eligibility, promotion, rewards and weights. Authority
+includes exact committed migration of the open unstarted September 25 round,
+local and real saved-output scoring validation, push, scorer-image publication
+if needed, and canonical paired gateway/normal-validator deployment. Preserve
+published historical scores and concurrent work. Use the existing runner,
+scorer, broker and isolated shadow validation path; do not create another
+competition mechanism. This scope ends after deployment and end-to-end proof.
+
 ## Scoped production authorization: audited bounded verifier improvements
 
 On 2026-09-24 the user authorized the narrow evidence-handling and semantic

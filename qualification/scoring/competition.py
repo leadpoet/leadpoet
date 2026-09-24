@@ -261,6 +261,21 @@ def _normalized_icp(icp: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def available_intent_score_cap(icp: Mapping[str, Any]) -> float:
+    """Maximum raw intent score for this buyer's distinct requested criteria.
+
+    Share the judge's ICP parser and cap table. Submitted evidence never sets
+    the denominator, and repeated or bonus criteria have the same meaning in
+    verification and score normalization.
+    """
+
+    from qualification.scoring.lead_scorer import COMPETITION_INTENT_CAP_BY_SIGNAL_COUNT
+
+    count = len(_normalized_icp(icp)["intent_signals"])
+    caps = COMPETITION_INTENT_CAP_BY_SIGNAL_COUNT
+    return float(caps[min(count, max(caps))])
+
+
 def _normalized_company(
     company: Mapping[str, Any], *, integrity_policy: bool = False,
     contacts_required: bool = False,

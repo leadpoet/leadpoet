@@ -1181,6 +1181,9 @@ def validate_submission_finalize_body(body: Any) -> Dict[str, Any]:
 # Scorer policy and scoring plan (section 12.1)
 # ---------------------------------------------------------------------------
 
+SCORE_NORMALIZATION_BINDING = "ARENA_SCORE_NORMALIZATION"
+AVAILABLE_INTENT_CAP_NORMALIZATION = "available_intent_cap_v1"
+
 SCORER_POLICY_FIELDS = (
     F("schema_version", "str", choices=(SCORER_POLICY_SCHEMA_VERSION,)),
     F("scoring_adapter_version", "str", minimum=1, maximum=64),
@@ -1214,6 +1217,11 @@ def validate_scorer_policy(document: Any) -> Dict[str, Any]:
     for key, value in policy["env_bindings"].items():
         if not isinstance(key, str) or not isinstance(value, str):
             raise ArenaContractError("env_bindings must map strings to strings")
+    if SCORE_NORMALIZATION_BINDING in policy["env_bindings"]:
+        if policy["env_bindings"][SCORE_NORMALIZATION_BINDING] != AVAILABLE_INTENT_CAP_NORMALIZATION:
+            raise ArenaContractError("unsupported score normalization")
+        if policy["scoring_adapter_version"] not in ("qualification_integrity_v2", "qualification_contacts_v3"):
+            raise ArenaContractError("intent score normalization requires integrity scoring")
     return policy
 
 

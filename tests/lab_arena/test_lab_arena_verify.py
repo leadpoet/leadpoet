@@ -146,8 +146,9 @@ def test_first_n_slice_and_employee_bucket_skip_are_recomputed():
 def test_stage_score_requires_the_exact_stage_or_final_icp_count():
     assert verify.stage_score([0.1] * 10, 10) == 0.1
     assert verify.stage_score([0.1] * 20, 20) == 0.1
+    assert verify.stage_score([1.0] * 15, 15) == 1.0
     assert verify.stage_score(list(range(20)), 20) == verify.stage_score(list(reversed(range(20))), 20)
-    for scores, denominator in (([1.0] * 9, 10), ([1.0] * 19, 20), ([1.0] * 15, 15), ([1.0] * 29, 30)):
+    for scores, denominator in (([1.0] * 9, 10), ([1.0] * 19, 20), ([1.0] * 14, 15), ([1.0] * 29, 30)):
         with pytest.raises(ArenaContractError):
             verify.stage_score(scores, denominator)
 

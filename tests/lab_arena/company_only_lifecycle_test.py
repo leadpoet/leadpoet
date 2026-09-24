@@ -130,12 +130,15 @@ def test_v6_discards_legacy_contact_claims_before_cache_identity():
 
 
 @pytest.mark.parametrize(
+    "normalized_scale", [False, True], ids=["historical-scale", "reachable-100"]
+)
+@pytest.mark.parametrize(
     "company_quality",
     [False, True],
     ids=["current-production-policy", "company-quality-policy"],
 )
 def test_company_only_ten_icp_baseline_and_miner_complete_full_lifecycle(
-    database, tmp_path, company_quality
+    database, tmp_path, company_quality, normalized_scale
 ):
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
@@ -173,6 +176,7 @@ def test_company_only_ten_icp_baseline_and_miner_complete_full_lifecycle(
         pool_percent=30,
         rewards_enabled=True,
         per_icp_cost_policy=True,
+        normalize_intent_scale=normalized_scale,
         contacts_from=None,
         company_quality_from=(
             "2026-01-01T00:00:00Z" if company_quality else None
@@ -214,7 +218,7 @@ def test_company_only_ten_icp_baseline_and_miner_complete_full_lifecycle(
                 for company in companies:
                     name = str(company["company_name"])
                     slug = name.casefold().replace(" ", "-")
-                    score = 40.0 if name.startswith("PublicBaseline") else 80.0
+                    score = 30.0 if name.startswith("PublicBaseline") else 60.0
                     raw = _positive_breakdown(
                         name,
                         str(urlsplit(company["company_website"]).hostname),
@@ -316,6 +320,9 @@ def test_company_only_ten_icp_baseline_and_miner_complete_full_lifecycle(
     assert configuration["stage_1_icp_count"] == 5
     assert configuration["stage_2_icp_count"] == 5
     assert configuration["promotion_margin"] == 0.5
+    assert (configuration["scorer_policy"]["env_bindings"].get(
+        contracts.SCORE_NORMALIZATION_BINDING
+    ) == contracts.AVAILABLE_INTENT_CAP_NORMALIZATION) is normalized_scale
     assert configuration["intent_details_policy"] == intent_details_policy.POLICY
     assert (configuration.get("company_quality_policy") == quality_policy.POLICY) is (
         company_quality
@@ -382,6 +389,9 @@ def test_company_only_ten_icp_baseline_and_miner_complete_full_lifecycle(
 
     ranking = published["publication_doc"]["final_ranking"]
     assert len(ranking) == 2
+    assert sorted(entry["final_score"] for entry in ranking) == (
+        [50.0, 100.0] if normalized_scale else [30.0, 60.0]
+    )
     assert all(entry["eligible"] for entry in ranking)
     # The fixture has five LinkedIn identities per ICP, but all five company
     # websites share one registrable example.com domain. The cost denominator

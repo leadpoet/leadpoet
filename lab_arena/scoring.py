@@ -81,6 +81,7 @@ def build_scorer_policy(
     scoring_adapter_version: str = SCORING_ADAPTER_VERSION_V1,
     company_quality: bool = False,
     intent_details: bool = False,
+    normalize_intent_scale: bool = False,
 ) -> Dict[str, Any]:
     """Return the plain scorer settings used for every participant."""
 
@@ -98,7 +99,10 @@ def build_scorer_policy(
         "provider_profile": provider_profile,
         "pre_slice_rule": "first_n_model_order",
         "employee_bucket_rule": "lab_relaxed_buckets",
-        "env_bindings": {},
+        "env_bindings": ({
+            contracts.SCORE_NORMALIZATION_BINDING:
+                contracts.AVAILABLE_INTENT_CAP_NORMALIZATION,
+        } if normalize_intent_scale else {}),
     })
 
 

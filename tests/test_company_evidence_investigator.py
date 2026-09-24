@@ -3294,19 +3294,18 @@ def test_public_stage_needs_listing_proof_not_labels_or_plans():
     )
 
 
-def test_acculon_retrospective_series_a_statement_proves_completed_round():
+def test_acculon_retrospective_series_a_statement_requires_recipient_binding():
     quote = (
         "The facility’s opening follows a period of rapid growth for Acculon, "
         "including a Series A investment led by Terex Corporation and the "
         "expansion of its Acculon Labs testing division."
     )
 
-    assert _stage_quote_supports_observation("series a", quote)
+    assert not _stage_quote_supports_observation("series a", quote)
     assert not _stage_quote_supports_observation("series b", quote)
     assert _stage_quote_supports_observation(
         "series a",
-        "The facility opening followed a period of growth, including a "
-        "minority Series A investment led by Terex Corporation.",
+        "Acculon completed a Series A financing round led by Terex Corporation.",
     )
 
 
@@ -3341,13 +3340,31 @@ def test_acculon_retrospective_series_a_statement_proves_completed_round():
             "The facility opening follows a period of growth, including a "
             "Series A investment that might close next year."
         ),
+        (
+            "Acculon's investment policy follows a diversified portfolio "
+            "strategy, including a Series A investment in Beta Corporation "
+            "led by Terex."
+        ),
+        (
+            "Acculon reported that the facility opening follows a period of "
+            "rapid growth for Beta Corporation, including a Series A "
+            "investment led by Terex."
+        ),
+        (
+            "The facility opening follows a period of growth for Acculon, "
+            "including a Series A investment for Beta Corporation led by Terex."
+        ),
+        (
+            "Terex's investor portfolio follows a period of growth for Acculon, "
+            "including a Series A investment led by Terex."
+        ),
     ],
 )
 def test_retrospective_round_pattern_rejects_uncompleted_or_old_events(quote):
     assert not _stage_quote_supports_observation("series a", quote)
 
 
-def test_retrospective_round_keeps_latest_stage_and_company_binding():
+def test_retrospective_round_stays_unproven_and_keeps_company_binding():
     series_a = (
         "The facility opening follows rapid growth for Acculon, including a "
         "Series A investment led by Terex Corporation."
@@ -3355,6 +3372,7 @@ def test_retrospective_round_keeps_latest_stage_and_company_binding():
     later_series_b = "Acculon later completed a Series B financing round."
     combined = f"{series_a} {later_series_b}"
 
+    assert not _stage_quote_supports_observation("series a", series_a)
     assert not _stage_quote_supports_observation("series a", combined)
     assert _stage_quote_supports_observation("series b", combined)
 

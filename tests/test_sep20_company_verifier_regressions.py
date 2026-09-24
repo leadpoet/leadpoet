@@ -5,11 +5,16 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from gateway.qualification.models import CompanyOutput
+from lab_arena import scoring as arena_scoring
 from qualification.scoring import company_verification, lead_scorer
 from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
     COMPANY_FIT_MISMATCH,
     COMPANY_FIT_UNAVAILABLE,
+    company_fit_unavailable,
+)
+from qualification.scoring.competition import (
+    scorer_breakdown_has_retryable_infrastructure_failure,
 )
 
 
@@ -388,13 +393,19 @@ def test_required_attribute_source_outage_is_unavailable_and_cached(monkeypatch)
     assert grounding["status"] == "source_unavailable"
     assert grounding["cache_hit"] is True
     assert result.details["failure_reason_code"] == "provider_error"
+    assert result.details.get("failure_class") != "insufficient_fit_evidence"
     assert result.details["dimension_evidence"]["required_attribute"] == {
         "url": "",
         "quote": "",
     }
+    assert scorer_breakdown_has_retryable_infrastructure_failure({
+        "verifier_gate_receipts": [result.receipt("company_fit")],
+    })
 
 
-def test_repeated_ungrounded_attribute_quote_is_retryable_malformed(monkeypatch):
+def test_repeated_ungrounded_attribute_quote_is_insufficient_fit_evidence(
+    monkeypatch,
+):
     source_url = "https://example.com/announcement"
     verdict = _required_attribute_verdict(
         satisfied=True,
@@ -422,8 +433,239 @@ def test_repeated_ungrounded_attribute_quote_is_retryable_malformed(monkeypatch)
     assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert provider.await_count == 2
     assert fetch.await_count == 1
-    assert result.details["failure_reason_code"] == "malformed_response"
+    assert result.details["failure_class"] == "insufficient_fit_evidence"
+    assert "failure_reason_code" not in result.details
+    assert result.details["required_attribute_grounding"]["status"] == (
+        "quote_absent"
+    )
+    assert result.details["dimension_evidence"]["required_attribute"] == {
+        "url": "",
+        "quote": "",
+    }
+    assert not scorer_breakdown_has_retryable_infrastructure_failure({
+        "verifier_gate_receipts": [result.receipt("company_fit")],
+    })
+
+
+def _complete_attribute_verdict(source_url):
+    return {
+        "observed_company_name": "Example Company",
+        "observed_company_website": "https://example.com/",
+        "observed_company_linkedin": "",
+        "observed_employee_count": "201-500",
+        "employee_size_matches": True,
+        "employee_size_evidence_url": "https://example.com/about",
+        "employee_size_evidence_quote": "Example Company has 250 employees.",
+        "observed_industry": "Software",
+        "observed_subindustry": "Business software",
+        "industry_matches": True,
+        "industry_activity_role": "supplier_operator",
+        "industry_evidence_url": "https://example.com/about",
+        "industry_evidence_quote": "Example Company builds business software.",
+        "observed_hq_country": "United States",
+        "observed_hq_state": "California",
+        "geography_matches": True,
+        "geography_evidence_url": "https://example.com/about",
+        "geography_evidence_quote": "Headquartered in California.",
+        "observed_company_stage": "",
+        "stage_matches": None,
+        "stage_evidence_url": "",
+        "stage_evidence_quote": "",
+        "attribute_satisfied": True,
+        "required_attribute_evidence_url": source_url,
+        "required_attribute_evidence_quote": (
+            "Example Company completed the acquisition."
+        ),
+        "reason": "required attribute check",
+    }
+
+
+def test_quote_absent_does_not_mask_retryable_linkedin_refresh(monkeypatch):
+    source_url = "https://example.com/announcement"
+    verdict = _complete_attribute_verdict(source_url)
+    provider = AsyncMock(side_effect=[(dict(verdict), ""), (dict(verdict), "")])
+    fetch = AsyncMock(return_value=(
+        200,
+        source_url,
+        "Example Company entered into an acquisition agreement.",
+    ))
+
+    async def retryable_refresh(
+        value,
+        _company_value,
+        _icp_value,
+        *,
+        invocation_cache,
+        **_kwargs,
+    ):
+        invocation_cache["refresh_outcome"] = "retryable_failure"
+        unavailable = dict(value)
+        unavailable.update(
+            observed_employee_count=None,
+            employee_size_matches=None,
+            employee_size_evidence_url="",
+            employee_size_evidence_quote="",
+        )
+        return unavailable
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", fetch)
+    monkeypatch.setattr(
+        lead_scorer,
+        "_refresh_linkedin_employee_size_observation",
+        retryable_refresh,
+    )
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _company(),
+        _icp(company_stage="", required_attribute="Completed an acquisition."),
+        require_company_fit_dimensions=True,
+    ))
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert result.details.get("failure_class") != "insufficient_fit_evidence"
+    assert result.details["failure_reason_code"] == "malformed_response"
+    assert scorer_breakdown_has_retryable_infrastructure_failure({
+        "verifier_gate_receipts": [result.receipt("company_fit")],
+    })
+
+
+def test_quote_absent_does_not_mask_retryable_homepage_identity(monkeypatch):
+    source_url = "https://example.com/announcement"
+    verdict = _required_attribute_verdict(
+        satisfied=True,
+        url=source_url,
+        quote="Example Company completed the acquisition.",
+    ) | {
+        "observed_company_name": "Example Company",
+        "observed_company_website": "https://example.com/",
+    }
+    provider = AsyncMock(side_effect=[(dict(verdict), ""), (dict(verdict), "")])
+    fetch = AsyncMock(return_value=(
+        200,
+        source_url,
+        "Example Company entered into an acquisition agreement.",
+    ))
+
+    def unresolved_identity(*_args, **_kwargs):
+        return {
+            "decision": COMPANY_FIT_UNAVAILABLE,
+            "reason_code": "identity_not_proven",
+            "evidence_source": "company_web_reverification",
+            "submitted_name": "example company",
+            "submitted_domain": "example.com",
+            "submitted_linkedin_slug": "",
+            "observed_name": "example company",
+            "observed_domain": "example.com",
+            "observed_linkedin_slug": "",
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", fetch)
+    monkeypatch.setattr(lead_scorer, "_web_identity_receipt", unresolved_identity)
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _company(),
+        _icp(company_stage="", required_attribute="Completed an acquisition."),
+        verified_homepage_identity=company_fit_unavailable(
+            "website returned HTTP 502"
+        ),
+    ))
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details.get("failure_class") != "insufficient_fit_evidence"
+    assert result.details["failure_reason_code"] == "malformed_response"
+    assert scorer_breakdown_has_retryable_infrastructure_failure({
+        "verifier_gate_receipts": [result.receipt("company_fit")],
+    })
+
+
+@pytest.mark.parametrize(
+    ("failure_reason", "error"),
+    [
+        ("malformed_response", "provider response JSON was malformed"),
+        ("provider_error", "provider HTTP 502"),
+    ],
+)
+def test_required_attribute_request_failures_remain_retryable(
+    monkeypatch,
+    failure_reason,
+    error,
+):
+    async def failed_request(**kwargs):
+        kwargs["diagnostic"][lead_scorer.VERIFIER_FAILURE_REASON_KEY] = (
+            failure_reason
+        )
+        return None, error
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(
+        lead_scorer,
+        "_request_company_reverify_json",
+        failed_request,
+    )
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _company(),
+        _icp(company_stage="", required_attribute="Completed an acquisition."),
+    ))
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["failure_reason_code"] == failure_reason
+    assert result.details.get("failure_class") != "insufficient_fit_evidence"
+    assert scorer_breakdown_has_retryable_infrastructure_failure({
+        "verifier_gate_receipts": [result.receipt("company_fit")],
+    })
+
+
+def test_score_work_item_preserves_other_companies_with_insufficient_quote():
+    calls = []
+    companies = [
+        {"company_name": name, "employee_count": "201-500"}
+        for name in ("Accepted One", "Just Ice Tea", "Accepted Two")
+    ]
+
+    def scorer(invoked, _icp_value, _is_reference_model):
+        calls.append([company["company_name"] for company in invoked])
+        return [
+            {
+                "final_score": 40.0,
+                "verifier_gate_receipts": [
+                    {"gate": "company_fit", "decision": "match"}
+                ],
+            },
+            {
+                "final_score": 0.0,
+                "failure_reason": (
+                    "Company fit unavailable: unproven dimensions: "
+                    "required_attribute"
+                ),
+                "verifier_gate_receipts": [{
+                    "gate": "company_fit",
+                    "decision": "unavailable",
+                    "failure_class": "insufficient_fit_evidence",
+                }],
+            },
+            {
+                "final_score": 55.0,
+                "verifier_gate_receipts": [
+                    {"gate": "company_fit", "decision": "match"}
+                ],
+            },
+        ]
+
+    result = arena_scoring.score_work_item(
+        {"scored_run_id": "quote-absent-company-zero"},
+        icp={"employee_count": ["201-500"], "max_companies": 3},
+        companies=companies,
+        scorer=scorer,
+        max_retries=3,
+    )
+
+    assert calls == [["Accepted One", "Just Ice Tea", "Accepted Two"]]
+    assert [row["final_score"] for row in result] == [40.0, 0.0, 55.0]
 
 
 def test_required_attribute_grounding_cache_bounds_distinct_urls():

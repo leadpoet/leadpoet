@@ -298,17 +298,6 @@ def _series_stage_statement_patterns(label: str) -> tuple[re.Pattern, ...]:
 
     return (
         re.compile(
-            rf"(?:^|[.!?;:\n]\s*)"
-            rf"(?![^.!?;:\n]{{0,160}}\b(?:if|whether|subject\s+to|"
-            rf"formerly|previously|once)\b)"
-            rf"[^.!?;:\n]{{1,120}}\b(?:follows|followed)\b"
-            rf"[^.!?;:\n]{{1,120}}\bincluding\s+(?:an?\s+)?"
-            rf"(?:minority\s+)?{label}\s+"
-            rf"(?:funding|financing|investment|round)\b"
-            rf"(?:\s+led\s+by\b)?",
-            re.I,
-        ),
-        re.compile(
             rf"\b(?:latest|most\s+recent)\s+(?:funding\s+)?round\s+"
             rf"(?:was|is)\b.{{0,30}}\b{label}\b",
             re.I,
@@ -5047,6 +5036,55 @@ async def _llm_reverify_company(
     required_attribute_grounding_failure = (
         _required_attribute_grounding_failure_reason(repaired_verdict)
     )
+    required_attribute_grounding = repaired_verdict.get(
+        _REQUIRED_ATTRIBUTE_GROUNDING
+    )
+    other_incomplete = tuple(
+        dimension
+        for dimension in repaired_incomplete
+        if dimension != "required_attribute"
+    )
+    quote_absent_is_insufficient_evidence = bool(
+        repaired_result.decision == COMPANY_FIT_UNAVAILABLE
+        and "required_attribute" in repaired_incomplete
+        and isinstance(required_attribute_grounding, Mapping)
+        and required_attribute_grounding.get("status") == "quote_absent"
+        and not (
+            "employee_size" in other_incomplete
+            and linkedin_refresh_outcome == "retryable_failure"
+        )
+        and not (
+            "identity" in other_incomplete
+            and verified_homepage_identity is not None
+            and _homepage_identity_has_retryable_failure(
+                verified_homepage_identity
+            )
+        )
+        and (
+            not other_incomplete
+            or _has_explicitly_unproven_fit_dimensions(
+                repaired_verdict,
+                other_incomplete,
+                icp=icp,
+                linkedin_refresh_outcome=linkedin_refresh_outcome,
+                identity_receipt=(
+                    repaired_result.details.get("identity_receipt")
+                    if isinstance(repaired_result.details, Mapping)
+                    else None
+                ),
+            )
+        )
+    )
+    if quote_absent_is_insufficient_evidence:
+        return company_fit_unavailable(
+            repaired_result.reason,
+            details={
+                **repaired_result.details,
+                "failure_class": (
+                    INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS
+                ),
+            },
+        )
     if (
         repaired_result.decision == COMPANY_FIT_UNAVAILABLE
         and "required_attribute" in repaired_incomplete

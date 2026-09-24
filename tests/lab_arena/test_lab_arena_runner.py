@@ -1354,15 +1354,17 @@ def test_binary_requirement_install_does_not_retry_unknown_pip_failure(
 
     monkeypatch.setattr(rn.subprocess, "run", run)
 
-    with pytest.raises(rn.AgentDependencyError):
+    with pytest.raises(rn.AgentDependencyError) as raised:
         rn.install_binary_requirements(requirements, target)
 
     assert pip_calls == 1
     assert not any(target.iterdir())
+    assert raised.value.diagnostic_detail == "No matching distribution found"
 
 
+@pytest.mark.parametrize("stderr_error", (None, OSError, ValueError, RuntimeError))
 def test_submitted_dependency_failure_is_a_model_error_not_an_abandoned_lease(
-    tmp_path,
+    tmp_path, capsys, monkeypatch, stderr_error,
 ):
     payload = _source_archive_with_requirements("missing-package==1.0.0\n")
     run_lease = lease()
@@ -1371,7 +1373,10 @@ def test_submitted_dependency_failure_is_a_model_error_not_an_abandoned_lease(
     api.source_payload = payload
 
     def reject_dependency(_requirements, _target):
-        raise rn.AgentDependencyError("binary dependency installation failed")
+        raise rn.AgentDependencyError(
+            "binary dependency installation failed",
+            detail="No matching distribution for missing-package==1.0.0 token=test-secret",
+        )
 
     sandbox = BridgingRuntime(output={"companies": [valid_company(1)]})
     (tmp_path / "work").mkdir()
@@ -1382,12 +1387,26 @@ def test_submitted_dependency_failure_is_a_model_error_not_an_abandoned_lease(
         dependency_installer=reject_dependency,
     )
     runner_ = rn.Runner(config)
+    if stderr_error is not None:
+        failed_stderr = Mock()
+        failed_stderr.write.side_effect = stderr_error("diagnostic sink failed")
+        monkeypatch.setattr(rn.sys, "stderr", failed_stderr)
 
     assert runner_.run_once() == 1
     assert runner_.abandoned == 0
     assert sandbox.specs == []
-    assert api.completions[0]["body"]["result"]["terminal_status"] == "model_error"
+    result = contracts.validate_run_result(api.completions[0]["body"]["result"])
+    assert result["terminal_status"] == "model_error"
+    assert "failure_diagnostic" not in result
+    assert not any(result["resource_summary"].values())
     assert api.completions[0]["body"]["output"] is None
+    assert "test-secret" not in json.dumps(api.completions)
+    if stderr_error is None:
+        log = capsys.readouterr().err
+        assert "run_id=r1 stage=dependency_install failure_kind=source_error" in log
+        assert "No matching distribution for missing-package==1.0.0" in log
+        assert "token=[redacted]" in log
+        assert "test-secret" not in log
 
 
 @pytest.mark.parametrize("stderr_fails", (False, True))
@@ -1431,8 +1450,60 @@ def test_persistent_dependency_infrastructure_failure_is_provider_error(
     if not stderr_fails:
         assert capsys.readouterr().err == (
             "Lab Arena dependency installation failure: "
-            "run_id=r1 failure_kind=network_error\n"
+            "run_id=r1 stage=dependency_install "
+            "failure_kind=network_error detail=network_error\n"
         )
+
+
+@pytest.mark.parametrize("network", (False, True))
+def test_dependency_error_detail_survives_cleanup_without_secret_output(
+    tmp_path, monkeypatch, capsys, network
+):
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("missing-package==1.0.0\n", encoding="utf-8")
+    target = tmp_path / "deps"
+    target.mkdir()
+    stderr_paths = []
+
+    def run(command, **kwargs):
+        if "pip" in command:
+            stderr_paths.append(Path(kwargs["stderr"].name))
+            kwargs["stderr"].write(
+                b"resolver progress\n" * 1000
+                + (b"NewConnectionError('connection failed') " if network else b"ERROR: ")
+                + b"missing-package==1.0.0 Bearer secret-bearer "
+                + b"https://user:pass@private.test/pip?token=query-secret "
+                + b"api_key=plain-secret sk-proj-secret\n"
+            )
+            return type("Result", (), {"returncode": 1})()
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(rn.subprocess, "run", run)
+    expected = rn.DependencyInstallInfrastructureError if network else rn.AgentDependencyError
+    with pytest.raises(expected) as raised:
+        rn.install_binary_requirements(requirements, target)
+    assert len(stderr_paths) == (2 if network else 1)
+    assert all(not p.exists() for p in stderr_paths)
+    detail = raised.value.diagnostic_detail
+    assert "missing-package==1.0.0" in detail
+    assert len(detail) <= rn.MAX_JUDGE_DIAGNOSTIC_CHARS
+    assert "\n" not in detail
+    for secret in ("secret-bearer", "user:pass", "query-secret", "plain-secret", "sk-proj-secret"):
+        assert secret not in detail
+    rn._log_dependency_failure("r1", raised.value)
+    assert detail in capsys.readouterr().err
+
+
+def test_pip_detail_discards_partial_secret_line_and_handles_missing_stderr(tmp_path):
+    stderr = tmp_path / "pip-stderr.log"
+    assert rn._pip_failure_detail(stderr) == ""
+    stderr.write_bytes(
+        b"token=" + b"s" * rn._DEPENDENCY_INSTALL_STDERR_TAIL_BYTES
+        + b"\nERROR: No matching distribution for missing-package==1.0.0\n"
+    )
+    assert rn._pip_failure_detail(stderr) == (
+        "ERROR: No matching distribution for missing-package==1.0.0"
+    )
 
 
 def test_http_source_download_uses_the_existing_lease_header_and_a_byte_cap():

@@ -1,5 +1,15 @@
 # Agent Instructions
 
+## Scoped production authorization: startup failure diagnostics
+
+On 2026-09-24 the user authorized retaining the real dependency/startup failure
+reason in existing bounded, redacted private operator diagnostics, focused
+regression tests, push, and canonical paired gateway/validator deployment.
+Preserve terminal classifications, retry rules, result schemas, saved results,
+scoring, costs, model workflow, credentials, rewards and concurrent work.
+Do not restart a published benchmark or interrupt another task's validation.
+This scope ends after exact-release deployment and diagnostic verification.
+
 ## Scoped production authorization: reachable Arena score scale
 
 On 2026-09-24 the user authorized the narrow Arena normalization fix so perfect

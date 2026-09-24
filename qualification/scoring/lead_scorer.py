@@ -5383,6 +5383,13 @@ async def _llm_reverify_company(
         if current_profile_cache.get("structured_employee_size_applicable")
         else None
     )
+    employee_size_conflict = bool(
+        evidence_investigator
+        and _employee_size_sources_conflict(
+            repaired_verdict,
+            structured_employee_size_evidence,
+        )
+    )
     structured_public_company_evidence = current_profile_cache.get(
         "structured_public_company_evidence"
     )

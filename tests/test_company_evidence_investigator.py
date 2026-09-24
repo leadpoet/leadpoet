@@ -3649,6 +3649,267 @@ def test_arena_conflict_check_collects_structured_size_without_replacing_direct_
     assert _employee_size_sources_conflict(refreshed, structured) is True
 
 
+def test_oxpay_schema_repair_recomputes_stale_employee_conflict(monkeypatch):
+    """A same-entity repair may omit size without erasing bound profile proof."""
+
+    company = _company(
+        name="OxPay",
+        website="https://oxpayfinancial.com/",
+        linkedin="https://www.linkedin.com/company/oxpayfinancial",
+    ).model_copy(update={
+        "employee_count": "51-200",
+        "company_stage": "Public",
+        "country": "Singapore",
+        "state": "",
+    })
+    icp = _icp(
+        employee_count="51-200",
+        company_stage="Public",
+        industry="Payments",
+        sub_industry="Payments infrastructure and merchant acquiring",
+        product_service="A merchant payments platform.",
+        geography="Singapore",
+        required_attribute=(
+            "Operates a payments business with evidence of a recent strategic "
+            "partnership."
+        ),
+    )
+    initial = _complete_verdict(
+        observed_company_name="OxPay",
+        observed_company_website="https://oxpayfinancial.com",
+        observed_company_linkedin=(
+            "https://www.linkedin.com/company/oxpayfinancial"
+        ),
+        observed_employee_count=37,
+        employee_size_matches=False,
+        employee_size_evidence_url=(
+            "https://www.oxpayfinancial.com/reports/sustainability-2024.pdf"
+        ),
+        employee_size_evidence_quote=(
+            "we had 36 full-time employees in FY2023 and 37 full-time "
+            "employees in FY2024"
+        ),
+        observed_industry="Payments",
+        observed_subindustry="merchant payment services",
+        industry_matches=True,
+        industry_activity_role="supplier_operator",
+        industry_evidence_url="https://oxpayfinancial.com/about-us/",
+        industry_evidence_quote=(
+            "OxPay provides merchant payment services through an integrated "
+            "platform."
+        ),
+        observed_hq_country="Singapore",
+        observed_hq_state="",
+        geography_matches=False,
+        geography_evidence_url=(
+            "https://www.linkedin.com/company/oxpayfinancial"
+        ),
+        geography_evidence_quote=(
+            "OxPay Financial Limited is headquartered in Singapore."
+        ),
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url="https://oxpayfinancial.com/investor-relations/",
+        stage_evidence_quote=(
+            "OxPay ordinary shares are listed on SGX under ticker TVV."
+        ),
+        attribute_satisfied=True,
+        required_attribute_evidence_url=(
+            "https://www.linkedin.com/company/oxpayfinancial"
+        ),
+        required_attribute_evidence_quote=(
+            "OxPay has offices in Singapore, Malaysia, Indonesia and Thailand."
+        ),
+    )
+    repaired = dict(
+        initial,
+        observed_employee_count=None,
+        employee_size_matches=None,
+        employee_size_evidence_url="",
+        employee_size_evidence_quote="",
+        geography_matches=True,
+        required_attribute_evidence_url="https://oxpayfinancial.com/about-us/",
+        required_attribute_evidence_quote=(
+            "OxPay helps merchants process payments through its integrated "
+            "platform and announced a strategic partnership."
+        ),
+    )
+    structured = {
+        "employee_count": "51-200",
+        "provider": "harvestapi_get_company",
+        "source_field": "employeeCountRange",
+        "url": "https://www.linkedin.com/company/oxpayfinancial",
+        "website": "https://oxpayfinancial.com/",
+    }
+    calls = {"provider": 0, "investigator": 0, "structured": 0, "current": 0}
+
+    async def provider(**_kwargs):
+        calls["provider"] += 1
+        return (initial if calls["provider"] == 1 else repaired), ""
+
+    async def structured_profile(
+        domain,
+        profile_url,
+        *,
+        diagnostic,
+        public_company_evidence,
+        **_kwargs,
+    ):
+        del diagnostic, public_company_evidence
+        calls["structured"] += 1
+        assert domain == "oxpayfinancial.com"
+        assert profile_url == (
+            "https://www.linkedin.com/company/oxpayfinancial"
+        )
+        return structured
+
+    async def current_profile(profile_url, **_kwargs):
+        calls["current"] += 1
+        return {
+            "outcome": lead_scorer.CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE,
+            "url": profile_url,
+        }
+
+    async def bounded_investigation(*, targets, **_kwargs):
+        calls["investigator"] += 1
+        assert targets == ("geography",)
+        return {
+            "claims": {
+                "geography": _finding(
+                    "geography",
+                    status="UNPROVEN",
+                    observed_value=None,
+                    evidence_url="",
+                    evidence_quote="",
+                    reason="No independent headquarters label was found.",
+                )
+            },
+            "failure_reason": "",
+            "usage": {"reasoning_turns": 1, "search_calls": 0, "fetch_calls": 0},
+        }
+
+    grounding_calls = 0
+
+    async def ground_attribute(candidate, **_kwargs):
+        nonlocal grounding_calls
+        grounding_calls += 1
+        grounded = dict(candidate)
+        if grounding_calls == 1:
+            grounded.update(
+                attribute_satisfied=None,
+                required_attribute_evidence_url="",
+                required_attribute_evidence_quote="",
+            )
+        return grounded, {}
+
+    homepage_identity = lead_scorer.company_fit_match(
+        "homepage identity verified",
+        details={
+            "identity": {
+                "decision": COMPANY_FIT_MATCH,
+                "evidence_source": "company_homepage",
+                "observed_name": "oxpay",
+                "observed_domain": "oxpayfinancial.com",
+                "observed_linkedin_slug": "oxpayfinancial",
+            },
+            "verified_homepage_transport_domain": "oxpayfinancial.com",
+        },
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_structured_linkedin_company_size",
+        structured_profile,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_current_linkedin_company_size",
+        current_profile,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "investigate_company_evidence",
+        bounded_investigation,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "_ground_required_attribute_evidence",
+        ground_attribute,
+    )
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        company,
+        icp,
+        require_company_fit_dimensions=True,
+        verified_homepage_identity=homepage_identity,
+        company_quality=True,
+        evidence_investigator=True,
+    ))
+
+    assert calls == {
+        "provider": 2,
+        "investigator": 1,
+        "structured": 1,
+        "current": 2,
+    }
+    assert grounding_calls == 2
+    assert result.decision == COMPANY_FIT_MATCH
+    assert result.details["dimension_decisions"]["employee_size"] == (
+        COMPANY_FIT_MATCH
+    )
+    assert result.details["dimension_evidence"]["employee_size"] == structured
+    assert result.details["employee_size_conflict"] is False
+
+
+def test_repaired_real_employee_range_conflict_stays_unproven():
+    repaired = _complete_verdict(
+        observed_company_name="OxPay",
+        observed_company_website="https://oxpayfinancial.com/",
+        observed_company_linkedin=(
+            "https://www.linkedin.com/company/oxpayfinancial"
+        ),
+        observed_employee_count="11-50",
+        employee_size_matches=False,
+        employee_size_evidence_url="https://directory.example/oxpay",
+        employee_size_evidence_quote="OxPay has 11-50 employees.",
+    )
+    structured = {
+        "employee_count": "51-200",
+        "provider": "harvestapi_get_company",
+        "source_field": "employeeCountRange",
+        "url": "https://www.linkedin.com/company/oxpayfinancial",
+        "website": "https://oxpayfinancial.com/",
+    }
+
+    conflict = _employee_size_sources_conflict(repaired, structured)
+    result = _reverify_decision(
+        repaired,
+        "",
+        "",
+        icp=_icp(employee_count="51-200"),
+        company=_company(
+            name="OxPay",
+            website="https://oxpayfinancial.com/",
+            linkedin="https://www.linkedin.com/company/oxpayfinancial",
+        ),
+        verified_homepage_identity={
+            "normalized_name": "OxPay",
+            "registrable_dns_domain": "oxpayfinancial.com",
+            "linkedin_company_slug": "oxpayfinancial",
+        },
+        structured_employee_size_evidence=structured,
+        employee_size_conflict=conflict,
+        company_quality=True,
+    )
+
+    assert conflict is True
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["dimension_decisions"]["employee_size"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+
+
 def test_structured_conflict_check_does_not_expand_calls_for_matching_headcount(
     monkeypatch,
 ):

@@ -399,6 +399,189 @@ def test_investigator_does_not_hydrate_malformed_or_unsuccessful_pages(
     assert cache[source_url] == original
 
 
+def test_attribute_cache_projects_exact_successful_source_for_investigator():
+    url = "https://www.grab.com/sg/press/atome/"
+    text = (
+        "Grab Holdings Limited (NASDAQ: GRAB) (“Grab”) announced an agreement "
+        "to acquire a controlling 60% interest in Atome Financial."
+    )
+
+    assert lead_scorer._investigator_prefetched_pages_from_attribute_cache(
+        {
+            url: {
+                "status": "fetched",
+                "final_url": url,
+                "text": text,
+            }
+        },
+        [url],
+    ) == {url: {"final_url": url, "text": text}}
+
+
+def test_grab_prefetch_repairs_only_stage_and_stays_out_of_receipt(monkeypatch):
+    url = "https://www.grab.com/sg/press/others/atome-financial/"
+    stage_quote = "Grab Holdings Limited (NASDAQ: GRAB) (“Grab”)"
+    acquisition_quote = (
+        "Grab entered an agreement to acquire a controlling 60% interest in "
+        "Atome Financial."
+    )
+    source_text = f"{stage_quote} {acquisition_quote}"
+    company_values = _company(
+        name="Grab", website="https://grab.com/", linkedin=""
+    ).model_dump(mode="json")
+    company_values["intent_signals"] = [{
+        "description": "Grab announced the proposed Atome acquisition.",
+        "source": "news",
+        "url": url,
+        "date": "2026-09-15",
+        "snippet": acquisition_quote,
+    }]
+    company = CompanyOutput.model_validate(company_values)
+    stage_finding = _finding(
+        "stage",
+        observed_value="Public",
+        evidence_url=url,
+        evidence_quote=stage_quote,
+    )
+
+    async def bounded_investigation(**kwargs):
+        assert kwargs["prefetched_pages"] == {
+            url: {"final_url": url, "text": source_text}
+        }
+        return {
+            "claims": {"stage": stage_finding},
+            "_validated_stage_finding": stage_finding,
+            "failure_reason": "",
+            "usage": {
+                "reasoning_turns": 1,
+                "search_calls": 0,
+                "fetch_calls": 0,
+            },
+            investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                url: {"final_url": url, "text": source_text}
+            },
+        }
+
+    monkeypatch.setattr(
+        lead_scorer, "investigate_company_evidence", bounded_investigation
+    )
+    _, result, _, _, _ = asyncio.run(
+        lead_scorer._run_targeted_company_evidence_investigation(
+            company=company,
+            icp=_icp(
+                company_stage="Public",
+                required_attribute=(
+                    "Announced a strategic partnership in the last 12 months."
+                ),
+            ),
+            verdict=_complete_verdict(
+                observed_company_name="Grab",
+                observed_company_website="https://grab.com/",
+                observed_company_linkedin="",
+                observed_company_stage="",
+                stage_matches=None,
+                stage_evidence_url="",
+                stage_evidence_quote="",
+                attribute_satisfied=False,
+                required_attribute_evidence_url=url,
+                required_attribute_evidence_quote=acquisition_quote,
+            ),
+            investigation_targets=("stage",),
+            icp_attribute=(
+                "Announced a strategic partnership in the last 12 months."
+            ),
+            icp_stage="public",
+            verified_identity={},
+            verified_transport_domain="grab.com",
+            structured_employee_size_evidence=None,
+            structured_public_company_evidence=None,
+            employee_size_conflict=False,
+            company_quality=True,
+            required_attribute_source_cache={
+                url: {
+                    "status": "fetched",
+                    "final_url": url,
+                    "text": source_text,
+                }
+            },
+        )
+    )
+
+    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MATCH
+    assert result.details["required_attribute_decision"] == COMPANY_FIT_MISMATCH
+    assert result.decision == COMPANY_FIT_MISMATCH
+    receipt = result.details["investigation_receipt"]
+    assert investigator.PRIVATE_FETCHED_PAGES_KEY not in receipt
+    assert source_text not in str(receipt)
+    assert source_text not in str(result.details)
+
+
+@pytest.mark.parametrize(
+    ("source_url", "submitted_urls", "entry"),
+    [
+        (
+            "https://example.com/unavailable",
+            ["https://example.com/unavailable"],
+            {"status": "source_unavailable", "final_url": "", "text": ""},
+        ),
+        (
+            "https://example.com/different",
+            ["https://example.com/submitted"],
+            {
+                "status": "fetched",
+                "final_url": "https://example.com/different",
+                "text": "Different URL evidence.",
+            },
+        ),
+        (
+            "https://example.com/oversized",
+            ["https://example.com/oversized"],
+            {
+                "status": "fetched",
+                "final_url": "https://example.com/oversized",
+                "text": "x" * (investigator.MAX_PAGE_CHARACTERS + 1),
+            },
+        ),
+        (
+            "http://example.com/unsafe",
+            ["http://example.com/unsafe"],
+            {
+                "status": "fetched",
+                "final_url": "http://example.com/unsafe",
+                "text": "Unsafe transport evidence.",
+            },
+        ),
+        (
+            "https://[malformed/source",
+            ["https://[malformed/source"],
+            {
+                "status": "fetched",
+                "final_url": "https://[malformed/source",
+                "text": "Malformed URL evidence.",
+            },
+        ),
+        (
+            "https://example.com/script-only",
+            ["https://example.com/script-only"],
+            {
+                "status": "fetched",
+                "final_url": "https://example.com/script-only",
+                "text": investigator._plain_text(
+                    "<script>Grab Holdings Limited (NASDAQ: GRAB)</script>"
+                ),
+            },
+        ),
+    ],
+)
+def test_attribute_cache_does_not_project_unusable_source(
+    source_url, submitted_urls, entry
+):
+    assert lead_scorer._investigator_prefetched_pages_from_attribute_cache(
+        {source_url: entry},
+        submitted_urls,
+    ) == {}
+
+
 def test_investigator_fetch_uses_bounded_transport_and_validates_final_url(
     monkeypatch,
 ):
@@ -3111,6 +3294,91 @@ def test_public_stage_needs_listing_proof_not_labels_or_plans():
     )
 
 
+def test_acculon_retrospective_series_a_statement_proves_completed_round():
+    quote = (
+        "The facility’s opening follows a period of rapid growth for Acculon, "
+        "including a Series A investment led by Terex Corporation and the "
+        "expansion of its Acculon Labs testing division."
+    )
+
+    assert _stage_quote_supports_observation("series a", quote)
+    assert not _stage_quote_supports_observation("series b", quote)
+    assert _stage_quote_supports_observation(
+        "series a",
+        "The facility opening followed a period of growth, including a "
+        "minority Series A investment led by Terex Corporation.",
+    )
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        (
+            "Terex is making a Series A investment in Acculon Energy to "
+            "accelerate electrification."
+        ),
+        (
+            "The facility opening is expected to follow a period of growth, "
+            "including a Series A investment led by Terex Corporation."
+        ),
+        (
+            "The facility opening follows planned growth, including a "
+            "proposed Series A investment led by Terex Corporation."
+        ),
+        (
+            "If completed, the facility opening follows a period of growth, "
+            "including a Series A investment led by Terex Corporation."
+        ),
+        (
+            "Subject to approval, the facility opening follows a period of "
+            "growth, including a Series A investment led by Terex Corporation."
+        ),
+        (
+            "Previously, the facility opening followed a period of growth, "
+            "including a Series A investment led by Terex Corporation."
+        ),
+        (
+            "The facility opening follows a period of growth, including a "
+            "Series A investment that might close next year."
+        ),
+    ],
+)
+def test_retrospective_round_pattern_rejects_uncompleted_or_old_events(quote):
+    assert not _stage_quote_supports_observation("series a", quote)
+
+
+def test_retrospective_round_keeps_latest_stage_and_company_binding():
+    series_a = (
+        "The facility opening follows rapid growth for Acculon, including a "
+        "Series A investment led by Terex Corporation."
+    )
+    later_series_b = "Acculon later completed a Series B financing round."
+    combined = f"{series_a} {later_series_b}"
+
+    assert not _stage_quote_supports_observation("series a", combined)
+    assert _stage_quote_supports_observation("series b", combined)
+
+    url = "https://news.example/facility"
+    quote_without_company = (
+        "The facility opening follows rapid growth, including a Series A "
+        "investment led by Terex Corporation."
+    )
+    finding = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            observed_value="Series A",
+            evidence_url=url,
+            evidence_quote=quote_without_company,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: quote_without_company},
+        first_party_domains={"acculonenergy.com"},
+        identity_names={"acculonenergy"},
+    )["stage"]
+    assert finding["status"] == "UNPROVEN"
+    assert finding["reason"] == "source quote did not identify the investigated company"
+
+
 def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
     requests = []
 
@@ -3259,6 +3527,190 @@ def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatc
         request["tool_choice"] == "required"
         for request in reasoning_requests
     )
+
+
+def test_prefetched_grab_source_requires_independent_exact_stage_submission(
+    monkeypatch,
+):
+    url = "https://www.grab.com/sg/press/others/atome-financial/"
+    quote = "Grab Holdings Limited (NASDAQ: GRAB) (“Grab”)"
+    text = (
+        "Grab to acquire majority stake in Atome Financial. SINGAPORE, "
+        f"September 15, 2026 — {quote} and Atome Financial announced that "
+        "Grab entered an agreement to acquire a controlling 60% interest."
+    )
+    requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        arguments = {
+            "findings": [_finding(
+                "stage",
+                observed_value="Public",
+                evidence_url=url,
+                evidence_quote=quote,
+            )]
+        }
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "submit-grab-stage",
+            "type": "function",
+            "function": {
+                "name": "submit_findings",
+                "arguments": json.dumps(arguments),
+            },
+        }]}}]}
+
+    network_fetch = AsyncMock()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_fetch_page", network_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Grab", "website": "https://grab.com/"},
+        targets=("stage",),
+        requested_stage="Public",
+        requested_attribute=(
+            "Announced a strategic partnership in the last 12 months."
+        ),
+        prior_observations={"submitted_source_urls": [url]},
+        prefetched_pages={url: {"final_url": url, "text": text}},
+    ))
+
+    assert result["claims"] == {
+        "stage": _finding(
+            "stage",
+            observed_value="Public",
+            evidence_url=url,
+            evidence_quote=quote,
+        )
+    }
+    assert result["_validated_stage_finding"] == result["claims"]["stage"]
+    assert _stage_quote_supports_observation("public", quote)
+    assert result["usage"] == {
+        "reasoning_turns": 1,
+        "search_calls": 0,
+        "fetch_calls": 0,
+    }
+    assert result[investigator.PRIVATE_FETCHED_PAGES_KEY] == {
+        url: {"final_url": url, "text": text}
+    }
+    assert network_fetch.await_count == 0
+    input_document = json.loads(
+        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+    )
+    assert input_document["prefetched_sources"] == [{"url": url, "text": text}]
+    assert input_document["investigation_limits"]["remaining_fetch_calls"] == 2
+    assert "strategic partnership" in input_document["requested_attribute"]
+    assert "required_attribute" not in result["claims"]
+
+
+def test_provider_injected_prefetched_body_is_not_reused(monkeypatch):
+    url = "https://evil.example/grab"
+    quote = "Grab Holdings Limited (NASDAQ: GRAB)"
+    requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        arguments = {"findings": [_finding(
+            "stage",
+            observed_value="Public",
+            evidence_url=url,
+            evidence_quote=quote,
+        )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"submit-{len(requests)}",
+            "type": "function",
+            "function": {
+                "name": "submit_findings",
+                "arguments": json.dumps(arguments),
+            },
+        }]}}]}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 1)
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Grab", "website": "https://grab.com/"},
+        targets=("stage",),
+        requested_stage="Public",
+        prior_observations={
+            "submitted_source_urls": [url],
+            "prefetched_sources": [{"url": url, "text": quote}],
+            investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                url: {"final_url": url, "text": quote}
+            },
+        },
+    ))
+
+    assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert "prefetched_sources" not in requests[0]["messages"][1]["content"]
+    assert result[investigator.PRIVATE_FETCHED_PAGES_KEY] == {}
+
+
+def test_prefetched_pages_reduce_remaining_network_fetch_budget(monkeypatch):
+    first_url = "https://acme.example/investors"
+    second_url = "https://acme.example/about"
+    third_url = "https://exchange.example/acme"
+    fourth_url = "https://news.example/acme"
+    quote = "Acme common stock is listed on NASDAQ under ticker ACME."
+    requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        if len(requests) == 1:
+            name, arguments = "fetch_page", {"url": third_url}
+        elif len(requests) == 2:
+            name, arguments = "fetch_page", {"url": fourth_url}
+        else:
+            name, arguments = "submit_findings", {
+                "findings": [_finding(
+                    "stage", evidence_url=first_url, evidence_quote=quote
+                )]
+            }
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{len(requests)}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    network_fetch = AsyncMock(return_value={
+        "ok": True,
+        "url": third_url,
+        "final_url": third_url,
+        "text": "Exchange page with no additional company proof.",
+    })
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_fetch_page", network_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("stage",),
+        requested_stage="Public",
+        prior_observations={
+            "submitted_source_urls": [first_url, second_url]
+        },
+        prefetched_pages={
+            first_url: {"final_url": first_url, "text": quote},
+            second_url: {
+                "final_url": second_url,
+                "text": "Acme builds enterprise software.",
+            },
+        },
+    ))
+
+    assert network_fetch.await_count == 1
+    assert result["usage"]["fetch_calls"] == 1
+    assert len(result[investigator.PRIVATE_FETCHED_PAGES_KEY]) == 3
+    exhausted = json.loads(requests[2]["messages"][-1]["content"])
+    assert exhausted == {"ok": False, "error": "fetch_budget_exhausted"}
 
 
 def test_harness_accepts_semantic_stage_finding_after_source_checks(monkeypatch):

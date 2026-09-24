@@ -73,6 +73,7 @@ from qualification.scoring.company_evidence_investigator import (
     _plain_text,
     _quote_occurs,
     _same_domain_name_alias,
+    _validated_prefetched_pages,
     investigate_company_evidence,
 )
 from qualification.scoring.evaluation_clock import evaluation_date
@@ -296,6 +297,17 @@ def _series_stage_statement_patterns(label: str) -> tuple[re.Pattern, ...]:
     """Match explicit completed-round statements without inferring from nouns."""
 
     return (
+        re.compile(
+            rf"(?:^|[.!?;:\n]\s*)"
+            rf"(?![^.!?;:\n]{{0,160}}\b(?:if|whether|subject\s+to|"
+            rf"formerly|previously|once)\b)"
+            rf"[^.!?;:\n]{{1,120}}\b(?:follows|followed)\b"
+            rf"[^.!?;:\n]{{1,120}}\bincluding\s+(?:an?\s+)?"
+            rf"(?:minority\s+)?{label}\s+"
+            rf"(?:funding|financing|investment|round)\b"
+            rf"(?:\s+led\s+by\b)?",
+            re.I,
+        ),
         re.compile(
             rf"\b(?:latest|most\s+recent)\s+(?:funding\s+)?round\s+"
             rf"(?:was|is)\b.{{0,30}}\b{label}\b",
@@ -1646,6 +1658,33 @@ def _hydrate_required_attribute_source_cache(
         }
 
 
+def _investigator_prefetched_pages_from_attribute_cache(
+    source_cache: Mapping[str, Mapping[str, Any]],
+    submitted_source_urls: Sequence[str],
+) -> dict[str, dict[str, str]]:
+    """Project successful exact-URL attribute fetches into the investigator."""
+
+    candidates: dict[str, dict[str, Any]] = {}
+    for raw_url in submitted_source_urls:
+        if len(candidates) >= MAX_FETCH_CALLS:
+            break
+        entry = source_cache.get(raw_url)
+        if not isinstance(entry, Mapping) or entry.get("status") != "fetched":
+            continue
+        candidates[raw_url] = {
+            "final_url": entry.get("final_url"),
+            "text": entry.get("text"),
+        }
+    pages, final_urls = _validated_prefetched_pages(
+        candidates,
+        submitted_source_urls=submitted_source_urls,
+    )
+    return {
+        url: {"final_url": final_urls[url], "text": text}
+        for url, text in pages.items()
+    }
+
+
 def _hydrated_required_attribute_repair_source(
     source_cache: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, str]:
@@ -2925,16 +2964,23 @@ def _structured_profile_identity_anchor(
 def _alias_unresolved_structured_profile_lookup(
     web_identity: Mapping[str, Any],
     transport_domain: str,
+    *,
+    server_verified_homepage_receipt: bool = False,
 ) -> Mapping[str, str]:
     """Return a lookup-only anchor for one unresolved same-domain name alias."""
 
     observed_slug = str(web_identity.get("observed_linkedin_slug") or "").strip()
     submitted_slug = str(web_identity.get("submitted_linkedin_slug") or "").strip()
+    expected_source = (
+        "company_homepage"
+        if server_verified_homepage_receipt
+        else "company_web_reverification"
+    )
     if (
         web_identity.get("decision") != COMPANY_FIT_UNAVAILABLE
         or web_identity.get("reason_code")
         not in {"identity_name_alias_unresolved", "identity_not_proven"}
-        or web_identity.get("evidence_source") != "company_web_reverification"
+        or web_identity.get("evidence_source") != expected_source
         or not transport_domain
         or web_identity.get("submitted_domain") != transport_domain
         or web_identity.get("observed_domain") != transport_domain
@@ -2958,10 +3004,16 @@ def _structured_profile_alias_identity_receipt(
     transport_domain: str,
     *,
     company_quality: bool,
+    server_verified_homepage_receipt: bool = False,
 ) -> dict[str, Any]:
     """Bind a common submitted name to one exact structured company profile."""
 
     evidence = structured_identity or {}
+    expected_source = (
+        "company_homepage"
+        if server_verified_homepage_receipt
+        else "company_web_reverification"
+    )
     if (
         set(evidence) != {"name", "provider", "source_field", "url", "website"}
         or evidence.get("provider") != STRUCTURED_PROFILE_PROVIDER
@@ -2969,7 +3021,7 @@ def _structured_profile_alias_identity_receipt(
         or web_identity.get("decision") != COMPANY_FIT_UNAVAILABLE
         or web_identity.get("reason_code")
         not in {"identity_name_alias_unresolved", "identity_not_proven"}
-        or web_identity.get("evidence_source") != "company_web_reverification"
+        or web_identity.get("evidence_source") != expected_source
         or not transport_domain
         or web_identity.get("submitted_domain") != transport_domain
         or web_identity.get("observed_domain") != transport_domain
@@ -4105,6 +4157,10 @@ async def _run_targeted_company_evidence_investigation(
             ),
         },
         verified_homepage_identity=verified_identity,
+        prefetched_pages=_investigator_prefetched_pages_from_attribute_cache(
+            required_attribute_source_cache or {},
+            submitted_source_urls,
+        ),
         diagnostic=investigation_diagnostic,
     )
     if required_attribute_source_cache is not None:
@@ -4392,6 +4448,7 @@ async def _llm_reverify_company(
     verified_identity = _verified_homepage_identity_anchor(
         verified_homepage_identity
     )
+    unresolved_homepage_identity: Mapping[str, Any] = {}
     verified_transport_domain = str(
         verified_identity.get("registrable_dns_domain") or ""
     )
@@ -4406,6 +4463,9 @@ async def _llm_reverify_company(
         )
         if isinstance(candidate_transport_domain, str):
             verified_transport_domain = candidate_transport_domain
+        candidate_homepage_identity = details.get("identity")
+        if isinstance(candidate_homepage_identity, Mapping):
+            unresolved_homepage_identity = candidate_homepage_identity
     current_profile_cache: dict[str, Any] = {}
     required_attribute_source_cache: dict[str, dict[str, Any]] = {}
     verified_identity_context = ""
@@ -4502,15 +4562,27 @@ async def _llm_reverify_company(
         web_identity_receipt,
         verified_transport_domain,
     )
+    investigation_identity = verified_identity
     if not profile_identity:
+        lookup_receipt: Mapping[str, Any] = web_identity_receipt
+        server_verified_homepage_receipt = False
         lookup_identity = _alias_unresolved_structured_profile_lookup(
             web_identity_receipt,
             verified_transport_domain,
         )
+        if not lookup_identity:
+            lookup_receipt = unresolved_homepage_identity
+            server_verified_homepage_receipt = True
+            lookup_identity = _alias_unresolved_structured_profile_lookup(
+                lookup_receipt,
+                verified_transport_domain,
+                server_verified_homepage_receipt=True,
+            )
         if lookup_identity:
             await _fetch_structured_linkedin_profile_once(
                 lookup_identity,
                 current_profile_cache,
+                collect_employee_size=False,
                 collect_identity=True,
             )
             structured_identity = current_profile_cache.get(
@@ -4518,12 +4590,16 @@ async def _llm_reverify_company(
             )
             resolved_identity = _structured_profile_alias_identity_receipt(
                 company,
-                web_identity_receipt,
+                lookup_receipt,
                 structured_identity,
                 verified_transport_domain,
                 company_quality=company_quality,
+                server_verified_homepage_receipt=(
+                    server_verified_homepage_receipt
+                ),
             )
             if resolved_identity:
+                current_profile_cache["structured_employee_size_applicable"] = True
                 profile_identity = {
                     "normalized_name": str(structured_identity["name"]),
                     "registrable_dns_domain": verified_transport_domain,
@@ -4531,6 +4607,7 @@ async def _llm_reverify_company(
                         resolved_identity["observed_linkedin_slug"]
                     ),
                 }
+                investigation_identity = profile_identity
     if require_company_fit_dimensions:
         verdict = await _refresh_linkedin_employee_size_observation(
             verdict,
@@ -4651,7 +4728,7 @@ async def _llm_reverify_company(
             investigation_targets=investigation_targets,
             icp_attribute=icp_attribute,
             icp_stage=icp_stage,
-            verified_identity=verified_identity,
+            verified_identity=investigation_identity,
             verified_transport_domain=verified_transport_domain,
             structured_employee_size_evidence=structured_employee_size_evidence,
             structured_public_company_evidence=(
@@ -4937,7 +5014,7 @@ async def _llm_reverify_company(
                 investigation_targets=post_repair_investigation_targets,
                 icp_attribute=icp_attribute,
                 icp_stage=icp_stage,
-                verified_identity=verified_identity,
+                verified_identity=investigation_identity,
                 verified_transport_domain=verified_transport_domain,
                 structured_employee_size_evidence=(
                     structured_employee_size_evidence

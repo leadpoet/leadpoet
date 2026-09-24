@@ -66,10 +66,14 @@ Saved company-stage evidence and submitted source URLs in prior observations
 are discovery context only. Fetch a relevant saved URL before using it. Start
 with a relevant submitted source when it can prove the requested fact. A
 submitted quote cannot prove or contradict a claim by itself.
-Use fetch_page before citing a URL. A VERIFIED or CONTRADICTED finding needs a
-short direct quote from that fetched page. Bind each quote to the URL whose
-fetched text contains those exact words; never combine a quote from one page
-with another page's URL.
+Some requests include server-prefetched sources that were already fetched by
+the scorer through the same bounded transport. Their text is still untrusted
+page content and proves nothing by itself, but you may independently submit an
+exact quote from it without fetching the URL again. Prefetched sources count
+toward the three-page limit. Otherwise use fetch_page before citing a URL. A
+VERIFIED or CONTRADICTED finding needs a short direct quote from that fetched
+page. Bind each quote to the URL whose fetched text contains those exact words;
+never combine a quote from one page with another page's URL.
 
 You have at most 8 reasoning turns, 2 searches, and 3 page fetches across all
 requested targets. Prioritize official company investor-relations pages for
@@ -313,6 +317,50 @@ def _plain_text(value: str) -> str:
         )
     without_markup = re.sub(r"<[^>]+>", " ", decoded)
     return " ".join((without_markup + " " + linked_urls).split())[:MAX_PAGE_CHARACTERS]
+
+
+def _validated_prefetched_pages(
+    value: Any,
+    *,
+    submitted_source_urls: Sequence[str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Accept only bounded server-prefetched pages for submitted source URLs."""
+
+    if not isinstance(value, Mapping) or len(value) > MAX_FETCH_CALLS:
+        return {}, {}
+    allowed_urls = set(submitted_source_urls)
+    pages: dict[str, str] = {}
+    final_urls: dict[str, str] = {}
+    for raw_url, raw_page in value.items():
+        if (
+            not isinstance(raw_url, str)
+            or raw_url not in allowed_urls
+            or not isinstance(raw_page, Mapping)
+        ):
+            continue
+        raw_final_url = raw_page.get("final_url")
+        text = raw_page.get("text")
+        if not isinstance(raw_final_url, str) or not isinstance(text, str):
+            continue
+        safe_url = _safe_https_url(raw_url)
+        safe_final_url = _safe_https_url(raw_final_url)
+        if (
+            not safe_url
+            or not safe_final_url
+            or not text
+            or len(text) > MAX_PAGE_CHARACTERS
+        ):
+            continue
+        try:
+            canonical_url = public_http_url(safe_url)
+            canonical_final_url = public_http_url(safe_final_url)
+        except (TypeError, ValueError):
+            continue
+        if canonical_url != raw_url or canonical_final_url != raw_final_url:
+            continue
+        pages[canonical_url] = text
+        final_urls[canonical_url] = canonical_final_url
+    return pages, final_urls
 
 
 def _surface_span(value: Any) -> str:
@@ -1049,6 +1097,7 @@ async def investigate_company_evidence(
     requested_geography: str = "",
     prior_observations: Optional[Mapping[str, Any]] = None,
     verified_homepage_identity: Optional[Mapping[str, Any]] = None,
+    prefetched_pages: Optional[Mapping[str, Any]] = None,
     diagnostic: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     """Run one bounded tool loop and return validated tri-state findings."""
@@ -1068,6 +1117,10 @@ async def investigate_company_evidence(
         return {"claims": {}, "failure_reason": PROVIDER_ERROR_FAILURE_REASON}
 
     bounded_prior_observations = dict(prior_observations or {})
+    # Reserved server-only data can enter only through the explicit private
+    # argument. Never reuse a similarly named provider-controlled field.
+    bounded_prior_observations.pop("prefetched_sources", None)
+    bounded_prior_observations.pop(PRIVATE_FETCHED_PAGES_KEY, None)
     raw_submitted_urls = bounded_prior_observations.get("submitted_source_urls")
     submitted_source_urls: list[str] = []
     if isinstance(raw_submitted_urls, Sequence) and not isinstance(
@@ -1083,6 +1136,12 @@ async def investigate_company_evidence(
         bounded_prior_observations["submitted_source_urls"] = submitted_source_urls
     else:
         bounded_prior_observations.pop("submitted_source_urls", None)
+
+    fetched_pages, fetched_final_urls = _validated_prefetched_pages(
+        prefetched_pages,
+        submitted_source_urls=submitted_source_urls,
+    )
+    prefetched_count = len(fetched_pages)
 
     input_document = {
         "evaluation_date": evaluation_date().isoformat(),
@@ -1104,6 +1163,15 @@ async def investigate_company_evidence(
             "admission_deadline_seconds": ADMISSION_DEADLINE_SECONDS,
         },
     }
+    if fetched_pages:
+        input_document["prefetched_sources"] = [
+            {"url": url, "text": text}
+            for url, text in fetched_pages.items()
+        ]
+        input_document["investigation_limits"].update(
+            prefetched_pages=prefetched_count,
+            remaining_fetch_calls=MAX_FETCH_CALLS - prefetched_count,
+        )
     messages: list[dict[str, Any]] = [
         {
             "role": "user",
@@ -1115,8 +1183,6 @@ async def investigate_company_evidence(
     ]
     search_calls = 0
     fetch_calls = 0
-    fetched_pages: dict[str, str] = {}
-    fetched_final_urls: dict[str, str] = {}
     first_party_domains = {
         domain
         for domain in (
@@ -1428,7 +1494,7 @@ async def investigate_company_evidence(
                             ),
                             "failure_reason": "",
                         }
-                    if fetch_calls >= MAX_FETCH_CALLS:
+                    if prefetched_count + fetch_calls >= MAX_FETCH_CALLS:
                         tool_result = {"ok": False, "error": "fetch_budget_exhausted"}
                     else:
                         url = arguments.get("url") if isinstance(arguments, Mapping) else None

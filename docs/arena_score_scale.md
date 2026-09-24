@@ -36,3 +36,9 @@ Published rounds are not rescored. The policy uses the existing transport format
 so older validator hosts can carry it without a new protocol. Deterministic
 normalization happens in the gateway after the trusted scorer returns its
 unchanged raw evidence and scores.
+
+The publication guard compares the aggregate in the same floating-point format
+as the service. Persisted six-decimal ICP scores remain authoritative; no
+comparison tolerance is added. Migration 362 fixes exact-decimal versus
+floating-point mismatches for repeating averages without altering scores,
+cost checks, publication authority, or historical results.

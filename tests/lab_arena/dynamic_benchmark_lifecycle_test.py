@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 import json
+import math
 import os
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -180,7 +181,7 @@ def test_ten_parallel_icps_form_one_execution_wave(connect, tmp_path):
     assert blocked["status"] == "no_pending"
 
 
-@pytest.mark.parametrize("count", [5, 10, 15, 20, 30])
+@pytest.mark.parametrize("count", [5, 10, 15, 17, 20, 30])
 def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_judge_cost(connect, tmp_path, count):
     harness = PerIcpHarness(connect, tmp_path, challengers=["Miner"], runners=["alpha", "beta"])
     harness.service.config.defaults = replace(
@@ -242,6 +243,15 @@ def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_ju
                 finally:
                     os.environ.pop(shim.WORKER_SOCKET_ENV, None)
 
+            if count == 17 and document["icp"]["icp_id"].endswith("_017"):
+                return runtime.fake_result(
+                    exit_code=0,
+                    output_bytes=json.dumps(scoring.build_scoring_failure(
+                        document["scored_run_id"], "judge_error",
+                        detail="deterministic terminal judge failure",
+                    )).encode(),
+                )
+
             def judge(companies, buyer, _reference):
                 company = companies[0]
                 name = company["company_name"]
@@ -297,6 +307,19 @@ def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_ju
                 (harness.round_id, json.dumps(entry)),
             )
             assert cursor.fetchone()[0] is True
+        if count == 17:
+            tampered_score = deepcopy(entry)
+            tampered_score["final_score"] = math.nextafter(
+                float(entry["final_score"]), math.inf
+            )
+            with connect() as connection, connection.cursor() as cursor:
+                with pytest.raises(
+                    Exception, match="lab_arena_publication_cost_report_mismatch"
+                ):
+                    cursor.execute(
+                        "SELECT public.lab_arena__per_icp_publication_valid(%s,%s::jsonb)",
+                        (harness.round_id, json.dumps(tampered_score)),
+                    )
         malformed = deepcopy(entry)
         malformed["cost_summary"]["per_icp"].pop()
         duplicate = deepcopy(entry)
@@ -316,6 +339,31 @@ def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_ju
     assert baseline_public["stage1_score"] == pytest.approx(baseline_public["final_score"])
     assert all(len(item["cost_summary"]["per_icp"]) == count for item in public_submissions)
     assert len(participants) == 2
+    if count == 17:
+        for participant in participants:
+            runs = harness.service.store.list_runs(
+                harness.round_id,
+                submission_id=participant["submission_id"],
+                kind="execute",
+            )
+            last = next(run for run in runs if run["icp_position"] == 16)
+            assert last["per_icp_score"] == 0
+            assert last["qualification_doc"] == {"companies": []}
+            score_attempts = [
+                run
+                for run in harness.service.store.list_runs(
+                    harness.round_id,
+                    submission_id=participant["submission_id"],
+                    kind="score",
+                )
+                if run["scored_run_id"] == last["run_id"]
+            ]
+            assert len(score_attempts) == 2
+            assert all(
+                run["status"] == "failed"
+                and run["terminal_cause"] == "judge_error"
+                for run in score_attempts
+            )
 
 
 @pytest.mark.parametrize("count", [15, 30])

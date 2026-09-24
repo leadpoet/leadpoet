@@ -23,6 +23,8 @@ from urllib.parse import urlsplit
 import aiohttp
 
 from leadpoet_verifier.identity.normalization import NormalizationError, normalize_host
+from qualification.competition_models import public_http_url
+from qualification.scoring.company_verification import _fetch_bounded_html
 from qualification.scoring.evaluation_clock import evaluation_date
 from qualification.scoring.linkedin_company_size import (
     MALFORMED_RESPONSE_FAILURE_REASON,
@@ -45,6 +47,7 @@ MAX_FETCH_CALLS = 3
 MAX_SEARCH_RESULTS = 5
 MAX_PAGE_CHARACTERS = 24_000
 MAX_SUBMITTED_SOURCE_URLS = 8
+PRIVATE_FETCHED_PAGES_KEY = "_server_fetched_pages"
 ADMISSION_DEADLINE_SECONDS = 110.0
 # OpenRouter chat is broker-bounded at 120 seconds. Add only local framing
 # tolerance. A request admitted before the deadline is allowed to settle.
@@ -668,14 +671,26 @@ async def _fetch_page(
     safe_url = _safe_https_url(url)
     if not safe_url:
         return {"ok": False, "error": "invalid_url"}
-    async with session.get(safe_url) as response:
-        if response.status != 200:
-            return {"ok": False, "error": f"http_{response.status}"}
-        raw = await response.text(errors="replace")
+    try:
+        canonical_url = public_http_url(safe_url)
+        status, final_url, raw = await _fetch_bounded_html(session, canonical_url)
+        safe_final_url = _safe_https_url(final_url)
+        if not safe_final_url:
+            raise ValueError("invalid final URL")
+        safe_final_url = public_http_url(safe_final_url)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "invalid_url"}
+    if status != 200:
+        return {"ok": False, "error": f"http_{status}"}
     text = _plain_text(raw)
     if not text:
         return {"ok": False, "error": "empty_page"}
-    return {"ok": True, "url": safe_url, "text": text}
+    return {
+        "ok": True,
+        "url": canonical_url,
+        "final_url": safe_final_url,
+        "text": text,
+    }
 
 
 def _validated_findings(
@@ -1093,6 +1108,7 @@ async def investigate_company_evidence(
     search_calls = 0
     fetch_calls = 0
     fetched_pages: dict[str, str] = {}
+    fetched_final_urls: dict[str, str] = {}
     first_party_domains = {
         domain
         for domain in (
@@ -1363,6 +1379,17 @@ async def investigate_company_evidence(
                                 "search_calls": search_calls,
                                 "fetch_calls": fetch_calls,
                             },
+                            # Private transport output constructed only from
+                            # pages fetched by this loop. The caller may reuse
+                            # it as bounded source text, but never publishes it
+                            # in an investigation receipt.
+                            PRIVATE_FETCHED_PAGES_KEY: {
+                                url: {
+                                    "final_url": fetched_final_urls[url],
+                                    "text": text,
+                                }
+                                for url, text in fetched_pages.items()
+                            },
                         }
                 elif name == "search_web":
                     if time.monotonic() - started >= ADMISSION_DEADLINE_SECONDS:
@@ -1403,6 +1430,15 @@ async def investigate_company_evidence(
                             fetched_pages[str(tool_result["url"])] = str(
                                 tool_result["text"]
                             )
+                            fetched_final_urls[str(tool_result["url"])] = str(
+                                tool_result.get("final_url")
+                                or tool_result["url"]
+                            )
+                            tool_result = {
+                                key: value
+                                for key, value in tool_result.items()
+                                if key != "final_url"
+                            }
                 else:
                     raise ValueError("reasoning_tool_unknown")
                 assistant_message: dict[str, Any] = {

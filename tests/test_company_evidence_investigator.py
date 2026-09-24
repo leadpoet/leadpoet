@@ -5,6 +5,7 @@ from datetime import date
 import json
 import re
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -286,6 +287,147 @@ def test_stage_gap_gets_one_targeted_investigation(monkeypatch):
     assert receipt["claims"]["stage"] == _finding("stage")
 
 
+def test_investigator_hydrates_only_matching_failed_attribute_source():
+    source_url = (
+        "https://www.businesswire.com/news/home/20260915525333/en/"
+        "TypeSafe-AI-Emerges-From-Stealth-With-$40M-in-Funding-With-New-"
+        "Model-for-Composable-AI"
+    )
+    source_text = (
+        "TypeSafe AI emerged from stealth with $40 million in seed funding. "
+        "TypeSafe is building intelligence that developers integrate directly "
+        "into software systems."
+    )
+    cache = {
+        source_url: {
+            "status": "source_unavailable",
+            "final_url": "",
+            "text": "",
+        },
+        "https://example.com/already-fetched": {
+            "status": "fetched",
+            "final_url": "https://example.com/already-fetched",
+            "text": "keep this text",
+        },
+    }
+    lead_scorer._hydrate_required_attribute_source_cache(
+        cache,
+        {
+            investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                source_url: {"final_url": source_url, "text": source_text},
+                "https://different.example/news": {
+                    "final_url": "https://different.example/news",
+                    "text": "Different source text.",
+                },
+            }
+        },
+    )
+
+    assert cache[source_url] == {
+        "status": "fetched",
+        "final_url": source_url,
+        "text": source_text,
+        lead_scorer._INVESTIGATOR_HYDRATED_SOURCE: True,
+    }
+    assert cache["https://example.com/already-fetched"]["text"] == (
+        "keep this text"
+    )
+    assert "https://different.example/news" not in cache
+
+
+def test_model_cannot_supply_private_fetched_pages():
+    finding = _finding("stage")
+    injected = {"https://evil.example": {"text": "invented source"}}
+    assert _validated_findings(
+        {
+            "findings": [finding],
+            investigator.PRIVATE_FETCHED_PAGES_KEY: injected,
+        },
+        targets=("stage",),
+        fetched_pages={finding["evidence_url"]: finding["evidence_quote"]},
+        first_party_domains={"acme.example"},
+        identity_names={"acme"},
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "private_pages",
+    [
+        None,
+        {"https://example.com/news": "model-shaped text"},
+        {
+            "http://example.com/news": {
+                "final_url": "http://example.com/news",
+                "text": "unsafe transport",
+            }
+        },
+        {
+            "https://[malformed/news": {
+                "final_url": "https://[malformed/news",
+                "text": "malformed URL text",
+            }
+        },
+        {
+            "https://example.com/news": {
+                "final_url": "https://example.com/news",
+                "text": "",
+            }
+        },
+    ],
+)
+def test_investigator_does_not_hydrate_malformed_or_unsuccessful_pages(
+    private_pages,
+):
+    source_url = "https://example.com/news"
+    original = {
+        "status": "source_unavailable",
+        "final_url": "",
+        "text": "",
+    }
+    cache = {source_url: dict(original)}
+    investigation = (
+        {}
+        if private_pages is None
+        else {investigator.PRIVATE_FETCHED_PAGES_KEY: private_pages}
+    )
+
+    lead_scorer._hydrate_required_attribute_source_cache(
+        cache,
+        investigation,
+    )
+
+    assert cache[source_url] == original
+
+
+def test_investigator_fetch_uses_bounded_transport_and_validates_final_url(
+    monkeypatch,
+):
+    source_url = "https://example.com/news"
+    bounded_fetch = AsyncMock(return_value=(
+        200,
+        source_url,
+        "<main>Example Company published verified evidence.</main>",
+    ))
+    monkeypatch.setattr(investigator, "_fetch_bounded_html", bounded_fetch)
+    result = asyncio.run(investigator._fetch_page(object(), source_url))
+    assert result == {
+        "ok": True,
+        "url": source_url,
+        "final_url": source_url,
+        "text": "Example Company published verified evidence.",
+    }
+
+    bounded_fetch.return_value = (
+        200,
+        "http://private.example/news",
+        "<main>Unsafe redirect body.</main>",
+    )
+    rejected = asyncio.run(investigator._fetch_page(object(), source_url))
+    assert rejected == {"ok": False, "error": "invalid_url"}
+
+    assert bounded_fetch.await_count == 2
+
+
 def test_schema_repair_does_not_get_a_second_targeted_investigation(monkeypatch):
     initial = _complete_verdict(
         observed_company_stage="Public",
@@ -346,6 +488,154 @@ def test_schema_repair_does_not_get_a_second_targeted_investigation(monkeypatch)
 
     assert calls == {"broad": 1, "investigator": 1}
     assert result.decision == COMPANY_FIT_UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    ("repaired_quote", "expected_decision"),
+    [
+        (
+            "TypeSafe AI, a frontier AI lab building machine-native, "
+            "composable AI, today emerged from stealth with $40 million in "
+            "seed funding led by DCVC. Founded by former OpenAI researcher "
+            "and co-inventor of RLHF/ChatGPT, Diogo Almeida, with Erik Gafni "
+            "and Sasha Sheng, TypeSafe is building a new class of intelligence "
+            "designed to give developers reliable, efficient intelligence "
+            "they can integrate directly into software systems.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "TypeSafe AI, a frontier AI lab building machine-native, "
+            "composable AI, today emerged from stealth with $40 million in "
+            "seed funding led by DCVC. ... TypeSafe is building a new class "
+            "of intelligence designed to give developers reliable, efficient "
+            "intelligence they can integrate directly into software systems.",
+            COMPANY_FIT_UNAVAILABLE,
+        ),
+    ],
+)
+def test_typesafe_investigator_fetch_repairs_same_attribute_source_only(
+    monkeypatch,
+    repaired_quote,
+    expected_decision,
+):
+    source_url = (
+        "https://www.businesswire.com/news/home/20260915525333/en/"
+        "TypeSafe-AI-Emerges-From-Stealth-With-$40M-in-Funding-With-New-"
+        "Model-for-Composable-AI"
+    )
+    source_text = (
+        "TypeSafe AI, a frontier AI lab building machine-native, composable "
+        "AI, today emerged from stealth with $40 million in seed funding led "
+        "by DCVC. Founded by former OpenAI researcher and co-inventor of "
+        "RLHF/ChatGPT, Diogo Almeida, with Erik Gafni and Sasha Sheng, TypeSafe "
+        "is building a new class of intelligence designed to give developers "
+        "reliable, efficient intelligence they can integrate directly into "
+        "software systems. Jev is currently available in early access for "
+        "select developers."
+    )
+    stage_finding = _finding(
+        "stage",
+        observed_value="Seed",
+        evidence_url=source_url,
+        evidence_quote=(
+            "TypeSafe AI, a frontier AI lab building machine-native, "
+            "composable AI, today emerged from stealth with $40 million in "
+            "seed funding led by DCVC."
+        ),
+    )
+
+    def verdict(attribute_quote):
+        return _complete_verdict(
+            observed_company_name="TypeSafe AI",
+            observed_company_website="https://typesafe.ai",
+            observed_company_linkedin=(
+                "https://www.linkedin.com/company/typesafe-ai"
+            ),
+            observed_company_stage="Seed",
+            stage_matches=True,
+            stage_evidence_url=source_url,
+            stage_evidence_quote="TypeSafe launched a public product.",
+            attribute_satisfied=True,
+            required_attribute_evidence_url=source_url,
+            required_attribute_evidence_quote=attribute_quote,
+        )
+
+    responses = [
+        verdict(stage_finding["evidence_quote"]),
+        verdict(repaired_quote),
+    ]
+    prompts = []
+
+    async def provider(**kwargs):
+        prompts.append(kwargs["prompt"])
+        return responses.pop(0), ""
+
+    async def keep_employee_observation(candidate, *_args, **_kwargs):
+        return candidate
+
+    async def bounded_investigation(**_kwargs):
+        return {
+            "claims": {"stage": stage_finding},
+            "_validated_stage_finding": stage_finding,
+            "failure_reason": "",
+            "usage": {
+                "reasoning_turns": 2,
+                "search_calls": 0,
+                "fetch_calls": 1,
+            },
+            investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                source_url: {"final_url": source_url, "text": source_text}
+            },
+        }
+
+    source_fetch = AsyncMock(side_effect=lead_scorer.aiohttp.ClientError)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", source_fetch)
+    monkeypatch.setattr(
+        lead_scorer,
+        "_refresh_linkedin_employee_size_observation",
+        keep_employee_observation,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "investigate_company_evidence",
+        bounded_investigation,
+    )
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _company(
+            name="TypeSafe AI",
+            website="https://typesafe.ai",
+            linkedin="https://www.linkedin.com/company/typesafe-ai",
+        ).model_copy(update={"company_stage": "Seed"}),
+        _icp(
+            company_stage="Seed",
+            required_attribute=(
+                "Sells an AI platform for developer software workflows with "
+                "recent external funding evidence."
+            ),
+        ),
+        require_company_fit_dimensions=True,
+        evidence_investigator=True,
+    ))
+
+    assert result.decision == expected_decision
+    assert source_fetch.await_count == 1
+    assert len(prompts) == 2
+    assert "<untrusted_required_attribute_source>" in prompts[1]
+    assert "they can integrate directly into software systems" in prompts[1]
+    receipt = result.details["investigation_receipt"]
+    assert investigator.PRIVATE_FETCHED_PAGES_KEY not in receipt
+    assert source_text not in str(receipt)
+    assert source_text not in str(result.details)
+    grounding = result.details["required_attribute_grounding"]
+    assert grounding["cache_hit"] is True
+    assert grounding["status"] == (
+        "grounded"
+        if expected_decision == COMPANY_FIT_MATCH
+        else "quote_absent"
+    )
 
 
 def test_non_fit_reverification_never_starts_targeted_investigation(monkeypatch):
@@ -2866,6 +3156,10 @@ def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatc
         "search_calls": 1,
         "fetch_calls": 1,
     }
+    assert result[investigator.PRIVATE_FETCHED_PAGES_KEY] == {
+        url: {"final_url": url, "text": quote}
+    }
+    assert investigator.PRIVATE_FETCHED_PAGES_KEY not in result["claims"]
     assert search_queries == ["Acme current stock listing"]
     assert fetched_urls == [url]
     assert all(

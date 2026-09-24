@@ -66,7 +66,10 @@ from qualification.scoring.company_fit_decision import (
     strict_company_fit_boolean,
 )
 from qualification.scoring.company_evidence_investigator import (
+    MAX_FETCH_CALLS,
+    MAX_PAGE_CHARACTERS,
     MAX_SUBMITTED_SOURCE_URLS,
+    PRIVATE_FETCHED_PAGES_KEY,
     _plain_text,
     _quote_occurs,
     _same_domain_name_alias,
@@ -1547,6 +1550,7 @@ _VERIFIED_LINKEDIN_REDIRECT_FINAL = "_server_verified_linkedin_redirect_final_ur
 _REQUIRED_ATTRIBUTE_GROUNDING = "_server_verified_required_attribute_grounding"
 _MAX_REQUIRED_ATTRIBUTE_SOURCE_URLS = 2
 _REQUIRED_ATTRIBUTE_REPAIR_TEXT_CHARS = 6000
+_INVESTIGATOR_HYDRATED_SOURCE = "_investigator_hydrated"
 
 
 def _required_attribute_source_receipt(
@@ -1594,6 +1598,69 @@ def _clear_required_attribute_evidence(verdict: dict[str, Any]) -> None:
         nested_copy = dict(nested)
         nested_copy["required_attribute"] = {}
         verdict["dimension_evidence"] = nested_copy
+
+
+def _hydrate_required_attribute_source_cache(
+    source_cache: dict[str, dict[str, Any]],
+    investigation: Mapping[str, Any],
+) -> None:
+    """Replace one exact-URL negative with a trusted investigator fetch."""
+
+    fetched_pages = investigation.get(PRIVATE_FETCHED_PAGES_KEY)
+    if not isinstance(fetched_pages, Mapping) or len(fetched_pages) > MAX_FETCH_CALLS:
+        return
+    for raw_url, raw_page in fetched_pages.items():
+        if not isinstance(raw_page, Mapping):
+            continue
+        raw_final_url = raw_page.get("final_url")
+        if not isinstance(raw_url, str) or not isinstance(raw_final_url, str):
+            continue
+        try:
+            if (
+                urlsplit(raw_url).scheme.casefold() != "https"
+                or urlsplit(raw_final_url).scheme.casefold() != "https"
+            ):
+                continue
+            canonical_url = public_http_url(raw_url)
+            final_url = public_http_url(raw_final_url)
+        except (TypeError, ValueError):
+            continue
+        text = raw_page.get("text")
+        if (
+            canonical_url != raw_url
+            or not isinstance(text, str)
+            or not text
+            or len(text) > MAX_PAGE_CHARACTERS
+        ):
+            continue
+        existing = source_cache.get(canonical_url)
+        if not isinstance(existing, Mapping) or existing.get("status") != (
+            "source_unavailable"
+        ):
+            continue
+        source_cache[canonical_url] = {
+            "status": "fetched",
+            "final_url": final_url,
+            "text": text,
+            _INVESTIGATOR_HYDRATED_SOURCE: True,
+        }
+
+
+def _hydrated_required_attribute_repair_source(
+    source_cache: Mapping[str, Mapping[str, Any]],
+) -> dict[str, str]:
+    """Return bounded context only from an internally hydrated cache entry."""
+
+    for url, entry in source_cache.items():
+        if entry.get(_INVESTIGATOR_HYDRATED_SOURCE) is not True:
+            continue
+        text = str(entry.get("text") or "")
+        if text:
+            return {
+                "url": url,
+                "text": text[:_REQUIRED_ATTRIBUTE_REPAIR_TEXT_CHARS],
+            }
+    return {}
 
 
 async def _ground_required_attribute_evidence(
@@ -3905,6 +3972,9 @@ async def _run_targeted_company_evidence_investigation(
     company_quality: bool,
     structured_profile_identity_evidence: Optional[Mapping[str, Any]] = None,
     prior_result: Optional[CompanyFitDecisionResult] = None,
+    required_attribute_source_cache: Optional[
+        dict[str, dict[str, Any]]
+    ] = None,
 ) -> Tuple[
     dict[str, Any],
     CompanyFitDecisionResult,
@@ -4037,6 +4107,11 @@ async def _run_targeted_company_evidence_investigation(
         verified_homepage_identity=verified_identity,
         diagnostic=investigation_diagnostic,
     )
+    if required_attribute_source_cache is not None:
+        _hydrate_required_attribute_source_cache(
+            required_attribute_source_cache,
+            investigation,
+        )
     claims = investigation.get("claims")
     if not isinstance(claims, Mapping):
         claims = {}
@@ -4588,6 +4663,7 @@ async def _llm_reverify_company(
             employee_size_conflict=employee_size_conflict,
             company_quality=company_quality,
             prior_result=result,
+            required_attribute_source_cache=required_attribute_source_cache,
         )
         if not claims:
             return result
@@ -4688,6 +4764,12 @@ async def _llm_reverify_company(
         "requires that."
         if "stage" in incomplete else ""
     )
+    if not required_attribute_repair_source:
+        required_attribute_repair_source = (
+            _hydrated_required_attribute_repair_source(
+                required_attribute_source_cache
+            )
+        )
     required_attribute_source_repair = ""
     if "required_attribute" in incomplete and required_attribute_repair_source:
         bounded_source_json = json.dumps(
@@ -4869,6 +4951,9 @@ async def _llm_reverify_company(
                 employee_size_conflict=employee_size_conflict,
                 company_quality=company_quality,
                 prior_result=repaired_result,
+                required_attribute_source_cache=(
+                    required_attribute_source_cache
+                ),
             )
             if not post_repair_claims:
                 return repaired_result

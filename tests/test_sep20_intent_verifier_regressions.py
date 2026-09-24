@@ -119,9 +119,12 @@ def test_review_evidence_surfaces_strict_first_party_body_dateline():
 
     evidence = intent_details.review_evidence(company, icp, signal_results, fit)
 
-    context = evidence["verified_signals"][0]["source_context"][0]
-    assert context["source_body_dateline_dates"] == ["2026-03-12"]
-    assert CLAIM in context["text"]
+    context_index = evidence["verified_signals"][0]["evidence_source_indexes"][0]
+    context = evidence["admitted_evidence"][context_index]
+    assert context["observed_dates"] == [{
+        "date": "2026-03-12", "basis": "source_body_dateline_date",
+    }]
+    assert CLAIM in context["admitted_text"][0]
     assert "source dated 2026-03-12" in " ".join(
         unit["text"] for unit in evidence["intent_details_units"]
     )
@@ -129,7 +132,7 @@ def test_review_evidence_surfaces_strict_first_party_body_dateline():
 
 
 @pytest.mark.asyncio
-async def test_exact_dated_quote_requires_concrete_diagnostic_when_rejected(
+async def test_exact_dated_quote_nonverified_unit_is_a_factual_mismatch(
     monkeypatch,
 ):
     response = {
@@ -137,41 +140,6 @@ async def test_exact_dated_quote_requires_concrete_diagnostic_when_rejected(
         "facts_supported": False,
         "signal_coverage": [{"matched_icp_signal": 0, "covered": True}],
     }
-
-    async def judge(prompt, **_kwargs):
-        document = json.loads(prompt)
-        grounding = _unit_grounding(document, facts_supported=True)
-        grounding[1].update({
-            "status": "UNPROVEN",
-            "evidence": [],
-        })
-        return json.dumps({
-            **response,
-            "unit_grounding": grounding,
-        })
-
-    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
-    receipt = await intent_details.review_intent_details(*_mind_style_inputs())
-
-    assert receipt["decision"] == "unavailable"
-    assert receipt["failure_reason_code"] == "malformed_response"
-
-
-@pytest.mark.asyncio
-async def test_exact_dated_quote_preserves_grounded_factual_rejection(
-    monkeypatch,
-):
-    paragraph = _mind_style_inputs()[0].intent_details
-    response = {
-        **{name: True for name in intent_details._CHECKS},
-        "facts_supported": False,
-        "unsupported_factual_clause": (
-            "These reported activities connect to the requested security capability."
-        ),
-        "unsupported_factual_reason": "The evidence does not establish this connection.",
-        "signal_coverage": [{"matched_icp_signal": 0, "covered": True}],
-    }
-    assert response["unsupported_factual_clause"] in paragraph
 
     async def judge(prompt, **_kwargs):
         document = json.loads(prompt)
@@ -190,17 +158,14 @@ async def test_exact_dated_quote_preserves_grounded_factual_rejection(
 
     assert receipt["decision"] == "mismatch"
     assert receipt["checks"]["facts_supported"] is False
-    assert "unsupported_factual_clause" not in receipt
 
 
 @pytest.mark.asyncio
-async def test_exact_dated_quote_accepts_empty_diagnostic_only_when_supported(
+async def test_exact_dated_quote_is_accepted_when_units_are_supported(
     monkeypatch,
 ):
     response = {
         **{name: True for name in intent_details._CHECKS},
-        "unsupported_factual_clause": "",
-        "unsupported_factual_reason": "",
         "signal_coverage": [{"matched_icp_signal": 0, "covered": True}],
     }
 

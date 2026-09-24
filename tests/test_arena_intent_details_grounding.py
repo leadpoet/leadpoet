@@ -71,20 +71,19 @@ def _unit_grounding(document, *, facts_supported=True):
 def _review_response(checks, coverage, document):
     facts_supported = checks["facts_supported"]
     return {
-        **checks,
-        "signal_coverage": coverage,
         "unit_grounding": _unit_grounding(
             document, facts_supported=facts_supported,
         ),
-        "unsupported_factual_clause": (
-            "Acme launched a reporting platform on September 1, 2026"
-            if not facts_supported else ""
-        ),
-        "unsupported_factual_reason": (
-            "The supplied evidence does not support this factual clause."
-            if not facts_supported else ""
-        ),
+        "signal_coverage": coverage,
+        **checks,
     }
+
+
+def _admitted_for_refs(document, references):
+    return [
+        document["admitted_evidence"][source_index]
+        for source_index in references
+    ]
 
 
 def inputs():
@@ -191,22 +190,41 @@ def test_review_keeps_non_qualifying_findings_separate_from_verified_coverage():
     )
     result = intent_details.review_evidence(company, icp, results + [failed], fit)
     assert len(result["verified_signals"]) == 2
-    assert [row["authoritative_date"] for row in result["verified_signals"]] == ["2026-09-01", "2026-09-03"]
+    signal_dates = [
+        source["observed_dates"]
+        for source in result["admitted_evidence"]
+        if source["evidence_kind"] == "verified_signal_observation"
+    ]
+    assert signal_dates == [
+        [{"date": "2026-09-01", "basis": "event"}],
+        [{"date": "2026-09-03", "basis": "event"}],
+    ]
     assert "2026-01-01" not in json.dumps(result)
     assert result["non_qualifying_signals"] == [{
         "matched_icp_signal": 1,
-        "verifier_status": "contradicted",
         "same_entity_check": "pass",
         "source_urls": ["https://acme.example/berlin"],
-        "submitted_claim_context": ["Acme opened a Berlin office."],
-        "supporting_quotes": [],
-        "contradicting_quotes": ["Acme opened no office in Berlin."],
-        "unsupported_parts": [
-            "The submitted source does not support a Berlin opening."
-        ],
-        "source_index": 2,
+        "untrusted_submitted_claim_context": ["Acme opened a Berlin office."],
+        "evidence_source_indexes": [2],
     }]
-    assert result["verified_company_evidence"]["industry"]["quote"] == "Acme provides reporting software."
+    serialized = json.dumps(result)
+    assert '"verifier_status"' not in serialized
+    assert '"prior_verifier_unsupported_parts"' not in serialized
+    assert "The submitted source does not support a Berlin opening." not in serialized
+    finding_refs = result["non_qualifying_signals"][0]["evidence_source_indexes"]
+    assert _admitted_for_refs(result, finding_refs) == [{
+        "source_index": 2,
+        "evidence_kind": "non_qualifying_contradicting_quotes",
+        "matched_icp_signal": 1,
+        "source_url": "https://acme.example/berlin",
+        "admitted_text": ["Acme opened no office in Berlin."],
+    }]
+    company_refs = result["verified_company_evidence"]["industry"][
+        "evidence_source_indexes"
+    ]
+    assert _admitted_for_refs(result, company_refs)[0]["admitted_text"] == [
+        "Acme provides reporting software."
+    ]
 
 
 def test_non_qualifying_projection_requires_an_independent_terminal_receipt():
@@ -251,11 +269,24 @@ def test_non_qualifying_projection_is_bounded_and_sanitized():
 
     assert len(findings) == intent_details._NON_QUALIFYING_CONTEXT_MAX_ITEMS
     assert all(item["same_entity_check"] == "" for item in findings)
-    assert all(len(item["supporting_quotes"]) == 1 for item in findings)
-    assert all(len(item["supporting_quotes"][0]) == 700 for item in findings)
-    assert all(len(item["contradicting_quotes"][0]) == 700 for item in findings)
-    assert all(len(item["unsupported_parts"]) == 1 for item in findings)
-    assert all(len(item["unsupported_parts"][0]) == 400 for item in findings)
+    assert all(len(item["evidence_source_indexes"]) == 2 for item in findings)
+    admitted = [
+        source for source in document["admitted_evidence"]
+        if source["evidence_kind"].startswith("non_qualifying_")
+    ]
+    assert len(admitted) == 6
+    assert all(len(source["admitted_text"]) == 1 for source in admitted)
+    assert all(len(source["admitted_text"][0]) == 700 for source in admitted)
+    serialized = json.dumps(document, ensure_ascii=False)
+    assert '"verifier_status"' not in serialized
+    assert '"prior_verifier_unsupported_parts"' not in serialized
+    assert "u" * 400 not in serialized
+    referenced_indexes = [
+        source_index
+        for finding in findings
+        for source_index in finding["evidence_source_indexes"]
+    ]
+    assert referenced_indexes == [source["source_index"] for source in admitted]
     assert len(json.dumps(document, ensure_ascii=False)) <= 48_000
 
 
@@ -271,12 +302,21 @@ def test_review_keeps_fetched_context_missing_from_selected_signal_quotes():
         "url": "https://unrelated.example/", "text": "UNRELATED SOURCE",
     }]
     result = intent_details.review_evidence(company, icp, results, fit)
-    assert result["verified_signals"][0]["source_context"] == [{
-        **source,
-        "source_index": 1,
-    }]
+    signal_sources = _admitted_for_refs(
+        result, result["verified_signals"][0]["evidence_source_indexes"]
+    )
+    assert signal_sources[0] == {
+        "source_index": 0,
+        "evidence_kind": "verified_source_context",
+        "matched_icp_signal": 0,
+        "source_url": source["url"],
+        "admitted_text": [source["text"]],
+        "observed_dates": [{
+            "date": "2026-09-01", "basis": "source_publication_date",
+        }],
+    }
     assert "UNRELATED SOURCE" not in json.dumps(result)
-    assert "platform integrates" not in str(result["verified_signals"][0]["supporting_quotes"])
+    assert "platform integrates" not in str(signal_sources[1])
 
 
 def test_source_context_preserves_review_size_and_utf8_bounds():
@@ -286,9 +326,12 @@ def test_source_context_preserves_review_size_and_utf8_bounds():
             "url": signal.url, "text": "é" * 20_000,
         }]
     document = intent_details.review_evidence(company, icp, results, fit)
-    contexts = [c for v in document["verified_signals"] for c in v["source_context"]]
-    assert sum(len(c["text"].encode("utf-8")) for c in contexts) <= 12_000
-    assert all(len(c["text"].encode("utf-8")) <= 6_000 for c in contexts)
+    contexts = [
+        source for source in document["admitted_evidence"]
+        if source["evidence_kind"] == "verified_source_context"
+    ]
+    assert sum(len(c["admitted_text"][0].encode("utf-8")) for c in contexts) <= 12_000
+    assert all(len(c["admitted_text"][0].encode("utf-8")) <= 6_000 for c in contexts)
     assert len(json.dumps(document, ensure_ascii=False)) <= 48_000
     assert json.loads(json.dumps(document)) == document
 
@@ -306,8 +349,16 @@ def test_early_multi_source_signal_cannot_starve_later_context(count):
             {"url": url, "text": "extra" * 2_000},
         ]
     document = intent_details.review_evidence(company, icp, results, fit)
-    sizes = [sum(len(c["text"].encode("utf-8")) for c in v["source_context"])
-             for v in document["verified_signals"]]
+    sizes = [
+        sum(
+            len(source["admitted_text"][0].encode("utf-8"))
+            for source in _admitted_for_refs(
+                document, signal["evidence_source_indexes"]
+            )
+            if source["evidence_kind"] == "verified_source_context"
+        )
+        for signal in document["verified_signals"]
+    ]
     assert sizes == [12_000 // count] * count
     assert sum(sizes) == 12_000
 
@@ -355,13 +406,12 @@ def test_review_without_non_qualifying_context_keeps_original_system_prompt(
     monkeypatch,
 ):
     company, icp, results, fit = inputs()
-    assert hashlib.sha256(intent_details._SYSTEM.encode()).hexdigest() == (
-        "fba083b7c546835b0340fced3ef0694c619ddccde8f529a4f42ab6ab20688bec"
-    )
     assert "A valid primary signal supports only the facts" in intent_details._SYSTEM
     assert "API inputs or outputs" in intent_details._SYSTEM
     assert "Equivalent supporting\nwording is sufficient" in intent_details._SYSTEM
     assert "Review\nevery unit exactly once" in intent_details._SYSTEM
+    assert "failed ICP event\nmatch is not a factual contradiction" in intent_details._SYSTEM
+    assert "Assess and return unit_grounding first" in intent_details._SYSTEM
 
     calls = []
     expected_document = intent_details.review_evidence(
@@ -424,9 +474,16 @@ def test_levanta_shaped_contradicted_claim_reaches_factual_review(monkeypatch):
     async def judge(prompt, **kwargs):
         document = json.loads(prompt)
         finding = document["non_qualifying_signals"][0]
-        assert finding["verifier_status"] == "contradicted"
-        assert finding["supporting_quotes"] == []
-        assert finding["contradicting_quotes"] == [
+        assert "verifier_status" not in finding
+        assert "prior_verifier_unsupported_parts" not in finding
+        assert finding["same_entity_check"] == "pass"
+        finding_sources = _admitted_for_refs(
+            document, finding["evidence_source_indexes"]
+        )
+        assert finding_sources[0]["evidence_kind"] == (
+            "non_qualifying_contradicting_quotes"
+        )
+        assert finding_sources[0]["admitted_text"] == [
             "Levanta announced a $22 million Series B investment."
         ]
         assert "zero or rejected signal is not by itself" in kwargs[
@@ -436,26 +493,19 @@ def test_levanta_shaped_contradicted_claim_reaches_factual_review(monkeypatch):
         unit_grounding[0].update({
             "status": "CONTRADICTED",
             "evidence": [{
-                "source_index": finding["source_index"],
-                "quote": finding["contradicting_quotes"][0][
+                "source_index": finding["evidence_source_indexes"][0],
+                "quote": finding_sources[0]["admitted_text"][0][
                     :intent_details._MAX_UNIT_EVIDENCE_QUOTE_LENGTH
                 ],
             }],
         })
         return json.dumps({
-            **checks,
+            "unit_grounding": unit_grounding,
             "signal_coverage": [
                 {"matched_icp_signal": 0, "covered": True},
                 {"matched_icp_signal": 1, "covered": True},
             ],
-            "unit_grounding": unit_grounding,
-            "unsupported_factual_clause": (
-                "Levanta released new research showing that creators are "
-                "routing commerce through its platform."
-            ),
-            "unsupported_factual_reason": (
-                "The independently fetched source contradicts this claim."
-            ),
+            **checks,
         })
 
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
@@ -508,11 +558,20 @@ def test_true_but_nonqualifying_fact_is_not_automatically_false(monkeypatch):
         ],
     )
 
-    async def judge(prompt, **_kwargs):
+    async def judge(prompt, **kwargs):
         document = json.loads(prompt)
         finding = document["non_qualifying_signals"][0]
-        assert finding["verifier_status"] == "contradicted"
-        assert finding["supporting_quotes"] == [
+        assert "verifier_status" not in finding
+        assert "prior_verifier_unsupported_parts" not in finding
+        assert finding["same_entity_check"] == "pass"
+        assert "same company and the activity\nasserted in the paragraph" in kwargs[
+            "system_prompt"
+        ]
+        assert "same company and verified activity" not in kwargs["system_prompt"]
+        finding_sources = _admitted_for_refs(
+            document, finding["evidence_source_indexes"]
+        )
+        assert finding_sources[0]["admitted_text"] == [
             "Acme published a research study."
         ]
         return json.dumps(_review_response(

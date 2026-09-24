@@ -222,24 +222,43 @@ def _local_responder(
                 assert set(declared.get("required") or []) == {
                     *intent_details._CHECKS,
                     "signal_coverage",
-                    "unsupported_factual_clause",
-                    "unsupported_factual_reason",
+                    "unit_grounding",
                 }
-                review_documents.append(json.loads(str(messages[-1]["content"])))
+                review_document = json.loads(str(messages[-1]["content"]))
+                review_documents.append(review_document)
+                source_index, values = next(iter(
+                    intent_details._bound_evidence_sources(review_document).items()
+                ))
+                quote = values[0][:intent_details._MAX_UNIT_EVIDENCE_QUOTE_LENGTH]
+                unit_grounding = [
+                    {
+                        "unit_id": unit["unit_id"],
+                        "contains_factual_claim": True,
+                        "status": (
+                            "UNPROVEN"
+                            if review_checks is not None
+                            and not review_checks["facts_supported"]
+                            and unit["unit_id"] == 0
+                            else "VERIFIED"
+                        ),
+                        "evidence": (
+                            []
+                            if review_checks is not None
+                            and not review_checks["facts_supported"]
+                            and unit["unit_id"] == 0
+                            else [{"source_index": source_index, "quote": quote}]
+                        ),
+                    }
+                    for unit in review_document["intent_details_units"]
+                ]
                 content = json.dumps(
                     {
-                        **dict(review_checks),
+                        "unit_grounding": unit_grounding,
                         "signal_coverage": [
                             {"matched_icp_signal": index, "covered": True}
                             for index in (0, 1)
                         ],
-                        "unsupported_factual_clause": (
-                            PARAGRAPH if not review_checks["facts_supported"] else ""
-                        ),
-                        "unsupported_factual_reason": (
-                            "The supplied evidence does not support this factual clause."
-                            if not review_checks["facts_supported"] else ""
-                        ),
+                        **dict(review_checks),
                     } if review_checks is not None else {}
                 )
             elif schema_name == "verification":
@@ -312,19 +331,21 @@ def test_real_judge_reviews_one_paragraph_against_two_verified_signals(
 
     assert len(review_documents) == 1, summary
     review = review_documents[0]
-    assert review["intent_details"] == PARAGRAPH
+    assert " ".join(
+        unit["text"] for unit in review["intent_details_units"]
+    ) == PARAGRAPH
     assert [item["matched_icp_signal"] for item in review["verified_signals"]] == [
         0,
         1,
     ]
-    assert [item["supporting_quotes"] for item in review["verified_signals"]] == [
-        [real_judge.SENTENCE],
-        [LAUNCH_SENTENCE],
-    ]
-    assert [item["authoritative_date"] for item in review["verified_signals"]] == [
-        "2026-07-15",
-        "2026-08-20",
-    ]
+    bound_sources = intent_details._bound_evidence_sources(review)
+    assert any(real_judge.SENTENCE in value for values in bound_sources.values() for value in values)
+    assert any(LAUNCH_SENTENCE in value for values in bound_sources.values() for value in values)
+    assert [
+        source["observed_dates"][0]["date"]
+        for source in review["admitted_evidence"]
+        if source["evidence_kind"] == "verified_signal_observation"
+    ] == ["2026-07-15", "2026-08-20"]
     assert document["scorer_policy"]["intent_details_policy"] == (
         intent_details_policy.POLICY
     )

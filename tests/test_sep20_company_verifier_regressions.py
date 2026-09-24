@@ -39,6 +39,8 @@ def _icp(**updates):
     values = {
         "employee_count": ["201-500"],
         "industry": "Software",
+        "sub_industry": "",
+        "product_service": "",
         "country": "United States",
         "geography": "United States",
         "company_stage": "Series B",

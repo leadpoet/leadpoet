@@ -91,6 +91,30 @@ def test_script_text_cannot_become_source_evidence(monkeypatch):
     assert verification_helpers.extract_article_body(hidden_only) == ""
 
 
+def test_visible_links_survive_fallback_and_exclude_hidden_targets(monkeypatch):
+    monkeypatch.setattr(verification_helpers, "_TRAFILATURA_AVAILABLE", False)
+    html = """<html><head><style>
+    .css-hidden { display: none; }
+    </style></head><body>
+    <nav><a href="https://nav.example/parent">Parent</a></nav>
+    <script><a href="https://script.example/parent">Script parent</a></script>
+    <a hidden href="https://hidden.example/parent">Hidden parent</a>
+    <div class="css-hidden">
+      <a href="https://css-hidden.example/parent">CSS hidden parent</a>
+    </div>
+    <a href="https://visible.example/company">Visible company</a>
+    <a href="https://visible.example/company">Duplicate company link</a>
+    </body></html>"""
+
+    body = verification_helpers.extract_article_body(html)
+
+    assert "Visible company" in body
+    assert "Parent" not in body
+    assert verification_helpers.visible_html_links(html) == (
+        "https://visible.example/company",
+    )
+
+
 def test_failed_trafilatura_uses_same_visible_text_fallback(monkeypatch):
     class _FailingTrafilatura:
         @staticmethod

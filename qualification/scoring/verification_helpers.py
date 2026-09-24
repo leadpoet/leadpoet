@@ -52,6 +52,7 @@ class _VisibleHTMLTextParser(HTMLParser):
         self._saw_heading = False
         self.parts: list[str] = []
         self.heading_parts: list[str] = []
+        self.links: list[str] = []
 
     @staticmethod
     def _attribute_map(attrs: Any) -> Dict[str, str]:
@@ -92,6 +93,10 @@ class _VisibleHTMLTextParser(HTMLParser):
         self._stack.append((lowered, hidden))
         if hidden:
             self._hidden_depth += 1
+        if lowered == "a" and not self._hidden_depth:
+            href = self._attribute_map(attrs).get("href", "").strip()
+            if href:
+                self.links.append(href)
         if (
             lowered == "h1"
             and not self._hidden_depth
@@ -200,6 +205,24 @@ def _visible_html_document(content: str) -> tuple[str, str]:
 
 def _visible_html_text(content: str) -> str:
     return _visible_html_document(content)[0]
+
+
+def visible_html_links(content: str) -> tuple[str, ...]:
+    """Return link targets from visible HTML elements in document order."""
+
+    if not content:
+        return ()
+    hidden_classes, hidden_ids = _css_hidden_selectors(content)
+    parser = _VisibleHTMLTextParser(
+        hidden_classes=hidden_classes,
+        hidden_ids=hidden_ids,
+    )
+    try:
+        parser.feed(content)
+        parser.close()
+    except Exception:
+        return ()
+    return tuple(dict.fromkeys(parser.links))
 
 
 _HEADING_STOPWORDS = frozenset({

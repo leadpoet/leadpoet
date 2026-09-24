@@ -417,6 +417,15 @@ _PRIVATE_EQUITY_CONTROL = (
     r"majority[- ]owned\s+by|controlling\s+owner|majority\s+stake|"
     r"controlling\s+stake)"
 )
+_COMPLETED_PRIVATE_EQUITY_ACQUISITION_RE = re.compile(
+    r"\b(?:completed|completion\s+of)\s+"
+    r"(?:(?:the|its|an?)\s+)?acquisition\s+by\s+"
+    r"[^,;.!?\n]{1,100},\s+"
+    r"(?:(?:a|an|the|leading|global|middle[- ]market)\s+){0,5}"
+    rf"{_PRIVATE_EQUITY_LABEL}\b"
+    r"(?![^.!?\n]{0,100}\bminority\b)",
+    re.I,
+)
 _PRIVATE_EQUITY_STAGE_PROOF_PATTERNS = (
     re.compile(
         rf"\b{_PRIVATE_EQUITY_CONTROL}\b.{{0,100}}\b{_PRIVATE_EQUITY_LABEL}\b",
@@ -445,11 +454,13 @@ _PRIVATE_EQUITY_STAGE_PROOF_PATTERNS = (
         r"[^.!?\n]{0,30}\b(?:close|complete|completion|closing)\b)",
         re.I,
     ),
+    _COMPLETED_PRIVATE_EQUITY_ACQUISITION_RE,
 )
 _PUBLIC_STAGE_SUPERSESSION_PATTERNS = (
     re.compile(r"\bdelisted(?:\s+from\b)?", re.I),
     re.compile(r"\b(?:taken|went|became)\s+private\b", re.I),
     re.compile(r"\b(?:ceased|stopped)\s+trading\b", re.I),
+    _COMPLETED_PRIVATE_EQUITY_ACQUISITION_RE,
 )
 _CURRENT_NONPUBLIC_STAGE_PROOF_PATTERNS = (
     re.compile(

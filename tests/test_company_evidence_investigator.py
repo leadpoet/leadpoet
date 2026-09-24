@@ -879,6 +879,132 @@ def test_plain_text_removes_nonvisible_blocks_before_clipping():
     assert len(text) <= investigator.MAX_PAGE_CHARACTERS
 
 
+def test_plain_text_extracts_realpage_article_before_navigation_cap():
+    exact_quote = (
+        "RealPage, Inc. (NASDAQ: RP), a leading global provider of software "
+        "and data analytics to the real estate industry, today announced the "
+        "completion of its acquisition by Thoma Bravo, a leading private "
+        "equity investment firm focused on the software sector, in an all-cash "
+        "transaction that valued RealPage at approximately $10.2 billion, "
+        "including net debt."
+    )
+    hidden_quote = (
+        "RealPage remains publicly listed on Nasdaq under ticker RP."
+    )
+    url = (
+        "https://www.realpage.com/news/"
+        "thoma-bravo-completes-acquisition-of-realpage/"
+    )
+    raw = f"""<html><head><title>Thoma Bravo: RealPage Acquisition</title>
+    <script>{hidden_quote}<a href="https://script-parent.example/">Parent</a></script>
+    </head><body>
+    <nav>{'Solutions Back products markets platforms ' * 2000}
+      <a href="https://nav-parent.example/">Parent company</a>
+    </nav>
+    <main><article>
+      <h1>Thoma Bravo Completes Acquisition of RealPage</h1>
+      <p>{exact_quote}</p>
+      <p hidden>{hidden_quote}
+        <a href="https://hidden-parent.example/">Hidden parent</a>
+      </p>
+      <a href="https://www.realpage.com/company/">About RealPage</a>
+    </article></main>
+    <template>{hidden_quote}</template>
+    </body></html>"""
+
+    text = investigator._plain_text(raw)
+
+    assert exact_quote in text
+    assert "Solutions Back products markets platforms" not in text
+    assert hidden_quote not in text
+    assert "https://script-parent.example/" not in text
+    assert "https://nav-parent.example/" not in text
+    assert "https://hidden-parent.example/" not in text
+    assert "https://www.realpage.com/company/" in text
+    assert len(text) <= investigator.MAX_PAGE_CHARACTERS
+
+    hidden = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            observed_value="Public",
+            evidence_url=url,
+            evidence_quote=hidden_quote,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: text},
+        first_party_domains={"realpage.com"},
+        identity_names={"realpageinc"},
+    )
+
+    exact = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            observed_value="Private Equity",
+            evidence_url=url,
+            evidence_quote=exact_quote,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: text},
+        first_party_domains={"realpage.com"},
+        identity_names={"realpageinc"},
+    )
+
+    assert investigator._quote_occurs(exact_quote, text)
+    assert not investigator._quote_occurs(hidden_quote, text)
+    assert _stage_quote_supports_observation("private equity", exact_quote)
+    assert not _stage_quote_supports_observation("public", exact_quote)
+    assert exact["stage"]["status"] == "VERIFIED"
+    assert hidden["stage"]["status"] == "UNPROVEN"
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        (
+            "RealPage expects the completion of its acquisition by Thoma Bravo, "
+            "a leading private equity investment firm, next month."
+        ),
+        (
+            "RealPage announced the proposed completion of its acquisition by "
+            "Thoma Bravo, a leading private equity investment firm."
+        ),
+        (
+            "RealPage announced the completion of its acquisition by Thoma "
+            "Bravo, a leading private equity investment firm, of a minority stake."
+        ),
+        (
+            "ParentCo announced the completion of its acquisition by Thoma Bravo, "
+            "a leading private equity investment firm."
+        ),
+    ],
+)
+def test_completed_private_equity_acquisition_keeps_negative_controls(quote):
+    if quote.startswith("ParentCo"):
+        url = "https://parent.example/acquisition"
+        finding = _validated_findings(
+            {"findings": [_finding(
+                "stage",
+                observed_value="Private Equity",
+                evidence_url=url,
+                evidence_quote=quote,
+            )]},
+            targets=("stage",),
+            fetched_pages={url: quote},
+            first_party_domains={"realpage.com"},
+            identity_names={"realpageinc"},
+        )
+        assert finding["stage"]["status"] == "UNPROVEN"
+    else:
+        assert not _stage_quote_supports_observation("private equity", quote)
+
+
+def test_current_private_equity_control_remains_stage_proof():
+    assert _stage_quote_supports_observation(
+        "private equity",
+        "RealPage is controlled by Thoma Bravo, a leading private equity firm.",
+    )
+
+
 def test_stage_quote_can_use_independently_bound_first_party_domain():
     url = "https://acme.example/about"
     quote = (

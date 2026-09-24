@@ -31,6 +31,10 @@ from qualification.scoring.linkedin_company_size import (
     VERIFIER_FAILURE_REASON_KEY,
     linkedin_company_page_slug,
 )
+from qualification.scoring.verification_helpers import (
+    extract_article_body,
+    visible_html_links,
+)
 
 # Use an already proven scorer tool model from the signed Arena policy. This
 # does not add a new model or role to that policy.
@@ -283,7 +287,16 @@ def _safe_https_url(value: Any) -> str:
 
 
 def _plain_text(value: str) -> str:
-    decoded = html.unescape(value)
+    linked_urls = " ".join(
+        match.rstrip("'\"<>.,)")
+        for match in visible_html_links(value)
+        if re.fullmatch(r"https?://[^\s'\"<>]+", match, flags=re.I)
+    )
+    # Extract the visible main body before applying the investigator's fixed
+    # character bound. Navigation-heavy pages can otherwise displace the
+    # article that the model must quote. The shared extractor also excludes
+    # hidden, executable, fallback, navigation, and related-page markup.
+    decoded = html.unescape(extract_article_body(value))
     # Script and style bodies are not visible page evidence. Remove them before
     # applying the fixed page-text bound so they cannot displace visible text.
     for tag in ("script", "style"):
@@ -293,10 +306,6 @@ def _plain_text(value: str) -> str:
             decoded,
             flags=re.I | re.S,
         )
-    linked_urls = " ".join(
-        match.rstrip("'\"<>.,)")
-        for match in re.findall(r"https?://[^\s'\"<>]+", decoded, flags=re.I)
-    )
     without_markup = re.sub(r"<[^>]+>", " ", decoded)
     return " ".join((without_markup + " " + linked_urls).split())[:MAX_PAGE_CHARACTERS]
 

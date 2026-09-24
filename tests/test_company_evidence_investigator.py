@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date
+import hashlib
 import json
 import re
 from types import SimpleNamespace
@@ -1792,6 +1793,171 @@ def test_audited_stage_quotes_get_source_context_then_exact_correction(
             "continuous fetched-page span"
         )
     assert "already fetched page" in correction["instruction"]
+
+
+def test_multiverse_spliced_quote_gets_bounded_exact_sentence_context():
+    opening = (
+        "Multiverse, the upskilling platform for AI and tech adoption, today "
+        "announced it has raised $70 million in primary funding to drive growth "
+        "across Europe."
+    )
+    intervening = (
+        "The funding was led by Schroders Capital, with participation from "
+        "existing investors. The investment will accelerate Multiverse's "
+        "expansion across Europe. Multiverse completed the acquisition of "
+        "Berlin-based data and AI training company StackFuel in January 2026."
+    )
+    later = (
+        "The $2.1bn valuation, a $400m increase on the last funding round, "
+        "reflects a company in its strongest position yet: revenue grew 50% yoy, "
+        "and increased at an accelerating rate for the third consecutive year."
+    )
+    page = " ".join(("LONDON – 15th May, 2026 –", opening, intervening, later))
+    spliced_quote = f"{opening} {later}"
+
+    assert len(spliced_quote) == 361
+    assert hashlib.sha256(spliced_quote.encode()).hexdigest() == (
+        "269b8adf03b73ee776de21b6b7ef54f43bf721e672cf41b7446b08064287acd4"
+    )
+    assert not investigator._quote_occurs(spliced_quote, page)
+    context = investigator._source_context_for_quote(spliced_quote, page)
+
+    assert opening in context
+    assert intervening in context
+    assert later in context
+    longest_exact_sentence = max((opening, later), key=len)
+    assert len(context) <= (
+        investigator.REJECTED_QUOTE_CONTEXT_BEFORE_CHARACTERS
+        + len(longest_exact_sentence)
+        + investigator.REJECTED_QUOTE_CONTEXT_AFTER_CHARACTERS
+    )
+
+
+def test_multiverse_amount_only_stage_fails_but_named_series_d_passes():
+    url = (
+        "https://www.multiverse.io/blog/"
+        "multiverse-raises-70-million-europes-ai-adoption-platform"
+    )
+    amount_only = (
+        "Multiverse, the upskilling platform for AI and tech adoption, today "
+        "announced it has raised $70 million in primary funding to drive growth "
+        "across Europe."
+    )
+    named_round = (
+        "In 2022, we raised our $220m Series D funding - one of the largest "
+        "venture rounds in EdTech history."
+    )
+    identity_anchor = {
+        "submitted_domain": "multiverse.io",
+        "observed_domain": "multiverse.io",
+        "verified_domain": "multiverse.io",
+    }
+
+    amount_finding = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            observed_value="Series D",
+            evidence_url=url,
+            evidence_quote=amount_only,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: amount_only},
+        first_party_domains={"multiverse.io"},
+        identity_names={"multiverse"},
+        identity_anchor=identity_anchor,
+    )["stage"]
+    assert amount_finding["status"] == "UNPROVEN"
+    assert amount_finding["reason"] == (
+        "source quote did not name the submitted venture stage"
+    )
+
+    named_finding = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            observed_value="Series D",
+            evidence_url=url,
+            evidence_quote=named_round,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: named_round},
+        first_party_domains={"multiverse.io"},
+        identity_names={"multiverse"},
+        identity_anchor=identity_anchor,
+    )["stage"]
+    assert named_finding["status"] == "VERIFIED"
+
+
+@pytest.mark.parametrize(
+    ("normalized_stage", "quote", "expected"),
+    [
+        ("seed", "TypeSafe emerged with a seed round.", True),
+        ("seed", "Acme closed a pre-seed round.", False),
+        ("seed", "Acme closed a pre–seed round.", False),
+        (
+            "seed",
+            "After a pre-seed investment, Acme closed its Seed round.",
+            True,
+        ),
+        ("series a", "Acme completed its Series A.", True),
+        ("series a", "Acme completed its Series B.", False),
+        ("series c+", "Acme completed its Series D.", True),
+        ("series c+", "Acme completed its Series B.", False),
+    ],
+)
+def test_venture_stage_token_must_match_normalized_category(
+    normalized_stage, quote, expected
+):
+    assert (
+        investigator._quote_names_compatible_venture_stage(
+            normalized_stage,
+            quote,
+        )
+        is expected
+    )
+
+
+def test_investigator_stage_keeps_other_recipient_control():
+    url = "https://news.example/quantumco-funding"
+    quote = "QuantumCo completed a Series D financing round led by Growth Partners."
+    finding = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            observed_value="Series D",
+            evidence_url=url,
+            evidence_quote=quote,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: quote},
+        first_party_domains={"multiverse.io"},
+        identity_names={"multiverse"},
+    )["stage"]
+
+    assert finding["status"] == "UNPROVEN"
+
+
+def test_investigator_can_accept_semantic_acculon_retrospective_receipt():
+    url = "https://www.acculonenergy.com/resources/facility-opening"
+    quote = (
+        "The facility’s opening follows a period of rapid growth for Acculon, "
+        "including a Series A investment led by Terex Corporation and the "
+        "expansion of its Acculon Labs testing division."
+    )
+    assert not _stage_quote_supports_observation("series a", quote)
+
+    finding = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            observed_value="Series A",
+            evidence_url=url,
+            evidence_quote=quote,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: quote},
+        first_party_domains={"acculonenergy.com"},
+        identity_names={"acculonenergy", "acculon"},
+    )["stage"]
+
+    assert finding["status"] == "VERIFIED"
 
 
 def test_submit_tool_requires_one_exact_continuous_quote_span():

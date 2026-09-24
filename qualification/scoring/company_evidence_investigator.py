@@ -389,18 +389,26 @@ def _source_context_for_quote(quote: str, fetched_text: str) -> str:
     """Return bounded nearby fetched text for a model-authored quote correction."""
 
     surface_page = _surface_span(fetched_text)
-    fragments = sorted(
-        (
-            fragment.strip()
-            for fragment in re.split(
-                r"\s*(?:\.{3}|\u2026)\s*", _surface_span(quote)
-            )
-            if len(fragment.strip()) >= 8
-        ),
-        key=len,
+    fragments = set()
+    for ellipsis_fragment in re.split(
+        r"\s*(?:\.{3}|\u2026)\s*", _surface_span(quote)
+    ):
+        ellipsis_fragment = ellipsis_fragment.strip()
+        if len(ellipsis_fragment) >= 8:
+            fragments.add(ellipsis_fragment)
+        # A model can splice two real sentences without writing an ellipsis.
+        # Surface one exact sentence and its local source context so the model
+        # can retry, while the final quote still must pass _quote_occurs.
+        fragments.update(
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+", ellipsis_fragment)
+            if len(sentence.strip()) >= 8
+        )
+    for fragment in sorted(
+        fragments,
+        key=lambda value: (len(value), value),
         reverse=True,
-    )
-    for fragment in fragments:
+    ):
         match = re.search(re.escape(fragment), surface_page, flags=re.I)
         if match is None:
             continue
@@ -562,6 +570,30 @@ def _quote_names_company(quote: str, identity_names: set[str]) -> bool:
             for name in identity_names
         )
     )
+
+
+def _quote_names_compatible_venture_stage(
+    normalized_stage: str,
+    quote: str,
+) -> bool:
+    """Require the exact quote to name the submitted venture-stage category."""
+
+    normalized_quote = _normalized_span(quote)
+    if normalized_stage == "seed":
+        # Seed and pre-seed are different stages in the current vocabulary.
+        without_pre_seed = re.sub(
+            r"\bpre(?:\s*[-\u2013\u2014]\s*|\s+)seed\b",
+            "",
+            normalized_quote,
+        )
+        return bool(re.search(r"\bseed\b", without_pre_seed))
+    if normalized_stage == "series a":
+        return bool(re.search(r"\bseries\s+a\b", normalized_quote))
+    if normalized_stage == "series b":
+        return bool(re.search(r"\bseries\s+b\b", normalized_quote))
+    if normalized_stage == "series c+":
+        return bool(re.search(r"\bseries\s+[c-z]\b", normalized_quote))
+    return True
 
 
 def _quote_supports_headcount(quote: str, observed_value: Any) -> bool:
@@ -897,6 +929,16 @@ def _validated_findings(
                         evidence_url="",
                         evidence_quote="",
                         reason="source quote did not prove current private-equity ownership",
+                    )
+                elif not _quote_names_compatible_venture_stage(
+                    normalized_stage,
+                    finding["evidence_quote"],
+                ):
+                    finding.update(
+                        status="UNPROVEN",
+                        evidence_url="",
+                        evidence_quote="",
+                        reason="source quote did not name the submitted venture stage",
                     )
             elif target == "headcount" and not _quote_supports_headcount(
                 finding["evidence_quote"], finding["observed_value"]

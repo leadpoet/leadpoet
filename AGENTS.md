@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: champion audit Arena fixes
+
+On 2026-09-24 the user authorized the narrow Arena-side fixes identified by
+the first champion audit, followed by tests, push, and canonical paired
+redeployment through `$overnight-rebenchmark-validation`. Confirm the promoted
+repository and next-day baseline credential selection. Preserve submitted model
+research, explicit valid output corrections, independent evidence verification,
+frozen historical scores, promotion ownership, source selection, costs, rewards,
+weights, secrets, and concurrent work. Authority includes protected production
+inspection, exact committed migrations if necessary, and live deployment
+verification. Do not rescore a completed round or rewrite the winning submission.
+This scope ends when the necessary Arena fixes are deployed and verified.
+
+
 ## Scoped production authorization: September 24 company-only Arena
 
 On 2026-09-23 the user explicitly authorized removing contact requirements,

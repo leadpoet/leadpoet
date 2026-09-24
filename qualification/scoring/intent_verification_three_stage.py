@@ -86,9 +86,18 @@ logger = logging.getLogger(__name__)
 # Scraping config — content-driven progressive escalation (NO host lists)
 # ─────────────────────────────────────────────────────────────────────
 MAX_SCRAPED_CHARS = 60_000
+_MAX_VERIFIED_SOURCE_CONTEXT_BYTES = 12_000
 SCRAPE_TIMEOUT = 60
 SCRAPINGDOG_PROVIDER_DEADLINE_S = 55
 SCRAPINGDOG_TERMINAL_TIMEOUT_S = 60
+
+
+def _retained_source_context_text(value: Any) -> str:
+    """Keep fetched text for later bounded paragraph evidence selection."""
+
+    return str(value or "").encode("utf-8")[
+        :_MAX_VERIFIED_SOURCE_CONTEXT_BYTES
+    ].decode("utf-8", errors="ignore")
 
 # Anti-bot / login-wall / parked-page text markers. When found in a short
 # response body, indicates the scraper hit a challenge page instead of real
@@ -3585,6 +3594,10 @@ def _decision(
         and item.get("confidence") == "high"
         and (
             not company_quality
+            or verdict.get("overall_verdict") == "qualified"
+        )
+        and (
+            not company_quality
             or item.get("same_entity_check") == "pass"
         )
     ):
@@ -5004,7 +5017,7 @@ async def verify_three_stage(
             result["verified_source_context"] = [
                 {
                     "url": declared[_normalize_url(item["url"])],
-                    "text": str(item.get("text") or "").encode("utf-8")[:6_000].decode("utf-8", errors="ignore"),
+                    "text": _retained_source_context_text(item.get("text")),
                     "source_publication_date": item.get("source_publication_date") or "",
                 }
                 for item in (contents.get("results") or [])[:3]

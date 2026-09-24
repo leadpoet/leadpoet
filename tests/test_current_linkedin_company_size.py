@@ -296,13 +296,16 @@ Senha
     calls, pending = _install_exa_bodies(monkeypatch, body)
 
     diagnostic = {}
+    source_text = {}
     assert asyncio.run(
         linkedin_company_size.fetch_current_linkedin_company_size(
             "https://linkedin.com/company/acme",
             diagnostic=diagnostic,
+            source_text_sink=source_text,
         )
     ) is None
     assert diagnostic == {"failure_reason": "source_blocked"}
+    assert source_text == {}
     assert len(calls) == 1
     assert pending == []
 
@@ -680,9 +683,11 @@ def test_exa_contents_request_is_uncached_and_bound_to_returned_url(monkeypatch)
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
     monkeypatch.setattr(linkedin_company_size.aiohttp, "ClientSession", Session)
 
+    source_text = {}
     result = asyncio.run(
         linkedin_company_size.fetch_current_linkedin_company_size(
-            "https://www.linkedin.com/company/acme"
+            "https://www.linkedin.com/company/acme",
+            source_text_sink=source_text,
         )
     )
 
@@ -690,6 +695,10 @@ def test_exa_contents_request_is_uncached_and_bound_to_returned_url(monkeypatch)
         "employee_count": "11-50",
         "quote": "Company size:\n\n11-50 employees",
         "url": "https://linkedin.com/company/acme/",
+    }
+    assert source_text == {
+        "url": "https://linkedin.com/company/acme/",
+        "text": "## About\n\nCompany size:\n\n11-50 employees",
     }
     assert len(calls) == 1
     assert calls[0][0] == "https://api.exa.ai/contents"
@@ -700,6 +709,200 @@ def test_exa_contents_request_is_uncached_and_bound_to_returned_url(monkeypatch)
         "livecrawlTimeout": 20000,
     }
     assert calls[0][1]["headers"]["x-api-key"] == "test-exa-key"
+
+
+@pytest.mark.parametrize(
+    ("returned_url", "text"),
+    [
+        (
+            "http://linkedin.com/company/acme",
+            "## About\nCompany size\n11-50 employees",
+        ),
+        (
+            "https://linkedin.com/company/acme",
+            "## About\nCompany size\n11-50 employees\n" + "x" * 4_000,
+        ),
+    ],
+)
+def test_profile_body_candidate_requires_https_and_existing_size_bound(
+    monkeypatch, returned_url, text,
+):
+    body = {
+        "statuses": [{"status": "success", "source": "crawled"}],
+        "results": [{"url": returned_url, "text": text}],
+    }
+    _calls, pending = _install_exa_bodies(monkeypatch, body)
+    source_text = {}
+
+    result = asyncio.run(
+        linkedin_company_size.fetch_current_linkedin_company_size(
+            "https://linkedin.com/company/acme",
+            source_text_sink=source_text,
+        )
+    )
+
+    assert result["employee_count"] == "11-50"
+    assert source_text == {}
+    assert pending == []
+
+
+def test_common_wealth_profile_body_reaches_paragraph_through_lab_scorer(
+    monkeypatch,
+):
+    from qualification.scoring import intent_details as intent_details_module
+
+    profile_url = "https://www.linkedin.com/company/common-wealth"
+    profile_quote = "Company size\n11-50 employees"
+    profile_body = (
+        "Common Wealth | LinkedIn\n## About us\n"
+        "Common Wealth provides modern retirement software to Canadians.\n"
+        f"{profile_quote}\n## Employees at Common Wealth"
+    )
+    exa_calls, pending = _install_exa_bodies(monkeypatch, {
+        "statuses": [{"status": "success", "source": "crawled"}],
+        "results": [{"url": profile_url, "text": profile_body}],
+    })
+    verdict = {
+        "observed_company_name": "Common Wealth",
+        "observed_company_website": "https://commonwealthretirement.com/",
+        "observed_company_linkedin": profile_url,
+        "observed_employee_count": "1",
+        "employee_size_matches": False,
+        "employee_size_evidence_url": profile_url,
+        "employee_size_evidence_quote": "An older profile copy listed 1 employee.",
+        "observed_industry": "Software",
+        "observed_subindustry": "Retirement software",
+        "industry_matches": True,
+        "industry_activity_role": "supplier_operator",
+        "industry_evidence_url": (
+            "https://commonwealthretirement.com/platform"
+        ),
+        "industry_evidence_quote": (
+            "Common Wealth provides retirement software to Canadian employers."
+        ),
+        "observed_hq_country": "Canada",
+        "observed_hq_state": "Ontario",
+        "geography_matches": True,
+        "geography_evidence_url": (
+            "https://commonwealthretirement.com/about"
+        ),
+        "geography_evidence_quote": (
+            "Common Wealth is headquartered in Toronto, Ontario, Canada."
+        ),
+        "reason": "Independent sources support the observations.",
+    }
+    company = {
+        "company_name": "Common Wealth",
+        "company_website": "https://commonwealthretirement.com/",
+        "company_linkedin": profile_url,
+        "industry": "Software",
+        "employee_count": "11-50",
+        "company_stage": "",
+        "country": "Canada",
+        "state": "Ontario",
+        "intent_details": (
+            "Common Wealth provides modern retirement software to Canadians."
+        ),
+        "intent_signals": [{
+            "matched_icp_signal": 0,
+            "description": "Common Wealth announced new retirement software.",
+            "date": "2026-09-01",
+            "url": "https://commonwealthretirement.com/platform",
+        }],
+    }
+    icp = {
+        "icp_id": "common-wealth-profile-context",
+        "prompt": "Find Canadian retirement software companies.",
+        "industry": "Software",
+        "sub_industry": "Retirement software",
+        "employee_count": ["11-50"],
+        "company_stage": "",
+        "geography": "Canada",
+        "country": "Canada",
+        "product_service": "retirement software",
+        "required_attribute": "",
+        "intent_signals": ["Announced new retirement software"],
+        "max_companies": 1,
+    }
+    paragraph_contexts = []
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_match(
+            "homepage identity verified",
+            details={
+                "verified_homepage_transport_domain": (
+                    "commonwealthretirement.com"
+                ),
+                "identity": {
+                    "decision": COMPANY_FIT_MATCH,
+                    "evidence_source": "company_homepage",
+                    "observed_name": "common wealth",
+                    "observed_domain": "commonwealthretirement.com",
+                    "observed_linkedin_slug": "common-wealth",
+                },
+            },
+        )
+
+    async def provider(**_kwargs):
+        return dict(verdict), ""
+
+    async def intent_score(*_args, **_kwargs):
+        return 60.0, 60.0, 1.0, 90, False, [{
+            "raw": 60.0,
+            "after_decay": 60.0,
+            "matched_icp_signal": 0,
+            "judge_verdict": {
+                "decision": "verified",
+                "pipeline_decision": "accept",
+                "client_ready": True,
+            },
+        }]
+
+    async def paragraph_review(
+        _company, _icp, _signals, _fit_receipt, *, company_source_contexts=None,
+    ):
+        paragraph_contexts.append(company_source_contexts)
+        return {"gate": "intent_details", "decision": COMPANY_FIT_MATCH}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(
+        lead_scorer, "_request_company_reverify_json", provider
+    )
+    monkeypatch.setattr(
+        lead_scorer, "score_company_competition_intent_signal", intent_score
+    )
+    monkeypatch.setattr(
+        intent_details_module, "review_intent_details", paragraph_review
+    )
+    scorer = arena_scoring.lab_scorer(
+        arena_scoring.build_scorer_policy(
+            scoring_adapter_version="qualification_integrity_v2",
+            intent_details=True,
+        )
+    )
+
+    result = arena_scoring.score_work_item(
+        {"scored_run_id": "common-wealth-profile-context"},
+        icp=icp,
+        companies=[company],
+        scorer=scorer,
+        max_retries=1,
+    )
+
+    assert result[0]["final_score"] == 60.0
+    assert len(exa_calls) == 1
+    assert pending == []
+    assert paragraph_contexts == [[{
+        "dimension": "employee_size",
+        "url": profile_url,
+        "text": profile_body,
+    }]]
+    assert profile_body not in str(result)
 
 
 def test_invalid_requested_profile_url_never_calls_exa(monkeypatch):
@@ -923,16 +1126,25 @@ def test_successful_exact_profile_without_company_size_is_insufficient(
     monkeypatch.setattr(linkedin_company_size.aiohttp, "ClientSession", Session)
 
     diagnostic = {}
+    source_text = {}
     assert asyncio.run(
         linkedin_company_size.fetch_current_linkedin_company_size(
             "https://linkedin.com/company/acme",
             diagnostic=diagnostic,
+            source_text_sink=source_text,
         )
     ) == {
         "outcome": "insufficient_evidence",
         "url": "https://linkedin.com/company/acme",
     }
     assert diagnostic == {}
+    assert source_text == {
+        "url": "https://linkedin.com/company/acme",
+        "text": (
+            "## Over ons\nAcme bouwt workflowsoftware.\n"
+            "Website\nhttps://acme.example.com"
+        ),
+    }
 
 
 @pytest.mark.parametrize(
@@ -2770,7 +2982,8 @@ def test_structured_size_fallback_is_reused_across_sonar_repair(monkeypatch):
         verdict["industry_matches"] = True if len(provider_calls) > 1 else None
         return verdict, ""
 
-    async def exa_fetch(url, *, diagnostic):
+    async def exa_fetch(url, *, diagnostic, source_text_sink=None):
+        del diagnostic, source_text_sink
         exa_fetches.append(url)
         return {"outcome": "insufficient_evidence", "url": url}
 

@@ -363,6 +363,553 @@ def test_valid_required_attribute_announcement_quote_is_grounded(monkeypatch):
     assert result.details["required_attribute_grounding"]["status"] == "grounded"
 
 
+def test_successful_attribute_body_survives_outer_retry_without_refetch(
+    monkeypatch,
+):
+    source_url = (
+        "https://www.businesswire.com/news/home/20260915525333/en/"
+        "TypeSafe-AI-Emerges-From-Stealth-With-$40M-in-Funding"
+    )
+    quote = (
+        "TypeSafe AI emerged from stealth with $40 million in seed funding."
+    )
+    verdict = _required_attribute_verdict(
+        satisfied=True,
+        url=source_url,
+        quote=quote,
+    ) | {
+        "observed_company_name": "Example Company",
+        "observed_company_website": "https://example.com/",
+    }
+    provider = AsyncMock(return_value=(verdict, ""))
+    fetch = AsyncMock(return_value=(200, source_url, f"News {quote} Details"))
+    retry_cache = {}
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", fetch)
+
+    first = asyncio.run(lead_scorer._llm_reverify_company(
+        _company(),
+        _icp(company_stage="", required_attribute="Raised seed funding."),
+        required_attribute_retry_source_cache=retry_cache,
+    ))
+    # This boundary represents an unrelated retryable intent-provider failure.
+    # The next company invocation must reuse only the prior successful body.
+    fetch.side_effect = AssertionError("retained source must not be refetched")
+    second = asyncio.run(lead_scorer._llm_reverify_company(
+        _company(),
+        _icp(company_stage="", required_attribute="Raised seed funding."),
+        required_attribute_retry_source_cache=retry_cache,
+    ))
+
+    assert first.decision == second.decision == COMPANY_FIT_MATCH
+    assert fetch.await_count == 1
+    assert retry_cache[source_url]["text"] == f"News {quote} Details"
+    assert retry_cache[source_url][lead_scorer._RETRY_RETAINED_SOURCE] is True
+    assert "News" not in str(second.receipt("company_fit"))
+
+
+def test_lab_scorer_retry_reuses_grounded_body_for_final_paragraph(
+    monkeypatch,
+):
+    from qualification.scoring import intent_details as intent_details_module
+
+    source_url = (
+        "https://www.businesswire.com/news/home/20260915525333/en/"
+        "TypeSafe-AI-Emerges-From-Stealth-With-$40M-in-Funding"
+    )
+    quote = (
+        "TypeSafe AI emerged from stealth with $40 million in seed funding."
+    )
+    source_body = (
+        f"News {quote} The company also reported 50% revenue growth."
+    )
+    verdict = {
+        "observed_company_name": "TypeSafe AI",
+        "observed_company_website": "https://typesafe.example/",
+        "observed_company_linkedin": (
+            "https://www.linkedin.com/company/typesafe-ai"
+        ),
+        "observed_employee_count": "11-50",
+        "employee_size_matches": True,
+        "employee_size_evidence_url": source_url,
+        "employee_size_evidence_quote": (
+            "TypeSafe AI has between 11 and 50 employees."
+        ),
+        "observed_industry": "Software",
+        "observed_subindustry": "SaaS",
+        "industry_matches": True,
+        "industry_activity_role": "supplier_operator",
+        "industry_evidence_url": source_url,
+        "industry_evidence_quote": "TypeSafe AI builds software.",
+        "observed_hq_country": "United States",
+        "observed_hq_state": "California",
+        "geography_matches": True,
+        "geography_evidence_url": source_url,
+        "geography_evidence_quote": (
+            "TypeSafe AI is headquartered in California, United States."
+        ),
+        "attribute_satisfied": True,
+        "required_attribute_evidence_url": source_url,
+        "required_attribute_evidence_quote": quote,
+        "reason": "All requested fit dimensions are verified.",
+    }
+    company = {
+        "company_name": "TypeSafe AI",
+        "company_website": "https://typesafe.example/",
+        "company_linkedin": "https://www.linkedin.com/company/typesafe-ai",
+        "industry": "Software",
+        "employee_count": "11-50",
+        "company_stage": "",
+        "country": "United States",
+        "state": "California",
+        "intent_details": (
+            "TypeSafe AI raised seed funding and reported 50% revenue growth."
+        ),
+        "intent_signals": [{
+            "matched_icp_signal": 0,
+            "description": "TypeSafe AI announced a completed funding event.",
+            "date": "2026-09-15",
+            "url": source_url,
+        }],
+    }
+    icp = {
+        "icp_id": "typesafe-retry",
+        "prompt": "Find software companies with recent funding.",
+        "industry": "Software",
+        "sub_industry": "SaaS",
+        "employee_count": ["11-50"],
+        "company_stage": "",
+        "geography": "United States",
+        "country": "United States",
+        "product_service": "software",
+        "required_attribute": "Raised seed funding.",
+        "intent_signals": ["Announced a completed funding event"],
+        "max_companies": 1,
+    }
+    provider_calls = []
+    fetch_calls = []
+    intent_calls = 0
+    paragraph_contexts = []
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_match("homepage identity verified")
+
+    async def company_provider(**kwargs):
+        provider_calls.append(kwargs["telemetry_purpose"])
+        return dict(verdict), ""
+
+    async def source_fetch(_session, url, **_kwargs):
+        fetch_calls.append(url)
+        if len(fetch_calls) > 1:
+            raise asyncio.TimeoutError("source is unavailable on retry")
+        return 200, url, source_body
+
+    async def intent_score(*_args, **_kwargs):
+        nonlocal intent_calls
+        intent_calls += 1
+        if intent_calls == 1:
+            return 0.0, 0.0, 1.0, 0, True, [{
+                "raw": 0.0,
+                "after_decay": 0.0,
+                "matched_icp_signal": 0,
+                "judge_verdict": {
+                    "decision": "rejected_verifier_error",
+                    "pipeline_decision": "unavailable",
+                    "error_class": "ProviderTimeout",
+                },
+            }]
+        return 60.0, 60.0, 1.0, 90, False, [{
+            "raw": 60.0,
+            "after_decay": 60.0,
+            "matched_icp_signal": 0,
+            "judge_verdict": {
+                "decision": "verified",
+                "pipeline_decision": "accept",
+                "client_ready": True,
+            },
+        }]
+
+    async def paragraph_review(
+        _company, _icp, _signals, _fit_receipt, *, company_source_contexts=None,
+    ):
+        paragraph_contexts.append(company_source_contexts)
+        return {"gate": "intent_details", "decision": COMPANY_FIT_MATCH}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(
+        lead_scorer, "_request_company_reverify_json", company_provider
+    )
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", source_fetch)
+    monkeypatch.setattr(
+        lead_scorer, "score_company_competition_intent_signal", intent_score
+    )
+    monkeypatch.setattr(
+        intent_details_module, "review_intent_details", paragraph_review
+    )
+    scorer = arena_scoring.lab_scorer(
+        arena_scoring.build_scorer_policy(
+            scoring_adapter_version="qualification_integrity_v2",
+            intent_details=True,
+        )
+    )
+
+    result = arena_scoring.score_work_item(
+        {"scored_run_id": "typesafe-source-retry"},
+        icp=icp,
+        companies=[company],
+        scorer=scorer,
+        max_retries=2,
+    )
+
+    assert result[0]["final_score"] == 60.0
+    assert provider_calls == ["lead_scorer_reverify"] * 2
+    assert intent_calls == 2
+    assert fetch_calls == [source_url]
+    assert paragraph_contexts == [[{
+        "dimension": "required_attribute",
+        "url": source_url,
+        "text": source_body,
+    }]]
+    assert source_body not in str(result)
+
+
+def test_failed_attribute_fetch_is_not_retained_across_outer_retry(monkeypatch):
+    source_url = "https://example.com/announcement"
+    quote = "Example Company announced a new regional office."
+    verdict = {
+        "attribute_satisfied": True,
+        "required_attribute_evidence_url": source_url,
+        "required_attribute_evidence_quote": quote,
+    }
+    retry_cache = {}
+    first_local_cache = {}
+
+    with patch.object(
+        lead_scorer,
+        "_fetch_bounded_html",
+        AsyncMock(side_effect=asyncio.TimeoutError),
+    ):
+        first, _ = asyncio.run(
+            lead_scorer._ground_required_attribute_evidence(
+                verdict,
+                active_attribute=True,
+                source_cache=first_local_cache,
+                successful_source_sink=retry_cache,
+            )
+        )
+
+    assert first[lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING]["status"] == (
+        "source_unavailable"
+    )
+    assert retry_cache == {}
+
+    with patch.object(
+        lead_scorer,
+        "_fetch_bounded_html",
+        AsyncMock(return_value=(200, source_url, quote)),
+    ):
+        second, _ = asyncio.run(
+            lead_scorer._ground_required_attribute_evidence(
+                verdict,
+                active_attribute=True,
+                source_cache=lead_scorer._validated_retry_retained_sources(
+                    retry_cache
+                ),
+                successful_source_sink=retry_cache,
+            )
+        )
+
+    assert second[lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING]["status"] == "grounded"
+    assert retry_cache[source_url]["status"] == "fetched"
+
+
+def test_retry_retained_sources_fail_closed_on_provenance_and_bounds():
+    source_url = "https://example.com/announcement"
+    valid_entry = {
+        "status": "fetched",
+        "final_url": source_url,
+        "text": "Example Company announced a new regional office.",
+        lead_scorer._RETRY_RETAINED_SOURCE: True,
+    }
+
+    assert lead_scorer._validated_retry_retained_sources(
+        {source_url: valid_entry}
+    ) == {source_url: valid_entry}
+    public_http_url = "http://example.com/announcement"
+    public_http_entry = {
+        **valid_entry,
+        "final_url": public_http_url,
+    }
+    assert lead_scorer._validated_retry_retained_sources(
+        {public_http_url: public_http_entry}
+    ) == {public_http_url: public_http_entry}
+    assert lead_scorer._validated_retry_retained_sources({
+        source_url: {key: value for key, value in valid_entry.items()
+                     if key != lead_scorer._RETRY_RETAINED_SOURCE}
+    }) == {}
+    assert lead_scorer._validated_retry_retained_sources({
+        "http://127.0.0.1/private": {
+            **valid_entry,
+            "final_url": "http://127.0.0.1/private",
+        }
+    }) == {}
+    assert lead_scorer._validated_retry_retained_sources({
+        "https://example.com": {
+            **valid_entry,
+            "final_url": "https://example.com",
+        }
+    }) == {}
+    assert lead_scorer._validated_retry_retained_sources({
+        source_url: {
+            **valid_entry,
+            "text": "x" * (lead_scorer.MAX_PAGE_CHARACTERS + 1),
+        }
+    }) == {}
+    assert lead_scorer._validated_retry_retained_sources({
+        f"https://example.com/{index}": {
+            **valid_entry,
+            "final_url": f"https://example.com/{index}",
+        }
+        for index in range(lead_scorer._MAX_REQUIRED_ATTRIBUTE_SOURCE_URLS + 1)
+    }) == {}
+
+
+def test_final_matched_attribute_body_is_private_paragraph_context_only():
+    source_url = "https://example.com/announcement"
+    quote = "Example Company announced a new regional office."
+    body = f"News {quote} Revenue grew 50% year over year."
+    retry_cache = {}
+    lead_scorer._retain_successful_required_attribute_source(
+        retry_cache,
+        source_url,
+        {"status": "fetched", "final_url": source_url, "text": body},
+    )
+    company_fit = company_fit_match(details={
+        "required_attribute_decision": COMPANY_FIT_MATCH,
+        "supporting_receipts": [{
+            "gate": "required_attribute_source",
+            "status": "grounded",
+        }],
+        "dimension_evidence": {
+            "required_attribute": {
+                "decision": COMPANY_FIT_MATCH,
+                "web_evidence": {"url": source_url, "quote": quote},
+            }
+        },
+    })
+
+    context = lead_scorer._matched_required_attribute_source_context(
+        company_fit,
+        retry_cache,
+    )
+
+    assert context == {"url": source_url, "text": body}
+    assert body not in str(company_fit.receipt("company_fit"))
+    missing_quote = company_fit_match(details={
+        **company_fit.details,
+        "dimension_evidence": {
+            "required_attribute": {
+                "decision": COMPANY_FIT_MATCH,
+                "web_evidence": {
+                    "url": source_url,
+                    "quote": "A claim absent from the fetched body.",
+                },
+            }
+        },
+    })
+    assert lead_scorer._matched_required_attribute_source_context(
+        missing_quote,
+        retry_cache,
+    ) is None
+
+    public_http_url = "http://example.com/announcement"
+    public_http_cache = {}
+    lead_scorer._retain_successful_required_attribute_source(
+        public_http_cache,
+        public_http_url,
+        {"status": "fetched", "final_url": public_http_url, "text": body},
+    )
+    public_http_fit = company_fit_match(details={
+        **company_fit.details,
+        "dimension_evidence": {
+            "required_attribute": {
+                "decision": COMPANY_FIT_MATCH,
+                "web_evidence": {"url": public_http_url, "quote": quote},
+            }
+        },
+    })
+    assert lead_scorer._matched_required_attribute_source_context(
+        public_http_fit,
+        public_http_cache,
+    ) is None
+
+
+def test_final_attribute_context_allows_only_trusted_exact_final_url_alias():
+    requested_url = "https://example.com/news/announcement"
+    final_url = "https://example.com/news/announcement/"
+    quote = "Example Company announced a new regional office."
+    body = f"News {quote} Revenue grew 50% year over year."
+    company_fit = company_fit_match(details={
+        "required_attribute_decision": COMPANY_FIT_MATCH,
+        "supporting_receipts": [{
+            "gate": "required_attribute_source",
+            "status": "grounded",
+        }],
+        "dimension_evidence": {
+            "required_attribute": {
+                "decision": COMPANY_FIT_MATCH,
+                "web_evidence": {"url": final_url, "quote": quote},
+            }
+        },
+    })
+    retained = {
+        requested_url: {
+            "status": "fetched",
+            "final_url": final_url,
+            "text": body,
+            lead_scorer._RETRY_RETAINED_SOURCE: True,
+            lead_scorer._INVESTIGATOR_HYDRATED_SOURCE: True,
+        }
+    }
+
+    assert lead_scorer._matched_required_attribute_source_context(
+        company_fit,
+        retained,
+    ) == {"url": final_url, "text": body}
+    retained[requested_url].pop(
+        lead_scorer._INVESTIGATOR_HYDRATED_SOURCE
+    )
+    assert lead_scorer._matched_required_attribute_source_context(
+        company_fit,
+        retained,
+    ) is None
+
+
+def test_final_linkedin_context_requires_matched_quote_and_identity_slug():
+    source_url = "https://www.linkedin.com/company/common-wealth"
+    quote = "Company size\n11-50 employees"
+    body = f"## About us\nCommon Wealth provides retirement software.\n{quote}"
+    company_fit = company_fit_match(details={
+        "dimension_evidence": {
+            "employee_size": {
+                "decision": COMPANY_FIT_MATCH,
+                "submitted_decision": COMPANY_FIT_MATCH,
+                "observed_decision": COMPANY_FIT_MATCH,
+                "web_evidence": {"url": source_url, "quote": quote},
+            },
+            "identity": {
+                "decision": COMPANY_FIT_MATCH,
+                "web_identity_receipt": {
+                    "decision": COMPANY_FIT_MATCH,
+                    "observed_linkedin_slug": "common-wealth",
+                },
+            },
+        },
+    })
+    candidate = {"url": source_url, "text": body}
+
+    assert lead_scorer._matched_linkedin_profile_source_context(
+        company_fit,
+        candidate,
+    ) == candidate
+    wrong_slug = company_fit_match(details={
+        "dimension_evidence": {
+            **company_fit.details["dimension_evidence"],
+            "identity": {
+                "decision": COMPANY_FIT_MATCH,
+                "web_identity_receipt": {
+                    "decision": COMPANY_FIT_MATCH,
+                    "observed_linkedin_slug": "other-company",
+                },
+            },
+        },
+    })
+    assert lead_scorer._matched_linkedin_profile_source_context(
+        wrong_slug,
+        candidate,
+    ) is None
+    assert lead_scorer._matched_linkedin_profile_source_context(
+        company_fit,
+        {"url": source_url, "text": "The exact final quote is absent."},
+    ) is None
+
+
+def test_company_source_contexts_are_bounded_and_dimension_ordered():
+    attribute_url = "https://example.com/funding"
+    attribute_quote = "Example Company raised a seed round."
+    profile_url = "https://www.linkedin.com/company/example-company"
+    profile_quote = "Company size\n11-50 employees"
+    company_fit = company_fit_match(details={
+        "required_attribute_decision": COMPANY_FIT_MATCH,
+        "supporting_receipts": [{
+            "gate": "required_attribute_source",
+            "status": "grounded",
+        }],
+        "dimension_evidence": {
+            "required_attribute": {
+                "decision": COMPANY_FIT_MATCH,
+                "web_evidence": {
+                    "url": attribute_url,
+                    "quote": attribute_quote,
+                },
+            },
+            "employee_size": {
+                "decision": COMPANY_FIT_MATCH,
+                "submitted_decision": COMPANY_FIT_MATCH,
+                "observed_decision": COMPANY_FIT_MATCH,
+                "web_evidence": {
+                    "url": profile_url,
+                    "quote": profile_quote,
+                },
+            },
+            "identity": {
+                "decision": COMPANY_FIT_MATCH,
+                "web_identity_receipt": {
+                    "decision": COMPANY_FIT_MATCH,
+                    "observed_linkedin_slug": "example-company",
+                },
+            },
+        },
+    })
+    attribute_cache = {}
+    lead_scorer._retain_successful_required_attribute_source(
+        attribute_cache,
+        attribute_url,
+        {
+            "status": "fetched",
+            "final_url": attribute_url,
+            "text": f"News {attribute_quote}",
+        },
+    )
+    profile_candidate = {
+        "url": profile_url,
+        "text": f"## About\n{profile_quote}",
+    }
+
+    assert lead_scorer._matched_company_source_contexts(
+        company_fit,
+        attribute_cache,
+        profile_candidate,
+    ) == [
+        {
+            "dimension": "required_attribute",
+            "url": attribute_url,
+            "text": f"News {attribute_quote}",
+        },
+        {
+            "dimension": "employee_size",
+            "url": profile_url,
+            "text": f"## About\n{profile_quote}",
+        },
+    ]
+
+
 def test_required_attribute_source_outage_is_unavailable_and_cached(monkeypatch):
     source_url = "https://example.com/announcement"
     verdict = _required_attribute_verdict(

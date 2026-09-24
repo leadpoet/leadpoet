@@ -271,6 +271,7 @@ def build_scoring_plan(
 # ---------------------------------------------------------------------------
 
 Scorer = Callable[[Sequence[Mapping[str, Any]], Mapping[str, Any], bool], Any]
+_SCOPED_RETRY_EVIDENCE_RUNNER = "_score_with_retry_evidence"
 
 
 def lab_scorer(policy: Mapping[str, Any], *, contact_source_evidence: Optional[Mapping[str, Any]] = None) -> Scorer:
@@ -292,15 +293,30 @@ def lab_scorer(policy: Mapping[str, Any], *, contact_source_evidence: Optional[M
         contact_source_evidence=contact_source_evidence,
         company_quality=quality_policy.scorer_enabled(validated),
         evidence_investigator=True,
+        scorer_policy=validated,
     )
 
     def score(companies: Sequence[Mapping[str, Any]], icp: Mapping[str, Any], is_reference_model: bool) -> Any:
         return scorer.score_with_breakdowns(list(companies), dict(icp), bool(is_reference_model))
 
+    def score_with_retry_evidence(
+        companies: Sequence[Mapping[str, Any]],
+        icp: Mapping[str, Any],
+        is_reference_model: bool,
+        retry_evidence_scope: MutableMapping[str, Any],
+    ) -> Any:
+        return scorer.score_with_breakdowns(
+            list(companies),
+            dict(icp),
+            bool(is_reference_model),
+            retry_evidence_scope=retry_evidence_scope,
+        )
+
     score.integrity_policy = contact_policy.integrity_adapter(adapter)
     score.contacts_required = contact_policy.scorer_enabled(validated)
     score.company_quality = quality_policy.scorer_enabled(validated)
     score.evidence_investigator = True
+    setattr(score, _SCOPED_RETRY_EVIDENCE_RUNNER, score_with_retry_evidence)
     return score
 
 
@@ -312,8 +328,19 @@ def _lab_adapter_version(arena_version: str) -> str:
     raise ScoringError("unsupported scoring adapter version")
 
 
-def _run_scorer(scorer: Scorer, companies: Sequence[Mapping[str, Any]], icp: Mapping[str, Any]) -> List[Dict[str, Any]]:
-    result = scorer(companies, icp, False)
+def _run_scorer(
+    scorer: Scorer,
+    companies: Sequence[Mapping[str, Any]],
+    icp: Mapping[str, Any],
+    *,
+    retry_evidence_scope: MutableMapping[str, Any],
+) -> List[Dict[str, Any]]:
+    scoped_runner = getattr(scorer, _SCOPED_RETRY_EVIDENCE_RUNNER, None)
+    result = (
+        scoped_runner(companies, icp, False, retry_evidence_scope)
+        if callable(scoped_runner)
+        else scorer(companies, icp, False)
+    )
     if asyncio.iscoroutine(result):
         result = asyncio.run(result)
     if not isinstance(result, (list, tuple)):
@@ -391,6 +418,10 @@ def score_work_item(
     unresolved = list(range(len(scored_indexes)))
     last_error: Optional[BaseException] = None
     last_failure_reason = ""
+    # This private dictionary is the complete lifetime boundary for source text
+    # retained between retries. A later score_work_item call always gets a new
+    # scope, even when its caller reuses the same scorer object.
+    retry_evidence_scope: Dict[str, Any] = {}
     attempts = max(1, int(max_retries))
     for attempt in range(attempts):
         if retain_terminal and attempt > 0:
@@ -402,7 +433,12 @@ def score_work_item(
             invoked_positions = list(range(len(scored_indexes)))
             invoked_companies = sliced
         try:
-            breakdowns = _run_scorer(scorer, invoked_companies, icp)
+            breakdowns = _run_scorer(
+                scorer,
+                invoked_companies,
+                icp,
+                retry_evidence_scope=retry_evidence_scope,
+            )
         except Exception as exc:  # judge/provider failure: retry unresolved input
             last_error = exc
             last_failure_reason = _validated_failure_reason(

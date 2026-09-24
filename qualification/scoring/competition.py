@@ -8,7 +8,7 @@ import json
 import logging
 import math
 import os
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, MutableMapping, Sequence
 from urllib.parse import urlsplit
 
 from leadpoet_verifier.aggregation import per_icp_normalized_score
@@ -864,6 +864,7 @@ class CompetitionCompanyScorer:
         contact_source_evidence: Mapping[str, Any] | None = None,
         company_quality: bool = False,
         evidence_investigator: bool = False,
+        scorer_policy: Mapping[str, Any] | None = None,
     ) -> None:
         self.company_quality = bool(company_quality)
         self.contacts_required = bool(contacts_required)
@@ -874,6 +875,28 @@ class CompetitionCompanyScorer:
             if isinstance(contact_source_evidence, Mapping)
             else {}
         )
+        self.scorer_policy = json.loads(json.dumps(
+            dict(scorer_policy or {}),
+            sort_keys=True,
+            separators=(",", ":"),
+        ))
+
+    def _retry_source_scope_key(self, company: Any, icp: Any) -> str:
+        """Bind private retry evidence to every frozen scoring input."""
+
+        from qualification.scoring.evaluation_clock import evaluation_date
+
+        return _semantic_hash({
+            "schema_version": "leadpoet.lab_arena.retry_source_evidence_scope.v1",
+            "company": company.model_dump(mode="json"),
+            "icp": icp.model_dump(mode="json"),
+            "evaluation_date": evaluation_date().isoformat(),
+            "scorer_policy": self.scorer_policy,
+            "integrity_policy": self.integrity_policy,
+            "contacts_required": self.contacts_required,
+            "company_quality": self.company_quality,
+            "evidence_investigator": self.evidence_investigator,
+        })
 
     async def __call__(
         self,
@@ -889,13 +912,25 @@ class CompetitionCompanyScorer:
         companies: Sequence[Mapping[str, Any]],
         icp: Mapping[str, Any],
         is_reference_model: bool,
+        *,
+        retry_evidence_scope: MutableMapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         if not self.company_quality:
-            return await self._score_with_breakdowns(companies, icp, is_reference_model)
+            return await self._score_with_breakdowns(
+                companies,
+                icp,
+                is_reference_model,
+                retry_evidence_scope=retry_evidence_scope,
+            )
         sliced = list(companies)[:_company_goal(icp)]
         raw = []
         for company in sliced:
-            rows = await self._score_with_breakdowns([company], icp, is_reference_model)
+            rows = await self._score_with_breakdowns(
+                [company],
+                icp,
+                is_reference_model,
+                retry_evidence_scope=retry_evidence_scope,
+            )
             raw.append(raw_company_judgment(rows[0]) if rows else bucket_skipped_judgment())
         return apply_company_judgment_context(sliced, raw, contacts_required=self.contacts_required)
 
@@ -904,6 +939,8 @@ class CompetitionCompanyScorer:
         companies: Sequence[Mapping[str, Any]],
         icp: Mapping[str, Any],
         is_reference_model: bool,
+        *,
+        retry_evidence_scope: MutableMapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         models = import_module("gateway.qualification.models")
         scorer_module = import_module("qualification.scoring.lead_scorer")
@@ -990,6 +1027,18 @@ class CompetitionCompanyScorer:
                     )
                 breakdowns.append(incompatible)
                 continue
+            required_attribute_retry_source_cache = None
+            if isinstance(retry_evidence_scope, MutableMapping):
+                source_scope_key = self._retry_source_scope_key(
+                    company_model,
+                    icp_model,
+                )
+                scoped_cache = retry_evidence_scope.setdefault(
+                    source_scope_key,
+                    {},
+                )
+                if isinstance(scoped_cache, MutableMapping):
+                    required_attribute_retry_source_cache = scoped_cache
             result = await score_company(
                 company=company_model,
                 icp=icp_model,
@@ -999,6 +1048,9 @@ class CompetitionCompanyScorer:
                 is_reference_model=bool(is_reference_model),
                 integrity_policy=self.integrity_policy,
                 evidence_investigator=self.evidence_investigator,
+                required_attribute_retry_source_cache=(
+                    required_attribute_retry_source_cache
+                ),
                 **({"company_quality": True} if self.company_quality else {}),
             )
             breakdown = (

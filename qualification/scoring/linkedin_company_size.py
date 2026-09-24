@@ -660,6 +660,7 @@ async def fetch_current_linkedin_company_size(
     profile_url: str,
     *,
     diagnostic: Optional[dict[str, str]] = None,
+    source_text_sink: Optional[dict[str, str]] = None,
 ) -> Optional[CurrentLinkedInCompanySizeResult]:
     """Return exact size proof, explicit no-size content, or retryable failure.
 
@@ -667,6 +668,8 @@ async def fetch_current_linkedin_company_size(
     the provider's exact-profile ``CRAWL_NOT_FOUND`` result, returns the explicit
     insufficient-evidence outcome. Authentication or block walls, transport
     failures, other status failures, and malformed results return ``None``.
+    An optional caller-owned sink receives only one bounded safe response body;
+    it is never included in this function's public result or diagnostics.
     """
 
     requested_slug = linkedin_company_page_slug(profile_url)
@@ -830,6 +833,31 @@ async def fetch_current_linkedin_company_size(
     if _is_linkedin_access_wall(text):
         _set_failure_reason(diagnostic, SOURCE_BLOCKED_FAILURE_REASON)
         return None
+    try:
+        returned_parts = urlsplit(returned_url)
+        returned_port = returned_parts.port
+    except (TypeError, ValueError):
+        returned_parts = None
+        returned_port = None
+    if (
+        isinstance(source_text_sink, dict)
+        and returned_parts is not None
+        and returned_parts.scheme == "https"
+        and returned_parts.username is None
+        and returned_parts.password is None
+        and not returned_parts.fragment
+        and (returned_port is None or returned_port == 443)
+        and returned_url == returned_url.strip()
+        and len(returned_url) <= 2_000
+        and returned_url.isascii()
+        and not any(character.isspace() for character in returned_url)
+        and text
+        and len(text) <= PROFILE_MAX_CHARACTERS
+    ):
+        # Private caller-owned evidence only. The raw body never enters the
+        # typed result, diagnostic, receipt, or model-facing JSON.
+        source_text_sink.clear()
+        source_text_sink.update({"url": returned_url, "text": text})
     extracted = extract_linkedin_company_size(text)
     if extracted is None:
         return {

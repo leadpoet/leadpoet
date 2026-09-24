@@ -789,6 +789,57 @@ def test_retry_retains_terminal_mismatch_zero_while_other_company_recovers():
     assert result == [mismatch, recovered]
 
 
+def test_retry_evidence_scope_is_shared_only_within_one_work_item():
+    companies = [scored_company(0), scored_company(1)]
+    unavailable = breakdown(0.0, "Company fit unavailable: provider timeout")
+    recovered = breakdown(62.0)
+    accepted = breakdown(61.0)
+    scopes = []
+    calls = []
+
+    def scorer(batch, _icp, _is_reference_model):
+        raise AssertionError("the scoped Lab runner must be used")
+
+    def scoped_runner(batch, _icp, _is_reference_model, retry_evidence_scope):
+        scopes.append(retry_evidence_scope)
+        calls.append([row["company_name"] for row in batch])
+        retry_evidence_scope.setdefault("private_source", {})[
+            "attempts"
+        ] = retry_evidence_scope.get("private_source", {}).get("attempts", 0) + 1
+        return [accepted, unavailable] if len(batch) == 2 else [recovered]
+
+    setattr(
+        scorer,
+        scoring._SCOPED_RETRY_EVIDENCE_RUNNER,
+        scoped_runner,
+    )
+
+    first = scoring.score_work_item(
+        {"scored_run_id": "run-scoped-evidence-one"},
+        icp=_ICPS[0],
+        companies=companies,
+        scorer=scorer,
+    )
+    first_scopes = list(scopes)
+    second = scoring.score_work_item(
+        {"scored_run_id": "run-scoped-evidence-two"},
+        icp=_ICPS[0],
+        companies=companies,
+        scorer=scorer,
+    )
+
+    assert first == second == [accepted, recovered]
+    assert calls == [
+        ["Scored Co 0", "Scored Co 1"],
+        ["Scored Co 1"],
+        ["Scored Co 0", "Scored Co 1"],
+        ["Scored Co 1"],
+    ]
+    assert all(scope is first_scopes[0] for scope in first_scopes)
+    assert all(scope is scopes[2] for scope in scopes[2:])
+    assert first_scopes[0] is not scopes[2]
+
+
 def test_retry_pending_subset_preserves_bucket_skip_cap_and_original_order():
     companies = [
         scored_company(0),

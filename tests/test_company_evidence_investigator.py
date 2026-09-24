@@ -27,6 +27,7 @@ from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MISMATCH,
     COMPANY_FIT_UNAVAILABLE,
 )
+from qualification.scoring.evaluation_clock import use_evaluation_date
 from qualification.scoring.linkedin_company_size import (
     MALFORMED_RESPONSE_FAILURE_REASON,
     PROVIDER_ERROR_FAILURE_REASON,
@@ -66,6 +67,36 @@ def _company(
             "snippet": "Acme raised a round.",
         }],
     )
+
+
+def test_retry_source_scope_key_binds_company_icp_date_and_policy():
+    company = _company()
+    other_company = _company(name="Other Acme")
+    icp = _icp()
+    other_icp = icp.model_copy(
+        update={"required_attribute": "Raised a Series A."}
+    )
+    scorer = CompetitionCompanyScorer(
+        integrity_policy=True,
+        company_quality=True,
+        evidence_investigator=True,
+        scorer_policy={"scoring_adapter_version": "one"},
+    )
+    other_policy_scorer = CompetitionCompanyScorer(
+        integrity_policy=True,
+        company_quality=True,
+        evidence_investigator=True,
+        scorer_policy={"scoring_adapter_version": "two"},
+    )
+
+    with use_evaluation_date("2026-09-24"):
+        base = scorer._retry_source_scope_key(company, icp)
+        assert scorer._retry_source_scope_key(company, icp) == base
+        assert scorer._retry_source_scope_key(other_company, icp) != base
+        assert scorer._retry_source_scope_key(company, other_icp) != base
+        assert other_policy_scorer._retry_source_scope_key(company, icp) != base
+    with use_evaluation_date("2026-09-25"):
+        assert scorer._retry_source_scope_key(company, icp) != base
 
 
 def _icp(**overrides) -> ICPPrompt:

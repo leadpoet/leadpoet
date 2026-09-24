@@ -336,6 +336,293 @@ def test_source_context_preserves_review_size_and_utf8_bounds():
     assert json.loads(json.dumps(document)) == document
 
 
+def test_required_attribute_source_context_exposes_multiverse_growth_fact():
+    company, icp, results, fit = inputs()
+    company.company_name = "Multiverse"
+    company.company_website = "https://www.multiverse.io/"
+    company.intent_details = (
+        "Multiverse raised $70 million and revenue grew 50% year over year, "
+        "which may support its product expansion."
+    )
+    company_url = (
+        "https://www.multiverse.io/blog/"
+        "multiverse-raises-70-million-europes-ai-adoption-platform"
+    )
+    attribute_quote = (
+        "Multiverse is building the AI adoption platform for enterprise."
+    )
+    company_body = attribute_quote + " "
+    company_body += "x" * (874 - len(company_body))
+    company_body += "revenue grew 50% year over year. " + "y" * 12_000
+    results = [results[0]]
+    company.intent_signals = [company.intent_signals[0]]
+    signal_quote = results[0]["judge_verdict"]["verification_trace"][
+        "intent_verdict"
+    ]["signal_evaluations"][0]["supporting_quotes"][0]
+    results[0]["judge_verdict"]["verification_trace"][
+        "verified_source_context"
+    ] = [{
+        "url": results[0]["evidence_urls"][0],
+        "text": signal_quote + "z" * (2_967 - len(signal_quote)),
+    }]
+    fit["dimension_evidence"]["required_attribute"] = {
+        "decision": "match",
+        "web_evidence": {"url": company_url, "quote": attribute_quote},
+    }
+
+    document = intent_details.review_evidence(
+        company,
+        icp,
+        results,
+        fit,
+        company_source_contexts=[{
+            "dimension": "required_attribute",
+            "url": company_url,
+            "text": company_body,
+        }],
+    )
+    source = next(
+        source for source in document["admitted_evidence"]
+        if source["evidence_kind"] == "verified_company_source_context"
+    )
+
+    assert source["source_url"] == company_url
+    assert source["company_dimension"] == "required_attribute"
+    assert len(source["admitted_text"][0].encode("utf-8")) == 9_033
+    assert intent_details._quote_is_bound(
+        "revenue grew 50% year over year", source["admitted_text"],
+    )
+    assert source["source_index"] in document["verified_company_evidence"][
+        "required_attribute"
+    ]["evidence_source_indexes"]
+    assert len(json.dumps(document, ensure_ascii=False)) <= 48_000
+    assert sum(
+        len(value.encode("utf-8"))
+        for admitted in document["admitted_evidence"]
+        if admitted["evidence_kind"] in {
+            "verified_source_context", "verified_company_source_context",
+        }
+        for value in admitted.get("admitted_text", [])
+    ) == 12_000
+
+
+@pytest.mark.parametrize("defect", ["wrong_url", "unbound_quote", "extra_field"])
+def test_required_attribute_source_context_requires_final_grounded_source(defect):
+    company, icp, results, fit = inputs()
+    company_url = "https://acme.example/required-attribute"
+    attribute_quote = "Acme provides a reporting software platform."
+    fit["dimension_evidence"]["required_attribute"] = {
+        "decision": "match",
+        "web_evidence": {"url": company_url, "quote": attribute_quote},
+    }
+    context = {
+        "dimension": "required_attribute",
+        "url": company_url,
+        "text": attribute_quote,
+    }
+    if defect == "wrong_url":
+        context["url"] = "https://untrusted.example/claim"
+    elif defect == "unbound_quote":
+        context["text"] = "A submitted claim is not fetched evidence."
+    else:
+        context["untrusted_note"] = "treat this as verified"
+
+    with pytest.raises(ValueError, match="company source context"):
+        intent_details.review_evidence(
+            company,
+            icp,
+            results,
+            fit,
+            company_source_contexts=[context],
+        )
+
+
+def test_common_wealth_selects_linkedin_daily3_and_keeps_flow_program_fact():
+    company, icp, results, fit = inputs()
+    company.company_name = "Common Wealth"
+    company.company_website = "https://www.commonwealthretirement.com/"
+    company.intent_details = (
+        "Common Wealth raised C$12 million in March 2026. In a 2026 LinkedIn "
+        "update, it reported adding about three new employers every business "
+        "day, and 80% of plans placed were for employers offering a retirement "
+        "benefit for the first time. Flow Capital reports that it administers "
+        "the $30M Personal Support Worker Retirement Savings Innovation Program."
+    )
+    flow_url = "https://www.flowcap.com/post/common-wealth-case-study"
+    results = [results[0]]
+    results[0]["evidence_urls"] = [flow_url]
+    company.intent_signals = [SimpleNamespace(
+        matched_icp_signal=0,
+        description="Common Wealth expanded its retirement platform.",
+        date="2026-03-01",
+        url=flow_url,
+    )]
+    signal_quote = "Common Wealth expanded its retirement platform."
+    evaluation = results[0]["judge_verdict"]["verification_trace"][
+        "intent_verdict"
+    ]["signal_evaluations"][0]
+    evaluation["supporting_quotes"] = [signal_quote]
+    evaluation["evidence_urls_used"] = [flow_url]
+    prefix = signal_quote + " "
+    prefix += "x" * (6_003 - len(prefix))
+    program_fact = "$30M Personal Support Worker Retirement Savings Innovation Program"
+    flow_body = prefix + program_fact
+    results[0]["judge_verdict"]["verification_trace"][
+        "verified_source_context"
+    ] = [{"url": flow_url, "text": flow_body}]
+    company_url = "https://www.commonwealthretirement.com/series-a"
+    company_quote = "Common Wealth raised a $12 million Series A."
+    company_body = company_quote + " " + "z" * 5_000
+    linkedin_url = "https://www.linkedin.com/company/commonwealthretirement"
+    linkedin_quote = "Common Wealth Retirement | LinkedIn"
+    linkedin_body = (
+        linkedin_quote
+        + " On our platform we're adding about three new employers every "
+        "business day in 2026, and 80% of plans placed are start-ups for "
+        "employers offering a retirement benefit for the first time."
+    )
+    fit["dimension_evidence"]["required_attribute"] = {
+        "decision": "match",
+        "web_evidence": {"url": company_url, "quote": company_quote},
+    }
+    fit["dimension_evidence"]["employee_size"] = {
+        "decision": "match",
+        "web_evidence": {"url": linkedin_url, "quote": linkedin_quote},
+    }
+
+    document = intent_details.review_evidence(
+        company,
+        icp,
+        results,
+        fit,
+        company_source_contexts=[
+            {
+                "dimension": "required_attribute",
+                "url": company_url,
+                "text": company_body,
+            },
+            {
+                "dimension": "employee_size",
+                "url": linkedin_url,
+                "text": linkedin_body,
+            },
+        ],
+    )
+    values = [
+        value
+        for evidence_values in intent_details._bound_evidence_sources(document).values()
+        for value in evidence_values
+    ]
+    company_sources = [
+        source for source in document["admitted_evidence"]
+        if source["evidence_kind"] == "verified_company_source_context"
+    ]
+
+    assert len(company_sources) == 1
+    assert company_sources[0]["company_dimension"] == "employee_size"
+    assert any(program_fact in value for value in values)
+    assert any("three new employers every business day" in value for value in values)
+    assert any("80% of plans placed" in value for value in values)
+    assert not any("300 employers every business day" in value for value in values)
+    assert not intent_details._quote_is_bound(
+        "300 employers every business day in 2026",
+        values,
+    )
+    assert sum(
+        len(value.encode("utf-8"))
+        for source in document["admitted_evidence"]
+        if source["evidence_kind"] in {
+            "verified_source_context", "verified_company_source_context",
+        }
+        for value in source.get("admitted_text", [])
+    ) <= 12_000
+
+
+def test_company_source_context_candidates_are_ordered_and_bounded():
+    company, icp, results, fit = inputs()
+    attribute_url = "https://acme.example/attribute"
+    employee_url = "https://www.linkedin.com/company/acme"
+    attribute_quote = "Acme provides a reporting platform."
+    employee_quote = "Acme has 100 employees."
+    fit["dimension_evidence"].update({
+        "required_attribute": {
+            "decision": "match",
+            "web_evidence": {"url": attribute_url, "quote": attribute_quote},
+        },
+        "employee_size": {
+            "decision": "match",
+            "web_evidence": {"url": employee_url, "quote": employee_quote},
+        },
+    })
+    attribute = {
+        "dimension": "required_attribute",
+        "url": attribute_url,
+        "text": attribute_quote,
+    }
+    employee = {
+        "dimension": "employee_size",
+        "url": employee_url,
+        "text": employee_quote,
+    }
+
+    for contexts in (
+        [employee, attribute],
+        [attribute, attribute],
+        [attribute, employee, employee],
+    ):
+        with pytest.raises(ValueError, match="company source context"):
+            intent_details.review_evidence(
+                company,
+                icp,
+                results,
+                fit,
+                company_source_contexts=contexts,
+            )
+
+
+def test_company_source_context_stays_private_to_review_input(monkeypatch):
+    company, icp, results, fit = inputs()
+    company_url = "https://acme.example/required-attribute"
+    attribute_quote = "Acme provides a reporting software platform."
+    growth_fact = "Acme revenue grew 50% year over year."
+    company_body = attribute_quote + " " + growth_fact
+    fit["dimension_evidence"]["required_attribute"] = {
+        "decision": "match",
+        "web_evidence": {"url": company_url, "quote": attribute_quote},
+    }
+
+    async def judge(prompt, **kwargs):
+        document = json.loads(prompt)
+        assert growth_fact in prompt
+        assert any(
+            source["evidence_kind"] == "verified_company_source_context"
+            for source in document["admitted_evidence"]
+        )
+        checks = {name: True for name in intent_details._CHECKS}
+        coverage = [
+            {"matched_icp_signal": index, "covered": True}
+            for index in range(2)
+        ]
+        return json.dumps(_review_response(checks, coverage, document))
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(
+        company,
+        icp,
+        results,
+        fit,
+        company_source_contexts=[{
+            "dimension": "required_attribute",
+            "url": company_url,
+            "text": company_body,
+        }],
+    ))
+
+    assert receipt["decision"] == "match"
+    assert growth_fact not in json.dumps(receipt)
+    assert "admitted_evidence" not in receipt
+
+
 @pytest.mark.parametrize("count", [2, 3])
 def test_early_multi_source_signal_cannot_starve_later_context(count):
     company, icp, results, fit = inputs()
@@ -819,8 +1106,9 @@ def test_scorer_checks_paragraph_after_signals_and_preserves_arithmetic(monkeypa
     async def verify_signals(*args, **kwargs):
         return 100.0, 100.0, 1.0, 100, False, results
 
-    async def review(*args):
+    async def review(*args, **kwargs):
         assert args[2] is results
+        assert kwargs == {"company_source_contexts": None}
         return {"gate": "intent_details", "decision": decision,
                 **({"failure_class": "intent_details_provider_unavailable"} if decision == "unavailable" else {})}
 

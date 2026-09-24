@@ -186,7 +186,10 @@ def test_verified_context_stays_bound_from_score_receipt_to_review(
     receipt_context = verdict["verification_trace"].get(
         "verified_source_context", []
     )
-    review_context = review["verified_signals"][0].get("source_context", [])
+    review_context = [
+        source for source in review["admitted_evidence"]
+        if source["evidence_kind"] == "verified_source_context"
+    ]
 
     expected = [{
         "url": SOURCE_URL,
@@ -194,4 +197,25 @@ def test_verified_context_stays_bound_from_score_receipt_to_review(
         "source_publication_date": "2026-09-14",
     }]
     assert receipt_context == expected
-    assert review_context == expected
+    assert review_context == [{
+        "source_index": 0,
+        "evidence_kind": "verified_source_context",
+        "matched_icp_signal": 0,
+        "source_url": SOURCE_URL,
+        "admitted_text": [SOURCE_TEXT],
+        "observed_dates": [{
+            "date": "2026-09-14",
+            "basis": "source_publication_date",
+        }],
+    }]
+
+
+def test_intermediate_context_retains_fact_immediately_after_old_6000_cut():
+    phrase = "$30M Personal Support Worker Retirement Savings Innovation Program"
+    body = "x" * 6_003 + phrase + "y" * 7_000
+
+    retained = three_stage._retained_source_context_text(body)
+
+    assert phrase in retained
+    assert len(retained.encode("utf-8")) == 12_000
+    assert retained == body[:12_000]

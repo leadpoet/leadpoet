@@ -907,7 +907,9 @@ def test_homepage_domain_conflict_with_failed_size_fetch_remains_retryable(
         )
         return verdict, ""
 
-    async def failed_profile_fetch(url, *, diagnostic=None):
+    async def failed_profile_fetch(
+        url, *, diagnostic=None, source_text_sink=None,
+    ):
         profile_calls.append(url)
         return None
 

@@ -1964,8 +1964,9 @@ def test_energy_manufacturing_disagreement_is_not_refined():
     )
 
 
+@pytest.mark.parametrize("criterion_field", ["industry", "sub_industry", "product_service"])
 def test_industry_prompt_keeps_requested_value_in_an_inert_data_boundary(
-    monkeypatch,
+    monkeypatch, criterion_field,
 ):
     import qualification.scoring.lead_scorer as scorer
 
@@ -1982,7 +1983,7 @@ def test_industry_prompt_keeps_requested_value_in_an_inert_data_boundary(
     result = asyncio.run(
         _llm_reverify_company(
             _company(),
-            _icp(industry=injected, company_stage="Series A"),
+            _icp(**{criterion_field: injected, "company_stage": "Series A"}),
             require_company_fit_dimensions=True,
         )
     )
@@ -2008,6 +2009,46 @@ def test_industry_prompt_keeps_requested_value_in_an_inert_data_boundary(
     assert "funding amount or total raised" in prompt
     assert 'a "Privately Held" label' in prompt
     assert '"not publicly traded" proves no stage' in prompt
+
+
+@pytest.mark.parametrize("product_service", [
+    "An online retail business that sells its own goods directly to consumers.",
+    "A commerce platform that supplies storefront and checkout software to retailers.",
+])
+def test_company_fit_prompt_preserves_the_full_requested_business_activity(
+    monkeypatch, product_service,
+):
+    import qualification.scoring.lead_scorer as scorer
+
+    prompts = []
+
+    async def provider(**kwargs):
+        prompts.append(kwargs["prompt"])
+        return None, "test stop after prompt capture"
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(scorer, "_request_company_reverify_json", provider)
+    icp = _icp(
+        industry="Commerce and Shopping",
+        sub_industry="Direct-to-consumer retail and marketplace commerce",
+        product_service=product_service,
+    )
+    result = asyncio.run(_llm_reverify_company(
+        _company(), icp, require_company_fit_dimensions=True,
+    ))
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert len(prompts) == 1
+    prompt = prompts[0]
+    criterion = json.loads(prompt.split("<untrusted_industry_criterion>", 1)[1]
+                           .split("</untrusted_industry_criterion>", 1)[0])
+    assert criterion == {
+        "requested_industry": icp.industry,
+        "requested_subindustry": icp.sub_industry,
+        "requested_product_service": product_service,
+    }
+    assert "customers operate in the requested industry" in prompt
+    assert "explicitly includes platforms or suppliers" in prompt
 
 
 def test_company_fit_accepts_exact_identity_on_verified_root_child_subdomain(
@@ -2219,9 +2260,8 @@ def test_grounded_supplier_role_resolves_taxonomy_disagreement():
         COMPANY_FIT_MATCH
     )
     assert "failure_class" not in web_result.details
-    assert (
-        "industry_activity_role"
-        not in web_result.details["provider_observations"]
+    assert web_result.details["provider_observations"]["industry_activity_role"] == (
+        "supplier_operator"
     )
 
 

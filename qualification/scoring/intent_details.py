@@ -181,6 +181,14 @@ literal copies of criterion wording. A supported paraphrase is acceptable.
 For facts_supported, check every factual clause, including numbers, dates,
 entity, event status and scope. A posting is not a completed hire; plans are not
 completed expansion. Do not accept facts drawn only from a submitted claim.
+An unconditional claim that an event increases or causes usage, transactions,
+checkout activity, visits, revenue, savings, or performance is factual and
+requires supporting admitted evidence. Marking such an outcome as relevance
+does not make it nonfactual. A clearly conditional claim using may, could, or
+suggests can remain a nonfactual commercial implication. Keep direct entailment
+separate from predicted outcomes: evidence that products were added supports
+that the catalog or assortment broadened, but does not by itself prove increased
+checkout activity, transactions, visits, or performance.
 Use authoritative_date_basis: publication dates must not become event dates.
 An unknown date must stay unknown; do not invent recency or urgency.
 Return facts_supported=false only when at least one concrete factual clause in
@@ -231,8 +239,11 @@ parts of one paragraph, not independent claims; read them together and do not
 change the writing or evidence standard because of a unit boundary. Set
 contains_factual_claim=true when the unit makes any concrete factual assertion.
 A clearly conditional commercial implication with no new asserted fact can be
-marked contains_factual_claim=false. For a factual unit, VERIFIED means every
-factual clause in that unit is supported. Use CONTRADICTED when admitted
+marked contains_factual_claim=false. An unconditional increase, effect, or
+performance outcome is a factual assertion even when it also explains ICP
+relevance. A directly entailed catalog or assortment expansion remains factual
+and can be supported by evidence that the products were added. For a factual
+unit, VERIFIED means every factual clause in that unit is supported. Use CONTRADICTED when admitted
 evidence conflicts with a clause and UNPROVEN when admitted evidence does not
 establish a clause. Missing evidence, a different metric, or a failed ICP event
 match is not a factual contradiction. CONTRADICTED requires evidence for an

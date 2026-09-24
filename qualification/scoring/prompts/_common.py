@@ -179,6 +179,10 @@ PART_A_BLOCK = """  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
       * Within the chosen alternative, retain every event or state, time
         window, threshold, scope qualifier, entity constraint, and factual
         condition. An alternative does not relax its own requirements.
+      * Preserve an explicit proof-source qualifier in the target. When it
+        requires a press release, product page, or company announcement, an
+        independent article is not itself one of those sources. Do not invent
+        a first-party-source requirement when the target does not state one.
       * Judge descriptive qualifiers from the facts the source proves, not
         from exact copied adjectives. For example, `major` need not appear
         verbatim when the source proves a concrete, material new capability;
@@ -194,8 +198,16 @@ PART_A_BLOCK = """  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
         kind of launch. When the target instead asks for a new customer-usable
         capability, storefront or store format, or retail channel, adding
         merchandise to an existing catalog or marketplace does not by itself
-        satisfy it. Do not relabel physical expansion, fulfillment capacity,
-        or local availability as product or marketplace functionality.
+        satisfy it. This remains an assortment change when the source calls it
+        a new category or section, predicts more units or repeat visits, or
+        describes add-on purchases through the existing checkout. Existing
+        technology used to sell new goods is not a new shopping capability.
+        Judge the exact submitted event: do not substitute a separate bundle,
+        mystery-box, feature, store-format, or channel event mentioned elsewhere
+        on the same page. A separate event may qualify only when it is itself
+        the submitted event and satisfies one requested alternative. Do not
+        relabel physical expansion, fulfillment capacity, local availability,
+        or assortment performance as product or marketplace functionality.
       * For a leadership-change alternative, do not invent an issuer or
         companywide-restructuring requirement. Unless the target explicitly
         requires a target-company announcement or a companywide change, exact

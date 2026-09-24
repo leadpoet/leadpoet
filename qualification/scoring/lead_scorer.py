@@ -2080,6 +2080,39 @@ async def _ground_required_attribute_evidence(
         if hydrated_entry is not None:
             entry = hydrated_entry
             cache_hit = True
+    if (
+        not cache_hit
+        or (
+            isinstance(entry, Mapping)
+            and entry.get("status") == "source_unavailable"
+        )
+    ):
+        retained_sources = _validated_retry_retained_sources(
+            successful_source_sink
+        )
+        retained_entry = retained_sources.get(canonical_url)
+        if retained_entry is None:
+            retained_entry = _hydrated_required_attribute_source_for_final_url(
+                retained_sources,
+                canonical_url,
+            )
+        if retained_entry is not None:
+            if (
+                canonical_url not in source_cache
+                and len(source_cache) >= _MAX_REQUIRED_ATTRIBUTE_SOURCE_URLS
+            ):
+                grounded[_REQUIRED_ATTRIBUTE_GROUNDING] = (
+                    _required_attribute_source_receipt(
+                        status="url_limit",
+                        source_url=canonical_url,
+                        failure_reason_code=MALFORMED_RESPONSE_FAILURE_REASON,
+                    )
+                )
+                _clear_required_attribute_evidence(grounded)
+                return grounded, {}
+            entry = dict(retained_entry)
+            source_cache[canonical_url] = entry
+            cache_hit = True
     if entry is None and len(source_cache) >= _MAX_REQUIRED_ATTRIBUTE_SOURCE_URLS:
         grounded[_REQUIRED_ATTRIBUTE_GROUNDING] = (
             _required_attribute_source_receipt(
@@ -4973,9 +5006,10 @@ async def _llm_reverify_company(
         if isinstance(candidate_homepage_identity, Mapping):
             unresolved_homepage_identity = candidate_homepage_identity
     current_profile_cache: dict[str, Any] = {}
-    required_attribute_source_cache = _validated_retry_retained_sources(
-        required_attribute_retry_source_cache
-    )
+    # Retained pages are admitted lazily only when this attempt cites their
+    # exact URL. Unused pages from an earlier attempt must not consume this
+    # attempt's two-URL grounding allowance.
+    required_attribute_source_cache: dict[str, dict[str, Any]] = {}
     verified_identity_context = ""
     if verified_identity:
         verified_identity_context = (

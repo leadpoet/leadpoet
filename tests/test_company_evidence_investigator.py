@@ -511,6 +511,291 @@ def test_failed_later_round_fetch_is_not_resolved_by_unrelated_older_round(
     )
 
 
+def _mirantis_with_submitted_signal(url: str) -> CompanyOutput:
+    base = _company(
+        name="Mirantis",
+        website="https://www.mirantis.com",
+        linkedin="https://www.linkedin.com/company/mirantis",
+    )
+    return CompanyOutput.model_validate({
+        **base.model_dump(),
+        "company_stage": "Series B",
+        "intent_signals": [{
+            "description": "IREN announced an acquisition involving Mirantis.",
+            "source": "news",
+            "url": url,
+            "date": "2026-08-04",
+            "snippet": "IREN announced an acquisition involving Mirantis.",
+        }],
+    })
+
+
+def _mirantis_series_b_verdict() -> dict:
+    return _complete_verdict(
+        observed_company_name="Mirantis",
+        observed_company_website="https://www.mirantis.com",
+        observed_company_linkedin="https://www.linkedin.com/company/mirantis",
+        observed_company_stage="Series B",
+        stage_matches=True,
+        stage_evidence_url=(
+            "https://www.mirantis.com/blog/mirantis-raises-100-million-series-b-"
+            "challenging-incumbents-pure-play-openstack-leader/"
+        ),
+        stage_evidence_quote=(
+            "Mirantis, the pure-play OpenStack company, today announced "
+            "$100 million in Series B funding led by Insight Venture Partners."
+        ),
+    )
+
+
+def test_saved_mirantis_acquisition_hint_reopens_full_match(monkeypatch):
+    submitted_url = (
+        "https://markets.businessinsider.com/news/stocks/"
+        "iren-completes-acquisition-of-mirantis-1036405471"
+    )
+    issuer_url = (
+        "https://irisenergy.gcs-web.com/news-releases/news-release-details/"
+        "iren-completes-acquisition-mirantis"
+    )
+    acquired_quote = (
+        "IREN Limited (NASDAQ: IREN) (“IREN”) today announced it has completed "
+        "the acquisition of Mirantis, Inc. (“Mirantis”), a leading provider "
+        "of cloud software and services"
+    )
+    requests = []
+    search_queries = []
+
+    async def provider(**_kwargs):
+        return _mirantis_series_b_verdict(), ""
+
+    async def keep_employee(candidate, *_args, **_kwargs):
+        return candidate
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        if len(requests) == 1:
+            name, arguments = "fetch_page", {"url": issuer_url}
+        else:
+            name, arguments = "submit_findings", {"findings": [_finding(
+                "stage",
+                status="CONTRADICTED",
+                observed_value="Acquired",
+                evidence_url=issuer_url,
+                evidence_quote=acquired_quote,
+            )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{len(requests)}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_search(_session, query, *, key):
+        del key
+        search_queries.append(query)
+        return {"results": [{"url": issuer_url}]}
+
+    async def fake_fetch(_session, url):
+        assert url == issuer_url
+        return {"ok": True, "url": url, "final_url": url, "text": acquired_quote}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer, "_refresh_linkedin_employee_size_observation", keep_employee
+    )
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _mirantis_with_submitted_signal(submitted_url),
+        _icp(company_stage="Series B"),
+        require_company_fit_dimensions=True,
+        evidence_investigator=True,
+    ))
+
+    assert result.decision == COMPANY_FIT_MISMATCH
+    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MISMATCH
+    assert result.details["dimension_decisions"]["employee_size"] == COMPANY_FIT_MATCH
+    assert result.details["dimension_decisions"]["industry"] == COMPANY_FIT_MATCH
+    assert result.details["dimension_decisions"]["geography"] == COMPANY_FIT_MATCH
+    assert search_queries == [
+        "Mirantis mirantis.com latest funding round acquisition IPO"
+    ]
+    input_document = json.loads(
+        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+    )
+    assert input_document["prior_observations"]["stage_dispute_urls"] == [
+        submitted_url
+    ]
+
+
+def test_failed_submitted_acquisition_fetch_cannot_retain_old_stage(monkeypatch):
+    submitted_url = (
+        "https://markets.businessinsider.com/news/stocks/"
+        "iren-completes-acquisition-of-mirantis-1036405471"
+    )
+    old_url = (
+        "https://www.mirantis.com/blog/mirantis-raises-100-million-series-b-"
+        "challenging-incumbents-pure-play-openstack-leader/"
+    )
+    old_quote = (
+        "Mirantis, the pure-play OpenStack company, today announced "
+        "$100 million in Series B funding led by Insight Venture Partners."
+    )
+    requests = []
+
+    async def provider(**_kwargs):
+        return _mirantis_series_b_verdict(), ""
+
+    async def keep_employee(candidate, *_args, **_kwargs):
+        return candidate
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        if len(requests) == 1:
+            name, arguments = "fetch_page", {"url": submitted_url}
+        elif len(requests) == 2:
+            name, arguments = "fetch_page", {"url": old_url}
+        else:
+            name, arguments = "submit_findings", {"findings": [_finding(
+                "stage",
+                observed_value="Series B",
+                evidence_url=old_url,
+                evidence_quote=old_quote,
+            )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{len(requests)}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_search(_session, query, *, key):
+        del query, key
+        return {"results": [{"url": submitted_url}]}
+
+    async def fake_fetch(_session, url):
+        if url == submitted_url:
+            return {"ok": False, "url": url, "text": ""}
+        assert url == old_url
+        return {"ok": True, "url": url, "final_url": url, "text": old_quote}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer, "_refresh_linkedin_employee_size_observation", keep_employee
+    )
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _mirantis_with_submitted_signal(submitted_url),
+        _icp(company_stage="Series B"),
+        require_company_fit_dimensions=True,
+        evidence_investigator=True,
+    ))
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["dimension_decisions"]["stage"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+    assert result.details["dimension_decisions"]["employee_size"] == COMPANY_FIT_MATCH
+    assert result.details["dimension_decisions"]["industry"] == COMPANY_FIT_MATCH
+    assert result.details["dimension_decisions"]["geography"] == COMPANY_FIT_MATCH
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "https://news.example/iren-completes-acquisition-of-mirantis-123",
+            (("https://news.example/iren-completes-acquisition-of-mirantis-123", "acquired"),),
+        ),
+        (
+            "https://news.example/mirantis-was-acquired-by-iren",
+            (("https://news.example/mirantis-was-acquired-by-iren", "acquired"),),
+        ),
+        ("https://news.example/mirantis-acquires-otherco", ()),
+        ("https://news.example/iren-acquires-otherco-with-mirantis", ()),
+        ("https://news.example/iren-acquisition-of-mirantis-cloud", ()),
+        ("https://news.example/mirantis-completes-acquisition-by-iren", ()),
+    ],
+)
+def test_submitted_acquisition_hint_binds_target_position(url, expected):
+    assert lead_scorer._submitted_intent_stage_conflict_hints(
+        _mirantis_with_submitted_signal(url), "Series B"
+    ) == expected
+
+
+def test_fetched_planned_acquisition_preserves_validated_series_b(monkeypatch):
+    submitted_url = (
+        "https://news.example/iren-announces-planned-acquisition-of-mirantis"
+    )
+    old_url = (
+        "https://www.mirantis.com/blog/mirantis-raises-100-million-series-b-"
+        "challenging-incumbents-pure-play-openstack-leader/"
+    )
+    old_quote = (
+        "Mirantis, the pure-play OpenStack company, today announced "
+        "$100 million in Series B funding led by Insight Venture Partners."
+    )
+    calls = {"investigator": 0}
+
+    async def provider(**_kwargs):
+        return _mirantis_series_b_verdict(), ""
+
+    async def keep_employee(candidate, *_args, **_kwargs):
+        return candidate
+
+    async def investigate(**kwargs):
+        calls["investigator"] += 1
+        assert kwargs["targets"] == ("stage",)
+        finding = _finding(
+            "stage",
+            observed_value="Series B",
+            evidence_url=old_url,
+            evidence_quote=old_quote,
+        )
+        return {
+            "claims": {"stage": finding},
+            "_validated_stage_finding": finding,
+            investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                submitted_url: {
+                    "final_url": submitted_url,
+                    "text": (
+                        "IREN announced a planned acquisition of Mirantis, "
+                        "subject to regulatory approval."
+                    ),
+                },
+                old_url: {"final_url": old_url, "text": old_quote},
+            },
+            "failure_reason": "",
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer, "_refresh_linkedin_employee_size_observation", keep_employee
+    )
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _mirantis_with_submitted_signal(submitted_url),
+        _icp(company_stage="Series B"),
+        require_company_fit_dimensions=True,
+        evidence_investigator=True,
+    ))
+
+    assert calls["investigator"] == 1
+    assert result.decision == COMPANY_FIT_MATCH
+    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MATCH
+
+
 @pytest.mark.parametrize(
     ("trigger_keys", "fetched_keys", "observed_stage", "expected"),
     [

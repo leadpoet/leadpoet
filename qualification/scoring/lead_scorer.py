@@ -4470,11 +4470,12 @@ def _submitted_intent_stage_conflict_hints(
     company: CompanyOutput,
     requested_stage: str,
 ) -> tuple[tuple[str, str], ...]:
-    """Detect an explicit, company-bound later-stage URL-title hint.
+    """Detect an explicit, company-bound stage-conflict URL-title hint.
 
     This only reopens the bounded investigator. The URL title remains untrusted
     and cannot itself establish or contradict stage. Free-form submitted prose
-    is excluded because a company mention does not bind another entity's round.
+    is excluded because a company mention does not bind another entity's round
+    or acquisition.
     """
 
     requested = _normalize_company_stage(requested_stage)
@@ -4498,6 +4499,33 @@ def _submitted_intent_stage_conflict_hints(
         candidate = re.sub(r"[-_/]+", " ", path_title)
         candidate_tokens = re.findall(r"[a-z0-9]+", candidate.casefold())
         width = len(company_name_tokens)
+        acquisition_target = any(
+            candidate_tokens[index:index + width] == company_name_tokens
+            and (
+                (
+                    candidate_tokens[max(0, index - 2):index]
+                    == ["acquisition", "of"]
+                    and all(
+                        token.isdigit()
+                        for token in candidate_tokens[index + width:]
+                    )
+                )
+                or any(
+                    candidate_tokens[index + width:index + width + len(suffix)]
+                    == suffix
+                    for suffix in (
+                        ["acquired", "by"],
+                        ["was", "acquired", "by"],
+                        ["has", "been", "acquired", "by"],
+                    )
+                )
+            )
+            for index in range(len(candidate_tokens) - width + 1)
+        )
+        if acquisition_target:
+            url = _valid_web_evidence_url(value("url"))
+            if url and (url, "acquired") not in conflicts:
+                conflicts.append((url, "acquired"))
         # A co-mentioned company or partner is not the financing subject.
         if not any(
             candidate_tokens[index:index + width] == company_name_tokens

@@ -14,7 +14,7 @@ import logging
 import unicodedata
 from datetime import date, datetime
 from typing import Any, Set, Optional, Tuple, List, Mapping, Sequence
-from urllib.parse import urlparse, urlsplit
+from urllib.parse import unquote, urlparse, urlsplit
 
 from gateway.qualification.config import CONFIG
 from gateway.qualification.models import (
@@ -4184,11 +4184,60 @@ def _employee_size_sources_conflict(
     )
 
 
+def _submitted_intent_stage_conflicts(
+    company: CompanyOutput,
+    requested_stage: str,
+) -> bool:
+    """Detect an explicit, company-bound later-stage URL-title hint.
+
+    This only reopens the bounded investigator. The URL title remains untrusted
+    and cannot itself establish or contradict stage. Free-form submitted prose
+    is excluded because a company mention does not bind another entity's round.
+    """
+
+    requested = _normalize_company_stage(requested_stage)
+    venture_stages = ("seed", "series a", "series b", "series c+")
+    if requested not in venture_stages:
+        return False
+    company_name_tokens = re.findall(
+        r"[a-z0-9]+", str(company.company_name or "").casefold()
+    )
+    if not company_name_tokens:
+        return False
+    for signal in company.intent_signals:
+        value = signal.get if isinstance(signal, Mapping) else (
+            lambda key, default="": getattr(signal, key, default)
+        )
+        try:
+            path_title = unquote(urlsplit(str(value("url") or "")).path)
+        except (TypeError, ValueError):
+            path_title = ""
+        candidate = re.sub(r"[-_/]+", " ", path_title)
+        candidate_tokens = re.findall(r"[a-z0-9]+", candidate.casefold())
+        width = len(company_name_tokens)
+        # A co-mentioned company or partner is not the financing subject.
+        if not any(
+            candidate_tokens[index:index + width] == company_name_tokens
+            and candidate_tokens[index + width] in {
+                "raises", "raised", "secures", "secured", "closes", "closed",
+            }
+            for index in range(len(candidate_tokens) - width)
+        ):
+            continue
+        if any(
+            _stage_quote_supports_observation(stage, candidate)
+            for stage in venture_stages[venture_stages.index(requested) + 1:]
+        ):
+            return True
+    return False
+
+
 def _targeted_company_investigation_dimensions(
     result: CompanyFitDecisionResult,
     *,
     icp_stage: str,
     employee_size_conflict: bool,
+    company: Optional[CompanyOutput] = None,
 ) -> tuple[str, ...]:
     """Select only fact gaps and unsupported semantic company disputes."""
 
@@ -4202,10 +4251,18 @@ def _targeted_company_investigation_dimensions(
         if isinstance(provider_observations, Mapping)
         else {}
     )
+    submitted_stage_conflict = bool(
+        company
+        and dimensions.get("stage") == COMPANY_FIT_MATCH
+        and _submitted_intent_stage_conflicts(company, icp_stage)
+    )
     if (
         icp_stage
-        and dimensions.get("stage")
-        in {COMPANY_FIT_MISMATCH, COMPANY_FIT_UNAVAILABLE}
+        and (
+            dimensions.get("stage")
+            in {COMPANY_FIT_MISMATCH, COMPANY_FIT_UNAVAILABLE}
+            or submitted_stage_conflict
+        )
     ):
         targets.append("stage")
     identity = details.get("identity_receipt")
@@ -4734,11 +4791,37 @@ async def _run_targeted_company_evidence_investigation(
     validated_stage_finding = investigation.get("_validated_stage_finding")
     if not isinstance(validated_stage_finding, Mapping):
         validated_stage_finding = {}
+    prior_dimensions = (
+        prior_result.details.get("dimension_decisions", {})
+        if prior_result is not None and isinstance(prior_result.details, Mapping)
+        else {}
+    )
+    reopened_matching_stage = bool(
+        "stage" in investigation_targets
+        and isinstance(prior_dimensions, Mapping)
+        and prior_dimensions.get("stage") == COMPANY_FIT_MATCH
+        and _submitted_intent_stage_conflicts(company, icp_stage)
+    )
     projected = _project_investigator_stage(
         verdict,
         claims.get("stage") if isinstance(claims.get("stage"), Mapping) else None,
         icp_stage=icp_stage,
     )
+    if reopened_matching_stage and not validated_stage_finding:
+        # The submitted conflict is only a trigger. Once it reopens a positive
+        # stage, failure to independently validate the current stage must not
+        # retain the stale positive verdict.
+        projected.update(
+            observed_company_stage="",
+            stage_matches=None,
+            stage_evidence_url="",
+            stage_evidence_quote="",
+        )
+        if isinstance(projected.get("dimension_evidence"), Mapping):
+            projected["dimension_evidence"] = {
+                key: value for key, value in projected["dimension_evidence"].items()
+                if key != "stage"
+            }
     projected = _project_investigator_headcount(
         projected,
         (
@@ -5257,6 +5340,7 @@ async def _llm_reverify_company(
             result,
             icp_stage=icp_stage,
             employee_size_conflict=employee_size_conflict,
+            company=company,
         )
         if require_company_fit_dimensions and evidence_investigator
         else ()
@@ -5589,6 +5673,7 @@ async def _llm_reverify_company(
                 repaired_result,
                 icp_stage=icp_stage,
                 employee_size_conflict=employee_size_conflict,
+                company=company,
             )
         )
         if post_repair_investigation_targets:

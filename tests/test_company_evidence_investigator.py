@@ -324,6 +324,304 @@ def test_stage_gap_gets_one_targeted_investigation(monkeypatch):
     assert receipt["claims"]["stage"] == _finding("stage")
 
 
+def test_submitted_later_round_hint_reopens_matching_stage(monkeypatch):
+    initial = _complete_verdict(
+        observed_company_name="Doctronic",
+        observed_company_website="https://doctronic.ai",
+        observed_company_linkedin="https://www.linkedin.com/company/doctronic-ai",
+        observed_company_stage="Series A",
+        stage_matches=True,
+        stage_evidence_url="https://news.example/doctronic-series-a",
+        stage_evidence_quote="Doctronic today announced a $20 million Series A round.",
+    )
+    calls = {"broad": 0, "investigator": 0}
+
+    async def provider(**_kwargs):
+        calls["broad"] += 1
+        return initial, ""
+
+    async def keep_employee_observation(candidate, *_args, **_kwargs):
+        return candidate
+
+    async def bounded_investigation(*, targets, prior_observations, **_kwargs):
+        calls["investigator"] += 1
+        assert targets == ("stage",)
+        assert any(
+            "Series-B" in url
+            for url in prior_observations["submitted_source_urls"]
+        )
+        return {
+            "claims": {"stage": _finding(
+                "stage",
+                status="CONTRADICTED",
+                observed_value="Series B",
+                evidence_url="https://www.businesswire.com/doctronic-series-b",
+                evidence_quote=(
+                    "Doctronic today announced a completed $40 million Series B round."
+                ),
+            )},
+            "_validated_stage_finding": _finding(
+                "stage",
+                status="CONTRADICTED",
+                observed_value="Series B",
+                evidence_url="https://www.businesswire.com/doctronic-series-b",
+                evidence_quote=(
+                    "Doctronic today announced a completed $40 million Series B round."
+                ),
+            ),
+            "failure_reason": "",
+        }
+
+    base_company = _company(
+        name="Doctronic",
+        website="https://doctronic.ai",
+        linkedin="https://www.linkedin.com/company/doctronic-ai",
+    )
+    company = CompanyOutput.model_validate({**base_company.model_dump(),
+        "company_stage": "Series A",
+        "intent_signals": [{
+            "description": "Doctronic launched prescription renewal services.",
+            "source": "news",
+            "url": (
+                "https://www.businesswire.com/news/home/20260324/"
+                "Doctronic-Raises-$40M-Series-B"
+            ),
+            "date": "2026-03-24",
+            "snippet": "Doctronic launched prescription renewal services.",
+        }],
+    })
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "_refresh_linkedin_employee_size_observation",
+        keep_employee_observation,
+    )
+    monkeypatch.setattr(
+        lead_scorer, "investigate_company_evidence", bounded_investigation
+    )
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        company,
+        _icp(company_stage="Series A"),
+        require_company_fit_dimensions=True,
+        evidence_investigator=True,
+    ))
+
+    assert calls == {"broad": 1, "investigator": 1}
+    assert result.decision == COMPANY_FIT_MISMATCH
+    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MISMATCH
+
+
+@pytest.mark.parametrize(
+    "page_text, observed_stage, expected_decision",
+    [
+        (
+            "Doctronic today announced a $40 million Series B round.",
+            "Series B",
+            COMPANY_FIT_MISMATCH,
+        ),
+        ("", "Series B", COMPANY_FIT_UNAVAILABLE),
+        (
+            "OtherCo today announced a $40 million Series B round.",
+            "Series B",
+            COMPANY_FIT_UNAVAILABLE,
+        ),
+        (
+            "Doctronic today announced a $20 million Series A round.",
+            "Series A",
+            COMPANY_FIT_MATCH,
+        ),
+    ],
+)
+def test_doctronic_submitted_later_round_uses_validated_fetch(
+    monkeypatch, page_text, observed_stage, expected_decision
+):
+    source_url = (
+        "https://www.businesswire.com/news/home/20260324814372/en/"
+        "Doctronic-Raises-%2440M-Series-B-Following-Breakthrough"
+    )
+    initial = _complete_verdict(
+        observed_company_name="Doctronic",
+        observed_company_website="https://doctronic.ai",
+        observed_company_linkedin="https://www.linkedin.com/company/doctronic-ai",
+        observed_company_stage="Series A",
+        stage_matches=True,
+        stage_evidence_url="https://news.example/doctronic-series-a",
+        stage_evidence_quote="Doctronic today announced a $20 million Series A round.",
+    )
+    turns = []
+
+    async def broad_provider(**_kwargs):
+        return initial, ""
+
+    async def keep_employee_observation(candidate, *_args, **_kwargs):
+        return candidate
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        turns.append(payload)
+        if len(turns) == 1:
+            name, arguments = "fetch_page", {"url": source_url}
+        else:
+            name, arguments = "submit_findings", {"findings": [_finding(
+                "stage",
+                status="VERIFIED",
+                observed_value=observed_stage,
+                evidence_url=source_url,
+                evidence_quote=(page_text or "Doctronic announced a Series B round."),
+            )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{len(turns)}",
+            "index": 0,
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_fetch(_session, requested_url):
+        assert requested_url == source_url
+        if not page_text:
+            return {"ok": False, "url": requested_url, "text": ""}
+        return {"ok": True, "url": requested_url, "text": page_text}
+
+    base_company = _company(
+        name="Doctronic",
+        website="https://doctronic.ai",
+        linkedin="https://www.linkedin.com/company/doctronic-ai",
+    )
+    company = CompanyOutput.model_validate({**base_company.model_dump(),
+        "company_stage": "Series A",
+        "intent_signals": [{
+            "description": "Doctronic launched prescription renewal services.",
+            "source": "news",
+            "url": source_url,
+            "date": "2026-03-24",
+            "snippet": "Doctronic launched prescription renewal services.",
+        }],
+    })
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", broad_provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "_refresh_linkedin_employee_size_observation",
+        keep_employee_observation,
+    )
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        company,
+        _icp(company_stage="Series A"),
+        require_company_fit_dimensions=True,
+        evidence_investigator=True,
+    ))
+
+    assert result.decision == expected_decision
+    assert result.details["dimension_decisions"]["stage"] == expected_decision
+    assert result.details["dimension_decisions"]["employee_size"] == COMPANY_FIT_MATCH
+    assert result.details["dimension_decisions"]["industry"] == COMPANY_FIT_MATCH
+    assert result.details["dimension_decisions"]["geography"] == COMPANY_FIT_MATCH
+    if expected_decision == COMPANY_FIT_UNAVAILABLE:
+        assert result.details["investigation_receipt"]["claims"]["stage"][
+            "status"
+        ] == "UNPROVEN"
+
+
+@pytest.mark.parametrize("signal", [
+    ("Doctronic launched the Series B product edition.",
+     "https://doctronic.ai/products/series-b"),
+    ("OtherCo announced a completed Series B round.",
+     "https://news.example/otherco-raises-series-b"),
+    (
+        "Doctronic announced a partnership with OtherCo, which raised a "
+        "$40 million Series B round.",
+        "https://news.example/doctronic-otherco-partnership",
+    ),
+    (
+        "Doctronic partners with OtherCo after OtherCo raised Series B.",
+        "https://news.example/doctronic-partners-otherco-raises-40m-series-b",
+    ),
+    ("Doctronic announced a completed Series A round.",
+     "https://news.example/doctronic-raises-series-a"),
+    ("Doctronic's historical Series B estimate was incorrect.",
+     "https://news.example/doctronic-history"),
+])
+def test_submitted_intent_without_bound_conflicting_round_does_not_reopen(signal):
+    description, url = signal
+    base_company = _company(name="Doctronic", website="https://doctronic.ai")
+    company = CompanyOutput.model_validate(
+        {**base_company.model_dump(), "company_stage": "Series A", "intent_signals": [{
+            "description": description,
+            "source": "news",
+            "url": url,
+            "date": "2026-03-24",
+            "snippet": description,
+        }]}
+    )
+    result = _reverify_decision(
+        _complete_verdict(
+            observed_company_name="Doctronic",
+            observed_company_website="https://doctronic.ai",
+            observed_company_stage="Series A",
+            stage_matches=True,
+            stage_evidence_url="https://news.example/doctronic-series-a",
+            stage_evidence_quote="Doctronic today announced a $20 million Series A round.",
+        ),
+        "",
+        "series a",
+        icp=_icp(company_stage="Series A"),
+        company=company,
+        company_quality=True,
+    )
+
+    assert _targeted_company_investigation_dimensions(
+        result,
+        icp_stage="series a",
+        employee_size_conflict=False,
+        company=company,
+    ) == ()
+
+
+def test_matching_stage_without_later_round_hint_keeps_current_path(monkeypatch):
+    initial = _complete_verdict(
+        observed_company_stage="Series A",
+        stage_matches=True,
+        stage_evidence_url="https://news.example/acme-series-a",
+        stage_evidence_quote="Acme today announced a $20 million Series A round.",
+    )
+
+    async def provider(**_kwargs):
+        return initial, ""
+
+    async def keep_employee_observation(candidate, *_args, **_kwargs):
+        return candidate
+
+    async def must_not_investigate(**_kwargs):
+        raise AssertionError("matching stage without a later-round hint was reopened")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "_refresh_linkedin_employee_size_observation",
+        keep_employee_observation,
+    )
+    monkeypatch.setattr(
+        lead_scorer, "investigate_company_evidence", must_not_investigate
+    )
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _company().model_copy(update={"company_stage": "Series A"}),
+        _icp(company_stage="Series A"),
+        require_company_fit_dimensions=True,
+        evidence_investigator=True,
+    ))
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert "investigation_receipt" not in result.details
+
+
 def test_investigator_hydrates_only_matching_failed_attribute_source():
     source_url = (
         "https://www.businesswire.com/news/home/20260915525333/en/"

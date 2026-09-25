@@ -36,6 +36,7 @@ def _retained(
     *,
     final_url: str = "",
     investigator_hydrated: bool = False,
+    recovery_domain: str = "",
 ) -> dict:
     return {
         "status": "fetched",
@@ -45,6 +46,11 @@ def _retained(
         **(
             {lead_scorer._INVESTIGATOR_HYDRATED_SOURCE: True}
             if investigator_hydrated
+            else {}
+        ),
+        **(
+            {lead_scorer._VERIFIED_ATTRIBUTE_RECOVERY_DOMAIN: recovery_domain}
+            if recovery_domain
             else {}
         ),
     }
@@ -583,4 +589,127 @@ def test_model_private_recovery_marker_cannot_authorize_alias():
         "url_limit"
     )
     assert grounded["attribute_satisfied"] is None
+    assert fetch.await_count == 0
+
+
+@pytest.mark.parametrize("occupied_slots", [0, 1])
+def test_retained_recovery_alias_is_admitted_without_refetch(occupied_slots):
+    actual_url = "https://happyrobot.ai/"
+    cited_url = "https://www.happyrobot.ai/"
+    quote = "HappyRobot deploys AI workers across enterprise operations."
+    retained = {
+        actual_url: _retained(
+            actual_url,
+            quote,
+            investigator_hydrated=True,
+            recovery_domain="happyrobot.ai",
+        )
+    }
+    current_attempt = {
+        "https://blocked.example/source": {
+            "status": "source_unavailable",
+            "final_url": "",
+            "text": "",
+        }
+        for _ in range(occupied_slots)
+    }
+    fetch = AsyncMock(side_effect=AssertionError("retained alias must not fetch"))
+
+    with patch.object(lead_scorer, "_fetch_bounded_html", fetch):
+        grounded, _ = asyncio.run(
+            lead_scorer._ground_required_attribute_evidence(
+                _verdict(cited_url, quote),
+                active_attribute=True,
+                source_cache=current_attempt,
+                successful_source_sink=retained,
+            )
+        )
+
+    receipt = grounded[lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING]
+    assert receipt["status"] == "grounded"
+    assert receipt["cache_hit"] is True
+    assert grounded["required_attribute_evidence_url"] == actual_url
+    assert current_attempt[actual_url][
+        lead_scorer._VERIFIED_ATTRIBUTE_RECOVERY_DOMAIN
+    ] == "happyrobot.ai"
+    assert len(current_attempt) == occupied_slots + 1
+    assert fetch.await_count == 0
+
+
+def test_retained_recovery_alias_cannot_bypass_full_local_url_budget():
+    actual_url = "https://happyrobot.ai/"
+    cited_url = "https://www.happyrobot.ai/"
+    quote = "HappyRobot deploys AI workers across enterprise operations."
+    retained = {
+        actual_url: _retained(
+            actual_url,
+            quote,
+            investigator_hydrated=True,
+            recovery_domain="happyrobot.ai",
+        )
+    }
+    current_attempt = {
+        f"https://blocked{index}.example/source": {
+            "status": "source_unavailable",
+            "final_url": "",
+            "text": "",
+        }
+        for index in range(lead_scorer._MAX_REQUIRED_ATTRIBUTE_SOURCE_URLS)
+    }
+    original = dict(current_attempt)
+    fetch = AsyncMock(side_effect=AssertionError("full cache must not fetch"))
+
+    with patch.object(lead_scorer, "_fetch_bounded_html", fetch):
+        grounded, _ = asyncio.run(
+            lead_scorer._ground_required_attribute_evidence(
+                _verdict(cited_url, quote),
+                active_attribute=True,
+                source_cache=current_attempt,
+                successful_source_sink=retained,
+            )
+        )
+
+    assert grounded[lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING]["status"] == (
+        "url_limit"
+    )
+    assert current_attempt == original
+    assert actual_url not in current_attempt
+    assert fetch.await_count == 0
+
+
+def test_retained_recovery_alias_rejects_mismatched_verified_domain_marker():
+    actual_url = "https://happyrobot.ai/"
+    cited_url = "https://www.happyrobot.ai/"
+    quote = "HappyRobot deploys AI workers across enterprise operations."
+    retained = {
+        actual_url: _retained(
+            actual_url,
+            quote,
+            investigator_hydrated=True,
+            recovery_domain="other.example",
+        )
+    }
+    current_attempt = {
+        f"https://blocked{index}.example/source": {
+            "status": "source_unavailable",
+            "final_url": "",
+            "text": "",
+        }
+        for index in range(lead_scorer._MAX_REQUIRED_ATTRIBUTE_SOURCE_URLS)
+    }
+    fetch = AsyncMock(side_effect=AssertionError("invalid marker must not fetch"))
+
+    with patch.object(lead_scorer, "_fetch_bounded_html", fetch):
+        grounded, _ = asyncio.run(
+            lead_scorer._ground_required_attribute_evidence(
+                _verdict(cited_url, quote),
+                active_attribute=True,
+                source_cache=current_attempt,
+                successful_source_sink=retained,
+            )
+        )
+
+    assert grounded[lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING]["status"] == (
+        "url_limit"
+    )
     assert fetch.await_count == 0

@@ -1873,6 +1873,85 @@ def _hydrate_required_attribute_source_cache(
         )
 
 
+def _hydrate_verified_required_attribute_recovery_source(
+    source_cache: dict[str, dict[str, Any]],
+    investigation: Mapping[str, Any],
+    claim: Mapping[str, Any],
+    *,
+    verified_transport_domain: str,
+    successful_source_sink: Optional[dict[str, dict[str, Any]]] = None,
+) -> None:
+    """Admit one validated first-party alternate into attribute repair."""
+
+    if (
+        claim.get("target") != "industry"
+        or claim.get("status") != "VERIFIED"
+        or claim.get("activity_role") != "supplier_operator"
+    ):
+        return
+    raw_url = claim.get("evidence_url")
+    quote = claim.get("evidence_quote")
+    fetched_pages = investigation.get(PRIVATE_FETCHED_PAGES_KEY)
+    if (
+        not isinstance(raw_url, str)
+        or not isinstance(quote, str)
+        or not quote
+        or not isinstance(fetched_pages, Mapping)
+        or len(fetched_pages) > MAX_FETCH_CALLS
+        or raw_url in source_cache
+        or len(source_cache) >= _MAX_REQUIRED_ATTRIBUTE_SOURCE_URLS
+    ):
+        return
+    raw_page = fetched_pages.get(raw_url)
+    if not isinstance(raw_page, Mapping):
+        return
+    raw_final_url = raw_page.get("final_url")
+    page_text = raw_page.get("text")
+    if (
+        not isinstance(raw_final_url, str)
+        or not isinstance(page_text, str)
+        or not page_text
+        or len(page_text) > MAX_PAGE_CHARACTERS
+        or not _quote_occurs(quote, page_text)
+    ):
+        return
+    try:
+        canonical_url = public_http_url(raw_url)
+        final_url = public_http_url(raw_final_url)
+        request_parts = urlsplit(canonical_url)
+        final_parts = urlsplit(final_url)
+        identity_domain = verified_transport_domain.casefold().rstrip(".")
+    except (TypeError, ValueError):
+        return
+    if (
+        canonical_url != raw_url
+        or request_parts.scheme.casefold() != "https"
+        or final_parts.scheme.casefold() != "https"
+        or request_parts.username is not None
+        or request_parts.password is not None
+        or final_parts.username is not None
+        or final_parts.password is not None
+        or (request_parts.port is not None and request_parts.port != 443)
+        or (final_parts.port is not None and final_parts.port != 443)
+        or not identity_domain
+        or _registrable_domain(canonical_url) != identity_domain
+        or _registrable_domain(final_url) != identity_domain
+    ):
+        return
+    hydrated_entry = {
+        "status": "fetched",
+        "final_url": final_url,
+        "text": page_text,
+        _INVESTIGATOR_HYDRATED_SOURCE: True,
+    }
+    source_cache[canonical_url] = hydrated_entry
+    _retain_successful_required_attribute_source(
+        successful_source_sink,
+        canonical_url,
+        hydrated_entry,
+    )
+
+
 def _investigator_prefetched_pages_from_attribute_cache(
     source_cache: Mapping[str, Mapping[str, Any]],
     submitted_source_urls: Sequence[str],
@@ -4806,6 +4885,23 @@ async def _run_targeted_company_evidence_investigation(
     claims = investigation.get("claims")
     if not isinstance(claims, Mapping):
         claims = {}
+    industry_claim = (
+        claims.get("industry")
+        if isinstance(claims.get("industry"), Mapping)
+        else {}
+    )
+    if (
+        preserve_matched_industry
+        and required_attribute_source_cache is not None
+        and icp_attribute
+    ):
+        _hydrate_verified_required_attribute_recovery_source(
+            required_attribute_source_cache,
+            investigation,
+            industry_claim,
+            verified_transport_domain=verified_transport_domain,
+            successful_source_sink=successful_required_attribute_source_sink,
+        )
     investigation_receipt = {
         "gate": "company_evidence_investigation",
         "targets": list(investigation_targets),
@@ -4884,11 +4980,7 @@ async def _run_targeted_company_evidence_investigation(
     if not preserve_matched_industry:
         projected = _project_investigator_industry(
             projected,
-            (
-                claims.get("industry")
-                if isinstance(claims.get("industry"), Mapping)
-                else None
-            ),
+            industry_claim,
         )
     projected = _project_investigator_geography(
         projected,

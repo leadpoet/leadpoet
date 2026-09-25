@@ -217,6 +217,68 @@ def test_internal_scorer_company_allows_missing_linkedin():
     assert CompanyOutput(**projected).company_linkedin == ""
 
 
+def test_v5_null_state_round_trips_to_empty_internal_region():
+    from gateway.qualification.models import CompanyOutput
+    from qualification.competition_models import CompetitionCompanyV5
+    from qualification.scoring.competition import _normalized_company
+
+    public = {
+        "company_name": "GenHealth.ai",
+        "company_website": "https://genhealth.example.com",
+        "company_linkedin": "https://www.linkedin.com/company/genhealth-ai",
+        "industry": "Healthcare software",
+        "employee_count": "51-200",
+        "company_stage": "Series A",
+        "country": "United States",
+        "state": None,
+        "intent_details": "GenHealth.ai announced a current product release.",
+        "intent_signals": [{
+            "matched_icp_signal": 0,
+            "description": "GenHealth.ai announced a product release.",
+            "date": "2026-09-01",
+            "url": "https://genhealth.example.com/releases/product",
+        }],
+    }
+    accepted = CompetitionCompanyV5.model_validate(public).model_dump(mode="json")
+    projected = _normalized_company(accepted, integrity_policy=True)
+    internal = CompanyOutput.model_validate(projected)
+    round_tripped = CompanyOutput.model_validate_json(internal.model_dump_json())
+
+    assert projected["state"] == ""
+    assert round_tripped.state == ""
+    assert round_tripped.country == "United States"
+
+
+def test_v5_non_null_invalid_state_is_not_coerced_or_region_weakened():
+    from gateway.qualification.models import CompanyOutput
+    from qualification.competition_models import CompetitionCompanyV5
+    from qualification.scoring.competition import _normalized_company
+
+    public = {
+        "company_name": "Regional Health",
+        "company_website": "https://regional-health.example.com",
+        "company_linkedin": "https://www.linkedin.com/company/regional-health",
+        "industry": "Healthcare software",
+        "employee_count": "51-200",
+        "company_stage": "Series A",
+        "country": "Canada",
+        "state": {"untrusted_region": "California"},
+        "intent_details": "Regional Health announced a current product release.",
+        "intent_signals": [{
+            "matched_icp_signal": 0,
+            "description": "Regional Health announced a product release.",
+            "date": "2026-09-01",
+            "url": "https://regional-health.example.com/releases/product",
+        }],
+    }
+    accepted = CompetitionCompanyV5.model_validate(public).model_dump(mode="json")
+    projected = _normalized_company(accepted, integrity_policy=True)
+
+    assert projected["state"] == {"untrusted_region": "California"}
+    with pytest.raises(ValueError):
+        CompanyOutput.model_validate(projected)
+
+
 @pytest.mark.parametrize("quote_length", [2001, 2347, 4096])
 def test_public_required_attribute_quote_reaches_internal_judge(
     monkeypatch, quote_length

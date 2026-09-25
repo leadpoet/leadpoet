@@ -416,7 +416,7 @@ def _quote_occurs(quote: Any, fetched_text: str) -> bool:
 
 
 def _source_context_for_quote(quote: str, fetched_text: str) -> str:
-    """Return bounded nearby fetched text for a model-authored quote correction."""
+    """Return bounded actual fetched text for a model-authored quote correction."""
 
     surface_page = _surface_span(_visible_quote_surface(fetched_text))
     fragments = set()
@@ -452,7 +452,14 @@ def _source_context_for_quote(quote: str, fetched_text: str) -> str:
             match.end() + REJECTED_QUOTE_CONTEXT_AFTER_CHARACTERS,
         )
         return surface_page[context_start:context_end]
-    return ""
+    # A fully paraphrased or invented quote has no exact fragment to anchor.
+    # Give the correction turn a small real-page excerpt instead. This does
+    # not relax _quote_occurs or any evidence gate: a retried quote must still
+    # be one exact continuous span from the fetched page.
+    return surface_page[:(
+        REJECTED_QUOTE_CONTEXT_BEFORE_CHARACTERS
+        + REJECTED_QUOTE_CONTEXT_AFTER_CHARACTERS
+    )]
 
 
 def _registrable_domain(value: Any) -> str:

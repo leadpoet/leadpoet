@@ -336,7 +336,7 @@ def _normalized_company(
         "employee_count": row["employee_count"],
         "company_stage": row["company_stage"],
         "country": row["country"],
-        "state": row["state"],
+        "state": "" if row["state"] is None else row["state"],
         "description": "" if simplified_intent else row["fit_summary"][:500],
         "fit_evidence_urls": (
             fit_evidence_url_hints(stage_evidence_urls)

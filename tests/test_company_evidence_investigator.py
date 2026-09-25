@@ -671,6 +671,80 @@ def test_investigator_hydrates_only_matching_failed_attribute_source():
     assert "https://different.example/news" not in cache
 
 
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "unverified",
+        "wrong_role",
+        "wrong_company",
+        "invalid_url",
+        "unfetched",
+        "quote_absent",
+        "redirected_off_domain",
+        "budget_exhausted",
+    ],
+)
+def test_alternate_attribute_recovery_source_stays_fail_closed(mode):
+    alternate_url = "https://www.happyrobot.ai/blog/series-c"
+    quote = "HappyRobot deploys its AI agents across enterprise operations."
+    claim = _finding(
+        "industry",
+        status="UNPROVEN" if mode == "unverified" else "VERIFIED",
+        activity_role="customer_user" if mode == "wrong_role" else "supplier_operator",
+        evidence_url=(
+            "https://other.example/happyrobot"
+            if mode == "wrong_company"
+            else "http://www.happyrobot.ai/blog/series-c"
+            if mode == "invalid_url"
+            else alternate_url
+        ),
+        evidence_quote=quote,
+    )
+    fetched_url = claim["evidence_url"]
+    investigation = {
+        investigator.PRIVATE_FETCHED_PAGES_KEY: {
+            fetched_url: {
+                "final_url": (
+                    "https://other.example/redirect"
+                    if mode == "redirected_off_domain"
+                    else fetched_url
+                ),
+                "text": (
+                    "HappyRobot announced a financing round."
+                    if mode == "quote_absent"
+                    else quote
+                ),
+            }
+        }
+    }
+    if mode == "unfetched":
+        investigation[investigator.PRIVATE_FETCHED_PAGES_KEY] = {}
+    cache = {
+        f"https://blocked{index}.example/news": {
+            "status": "source_unavailable",
+            "final_url": "",
+            "text": "",
+        }
+        for index in range(
+            lead_scorer._MAX_REQUIRED_ATTRIBUTE_SOURCE_URLS
+            if mode == "budget_exhausted"
+            else 1
+        )
+    }
+
+    lead_scorer._hydrate_verified_required_attribute_recovery_source(
+        cache,
+        investigation,
+        claim,
+        verified_transport_domain="happyrobot.ai",
+    )
+
+    assert not any(
+        entry.get(lead_scorer._INVESTIGATOR_HYDRATED_SOURCE) is True
+        for entry in cache.values()
+    )
+
+
 def test_hydrated_attribute_source_matches_only_exact_safe_final_url():
     requested_url = (
         "https://www.businesswire.com/news/home/20260915525333/en/"
@@ -1407,6 +1481,11 @@ def _finding(target: str, **overrides):
     ("investigator_mode", "expected_decision"),
     [
         ("supported", COMPANY_FIT_MATCH),
+        ("alternate_supported", COMPANY_FIT_MATCH),
+        ("alternate_wrong_company", COMPANY_FIT_UNAVAILABLE),
+        ("alternate_unsupported_attribute", COMPANY_FIT_UNAVAILABLE),
+        ("alternate_unfetched", COMPANY_FIT_UNAVAILABLE),
+        ("alternate_invalid_url", COMPANY_FIT_UNAVAILABLE),
         ("wrong_company", COMPANY_FIT_MISMATCH),
         ("quote_absent", COMPANY_FIT_UNAVAILABLE),
         ("still_blocked", COMPANY_FIT_UNAVAILABLE),
@@ -1425,6 +1504,16 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
         "Its platform enables organizations to build, deploy, and manage AI "
         "agents that automate complex operational workflows across voice, "
         "email, documents, and the web."
+    )
+    alternate_url = (
+        "https://www.happyrobot.ai/blog/"
+        "happyrobot-seriesc-fundraising-announcement"
+    )
+    alternate_quote = (
+        "This round values us at $1.2 billion post-money, bringing our total "
+        "funding to around $200 million as we enter a new stage of growth, "
+        "deploying our AI agents across more of the mission-critical work "
+        "enterprises can't afford to get wrong."
     )
     wrong_company_quote = (
         "OtherCo lets customers deploy its own AI agents in production."
@@ -1505,7 +1594,19 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
     async def provider(**_kwargs):
         calls["provider"] += 1
         if calls["provider"] == 1 or investigator_mode != "wrong_company":
-            return verdict(), ""
+            candidate = verdict()
+            if calls["provider"] == 2 and investigator_mode.startswith(
+                "alternate_"
+            ):
+                if investigator_mode == "alternate_supported":
+                    candidate.update(
+                        required_attribute_evidence_url=alternate_url,
+                        required_attribute_evidence_quote=alternate_quote,
+                    )
+                else:
+                    candidate = verdict(attribute=None)
+                    lead_scorer._clear_required_attribute_evidence(candidate)
+            return candidate, ""
         return verdict(attribute=False) | {
             "required_attribute_evidence_quote": wrong_company_quote,
         }, ""
@@ -1524,39 +1625,67 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
                 "HappyRobot announced its enterprise AI agent platform. "
                 + attribute_quote
             ),
+            "alternate_supported": (
+                "We've Raised $150 Million in Series C Funding | HappyRobot. "
+                + alternate_quote
+            ),
+            "alternate_wrong_company": attribute_quote,
+            "alternate_unsupported_attribute": (
+                "HappyRobot announced a financing round."
+            ),
+            "alternate_unfetched": "",
+            "alternate_invalid_url": attribute_quote,
             "wrong_company": wrong_company_quote,
             "quote_absent": "HappyRobot announced a financing round.",
             "still_blocked": "",
             "unfetched_positive": "",
         }[investigator_mode]
+        claim_url = (
+            "https://other.example/happyrobot"
+            if investigator_mode == "alternate_wrong_company"
+            else "http://www.happyrobot.ai/blog/unsafe"
+            if investigator_mode == "alternate_invalid_url"
+            else alternate_url
+            if investigator_mode.startswith("alternate_")
+            else source_url
+        )
         result = {
             "claims": {"industry": _finding(
                 "industry",
                 status=(
                     "UNPROVEN" if investigator_mode == "still_blocked"
-                    else "VERIFIED" if investigator_mode == "unfetched_positive"
+                    else "VERIFIED" if (
+                        investigator_mode == "unfetched_positive"
+                        or investigator_mode.startswith("alternate_")
+                    )
                     else "CONTRADICTED"
                 ),
                 observed_industry=(
                     "" if investigator_mode == "still_blocked"
-                    else "Artificial Intelligence"
-                    if investigator_mode == "unfetched_positive"
+                    else "Artificial Intelligence" if (
+                        investigator_mode == "unfetched_positive"
+                        or investigator_mode.startswith("alternate_")
+                    )
                     else "Other business"
                 ),
                 observed_subindustry=(
                     "" if investigator_mode == "still_blocked"
-                    else "AI agent platform"
-                    if investigator_mode == "unfetched_positive"
+                    else "AI agent platform" if (
+                        investigator_mode == "unfetched_positive"
+                        or investigator_mode.startswith("alternate_")
+                    )
                     else "Customer use"
                 ),
                 activity_role=(
                     "unresolved" if investigator_mode == "still_blocked"
-                    else "supplier_operator"
-                    if investigator_mode == "unfetched_positive"
+                    else "supplier_operator" if (
+                        investigator_mode == "unfetched_positive"
+                        or investigator_mode.startswith("alternate_")
+                    )
                     else "customer_user"
                 ),
                 evidence_url=(
-                    "" if investigator_mode == "still_blocked" else source_url
+                    "" if investigator_mode == "still_blocked" else claim_url
                 ),
                 evidence_quote=(
                     attribute_quote
@@ -1568,9 +1697,9 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
             "usage": {"reasoning_turns": 2, "search_calls": 0, "fetch_calls": 1},
             "failure_reason": "",
         }
-        if page_text:
+        if page_text and investigator_mode != "alternate_unfetched":
             result[investigator.PRIVATE_FETCHED_PAGES_KEY] = {
-                source_url: {"final_url": source_url, "text": page_text}
+                claim_url: {"final_url": claim_url, "text": page_text}
             }
         return result
 
@@ -1614,10 +1743,15 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
         else (
             "quote_absent"
             if investigator_mode == "quote_absent"
+            else "invalid_evidence"
+            if investigator_mode.startswith("alternate_")
             else "source_unavailable"
         )
     )
-    assert attribute_receipt["cache_hit"] is True
+    assert attribute_receipt["cache_hit"] is (
+        not investigator_mode.startswith("alternate_")
+        or investigator_mode == "alternate_supported"
+    )
     assert investigator.PRIVATE_FETCHED_PAGES_KEY not in str(
         result.details["supporting_receipts"]
     )
@@ -2582,6 +2716,14 @@ def test_decisive_quote_must_occur_in_fetched_page():
 @pytest.mark.parametrize(
     ("company_name", "url", "page", "first_quote", "corrected_quote", "stage"),
     [
+        (
+            "Latent",
+            "https://www.latenthealth.com/blog/latent-raises-80m",
+            "Latent has raised $80M in Series A funding to expand its platform.",
+            "The business secured eighty million dollars during its initial institutional financing.",
+            "Latent has raised $80M in Series A funding to expand its platform.",
+            "Series A",
+        ),
         (
             "TypeSafe AI",
             (

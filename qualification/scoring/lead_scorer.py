@@ -1680,7 +1680,39 @@ _REQUIRED_ATTRIBUTE_GROUNDING = "_server_verified_required_attribute_grounding"
 _MAX_REQUIRED_ATTRIBUTE_SOURCE_URLS = 2
 _REQUIRED_ATTRIBUTE_REPAIR_TEXT_CHARS = 6000
 _INVESTIGATOR_HYDRATED_SOURCE = "_investigator_hydrated"
+_VERIFIED_ATTRIBUTE_RECOVERY_DOMAIN = (
+    "_server_verified_attribute_recovery_domain"
+)
 _RETRY_RETAINED_SOURCE = "_server_retry_retained"
+
+
+def _verified_attribute_recovery_domain(
+    entry: Mapping[str, Any],
+    request_url: str,
+    final_url: str,
+) -> str:
+    """Validate one server-created first-party recovery-domain marker."""
+
+    raw_domain = entry.get(_VERIFIED_ATTRIBUTE_RECOVERY_DOMAIN)
+    if (
+        entry.get(_INVESTIGATOR_HYDRATED_SOURCE) is not True
+        or not isinstance(raw_domain, str)
+        or not raw_domain
+        or raw_domain != raw_domain.casefold().rstrip(".")
+    ):
+        return ""
+    try:
+        domain_url = public_http_url(f"https://{raw_domain}/")
+    except (TypeError, ValueError):
+        return ""
+    if (
+        urlsplit(domain_url).hostname != raw_domain
+        or _registrable_domain(domain_url) != raw_domain
+        or _registrable_domain(request_url) != raw_domain
+        or _registrable_domain(final_url) != raw_domain
+    ):
+        return ""
+    return raw_domain
 
 
 def _validated_retry_retained_sources(
@@ -1733,6 +1765,15 @@ def _validated_retry_retained_sources(
                 if raw_entry.get(_INVESTIGATOR_HYDRATED_SOURCE) is True
                 else {}
             ),
+            **(
+                {_VERIFIED_ATTRIBUTE_RECOVERY_DOMAIN: recovery_domain}
+                if (
+                    recovery_domain := _verified_attribute_recovery_domain(
+                        raw_entry, canonical_url, final_url
+                    )
+                )
+                else {}
+            ),
         }
     return retained
 
@@ -1763,6 +1804,15 @@ def _retain_successful_required_attribute_source(
             **(
                 {_INVESTIGATOR_HYDRATED_SOURCE: True}
                 if entry.get(_INVESTIGATOR_HYDRATED_SOURCE) is True
+                else {}
+            ),
+            **(
+                {_VERIFIED_ATTRIBUTE_RECOVERY_DOMAIN: recovery_domain}
+                if (
+                    recovery_domain := _verified_attribute_recovery_domain(
+                        entry, source_url, str(entry.get("final_url") or "")
+                    )
+                )
                 else {}
             ),
         }
@@ -1943,6 +1993,7 @@ def _hydrate_verified_required_attribute_recovery_source(
         "final_url": final_url,
         "text": page_text,
         _INVESTIGATOR_HYDRATED_SOURCE: True,
+        _VERIFIED_ATTRIBUTE_RECOVERY_DOMAIN: identity_domain,
     }
     source_cache[canonical_url] = hydrated_entry
     _retain_successful_required_attribute_source(
@@ -2114,6 +2165,96 @@ def _hydrated_required_attribute_source_for_final_url(
     return None
 
 
+def _recovery_required_attribute_www_alias_source(
+    source_cache: Mapping[str, Mapping[str, Any]],
+    cited_url: str,
+    quote: str,
+) -> Optional[tuple[str, Mapping[str, Any]]]:
+    """Bind an apex/www citation typo to the actual recovery fetch URL."""
+
+    for request_url, entry in source_cache.items():
+        if (
+            not isinstance(request_url, str)
+            or not isinstance(entry, Mapping)
+            or entry.get("status") != "fetched"
+        ):
+            continue
+        raw_final_url = entry.get("final_url")
+        source_text = entry.get("text")
+        if (
+            not isinstance(raw_final_url, str)
+            or not isinstance(source_text, str)
+            or not source_text
+            or len(source_text) > MAX_PAGE_CHARACTERS
+            or not _quote_occurs(quote, source_text)
+        ):
+            continue
+        try:
+            safe_request_url = public_http_url(request_url)
+            safe_final_url = public_http_url(raw_final_url)
+            safe_cited_url = public_http_url(cited_url)
+            request_parts = urlsplit(safe_request_url)
+            final_parts = urlsplit(safe_final_url)
+            cited_parts = urlsplit(safe_cited_url)
+        except (TypeError, ValueError):
+            continue
+        recovery_domain = _verified_attribute_recovery_domain(
+            entry, safe_request_url, safe_final_url
+        )
+        allowed_hosts = {recovery_domain, f"www.{recovery_domain}"}
+        if (
+            not recovery_domain
+            or safe_request_url != request_url
+            or safe_final_url != raw_final_url
+            or safe_cited_url != cited_url
+            or any(
+                parts.scheme != "https"
+                or parts.username is not None
+                or parts.password is not None
+                or parts.fragment
+                or (parts.port is not None and parts.port != 443)
+                for parts in (request_parts, final_parts, cited_parts)
+            )
+            or {
+                request_parts.hostname,
+                final_parts.hostname,
+                cited_parts.hostname,
+            } - allowed_hosts
+            or final_parts.hostname == cited_parts.hostname
+            or {final_parts.hostname, cited_parts.hostname} != allowed_hosts
+            or _registrable_domain(safe_cited_url) != recovery_domain
+            or len({
+                (request_parts.path, request_parts.query),
+                (final_parts.path, final_parts.query),
+                (cited_parts.path, cited_parts.query),
+            }) != 1
+        ):
+            continue
+        return safe_final_url, entry
+    return None
+
+
+def _replace_required_attribute_evidence_url(
+    verdict: dict[str, Any], actual_url: str
+) -> None:
+    """Record the actual fetched URL after a bounded citation correction."""
+
+    verdict["required_attribute_evidence_url"] = actual_url
+    nested = verdict.get("dimension_evidence")
+    if not isinstance(nested, Mapping):
+        return
+    nested_copy = dict(nested)
+    attribute = nested_copy.get("required_attribute")
+    if isinstance(attribute, Mapping):
+        attribute_copy = dict(attribute)
+        if "url" in attribute_copy:
+            attribute_copy["url"] = actual_url
+        if "evidence_url" in attribute_copy:
+            attribute_copy["evidence_url"] = actual_url
+        nested_copy["required_attribute"] = attribute_copy
+        verdict["dimension_evidence"] = nested_copy
+
+
 async def _ground_required_attribute_evidence(
     verdict: Mapping[str, Any],
     *,
@@ -2170,6 +2311,16 @@ async def _ground_required_attribute_evidence(
         if hydrated_entry is not None:
             entry = hydrated_entry
             cache_hit = True
+        else:
+            recovery_alias = _recovery_required_attribute_www_alias_source(
+                source_cache, source_url, quote
+            )
+            if recovery_alias is not None:
+                canonical_url, entry = recovery_alias
+                _replace_required_attribute_evidence_url(
+                    grounded, canonical_url
+                )
+                cache_hit = True
     if (
         not cache_hit
         or (
@@ -2186,6 +2337,15 @@ async def _ground_required_attribute_evidence(
                 retained_sources,
                 canonical_url,
             )
+        if retained_entry is None:
+            recovery_alias = _recovery_required_attribute_www_alias_source(
+                retained_sources, source_url, quote
+            )
+            if recovery_alias is not None:
+                canonical_url, retained_entry = recovery_alias
+                _replace_required_attribute_evidence_url(
+                    grounded, canonical_url
+                )
         if retained_entry is not None:
             if (
                 canonical_url not in source_cache

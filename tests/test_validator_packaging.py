@@ -127,7 +127,7 @@ from Leadpoet.utils.subnet_epoch import (
 assert callable(main)
 assert standard_main is main
 assert callable(maybe_reexec_rootful)
-assert sorted(DEFAULT_PROFILE_PATHS) == [455, 456, 457, 458, 459, 464, 466, 467]
+assert sorted(DEFAULT_PROFILE_PATHS) == [455, 456, 457, 458, 459, 464, 466, 467, 470]
 for spec_version in sorted(DEFAULT_PROFILE_PATHS):
     assert load_subtensor_events_profile_v2(
         spec_version=spec_version

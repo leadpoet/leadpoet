@@ -5012,6 +5012,256 @@ def test_oxpay_schema_repair_recomputes_stale_employee_conflict(monkeypatch):
     assert result.details["employee_size_conflict"] is False
 
 
+@pytest.mark.parametrize(
+    (
+        "investigator_status",
+        "activity_role",
+        "repair_identity",
+        "repair_industry_match",
+        "repair_attribute",
+        "expected_decision",
+        "expected_industry_decision",
+        "expected_provider_calls",
+    ),
+    [
+        (
+            "VERIFIED",
+            "supplier_operator",
+            "same",
+            False,
+            True,
+            COMPANY_FIT_MATCH,
+            COMPANY_FIT_MATCH,
+            2,
+        ),
+        (
+            "CONTRADICTED",
+            "internal_function",
+            "same",
+            True,
+            True,
+            COMPANY_FIT_MISMATCH,
+            COMPANY_FIT_MISMATCH,
+            1,
+        ),
+        (
+            "UNPROVEN",
+            "unresolved",
+            "same",
+            None,
+            True,
+            COMPANY_FIT_UNAVAILABLE,
+            COMPANY_FIT_UNAVAILABLE,
+            2,
+        ),
+        (
+            "UNPROVEN",
+            "unresolved",
+            "same",
+            True,
+            True,
+            COMPANY_FIT_MATCH,
+            COMPANY_FIT_MATCH,
+            2,
+        ),
+        (
+            "VERIFIED",
+            "supplier_operator",
+            "wrong",
+            False,
+            True,
+            COMPANY_FIT_UNAVAILABLE,
+            COMPANY_FIT_MATCH,
+            2,
+        ),
+        (
+            "VERIFIED",
+            "supplier_operator",
+            "same",
+            False,
+            False,
+            COMPANY_FIT_MISMATCH,
+            COMPANY_FIT_MATCH,
+            2,
+        ),
+    ],
+)
+def test_schema_repair_reconciles_bounded_industry_decision(
+    monkeypatch,
+    investigator_status,
+    activity_role,
+    repair_identity,
+    repair_industry_match,
+    repair_attribute,
+    expected_decision,
+    expected_industry_decision,
+    expected_provider_calls,
+):
+    company = _company()
+    icp = _icp(
+        industry="Web security",
+        sub_industry="Web application firewall",
+        product_service="Customer-operated web application firewall controls",
+        required_attribute="Offers configurable web application firewall rules.",
+    )
+    initial = _complete_verdict(
+        observed_industry="",
+        observed_subindustry="",
+        industry_matches=None,
+        industry_activity_role="unresolved",
+        industry_evidence_url="",
+        industry_evidence_quote="",
+        attribute_satisfied=None,
+        required_attribute_evidence_url="",
+        required_attribute_evidence_quote="",
+    )
+    repaired = _complete_verdict(
+        observed_industry=(
+            "Cloud platform" if repair_industry_match is not None else ""
+        ),
+        observed_subindustry=(
+            "Web application firewall"
+            if repair_industry_match is not None
+            else ""
+        ),
+        industry_matches=repair_industry_match,
+        industry_activity_role=(
+            "supplier_operator"
+            if repair_industry_match is not None
+            else "unresolved"
+        ),
+        industry_evidence_url=(
+            "https://acme.example/platform"
+            if repair_industry_match is not None
+            else ""
+        ),
+        industry_evidence_quote=(
+            "Acme's platform includes configurable web application firewall rules."
+            if repair_industry_match is not None
+            else ""
+        ),
+        attribute_satisfied=repair_attribute,
+        required_attribute_evidence_url="https://acme.example/platform",
+        required_attribute_evidence_quote=(
+            "Acme's platform includes configurable web application firewall rules."
+        ),
+    )
+    if repair_identity == "wrong":
+        repaired.update(
+            observed_company_name="Other Acme",
+            observed_company_website="https://other.example",
+            observed_company_linkedin=(
+                "https://www.linkedin.com/company/other-acme"
+            ),
+        )
+    calls = {"provider": 0, "investigator": 0}
+
+    async def provider(**_kwargs):
+        calls["provider"] += 1
+        return (initial if calls["provider"] == 1 else repaired), ""
+
+    async def bounded_investigation(*, targets, **_kwargs):
+        calls["investigator"] += 1
+        assert targets == ("industry",)
+        finding = _finding(
+            "industry",
+            status=investigator_status,
+            observed_value=(
+                "Web application firewall"
+                if investigator_status != "UNPROVEN"
+                else None
+            ),
+            observed_industry=(
+                "Web security" if investigator_status != "UNPROVEN" else ""
+            ),
+            observed_subindustry=(
+                "Web application firewall"
+                if investigator_status != "UNPROVEN"
+                else ""
+            ),
+            activity_role=activity_role,
+            evidence_url=(
+                "https://acme.example/firewall"
+                if investigator_status != "UNPROVEN"
+                else ""
+            ),
+            evidence_quote=(
+                "Acme sells customer-operated web application firewall controls."
+                if investigator_status == "VERIFIED"
+                else (
+                    "Acme uses firewall controls only for its internal compliance."
+                    if investigator_status == "CONTRADICTED"
+                    else ""
+                )
+            ),
+            reason="bounded industry decision",
+        )
+        return {
+            "claims": {"industry": finding},
+            "failure_reason": "",
+            "usage": {"reasoning_turns": 1, "search_calls": 0, "fetch_calls": 1},
+        }
+
+    async def keep_observation(verdict, *_args, **_kwargs):
+        return verdict
+
+    async def keep_attribute(verdict, **_kwargs):
+        return verdict, {}
+
+    homepage_identity = lead_scorer.company_fit_match(
+        "homepage identity verified",
+        details={
+            "identity": {
+                "decision": COMPANY_FIT_MATCH,
+                "evidence_source": "company_homepage",
+                "observed_name": "acme",
+                "observed_domain": "acme.example",
+                "observed_linkedin_slug": "acme",
+            },
+            "verified_homepage_transport_domain": "acme.example",
+        },
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "investigate_company_evidence",
+        bounded_investigation,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "_refresh_linkedin_employee_size_observation",
+        keep_observation,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "_ground_required_attribute_evidence",
+        keep_attribute,
+    )
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        company,
+        icp,
+        require_company_fit_dimensions=True,
+        verified_homepage_identity=homepage_identity,
+        company_quality=True,
+        evidence_investigator=True,
+    ))
+
+    assert calls == {
+        "provider": expected_provider_calls,
+        "investigator": 1,
+    }
+    assert result.decision == expected_decision
+    assert result.details["dimension_decisions"]["industry"] == (
+        expected_industry_decision
+    )
+    if repair_attribute is False:
+        assert result.details["required_attribute_decision"] == (
+            COMPANY_FIT_MISMATCH
+        )
+
+
 def test_repaired_real_employee_range_conflict_stays_unproven():
     repaired = _complete_verdict(
         observed_company_name="OxPay",

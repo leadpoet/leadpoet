@@ -5335,7 +5335,14 @@ async def _llm_reverify_company(
                 "requirement. "
                 "When the requested activity explicitly includes platforms or "
                 "suppliers, verify that the candidate supplies that specific "
-                "capability; do not require it to be its own customer. Populate the "
+                "capability; do not require it to be its own customer. A qualifying "
+                "customer-facing commercial capability can be sold within a larger "
+                "platform without being the company's main business or a standalone "
+                "product, unless the criterion explicitly requires either condition. "
+                "Distinguish controls that customers operate in the sold product from "
+                "the vendor's internal compliance, internal use, or badges. Prove every "
+                "requested function and conjunct; missing discussion is not a "
+                "contradiction. Populate the "
                 "observed fields only from the cited source. Do not rely only on a "
                 "directory's generic sector: preserve a specific, directly stated "
                 "operating activity in observed_subindustry instead of replacing it "
@@ -6023,6 +6030,16 @@ async def _llm_reverify_company(
         icp=icp,
         existing_conflict=employee_size_conflict,
     )
+    if "industry" in investigation_targets and not required_attribute_source_recovery:
+        repaired_verdict = _project_investigator_industry(
+            repaired_verdict,
+            (
+                claims.get("industry")
+                if isinstance(claims, Mapping)
+                and isinstance(claims.get("industry"), Mapping)
+                else None
+            ),
+        )
     repaired_result = _reverify_decision(
         repaired_verdict,
         icp_attribute,

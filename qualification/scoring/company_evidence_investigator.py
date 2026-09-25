@@ -115,6 +115,12 @@ sub-industry, product/service, and required-attribute context. A company that
 sells software to a requested industry is not itself in that industry unless
 the exact criterion says that vendors to that industry qualify. For industry,
 VERIFIED means direct supplier/operator evidence for the requested activity.
+A qualifying customer-facing commercial capability can be sold within a larger
+platform without being the company's main business or a standalone product,
+unless the exact criterion explicitly requires either condition. Distinguish
+controls that customers operate in the sold product from the vendor's internal
+compliance, internal use, or badges. Prove every requested function and
+conjunct; missing discussion is not a contradiction.
 CONTRADICTED requires direct customer, internal-function, or third-party
 evidence; a page that describes only a different business is UNPROVEN because
 it does not prove absence of another activity.

@@ -708,6 +708,10 @@ def test_doctronic_submitted_later_round_uses_validated_fetch(
             return {"ok": False, "url": requested_url, "text": ""}
         return {"ok": True, "url": requested_url, "text": page_text}
 
+    async def fake_search(_session, query, *, key):
+        del query, key
+        return {"results": []}
+
     base_company = _company(
         name="Doctronic",
         website="https://doctronic.ai",
@@ -733,6 +737,7 @@ def test_doctronic_submitted_later_round_uses_validated_fetch(
     )
     monkeypatch.setattr(investigator, "_post_json", fake_post_json)
     monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
 
     result = asyncio.run(lead_scorer._llm_reverify_company(
         company,
@@ -3027,10 +3032,15 @@ def test_audited_stage_quotes_get_source_context_then_exact_correction(
     async def fake_fetch(_session, requested_url):
         return {"ok": True, "url": requested_url, "text": page}
 
+    async def fake_search(_session, query, *, key):
+        del query, key
+        return {"results": []}
+
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
     monkeypatch.setattr(investigator, "_post_json", fake_post_json)
     monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
 
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": company_name, "website": f"https://{company_name.casefold().replace(' ', '')}.example"},
@@ -3480,10 +3490,15 @@ def test_corestack_buyer_quote_is_rejected_before_submitted_series_b_fetch(
             "text": series_b_quote,
         }
 
+    async def fake_search(_session, query, *, key):
+        del query, key
+        return {"results": []}
+
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
     monkeypatch.setattr(investigator, "_post_json", fake_post_json)
     monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
 
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={
@@ -3514,7 +3529,7 @@ def test_corestack_buyer_quote_is_rejected_before_submitted_series_b_fetch(
     assert result["claims"]["stage"]["evidence_quote"] == series_b_quote
     assert result["usage"] == {
         "reasoning_turns": 3,
-        "search_calls": 0,
+        "search_calls": 1,
         "fetch_calls": 1,
     }
     rejection = json.loads(requests[1]["messages"][-1]["content"])
@@ -5881,6 +5896,403 @@ def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatc
         request["tool_choice"] == "required"
         for request in reasoning_requests
     )
+
+
+def test_saved_doctronic_case_script_discovers_and_fetches_current_series_b(
+    monkeypatch,
+):
+    old_url = (
+        "https://www.vcaonline.com/news/2025091504/"
+        "doctronic-raises-20-million-series-a-to-bring-private-and-"
+        "personalized-ai-doctor-to-the-masses/"
+    )
+    current_url = (
+        "https://www.businesswire.com/news/home/20260324814372/en/"
+        "Doctronic-Raises-%2440M-Series-B-Following-Breakthrough-as-First-"
+        "AI-to-Legally-Renew-Prescriptions-in-the-U.S."
+    )
+    old_quote = (
+        "Doctronic, the AI-native platform delivering fast, private, and "
+        "personalized healthcare at scale, today announced a $20 million "
+        "Series A round led by Lightspeed Venture Partners"
+    )
+    current_quote = (
+        "Doctronic, the first AI system legally authorized to practice medicine "
+        "in the United States, today announced a $40 million Series B round "
+        "co-led by Abstract and Lightspeed Venture Partners"
+    )
+    requests = []
+    search_queries = []
+    fetched_urls = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        turn = len(requests)
+        if turn == 1:
+            name, arguments = "fetch_page", {"url": old_url}
+        elif turn == 2:
+            name, arguments = "fetch_page", {"url": current_url}
+        else:
+            name, arguments = "submit_findings", {"findings": [_finding(
+                "stage",
+                status="CONTRADICTED",
+                observed_value="Series B",
+                evidence_url=current_url,
+                evidence_quote=current_quote,
+            )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{turn}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_search(_session, query, *, key):
+        del key
+        search_queries.append(query)
+        return {"results": [{"url": current_url}]}
+
+    async def fake_fetch(_session, url):
+        fetched_urls.append(url)
+        return {
+            "ok": True,
+            "url": url,
+            "final_url": url,
+            "text": old_quote if url == old_url else current_quote,
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Doctronic", "website": "https://doctronic.ai"},
+        targets=("stage",),
+        requested_stage="Series A",
+        prior_observations={"submitted_source_urls": [old_url]},
+    ))
+
+    assert result["claims"]["stage"]["status"] == "CONTRADICTED"
+    assert result["claims"]["stage"]["observed_value"] == "Series B"
+    assert result["usage"] == {
+        "reasoning_turns": 3,
+        "search_calls": 1,
+        "fetch_calls": 2,
+    }
+    assert search_queries == [
+        "Doctronic doctronic.ai latest funding round acquisition IPO"
+    ]
+    assert fetched_urls == [old_url, current_url]
+    input_document = json.loads(
+        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+    )
+    stage_discovery = input_document["server_current_stage_discovery"]
+    assert stage_discovery["ok"] is True
+    assert stage_discovery["query"] == search_queries[0]
+    assert stage_discovery["discovery"]["results"] == [{"url": current_url}]
+    assert stage_discovery["notice"] == (
+        "server_search_results_are_discovery_only_not_evidence"
+    )
+    assert input_document["investigation_limits"]["remaining_search_calls"] == 1
+
+
+@pytest.mark.parametrize(
+    ("later_url", "later_quote"),
+    [
+        ("", ""),
+        (
+            "https://news.example/acme-debt",
+            "Acme secured a new debt facility to support continued growth.",
+        ),
+        (
+            "https://news.example/acme-grant",
+            "Acme received a government grant for product development.",
+        ),
+        (
+            "https://news.example/acme-buys-otherco",
+            "Acme completed its acquisition of OtherCo.",
+        ),
+    ],
+)
+def test_current_stage_search_preserves_valid_series_a_without_superseding_event(
+    monkeypatch,
+    later_url,
+    later_quote,
+):
+    old_url = "https://acme.example/news/series-a"
+    old_quote = "Acme today announced a completed $20 million Series A round."
+    requests = []
+    search_queries = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        turn = len(requests)
+        if not later_url and turn == 1:
+            name, arguments = "search_web", {"query": "Acme financing history"}
+        elif turn == (2 if not later_url else 1):
+            name, arguments = "fetch_page", {"url": old_url}
+        elif later_url and turn == 2:
+            name, arguments = "fetch_page", {"url": later_url}
+        else:
+            name, arguments = "submit_findings", {"findings": [_finding(
+                "stage",
+                observed_value="Series A",
+                evidence_url=old_url,
+                evidence_quote=old_quote,
+            )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{turn}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_search(_session, query, *, key):
+        del key
+        search_queries.append(query)
+        return {"results": ([{"url": later_url}] if later_url else [])}
+
+    async def fake_fetch(_session, url):
+        return {
+            "ok": True,
+            "url": url,
+            "final_url": url,
+            "text": old_quote if url == old_url else later_quote,
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("stage",),
+        requested_stage="Series A",
+    ))
+
+    assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["claims"]["stage"]["observed_value"] == "Series A"
+    assert result["usage"] == {
+        "reasoning_turns": 3,
+        "search_calls": 1 if later_url else 2,
+        "fetch_calls": 2 if later_url else 1,
+    }
+    assert search_queries[0] == (
+        "Acme acme.example latest funding round acquisition IPO"
+    )
+
+
+@pytest.mark.parametrize(
+    "search_mode", ["provider_failure", "malformed_response", "zero_budget"]
+)
+@pytest.mark.parametrize("submitted_status", ["VERIFIED", "CONTRADICTED"])
+def test_required_current_stage_search_failure_returns_unproven(
+    monkeypatch,
+    search_mode,
+    submitted_status,
+):
+    old_url = "https://acme.example/news/series-a"
+    old_quote = "Acme today announced a completed $20 million Series A round."
+    requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        turn = len(requests)
+        if turn == 1:
+            name, arguments = "fetch_page", {"url": old_url}
+        else:
+            name, arguments = "submit_findings", {"findings": [_finding(
+                "stage",
+                status=submitted_status,
+                observed_value="Series A",
+                evidence_url=old_url,
+                evidence_quote=old_quote,
+            )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{turn}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_search(_session, query, *, key):
+        del query, key
+        if search_mode == "zero_budget":
+            raise AssertionError("zero search budget must not call the provider")
+        if search_mode == "malformed_response":
+            raise ValueError("malformed search response")
+        raise RuntimeError("search unavailable")
+
+    async def fake_fetch(_session, url):
+        return {"ok": True, "url": url, "final_url": url, "text": old_quote}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    if search_mode == "zero_budget":
+        monkeypatch.setattr(investigator, "MAX_SEARCH_CALLS", 0)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("stage",),
+        requested_stage="Series A",
+    ))
+
+    assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["claims"]["stage"]["evidence_url"] == ""
+    assert result["claims"]["stage"]["evidence_quote"] == ""
+    assert result["usage"]["search_calls"] == (
+        0 if search_mode == "zero_budget" else 1
+    )
+    input_document = json.loads(
+        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+    )
+    assert input_document["investigation_limits"]["remaining_search_calls"] == (
+        0 if search_mode == "zero_budget" else 1
+    )
+
+
+@pytest.mark.parametrize("deadline_mode", ["before_admission", "after_admission"])
+def test_current_stage_search_deadline_returns_unproven(monkeypatch, deadline_mode):
+    old_url = "https://acme.example/news/series-a"
+    old_quote = "Acme today announced a completed $20 million Series A round."
+    requests = []
+    searches = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        if len(requests) == 1:
+            name, arguments = "fetch_page", {"url": old_url}
+        else:
+            name, arguments = "submit_findings", {"findings": [_finding(
+                "stage",
+                observed_value="Series A",
+                evidence_url=old_url,
+                evidence_quote=old_quote,
+            )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{len(requests)}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_fetch(_session, url):
+        return {"ok": True, "url": url, "final_url": url, "text": old_quote}
+
+    async def fake_search(_session, query, *, key):
+        del key
+        searches.append(query)
+        return {"results": []}
+
+    monotonic_values = iter(
+        (0.0, 111.0, 111.0)
+        if deadline_mode == "before_admission"
+        else (0.0, 0.0, 111.0)
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(
+        investigator,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(monotonic_values)),
+    )
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("stage",),
+        requested_stage="Series A",
+    ))
+
+    assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["usage"] == {
+        "reasoning_turns": 0,
+        "search_calls": 0 if deadline_mode == "before_admission" else 1,
+        "fetch_calls": 0,
+    }
+    assert len(searches) == result["usage"]["search_calls"]
+
+
+@pytest.mark.parametrize("search_mode", ["provider_failure", "malformed_response"])
+def test_failed_current_stage_search_preserves_valid_other_findings(
+    monkeypatch,
+    search_mode,
+):
+    url = "https://acme.example/about-and-series-a"
+    stage_quote = "Acme today announced a completed $20 million Series A round."
+    headcount_quote = "Acme has 11-50 employees."
+    page = f"{stage_quote} {headcount_quote}"
+    requests = []
+
+    def findings():
+        return [
+            _finding(
+                "stage",
+                observed_value="Series A",
+                evidence_url=url,
+                evidence_quote=stage_quote,
+            ),
+            _finding(
+                "headcount",
+                observed_value="11-50",
+                evidence_url=url,
+                evidence_quote=headcount_quote,
+            ),
+        ]
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        turn = len(requests)
+        if turn == 1:
+            name, arguments = "fetch_page", {"url": url}
+        else:
+            name, arguments = "submit_findings", {"findings": findings()}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{turn}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_fetch(_session, requested_url):
+        return {
+            "ok": True,
+            "url": requested_url,
+            "final_url": requested_url,
+            "text": page,
+        }
+
+    async def fake_search(_session, query, *, key):
+        del query, key
+        if search_mode == "malformed_response":
+            raise ValueError("malformed search response")
+        raise RuntimeError("search unavailable")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("stage", "headcount"),
+        requested_stage="Series A",
+        requested_employee_buckets=("11-50",),
+    ))
+
+    assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["claims"]["headcount"]["status"] == "VERIFIED"
+    assert result["claims"]["headcount"]["evidence_quote"] == headcount_quote
 
 
 def test_curated_armada_relationship_rejection_forces_targeted_research(

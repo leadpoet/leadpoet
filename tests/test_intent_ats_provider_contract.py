@@ -18,6 +18,9 @@ ASHBY_URL = (
 GREENHOUSE_URL = "https://boards.greenhouse.io/acme/jobs/12345"
 GREENHOUSE_CLAIM = "Acme is hiring a power electronics engineer."
 GREENHOUSE_TARGET = "Company is actively hiring power electronics engineers."
+SCALE_GREENHOUSE_URL = (
+    "https://job-boards.greenhouse.io/scaleai/jobs/4730512005"
+)
 WORKDAY_URL = (
     "https://acme.wd5.myworkdayjobs.com/en-US/Careers/job/"
     "San-Francisco/Software-Engineer_R123"
@@ -55,6 +58,29 @@ def _encoded_greenhouse_payload() -> dict:
         "content": (
             "&lt;section&gt;&lt;h2&gt;What You&#39;ll Do&lt;/h2&gt;"
             "&lt;p&gt;Design autonomous systems for industrial sites.&lt;/p&gt;&lt;/section&gt;"
+        ),
+    }
+
+
+def _scale_greenhouse_payload() -> dict:
+    """Retained job metadata with a small synthetic body and office control."""
+    return {
+        "id": 4730512005,
+        "absolute_url": SCALE_GREENHOUSE_URL,
+        "title": "Senior Software Engineer, Platform",
+        "company_name": "Scale AI",
+        "updated_at": "2026-09-03T14:53:30-04:00",
+        "location": {"name": "San Francisco, CA; New York, NY"},
+        "departments": [{
+            "id": 4136579005,
+            "name": "Horizontals EPD",
+            "child_ids": [],
+            "parent_id": None,
+        }],
+        "offices": [{"id": 456, "name": "Restricted Office Metadata"}],
+        "content": (
+            "<section><h2>About the Role</h2>"
+            "<p>Build reliable platform systems for AI applications.</p></section>"
         ),
     }
 
@@ -272,6 +298,102 @@ async def test_greenhouse_decodes_encoded_job_heading_before_body_gate(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_scale_greenhouse_department_reaches_source_and_semantic_gate(
+    monkeypatch,
+):
+    client = _GreenhouseClient(_scale_greenhouse_payload())
+    prompts = []
+
+    async def call_openrouter(_client, _model, prompt):
+        prompts.append(prompt)
+        return {
+            "answer": {
+                "overall_verdict": "qualified",
+                "overall_confidence": "high",
+                "signal_evaluations": [{
+                    "signal_status": "supported",
+                    "verification_mode": "source_grounded",
+                    "same_entity_check": "pass",
+                    "confidence": "high",
+                    "evidence_urls_used": [SCALE_GREENHOUSE_URL],
+                    "claim_matches_miner_date": "no_date_in_content",
+                    "source_accessibility": "accessible",
+                    "claim": "Scale AI is hiring in Horizontals EPD.",
+                    "supporting_quotes": ["Horizontals EPD"],
+                    "contradicting_quotes": [],
+                    "risk_notes": [],
+                    "unsupported_parts": [],
+                }],
+            },
+            "model": "perplexity/sonar-pro",
+            "usage": {},
+        }
+
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", "test-runtime-handle")
+    monkeypatch.setattr(intent.httpx, "AsyncClient", lambda **_kwargs: client)
+    monkeypatch.setattr(intent, "_call_openrouter", call_openrouter)
+
+    fetched = await intent._fetch_sd_then_exa([SCALE_GREENHOUSE_URL])
+    assert fetched["results"][0]["url"] == SCALE_GREENHOUSE_URL
+    assert "Department: Horizontals EPD" in fetched["results"][0]["text"]
+    assert "Restricted Office Metadata" not in fetched["results"][0]["text"]
+    assert fetched["results"][0]["source_publication_date"] == ""
+
+    result = await intent.verify_three_stage(
+        None,
+        company_name="Scale AI",
+        company_linkedin="https://www.linkedin.com/company/scaleai",
+        company_website="https://scale.com",
+        source_url=SCALE_GREENHOUSE_URL,
+        miner_claim="Scale AI is hiring in Horizontals EPD.",
+        target_signal_text="Company is actively hiring in Horizontals EPD.",
+        evidence_type="HIRING",
+        declared_source="job_board",
+        stage1_soft_reject=True,
+    )
+
+    assert len(prompts) == 1
+    assert "Department: Horizontals EPD" in json.dumps(prompts[0])
+    assert result["stage3"]["status"] == "supported"
+    assert result["decision"] == "approve"
+    assert client.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_greenhouse_ignores_malformed_and_unbounded_department_metadata(
+    monkeypatch,
+):
+    payload = {
+        **_greenhouse_payload(),
+        "departments": [
+            None,
+            {},
+            {"name": 123},
+            {"name": ""},
+            {"name": "bad\x00department"},
+            {"name": "x" * 301},
+            *({"name": f"Valid Department {index}"} for index in range(20)),
+            {"name": "Outside Department Limit"},
+        ],
+        "offices": [{"name": "Ignored Office"}],
+    }
+    client = _GreenhouseClient(payload)
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", "test-runtime-handle")
+    monkeypatch.setattr(intent.httpx, "AsyncClient", lambda **_kwargs: client)
+
+    result = await intent._scrape_greenhouse_job(GREENHOUSE_URL)
+
+    assert result["ok"] is True
+    assert "Valid Department 0" in result["content"]
+    assert "Valid Department 13" in result["content"]
+    assert "Valid Department 14" not in result["content"]
+    assert "Outside Department Limit" not in result["content"]
+    assert "Ignored Office" not in result["content"]
+    assert "x" * 301 not in result["content"]
+    assert client.calls == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("date_fields", "expected"),
     [
@@ -337,6 +459,10 @@ async def test_encoded_greenhouse_job_still_obeys_negative_stage3(monkeypatch):
         {
             **_greenhouse_payload(),
             "absolute_url": "https://boards.greenhouse.io/acme/jobs/54321",
+        },
+        {
+            **_greenhouse_payload(),
+            "absolute_url": "https://boards.greenhouse.io/not-acme/jobs/12345",
         },
     ],
 )

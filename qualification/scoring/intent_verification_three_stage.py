@@ -953,6 +953,21 @@ async def _scrape_greenhouse_job(source_url: str) -> Dict[str, Any]:
                     and "\x00" not in location_name
                 ):
                     exact_fields.append(location_name)
+            departments = payload.get("departments")
+            if isinstance(departments, list):
+                for department in departments[:20]:
+                    if not isinstance(department, Mapping):
+                        continue
+                    department_name = department.get("name")
+                    if not isinstance(department_name, str):
+                        continue
+                    department_name = " ".join(department_name.split())
+                    if (
+                        department_name
+                        and len(department_name) <= 300
+                        and "\x00" not in department_name
+                    ):
+                        exact_fields.append(f"Department: {department_name}")
             exact_fields.append(description)
             content = "\n".join(exact_fields)[:MAX_SCRAPED_CHARS]
             if len(content) < 20:

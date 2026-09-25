@@ -149,6 +149,14 @@ Submitted descriptions are claim context only; source evidence must support fact
 A valid primary signal supports only the facts its supplied evidence proves; it
 does not by itself establish separate growth metrics, funding details, product
 behavior, API inputs or outputs, architecture, integrations, or capabilities.
+When the paragraph claims that an activity satisfies a requested strategic-
+partnership criterion, standalone enrollment in a partner, perks, accelerator,
+or vendor program; a partner tier or certification; and marketplace participation
+do not support that recategorization. Exact evidence must also prove the requested
+bilateral strategic collaboration or concrete joint commitments, such as joint
+go-to-market or co-development work. Apply this distinction only when the actual
+ICP criterion requires a strategic partnership; preserve different relationship
+wording and qualifying program activity that has those explicit commitments.
 Require each such factual clause to be semantically supported by supplied
 independently fetched context or verified quotes. The paragraph's own wording,
 plausibility, and outside knowledge are not evidence. Equivalent supporting

@@ -308,6 +308,83 @@ def test_oxpay_positive_control_source_and_rule_reach_final_prompt() -> None:
     assert source_text in stage_three
 
 
+def test_duplocloud_program_and_partner_tier_controls_reach_both_prompts() -> None:
+    cases = (
+        (
+            "DuploCloud joined Google Cloud's Startup Perks program and offers "
+            "eligible startups one month free on its DevOps AI platform.",
+            "DuploCloud joined Google Cloud's Startup Perks program.",
+        ),
+        (
+            "DuploCloud achieved AWS Premier Tier Services Partner status.",
+            "DuploCloud achieved AWS Premier Tier Services Partner status.",
+        ),
+    )
+    for claim, source_text in cases:
+        row = _row(
+            company="DuploCloud",
+            claim=claim,
+            target="Announced a strategic partnership in the last 365 days.",
+            source_url="https://www.newswire.com/news/duplocloud-event",
+            evidence_type="PARTNERSHIP",
+        )
+        stage_one, stage_three = _prompts(row, source_text)
+        for prompt in (stage_one, stage_three):
+            assert "Standalone enrollment" in prompt
+            assert "partner tier or\n        certification" in prompt
+            assert "marketplace participation do not prove" in prompt
+            assert (
+                "bilateral strategic collaboration or concrete joint commitments"
+                in prompt
+            )
+        assert source_text in stage_three
+
+
+def test_explicit_joint_commitments_remain_eligible_in_partnership_prompt() -> None:
+    controls = (
+        (
+            "MontyCloud",
+            "MontyCloud and AWS signed a strategic collaboration agreement for "
+            "joint go-to-market and co-development work.",
+            "MontyCloud and AWS signed a strategic collaboration agreement. The "
+            "companies committed to joint go-to-market and co-development work.",
+        ),
+        (
+            "Acme",
+            "Acme joined the ExampleCloud partner program under an agreement for "
+            "joint go-to-market and co-development work.",
+            "Acme joined the ExampleCloud partner program. Under the bilateral "
+            "agreement, both companies committed to joint go-to-market campaigns "
+            "and co-development of an integrated product.",
+        ),
+    )
+    for company, claim, source_text in controls:
+        row = _row(
+            company=company,
+            claim=claim,
+            target="Entered a strategic partnership in the last 365 days.",
+            source_url=f"https://{company.casefold()}.example/collaboration",
+            evidence_type="PARTNERSHIP",
+        )
+        stage_one, stage_three = _prompts(row, source_text)
+        for prompt in (stage_one, stage_three):
+            assert "They can qualify only when exact evidence also proves" in prompt
+            assert "joint go-to-market or co-development work" in prompt
+        assert source_text in stage_three
+
+
+def test_partnership_rule_is_not_added_for_a_different_relationship() -> None:
+    row = _row(
+        company="Acme",
+        claim="Acme joined the ExampleCloud vendor program.",
+        target="Joined a cloud vendor program in the last 365 days.",
+        source_url="https://acme.example/vendor-program",
+        evidence_type="PARTNERSHIP",
+    )
+    for prompt in _prompts(row, "Acme joined the ExampleCloud vendor program."):
+        assert "Standalone enrollment" not in prompt
+
+
 def test_corestack_completion_guidance_reaches_both_prompts() -> None:
     row = _row(
         company="CoreStack",

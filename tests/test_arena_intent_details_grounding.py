@@ -689,6 +689,57 @@ def test_all_grounding_and_writing_checks_must_pass(monkeypatch, failed_check):
     assert result["input_hash"].startswith("sha256:")
 
 
+def test_duplocloud_narrative_recategorization_reaches_review_contract(
+    monkeypatch,
+) -> None:
+    company, icp, results, fit = inputs()
+    paragraph = (
+        "DuploCloud joined Google Cloud's Startup Perks program. This activity "
+        "is an announced strategic partnership relevant to the requested ICP."
+    )
+    company.company_name = "DuploCloud"
+    company.intent_details = paragraph
+    company.intent_signals = [company.intent_signals[0]]
+    company.intent_signals[0].description = (
+        "DuploCloud joined Google Cloud's Startup Perks program."
+    )
+    icp.prompt = "Find companies that announced a strategic partnership."
+    icp.intent_signals = [
+        "Announced a strategic partnership in the last 365 days."
+    ]
+    results = [results[0]]
+    evaluation = results[0]["judge_verdict"]["verification_trace"][
+        "intent_verdict"
+    ]["signal_evaluations"][0]
+    evaluation["supporting_quotes"] = [
+        "DuploCloud joined Google Cloud's Startup Perks program."
+    ]
+
+    async def judge(prompt, **kwargs):
+        document = json.loads(prompt)
+        assert " ".join(
+            unit["text"] for unit in document["intent_details_units"]
+        ) == paragraph
+        assert "strategic partnership" in document["icp"]["prompt"]
+        assert "Startup Perks program" in json.dumps(document)
+        assert "do not support that recategorization" in kwargs["system_prompt"]
+        checks = {name: True for name in intent_details._CHECKS}
+        return json.dumps(_review_response(
+            checks,
+            [{"matched_icp_signal": 0, "covered": True}],
+            document,
+        ))
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(
+        company, icp, results, fit
+    ))
+
+    # This verifies prompt and context delivery. The mocked verdict is not
+    # evidence of real-model accuracy.
+    assert receipt["decision"] == "match"
+
+
 def test_review_without_non_qualifying_context_keeps_original_system_prompt(
     monkeypatch,
 ):
@@ -699,6 +750,13 @@ def test_review_without_non_qualifying_context_keeps_original_system_prompt(
     assert "Review\nevery unit exactly once" in intent_details._SYSTEM
     assert "failed ICP event\nmatch is not a factual contradiction" in intent_details._SYSTEM
     assert "Assess and return unit_grounding first" in intent_details._SYSTEM
+    assert "standalone enrollment in a partner, perks, accelerator" in intent_details._SYSTEM
+    assert "do not support that recategorization" in intent_details._SYSTEM
+    assert (
+        "bilateral strategic collaboration or concrete joint commitments"
+        in intent_details._SYSTEM
+    )
+    assert "Apply this distinction only when the actual\nICP criterion requires" in intent_details._SYSTEM
 
     calls = []
     expected_document = intent_details.review_evidence(

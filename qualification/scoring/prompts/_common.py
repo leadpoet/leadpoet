@@ -268,7 +268,15 @@ PARTNERSHIP_BLOCK = """      * Apply this block only to a chosen partnership alt
         partnership requirement to a separate acquisition, product-launch, or
         other OR alternative. A strategic-partnership target requires positive evidence
         that the target company entered a partnership, alliance, joint venture, or
-        comparable collaborative commercial arrangement. An acquisition,
+        comparable collaborative commercial arrangement. Standalone enrollment
+        in a partner, perks, accelerator, or vendor program; a partner tier or
+        certification; and marketplace participation do not prove a strategic
+        partnership. They can qualify only when exact evidence also proves the
+        requested bilateral strategic collaboration or concrete joint commitments,
+        such as joint go-to-market or co-development work. Apply the exact
+        relationship wording in the target: do not impose a strategic-partnership
+        standard when the chosen ICP alternative asks for a different relationship.
+        An acquisition,
         takeover, purchase agreement, or other ownership transaction alone is
         not a partnership, even when the source calls it strategic, describes
         future collaboration, or the target ICP does not explicitly exclude

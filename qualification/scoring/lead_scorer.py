@@ -326,16 +326,21 @@ def _series_stage_statement_patterns(label: str) -> tuple[re.Pattern, ...]:
 _VENTURE_STAGE_PROOF_PATTERNS = {
     "seed": (
         re.compile(
-            r"\b(?:raised|closed|secured|completed|announced|received)\b.{0,40}"
-            r"\b(?:pre[- ]seed|seed)\b",
+            r"\b(?:raised|closed|secured|completed|announced|received)\b"
+            r"(?:(?!\bpre_seed_stage\b).){0,40}"
+            r"\bseed\b",
             re.I,
         ),
-        _present_tense_raise_proof_pattern(r"(?:pre[- ]seed|seed)"),
+        _present_tense_raise_proof_pattern(r"seed"),
     ),
     "series a": _series_stage_proof_patterns(r"series\s+a"),
     "series b": _series_stage_proof_patterns(r"series\s+b"),
     "series c+": _series_stage_proof_patterns(r"series\s+[c-z]"),
 }
+_PRE_SEED_STAGE_TOKEN_RE = re.compile(
+    r"\bpre(?:\s*[-\u2010\u2011\u2013\u2014]\s*|\s+)seed\b",
+    re.I,
+)
 _VENTURE_STAGE_STATEMENT_PATTERNS = {
     "series a": _series_stage_statement_patterns(r"series\s+a"),
     "series b": _series_stage_statement_patterns(r"series\s+b"),
@@ -668,12 +673,18 @@ def _stage_quote_supports_observation(observed: str, quote: str) -> bool:
     if proven_ownership_states:
         return observed == proven_ownership_states[0]
 
+    seed_compatible_text = _PRE_SEED_STAGE_TOKEN_RE.sub(
+        "pre_seed_stage", text
+    )
     proven_venture_stages = [
         stage
         for stage, patterns in _VENTURE_STAGE_PROOF_PATTERNS.items()
-        if _has_affirmed_stage_proof(text, patterns)
+        if _has_affirmed_stage_proof(
+            seed_compatible_text if stage == "seed" else text,
+            patterns,
+        )
         or _has_affirmed_stage_proof(
-            text,
+            seed_compatible_text if stage == "seed" else text,
             _VENTURE_STAGE_STATEMENT_PATTERNS.get(stage, ()),
             reject_historical=True,
         )

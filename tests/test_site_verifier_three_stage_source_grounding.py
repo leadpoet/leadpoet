@@ -820,6 +820,31 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
                     result["rejection_reason"], "evidence_fetch_failed"
                 )
 
+    async def test_mixed_sd_502_and_exact_exa_not_found_stays_unavailable(self):
+        url = "https://news.example/acme-funding"
+        statuses = [{
+            "url": url,
+            "source": "none",
+            "sd_stage": "all_tiers_exhausted:http_502",
+            "sd_error": "http_502",
+            "exa_stage": "exa_target_not_found",
+            "exa_error": "target_not_found",
+            "exa_target_absence": {
+                "id_matches_requested_url": True,
+                "status": "error",
+                "error_tag": "CRAWL_NOT_FOUND",
+                "error_http_status": 404,
+                "confirmed_attempts": 2,
+            },
+        }]
+
+        result, call, _fetch = await self._verify_empty_fetch(url, statuses)
+
+        self.assertEqual(call.await_count, 0)
+        self.assertFalse(result["client_ready"])
+        self.assertEqual(result["decision"], "unavailable")
+        self.assertEqual(result["rejection_reason"], "evidence_fetch_failed")
+
     async def test_stage_three_makes_the_terminal_decision_from_fetched_content(self):
         url = "https://news.example/acme-funding"
         call = AsyncMock(return_value=supported(url))

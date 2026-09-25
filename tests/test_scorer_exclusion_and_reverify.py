@@ -1083,6 +1083,82 @@ def test_series_stage_statements_require_current_completed_proof(
 
 
 @pytest.mark.parametrize(
+    "quote",
+    [
+        "Anchorbase announced it raised a $2 million pre-seed round.",
+        "Anchorbase announced it raised a $2 million pre seed round.",
+        "Anchorbase announced it raised a $2 million pre  seed round.",
+        "Anchorbase announced it raised a $2 million pre‐seed round.",
+        "Anchorbase announced it raised a $2 million pre‑seed round.",
+        "Anchorbase announced it raised a $2 million pre–seed round.",
+        "Anchorbase announced it raised a $2 million pre—seed round.",
+        "Anchorbase announced it raised a $2 million pre - seed round.",
+        "Acme raised pre-seed and plans to raise a Seed round.",
+        "Acme raised pre-seed; its Seed plans remain unknown.",
+    ],
+)
+def test_pre_seed_event_does_not_prove_seed_stage(quote):
+    assert _stage_quote_supports_observation("seed", quote) is False
+    assert _decision_from_observed_stage(
+        {
+            "observed_company_stage": "Seed",
+            "stage_matches": True,
+            "stage_evidence_url": "https://evidence.example/anchorbase-round",
+            "stage_evidence_quote": quote,
+        },
+        "seed",
+        evidence_attributed=True,
+    ) == COMPANY_FIT_UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "Anchorbase announced it raised a $2 million Seed round.",
+        "After its pre-seed investment, Acme later closed a $5 million Seed round.",
+        "Acme raised a Seed round after its pre-seed round.",
+    ],
+)
+def test_affirmed_seed_event_still_proves_seed_stage(quote):
+    assert _stage_quote_supports_observation("seed", quote) is True
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "Acme raised $2.5 million in Seed funding.",
+        "Acme raised U.S. $2.5 million in Seed funding.",
+        "Acme raised USD 2.5M in Seed funding.",
+        "Acme raised €2.5 million in Seed funding.",
+        "Acme closed its Seed round in 2024.",
+        "In 2024, Acme announced it had completed a Seed financing.",
+    ],
+)
+def test_seed_proof_preserves_realistic_amounts_and_past_rounds(quote):
+    assert _stage_quote_supports_observation("seed", quote) is True
+
+
+@pytest.mark.parametrize(
+    ("observed", "quote"),
+    [
+        ("series a", "Acme closed its Series A round."),
+        ("series b", "Acme closed its Series B round."),
+        ("series c+", "Acme closed its Series D round."),
+    ],
+)
+def test_pre_seed_token_guard_does_not_change_series_stage_proof(observed, quote):
+    assert _stage_quote_supports_observation(observed, quote) is True
+
+
+@pytest.mark.parametrize("observed", ["", "unknown", "pre-seed"])
+def test_noncanonical_stage_remains_unproven(observed):
+    assert _stage_quote_supports_observation(
+        observed,
+        "Anchorbase announced it raised a $2 million pre-seed round.",
+    ) is False
+
+
+@pytest.mark.parametrize(
     ("prefix", "suffix", "expected"),
     [
         ("", "", True),

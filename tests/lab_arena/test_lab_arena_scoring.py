@@ -1137,6 +1137,285 @@ def _exact_target_crawl_failure_status():
     }
 
 
+def _exact_target_not_found_status():
+    return {
+        "url": "https://failed.example/evidence",
+        "source": "none",
+        "stage": "",
+        "sd_stage": "all_tiers_exhausted:http_502",
+        "exa_stage": "exa_target_not_found",
+        "exa_target_absence": {
+            "id_matches_requested_url": True,
+            "status": "error",
+            "error_tag": "CRAWL_NOT_FOUND",
+            "error_http_status": 404,
+            "confirmed_attempts": 2,
+        },
+    }
+
+
+@pytest.mark.parametrize("integrity_policy", [False, True])
+def test_exact_target_not_found_isolates_company_after_three_retries(
+    integrity_policy,
+):
+    from lab_arena.company_judgments import raw_judgment_is_cacheable
+    from qualification.scoring.competition import (
+        count_penalizable_false_positives,
+        raw_company_judgment,
+        scorer_breakdown_is_terminal_company_verification_failure,
+    )
+
+    calls = []
+
+    def scorer(batch, _icp, _is_reference_model):
+        calls.append([row["company_name"] for row in batch])
+        rows = []
+        for index, company_row in enumerate(batch):
+            if company_row["company_name"] == "Scored Co 0":
+                row = breakdown(91.0)
+            else:
+                row = _exact_target_crawl_failure_breakdown([
+                    _exact_target_not_found_status()
+                ])
+            row.update({
+                "company_index": index,
+                "company_identity_key": company_row["company_website"],
+                "company_identity_alias_keys": [company_row["company_website"]],
+            })
+            rows.append(row)
+        return rows
+
+    scorer.integrity_policy = integrity_policy
+
+    result = scoring.score_work_item(
+        {"scored_run_id": "run-exact-target-not-found"},
+        icp=_ICPS[0],
+        companies=[scored_company(0), scored_company(1)],
+        scorer=scorer,
+        max_retries=3,
+    )
+
+    assert calls == [
+        ["Scored Co 0", "Scored Co 1"],
+        ["Scored Co 1"],
+        ["Scored Co 1"],
+    ]
+    assert [row["final_score"] for row in result] == [91.0, 0.0]
+    assert [row["company_index"] for row in result] == (
+        [0, 1] if integrity_policy else [0, 0]
+    )
+    terminal = result[1]
+    assert terminal["verifier_gate_receipts"][-1] == {
+        "gate": "intent_verification",
+        "decision": "unavailable",
+        "failure_class": "company_verification_exhausted",
+    }
+    public = verify.redact_breakdown(terminal)
+    assert scorer_breakdown_is_terminal_company_verification_failure(public)
+    assert raw_judgment_is_cacheable(raw_company_judgment(terminal))
+    assert count_penalizable_false_positives(
+        [public], icp_has_intent_signals=True
+    ) == (0, 0)
+
+
+@pytest.mark.parametrize("integrity_policy", [False, True])
+def test_exact_target_not_found_solo_company_and_scraped_bundle_sibling_zero(
+    integrity_policy,
+):
+    calls = []
+
+    def scorer(batch, _icp, _is_reference_model):
+        calls.append([row["company_name"] for row in batch])
+        unavailable = _exact_target_crawl_failure_breakdown([
+            {
+                "url": "https://healthy.example/evidence",
+                "source": "exa_fallback",
+                "stage": "exa_scraped",
+                "sd_stage": "all_tiers_exhausted:http_502",
+            },
+            _exact_target_not_found_status(),
+        ])
+        unavailable.update({
+            "company_index": 0,
+            "company_identity_key": batch[0]["company_website"],
+            "company_identity_alias_keys": [batch[0]["company_website"]],
+        })
+        return [unavailable]
+
+    scorer.integrity_policy = integrity_policy
+
+    result = scoring.score_work_item(
+        {"scored_run_id": "run-solo-exact-target-not-found"},
+        icp=_ICPS[0],
+        companies=[scored_company(0)],
+        scorer=scorer,
+        max_retries=3,
+    )
+
+    assert calls == [["Scored Co 0"], ["Scored Co 0"], ["Scored Co 0"]]
+    assert result[0]["final_score"] == 0.0
+    assert result[0]["company_index"] == 0
+    assert result[0]["verifier_gate_receipts"][-1]["failure_class"] == (
+        "company_verification_exhausted"
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"exa_target_absence": None},
+        {"source": "unknown"},
+        {"url": ""},
+        {"sd_stage": "all_tiers_exhausted:http_429"},
+        {"sd_stage": "all_tiers_exhausted:http_503"},
+        {"sd_stage": "all_tiers_exhausted:no_sd_key"},
+        {"sd_stage": "all_tiers_exhausted:exception:ValueError"},
+        {"sd_stage": "all_tiers_exhausted:client_deadline:baseline"},
+        {"exa_stage": "exa_target_not_found_unconfirmed"},
+        {"exa_target_absence": {
+            "id_matches_requested_url": False,
+            "status": "error",
+            "error_tag": "CRAWL_NOT_FOUND",
+            "error_http_status": 404,
+            "confirmed_attempts": 2,
+        }},
+        {"exa_target_absence": {
+            "id_matches_requested_url": True,
+            "status": "error",
+            "error_tag": "CRAWL_NOT_FOUND",
+            "error_http_status": 404,
+            "confirmed_attempts": True,
+        }},
+        {"exa_target_absence": {
+            "id_matches_requested_url": True,
+            "status": "error",
+            "error_tag": "CRAWL_NOT_FOUND",
+            "error_http_status": 404,
+        }},
+        {"exa_target_absence": {
+            "id_matches_requested_url": True,
+            "status": "error",
+            "error_tag": "CRAWL_NOT_FOUND",
+            "error_http_status": True,
+            "confirmed_attempts": 2,
+        }},
+        {"exa_target_absence": {
+            "id_matches_requested_url": True,
+            "status": "error",
+            "error_tag": "CRAWL_NOT_FOUND",
+            "error_http_status": 404.0,
+            "confirmed_attempts": 2,
+        }},
+        {"exa_target_absence": {
+            "id_matches_requested_url": True,
+            "status": "success",
+            "error_tag": "CRAWL_NOT_FOUND",
+            "error_http_status": 404,
+            "confirmed_attempts": 2,
+        }},
+        {"exa_target_absence": {
+            "id_matches_requested_url": True,
+            "status": "error",
+            "error_tag": "CRAWL_UNKNOWN_ERROR",
+            "error_http_status": 404,
+            "confirmed_attempts": 2,
+        }},
+        {"exa_target_absence": {
+            "id_matches_requested_url": True,
+            "status": "error",
+            "error_tag": "CRAWL_NOT_FOUND",
+            "error_http_status": 500,
+            "confirmed_attempts": 2,
+        }},
+        {"exa_target_absence": {
+            "id_matches_requested_url": True,
+            "status": "error",
+            "error_tag": "CRAWL_NOT_FOUND",
+            "error_http_status": 404,
+            "confirmed_attempts": 1,
+        }},
+        {"exa_target_absence": {
+            "id_matches_requested_url": True,
+            "status": "error",
+            "error_tag": "CRAWL_NOT_FOUND",
+            "error_http_status": 404,
+            "confirmed_attempts": 2.0,
+        }},
+        {"exa_target_absence": {
+            "id_matches_requested_url": True,
+            "status": "error",
+            "error_tag": "CRAWL_NOT_FOUND",
+            "error_http_status": 404,
+            "confirmed_attempts": 2,
+            "unexpected": "field",
+        }},
+    ],
+)
+def test_unproven_exact_target_not_found_remains_systemic(mutation):
+    from qualification.scoring.competition import (
+        scorer_breakdown_has_company_local_verification_failure,
+    )
+
+    status = {**_exact_target_not_found_status(), **mutation}
+    row = _exact_target_crawl_failure_breakdown([status])
+    assert not scorer_breakdown_has_company_local_verification_failure(row)
+    with pytest.raises(scoring.ScoringError):
+        scoring.score_work_item(
+            {"scored_run_id": "run-unproven-target-not-found"},
+            icp=_ICPS[0],
+            companies=[scored_company(0)],
+            scorer=lambda *_args: [row],
+            max_retries=3,
+        )
+
+
+def test_exact_target_not_found_does_not_mask_systemic_sibling_or_model_error():
+    from qualification.scoring.competition import (
+        scorer_breakdown_has_company_local_verification_failure,
+    )
+
+    row = _exact_target_crawl_failure_breakdown([
+        _exact_target_not_found_status(),
+        {"url": "https://other.example/evidence", "source": "none",
+         "sd_stage": "all_tiers_exhausted:transport_error:ConnectError",
+         "exa_stage": "exa_failed"},
+    ])
+    assert not scorer_breakdown_has_company_local_verification_failure(row)
+
+    row = _exact_target_crawl_failure_breakdown([
+        _exact_target_not_found_status()
+    ])
+    row["intent_signals_detail"][0]["judge_verdict"]["error_class"] = (
+        "MalformedResponseError"
+    )
+    assert not scorer_breakdown_has_company_local_verification_failure(row)
+
+
+def test_exact_target_not_found_does_not_mask_unavailable_company_fit():
+    from qualification.scoring.competition import (
+        scorer_breakdown_has_company_local_verification_failure,
+    )
+
+    row = _exact_target_crawl_failure_breakdown([
+        _exact_target_not_found_status()
+    ])
+    row["verifier_gate_receipts"].append({
+        "gate": "company_fit",
+        "decision": "unavailable",
+        "failure_reason_code": "provider_error",
+    })
+
+    assert not scorer_breakdown_has_company_local_verification_failure(row)
+    with pytest.raises(scoring.ScoringError):
+        scoring.score_work_item(
+            {"scored_run_id": "run-target-not-found-systemic-company-fit"},
+            icp=_ICPS[0],
+            companies=[scored_company(0)],
+            scorer=lambda *_args: [row],
+            max_retries=3,
+        )
+
+
 def test_exact_target_crawl_exhaustion_isolates_one_company_after_three_retries():
     companies = [scored_company(0), scored_company(1), scored_company(2)]
     unavailable = _exact_target_crawl_failure_breakdown([

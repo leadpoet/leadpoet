@@ -1185,6 +1185,28 @@ def _confirmed_exa_target_crawl_failure(value: Any) -> bool:
     )
 
 
+def _confirmed_exa_target_absence(value: Any) -> bool:
+    """Validate the projected two-attempt exact-target not-found receipt."""
+
+    return bool(
+        isinstance(value, Mapping)
+        and set(value) == {
+            "id_matches_requested_url",
+            "status",
+            "error_tag",
+            "error_http_status",
+            "confirmed_attempts",
+        }
+        and value.get("id_matches_requested_url") is True
+        and value.get("status") == "error"
+        and value.get("error_tag") == "CRAWL_NOT_FOUND"
+        and type(value.get("error_http_status")) is int
+        and value.get("error_http_status") == 404
+        and type(value.get("confirmed_attempts")) is int
+        and value.get("confirmed_attempts") == 2
+    )
+
+
 def _intent_attempts_have_exact_target_crawl_exhaustion(attempts: Any) -> bool:
     """Accept only known Exa successes plus exact repeated target failures."""
 
@@ -1199,13 +1221,20 @@ def _intent_attempts_have_exact_target_crawl_exhaustion(attempts: Any) -> bool:
             return False
         if row.get("source") == "exa_fallback" and row.get("stage") == "exa_scraped":
             continue
-        if not (
-            row.get("source") == "none"
-            and row.get("sd_stage") == "all_tiers_exhausted:http_502"
-            and row.get("exa_stage") == "exa_no_results"
+        exact_crawl_failure = bool(
+            row.get("exa_stage") == "exa_no_results"
             and _confirmed_exa_target_crawl_failure(
                 row.get("exa_target_crawl_failure")
             )
+        )
+        exact_target_absence = bool(
+            row.get("exa_stage") == "exa_target_not_found"
+            and _confirmed_exa_target_absence(row.get("exa_target_absence"))
+        )
+        if not (
+            row.get("source") == "none"
+            and row.get("sd_stage") == "all_tiers_exhausted:http_502"
+            and (exact_crawl_failure or exact_target_absence)
         ):
             return False
         proven_failures += 1

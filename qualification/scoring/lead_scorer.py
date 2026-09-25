@@ -2218,6 +2218,38 @@ def _required_attribute_grounding_failure_reason(
     return reason if reason in _VERIFIER_FAILURE_REASONS else ""
 
 
+def _required_attribute_source_recovery_needed(
+    result: CompanyFitDecisionResult,
+    verdict: Mapping[str, Any],
+    *,
+    active_attribute: bool,
+) -> bool:
+    """Whether one blocked attribute source may use bounded evidence recovery."""
+
+    if not active_attribute or result.decision != COMPANY_FIT_UNAVAILABLE:
+        return False
+    details = result.details if isinstance(result.details, Mapping) else {}
+    dimensions = details.get("dimension_decisions")
+    if (
+        details.get("identity_decision") != COMPANY_FIT_MATCH
+        or details.get("required_attribute_decision")
+        != COMPANY_FIT_UNAVAILABLE
+        or not isinstance(dimensions, Mapping)
+        or any(
+            dimensions.get(dimension) != COMPANY_FIT_MATCH
+            for dimension in ("employee_size", "industry", "geography", "stage")
+        )
+    ):
+        return False
+    receipt = verdict.get(_REQUIRED_ATTRIBUTE_GROUNDING)
+    return bool(
+        isinstance(receipt, Mapping)
+        and receipt.get("status") == "source_unavailable"
+        and _required_attribute_grounding_failure_reason(verdict)
+        in {SOURCE_BLOCKED_FAILURE_REASON, PROVIDER_ERROR_FAILURE_REASON}
+    )
+
+
 async def _resolve_observed_linkedin_redirect_alias(
     company: CompanyOutput,
     verdict: Mapping[str, Any],
@@ -4605,6 +4637,7 @@ async def _run_targeted_company_evidence_investigation(
     successful_required_attribute_source_sink: Optional[
         dict[str, dict[str, Any]]
     ] = None,
+    preserve_matched_industry: bool = False,
 ) -> Tuple[
     dict[str, Any],
     CompanyFitDecisionResult,
@@ -4625,6 +4658,11 @@ async def _run_targeted_company_evidence_investigation(
     )
     submitted_source_urls: list[str] = []
     source_candidates = [
+        *(
+            (required_attribute_source_cache or {}).keys()
+            if preserve_matched_industry
+            else []
+        ),
         *(item.get("url") for item in stage_evidence),
         *(signal.url for signal in company.intent_signals),
         *(
@@ -4832,14 +4870,15 @@ async def _run_targeted_company_evidence_investigation(
         icp=icp,
         existing_conflict=employee_size_conflict,
     )
-    projected = _project_investigator_industry(
-        projected,
-        (
-            claims.get("industry")
-            if isinstance(claims.get("industry"), Mapping)
-            else None
-        ),
-    )
+    if not preserve_matched_industry:
+        projected = _project_investigator_industry(
+            projected,
+            (
+                claims.get("industry")
+                if isinstance(claims.get("industry"), Mapping)
+                else None
+            ),
+        )
     projected = _project_investigator_geography(
         projected,
         (
@@ -5345,6 +5384,22 @@ async def _llm_reverify_company(
         if require_company_fit_dimensions and evidence_investigator
         else ()
     )
+    required_attribute_source_recovery = bool(
+        require_company_fit_dimensions
+        and evidence_investigator
+        and not investigation_targets
+        and _required_attribute_source_recovery_needed(
+            result,
+            verdict,
+            active_attribute=bool(icp_attribute),
+        )
+    )
+    if required_attribute_source_recovery:
+        # The existing industry investigator already verifies the company's
+        # supplied product/activity against the requested product and required
+        # attribute. Use it only to recover independently fetched exact-source
+        # text; do not reopen or replace an already grounded industry match.
+        investigation_targets = ("industry",)
     claims: Mapping[str, Any] = {}
     if investigation_targets:
         (
@@ -5381,6 +5436,7 @@ async def _llm_reverify_company(
             successful_required_attribute_source_sink=(
                 required_attribute_retry_source_cache
             ),
+            preserve_matched_industry=required_attribute_source_recovery,
         )
         if not claims:
             return result

@@ -31,6 +31,7 @@ from qualification.scoring.evaluation_clock import use_evaluation_date
 from qualification.scoring.linkedin_company_size import (
     MALFORMED_RESPONSE_FAILURE_REASON,
     PROVIDER_ERROR_FAILURE_REASON,
+    SOURCE_BLOCKED_FAILURE_REASON,
     VERIFIER_FAILURE_REASON_KEY,
 )
 from qualification.scoring.lead_scorer import (
@@ -1400,6 +1401,341 @@ def _finding(target: str, **overrides):
     }
     finding.update(overrides)
     return finding
+
+
+@pytest.mark.parametrize(
+    ("investigator_mode", "expected_decision"),
+    [
+        ("supported", COMPANY_FIT_MATCH),
+        ("wrong_company", COMPANY_FIT_MISMATCH),
+        ("quote_absent", COMPANY_FIT_UNAVAILABLE),
+        ("still_blocked", COMPANY_FIT_UNAVAILABLE),
+        ("unfetched_positive", COMPANY_FIT_UNAVAILABLE),
+    ],
+)
+def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
+    monkeypatch, investigator_mode, expected_decision
+):
+    source_url = (
+        "https://www.businesswire.com/news/home/20260804192350/en/"
+        "HappyRobot-Raises-$150-Million-Series-C-to-Build-Enterprise-"
+        "Superintelligence"
+    )
+    attribute_quote = (
+        "Its platform enables organizations to build, deploy, and manage AI "
+        "agents that automate complex operational workflows across voice, "
+        "email, documents, and the web."
+    )
+    wrong_company_quote = (
+        "OtherCo lets customers deploy its own AI agents in production."
+    )
+    company = CompanyOutput.model_validate({
+        **_company(
+            name="HappyRobot",
+            website="https://www.happyrobot.ai/",
+            linkedin="https://www.linkedin.com/company/happyrobot",
+        ).model_dump(mode="json"),
+        "industry": "Artificial Intelligence",
+        "employee_count": "201-500",
+        "company_stage": "Series C+",
+    })
+    icp = _icp(
+        industry="Artificial Intelligence",
+        sub_industry="Generative AI platforms",
+        employee_count="201-500",
+        company_stage="Series C+",
+        product_service="Commercial AI platform for model-driven workflows.",
+        required_attribute=(
+            "Builds and sells AI software used to develop, deploy, or operate "
+            "machine-learning applications."
+        ),
+    )
+
+    def verdict(*, attribute=True):
+        return _complete_verdict(
+            observed_company_name="HappyRobot",
+            observed_company_website="https://www.happyrobot.ai/",
+            observed_company_linkedin=(
+                "https://www.linkedin.com/company/happyrobot"
+            ),
+            observed_employee_count="201-500",
+            employee_size_evidence_url=(
+                "https://www.linkedin.com/company/happyrobot"
+            ),
+            employee_size_evidence_quote="Company size 201-500 employees",
+            observed_industry="Artificial Intelligence",
+            observed_subindustry="AI agent platform for enterprise operations",
+            industry_evidence_url="https://www.happyrobot.ai/home",
+            industry_evidence_quote=(
+                "HappyRobot helps enterprises put agents to work in complex "
+                "environments"
+            ),
+            observed_company_stage="Series C+",
+            stage_matches=True,
+            stage_evidence_url=source_url,
+            stage_evidence_quote=(
+                "HappyRobot announced it has raised $150 million in Series C "
+                "funding."
+            ),
+            attribute_satisfied=attribute,
+            required_attribute_evidence_url=source_url,
+            required_attribute_evidence_quote=attribute_quote,
+        )
+
+    calls = {"provider": 0, "investigator": 0, "direct_fetch": 0}
+
+    async def prechecks(*_args, **_kwargs):
+        return lead_scorer.company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return lead_scorer.company_fit_match(
+            "homepage identity verified",
+            details={
+                "identity": {
+                    "decision": COMPANY_FIT_MATCH,
+                    "evidence_source": "company_homepage",
+                    "observed_name": "happyrobot",
+                    "observed_domain": "happyrobot.ai",
+                    "observed_linkedin_slug": "happyrobot",
+                },
+                "verified_homepage_transport_domain": "happyrobot.ai",
+            },
+        )
+
+    async def provider(**_kwargs):
+        calls["provider"] += 1
+        if calls["provider"] == 1 or investigator_mode != "wrong_company":
+            return verdict(), ""
+        return verdict(attribute=False) | {
+            "required_attribute_evidence_quote": wrong_company_quote,
+        }, ""
+
+    async def direct_fetch(_session, url):
+        calls["direct_fetch"] += 1
+        assert url == source_url
+        return 403, url, ""
+
+    async def investigate(*, targets, prior_observations, **_kwargs):
+        calls["investigator"] += 1
+        assert targets == ("industry",)
+        assert prior_observations["submitted_source_urls"][0] == source_url
+        page_text = {
+            "supported": (
+                "HappyRobot announced its enterprise AI agent platform. "
+                + attribute_quote
+            ),
+            "wrong_company": wrong_company_quote,
+            "quote_absent": "HappyRobot announced a financing round.",
+            "still_blocked": "",
+            "unfetched_positive": "",
+        }[investigator_mode]
+        result = {
+            "claims": {"industry": _finding(
+                "industry",
+                status=(
+                    "UNPROVEN" if investigator_mode == "still_blocked"
+                    else "VERIFIED" if investigator_mode == "unfetched_positive"
+                    else "CONTRADICTED"
+                ),
+                observed_industry=(
+                    "" if investigator_mode == "still_blocked"
+                    else "Artificial Intelligence"
+                    if investigator_mode == "unfetched_positive"
+                    else "Other business"
+                ),
+                observed_subindustry=(
+                    "" if investigator_mode == "still_blocked"
+                    else "AI agent platform"
+                    if investigator_mode == "unfetched_positive"
+                    else "Customer use"
+                ),
+                activity_role=(
+                    "unresolved" if investigator_mode == "still_blocked"
+                    else "supplier_operator"
+                    if investigator_mode == "unfetched_positive"
+                    else "customer_user"
+                ),
+                evidence_url=(
+                    "" if investigator_mode == "still_blocked" else source_url
+                ),
+                evidence_quote=(
+                    attribute_quote
+                    if investigator_mode == "unfetched_positive"
+                    else "" if investigator_mode == "still_blocked"
+                    else page_text
+                ),
+            )},
+            "usage": {"reasoning_turns": 2, "search_calls": 0, "fetch_calls": 1},
+            "failure_reason": "",
+        }
+        if page_text:
+            result[investigator.PRIVATE_FETCHED_PAGES_KEY] = {
+                source_url: {"final_url": source_url, "text": page_text}
+            }
+        return result
+
+    async def keep_employee(candidate, *_args, **_kwargs):
+        return candidate
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", direct_fetch)
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
+    monkeypatch.setattr(
+        lead_scorer, "_refresh_linkedin_employee_size_observation", keep_employee
+    )
+
+    result = asyncio.run(lead_scorer._verify_company_fit(
+        company,
+        icp,
+        0.0,
+        1.0,
+        set(),
+        require_https_transport=True,
+        company_quality=True,
+        evidence_investigator=True,
+    ))
+
+    assert calls == {"provider": 2, "investigator": 1, "direct_fetch": 1}
+    assert result.decision == expected_decision
+    assert result.details["company_fit_dimensions"]["industry"] == (
+        COMPANY_FIT_MATCH
+    )
+    assert result.details["required_attribute_decision"] == expected_decision
+    attribute_receipt = next(
+        receipt for receipt in result.details["supporting_receipts"]
+        if receipt["gate"] == "required_attribute_source"
+    )
+    assert attribute_receipt["status"] == (
+        "grounded"
+        if expected_decision in {COMPANY_FIT_MATCH, COMPANY_FIT_MISMATCH}
+        else (
+            "quote_absent"
+            if investigator_mode == "quote_absent"
+            else "source_unavailable"
+        )
+    )
+    assert attribute_receipt["cache_hit"] is True
+    assert investigator.PRIVATE_FETCHED_PAGES_KEY not in str(
+        result.details["supporting_receipts"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("attribute_satisfied", "expected_decision"),
+    [(True, COMPANY_FIT_MATCH), (False, COMPANY_FIT_MISMATCH)],
+)
+def test_grounded_attribute_outcome_skips_investigator_full_path(
+    monkeypatch, attribute_satisfied, expected_decision
+):
+    source_url = "https://acme.example/platform"
+    quote = "Acme builds and sells software for production AI workflows."
+    calls = {"provider": 0, "fetch": 0, "investigator": 0}
+
+    async def prechecks(*_args, **_kwargs):
+        return lead_scorer.company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return lead_scorer.company_fit_match(
+            "homepage identity verified",
+            details={
+                "identity": {
+                    "decision": COMPANY_FIT_MATCH,
+                    "evidence_source": "company_homepage",
+                    "observed_name": "acme",
+                    "observed_domain": "acme.example",
+                    "observed_linkedin_slug": "acme",
+                },
+                "verified_homepage_transport_domain": "acme.example",
+            },
+        )
+
+    async def provider(**_kwargs):
+        calls["provider"] += 1
+        return _complete_verdict(
+            attribute_satisfied=attribute_satisfied,
+            required_attribute_evidence_url=source_url,
+            required_attribute_evidence_quote=quote,
+        ), ""
+
+    async def source_fetch(_session, url):
+        calls["fetch"] += 1
+        assert url == source_url
+        return 200, url, quote
+
+    async def must_not_investigate(**_kwargs):
+        calls["investigator"] += 1
+        raise AssertionError("grounded attribute reopened investigation")
+
+    async def keep_employee(candidate, *_args, **_kwargs):
+        return candidate
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", source_fetch)
+    monkeypatch.setattr(
+        lead_scorer, "investigate_company_evidence", must_not_investigate
+    )
+    monkeypatch.setattr(
+        lead_scorer, "_refresh_linkedin_employee_size_observation", keep_employee
+    )
+
+    result = asyncio.run(lead_scorer._verify_company_fit(
+        _company(),
+        _icp(required_attribute="Sells software for production AI workflows."),
+        0.0,
+        1.0,
+        set(),
+        require_https_transport=True,
+        company_quality=True,
+        evidence_investigator=True,
+    ))
+
+    assert result.decision == expected_decision
+    assert result.details["required_attribute_decision"] == expected_decision
+    assert calls == {"provider": 1, "fetch": 1, "investigator": 0}
+
+
+@pytest.mark.parametrize(
+    ("failure_reason", "receipt_status", "expect_investigation"),
+    [
+        (SOURCE_BLOCKED_FAILURE_REASON, "source_unavailable", True),
+        (PROVIDER_ERROR_FAILURE_REASON, "source_unavailable", True),
+        (MALFORMED_RESPONSE_FAILURE_REASON, "quote_absent", False),
+        ("", "grounded", False),
+    ],
+)
+def test_attribute_recovery_trigger_is_only_blocked_or_provider_unavailable(
+    failure_reason, receipt_status, expect_investigation
+):
+    verdict = _complete_verdict()
+    verdict[lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING] = {
+        "status": receipt_status,
+        **(
+            {lead_scorer.VERIFIER_FAILURE_DETAIL_KEY: failure_reason}
+            if failure_reason
+            else {}
+        ),
+    }
+    result = lead_scorer.company_fit_unavailable(
+        "unproven dimensions: required_attribute",
+        details={
+            "identity_decision": COMPANY_FIT_MATCH,
+            "required_attribute_decision": COMPANY_FIT_UNAVAILABLE,
+            "dimension_decisions": {
+                dimension: COMPANY_FIT_MATCH
+                for dimension in ("employee_size", "industry", "geography", "stage")
+            },
+        },
+    )
+
+    assert lead_scorer._required_attribute_source_recovery_needed(
+        result, verdict, active_attribute=True
+    ) is expect_investigation
 
 
 def test_selector_reopens_only_unsupported_industry_semantics():

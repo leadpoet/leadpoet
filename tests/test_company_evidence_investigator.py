@@ -3051,6 +3051,7 @@ def test_audited_stage_quotes_get_source_context_then_exact_correction(
             "continuous fetched-page span"
         )
     assert "already fetched page" in correction["instruction"]
+    assert requests[2]["tool_choice"] == "required"
 
 
 def test_multiverse_spliced_quote_gets_bounded_exact_sentence_context():
@@ -5630,6 +5631,431 @@ def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatc
         request["tool_choice"] == "required"
         for request in reasoning_requests
     )
+
+
+def test_curated_armada_relationship_rejection_forces_targeted_research(
+    monkeypatch,
+):
+    """A curated Armada-shaped fixture tests control flow, not a live verdict."""
+
+    infrastructure_url = "https://www.armada.ai/news/edge-ai"
+    infrastructure_quote = (
+        "Armada is the hyperscaler for the edge, delivering modular AI "
+        "infrastructure from first deployment to AI factory with speed, "
+        "scale and sovereignty."
+    )
+    software_url = "https://www.armada.ai/platform"
+    software_quote = (
+        "Armada provides cloud software for IT teams to manage edge "
+        "infrastructure."
+    )
+    requests = []
+    search_queries = []
+    fetched_urls = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        turn = len(requests)
+        if turn == 1:
+            name, arguments = "fetch_page", {"url": infrastructure_url}
+        elif turn == 2:
+            name, arguments = "submit_findings", {
+                "findings": [_finding(
+                    "industry",
+                    status="CONTRADICTED",
+                    observed_industry="AI infrastructure",
+                    observed_subindustry="Modular edge infrastructure",
+                    activity_role="supplier_operator",
+                    evidence_url=infrastructure_url,
+                    evidence_quote=infrastructure_quote,
+                )]
+            }
+        elif turn == 3:
+            name, arguments = "search_web", {
+                "query": "Armada cloud software IT teams"
+            }
+        elif turn == 4:
+            name, arguments = "fetch_page", {"url": software_url}
+        else:
+            name, arguments = "submit_findings", {
+                "findings": [_finding(
+                    "industry",
+                    observed_industry="Software",
+                    observed_subindustry="Cloud software",
+                    activity_role="supplier_operator",
+                    evidence_url=software_url,
+                    evidence_quote=software_quote,
+                )]
+            }
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{turn}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_search(_session, query, *, key):
+        del key
+        search_queries.append(query)
+        return {"results": [{"url": software_url}]}
+
+    async def fake_fetch(_session, url):
+        fetched_urls.append(url)
+        text = (
+            infrastructure_quote if url == infrastructure_url else software_quote
+        )
+        return {"ok": True, "url": url, "text": text}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "Armada",
+            "website": "https://www.armada.ai",
+        },
+        targets=("industry",),
+        requested_industry="Software",
+        requested_subindustry="Cloud software",
+        requested_product_service="Cloud platforms for IT teams",
+        requested_attribute="Provides cloud software to IT teams",
+        verified_homepage_identity={
+            "normalized_name": "Armada",
+            "registrable_dns_domain": "armada.ai",
+        },
+    ))
+
+    assert result["claims"]["industry"]["status"] == "VERIFIED"
+    assert result["claims"]["industry"]["evidence_url"] == software_url
+    assert result["usage"] == {
+        "reasoning_turns": 5,
+        "search_calls": 1,
+        "fetch_calls": 2,
+    }
+    assert search_queries == ["Armada cloud software IT teams"]
+    assert fetched_urls == [infrastructure_url, software_url]
+    assert requests[2]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "search_web"},
+    }
+    feedback = json.loads(requests[2]["messages"][-1]["content"])
+    assert "requested industry, product/service, and attribute" in (
+        feedback["instruction"]
+    )
+    assert "Search results are discovery only" in feedback["instruction"]
+
+
+@pytest.mark.parametrize(
+    ("status", "activity_role", "quote"),
+    [
+        (
+            "VERIFIED",
+            "supplier_operator",
+            "Armada provides cloud software for IT teams.",
+        ),
+        (
+            "CONTRADICTED",
+            "customer_user",
+            "Armada uses cloud software supplied by ExampleCo.",
+        ),
+        (
+            "CONTRADICTED",
+            "third_party",
+            "Armada's partner ExampleCo provides cloud software.",
+        ),
+    ],
+)
+def test_valid_industry_relationship_findings_do_not_force_research(
+    monkeypatch, status, activity_role, quote,
+):
+    url = "https://www.armada.ai/platform"
+    requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        if len(requests) == 1:
+            name, arguments = "fetch_page", {"url": url}
+        else:
+            name, arguments = "submit_findings", {
+                "findings": [_finding(
+                    "industry",
+                    status=status,
+                    observed_industry="Software",
+                    observed_subindustry="Cloud software",
+                    activity_role=activity_role,
+                    evidence_url=url,
+                    evidence_quote=quote,
+                )]
+            }
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{len(requests)}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_fetch(_session, requested_url):
+        return {"ok": True, "url": requested_url, "text": quote}
+
+    search = AsyncMock()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    monkeypatch.setattr(investigator, "_search_web", search)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "Armada",
+            "website": "https://www.armada.ai",
+        },
+        targets=("industry",),
+        requested_industry="Software",
+        verified_homepage_identity={
+            "normalized_name": "Armada",
+            "registrable_dns_domain": "armada.ai",
+        },
+    ))
+
+    assert result["claims"]["industry"]["status"] == status
+    assert len(requests) == 2
+    search.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "forced_response",
+    ["wrong_tool", "malformed_arguments", "overlong_query"],
+)
+def test_forced_industry_search_must_return_a_valid_search_call(
+    monkeypatch, forced_response,
+):
+    url = "https://www.armada.ai/news/edge-ai"
+    quote = "Armada supplies modular AI infrastructure at the edge."
+    requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        turn = len(requests)
+        if turn == 1:
+            name, arguments = "fetch_page", {"url": url}
+            raw_arguments = json.dumps(arguments)
+        elif turn == 2:
+            name = "submit_findings"
+            raw_arguments = json.dumps({"findings": [_finding(
+                "industry",
+                status="CONTRADICTED",
+                observed_industry="AI infrastructure",
+                activity_role="supplier_operator",
+                evidence_url=url,
+                evidence_quote=quote,
+            )]})
+        elif forced_response == "wrong_tool":
+            name = "submit_findings"
+            raw_arguments = json.dumps({"findings": [_finding(
+                "industry", status="UNPROVEN"
+            )]})
+        elif forced_response == "malformed_arguments":
+            name = "search_web"
+            raw_arguments = json.dumps({})
+        else:
+            name = "search_web"
+            raw_arguments = json.dumps({"query": "x" * 501})
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{turn}",
+            "type": "function",
+            "function": {"name": name, "arguments": raw_arguments},
+        }]}}]}
+
+    async def fake_fetch(_session, requested_url):
+        return {"ok": True, "url": requested_url, "text": quote}
+
+    search = AsyncMock()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    monkeypatch.setattr(investigator, "_search_web", search)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "Armada",
+            "website": "https://www.armada.ai",
+        },
+        targets=("industry",),
+        requested_industry="Software",
+        verified_homepage_identity={
+            "normalized_name": "Armada",
+            "registrable_dns_domain": "armada.ai",
+        },
+    ))
+
+    assert requests[2]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "search_web"},
+    }
+    assert result["claims"] == {}
+    assert result["failure_reason"] == MALFORMED_RESPONSE_FAILURE_REASON
+    search.assert_not_awaited()
+
+
+def test_forced_industry_search_does_not_accept_an_unfetched_result(monkeypatch):
+    infrastructure_url = "https://www.armada.ai/news/edge-ai"
+    infrastructure_quote = "Armada supplies modular AI infrastructure at the edge."
+    software_url = "https://www.armada.ai/platform"
+    software_quote = "Armada provides cloud software for IT teams."
+    requests = []
+    fetched_urls = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        turn = len(requests)
+        if turn == 1:
+            name, arguments = "fetch_page", {"url": infrastructure_url}
+        elif turn == 2:
+            name, arguments = "submit_findings", {
+                "findings": [_finding(
+                    "industry",
+                    status="CONTRADICTED",
+                    observed_industry="AI infrastructure",
+                    activity_role="supplier_operator",
+                    evidence_url=infrastructure_url,
+                    evidence_quote=infrastructure_quote,
+                )]
+            }
+        elif turn == 3:
+            name, arguments = "search_web", {"query": "Armada cloud software"}
+        elif turn == 4:
+            name, arguments = "submit_findings", {
+                "findings": [_finding(
+                    "industry",
+                    observed_industry="Software",
+                    activity_role="supplier_operator",
+                    evidence_url=software_url,
+                    evidence_quote=software_quote,
+                )]
+            }
+        else:
+            name, arguments = "submit_findings", {
+                "findings": [_finding("industry", status="UNPROVEN")]
+            }
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{turn}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_fetch(_session, url):
+        fetched_urls.append(url)
+        return {"ok": True, "url": url, "text": infrastructure_quote}
+
+    async def fake_search(_session, query, *, key):
+        del query, key
+        return {"results": [{"url": software_url}]}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "Armada",
+            "website": "https://www.armada.ai",
+        },
+        targets=("industry",),
+        requested_industry="Software",
+        verified_homepage_identity={
+            "normalized_name": "Armada",
+            "registrable_dns_domain": "armada.ai",
+        },
+    ))
+
+    assert result["claims"]["industry"]["status"] == "UNPROVEN"
+    assert result["claims"]["industry"]["evidence_url"] == ""
+    assert fetched_urls == [infrastructure_url]
+
+
+@pytest.mark.parametrize("exhausted_budget", ["search", "fetch"])
+def test_exhausted_budget_does_not_force_a_useless_industry_search(
+    monkeypatch, exhausted_budget,
+):
+    url = "https://www.armada.ai/news/edge-ai"
+    quote = "Armada supplies modular AI infrastructure at the edge."
+    requests = []
+    search_queries = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        turn = len(requests)
+        if exhausted_budget == "search" and turn == 1:
+            name, arguments = "search_web", {"query": "Armada company profile"}
+        elif turn == (2 if exhausted_budget == "search" else 1):
+            name, arguments = "fetch_page", {"url": url}
+        elif turn == (3 if exhausted_budget == "search" else 2):
+            name, arguments = "submit_findings", {
+                "findings": [_finding(
+                    "industry",
+                    status="CONTRADICTED",
+                    observed_industry="AI infrastructure",
+                    activity_role="supplier_operator",
+                    evidence_url=url,
+                    evidence_quote=quote,
+                )]
+            }
+        else:
+            name, arguments = "submit_findings", {
+                "findings": [_finding("industry", status="UNPROVEN")]
+            }
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{turn}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_search(_session, query, *, key):
+        del key
+        search_queries.append(query)
+        return {"results": []}
+
+    async def fake_fetch(_session, requested_url):
+        return {"ok": True, "url": requested_url, "text": quote}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    if exhausted_budget == "search":
+        monkeypatch.setattr(investigator, "MAX_SEARCH_CALLS", 1)
+    else:
+        monkeypatch.setattr(investigator, "MAX_FETCH_CALLS", 1)
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "Armada",
+            "website": "https://www.armada.ai",
+        },
+        targets=("industry",),
+        requested_industry="Software",
+        verified_homepage_identity={
+            "normalized_name": "Armada",
+            "registrable_dns_domain": "armada.ai",
+        },
+    ))
+
+    assert result["claims"]["industry"]["status"] == "UNPROVEN"
+    assert search_queries == (
+        ["Armada company profile"] if exhausted_budget == "search" else []
+    )
+    submission_after_rejection = 3 if exhausted_budget == "search" else 2
+    assert requests[submission_after_rejection]["tool_choice"] == "required"
 
 
 def test_prefetched_grab_source_requires_independent_exact_stage_submission(

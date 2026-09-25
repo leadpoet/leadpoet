@@ -56,6 +56,9 @@ ADMISSION_DEADLINE_SECONDS = 110.0
 BROKER_SETTLEMENT_TIMEOUT_SECONDS = 125.0
 TARGETS = frozenset({"stage", "rebrand", "headcount", "industry", "geography"})
 STATUSES = frozenset({"VERIFIED", "CONTRADICTED", "UNPROVEN"})
+INDUSTRY_RELATIONSHIP_UNPROVEN_REASON = (
+    "source did not prove the company's relationship to the activity"
+)
 _IDENTITY_LINK_CONTEXT_MARKER = (
     "[[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]]"
 )
@@ -1080,7 +1083,7 @@ def _validated_findings(
                     status="UNPROVEN",
                     evidence_url="",
                     evidence_quote="",
-                    reason="source did not prove the company's relationship to the activity",
+                    reason=INDUSTRY_RELATIONSHIP_UNPROVEN_REASON,
                 )
             elif target == "geography" and not _quote_supports_headquarters(
                 finding["evidence_quote"],
@@ -1416,6 +1419,7 @@ async def investigate_company_evidence(
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             final_correction_pending = False
+            forced_next_tool = ""
             for _turn in range(MAX_REASONING_TURNS + 1):
                 correction_turn = _turn == MAX_REASONING_TURNS
                 if correction_turn and not final_correction_pending:
@@ -1436,6 +1440,7 @@ async def investigate_company_evidence(
                         },
                     }
                 force_submit = _turn >= MAX_REASONING_TURNS - 1
+                required_tool = forced_next_tool
                 status, body = await _post_json(
                     session,
                     "https://openrouter.ai/api/v1/chat/completions",
@@ -1464,9 +1469,15 @@ async def investigate_company_evidence(
                         "tool_choice": (
                             {
                                 "type": "function",
-                                "function": {"name": "submit_findings"},
+                                "function": {
+                                    "name": (
+                                        "submit_findings"
+                                        if force_submit
+                                        else required_tool
+                                    )
+                                },
                             }
-                            if force_submit
+                            if force_submit or required_tool
                             else "required"
                         ),
                         "parallel_tool_calls": False,
@@ -1507,6 +1518,8 @@ async def investigate_company_evidence(
                 raw_arguments = function.get("arguments")
                 if correction_turn and name != "submit_findings":
                     raise ValueError("reasoning_final_correction_must_submit")
+                if required_tool and name != required_tool:
+                    raise ValueError("reasoning_forced_tool_not_used")
                 if (
                     not isinstance(call_id, str)
                     or not call_id
@@ -1520,6 +1533,14 @@ async def investigate_company_evidence(
                     arguments = json.loads(raw_arguments or "{}")
                 except (TypeError, ValueError):
                     raise ValueError("reasoning_tool_arguments_malformed") from None
+                if required_tool == "search_web" and (
+                    not isinstance(arguments, Mapping)
+                    or set(arguments) != {"query"}
+                    or not isinstance(arguments.get("query"), str)
+                    or not arguments["query"].strip()
+                    or len(arguments["query"]) > 500
+                ):
+                    raise ValueError("reasoning_forced_tool_arguments_malformed")
                 canonical_call = {
                     "id": call_id,
                     "type": "function",
@@ -1528,6 +1549,8 @@ async def investigate_company_evidence(
                         "arguments": raw_arguments,
                     },
                 }
+                if required_tool:
+                    forced_next_tool = ""
                 if name == "submit_findings":
                     claims = _validated_findings(
                         arguments,
@@ -1571,14 +1594,49 @@ async def investigate_company_evidence(
                             for finding in claims.values()
                         )
                     )
+                    force_industry_search = bool(
+                        rejected
+                        and not force_submit
+                        and _turn < MAX_REASONING_TURNS - 3
+                        and search_calls == 0
+                        and search_calls < MAX_SEARCH_CALLS
+                        and prefetched_count + fetch_calls < MAX_FETCH_CALLS
+                        and time.monotonic() - started
+                        < ADMISSION_DEADLINE_SECONDS
+                        and any(
+                            item.get("target") == "industry"
+                            and item.get("reason")
+                            == INDUSTRY_RELATIONSHIP_UNPROVEN_REASON
+                            and submitted_findings.get("industry", {}).get("status")
+                            == "CONTRADICTED"
+                            and submitted_findings.get("industry", {}).get(
+                                "activity_role"
+                            )
+                            == "supplier_operator"
+                            for item in rejected
+                        )
+                    )
                     if rejected and not correction_turn:
                         final_correction_pending = force_submit
+                        if force_industry_search:
+                            forced_next_tool = "search_web"
                         tool_result = {
                             "ok": False,
                             "error": "deterministic_evidence_validation_failed",
                             "rejected_findings": rejected,
                             "instruction": (
-                                "Never repeat a rejected quote. Use one exact continuous "
+                                (
+                                    "The submitted industry contradiction proved the "
+                                    "company operates another activity, but it did not "
+                                    "prove the requested activity absent. The next action "
+                                    "must search for the exact company and requested "
+                                    "industry, product/service, and attribute. Search "
+                                    "results are discovery only; fetch a useful result "
+                                    "before citing it. "
+                                    if force_industry_search
+                                    else ""
+                                )
+                                + "Never repeat a rejected quote. Use one exact continuous "
                                 "company-bound span from a fetched page; do not paraphrase, "
                                 "join passages, or insert ellipses. VERIFIED and "
                                 "CONTRADICTED require that exact quote and its fetched URL. "
@@ -1588,9 +1646,17 @@ async def investigate_company_evidence(
                                     "do not search or fetch. "
                                     if force_submit
                                     else (
-                                        "First repair the quote from an already fetched page. "
-                                        "Fetch another useful source only if no continuous "
-                                        "company-bound span on that page proves the fact. "
+                                        (
+                                            "After the required search, fetch a useful "
+                                            "source before submitting evidence. "
+                                        )
+                                        if force_industry_search
+                                        else (
+                                            "First repair the quote from an already fetched "
+                                            "page. Fetch another useful source only if no "
+                                            "continuous company-bound span on that page "
+                                            "proves the fact. "
+                                        )
                                     )
                                 )
                                 + "Submit one complete finding for every requested target."

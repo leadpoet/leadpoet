@@ -602,6 +602,45 @@ def _quote_names_company(quote: str, identity_names: set[str]) -> bool:
     )
 
 
+def _quote_names_domain_styled_stage_company(
+    quote: str,
+    identity_anchor: Mapping[str, Any],
+) -> bool:
+    """Bind a stage quote's brand stem to three matching identity anchors."""
+
+    domains = {
+        identity_anchor.get("submitted_domain"),
+        identity_anchor.get("observed_domain"),
+        identity_anchor.get("verified_domain"),
+    }
+    if len(domains) != 1 or None in domains or "" in domains:
+        return False
+    domain = next(iter(domains))
+    if not isinstance(domain, str) or domain.count(".") != 1:
+        return False
+    brand, suffix = domain.casefold().split(".", 1)
+    if (
+        len(brand) < 4
+        or not brand.isalnum()
+        or not suffix.isalpha()
+        or not 2 <= len(suffix) <= 10
+    ):
+        return False
+    expected_name = brand + suffix
+    names = {
+        re.sub(r"[^a-z0-9]+", "", _normalized_span(identity_anchor.get(key)))
+        for key in ("submitted_name", "observed_name", "verified_name")
+    }
+    if names != {expected_name}:
+        return False
+    return bool(
+        re.search(
+            rf"(?<![a-z0-9]){re.escape(brand)}(?![a-z0-9])",
+            _normalized_span(quote),
+        )
+    )
+
+
 def _quote_names_compatible_venture_stage(
     normalized_stage: str,
     quote: str,
@@ -914,6 +953,12 @@ def _validated_findings(
                 and not _quote_names_company(
                     finding["evidence_quote"],
                     stage_attribution_names if target == "stage" else attribution_names,
+                )
+                and not (
+                    target == "stage"
+                    and _quote_names_domain_styled_stage_company(
+                        finding["evidence_quote"], identity_anchor or {}
+                    )
                 )
                 and not (
                     target == "stage"

@@ -2256,6 +2256,96 @@ def test_venture_stage_token_must_match_normalized_category(
     )
 
 
+def _domain_styled_stage_finding(
+    quote: str,
+    *,
+    identity_anchor: dict,
+):
+    url = "https://investor.example/investing-in-genhealth"
+    return _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            observed_value="Series A",
+            evidence_url=url,
+            evidence_quote=quote,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: quote},
+        first_party_domains={"genhealth.ai"},
+        identity_names={"genhealthai"},
+        identity_anchor=identity_anchor,
+    )["stage"]
+
+
+def _genhealth_identity_anchor(**updates):
+    anchor = {
+        "submitted_name": "GenHealth.ai",
+        "submitted_domain": "genhealth.ai",
+        "observed_name": "GenHealth.ai",
+        "observed_domain": "genhealth.ai",
+        "verified_name": "GenHealth.ai",
+        "verified_domain": "genhealth.ai",
+    }
+    anchor.update(updates)
+    return anchor
+
+
+def test_domain_styled_brand_binds_saved_genhealth_stage_quote():
+    finding = _domain_styled_stage_finding(
+        "Flare Capital Partners has led the $16.5 million Series A in GenHealth",
+        identity_anchor=_genhealth_identity_anchor(),
+    )
+
+    assert finding["status"] == "VERIFIED"
+
+
+@pytest.mark.parametrize(
+    "identity_anchor",
+    [
+        _genhealth_identity_anchor(verified_domain="other.ai"),
+        _genhealth_identity_anchor(verified_domain=""),
+        _genhealth_identity_anchor(verified_name="Other.ai"),
+        _genhealth_identity_anchor(observed_name="Gen Health"),
+        {
+            "submitted_name": "AI.ai",
+            "submitted_domain": "ai.ai",
+            "observed_name": "AI.ai",
+            "observed_domain": "ai.ai",
+            "verified_name": "AI.ai",
+            "verified_domain": "ai.ai",
+        },
+    ],
+    ids=("domain_mismatch", "missing_domain", "name_mismatch", "unbound_name", "short_stem"),
+)
+def test_domain_styled_stage_alias_requires_complete_matching_identity(identity_anchor):
+    finding = _domain_styled_stage_finding(
+        "Flare Capital Partners has led the $16.5 million Series A in GenHealth",
+        identity_anchor=identity_anchor,
+    )
+
+    assert finding["status"] == "UNPROVEN"
+    assert finding["reason"] == "source quote did not identify the investigated company"
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "Flare led the $16.5 million Series A in OtherHealth.",
+        "Flare led the $16.5 million Series A in GenHealthcare.",
+        "Flare led the $16.5 million Series A in MyGenHealth.",
+    ],
+    ids=("wrong_company", "superstring", "prefix"),
+)
+def test_domain_styled_stage_alias_requires_exact_brand_word(quote):
+    finding = _domain_styled_stage_finding(
+        quote,
+        identity_anchor=_genhealth_identity_anchor(),
+    )
+
+    assert finding["status"] == "UNPROVEN"
+    assert finding["reason"] == "source quote did not identify the investigated company"
+
+
 def test_investigator_stage_keeps_other_recipient_control():
     url = "https://news.example/quantumco-funding"
     quote = "QuantumCo completed a Series D financing round led by Growth Partners."

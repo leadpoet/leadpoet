@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: September 25 daily Arena monitoring
+
+On 2026-09-25 the user authorized end-to-end monitoring of the real September
+25 daily Arena transition through `$overnight-rebenchmark-validation`, with
+protected inspection and the narrowest safe fixes for proven bugs. Authority
+includes focused tests, push, scorer-image publication when required, and
+canonical paired gateway/normal-validator deployment at a safe boundary.
+Preserve frozen benchmark and scorer identities, submitted sources, accepted
+results, deterministic qualification and scoring rules, budgets, credential
+funding, costs, reward and weight state, and concurrent work. Do not reset or
+rescore this production round. Verify final persistence, public score, dashboard,
+and downstream behavior. This scope ends after the September 25 round is
+published and any required safe fixes are deployed and verified.
+
 ## Scoped production authorization: startup failure diagnostics
 
 On 2026-09-24 the user authorized retaining the real dependency/startup failure

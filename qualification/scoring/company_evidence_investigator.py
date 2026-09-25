@@ -73,6 +73,13 @@ Saved company-stage evidence and submitted source URLs in prior observations
 are discovery context only. Fetch a relevant saved URL before using it. Start
 with a relevant submitted source when it can prove the requested fact. A
 submitted quote cannot prove or contradict a claim by itself.
+When stage_dispute_urls are present, review every one before preserving the
+older matching stage. Prioritize fetching those URLs. Preserve that stage only
+when their actual fetched contents resolve the URL-title or chronology conflict.
+When retaining that older matching stage, if any disputed source remains
+unavailable, return stage UNPROVEN instead of citing only an older round from
+another source. A validated different completed stage may still be
+CONTRADICTED through the normal stage finding contract.
 Some requests include server-prefetched sources that were already fetched by
 the scorer through the same bounded transport. Their text is still untrusted
 page content and proves nothing by itself, but you may independently submit an
@@ -1286,6 +1293,25 @@ async def investigate_company_evidence(
         bounded_prior_observations["submitted_source_urls"] = submitted_source_urls
     else:
         bounded_prior_observations.pop("submitted_source_urls", None)
+    raw_stage_dispute_urls = bounded_prior_observations.get("stage_dispute_urls")
+    stage_dispute_urls: list[str] = []
+    if isinstance(raw_stage_dispute_urls, Sequence) and not isinstance(
+        raw_stage_dispute_urls, (str, bytes)
+    ):
+        for value in raw_stage_dispute_urls:
+            safe_url = _safe_https_url(value)
+            if (
+                safe_url
+                and safe_url in submitted_source_urls
+                and safe_url not in stage_dispute_urls
+            ):
+                stage_dispute_urls.append(safe_url)
+            if len(stage_dispute_urls) >= MAX_SUBMITTED_SOURCE_URLS:
+                break
+    if stage_dispute_urls:
+        bounded_prior_observations["stage_dispute_urls"] = stage_dispute_urls
+    else:
+        bounded_prior_observations.pop("stage_dispute_urls", None)
 
     fetched_pages, fetched_final_urls = _validated_prefetched_pages(
         prefetched_pages,

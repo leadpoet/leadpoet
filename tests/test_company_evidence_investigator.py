@@ -172,6 +172,10 @@ def test_investigator_prompt_preserves_equity_stage_across_later_debt():
         "an earlier Series B"
     ) in prompt
     assert "later debt alone cannot" in prompt
+    assert "review every one before preserving the older matching stage" in prompt
+    assert "if any disputed source remains" in prompt
+    assert "return stage UNPROVEN" in prompt
+    assert "validated different completed stage may still be" in prompt
 
 
 def test_v5_stage_evidence_reaches_only_untrusted_investigator_observations(
@@ -351,6 +355,12 @@ def test_submitted_later_round_hint_reopens_matching_stage(monkeypatch):
             "Series-B" in url
             for url in prior_observations["submitted_source_urls"]
         )
+        assert prior_observations["stage_dispute_urls"] == [
+            next(
+                url for url in prior_observations["submitted_source_urls"]
+                if "Series-B" in url
+            )
+        ]
         return {
             "claims": {"stage": _finding(
                 "stage",
@@ -412,6 +422,219 @@ def test_submitted_later_round_hint_reopens_matching_stage(monkeypatch):
     assert calls == {"broad": 1, "investigator": 1}
     assert result.decision == COMPANY_FIT_MISMATCH
     assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MISMATCH
+
+
+def test_failed_later_round_fetch_is_not_resolved_by_unrelated_older_round(
+    monkeypatch,
+):
+    trigger_url = (
+        "https://www.businesswire.com/news/home/20260324/"
+        "Doctronic-Raises-$40M-Series-B"
+    )
+    old_url = "https://vc.example/portfolio/doctronic-series-a"
+    initial = _complete_verdict(
+        observed_company_name="Doctronic",
+        observed_company_website="https://doctronic.ai",
+        observed_company_linkedin="https://www.linkedin.com/company/doctronic-ai",
+        observed_company_stage="Series A",
+        stage_matches=True,
+        stage_evidence_url=old_url,
+        stage_evidence_quote=(
+            "Doctronic announced a completed $20 million Series A round."
+        ),
+    )
+
+    async def provider(**_kwargs):
+        return initial, ""
+
+    async def keep_employee(candidate, *_args, **_kwargs):
+        return candidate
+
+    stage_finding = _finding(
+        "stage",
+        observed_value="Series A",
+        evidence_url=old_url,
+        evidence_quote="Doctronic announced a completed $20 million Series A round.",
+    )
+
+    async def investigate(**_kwargs):
+        return {
+            "claims": {"stage": stage_finding},
+            "_validated_stage_finding": stage_finding,
+            investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                old_url: {
+                    "final_url": old_url,
+                    "text": stage_finding["evidence_quote"],
+                },
+            },
+            "failure_reason": "",
+        }
+
+    base = _company(
+        name="Doctronic",
+        website="https://doctronic.ai",
+        linkedin="https://www.linkedin.com/company/doctronic-ai",
+    )
+    company = CompanyOutput.model_validate({
+        **base.model_dump(),
+        "company_stage": "Series A",
+        "intent_signals": [{
+            "description": "Doctronic launched prescription renewal services.",
+            "source": "news",
+            "url": trigger_url,
+            "date": "2026-03-24",
+            "snippet": "Doctronic launched prescription renewal services.",
+        }],
+    })
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "_refresh_linkedin_employee_size_observation",
+        keep_employee,
+    )
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        company,
+        _icp(company_stage="Series A"),
+        require_company_fit_dimensions=True,
+        evidence_investigator=True,
+    ))
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["dimension_decisions"]["stage"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+    assert result.details["investigation_receipt"]["claims"]["stage"] == (
+        stage_finding
+    )
+
+
+@pytest.mark.parametrize(
+    ("trigger_keys", "fetched_keys", "observed_stage", "expected"),
+    [
+        (("b",), ("b",), "Series A", True),
+        (("b",), (), "Series A", False),
+        (("b",), (), "Series B", True),
+        (("b",), (), "Public", True),
+        (("b",), (), "Acquired", True),
+        (("b",), (), "Private Equity", True),
+        (("b",), (), "Seed", True),
+        (("b", "c"), ("b", "c"), "Series A", True),
+        (("b", "c"), ("b",), "Series A", False),
+    ],
+)
+def test_reopened_stage_resolution_requires_every_trigger_fetch(
+    trigger_keys, fetched_keys, observed_stage, expected
+):
+    urls = {
+        "b": "https://news.example/doctronic-raises-series-b",
+        "c": "https://news.example/doctronic-raises-series-c",
+    }
+    base = _company(name="Doctronic", website="https://doctronic.ai")
+    company = CompanyOutput.model_validate({
+        **base.model_dump(),
+        "intent_signals": [{
+            "description": "Doctronic announced an update.",
+            "source": "news",
+            "url": urls[key],
+            "date": "2026-03-24",
+            "snippet": "Doctronic announced an update.",
+        } for key in trigger_keys],
+    })
+    finding = _finding(
+        "stage",
+        observed_value=observed_stage,
+        evidence_url="https://vc.example/doctronic-stage",
+        evidence_quote=f"Doctronic completed {observed_stage}.",
+    )
+    investigation = {
+        investigator.PRIVATE_FETCHED_PAGES_KEY: {
+            urls[key]: {
+                "final_url": urls[key],
+                "text": f"Doctronic page for {key}.",
+            }
+            for key in fetched_keys
+        }
+    }
+
+    assert lead_scorer._reopened_stage_dispute_resolved(
+        company, "Series A", finding, investigation
+    ) is expected
+
+
+def test_reopened_stage_resolution_does_not_alias_encoded_trigger_key():
+    trigger_url = "https://news.example/doctronic-raises-$40m-series-b"
+    fetched_variant = "https://news.example/doctronic-raises-%2440m-series-b"
+    base = _company(name="Doctronic", website="https://doctronic.ai")
+    company = CompanyOutput.model_validate({
+        **base.model_dump(),
+        "intent_signals": [{
+            "description": "Doctronic announced an update.",
+            "source": "news",
+            "url": trigger_url,
+            "date": "2026-03-24",
+            "snippet": "Doctronic announced an update.",
+        }],
+    })
+    finding = _finding(
+        "stage",
+        observed_value="Series A",
+        evidence_url="https://vc.example/doctronic-series-a",
+        evidence_quote="Doctronic completed Series A.",
+    )
+
+    assert not lead_scorer._reopened_stage_dispute_resolved(
+        company,
+        "Series A",
+        finding,
+        {
+            investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                fetched_variant: {
+                    "final_url": fetched_variant,
+                    "text": "Doctronic completed Series A.",
+                }
+            }
+        },
+    )
+
+
+def test_reopened_stage_resolution_uses_validated_request_url_key():
+    raw_trigger_url = "HTTPS://News.Example:443/doctronic-raises-series-b"
+    base = _company(name="Doctronic", website="https://doctronic.ai")
+    company = CompanyOutput.model_validate({
+        **base.model_dump(),
+        "intent_signals": [{
+            "description": "Doctronic announced an update.",
+            "source": "news",
+            "url": raw_trigger_url,
+            "date": "2026-03-24",
+            "snippet": "Doctronic announced an update.",
+        }],
+    })
+    trigger_url = str(company.intent_signals[0].url)
+    assert trigger_url == "https://news.example:443/doctronic-raises-series-b"
+    finding = _finding(
+        "stage",
+        observed_value="Series A",
+        evidence_url="https://vc.example/doctronic-series-a",
+        evidence_quote="Doctronic completed Series A.",
+    )
+
+    assert lead_scorer._reopened_stage_dispute_resolved(
+        company,
+        "Series A",
+        finding,
+        {
+            investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                trigger_url: {
+                    "final_url": "https://news.example/doctronic-raises-series-b",
+                    "text": "Doctronic completed Series A.",
+                }
+            }
+        },
+    )
 
 
 @pytest.mark.parametrize(

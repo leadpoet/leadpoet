@@ -4306,10 +4306,10 @@ def _employee_size_sources_conflict(
     )
 
 
-def _submitted_intent_stage_conflicts(
+def _submitted_intent_stage_conflict_hints(
     company: CompanyOutput,
     requested_stage: str,
-) -> bool:
+) -> tuple[tuple[str, str], ...]:
     """Detect an explicit, company-bound later-stage URL-title hint.
 
     This only reopens the bounded investigator. The URL title remains untrusted
@@ -4320,12 +4320,13 @@ def _submitted_intent_stage_conflicts(
     requested = _normalize_company_stage(requested_stage)
     venture_stages = ("seed", "series a", "series b", "series c+")
     if requested not in venture_stages:
-        return False
+        return ()
     company_name_tokens = re.findall(
         r"[a-z0-9]+", str(company.company_name or "").casefold()
     )
     if not company_name_tokens:
-        return False
+        return ()
+    conflicts: list[tuple[str, str]] = []
     for signal in company.intent_signals:
         value = signal.get if isinstance(signal, Mapping) else (
             lambda key, default="": getattr(signal, key, default)
@@ -4346,12 +4347,51 @@ def _submitted_intent_stage_conflicts(
             for index in range(len(candidate_tokens) - width)
         ):
             continue
-        if any(
-            _stage_quote_supports_observation(stage, candidate)
-            for stage in venture_stages[venture_stages.index(requested) + 1:]
-        ):
-            return True
-    return False
+        for stage in venture_stages[venture_stages.index(requested) + 1:]:
+            if _stage_quote_supports_observation(stage, candidate):
+                url = _valid_web_evidence_url(value("url"))
+                if url and (url, stage) not in conflicts:
+                    conflicts.append((url, stage))
+    return tuple(conflicts)
+
+
+def _submitted_intent_stage_conflicts(
+    company: CompanyOutput,
+    requested_stage: str,
+) -> bool:
+    """Return whether a bounded submitted URL-title stage conflict exists."""
+
+    return bool(_submitted_intent_stage_conflict_hints(company, requested_stage))
+
+
+def _reopened_stage_dispute_resolved(
+    company: CompanyOutput,
+    requested_stage: str,
+    finding: Mapping[str, Any],
+    investigation: Mapping[str, Any],
+) -> bool:
+    """Require every reopened source before retaining an older stage MATCH.
+
+    The typed investigator finding owns stage semantics. This guard only
+    enforces source availability; it does not treat a fetched page as proof.
+    """
+
+    hints = _submitted_intent_stage_conflict_hints(company, requested_stage)
+    if not hints or finding.get("status") not in {"VERIFIED", "CONTRADICTED"}:
+        return False
+    observed = _normalize_company_stage(finding.get("observed_value"))
+    requested = _normalize_company_stage(requested_stage)
+    if observed and observed != requested:
+        return True
+    if not observed:
+        return False
+    fetched_pages = investigation.get(PRIVATE_FETCHED_PAGES_KEY)
+    trigger_urls = tuple(dict.fromkeys(url for url, _stage in hints))
+    pages, _final_urls = _validated_prefetched_pages(
+        fetched_pages,
+        submitted_source_urls=trigger_urls,
+    )
+    return set(pages) == set(trigger_urls)
 
 
 def _targeted_company_investigation_dimensions(
@@ -4854,6 +4894,20 @@ async def _run_targeted_company_evidence_investigation(
             ),
             **(
                 {
+                    "stage_dispute_urls": list(dict.fromkeys(
+                        url for url, _stage in (
+                            _submitted_intent_stage_conflict_hints(
+                                company, icp_stage
+                            )
+                        )
+                    ))
+                }
+                if "stage" in investigation_targets
+                and _submitted_intent_stage_conflicts(company, icp_stage)
+                else {}
+            ),
+            **(
+                {
                     "structured_company_type_evidence": (
                         structured_private_stage_evidence
                     )
@@ -4952,7 +5006,16 @@ async def _run_targeted_company_evidence_investigation(
         claims.get("stage") if isinstance(claims.get("stage"), Mapping) else None,
         icp_stage=icp_stage,
     )
-    if reopened_matching_stage and not validated_stage_finding:
+    reopened_stage_resolved = bool(
+        reopened_matching_stage
+        and _reopened_stage_dispute_resolved(
+            company,
+            icp_stage,
+            validated_stage_finding,
+            investigation,
+        )
+    )
+    if reopened_matching_stage and not reopened_stage_resolved:
         # The submitted conflict is only a trigger. Once it reopens a positive
         # stage, failure to independently validate the current stage must not
         # retain the stale positive verdict.

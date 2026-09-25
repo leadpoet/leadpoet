@@ -1290,6 +1290,16 @@ def _intent_detail_has_source_local_failure(detail: Any) -> bool:
             for marker in _SYSTEMIC_INTENT_STAGE_MARKERS
         ):
             return False
+        if (
+            attempt.get("source") == "scrapingdog_ashby_api_fallback"
+            and attempt.get("stage") == "ashby_posting_not_listed"
+            and set(attempt) == {"url", "source", "stage"}
+            and isinstance(attempt.get("url"), str)
+            and bool(attempt["url"])
+        ):
+            # Two valid API listings omitted the exact posting. This is only
+            # source-local unavailability; later fetch failures still govern.
+            continue
         if not any(
             marker in stage
             for stage in stages

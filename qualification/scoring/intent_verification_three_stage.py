@@ -730,6 +730,7 @@ async def _scrape_ashby_job(source_url: str) -> Dict[str, Any]:
             "error": "missing key",
         }
     history: List[tuple[str, str]] = []
+    valid_listing_misses = 0
     async with httpx.AsyncClient(timeout=SCRAPINGDOG_TERMINAL_TIMEOUT_S) as cli:
         for attempt, extra in enumerate(({}, {"premium": "true"}), start=1):
             try:
@@ -775,6 +776,18 @@ async def _scrape_ashby_job(source_url: str) -> Dict[str, Any]:
                 and _ashby_posting_identity(item.get("jobUrl")) == source_identity
             ), None)
             if not isinstance(posting, Mapping):
+                # A valid tenant-bound listing can omit this exact posting.
+                # Preserve that source-local observation, not a claim that
+                # the job is closed. Mixed or malformed replies stay unknown.
+                if all(
+                    isinstance(item, Mapping)
+                    and (identity := _ashby_posting_identity(item.get("jobUrl")))
+                    is not None
+                    and identity[0] == source_identity[0]
+                    and str(item.get("id") or "").casefold() == identity[1]
+                    for item in jobs
+                ):
+                    valid_listing_misses += 1
                 history[-1] = (f"attempt_{attempt}", "posting_missing")
                 continue
             title = posting.get("title")
@@ -830,7 +843,11 @@ async def _scrape_ashby_job(source_url: str) -> Dict[str, Any]:
     return {
         "routed": True,
         "ok": False,
-        "stage": "ashby_api_exhausted",
+        "stage": (
+            "ashby_posting_not_listed"
+            if valid_listing_misses == 2
+            else "ashby_api_exhausted"
+        ),
         "content": "",
         "error": history[-1][1] if history else "not_attempted",
         "stage_history": history,
@@ -3215,6 +3232,7 @@ async def _fetch_sd_then_exa(
             statuses.append({
                 "url": url,
                 "source": "scrapingdog_ashby_api_fallback",
+                "stage": ashby.get("stage"),
                 "ashby_stage": ashby.get("stage"),
                 "ashby_error": ashby.get("error"),
             })

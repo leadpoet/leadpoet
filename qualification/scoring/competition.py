@@ -1028,17 +1028,26 @@ class CompetitionCompanyScorer:
                 breakdowns.append(incompatible)
                 continue
             required_attribute_retry_source_cache = None
+            intent_terminal_retry_cache = None
+            retry_evidence_context_key = ""
             if isinstance(retry_evidence_scope, MutableMapping):
                 source_scope_key = self._retry_source_scope_key(
                     company_model,
                     icp_model,
                 )
+                retry_evidence_context_key = source_scope_key
                 scoped_cache = retry_evidence_scope.setdefault(
                     source_scope_key,
                     {},
                 )
                 if isinstance(scoped_cache, MutableMapping):
                     required_attribute_retry_source_cache = scoped_cache
+                intent_cache = retry_evidence_scope.setdefault(
+                    f"intent-terminal-v1:{source_scope_key}",
+                    {},
+                )
+                if isinstance(intent_cache, MutableMapping):
+                    intent_terminal_retry_cache = intent_cache
             result = await score_company(
                 company=company_model,
                 icp=icp_model,
@@ -1051,6 +1060,8 @@ class CompetitionCompanyScorer:
                 required_attribute_retry_source_cache=(
                     required_attribute_retry_source_cache
                 ),
+                intent_terminal_retry_cache=intent_terminal_retry_cache,
+                retry_evidence_context_key=retry_evidence_context_key,
                 **({"company_quality": True} if self.company_quality else {}),
             )
             breakdown = (

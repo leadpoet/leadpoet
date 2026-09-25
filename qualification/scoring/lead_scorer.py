@@ -6,14 +6,16 @@ verified. The competition adapter adds contact checks and score aggregation.
 
 import asyncio
 import aiohttp
+from copy import deepcopy
 import hashlib
 import json
+import math
 import os
 import re
 import logging
 import unicodedata
 from datetime import date, datetime
-from typing import Any, Set, Optional, Tuple, List, Mapping, Sequence
+from typing import Any, Set, Optional, Tuple, List, Mapping, MutableMapping, Sequence
 from urllib.parse import unquote, urlparse, urlsplit
 
 from gateway.qualification.config import CONFIG
@@ -88,6 +90,7 @@ from qualification.scoring.arena_integrity import (
 )
 from qualification.scoring.competition import (
     REQUIRED_ATTRIBUTE_QUOTE_ABSENT_FAILURE_CLASS,
+    _semantic_hash,
     intent_unavailability_requires_retry,
 )
 from leadpoet_verifier.identity.normalization import (
@@ -7034,6 +7037,8 @@ async def score_company_competition_intent(
     required_attribute_retry_source_cache: Optional[
         dict[str, dict[str, Any]]
     ] = None,
+    intent_terminal_retry_cache: Optional[MutableMapping[str, Any]] = None,
+    retry_evidence_context_key: str = "",
 ) -> LeadScoreBreakdown:
     """Score one Arena company with binary fit gates and 0-100 intent score.
 
@@ -7084,6 +7089,8 @@ async def score_company_competition_intent(
             integrity_policy=integrity_policy,
             company_quality=company_quality,
             verified_company_identity=verified_identity_receipt(gate_receipts),
+            intent_terminal_retry_cache=intent_terminal_retry_cache,
+            retry_evidence_context_key=retry_evidence_context_key,
         )
         if _intent_verifier_unavailable(
             signal_results, integrity_policy=integrity_policy
@@ -7414,6 +7421,104 @@ def _company_stage_matches(observed: str, requested: str) -> bool:
     )
 
 
+def _intent_terminal_retry_key(
+    context_key, verified_company_identity, evidence_group, target_signal,
+    evidence_type, max_age_days, scoring_flags,
+) -> str:
+    return _semantic_hash({
+        "schema_version": "leadpoet.intent_terminal_retry.v1",
+        "context_key": context_key,
+        "verified_company_identity": dict(verified_company_identity or {}),
+        "evidence_group": [item.model_dump(mode="json") for item in evidence_group],
+        "target_signal": str(target_signal or ""),
+        "evidence_type": evidence_type, "max_age_days": max_age_days,
+        "scoring_flags": dict(scoring_flags),
+    })
+
+
+def _reusable_terminal_intent_row(
+    row: Any,
+    *,
+    expected_urls: Sequence[str],
+    expected_index: int,
+    expected_evidence_type: str,
+) -> bool:
+    """Accept only a complete positive source-grounded terminal result."""
+
+    required = {
+        "raw", "after_decay", "decay", "confidence", "date_status",
+        "matched_icp_signal", "evidence_type", "evidence_urls", "judge_verdict",
+    }
+    if (
+        not isinstance(row, Mapping)
+        or not required.issubset(row)
+        or intent_unavailability_requires_retry([row], integrity_policy=True)
+    ):
+        return False
+    verdict = row.get("judge_verdict")
+    trace = verdict.get("verification_trace") if isinstance(verdict, Mapping) else None
+    intent_verdict = trace.get("intent_verdict") if isinstance(trace, Mapping) else None
+    evaluations = intent_verdict.get("signal_evaluations") if isinstance(
+        intent_verdict, Mapping
+    ) else None
+    positive_scores = all(
+        type(row.get(field)) in {int, float}
+        and math.isfinite(float(row[field]))
+        and float(row[field]) > 0
+        for field in ("raw", "after_decay")
+    )
+    valid_decay = (
+        type(row.get("decay")) in {int, float}
+        and math.isfinite(float(row["decay"]))
+        and 0 < float(row["decay"]) <= 1
+    )
+    valid_confidence = (
+        type(row.get("confidence")) in {int, float}
+        and math.isfinite(float(row["confidence"]))
+        and 0 <= float(row["confidence"]) <= 100
+    )
+    source_context = trace.get("verified_source_context") if isinstance(
+        trace, Mapping
+    ) else None
+    return bool(
+        positive_scores
+        and valid_decay
+        and valid_confidence
+        and row.get("date_status") in {"in_window", "uncertain"}
+        and row.get("date_verdict") == row.get("date_status")
+        and row.get("matched_icp_signal") == expected_index
+        and row.get("evidence_type") == expected_evidence_type
+        and row.get("evidence_urls") == list(expected_urls)
+        and isinstance(verdict, Mapping)
+        and verdict.get("decision") == "verified"
+        and verdict.get("pipeline_decision") == "approve"
+        and verdict.get("claim_support_verdict") == "supported"
+        and verdict.get("client_ready") is True
+        and isinstance(trace, Mapping)
+        and trace.get("evidence_url") == expected_urls[0]
+        and trace.get("evidence_urls") == list(expected_urls)
+        and trace.get("final_disposition") == "approve"
+        and "extracted_signal_date" in trace
+        and bool(trace.get("evidence_source"))
+        and isinstance(source_context, list)
+        and bool(source_context)
+        and all(
+            isinstance(item, Mapping) and item.get("url") and item.get("text")
+            for item in source_context
+        )
+        and isinstance(evaluations, list)
+        and evaluations
+        and all(
+            isinstance(item, Mapping)
+            and item.get("signal_status") == "supported"
+            and item.get("same_entity_check") == "pass"
+            and bool(item.get("supporting_quotes"))
+            and bool(item.get("evidence_urls_used"))
+            for item in evaluations
+        )
+    )
+
+
 async def score_company_competition_intent_signal(
     company: CompanyOutput,
     icp: ICPPrompt,
@@ -7423,6 +7528,8 @@ async def score_company_competition_intent_signal(
     integrity_policy: bool = False,
     company_quality: bool = False,
     verified_company_identity: Optional[Mapping[str, Any]] = None,
+    intent_terminal_retry_cache: Optional[MutableMapping[str, Any]] = None,
+    retry_evidence_context_key: str = "",
 ) -> Tuple[float, float, float, int, bool, List[dict]]:
     """Score CompanyOutput intent signals with capped-sum breadth rewards.
 
@@ -7525,6 +7632,34 @@ async def score_company_competition_intent_signal(
                         "intent_max_age_days": signal_max_age_days[matched_idx]
                     }
                 )
+        evidence_urls = [item.url for item in evidence_group]
+        terminal_cache_key = ""
+        if (
+            integrity_policy
+            and retry_evidence_context_key
+            and isinstance(intent_terminal_retry_cache, MutableMapping)
+        ):
+            terminal_cache_key = _intent_terminal_retry_key(
+                retry_evidence_context_key, verified_company_identity,
+                evidence_group, target_signal, _evidence_type_for(matched_idx),
+                getattr(signal_icp, "intent_max_age_days", None), {
+                    "trust_signal_date": trust_signal_date,
+                    "no_time_decay": no_time_decay,
+                    "integrity_policy": integrity_policy,
+                    "company_quality": company_quality,
+                },
+            )
+            if terminal_cache_key in intent_terminal_retry_cache:
+                cached = intent_terminal_retry_cache[terminal_cache_key]
+                if _reusable_terminal_intent_row(
+                    cached,
+                    expected_urls=evidence_urls,
+                    expected_index=matched_idx,
+                    expected_evidence_type=_evidence_type_for(matched_idx),
+                ):
+                    signal_results.append(deepcopy(dict(cached)))
+                    continue
+                intent_terminal_retry_cache.pop(terminal_cache_key, None)
         score, confidence, date_status, content_found_date, _matched_idx = (
             await _score_single_intent_signal(
                 signal,
@@ -7590,7 +7725,7 @@ async def score_company_competition_intent_signal(
             if date_status in {"in_window", "out_of_window", "uncertain"}
             else "not_evaluated"
         )
-        signal_results.append({
+        signal_result = {
             "raw": score,
             "after_decay": after_decay,
             "decay": decay,
@@ -7609,10 +7744,26 @@ async def score_company_competition_intent_signal(
             ),
             "matched_icp_signal": resolved_idx,
             "evidence_type": _evidence_type_for(resolved_idx),
-            **({"evidence_urls": [item.url for item in evidence_group]}
+            **({"evidence_urls": evidence_urls}
                if integrity_policy else {}),
             **({"judge_verdict": judge_verdict} if judge_verdict else {}),
-        })
+        }
+        signal_results.append(signal_result)
+        if (
+            terminal_cache_key
+            and isinstance(intent_terminal_retry_cache, MutableMapping)
+            and _reusable_terminal_intent_row(
+                signal_result,
+                expected_urls=evidence_urls,
+                expected_index=matched_idx,
+                expected_evidence_type=_evidence_type_for(matched_idx),
+            )
+            and (
+                terminal_cache_key in intent_terminal_retry_cache
+                or len(intent_terminal_retry_cache) < len(evidence_groups)
+            )
+        ):
+            intent_terminal_retry_cache[terminal_cache_key] = deepcopy(signal_result)
 
     if not signal_results:
         return 0.0, 0.0, 0.0, 0, True, []

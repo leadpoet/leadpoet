@@ -156,7 +156,12 @@ proof gate still applies. Otherwise return UNPROVEN or a proven different stage.
 
 Public stage needs current company-attributed exchange/ticker or current
 listed/traded-share proof. A 'Public Company' label, planned IPO, old listing,
-product launch, or funding total is insufficient. Compare dated rounds,
+product launch, or funding total is insufficient. A current SEC filing's
+Section 12(b) table can establish registered common/ordinary shares, their
+ticker, and exchange. Quote one continuous span that includes the registrant
+name and the complete row. Check the filing date and later ownership/listing
+events; an old table does not establish current status or override newer
+private-company evidence. Compare dated rounds,
 acquisitions, and IPO/listing events; use the latest completed event rather
 than the highest label found. For a Series stage, compare completed
 priced-equity rounds and use the latest completed priced-equity round. A later
@@ -726,6 +731,52 @@ def _quote_supports_semantic_public_listing(quote: str) -> bool:
     )
 
 
+def _quote_supports_sec_equity_listing(
+    url: str, quote: str, identity_names: set[str],
+) -> bool:
+    """Recognize the SEC cover-page format, not a different listing standard.
+
+    The investigator still owns chronology. Exact fetched text, company binding,
+    and the scorer's newer-private-company conflict guard remain mandatory.
+    """
+
+    parsed = urlsplit(url)
+    if (
+        str(parsed.hostname or "").casefold() not in {"sec.gov", "www.sec.gov"}
+        or not parsed.path.casefold().startswith("/archives/edgar/data/")
+    ):
+        return False
+    text = _normalized_span(quote)
+    registrant, marker, _ = text.partition("(exact name of registrant")
+    registrant_key = re.sub(r"[^a-z0-9]+", "", registrant)
+    if not marker or not any(
+        registrant_key == re.sub(r"[^a-z0-9]+", "", name) + suffix
+        for name in identity_names
+        for suffix in ("", "inc", "incorporated", "corp", "corporation",
+                       "ltd", "limited", "plc", "llc")
+    ):
+        return False
+    if re.search(
+        r"\b(?:proposed|planned|expected|formerly|previously|delisted)\b|"
+        r"\b(?:ceased|stopped)\s+trading\b|\bno\s+longer\s+listed\b|"
+        r"\b(?:taken|went|became)\s+private\b",
+        text,
+    ):
+        return False
+    return bool(re.search(
+        r"securities\s+registered\s+pursuant\s+to\s+section\s+12\s*\(b\)"
+        r".{0,100}title\s+of\s+each\s+class"
+        r".{0,40}trading\s+symbol\(s\)"
+        r".{0,40}name\s+of\s+each\s+exchange\s+on\s+which\s+registered"
+        r"\s+(?:(?:class\s+[a-z]|voting|non-voting)\s+)?"
+        r"(?:common\s+(?:stock|shares)|ordinary\s+shares)"
+        r"[^;]{0,100}?\s+[a-z][a-z0-9.-]{0,9}\s+(?:the\s+)?"
+        r"(?:nasdaq\s+(?:stock\s+market|global\s+(?:select\s+)?market|"
+        r"capital\s+market)|new\s+york\s+stock\s+exchange)\b",
+        text,
+    ))
+
+
 def _quote_supports_headcount(quote: str, observed_value: Any) -> bool:
     """Bind the submitted count to company-wide text without inventing freshness."""
 
@@ -1088,6 +1139,10 @@ def _validated_findings(
                     )
                     or _quote_supports_semantic_public_listing(
                         finding["evidence_quote"]
+                    )
+                    or _quote_supports_sec_equity_listing(
+                        evidence_url, finding["evidence_quote"],
+                        stage_attribution_names,
                     )
                 ):
                     finding.update(

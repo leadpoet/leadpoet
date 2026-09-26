@@ -726,12 +726,33 @@ _BOUND_ACQUISITION_SUBJECT_PATTERNS = (
         r"majority[- ]owned\s+)?subsidiary\s+of\b",
         re.I,
     ),
+    re.compile(
+        r"(?:^|[,;.!?]\s+)(?P<subject>[a-z0-9&.'’+ -]{2,120}?)\s+"
+        r"(?:today\s+)?announced\s+(?:today\s+)?the\s+"
+        r"(?:closing|completion)\s+of\s+its\s+acquisition\s+by\b",
+        re.I,
+    ),
+    re.compile(
+        r"(?:^|[,;.!?]\s+)(?P<subject>[a-z0-9&.'’+ -]{2,120}?)"
+        r"(?:\s+\([^()\r\n]{1,120}\))?\s*,\s*"
+        r"(?:an?|the)\s+[^.!?;\n]{1,180}?,\s+(?:today\s+)?announced\s+"
+        r"(?:today\s+)?the\s+(?:closing|completion)\s+of\s+its\s+"
+        r"acquisition\s+by\b",
+        re.I,
+    ),
 )
 _ACQUISITION_NO_LONGER_CURRENT_RE = re.compile(
     r"\b(?:later|subsequently|since)\b.{0,100}\b(?:"
     r"went\s+public|ipo|listed|relisted|spun?\s+out|became\s+independent"
     r")\b|\bis\s+(?:now\s+)?(?:publicly\s+traded|listed\s+on|independent)\b",
     re.I | re.S,
+)
+_ACQUISITION_FAILED_RE = re.compile(
+    r"\b(?:acquisition|transaction|deal)\b[^.!?;\n]{0,160}\b(?:"
+    r"(?:was|is|has\s+been)\s+(?:cancelled|canceled)|"
+    r"(?:was|is|has\s+been)\s+not\s+(?:closed|completed)|"
+    r"(?:did|does|will)\s+not\s+(?:close|complete)|fell\s+through)\b",
+    re.I,
 )
 _ACQUISITION_CONDITIONAL_RE = re.compile(
     r"\b(?:if|unless|conditional(?:ly)?|subject\s+to)\b.{0,100}\b"
@@ -868,7 +889,10 @@ def _acquired_stage_quote_supports_names(
                 reject_historical=True,
                 reject_minority=True,
                 reject_future_will=True,
-            ) or _ACQUISITION_CONDITIONAL_RE.search(context):
+            ) or (
+                _ACQUISITION_CONDITIONAL_RE.search(context)
+                or _ACQUISITION_FAILED_RE.search(context)
+            ):
                 continue
             subject = tuple(re.findall(
                 r"[a-z0-9]+", match.group("subject").casefold()
@@ -877,8 +901,25 @@ def _acquired_stage_quote_supports_names(
                 "co", "company", "corp", "corporation", "inc",
                 "incorporated", "limited", "llc", "ltd", "plc",
             }
+
+            def without_legal_suffixes(parts: tuple[str, ...]) -> tuple[str, ...]:
+                while len(parts) > 1 and parts[-1] in legal_suffixes:
+                    parts = parts[:-1]
+                return parts
+
+            subject_base = without_legal_suffixes(subject)
             if any(
                 subject == name
+                or "".join(subject) == "".join(name)
+                or (
+                    subject_base
+                    and without_legal_suffixes(name)
+                    and (
+                        subject_base == without_legal_suffixes(name)
+                        or "".join(subject_base)
+                        == "".join(without_legal_suffixes(name))
+                    )
+                )
                 or (
                     subject[:len(name)] == name
                     and subject[len(name):]

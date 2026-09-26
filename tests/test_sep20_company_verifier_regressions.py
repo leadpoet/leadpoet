@@ -1828,11 +1828,21 @@ def test_stale_venture_stage_with_bound_current_owner_proof_requires_repair():
             COMPANY_FIT_UNAVAILABLE,
         ),
         (
+            "Following completion of the acquisition, Envestnet's common stock "
+            "ceased trading on the New York Stock Exchange on April 16, 2025.",
+            COMPANY_FIT_UNAVAILABLE,
+        ),
+        (
             "Bain Capital completes acquisition of Envestnet.",
             COMPANY_FIT_MATCH,
         ),
         (
             "Envestnet will be taken private if the proposed transaction closes.",
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            "Envestnet's common stock will cease trading if the proposed "
+            "transaction closes.",
             COMPANY_FIT_MATCH,
         ),
         (
@@ -1863,6 +1873,34 @@ def test_public_stage_reopens_only_for_bound_completed_take_private_or_delisting
             company_stage="Public",
         ),
     ) == expected
+
+
+def test_saved_solarwinds_trading_cessation_reopens_stale_public_stage():
+    verdict = {
+        "observed_company_name": "SolarWinds",
+        "observed_company_stage": "Public",
+        "stage_matches": True,
+        "stage_evidence_url": "https://investors.solarwinds.com/old-listing",
+        "stage_evidence_quote": "SolarWinds common stock is listed on NYSE.",
+        "required_attribute_evidence_url": (
+            "https://www.solarwinds.com/company/newsroom/press-releases/"
+            "turnriver-completes-acquisition-of-solarwinds"
+        ),
+        "required_attribute_evidence_quote": (
+            "With the closing of the transaction, SolarWinds common stock has "
+            "ceased trading, and the Company is no longer listed on the New York "
+            "Stock Exchange."
+        ),
+    }
+
+    assert lead_scorer._decision_from_observed_stage(
+        verdict,
+        "public",
+        company=_company(
+            company_name="SolarWinds",
+            company_website="https://www.solarwinds.com/",
+        ),
+    ) == COMPANY_FIT_UNAVAILABLE
 
 
 def test_investigator_receipt_cannot_bypass_acquired_subject_binding():

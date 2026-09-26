@@ -1029,10 +1029,9 @@ def test_unproven_bad_optional_quote_is_not_automatically_cleared(monkeypatch):
     "change",
     [
         "upgrade_unproven", "factual_flag", "coverage", "aggregate_boolean",
-        "unflagged_evidence",
     ],
 )
-def test_typed_citation_repair_rejects_semantic_fields_or_unflagged_units(
+def test_typed_citation_repair_rejects_semantic_fields(
     monkeypatch, change,
 ):
     financing = "Example raised a Series A."
@@ -1068,11 +1067,6 @@ def test_typed_citation_repair_rejects_semantic_fields_or_unflagged_units(
             ]
         elif change == "aggregate_boolean":
             repair["facts_supported"] = True
-        else:
-            repair["repairs"].append({
-                "unit_id": 2,
-                "evidence": unit_two["evidence"],
-            })
         return json.dumps(repair)
 
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
@@ -1083,8 +1077,8 @@ def test_typed_citation_repair_rejects_semantic_fields_or_unflagged_units(
     assert receipt["failure_reason_code"] == "malformed_response"
 
 
-@pytest.mark.parametrize("id_defect", ["missing", "extra", "duplicate"])
-def test_typed_citation_repair_requires_the_exact_flagged_unit_ids(
+@pytest.mark.parametrize("id_defect", ["missing", "unknown", "duplicate"])
+def test_typed_citation_repair_requires_every_flagged_unit_id(
     monkeypatch, id_defect,
 ):
     quote = "Example raised a Series A and launched a product."
@@ -1118,11 +1112,163 @@ def test_typed_citation_repair_requires_the_exact_flagged_unit_ids(
         ]
         if id_defect == "missing":
             repairs.pop()
-        elif id_defect == "extra":
+        elif id_defect == "unknown":
             repairs.append({"unit_id": 2, "evidence": [binding]})
         else:
             repairs[1]["unit_id"] = 0
         return json.dumps({"repairs": repairs})
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(*inputs))
+
+    assert calls == 2
+    assert receipt["decision"] == "unavailable"
+    assert receipt["failure_reason_code"] == "malformed_response"
+
+
+def test_saved_sentinelone_repair_ignores_an_extra_known_unit(monkeypatch):
+    appointment = (
+        "SentinelOne (NYSE: S), the leader in AI-native cybersecurity, today "
+        "announced the appointment of Sonalee Parekh as Chief Financial "
+        "Officer, effective March 24, 2026."
+    )
+    platform = (
+        "Its Singularity™ Platform detects, prevents, and responds to "
+        "cyberattacks at machine speed, autonomously – empowering organizations "
+        "to secure endpoints, cloud workloads, containers, identities, GenAI, "
+        "and mobile and network-connected devices"
+    )
+    source = (
+        "MOUNTAIN VIEW, Calif. – March 3, 2026 – " + appointment + " "
+        "Barry Padgett will continue to serve as Interim CFO until Ms. Parekh’s "
+        "start date. About SentinelOne. SentinelOne is a global leader in "
+        "AI-native cybersecurity. " + platform + " with speed, accuracy, and "
+        "simplicity."
+    )
+    paragraph = (
+        "SentinelOne announced on March 3, 2026 that Sonalee Parekh would become "
+        "Chief Financial Officer effective March 24, 2026, succeeding interim "
+        "CFO Barry Padgett. The release identifies SentinelOne as NYSE-listed "
+        "and says its Singularity Platform detects, prevents, and responds to "
+        "cyberattacks across endpoints, cloud workloads, containers, identities, "
+        "GenAI, mobile, and network-connected devices. This finance-leadership "
+        "transition could make SentinelOne relevant for conversations around "
+        "security software protecting accounts, infrastructure, endpoints, and "
+        "sensitive data."
+    )
+    inputs = _inputs(
+        paragraph,
+        source,
+        supporting_quote=appointment,
+        authoritative_date="2026-03-24",
+    )
+    calls = 0
+
+    async def judge(prompt, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return json.dumps({
+                "connects_icp": True,
+                "facts_supported": True,
+                "natural_paragraph": True,
+                "relevance_grounded": True,
+                "signal_coverage": [{
+                    "covered": True, "matched_icp_signal": 0,
+                }],
+                "unit_grounding": [
+                    {
+                        "contains_factual_claim": True,
+                        "evidence": [
+                            {"quote": "2026-03-03", "source_index": 1},
+                            {"quote": appointment, "source_index": 0},
+                        ],
+                        "status": "VERIFIED",
+                        "unit_id": 0,
+                    },
+                    {
+                        "contains_factual_claim": True,
+                        "evidence": [
+                            {"quote": "SentinelOne (NYSE: S)", "source_index": 0},
+                            {"quote": platform, "source_index": 0},
+                        ],
+                        "status": "VERIFIED",
+                        "unit_id": 1,
+                    },
+                    {
+                        "contains_factual_claim": False,
+                        "evidence": [],
+                        "status": "VERIFIED",
+                        "unit_id": 2,
+                    },
+                ],
+                "verified_signals_covered": True,
+            })
+        return json.dumps({"repairs": [
+            {
+                "evidence": [{
+                    "quote": (
+                        "MOUNTAIN VIEW, Calif. – March 3, 2026 – "
+                        + appointment
+                    ),
+                    "source_index": 0,
+                }],
+                "unit_id": 0,
+            },
+            {
+                "evidence": [{
+                    "quote": "THIS EXTRA TEXT MUST BE IGNORED",
+                    "source_index": 999,
+                }],
+                "unit_id": 1,
+            },
+        ]})
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(*inputs))
+
+    assert calls == 2
+    assert receipt["decision"] == "match"
+
+
+@pytest.mark.parametrize("repair_defect", ["wrong_source", "unsupported_quote"])
+def test_extra_unit_tolerance_does_not_weaken_flagged_citation_validation(
+    monkeypatch, repair_defect,
+):
+    quote = "Example raised a Series A."
+    inputs = _inputs(
+        "Example raised a Series A. This could support product delivery.",
+        quote,
+        supporting_quote=quote,
+    )
+    calls = 0
+
+    async def judge(prompt, **_kwargs):
+        nonlocal calls
+        calls += 1
+        document = _prompt_document(prompt)
+        factual = _verified_unit(document, 0, quote)
+        nonfactual = _nonfactual_unit(1)
+        if calls == 1:
+            factual["evidence"][0]["quote"] = "UNBOUND OLD CITATION"
+            return json.dumps(_response(
+                document, [factual, nonfactual], facts_supported=True,
+            ))
+        repaired = _binding(document, quote)
+        if repair_defect == "wrong_source":
+            repaired["source_index"] = next(
+                index for index in intent_details._bound_evidence_sources(document)
+                if index != repaired["source_index"]
+            )
+        else:
+            repaired["quote"] = "Example raised an unsupported Series B."
+        return json.dumps({"repairs": [
+            {"unit_id": 0, "evidence": [repaired]},
+            {
+                "unit_id": 1,
+                "evidence": [{"source_index": 999, "quote": "IGNORED"}],
+            },
+        ]})
 
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     receipt = asyncio.run(intent_details.review_intent_details(*inputs))

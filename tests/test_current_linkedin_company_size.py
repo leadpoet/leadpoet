@@ -3230,7 +3230,7 @@ def test_structured_size_proof_survives_full_company_fit_merge(monkeypatch):
     assert "quote" not in employee_evidence["web_evidence"]
 
 
-def test_structured_public_profile_repairs_unavailable_stage_with_one_fetch(
+def test_structured_public_profile_does_not_repair_unavailable_stage(
     monkeypatch,
 ):
     provider_calls = []
@@ -3313,25 +3313,122 @@ def test_structured_public_profile_repairs_unavailable_stage_with_one_fetch(
         )
     )
 
-    assert result.decision == COMPANY_FIT_MATCH, result.details
-    assert provider_calls == ["lead_scorer_reverify"]
+    assert result.decision == COMPANY_FIT_UNAVAILABLE, result.details
+    assert provider_calls == [
+        "lead_scorer_reverify",
+        "lead_scorer_reverify_schema_repair",
+    ]
     assert structured_fetches == [
         ("example.com", "https://www.linkedin.com/company/acme")
     ]
-    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MATCH
+    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_UNAVAILABLE
     assert result.details["dimension_evidence"]["stage"] == {
-        "company_type": "Public Company",
-        "provider": "harvestapi_get_company",
-        "source_field": "companyType",
-        "url": "https://www.linkedin.com/company/acme",
-        "website": "https://example.com/",
+        "url": "https://acme.example.com/about",
+        "quote": "Company type: Public Company",
+    }
+
+
+def test_saved_solarwinds_public_label_reaches_investigator_and_fails_stage(
+    monkeypatch,
+):
+    source_url = (
+        "https://www.solarwinds.com/company/newsroom/press-releases/"
+        "turnriver-completes-acquisition-of-solarwinds"
+    )
+    source_quote = "Turn/River Completes Acquisition of SolarWinds"
+    profile_url = "https://www.linkedin.com/company/solarwinds"
+    investigator_calls = []
+    assert lead_scorer._acquired_stage_quote_supports_names(
+        ("SolarWinds",), source_quote
+    )
+
+    async def provider(**_kwargs):
+        verdict = _verdict()
+        verdict.update(
+            observed_company_name="SolarWinds",
+            observed_company_website="https://www.solarwinds.com",
+            observed_company_linkedin=profile_url,
+            observed_company_stage="Public",
+            stage_matches=True,
+            stage_evidence_url=profile_url,
+            stage_evidence_quote="Company type: Public Company",
+        )
+        return verdict, ""
+
+    async def structured_fetch(
+        domain, url, *, public_company_evidence, **_kwargs
+    ):
+        public_company_evidence.update({
+            "company_type": "Public Company",
+            "provider": "harvestapi_get_company",
+            "source_field": "companyType",
+            "url": url,
+            "website": "https://solarwinds.com/",
+        })
+        return None
+
+    async def investigate(**kwargs):
+        investigator_calls.append(kwargs)
+        finding = {
+            "target": "stage",
+            "status": "CONTRADICTED",
+            "observed_value": "Acquired",
+            "evidence_url": source_url,
+            "evidence_quote": source_quote,
+            "reason": "completed acquisition and trading cessation",
+        }
+        return {
+            "claims": {"stage": finding},
+            "_validated_stage_finding": finding,
+            "failure_reason": "",
+            "usage": {"reasoning_turns": 3, "search_calls": 1, "fetch_calls": 1},
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_structured_linkedin_company_size",
+        structured_fetch,
+    )
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _company().model_copy(update={
+            "company_name": "SolarWinds",
+            "company_website": "https://www.solarwinds.com",
+            "company_linkedin": profile_url,
+            "company_stage": "Public",
+        }),
+        _icp().model_copy(update={"company_stage": "Public"}),
+        require_company_fit_dimensions=True,
+        evidence_investigator=True,
+        verified_homepage_identity=company_fit_match(
+            "homepage identity verified",
+            details={"identity": {
+                "decision": COMPANY_FIT_MATCH,
+                "evidence_source": "company_homepage",
+                "observed_name": "solarwinds",
+                "observed_domain": "solarwinds.com",
+                "observed_linkedin_slug": "solarwinds",
+            }},
+        ),
+    ))
+
+    assert investigator_calls
+    assert "stage" in investigator_calls[0]["targets"]
+    assert result.decision == COMPANY_FIT_MISMATCH
+    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MISMATCH
+    assert result.details["dimension_evidence"]["stage"] == {
+        "url": source_url,
+        "quote": source_quote,
     }
 
 
 @pytest.mark.parametrize(
     ("company_type", "profile_website", "profile_slug", "expected"),
     [
-        ("Public Company", "https://www.statestreet.com", "state-street", "match"),
+        ("Public Company", "https://www.statestreet.com", "state-street", "unavailable"),
         ("Privately Held", "https://www.statestreet.com", "state-street", "unavailable"),
         ("Public Company", "https://unrelated.example", "state-street", "unavailable"),
         ("Public Company", "https://www.statestreet.com", "unrelated", "unavailable"),
@@ -3434,7 +3531,7 @@ def test_public_stage_uses_verified_web_identity_without_homepage_linkedin(
 
 @pytest.mark.parametrize("missing_size_observation", [False, True])
 @pytest.mark.parametrize("frozen_round_policy", [False, True])
-def test_state_street_web_identity_reuses_structured_profile_for_size_and_stage(
+def test_state_street_web_identity_reuses_structured_profile_for_size_with_listing_proof(
     monkeypatch, missing_size_observation, frozen_round_policy,
 ):
     """Reproduce the saved rerun337 profile through the full outer fit gate."""
@@ -3481,8 +3578,10 @@ def test_state_street_web_identity_reuses_structured_profile_for_size_and_stage(
         geography_evidence_quote="Corporate headquarters: Boston, Massachusetts.",
         observed_company_stage="Public",
         stage_matches=True,
-        stage_evidence_url=profile_url,
-        stage_evidence_quote="Public Company",
+        stage_evidence_url="https://investors.statestreet.com/stock-information",
+        stage_evidence_quote=(
+            "State Street common stock is listed on the NYSE under ticker STT."
+        ),
     )
     if missing_size_observation:
         verdict.update(
@@ -3627,11 +3726,8 @@ def test_state_street_web_identity_reuses_structured_profile_for_size_and_stage(
         "website": "https://statestreet.com/",
     }
     assert details["dimension_evidence"]["stage"]["web_evidence"] == {
-        "company_type": "Public Company",
-        "provider": "harvestapi_get_company",
-        "source_field": "companyType",
-        "url": profile_url,
-        "website": "https://statestreet.com/",
+        "url": "https://investors.statestreet.com/stock-information",
+        "quote": "State Street common stock is listed on the NYSE under ticker STT.",
     }
 
 
@@ -3753,13 +3849,8 @@ def test_structured_public_stage_scorer_entrypoint_transition(
         assert output["failure"] == "judge_error"
         assert output["reason"] == "provider_error"
         return
-    assert calls == 1
-    receipt = output["breakdowns"][0]["verifier_gate_receipts"][0]
-    assert receipt["decision"] == COMPANY_FIT_MATCH
-    assert receipt["company_fit_dimensions"]["stage"] == COMPANY_FIT_MATCH
-    assert receipt["dimension_evidence"]["stage"]["web_evidence"] == (
-        structured_stage_evidence
-    )
+    assert calls == 3
+    assert output["failure"] == "judge_error", output
 
 
 def test_truist_structured_identity_recovers_full_scorer_entrypoint(monkeypatch):
@@ -3808,7 +3899,10 @@ def test_truist_structured_identity_recovers_full_scorer_entrypoint(monkeypatch)
             "observed_company_stage": "Public",
             "stage_matches": True,
             "stage_evidence_url": "https://ir.truist.com/",
-            "stage_evidence_quote": "Truist Financial Corporation NYSE TFC",
+            "stage_evidence_quote": (
+                "Truist Financial Corporation common stock is listed on the "
+                "NYSE under ticker TFC."
+            ),
             "attribute_satisfied": None,
             "required_attribute_evidence_url": "",
             "required_attribute_evidence_quote": "",

@@ -229,6 +229,7 @@ TABLES = (
     "lab_arena_submissions",
     "lab_arena_runs",
     "lab_arena_ledger",
+    "lab_arena_trajectory_events",
     "lab_arena_accepted_weight_states",
     "lab_arena_chain_outcomes",
     "lab_arena_judgment_cache",
@@ -1820,6 +1821,22 @@ class ArenaStore:
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
         rows = self._transport.select("lab_arena_runs", filters={"run_id": run_id}, limit=1)
         return rows[0] if rows else None
+
+    def list_trajectory_events(self, run_id: str) -> List[Dict[str, Any]]:
+        """Read one private run in bounded pages, including long trajectories."""
+
+        if not run_id:
+            raise ArenaStoreError("trajectory run id is required")
+        rows: List[Dict[str, Any]] = []
+        for offset in range(0, 10_000, 500):
+            page = self._transport.select(
+                "lab_arena_trajectory_events", filters={"run_id": run_id},
+                order="trajectory_id", limit=500, offset=offset,
+            )
+            rows.extend(page)
+            if len(page) < 500:
+                break
+        return rows
 
     def list_runs(self, round_id: str, *, stage: Optional[int] = None, status: Optional[str] = None, submission_id: Optional[str] = None, kind: Optional[str] = None) -> List[Dict[str, Any]]:
         filters: Dict[str, Any] = {"round_id": round_id}

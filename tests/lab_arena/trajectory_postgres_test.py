@@ -101,6 +101,9 @@ def test_migration_replays_and_append_is_idempotent_with_derived_identity(seeded
     replay = store.append_trajectory_events(
         RUN, hash_lease_token(LEASE), [document]
     )
+    stored_events = store.list_trajectory_events(RUN)
+    assert len(stored_events) == 1
+    assert stored_events[0]["event_id"] == document["event_id"]
     store.close()
     assert (first["inserted"], replay["existing"]) == (1, 1)
 

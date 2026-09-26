@@ -3910,11 +3910,37 @@ def _structured_profile_identity_anchor(
         web_observed_slug = str(
             web_identity.get("observed_linkedin_slug") or ""
         ).strip().casefold()
-        numeric_alias_recovery_needed = (
-            web_identity.get("decision") == COMPANY_FIT_UNAVAILABLE
-            and web_identity.get("reason_code")
-            == "identity_linkedin_alias_unresolved"
-            and web_identity.get("evidence_source")
+        structured_identity = web_identity.get("structured_profile_identity")
+        structured_identity = (
+            structured_identity
+            if isinstance(structured_identity, Mapping)
+            else {}
+        )
+        try:
+            structured_domain = _registrable_domain(
+                str(structured_identity.get("website") or "")
+            )
+        except NormalizationError:
+            structured_domain = ""
+        structured_numeric_alias_proof = (
+            structured_identity.get("provider")
+            == STRUCTURED_PROFILE_PROVIDER
+            and structured_identity.get("source_field")
+            == STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
+            and str(structured_identity.get("company_id") or "")
+            == homepage_slug
+            and linkedin_company_page_slug(
+                structured_identity.get("requested_url")
+            )
+            == homepage_slug
+            and linkedin_company_page_slug(structured_identity.get("url"))
+            == web_observed_slug
+            and structured_domain == transport_domain
+            and _company_name(structured_identity.get("name"))
+            == homepage_name
+        )
+        exact_numeric_alias_identity = (
+            web_identity.get("evidence_source")
             == "company_web_reverification"
             and homepage_domain == transport_domain
             and web_identity.get("submitted_domain") == transport_domain
@@ -3927,6 +3953,24 @@ def _structured_profile_identity_anchor(
             and homepage_name == _company_name(web_identity.get("submitted_name"))
             and homepage_name == _company_name(web_identity.get("observed_name"))
         )
+        numeric_alias_recovery_needed = (
+            exact_numeric_alias_identity
+            and web_identity.get("decision") == COMPANY_FIT_UNAVAILABLE
+            and web_identity.get("reason_code")
+            == "identity_linkedin_alias_unresolved"
+        )
+        numeric_alias_verified = (
+            exact_numeric_alias_identity
+            and structured_numeric_alias_proof
+            and web_identity.get("decision") == COMPANY_FIT_MATCH
+            and web_identity.get("reason_code")
+            == "structured_numeric_linkedin_alias_verified"
+        )
+        if numeric_alias_verified:
+            return {
+                **homepage_identity,
+                "linkedin_company_slug": web_observed_slug,
+            }
         if not numeric_alias_recovery_needed:
             return homepage_identity
     if (

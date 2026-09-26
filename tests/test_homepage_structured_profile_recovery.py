@@ -195,6 +195,210 @@ def test_numeric_homepage_anchor_defers_to_structured_alias_recovery():
     )["requested_profile_url"] == RAPID7_NUMERIC_URL
 
 
+def _rapid7_public_stage_case():
+    homepage = lead_scorer._verified_homepage_identity_anchor(
+        _rapid7_homepage_identity()
+    )
+    company = _rapid7_company().model_copy(update={
+        "employee_count": "1,001-5,000",
+        "company_stage": "Public",
+        "industry": "Cybersecurity",
+    })
+    icp = _icp().model_copy(update={
+        "industry": "Cybersecurity",
+        "employee_count": "1,001-5,000",
+        "company_stage": "Public",
+        "product_service": "Cybersecurity risk and detection software.",
+    })
+    verdict = {
+        "observed_company_name": "Rapid7, Inc.",
+        "observed_company_website": "https://www.rapid7.com",
+        "observed_company_linkedin": RAPID7_VANITY_URL,
+        "observed_employee_count": "1,001-5,000",
+        "employee_size_matches": True,
+        "employee_size_evidence_url": RAPID7_VANITY_URL,
+        "employee_size_evidence_quote": (
+            "Company size 1,001-5,000 employees"
+        ),
+        "observed_industry": "Cybersecurity",
+        "observed_subindustry": "",
+        "industry_matches": True,
+        "industry_activity_role": "supplier_operator",
+        "industry_evidence_url": "https://rapid7.com/company/about",
+        "industry_evidence_quote": (
+            "Rapid7 provides cybersecurity risk and detection software."
+        ),
+        "observed_hq_country": "United States",
+        "observed_hq_state": "Massachusetts",
+        "geography_matches": True,
+        "geography_evidence_url": "https://rapid7.com/company/about",
+        "geography_evidence_quote": "Rapid7 is based in Boston.",
+        "observed_company_stage": "Public",
+        "stage_matches": True,
+        "stage_evidence_url": "https://rapid7.com/investors",
+        "stage_evidence_quote": (
+            "Rapid7 common stock is listed on Nasdaq under ticker RPD."
+        ),
+        "attribute_satisfied": None,
+        "required_attribute_evidence_url": "",
+        "required_attribute_evidence_quote": "",
+        "reason": "All requested dimensions match.",
+    }
+    structured_identity = _rapid7_structured_identity()
+    return homepage, company, icp, verdict, structured_identity
+
+
+def test_numeric_homepage_structured_alias_binds_private_stage_conflict():
+    homepage, company, icp, verdict, structured_identity = (
+        _rapid7_public_stage_case()
+    )
+    identity = lead_scorer._web_identity_receipt(
+        company,
+        verdict,
+        verified_homepage_identity=homepage,
+        verified_homepage_transport_domain="rapid7.com",
+        verified_structured_identity=structured_identity,
+        company_quality=True,
+    )
+    private_evidence = {
+        "company_type": "Privately Held",
+        "provider": "harvestapi_get_company",
+        "source_field": "companyType",
+        "url": RAPID7_VANITY_URL,
+        "website": "https://rapid7.com/",
+    }
+
+    assert identity["decision"] == COMPANY_FIT_MATCH
+    assert identity["reason_code"] == (
+        "structured_numeric_linkedin_alias_verified"
+    )
+    assert lead_scorer._structured_profile_identity_anchor(
+        homepage,
+        identity,
+        "rapid7.com",
+    ) == {
+        "normalized_name": "rapid7",
+        "registrable_dns_domain": "rapid7.com",
+        "linkedin_company_slug": "rapid7",
+    }
+
+    result = lead_scorer._reverify_decision(
+        verdict,
+        "",
+        "public",
+        icp=icp,
+        company=company,
+        verified_homepage_identity=homepage,
+        verified_homepage_transport_domain="rapid7.com",
+        structured_public_company_evidence=private_evidence,
+        structured_profile_identity_evidence=structured_identity,
+        company_quality=True,
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["dimension_decisions"]["stage"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+    assert result.details["dimension_evidence"]["stage"] == private_evidence
+
+
+def test_numeric_homepage_structured_public_type_keeps_public_stage_match():
+    homepage, company, icp, verdict, structured_identity = (
+        _rapid7_public_stage_case()
+    )
+    public_evidence = {
+        "company_type": "Public Company",
+        "provider": "harvestapi_get_company",
+        "source_field": "companyType",
+        "url": RAPID7_VANITY_URL,
+        "website": "https://rapid7.com/",
+    }
+
+    result = lead_scorer._reverify_decision(
+        verdict,
+        "",
+        "public",
+        icp=icp,
+        company=company,
+        verified_homepage_identity=homepage,
+        verified_homepage_transport_domain="rapid7.com",
+        structured_public_company_evidence=public_evidence,
+        structured_profile_identity_evidence=structured_identity,
+        company_quality=True,
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MATCH
+
+
+def test_numeric_homepage_unrelated_private_type_cannot_change_public_stage():
+    homepage, company, icp, verdict, structured_identity = (
+        _rapid7_public_stage_case()
+    )
+    unrelated_private_evidence = {
+        "company_type": "Privately Held",
+        "provider": "harvestapi_get_company",
+        "source_field": "companyType",
+        "url": "https://www.linkedin.com/company/other-company",
+        "website": "https://rapid7.com/",
+    }
+
+    result = lead_scorer._reverify_decision(
+        verdict,
+        "",
+        "public",
+        icp=icp,
+        company=company,
+        verified_homepage_identity=homepage,
+        verified_homepage_transport_domain="rapid7.com",
+        structured_public_company_evidence=unrelated_private_evidence,
+        structured_profile_identity_evidence=structured_identity,
+        company_quality=True,
+    )
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MATCH
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"decision": COMPANY_FIT_UNAVAILABLE},
+        {"reason_code": "verifier_accepted"},
+        {"evidence_source": "company_homepage"},
+        {"submitted_domain": "other.example"},
+        {"observed_domain": "other.example"},
+        {"submitted_name": "other company"},
+        {"observed_name": "other company"},
+        {"submitted_linkedin_slug": "393624"},
+        {"observed_linkedin_slug": "393624"},
+        {"observed_linkedin_slug": "other-company"},
+    ],
+)
+def test_numeric_homepage_keeps_numeric_anchor_without_exact_verified_receipt(
+    changes,
+):
+    homepage = lead_scorer._verified_homepage_identity_anchor(
+        _rapid7_homepage_identity()
+    )
+    resolved = lead_scorer._structured_profile_alias_identity_receipt(
+        _rapid7_company(),
+        _rapid7_web_identity(),
+        _rapid7_structured_identity(),
+        "rapid7.com",
+        company_quality=True,
+    )
+    assert resolved["reason_code"] == (
+        "structured_numeric_linkedin_alias_verified"
+    )
+
+    assert lead_scorer._structured_profile_identity_anchor(
+        homepage,
+        {**resolved, **changes},
+        "rapid7.com",
+    ) == homepage
+
+
 @pytest.mark.parametrize(
     "changes",
     [

@@ -16,8 +16,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy
-from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, verify, weight_state
+from lab_arena import code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, trajectory
+from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, operations, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
     validate_accepted_weight_state,
@@ -32,6 +32,23 @@ from gateway.utils.hotkey_roles import (
 )
 
 logger = logging.getLogger(__name__)
+_TRAJECTORY_WARNING_LOCK = threading.Lock()
+_TRAJECTORY_WARNING_LAST: Dict[str, float] = {}
+
+
+def _warn_trajectory_failure(phase: str, exc: BaseException) -> None:
+    """Emit a bounded warning without provider content or exception text."""
+
+    now = time.monotonic()
+    with _TRAJECTORY_WARNING_LOCK:
+        if now - _TRAJECTORY_WARNING_LAST.get(phase, float("-inf")) < 30.0:
+            return
+        _TRAJECTORY_WARNING_LAST[phase] = now
+    logger.warning(
+        "arena trajectory persistence failed phase=%s error_class=%s",
+        phase[:32],
+        type(exc).__name__[:64],
+    )
 
 MODES = ("off", "shadow", "live")
 HOT_ROUND_TTL_SECONDS = 2.0
@@ -3793,6 +3810,36 @@ class ArenaService:
             # failure, or database failure through this passive read.
             raise ServiceError("quota_unavailable", 503) from None
 
+    def handle_trajectory(
+        self, run_id: str, lease_token: str, document: Any
+    ) -> Dict[str, Any]:
+        """Append sanitized events while the exact run lease is active."""
+
+        try:
+            events = trajectory.validate_batch(document, secrets=(lease_token,))
+        except trajectory.TrajectoryError as exc:
+            raise ServiceError("trajectory_invalid:%s" % str(exc)[:80], 400) from None
+        if any(not item["kind"].startswith("runtime.") for item in events):
+            raise ServiceError("trajectory_invalid:runtime events required", 400)
+        run = self._store.get_run(run_id)
+        if run is None:
+            raise ServiceError("run_missing", 404)
+        self._require_round_ownership(str(run.get("round_id") or ""))
+        try:
+            result = self._store.append_trajectory_events(
+                run_id, hash_lease_token(lease_token), events
+            )
+        except ArenaStoreError:
+            raise ServiceError("trajectory_unavailable", 503) from None
+        if result.get("status") == "stale":
+            raise ServiceError("lease_stale", 409)
+        if (
+            result.get("status") != "accepted"
+            or result.get("accepted") != len(events)
+        ):
+            raise ServiceError("trajectory_unavailable", 503)
+        return result
+
     def handle_source(self, run_id: str, lease_token: str) -> bytes:
         """Return source bytes only to the runner that holds the active lease."""
 
@@ -4008,15 +4055,69 @@ class ArenaService:
         contracts.check_strict_document(frame, limits)
         run, context = self._run_context(run_id, lease_token)
         broker = self._broker_for(run["round_id"])
-        result = broker.execute(
-            context,
-            operation_id=str(frame["operation_id"]),
-            parameters=frame["parameters"],
-            action_sequence=frame["action_sequence"],
-            timeout_ms=int(frame["timeout_ms"]),
-            cancel_requested=cancel_requested,
-        )
-        return result.to_document()
+        operation_id = str(frame["operation_id"])
+        operation = operations.OPERATIONS.get(operation_id)
+
+        def persist_provider_event(document: Mapping[str, Any]) -> None:
+            persisted = self._store.append_trajectory_events(
+                run_id, context.lease_token_hash, [document]
+            )
+            if (
+                persisted.get("status") != "accepted"
+                or persisted.get("accepted") != 1
+            ):
+                raise ArenaStoreError("provider trajectory was not accepted")
+
+        try:
+            request_content = trajectory.provider_request_content(frame)
+            if operation is not None:
+                request_content["provider"] = operation.provider
+            persist_provider_event(
+                trajectory.event("provider.request", request_content)
+            )
+        except Exception as exc:
+            # Diagnostics must never change provider dispatch, billing, retry,
+            # or the result returned to the worker.
+            _warn_trajectory_failure("provider_request", exc)
+        started = time.monotonic()
+        try:
+            result = broker.execute(
+                context,
+                operation_id=operation_id,
+                parameters=frame["parameters"],
+                action_sequence=frame["action_sequence"],
+                timeout_ms=int(frame["timeout_ms"]),
+                cancel_requested=cancel_requested,
+            )
+        except Exception as exc:
+            try:
+                error_content = {
+                    "operation_id": operation_id,
+                    "provider": operation.provider if operation is not None else "unknown",
+                    "action_sequence": frame["action_sequence"],
+                    "elapsed_ms": int((time.monotonic() - started) * 1000),
+                    "error_class": type(exc).__name__,
+                }
+                persist_provider_event(
+                    trajectory.event("provider.error", error_content)
+                )
+            except Exception as diagnostic_exc:
+                _warn_trajectory_failure("provider_error", diagnostic_exc)
+            raise
+        document = result.to_document()
+        try:
+            persist_provider_event(
+                trajectory.event(
+                    "provider.response",
+                    trajectory.provider_response_content(
+                        document,
+                        elapsed_ms=int((time.monotonic() - started) * 1000),
+                    ),
+                )
+            )
+        except Exception as exc:
+            _warn_trajectory_failure("provider_response", exc)
+        return document
 
     def handle_complete(self, envelope: Any) -> Dict[str, Any]:
         validated, round_row = self._request_round(envelope, scope=contracts.SCOPE_COMPLETE, hot=True)

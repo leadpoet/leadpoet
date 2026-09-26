@@ -3812,6 +3812,7 @@ def test_state_street_web_identity_reuses_structured_profile_for_size_with_listi
     }
     structured_calls = []
     exa_calls = []
+    investigator_calls = []
 
     async def prechecks(*_args, **_kwargs):
         return company_fit_match("prechecks passed")
@@ -3857,6 +3858,26 @@ def test_state_street_web_identity_reuses_structured_profile_for_size_with_listi
         exa_calls.append(url)
         return {"outcome": "insufficient_evidence", "url": url}
 
+    async def investigate(**kwargs):
+        investigator_calls.append(kwargs)
+        assert kwargs["targets"] == ("stage",)
+        finding = {
+            "target": "stage",
+            "status": "VERIFIED",
+            "observed_value": "Public",
+            "evidence_url": "https://investors.statestreet.com/stock-information",
+            "evidence_quote": (
+                "State Street common stock is listed on the NYSE under ticker STT."
+            ),
+            "reason": "Current issuer listing evidence supports Public stage.",
+        }
+        return {
+            "claims": {"stage": finding},
+            "_validated_stage_finding": finding,
+            "failure_reason": "",
+            "usage": {"reasoning_turns": 1, "search_calls": 1, "fetch_calls": 1},
+        }
+
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
     monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
@@ -3867,6 +3888,7 @@ def test_state_street_web_identity_reuses_structured_profile_for_size_with_listi
     monkeypatch.setattr(
         lead_scorer, "fetch_current_linkedin_company_size", exa_profile
     )
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
 
     if frozen_round_policy:
         for name, value in scorer_entrypoint.PLACEHOLDER_CREDENTIALS.items():
@@ -3924,6 +3946,7 @@ def test_state_street_web_identity_reuses_structured_profile_for_size_with_listi
     assert decision == COMPANY_FIT_MATCH, details
     assert exa_calls == [profile_url] * 2
     assert structured_calls == [("statestreet.com", profile_url)]
+    assert len(investigator_calls) == 1
     assert details["company_fit_dimensions"]["employee_size"] == COMPANY_FIT_MATCH
     assert details["company_fit_dimensions"]["stage"] == COMPANY_FIT_MATCH
     assert details["dimension_evidence"]["employee_size"]["web_evidence"] == {
@@ -4064,7 +4087,7 @@ def test_structured_public_stage_scorer_entrypoint_transition(
 def test_truist_structured_identity_recovers_full_scorer_entrypoint(monkeypatch):
     for name, value in scorer_entrypoint.PLACEHOLDER_CREDENTIALS.items():
         monkeypatch.setenv(name, value)
-    calls = {"web": 0, "structured": 0, "exa": 0}
+    calls = {"web": 0, "structured": 0, "exa": 0, "investigator": 0}
     profile_url = (
         "https://www.linkedin.com/company/truistfinancialcorporation"
     )
@@ -4155,6 +4178,27 @@ def test_truist_structured_identity_recovers_full_scorer_entrypoint(monkeypatch)
         calls["exa"] += 1
         return {"outcome": "insufficient_evidence", "url": url}
 
+    async def investigate(**kwargs):
+        calls["investigator"] += 1
+        assert kwargs["targets"] == ("stage",)
+        finding = {
+            "target": "stage",
+            "status": "VERIFIED",
+            "observed_value": "Public",
+            "evidence_url": "https://ir.truist.com/",
+            "evidence_quote": (
+                "Truist Financial Corporation common stock is listed on the "
+                "NYSE under ticker TFC."
+            ),
+            "reason": "Current issuer listing evidence supports Public stage.",
+        }
+        return {
+            "claims": {"stage": finding},
+            "_validated_stage_finding": finding,
+            "failure_reason": "",
+            "usage": {"reasoning_turns": 1, "search_calls": 1, "fetch_calls": 1},
+        }
+
     async def intent_score(*_args, **_kwargs):
         return 60.0, 100, "verified", "2026-09-03", 0
 
@@ -4171,6 +4215,7 @@ def test_truist_structured_identity_recovers_full_scorer_entrypoint(monkeypatch)
         "fetch_current_linkedin_company_size",
         exa_profile,
     )
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
     monkeypatch.setattr(lead_scorer, "_score_single_intent_signal", intent_score)
     icp = _icp().model_copy(update={
         "industry": "Financial Services",
@@ -4209,7 +4254,9 @@ def test_truist_structured_identity_recovers_full_scorer_entrypoint(monkeypatch)
     output = scorer_entrypoint.score_input(document)
 
     assert "failure" not in output, (output, calls)
-    assert calls == {"web": 1, "structured": 1, "exa": 2}, output
+    assert calls == {
+        "web": 1, "structured": 1, "exa": 2, "investigator": 1,
+    }, output
     receipt = output["breakdowns"][0]["verifier_gate_receipts"][0]
     assert receipt["decision"] == COMPANY_FIT_MATCH
     assert receipt["dimension_evidence"]["identity"][

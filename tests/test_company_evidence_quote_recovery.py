@@ -200,9 +200,13 @@ def test_ciso_quote_repair_failure_forces_one_remaining_search_and_fetch(monkeyp
         result["claims"]["industry"], result["usage"]
     )
     assert result["usage"] == {
-        "reasoning_turns": 5, "search_calls": 1, "fetch_calls": 1,
+        "reasoning_turns": 5, "search_calls": 2, "fetch_calls": 1,
     }
     assert searches == [
+        (
+            "CISO Global ciso.inc current public listing completed "
+            "take-private acquisition delisting"
+        ),
         "CISO Global current Nasdaq listing cybersecurity software"
     ]
     fetch.assert_awaited_once()

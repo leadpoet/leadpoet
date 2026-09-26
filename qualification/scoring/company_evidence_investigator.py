@@ -40,9 +40,10 @@ from qualification.scoring.verification_helpers import (
     visible_html_links,
 )
 
-# Use an already proven scorer tool model from the signed Arena policy. This
-# does not add a new model or role to that policy.
+# Use only scorer models already pinned by the signed Arena policy. This does
+# not add a new model or role to that policy.
 INVESTIGATOR_MODEL = "google/gemini-2.5-flash"
+POSITIVE_SEMANTIC_REVIEW_MODEL = "openai/gpt-6-luna"
 MAX_REASONING_TURNS = 8
 MAX_SEARCH_CALLS = 2
 MAX_FETCH_CALLS = 3
@@ -1916,7 +1917,11 @@ async def investigate_company_evidence(
                         "Content-Type": "application/json",
                     },
                     payload={
-                        "model": INVESTIGATOR_MODEL,
+                        "model": (
+                            POSITIVE_SEMANTIC_REVIEW_MODEL
+                            if positive_semantic_review
+                            else INVESTIGATOR_MODEL
+                        ),
                         "messages": [
                             {"role": "system", "content": _SYSTEM_PROMPT},
                             *messages,

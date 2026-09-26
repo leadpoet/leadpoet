@@ -7682,6 +7682,112 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
     assert "Equivalent source language is sufficient" in system_prompt
 
 
+@pytest.mark.parametrize(
+    ("positive_semantic_review", "expected_model"),
+    [
+        (False, investigator.INVESTIGATOR_MODEL),
+        (True, investigator.POSITIVE_SEMANTIC_REVIEW_MODEL),
+    ],
+)
+def test_positive_semantic_review_routes_one_bounded_loop_to_existing_luna(
+    monkeypatch,
+    positive_semantic_review,
+    expected_model,
+):
+    url = "https://acme.example/platform"
+    quote = "Acme supplies enrollment software to universities worldwide."
+    requests = []
+    routed_requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        normalized = arena_operations.validate_operation_request(
+            "openrouter.chat", payload
+        )
+        outbound = arena_operations.build_outbound_request(
+            "openrouter.chat", payload
+        )
+        outbound_body = json.loads(outbound.body)
+        routed_requests.append((normalized, outbound_body))
+        requests.append(payload)
+        arguments = {"findings": [_finding(
+            "industry",
+            observed_value="University enrollment software",
+            observed_industry="Education",
+            observed_subindustry="Higher education services",
+            activity_role="supplier_operator",
+            evidence_url=url,
+            evidence_quote=quote,
+        )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {
+                "name": "submit_findings",
+                "arguments": json.dumps(arguments),
+            },
+        }]}}]}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("industry",),
+        requested_industry="Education",
+        requested_subindustry="Higher education services",
+        requested_product_service="Enrollment software for universities",
+        positive_semantic_review=positive_semantic_review,
+        prior_observations={"submitted_source_urls": [url]},
+        verified_homepage_identity={
+            "normalized_name": "acme",
+            "registrable_dns_domain": "acme.example",
+        },
+        prefetched_pages={url: {"final_url": url, "text": quote}},
+    ))
+
+    assert len(requests) == 1
+    assert len(routed_requests) == 1
+    assert requests[0]["model"] == expected_model
+    normalized, outbound_body = routed_requests[0]
+    assert normalized["max_tokens"] == requests[0]["max_tokens"] == 3000
+    assert normalized["max_tokens"] <= (
+        arena_operations.OPENROUTER_MAX_OUTPUT_TOKENS
+    )
+    assert outbound_body["provider"] == dict(
+        arena_operations.OPENROUTER_STRICT_PROVIDER_POLICY
+    )
+    assert outbound_body["tools"] == requests[0]["tools"]
+    assert outbound_body["tool_choice"] == "required"
+    input_document = json.loads(
+        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+    )
+    assert input_document["positive_semantic_review"] is (
+        positive_semantic_review
+    )
+    assert input_document["investigation_limits"] == {
+        "reasoning_turns": 8,
+        "search_calls": 2,
+        "fetch_calls": 3,
+        "admission_deadline_seconds": 110.0,
+        "prefetched_pages": 1,
+        "remaining_fetch_calls": 2,
+    }
+    assert result["claims"]["industry"]["status"] == "VERIFIED"
+    assert result["usage"] == {
+        "reasoning_turns": 1,
+        "search_calls": 0,
+        "fetch_calls": 0,
+    }
+
+
+def test_positive_semantic_review_model_is_already_in_judge_allowlist():
+    assert arena_scoring.DEFAULT_JUDGE_MODELS["intent_fetched_evidence"] == (
+        investigator.POSITIVE_SEMANTIC_REVIEW_MODEL
+    )
+
+
 def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatch):
     url = "https://acme.example/investors"
     quote = "Acme common stock is listed on NASDAQ under ticker ACME."

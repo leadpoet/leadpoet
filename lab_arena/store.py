@@ -52,6 +52,11 @@ SERVICE_ROLE_NAME = "lab_arena_service"
 SCORE_BATCH_SIZE = 500
 
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
+    "lab_arena_append_trajectory_events_v1": (
+        ("p_run_id", "text"),
+        ("p_lease_token_hash", "text"),
+        ("p_events", "jsonb"),
+    ),
     "lab_arena_per_icp_cost_schema_v1": (),
     "lab_arena_next_closed_deepline_reconciliation_v1": (
         ("p_mode", "text"), ("p_network_name", "text"),
@@ -731,6 +736,26 @@ class ArenaStore:
             ):
                 raise ArenaStoreError("run quota snapshot schema mismatch")
         return result
+
+    def append_trajectory_events(
+        self,
+        run_id: str,
+        lease_token_hash: str,
+        events: Sequence[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        """Append one bounded batch under the run's active lease."""
+
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_append_trajectory_events_v1",
+                {
+                    "p_run_id": run_id,
+                    "p_lease_token_hash": lease_token_hash,
+                    "p_events": [dict(item) for item in events],
+                },
+            ),
+            "append_trajectory_events",
+        )
 
     def champion_provider_restart_required(self, run_id: str, provider: str) -> bool:
         return self.provider_funding(run_id, provider).get("restart_required") is True

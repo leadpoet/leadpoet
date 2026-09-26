@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: minimal Arena trajectories
+
+On 2026-09-25 the user authorized a simple private Arena trajectory event log
+for baseline and miner executions on primary and external validators. Authority
+includes protected inspection, exact committed Supabase migrations and policies,
+narrow code changes, provider-backed runtime tests, pushes and safe merges,
+and canonical paired restarts through the overnight operational procedures.
+Use existing validator leases and gateway credentials; require no new external
+validator secrets or configuration. Preserve scoring, costs, qualification,
+frozen rounds, accepted work, rewards, weights and concurrent changes. Do not
+introduce receipt graphs, hash chains, manifests or retired Research Lab paths.
+This scope ends after deployment and all four execution paths are verified.
+
 ## Scoped production authorization: September 26 Arena monitoring and audit
 
 On 2026-09-25 the user authorized monitoring the September 26 production

@@ -26,6 +26,7 @@ _MAX_REQUEST_BYTES = 1_100_000
 # A completion can contain the judge's accepted 2 MiB scoring output plus the
 # small signed-request wrapper. The sidecar performs the exact schema checks.
 _MAX_COMPLETION_REQUEST_BYTES = (2 * 1_048_576) + 65_536
+_MAX_TRAJECTORY_REQUEST_BYTES = 64 * 1024
 _SIDECAR_URL = "http://127.0.0.1:8792"
 _TESTNET_SIDECAR_URL = "http://127.0.0.1:8793"
 _FORWARDED_REQUEST_HEADERS = ("content-type", "x-lab-arena-lease")
@@ -279,6 +280,11 @@ async def _proxy_request(arena_path: str, request: Request, *, testnet: bool = F
         and len(parts) == 4
         and parts[:2] == ["v1", "runs"]
         and parts[3] == "complete"
+        else _MAX_TRAJECTORY_REQUEST_BYTES
+        if request.method == "POST"
+        and len(parts) == 4
+        and parts[:2] == ["v1", "runs"]
+        and parts[3] == "trajectory"
         else _MAX_REQUEST_BYTES
     )
     body = await _bounded_body(request, limit=request_limit)

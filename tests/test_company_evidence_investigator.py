@@ -6500,6 +6500,128 @@ def test_conflicting_third_party_ranges_remain_unproven():
     assert receipt["resolution"] == "unresolved"
 
 
+@pytest.mark.parametrize(
+    ("requested_ranges", "eligibility", "expected_decision", "receipt_status"),
+    [
+        (
+            "11-50 or 51-200",
+            True,
+            COMPANY_FIT_MATCH,
+            "VERIFIED",
+        ),
+        (
+            "201-500",
+            False,
+            COMPANY_FIT_MISMATCH,
+            "CONTRADICTED",
+        ),
+    ],
+)
+def test_exact_identity_canonical_range_conflict_resolves_when_eligibility_agrees(
+    requested_ranges,
+    eligibility,
+    expected_decision,
+    receipt_status,
+):
+    verdict = _complete_verdict(
+        observed_employee_count="11-50",
+        employee_size_matches=eligibility,
+        employee_size_evidence_url="https://directory.example/acme",
+        employee_size_evidence_quote="Acme Company size 11-50 employees.",
+    )
+    structured = {
+        "employee_count": "51-200",
+        "provider": "harvestapi_get_company",
+        "source_field": "employeeCountRange",
+        "url": "https://www.linkedin.com/company/acme",
+        "website": "https://acme.example/",
+    }
+    assert _employee_size_sources_conflict(verdict, structured) is True
+
+    result = _reverify_decision(
+        verdict,
+        "",
+        "",
+        icp=_icp(employee_count=requested_ranges),
+        company=_company(),
+        verified_homepage_identity={
+            "normalized_name": "Acme",
+            "registrable_dns_domain": "acme.example",
+            "linkedin_company_slug": "acme",
+        },
+        structured_employee_size_evidence=structured,
+        employee_size_conflict=True,
+        company_quality=True,
+    )
+
+    assert result.decision == expected_decision
+    assert result.details["dimension_decisions"]["employee_size"] == (
+        expected_decision
+    )
+    receipt = result.details["employee_size_conflict_receipt"]
+    assert receipt["status"] == receipt_status
+    assert receipt["resolution"] == (
+        "structured_linkedin_employee_count_range_primary"
+    )
+
+
+@pytest.mark.parametrize(
+    ("observed_range", "structured_overrides"),
+    [
+        ("11ish-50ish", {}),
+        (
+            "11-50",
+            {
+                "url": "https://www.linkedin.com/company/different-company",
+                "website": "https://different.example/",
+            },
+        ),
+    ],
+)
+def test_range_conflict_resolution_rejects_malformed_or_different_identity(
+    observed_range,
+    structured_overrides,
+):
+    verdict = _complete_verdict(
+        observed_employee_count=observed_range,
+        employee_size_matches=True,
+        employee_size_evidence_url="https://directory.example/acme",
+        employee_size_evidence_quote=f"Acme Company size {observed_range} employees.",
+    )
+    structured = {
+        "employee_count": "51-200",
+        "provider": "harvestapi_get_company",
+        "source_field": "employeeCountRange",
+        "url": "https://www.linkedin.com/company/acme",
+        "website": "https://acme.example/",
+        **structured_overrides,
+    }
+
+    result = _reverify_decision(
+        verdict,
+        "",
+        "",
+        icp=_icp(employee_count="11-50 or 51-200"),
+        company=_company(),
+        verified_homepage_identity={
+            "normalized_name": "Acme",
+            "registrable_dns_domain": "acme.example",
+            "linkedin_company_slug": "acme",
+        },
+        structured_employee_size_evidence=structured,
+        employee_size_conflict=True,
+        company_quality=True,
+    )
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["dimension_decisions"]["employee_size"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+    assert result.details["employee_size_conflict_receipt"]["resolution"] == (
+        "unresolved"
+    )
+
+
 def test_headcount_finding_binds_value_and_rejects_scoped_counts():
     url = "https://acme.example/about"
     finding = _finding(

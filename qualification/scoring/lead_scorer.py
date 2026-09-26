@@ -3621,8 +3621,9 @@ def _structured_linkedin_resolves_exact_estimate_conflict(
     verdict: Mapping[str, Any],
     structured_evidence: Optional[Mapping[str, Any]],
     verified_homepage_identity: Optional[Mapping[str, str]],
+    icp: ICPPrompt,
 ) -> bool:
-    """Prefer only an exact-identity LinkedIn range over a third-party integer."""
+    """Resolve exact-identity integer or eligibility-equivalent range conflicts."""
 
     if not isinstance(structured_evidence, Mapping):
         return False
@@ -3639,20 +3640,34 @@ def _structured_linkedin_resolves_exact_estimate_conflict(
         str(structured_evidence.get("website") or "")
     )
     evidence_slug = linkedin_company_page_slug(structured_evidence.get("url"))
-    return bool(
-        isinstance(observed, int)
-        and not isinstance(observed, bool)
-        and observed >= 0
-        and web_evidence["url"]
-        and web_evidence["quote"]
-        and not is_linkedin_evidence_url(web_evidence["url"])
-        and structured_evidence.get("provider") == STRUCTURED_PROFILE_PROVIDER
+    evidence_is_exact_identity_range = bool(
+        structured_evidence.get("provider") == STRUCTURED_PROFILE_PROVIDER
         and structured_evidence.get("source_field") == STRUCTURED_PROFILE_SOURCE_FIELD
         and structured_evidence.get("employee_count") in LINKEDIN_EMPLOYEE_BUCKETS
         and anchor_domain
         and anchor_slug
         and evidence_domain == anchor_domain
         and evidence_slug == anchor_slug
+    )
+    if not (
+        web_evidence["url"]
+        and web_evidence["quote"]
+        and not is_linkedin_evidence_url(web_evidence["url"])
+        and evidence_is_exact_identity_range
+    ):
+        return False
+    if isinstance(observed, int) and not isinstance(observed, bool):
+        return observed >= 0
+    if not isinstance(observed, str) or observed not in LINKEDIN_EMPLOYEE_BUCKETS:
+        return False
+    web_decision = _decision_from_observed_employee_size(dict(verdict), icp)
+    structured_decision = _structured_employee_size_decision(
+        structured_evidence,
+        icp,
+    )
+    return bool(
+        web_decision in {COMPANY_FIT_MATCH, COMPANY_FIT_MISMATCH}
+        and web_decision == structured_decision
     )
 
 
@@ -4462,6 +4477,7 @@ def _reverify_decision(
             verdict,
             structured_employee_size_evidence,
             verified_homepage_identity,
+            icp,
         )
     )
     stage_evidence = _dimension_web_evidence(verdict, "stage")

@@ -3142,6 +3142,213 @@ def _schema_repair_changes_grounded_identity(
     return True
 
 
+def _atomic_stage_evidence_for_schema_repair(
+    verdict: Mapping[str, Any],
+) -> Optional[dict[str, str]]:
+    """Read stage evidence without joining fields from different layers."""
+
+    def _one_raw_value(*values: Any) -> Optional[str]:
+        present: list[str] = []
+        for value in values:
+            if value is None or value == "":
+                continue
+            if not isinstance(value, str):
+                return None
+            present.append(value)
+        if not present:
+            return ""
+        if any(value != present[0] for value in present[1:]):
+            return None
+        return present[0]
+
+    def _layer(url: Any, quote: Any) -> Optional[dict[str, str]]:
+        if url is None or quote is None:
+            return None
+        if not url and not quote:
+            return {}
+        if not url or not quote:
+            return None
+        valid_url = _valid_web_evidence_url(url)
+        clean_quote = quote.strip() if isinstance(quote, str) else ""
+        if (
+            not valid_url
+            or not clean_quote
+            or len(clean_quote) > 2000
+        ):
+            return None
+        return {"url": valid_url, "quote": clean_quote}
+
+    top_url = _one_raw_value(verdict.get("stage_evidence_url"))
+    top_quote = _one_raw_value(verdict.get("stage_evidence_quote"))
+    if top_url is None or top_quote is None:
+        return None
+    top = _layer(top_url, top_quote)
+    if top is None:
+        return None
+
+    nested_container = verdict.get("dimension_evidence")
+    if nested_container is not None and not isinstance(
+        nested_container, Mapping
+    ):
+        return None
+    nested_value = (
+        nested_container.get("stage")
+        if isinstance(nested_container, Mapping)
+        else None
+    )
+    if nested_value is not None and not isinstance(nested_value, Mapping):
+        return None
+    nested = nested_value if isinstance(nested_value, Mapping) else {}
+    nested_url = _one_raw_value(
+        nested.get("url"),
+        nested.get("evidence_url"),
+    )
+    nested_quote = _one_raw_value(
+        nested.get("quote"),
+        nested.get("evidence_quote"),
+    )
+    if nested_url is None or nested_quote is None:
+        return None
+    nested_layer = _layer(nested_url, nested_quote)
+    if nested_layer is None:
+        return None
+    if top and nested_layer and top != nested_layer:
+        return None
+    return top or nested_layer
+
+
+def _preserve_unrelated_validated_stage_evidence(
+    prior_verdict: Mapping[str, Any],
+    prior_result: CompanyFitDecisionResult,
+    repaired_verdict: Mapping[str, Any],
+    repaired_identity: Mapping[str, Any],
+    *,
+    repaired_dimensions: Sequence[str],
+    investigation_targets: Sequence[str],
+    icp_stage: str,
+    verified_homepage_identity: Optional[Mapping[str, Any]],
+    verified_rebrand_identity: Optional[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Keep valid Public proof lost to a weak LinkedIn profile label."""
+
+    projected = dict(repaired_verdict)
+    prior_details = (
+        prior_result.details
+        if isinstance(prior_result.details, Mapping)
+        else {}
+    )
+    prior_dimensions = prior_details.get("dimension_decisions")
+    prior_identity = prior_details.get("identity_receipt")
+    if (
+        not icp_stage
+        or "stage" in repaired_dimensions
+        or "stage" in investigation_targets
+        or not isinstance(prior_dimensions, Mapping)
+        or prior_dimensions.get("stage") != COMPANY_FIT_MATCH
+        or not isinstance(prior_identity, Mapping)
+        or prior_identity.get("decision") != COMPANY_FIT_MATCH
+        or repaired_identity.get("decision") != COMPANY_FIT_MATCH
+    ):
+        return projected
+
+    identity_fields = (
+        "observed_name",
+        "observed_domain",
+        "observed_linkedin_slug",
+    )
+    prior_identity_key = tuple(
+        str(prior_identity.get(field) or "").strip().casefold()
+        for field in identity_fields
+    )
+    repaired_identity_key = tuple(
+        str(repaired_identity.get(field) or "").strip().casefold()
+        for field in identity_fields
+    )
+    if (
+        not all(prior_identity_key)
+        or repaired_identity_key != prior_identity_key
+    ):
+        return projected
+
+    prior_stage = _normalize_company_stage(
+        prior_verdict.get("observed_company_stage")
+    )
+    repaired_stage = _normalize_company_stage(
+        repaired_verdict.get("observed_company_stage")
+    )
+    if (
+        _normalize_company_stage(icp_stage) != "public"
+        or prior_stage != "public"
+        or repaired_stage != "public"
+        or strict_company_fit_boolean(prior_verdict.get("stage_matches"))
+        is not True
+        or strict_company_fit_boolean(repaired_verdict.get("stage_matches"))
+        is not True
+    ):
+        return projected
+
+    prior_evidence = _atomic_stage_evidence_for_schema_repair(prior_verdict)
+    repaired_evidence = _atomic_stage_evidence_for_schema_repair(
+        repaired_verdict
+    )
+    if (
+        prior_evidence is None
+        or repaired_evidence is None
+        or not prior_evidence.get("url")
+        or not prior_evidence.get("quote")
+        or not _stage_quote_supports_observation(
+            prior_stage,
+            prior_evidence["quote"],
+        )
+        or not _evidence_has_no_established_source_conflict(
+            prior_evidence,
+            verified_homepage_identity=verified_homepage_identity,
+            verified_rebrand_identity=verified_rebrand_identity,
+        )
+    ):
+        return projected
+
+    repaired_quote = repaired_evidence.get("quote", "")
+    if repaired_quote:
+        profile_url = _strict_linkedin_company_profile_url(
+            repaired_evidence.get("url", "")
+        )
+        expected_profile_url = (
+            "https://www.linkedin.com/company/"
+            + repaired_identity_key[2]
+        )
+        if (
+            profile_url != expected_profile_url
+            or repaired_evidence.get("url", "").rstrip("/") != profile_url
+            or re.fullmatch(
+                r"(?:company\s+type\s*:\s*)?public\s+company"
+                r"(?:\s*[·|]\s*(?:"
+                r"founded\s+\d{4}|"
+                r"(?:company\s+size\s+)?\d[\d,]*\s*"
+                r"(?:[-–]\s*\d[\d,]*|\+)?\s+employees|"
+                r"\d[\d,]*\s+followers"
+                r"))*",
+                " ".join(repaired_quote.split()),
+                re.I,
+            )
+            is None
+        ):
+            return projected
+
+    projected.update(
+        observed_company_stage=prior_stage,
+        stage_matches=True,
+        stage_evidence_url=prior_evidence["url"],
+        stage_evidence_quote=prior_evidence["quote"],
+    )
+    nested = repaired_verdict.get("dimension_evidence")
+    if isinstance(nested, Mapping):
+        nested_copy = dict(nested)
+        nested_copy["stage"] = dict(prior_evidence)
+        projected["dimension_evidence"] = nested_copy
+    return projected
+
+
 def _without_employee_size_observation(verdict: Mapping[str, Any]) -> dict[str, Any]:
     """Copy a verdict while making only employee-size proof unavailable."""
 
@@ -5930,6 +6137,17 @@ async def _llm_reverify_company(
         # may describe the newly observed entity, so reject the whole response
         # instead of mixing them with the prior entity's validated findings.
         return result
+    repaired_verdict = _preserve_unrelated_validated_stage_evidence(
+        verdict,
+        result,
+        repaired_verdict,
+        repaired_identity_receipt,
+        repaired_dimensions=incomplete,
+        investigation_targets=investigation_targets,
+        icp_stage=icp_stage,
+        verified_homepage_identity=verified_identity,
+        verified_rebrand_identity=verified_rebrand_identity,
+    )
     repaired_verdict, _repaired_attribute_source = (
         await _ground_required_attribute_evidence(
             repaired_verdict,

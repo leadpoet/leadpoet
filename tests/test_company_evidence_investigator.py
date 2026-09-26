@@ -5670,6 +5670,512 @@ def test_schema_repair_reconciles_bounded_industry_decision(
         )
 
 
+@pytest.mark.parametrize(
+    ("repair_attribute", "expected_decision"),
+    [
+        (True, COMPANY_FIT_MATCH),
+        (False, COMPANY_FIT_MISMATCH),
+    ],
+)
+def test_sentinelone_style_industry_repair_preserves_valid_public_stage(
+    monkeypatch,
+    repair_attribute,
+    expected_decision,
+):
+    """Curated fixture reproducing the retained SentinelOne field transition."""
+
+    company = _company(
+        name="SentinelOne",
+        website="https://www.sentinelone.com/",
+        linkedin="https://www.linkedin.com/company/sentinelone",
+    ).model_copy(update={
+        "industry": "Cybersecurity",
+        "employee_count": "1,001-5,000",
+        "company_stage": "Public",
+    })
+    icp = _icp(
+        industry="Cybersecurity",
+        sub_industry="Endpoint security",
+        employee_count="1,001-5,000",
+        company_stage="Public",
+        product_service="Enterprise endpoint security software.",
+        required_attribute="Provides an AI-powered endpoint security platform.",
+    )
+    public_url = "https://www.sentinelone.com/faq/"
+    public_quote = (
+        "SentinelOne is a publicly traded company on the New York Stock "
+        "Exchange (Ticker Symbol: S)."
+    )
+    initial = _complete_verdict(
+        observed_company_name="SentinelOne",
+        observed_company_website="https://www.sentinelone.com/",
+        observed_company_linkedin=(
+            "https://www.linkedin.com/company/sentinelone"
+        ),
+        observed_employee_count="1,001-5,000",
+        employee_size_evidence_url=(
+            "https://www.linkedin.com/company/sentinelone"
+        ),
+        employee_size_evidence_quote="Company size 1,001-5,000 employees",
+        observed_industry="",
+        observed_subindustry="",
+        industry_matches=None,
+        industry_activity_role="unresolved",
+        industry_evidence_url="",
+        industry_evidence_quote="",
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url=public_url,
+        stage_evidence_quote=public_quote,
+        attribute_satisfied=None,
+        required_attribute_evidence_url="",
+        required_attribute_evidence_quote="",
+    )
+    repaired = _complete_verdict(
+        observed_company_name="SentinelOne",
+        observed_company_website="https://www.sentinelone.com/",
+        observed_company_linkedin=(
+            "https://www.linkedin.com/company/sentinelone"
+        ),
+        observed_employee_count="1,001-5,000",
+        employee_size_evidence_url=(
+            "https://www.linkedin.com/company/sentinelone"
+        ),
+        employee_size_evidence_quote="Company size 1,001-5,000 employees",
+        observed_industry="Cybersecurity",
+        observed_subindustry="Endpoint security",
+        industry_matches=True,
+        industry_activity_role="supplier_operator",
+        industry_evidence_url="https://www.sentinelone.com/platform/",
+        industry_evidence_quote=(
+            "SentinelOne provides an AI-powered endpoint security platform."
+        ),
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url=(
+            "https://www.linkedin.com/company/sentinelone"
+        ),
+        stage_evidence_quote=(
+            "Public Company · Founded 2013 · 1,001-5,000 employees"
+        ),
+        attribute_satisfied=repair_attribute,
+        required_attribute_evidence_url=(
+            "https://www.sentinelone.com/platform/"
+        ),
+        required_attribute_evidence_quote=(
+            "SentinelOne provides an AI-powered endpoint security platform."
+        ),
+    )
+    provider_calls = []
+
+    async def provider(**kwargs):
+        provider_calls.append(kwargs["telemetry_purpose"])
+        return (initial if len(provider_calls) == 1 else repaired), ""
+
+    async def bounded_investigation(*, targets, **_kwargs):
+        assert targets == ("industry",)
+        return {
+            "claims": {
+                "industry": _finding(
+                    "industry",
+                    observed_value="Endpoint security",
+                    observed_industry="Cybersecurity",
+                    observed_subindustry="Endpoint security",
+                    activity_role="supplier_operator",
+                    evidence_url="https://www.sentinelone.com/platform/",
+                    evidence_quote=(
+                        "SentinelOne provides an AI-powered endpoint security "
+                        "platform."
+                    ),
+                )
+            },
+            "failure_reason": "",
+        }
+
+    async def keep_observation(verdict, *_args, **_kwargs):
+        return verdict
+
+    async def keep_attribute(verdict, **_kwargs):
+        return verdict, {}
+
+    homepage_identity = lead_scorer.company_fit_match(
+        "homepage identity verified",
+        details={
+            "identity": {
+                "decision": COMPANY_FIT_MATCH,
+                "evidence_source": "company_homepage",
+                "observed_name": "sentinelone",
+                "observed_domain": "sentinelone.com",
+                "observed_linkedin_slug": "sentinelone",
+            },
+            "verified_homepage_transport_domain": "sentinelone.com",
+        },
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "investigate_company_evidence",
+        bounded_investigation,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "_refresh_linkedin_employee_size_observation",
+        keep_observation,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "_ground_required_attribute_evidence",
+        keep_attribute,
+    )
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        company,
+        icp,
+        require_company_fit_dimensions=True,
+        verified_homepage_identity=homepage_identity,
+        company_quality=True,
+        evidence_investigator=True,
+    ))
+
+    assert provider_calls == [
+        "lead_scorer_reverify",
+        "lead_scorer_reverify_schema_repair",
+    ]
+    assert result.decision == expected_decision
+    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MATCH
+    assert result.details["dimension_evidence"]["stage"] == {
+        "url": public_url,
+        "quote": public_quote,
+    }
+    assert result.details["required_attribute_decision"] == (
+        COMPANY_FIT_MATCH
+        if repair_attribute
+        else COMPANY_FIT_MISMATCH
+    )
+
+
+def _stage_repair_guard_fixture():
+    company = _company(
+        name="SentinelOne",
+        website="https://www.sentinelone.com/",
+        linkedin="https://www.linkedin.com/company/sentinelone",
+    ).model_copy(update={"company_stage": "Public"})
+    icp = _icp(company_stage="Public")
+    homepage = {
+        "normalized_name": "sentinelone",
+        "registrable_dns_domain": "sentinelone.com",
+        "linkedin_company_slug": "sentinelone",
+    }
+    prior = _complete_verdict(
+        observed_company_name="SentinelOne",
+        observed_company_website="https://www.sentinelone.com/",
+        observed_company_linkedin=(
+            "https://www.linkedin.com/company/sentinelone"
+        ),
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url="https://www.sentinelone.com/faq/",
+        stage_evidence_quote=(
+            "SentinelOne is a publicly traded company on the New York Stock "
+            "Exchange (Ticker Symbol: S)."
+        ),
+    )
+    result = _reverify_decision(
+        prior,
+        "",
+        "public",
+        icp=icp,
+        company=company,
+        verified_homepage_identity=homepage,
+        verified_homepage_transport_domain="sentinelone.com",
+        company_quality=True,
+    )
+    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MATCH
+    repaired = dict(prior)
+    repaired.update(
+        stage_evidence_url="https://www.linkedin.com/company/sentinelone",
+        stage_evidence_quote="Company type: Public Company",
+    )
+    return company, homepage, prior, result, repaired
+
+
+@pytest.mark.parametrize(
+    ("repaired_dimensions", "investigation_targets"),
+    [
+        (("stage",), ("industry",)),
+        (("required_attribute",), ("stage",)),
+    ],
+)
+def test_stage_repair_guard_does_not_override_stage_targeted_research(
+    repaired_dimensions,
+    investigation_targets,
+):
+    company, homepage, prior, result, repaired = _stage_repair_guard_fixture()
+
+    projected = lead_scorer._preserve_unrelated_validated_stage_evidence(
+        prior,
+        result,
+        repaired,
+        result.details["identity_receipt"],
+        repaired_dimensions=repaired_dimensions,
+        investigation_targets=investigation_targets,
+        icp_stage="public",
+        verified_homepage_identity=homepage,
+        verified_rebrand_identity=None,
+    )
+
+    assert projected["stage_evidence_quote"] == "Company type: Public Company"
+
+
+def test_stage_repair_guard_does_not_promote_unproven_prior_stage():
+    company, homepage, prior, _result, repaired = _stage_repair_guard_fixture()
+    prior.update(
+        stage_evidence_url="https://www.linkedin.com/company/sentinelone",
+        stage_evidence_quote="Company type: Public Company",
+    )
+    result = _reverify_decision(
+        prior,
+        "",
+        "public",
+        icp=_icp(company_stage="Public"),
+        company=company,
+        verified_homepage_identity=homepage,
+        verified_homepage_transport_domain="sentinelone.com",
+        company_quality=True,
+    )
+
+    projected = lead_scorer._preserve_unrelated_validated_stage_evidence(
+        prior,
+        result,
+        repaired,
+        result.details["identity_receipt"],
+        repaired_dimensions=("required_attribute",),
+        investigation_targets=("industry",),
+        icp_stage="public",
+        verified_homepage_identity=homepage,
+        verified_rebrand_identity=None,
+    )
+
+    assert result.details["dimension_decisions"]["stage"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+    assert projected["stage_evidence_quote"] == "Company type: Public Company"
+
+
+def test_stage_repair_guard_preserves_an_empty_same_stage_replacement():
+    _company_value, homepage, prior, result, repaired = (
+        _stage_repair_guard_fixture()
+    )
+    repaired.update(stage_evidence_url="", stage_evidence_quote="")
+
+    projected = lead_scorer._preserve_unrelated_validated_stage_evidence(
+        prior,
+        result,
+        repaired,
+        result.details["identity_receipt"],
+        repaired_dimensions=("required_attribute",),
+        investigation_targets=("industry",),
+        icp_stage="public",
+        verified_homepage_identity=homepage,
+        verified_rebrand_identity=None,
+    )
+
+    assert projected["stage_evidence_url"] == (
+        "https://www.sentinelone.com/faq/"
+    )
+    assert _stage_quote_supports_observation(
+        "public",
+        projected["stage_evidence_quote"],
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "top_half_pair",
+        "nested_half_pair",
+        "conflicting_nested_url",
+        "conflicting_nested_quote",
+        "top_half_with_unrelated_nested_pair",
+        "invalid_raw_type",
+    ],
+)
+def test_stage_repair_guard_rejects_non_atomic_evidence_layers(mutation):
+    _company_value, homepage, prior, result, repaired = (
+        _stage_repair_guard_fixture()
+    )
+    profile_url = "https://www.linkedin.com/company/sentinelone"
+    label = "Company type: Public Company"
+    if mutation == "top_half_pair":
+        repaired.update(
+            stage_evidence_url="https://other.example/status",
+            stage_evidence_quote="",
+        )
+    elif mutation == "nested_half_pair":
+        repaired["dimension_evidence"] = {
+            "stage": {"url": profile_url, "quote": ""}
+        }
+    elif mutation == "conflicting_nested_url":
+        repaired["dimension_evidence"] = {
+            "stage": {
+                "url": "https://other.example/status",
+                "quote": label,
+            }
+        }
+    elif mutation == "conflicting_nested_quote":
+        repaired["dimension_evidence"] = {
+            "stage": {
+                "url": profile_url,
+                "quote": "SentinelOne is no longer publicly traded.",
+            }
+        }
+    elif mutation == "top_half_with_unrelated_nested_pair":
+        repaired.update(
+            stage_evidence_url=profile_url,
+            stage_evidence_quote="",
+            dimension_evidence={
+                "stage": {
+                    "url": "https://other.example/status",
+                    "quote": label,
+                }
+            },
+        )
+    else:
+        repaired["stage_evidence_quote"] = [label]
+    expected = dict(repaired)
+
+    projected = lead_scorer._preserve_unrelated_validated_stage_evidence(
+        prior,
+        result,
+        repaired,
+        result.details["identity_receipt"],
+        repaired_dimensions=("required_attribute",),
+        investigation_targets=("industry",),
+        icp_stage="public",
+        verified_homepage_identity=homepage,
+        verified_rebrand_identity=None,
+    )
+
+    assert projected == expected
+
+
+def test_stage_repair_guard_accepts_identical_atomic_nested_pair():
+    _company_value, homepage, prior, result, repaired = (
+        _stage_repair_guard_fixture()
+    )
+    profile_evidence = {
+        "url": "https://www.linkedin.com/company/sentinelone",
+        "quote": "Company type: Public Company",
+    }
+    repaired["dimension_evidence"] = {"stage": dict(profile_evidence)}
+
+    projected = lead_scorer._preserve_unrelated_validated_stage_evidence(
+        prior,
+        result,
+        repaired,
+        result.details["identity_receipt"],
+        repaired_dimensions=("required_attribute",),
+        investigation_targets=("industry",),
+        icp_stage="public",
+        verified_homepage_identity=homepage,
+        verified_rebrand_identity=None,
+    )
+
+    expected = {
+        "url": "https://www.sentinelone.com/faq/",
+        "quote": (
+            "SentinelOne is a publicly traded company on the New York Stock "
+            "Exchange (Ticker Symbol: S)."
+        ),
+    }
+    assert projected["stage_evidence_url"] == expected["url"]
+    assert projected["stage_evidence_quote"] == expected["quote"]
+    assert projected["dimension_evidence"]["stage"] == expected
+
+
+@pytest.mark.parametrize("drift", ["identity", "source"])
+def test_stage_repair_guard_rejects_identity_or_source_drift(drift):
+    company, homepage, prior, result, repaired = _stage_repair_guard_fixture()
+    repaired_identity = dict(result.details["identity_receipt"])
+    if drift == "identity":
+        repaired_identity["observed_domain"] = "other.example"
+    else:
+        repaired.update(
+            stage_evidence_url=(
+                "https://www.linkedin.com/posts/sentinelonecareers_update"
+            ),
+            stage_evidence_quote="Company type: Public Company",
+        )
+
+    projected = lead_scorer._preserve_unrelated_validated_stage_evidence(
+        prior,
+        result,
+        repaired,
+        repaired_identity,
+        repaired_dimensions=("required_attribute",),
+        investigation_targets=("industry",),
+        icp_stage="public",
+        verified_homepage_identity=homepage,
+        verified_rebrand_identity=None,
+    )
+
+    assert projected["stage_evidence_quote"] == "Company type: Public Company"
+
+
+@pytest.mark.parametrize(
+    "replacement_quote",
+    [
+        "SentinelOne is no longer publicly traded.",
+        "SentinelOne was delisted from the New York Stock Exchange.",
+        "SentinelOne was acquired by Palo Alto Networks.",
+        "SentinelOne plans to list on the New York Stock Exchange.",
+        "SentinelOne has a strong market presence and experienced leadership.",
+    ],
+)
+def test_stage_repair_guard_rejects_non_profile_or_contradictory_prose(
+    replacement_quote,
+):
+    company, homepage, prior, result, repaired = _stage_repair_guard_fixture()
+    repaired["stage_evidence_quote"] = replacement_quote
+
+    projected = lead_scorer._preserve_unrelated_validated_stage_evidence(
+        prior,
+        result,
+        repaired,
+        result.details["identity_receipt"],
+        repaired_dimensions=("required_attribute",),
+        investigation_targets=("industry",),
+        icp_stage="public",
+        verified_homepage_identity=homepage,
+        verified_rebrand_identity=None,
+    )
+
+    assert projected["stage_evidence_quote"] == replacement_quote
+
+
+def test_stage_repair_guard_does_not_override_a_false_repaired_stage_flag():
+    _company_value, homepage, prior, result, repaired = (
+        _stage_repair_guard_fixture()
+    )
+    repaired["stage_matches"] = False
+
+    projected = lead_scorer._preserve_unrelated_validated_stage_evidence(
+        prior,
+        result,
+        repaired,
+        result.details["identity_receipt"],
+        repaired_dimensions=("required_attribute",),
+        investigation_targets=("industry",),
+        icp_stage="public",
+        verified_homepage_identity=homepage,
+        verified_rebrand_identity=None,
+    )
+
+    assert projected["stage_matches"] is False
+    assert projected["stage_evidence_quote"] == "Company type: Public Company"
+
+
 def test_repaired_real_employee_range_conflict_stays_unproven():
     repaired = _complete_verdict(
         observed_company_name="OxPay",

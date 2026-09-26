@@ -90,8 +90,14 @@ def test_unibuddy_source_and_functional_role_rule_reach_stage_three() -> None:
     assert TARGET in prompt
     assert UNIBUDDY_URL in prompt
     assert UNIBUDDY_TEXT in prompt
-    assert "do not require the job title to repeat the category word" in prompt
-    assert "work across the\n    employer's platform stack or components" in prompt
+    assert "title and submitted claim quote need not repeat" in prompt
+    assert "direct responsibility to build,\n    operate, own, maintain" in prompt
+    assert (
+        "one sentence may establish\n    the platform or component scope and "
+        "another may assign the direct duties"
+    ) in prompt
+    assert "The duty sentence need not repeat the platform name" in prompt
+    assert "an internal developer platform" in prompt
 
 
 @pytest.mark.parametrize(
@@ -103,7 +109,7 @@ def test_unibuddy_source_and_functional_role_rule_reach_stage_three() -> None:
                 "the shared identity and data services that power every layer "
                 "of the Acme platform."
             ),
-            "employer's platform stack or components",
+            "employer's platform products or\n    components",
             id="direct-platform-duties",
         ),
         pytest.param(
@@ -111,7 +117,7 @@ def test_unibuddy_source_and_functional_role_rule_reach_stage_three() -> None:
                 "Software Engineer. You will deliver customer features with "
                 "our product team. About Acme: Acme sells a workflow platform."
             ),
-            "generic software role at a company that sells\n    a platform",
+            "generic software role at a company that sells a\n    platform",
             id="generic-software-at-platform-company",
         ),
         pytest.param(
@@ -127,7 +133,7 @@ def test_unibuddy_source_and_functional_role_rule_reach_stage_three() -> None:
                 "Sales Solutions Engineer. This role belongs to the sales "
                 "organization and demonstrates the platform to prospects."
             ),
-            "Preserve every explicit inclusion and\n    exclusion",
+            "Preserve every explicit inclusion, exclusion",
             id="explicitly-excluded-function",
         ),
     ],
@@ -154,3 +160,32 @@ def test_functional_hiring_guidance_is_bounded_to_hiring_evidence() -> None:
     ):
         assert "HIRING — FUNCTIONAL ROLE MATCH" not in prompt
         assert "job title to repeat the category word" not in prompt
+
+
+def test_functional_role_precedence_does_not_import_unrelated_evidence() -> None:
+    source_text = (
+        "This role gains exposure to the Acme platform. A separate sales role "
+        "operates the platform. About Acme: our platform powers global teams."
+    )
+
+    prompt = _stage_three_prompt(_row(), source_text)
+
+    assert source_text in prompt
+    assert (
+        "Never borrow duties from another role or hiring event"
+    ) in prompt
+    assert "Merely using a platform" in prompt
+    assert "generic software role" in prompt
+
+
+def test_broad_platform_role_does_not_erase_narrow_target_qualifiers() -> None:
+    target = "Actively hiring for internal developer platform roles."
+    prompt = _stage_three_prompt(
+        _row(target=target),
+        "Product Engineer. Own and maintain customer-facing product features.",
+    )
+
+    assert target in prompt
+    assert "If the target instead\n    asks for infrastructure" in prompt
+    assert "an internal developer platform" in prompt
+    assert "preserve that qualifier" in prompt

@@ -3536,6 +3536,12 @@ async def _fetch_structured_linkedin_profile_once(
     anchor_slug = str(
         verified_homepage_identity.get("linkedin_company_slug") or ""
     ).strip().casefold()
+    requested_profile_url = str(
+        verified_homepage_identity.get("requested_profile_url") or ""
+    ).strip()
+    observed_profile_url = str(
+        verified_homepage_identity.get("observed_profile_url") or ""
+    ).strip()
     if not anchor_name or not anchor_domain or not anchor_slug:
         return
     invocation_cache["structured_attempted"] = True
@@ -3551,10 +3557,15 @@ async def _fetch_structured_linkedin_profile_once(
     }
     if collect_identity:
         fetch_kwargs["company_identity_evidence"] = company_identity_evidence
+        if requested_profile_url and observed_profile_url:
+            fetch_kwargs["company_identity_observed_profile_url"] = (
+                observed_profile_url
+            )
     structured_employee_size_evidence = (
         await fetch_structured_linkedin_company_size(
             anchor_domain,
-            f"https://www.linkedin.com/company/{anchor_slug}",
+            requested_profile_url
+            or f"https://www.linkedin.com/company/{anchor_slug}",
             **fetch_kwargs,
         )
     )
@@ -3922,24 +3933,42 @@ def _alias_unresolved_structured_profile_lookup(
         if server_verified_homepage_receipt
         else "company_web_reverification"
     )
-    if (
+    shared_invalid = (
         web_identity.get("decision") != COMPANY_FIT_UNAVAILABLE
-        or web_identity.get("reason_code")
-        not in {"identity_name_alias_unresolved", "identity_not_proven"}
         or web_identity.get("evidence_source") != expected_source
         or not transport_domain
         or web_identity.get("submitted_domain") != transport_domain
         or web_identity.get("observed_domain") != transport_domain
         or not observed_slug
-        or (submitted_slug and submitted_slug != observed_slug)
         or not isinstance(web_identity.get("observed_name"), str)
         or not str(web_identity["observed_name"]).strip()
-    ):
+    )
+    reason_code = web_identity.get("reason_code")
+    if shared_invalid:
         return {}
-    return {
+    anchor = {
         "normalized_name": str(web_identity["observed_name"]).strip(),
         "registrable_dns_domain": transport_domain,
         "linkedin_company_slug": observed_slug,
+    }
+    if reason_code in {"identity_name_alias_unresolved", "identity_not_proven"}:
+        return anchor if not submitted_slug or submitted_slug == observed_slug else {}
+    if (
+        reason_code != "identity_linkedin_alias_unresolved"
+        or not submitted_slug.isdigit()
+        or observed_slug.isdigit()
+        or _company_name(web_identity.get("submitted_name"))
+        != _company_name(web_identity.get("observed_name"))
+    ):
+        return {}
+    return {
+        **anchor,
+        "requested_profile_url": (
+            f"https://www.linkedin.com/company/{submitted_slug}"
+        ),
+        "observed_profile_url": (
+            f"https://www.linkedin.com/company/{observed_slug}"
+        ),
     }
 
 
@@ -3960,19 +3989,98 @@ def _structured_profile_alias_identity_receipt(
         if server_verified_homepage_receipt
         else "company_web_reverification"
     )
+    base_keys = {"name", "provider", "source_field", "url", "website"}
+    numeric_alias = web_identity.get("reason_code") == (
+        "identity_linkedin_alias_unresolved"
+    )
+    redirected_website = numeric_alias and (
+        "provider_website_requested_url" in evidence
+        or "provider_website_final_url" in evidence
+    )
+    expected_keys = base_keys | (
+        {"company_id", "requested_url"} if numeric_alias else set()
+    ) | (
+        {
+            "provider_website_url",
+            "provider_website_requested_url",
+            "provider_website_final_url",
+        }
+        if redirected_website
+        else set()
+    )
     if (
-        set(evidence) != {"name", "provider", "source_field", "url", "website"}
+        set(evidence) != expected_keys
         or evidence.get("provider") != STRUCTURED_PROFILE_PROVIDER
         or evidence.get("source_field") != STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
         or web_identity.get("decision") != COMPANY_FIT_UNAVAILABLE
-        or web_identity.get("reason_code")
-        not in {"identity_name_alias_unresolved", "identity_not_proven"}
+        or (
+            not numeric_alias
+            and web_identity.get("reason_code")
+            not in {"identity_name_alias_unresolved", "identity_not_proven"}
+        )
         or web_identity.get("evidence_source") != expected_source
         or not transport_domain
         or web_identity.get("submitted_domain") != transport_domain
         or web_identity.get("observed_domain") != transport_domain
     ):
         return {}
+    if numeric_alias:
+        submitted_slug = str(
+            web_identity.get("submitted_linkedin_slug") or ""
+        ).strip()
+        observed_slug = str(
+            web_identity.get("observed_linkedin_slug") or ""
+        ).strip()
+        submitted_name = _company_name(web_identity.get("submitted_name"))
+        observed_name = _company_name(web_identity.get("observed_name"))
+        evidence_name = _company_name(evidence.get("name"))
+        try:
+            provider_website_url = public_http_url(
+                evidence.get("provider_website_url")
+            ) if redirected_website else ""
+            provider_website_requested_url = public_http_url(
+                evidence.get("provider_website_requested_url")
+            ) if redirected_website else ""
+            provider_website_final_url = public_http_url(
+                evidence.get("provider_website_final_url")
+            ) if redirected_website else ""
+        except (TypeError, ValueError):
+            return {}
+        if (
+            not submitted_slug.isdigit()
+            or not observed_slug
+            or observed_slug.isdigit()
+            or not submitted_name
+            or submitted_name != observed_name
+            or submitted_name != _company_name(company.company_name)
+            or _registrable_domain(company.company_website) != transport_domain
+            or _registrable_domain(str(evidence.get("website") or ""))
+            != transport_domain
+            or str(evidence.get("company_id") or "") != submitted_slug
+            or linkedin_company_page_slug(evidence.get("requested_url"))
+            != submitted_slug
+            or linkedin_company_page_slug(evidence.get("url")) != observed_slug
+            or evidence_name != observed_name
+            or (
+                redirected_website
+                and (
+                    provider_website_url != provider_website_requested_url
+                    or
+                    urlsplit(provider_website_requested_url).scheme != "https"
+                    or urlsplit(provider_website_final_url).scheme != "https"
+                    or _registrable_domain(provider_website_final_url)
+                    != transport_domain
+                )
+            )
+        ):
+            return {}
+        resolved = dict(web_identity)
+        resolved.update(
+            decision=COMPANY_FIT_MATCH,
+            reason_code="structured_numeric_linkedin_alias_verified",
+            structured_profile_identity=dict(evidence),
+        )
+        return resolved
     structured_receipt = evaluate_company_identity(
         submitted_name=company.company_name,
         submitted_website=company.company_website,

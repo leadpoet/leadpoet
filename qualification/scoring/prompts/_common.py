@@ -244,23 +244,26 @@ PART_A_BLOCK = """  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
 
 HIRING_FUNCTIONAL_ROLE_BLOCK = """  HIRING — FUNCTIONAL ROLE MATCH:
     Apply this block only when the target asks for hiring in a named function
-    or role category. Judge the role from its documented primary duties, team,
-    and product scope; do not require the job title to repeat the category word.
-    A role can satisfy a functional category only when exact body evidence
-    directly assigns its work to that function. For example, an engineering
-    role can be a platform role when the posting assigns it work across the
-    employer's platform stack or components and gives it build, operation,
-    maintenance, or ownership duties there.
+    or role category. Judge the complete documented duties, team, and product
+    scope of that same role; the title and submitted claim quote need not repeat
+    the category word or contain the complete evidentiary window.
 
-    Keep the boundary strict. A generic software role at a company that sells
-    a platform is not automatically a platform role. Merely using a platform,
-    gaining incidental exposure to it, or mentioning it only in company
-    boilerplate is insufficient. Evidence about the role's own work must make
-    the functional match. Serving users in a named function does not by itself
-    place the role in that function. Preserve every explicit inclusion and
-    exclusion in the target: do not relabel a role assigned to a different or
-    excluded function merely because it collaborates with the requested
-    function."""
+    For a broad target such as "platform roles", direct responsibility to build,
+    operate, own, maintain, or improve the employer's platform products or
+    components qualifies; the role need not have an infrastructure or platform-
+    team title. Read same-role sentences together: one sentence may establish
+    the platform or component scope and another may assign the direct duties.
+    The duty sentence need not repeat the platform name. If the target instead
+    asks for infrastructure, an internal developer platform, or another narrower
+    scope, preserve that qualifier.
+
+    Keep the boundary strict. A generic software role at a company that sells a
+    platform is not automatically a platform role. Merely using a platform,
+    gaining incidental exposure to it, serving its users, or mentioning it only
+    in company boilerplate is insufficient when the same role has no direct
+    functional duties. Never borrow duties from another role or hiring event.
+    Preserve every explicit inclusion, exclusion, and organizational constraint
+    in the target."""
 
 
 ADVERTISING_BLOCK = """      * Advertising technology includes tools that measure paid campaign

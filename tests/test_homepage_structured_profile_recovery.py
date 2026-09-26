@@ -15,6 +15,8 @@ from qualification.scoring.company_fit_decision import (
 
 
 PROFILE_URL = "https://www.linkedin.com/company/medici-brands"
+RAPID7_NUMERIC_URL = "https://www.linkedin.com/company/39624"
+RAPID7_VANITY_URL = "https://www.linkedin.com/company/rapid7"
 
 
 def _company() -> CompanyOutput:
@@ -76,6 +78,225 @@ def _structured_identity(**changes: str) -> dict[str, str]:
     }
     evidence.update(changes)
     return evidence
+
+
+def _rapid7_company() -> CompanyOutput:
+    return _company().model_copy(update={
+        "company_name": "Rapid7",
+        "company_website": "https://rapid7.com",
+        "company_linkedin": RAPID7_NUMERIC_URL,
+        "employee_count": "10,001+",
+        "state": "Massachusetts",
+    })
+
+
+def _rapid7_web_identity() -> dict[str, str]:
+    receipt = evaluate_company_identity(
+        submitted_name="Rapid7",
+        submitted_website="https://rapid7.com",
+        submitted_linkedin=RAPID7_NUMERIC_URL,
+        observed_name="Rapid7 Inc",
+        observed_website="https://rapid7.com",
+        observed_linkedin=RAPID7_VANITY_URL,
+        evidence_source="company_web_reverification",
+        company_quality=True,
+    )
+    assert receipt["reason_code"] == "identity_linkedin_alias_unresolved"
+    return receipt
+
+
+def _rapid7_structured_identity(**changes: str) -> dict[str, str]:
+    evidence = {
+        "name": "Rapid7, Inc.",
+        "provider": "harvestapi_get_company",
+        "source_field": "name",
+        "url": RAPID7_VANITY_URL,
+        "website": "https://rapid7.com/",
+        "company_id": "39624",
+        "requested_url": RAPID7_NUMERIC_URL,
+    }
+    evidence.update(changes)
+    return evidence
+
+
+def _rapid7_redirected_structured_identity(**changes: str) -> dict[str, str]:
+    evidence = _rapid7_structured_identity()
+    evidence.update({
+        "provider_website_url": "https://r-7.co/3i5nlhP",
+        "provider_website_requested_url": "https://r-7.co/3i5nlhP",
+        "provider_website_final_url": "https://www.rapid7.com/",
+    })
+    evidence.update(changes)
+    return evidence
+
+
+def test_numeric_linkedin_alias_requires_structured_id_and_vanity_binding():
+    lookup = lead_scorer._alias_unresolved_structured_profile_lookup(
+        _rapid7_web_identity(),
+        "rapid7.com",
+    )
+    assert lookup == {
+        "normalized_name": "rapid7",
+        "registrable_dns_domain": "rapid7.com",
+        "linkedin_company_slug": "rapid7",
+        "requested_profile_url": RAPID7_NUMERIC_URL,
+        "observed_profile_url": RAPID7_VANITY_URL,
+    }
+    resolved = lead_scorer._structured_profile_alias_identity_receipt(
+        _rapid7_company(),
+        _rapid7_web_identity(),
+        _rapid7_structured_identity(),
+        "rapid7.com",
+        company_quality=True,
+    )
+    assert resolved["decision"] == COMPANY_FIT_MATCH
+    assert resolved["reason_code"] == (
+        "structured_numeric_linkedin_alias_verified"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("company_id", "393624"),
+        ("requested_url", "https://www.linkedin.com/company/393624"),
+        ("url", "https://www.linkedin.com/company/other"),
+        ("name", "Other Company"),
+        ("website", "https://other.example/"),
+    ],
+)
+def test_numeric_linkedin_alias_rejects_any_structured_conflict(field, value):
+    assert not lead_scorer._structured_profile_alias_identity_receipt(
+        _rapid7_company(),
+        _rapid7_web_identity(),
+        _rapid7_structured_identity(**{field: value}),
+        "rapid7.com",
+        company_quality=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"provider_website_url": "https://other.example/"},
+        {"provider_website_final_url": "https://other.example/"},
+        {"provider_website_final_url": "http://rapid7.com/"},
+        {"provider_website_requested_url": ""},
+    ],
+)
+def test_numeric_linkedin_alias_rejects_redirect_receipt_conflict(changes):
+    assert not lead_scorer._structured_profile_alias_identity_receipt(
+        _rapid7_company(),
+        _rapid7_web_identity(),
+        _rapid7_redirected_structured_identity(**changes),
+        "rapid7.com",
+        company_quality=True,
+    )
+
+
+def test_numeric_linkedin_alias_rejects_incomplete_redirect_receipt():
+    evidence = _rapid7_redirected_structured_identity()
+    evidence.pop("provider_website_final_url")
+    assert not lead_scorer._structured_profile_alias_identity_receipt(
+        _rapid7_company(),
+        _rapid7_web_identity(),
+        evidence,
+        "rapid7.com",
+        company_quality=True,
+    )
+
+
+def test_numeric_linkedin_alias_unlocks_full_company_fit_gate(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    calls = {"structured": 0}
+
+    async def provider(**_kwargs):
+        return {
+            "observed_company_name": "Rapid7 Inc",
+            "observed_company_website": "https://rapid7.com",
+            "observed_company_linkedin": RAPID7_VANITY_URL,
+            "observed_employee_count": 11706,
+            "employee_size_matches": True,
+            "employee_size_evidence_url": (
+                "https://rapid7.com/company/about"
+            ),
+            "employee_size_evidence_quote": "Rapid7 has 11,706 employees.",
+            "observed_industry": "Food and Beverage Manufacturing",
+            "observed_subindustry": "",
+            "industry_matches": True,
+            "industry_activity_role": "supplier_operator",
+            "industry_evidence_url": "https://rapid7.com/company/about",
+            "industry_evidence_quote": "Rapid7 develops food brands.",
+            "observed_hq_country": "United States",
+            "observed_hq_state": "Massachusetts",
+            "geography_matches": True,
+            "geography_evidence_url": "https://rapid7.com/company/about",
+            "geography_evidence_quote": "Rapid7 is based in Boston.",
+            "reason": "All requested dimensions match.",
+        }, ""
+
+    async def structured_profile(
+        domain,
+        url,
+        *,
+        company_identity_evidence,
+        company_identity_observed_profile_url,
+        **_kwargs,
+    ):
+        calls["structured"] += 1
+        assert (domain, url) == ("rapid7.com", RAPID7_NUMERIC_URL)
+        assert company_identity_observed_profile_url == RAPID7_VANITY_URL
+        company_identity_evidence.update(
+            _rapid7_redirected_structured_identity()
+        )
+        return {
+            "employee_count": "10,001+",
+            "provider": "harvestapi_get_company",
+            "source_field": "employeeCountRange",
+            "url": RAPID7_VANITY_URL,
+            "website": "https://rapid7.com/",
+        }
+
+    async def current_profile(url, **_kwargs):
+        assert url == RAPID7_VANITY_URL
+        return {"outcome": "insufficient_evidence", "url": url}
+
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_structured_linkedin_company_size",
+        structured_profile,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_current_linkedin_company_size",
+        current_profile,
+    )
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _rapid7_company(),
+            _icp().model_copy(update={
+                "employee_count": "10,001+",
+                "geography": "United States",
+                "country": "United States",
+            }),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=company_fit_unavailable(
+                "homepage identity is incomplete",
+                details={
+                    "identity": _rapid7_web_identity(),
+                    "verified_homepage_transport_domain": "rapid7.com",
+                },
+            ),
+            company_quality=True,
+        )
+    )
+
+    assert calls == {"structured": 1}
+    assert result.decision == COMPANY_FIT_MATCH, result.details
+    assert result.details["identity_receipt"]["reason_code"] == (
+        "structured_numeric_linkedin_alias_verified"
+    )
 
 
 def test_server_homepage_slug_can_only_be_a_lookup_anchor():

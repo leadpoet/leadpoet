@@ -1778,6 +1778,214 @@ def test_structured_company_identity_projects_only_exact_main_profile():
     ) is None
 
 
+def test_structured_company_identity_proves_numeric_profile_alias():
+    payload = _structured_company_payload(
+        id=39624,
+        name="Rapid7, Inc.",
+        website="https://rapid7.com",
+        linkedinUrl="https://www.linkedin.com/company/rapid7/",
+    )
+
+    assert linkedin_company_size.project_structured_linkedin_company_identity(
+        "rapid7.com",
+        "https://www.linkedin.com/company/39624",
+        payload,
+        observed_profile_url="https://www.linkedin.com/company/rapid7",
+        expected_company_name="Rapid7",
+    ) == {
+        "name": "Rapid7, Inc.",
+        "provider": "harvestapi_get_company",
+        "source_field": "name",
+        "url": "https://www.linkedin.com/company/rapid7",
+        "website": "https://rapid7.com/",
+        "company_id": "39624",
+        "requested_url": "https://www.linkedin.com/company/39624",
+    }
+    assert linkedin_company_size.project_structured_linkedin_company_identity(
+        "rapid7.com",
+        "https://www.linkedin.com/company/39624",
+        payload,
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"id": 393624},
+        {"id": " 39624"},
+        {"name": "Other Company"},
+        {"website": "https://other.example"},
+        {"linkedinUrl": "https://www.linkedin.com/company/other-company"},
+    ],
+)
+def test_structured_company_identity_rejects_unbound_numeric_alias(update):
+    values = {
+        "id": 39624,
+        "name": "Rapid7",
+        "website": "https://rapid7.com",
+        "linkedinUrl": "https://www.linkedin.com/company/rapid7",
+    }
+    values.update(update)
+    assert linkedin_company_size.project_structured_linkedin_company_identity(
+        "rapid7.com",
+        "https://www.linkedin.com/company/39624",
+        _structured_company_payload(**values),
+        observed_profile_url="https://www.linkedin.com/company/rapid7",
+        expected_company_name="Rapid7",
+    ) is None
+
+
+def test_structured_company_identity_rejects_multiple_numeric_alias_profiles():
+    element = _structured_company_payload(
+        id=39624,
+        name="Rapid7",
+        website="https://rapid7.com",
+        linkedinUrl="https://www.linkedin.com/company/rapid7",
+    )["result"]["data"]["element"]
+    payload = {
+        "status": "completed",
+        "result": {"data": {"status": 200, "elements": [element, element]}},
+    }
+    assert linkedin_company_size.project_structured_linkedin_company_identity(
+        "rapid7.com",
+        "https://www.linkedin.com/company/39624",
+        payload,
+        observed_profile_url="https://www.linkedin.com/company/rapid7",
+        expected_company_name="Rapid7",
+    ) is None
+
+
+def test_structured_fetch_proves_numeric_alias_website_redirect(monkeypatch):
+    harvest = _structured_company_payload(
+        id="39624",
+        name="Rapid7",
+        website="https://r-7.co/3i5nlhP",
+        linkedinUrl="https://www.linkedin.com/company/rapid7/",
+    )
+    firecrawl = {
+        "status": "completed",
+        "result": {
+            "data": {
+                "rawHtml": "<html></html>",
+                "metadata": {
+                    "sourceURL": "https://r-7.co/3i5nlhP",
+                    "url": "https://www.rapid7.com/",
+                    "statusCode": 200,
+                },
+            }
+        },
+    }
+    calls, pending = _install_exa_bodies(monkeypatch, harvest, firecrawl)
+    monkeypatch.setenv("DEEPLINE_API_KEY", "test-deepline-key")
+    identity = {}
+
+    result = asyncio.run(
+        linkedin_company_size.fetch_structured_linkedin_company_size(
+            "rapid7.com",
+            "https://www.linkedin.com/company/39624",
+            company_identity_evidence=identity,
+            company_identity_observed_profile_url=(
+                "https://www.linkedin.com/company/rapid7"
+            ),
+            expected_company_name="Rapid7",
+        )
+    )
+
+    assert result == {
+        "employee_count": "11-50",
+        "provider": "harvestapi_get_company",
+        "source_field": "employeeCountRange",
+        "url": "https://www.linkedin.com/company/rapid7",
+        "website": "https://rapid7.com/",
+    }
+    assert identity == {
+        "name": "Rapid7",
+        "provider": "harvestapi_get_company",
+        "source_field": "name",
+        "url": "https://www.linkedin.com/company/rapid7",
+        "website": "https://rapid7.com/",
+        "company_id": "39624",
+        "requested_url": "https://www.linkedin.com/company/39624",
+        "provider_website_url": "https://r-7.co/3i5nlhP",
+        "provider_website_requested_url": "https://r-7.co/3i5nlhP",
+        "provider_website_final_url": "https://www.rapid7.com/",
+    }
+    assert pending == []
+    assert len(calls) == 2
+    assert calls[0][0].endswith("/harvestapi_get_company/execute")
+    assert calls[1][0].endswith("/firecrawl_scrape/execute")
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {
+            "sourceURL": "https://other.example/",
+            "url": "https://rapid7.com/",
+            "statusCode": 200,
+        },
+        {
+            "sourceURL": "https://r-7.co/3i5nlhP",
+            "url": "http://rapid7.com/",
+            "statusCode": 200,
+        },
+        {
+            "sourceURL": "https://r-7.co/3i5nlhP",
+            "url": "https://127.0.0.1/",
+            "statusCode": 200,
+        },
+        {
+            "sourceURL": "https://r-7.co/3i5nlhP",
+            "url": "https://other.example/",
+            "statusCode": 200,
+        },
+        {
+            "sourceURL": "https://r-7.co/3i5nlhP",
+            "url": "https://rapid7.com/",
+            "statusCode": 503,
+        },
+    ],
+)
+def test_structured_numeric_alias_rejects_unproved_website_redirect(
+    monkeypatch, metadata
+):
+    body = {
+        "status": "completed",
+        "result": {
+            "data": {"rawHtml": "<html></html>", "metadata": metadata}
+        },
+    }
+    calls, pending = _install_exa_bodies(monkeypatch, body)
+
+    assert asyncio.run(
+        linkedin_company_size._verified_provider_website_redirect(
+            "test-key",
+            "rapid7.com",
+            "https://r-7.co/3i5nlhP",
+        )
+    ) == ""
+    assert len(calls) == 1
+    assert pending == []
+
+
+@pytest.mark.parametrize(
+    "requested_url",
+    ["", "http://r-7.co/3i5nlhP", "https://127.0.0.1/", "not a URL"],
+)
+def test_structured_numeric_alias_rejects_unsafe_redirect_without_fetch(
+    monkeypatch, requested_url
+):
+    calls, pending = _install_exa_bodies(monkeypatch)
+
+    assert asyncio.run(
+        linkedin_company_size._verified_provider_website_redirect(
+            "test-key", "rapid7.com", requested_url
+        )
+    ) == ""
+    assert calls == []
+    assert pending == []
+
+
 def test_structured_company_description_projects_exact_multiverse_profile():
     description = (
         "Multiverse is the upskilling platform for AI and tech adoption. We’ve "

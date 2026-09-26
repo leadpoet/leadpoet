@@ -1776,6 +1776,7 @@ async def investigate_company_evidence(
                         and any(
                             item.get("target") == "stage"
                             and item.get("reason") in {
+                                "submitted quote was not present in fetched source",
                                 "source quote did not prove current private-equity ownership",
                                 "source quote did not prove current public listing",
                             }

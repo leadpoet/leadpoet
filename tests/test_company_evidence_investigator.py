@@ -7404,29 +7404,44 @@ def test_provider_injected_prefetched_body_is_not_reused(monkeypatch):
     url = "https://evil.example/grab"
     quote = "Grab Holdings Limited (NASDAQ: GRAB)"
     requests = []
+    searches = []
 
     async def fake_post_json(_session, _url, *, headers, payload):
         del headers
         requests.append(payload)
-        arguments = {"findings": [_finding(
-            "stage",
-            observed_value="Public",
-            evidence_url=url,
-            evidence_quote=quote,
-        )]}
+        if len(requests) == 1:
+            name = "submit_findings"
+            arguments = {"findings": [_finding(
+                "stage",
+                observed_value="Public",
+                evidence_url=url,
+                evidence_quote=quote,
+            )]}
+        elif len(requests) == 2:
+            name = "search_web"
+            arguments = {"query": "Grab current public listing"}
+        else:
+            name = "submit_findings"
+            arguments = {"findings": [_finding("stage", status="UNPROVEN")]}
         return 200, {"choices": [{"message": {"tool_calls": [{
             "id": f"submit-{len(requests)}",
             "type": "function",
             "function": {
-                "name": "submit_findings",
+                "name": name,
                 "arguments": json.dumps(arguments),
             },
         }]}}]}
 
+    async def fake_search(_session, query, *, key):
+        del key
+        searches.append(query)
+        return {"results": []}
+
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
-    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 1)
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 3)
     monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
 
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Grab", "website": "https://grab.com/"},
@@ -7442,6 +7457,7 @@ def test_provider_injected_prefetched_body_is_not_reused(monkeypatch):
     ))
 
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert searches == ["Grab current public listing"]
     assert "prefetched_sources" not in requests[0]["messages"][1]["content"]
     assert result[investigator.PRIVATE_FETCHED_PAGES_KEY] == {}
 
@@ -8341,6 +8357,117 @@ def test_final_rejected_stage_quote_gets_one_bounded_search_and_source_fetch(
     assert fetched_urls == [strong_url]
     assert requests[1]["tool_choice"]["function"]["name"] == "search_web"
     assert requests[-1]["tool_choice"]["function"]["name"] == "submit_findings"
+
+
+@pytest.mark.parametrize(
+    ("target", "outcome", "expected_status", "search_count", "fetch_count"),
+    [
+        ("stage", "verified", "VERIFIED", 1, 1),
+        ("stage", "future", "UNPROVEN", 1, 1),
+        ("stage", "search_exhausted", "UNPROVEN", 1, 0),
+        ("stage", "fetch_exhausted", "UNPROVEN", 0, 0),
+        ("industry", "wrong_target", "UNPROVEN", 0, 0),
+    ],
+)
+def test_missing_saved_stage_quote_uses_only_bounded_stage_search(
+    monkeypatch, target, outcome, expected_status, search_count, fetch_count,
+):
+    saved_url = "https://www.bigtime.net/about-us/"
+    current_url = "https://www.bigtime.net/news/current-owner"
+    saved_quote = "BigTime Software is a private equity-funded company."
+    current_quote = (
+        "Vista Equity Partners, a private equity firm, will acquire BigTime Software."
+        if outcome == "future" else
+        "BigTime Software is owned by Vista Equity Partners, a private equity firm."
+    )
+    actions = {
+        "verified": ["missing", "search_current", "fetch", "current"],
+        "future": ["missing", "search_current", "fetch", "current", "unproven"],
+        "search_exhausted": ["search_prior", "missing", "unproven"],
+        "fetch_exhausted": ["missing", "unproven"],
+        "wrong_target": ["missing", "unproven"],
+    }[outcome]
+    requests = []
+    search_queries = []
+    fetched_urls = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        action = actions[len(requests)]
+        requests.append(payload)
+        if action in {"search_current", "search_prior"}:
+            name = "search_web"
+            args = {"query": (
+                "BigTime Software current private equity ownership"
+                if action == "search_current" else "BigTime Software profile"
+            )}
+        elif action == "fetch":
+            name, args = "fetch_page", {"url": current_url}
+        else:
+            name = "submit_findings"
+            if action == "unproven":
+                finding = _finding(
+                    target, status="UNPROVEN", evidence_url="", evidence_quote="",
+                )
+            else:
+                finding = _finding(
+                    target,
+                    observed_value="Private Equity",
+                    observed_industry="Software",
+                    activity_role="supplier_operator",
+                    evidence_url=current_url if action == "current" else saved_url,
+                    evidence_quote=current_quote if action == "current" else saved_quote,
+                )
+            args = {"findings": [finding]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(len(requests)), "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)},
+        }]}}]}
+
+    async def fake_search(_session, query, *, key):
+        del key
+        search_queries.append(query)
+        return {"results": [{"url": current_url}]}
+
+    async def fake_fetch(_session, url):
+        fetched_urls.append(url)
+        return {"ok": True, "url": url, "final_url": url, "text": current_quote}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(
+        investigator, "MAX_REASONING_TURNS", 1 if outcome == "wrong_target" else 4,
+    )
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    if outcome == "search_exhausted":
+        monkeypatch.setattr(investigator, "MAX_SEARCH_CALLS", 1)
+    if outcome == "fetch_exhausted":
+        monkeypatch.setattr(investigator, "MAX_FETCH_CALLS", 1)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "BigTime Software",
+            "website": "https://www.bigtime.net",
+        },
+        targets=(target,),
+        requested_stage="Private Equity",
+        requested_industry="Software",
+        prior_observations={"submitted_source_urls": [saved_url]},
+        prefetched_pages={
+            saved_url: {"final_url": saved_url, "text": "Dynamic page changed."}
+        },
+    ))
+
+    assert result["claims"][target]["status"] == expected_status
+    assert result["usage"]["search_calls"] == search_count
+    assert result["usage"]["fetch_calls"] == fetch_count
+    assert len(search_queries) == search_count
+    assert len(fetched_urls) == fetch_count
+    if "search_current" in actions:
+        search_index = actions.index("search_current")
+        assert requests[search_index]["tool_choice"]["function"]["name"] == "search_web"
 
 
 def test_stage_repair_owns_overlapping_industry_followup_search(monkeypatch):

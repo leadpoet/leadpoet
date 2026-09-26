@@ -1209,6 +1209,22 @@ def _validate_unit_grounding(
                 raise ValueError("invalid Intent Details unit evidence")
             source_index = binding["source_index"]
             quote = binding["quote"]
+            # A correct quote can name the wrong local evidence index. Repair
+            # that reference only when the unchanged quote has exactly one
+            # match in this review's already-admitted evidence. Never search
+            # submitted prose, join passages, or infer a missing quotation.
+            if (
+                type(source_index) is int
+                and quote.strip()
+                and len(quote) <= _MAX_UNIT_EVIDENCE_QUOTE_LENGTH
+                and not _quote_is_bound(quote, sources.get(source_index, []))
+            ):
+                matches = [
+                    index for index, values in sources.items()
+                    if _quote_is_bound(quote, values)
+                ]
+                if len(matches) == 1:
+                    source_index = binding["source_index"] = matches[0]
             binding_key = (source_index, quote)
             issues = citation_issues.setdefault(unit_id, set())
             if type(source_index) is not int or source_index not in sources:
@@ -1491,9 +1507,14 @@ missing review into an accepted paragraph or a terminal company mismatch.
             "failure_class": "intent_details_provider_unavailable",
             "failure_reason_code": "provider_error",
         }
+    citation_failure = False
     try:
         checks = _validate_review_response(response, document)
     except _CitationRepairNeeded as exc:
+        # The original semantic verdict and response structure were valid.
+        # Exhaustion here belongs to this company's citations, not the whole
+        # scoring batch. Provider failures below remain infrastructure errors.
+        citation_failure = True
         try:
             repair_prompt = _citation_repair_user_prompt(
                 document, exc.issues, exc.held_response,
@@ -1535,7 +1556,10 @@ missing review into an accepted paragraph or a terminal company mismatch.
         return {
             **receipt,
             "decision": "unavailable",
-            "failure_class": "intent_details_review_unavailable",
+            "failure_class": (
+                "intent_details_citation_unavailable"
+                if citation_failure else "intent_details_review_unavailable"
+            ),
             "failure_reason_code": "malformed_response",
         }
     return {**receipt, "decision": "match" if all(checks.values()) else "mismatch",

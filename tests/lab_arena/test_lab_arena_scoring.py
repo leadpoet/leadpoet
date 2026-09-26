@@ -82,6 +82,23 @@ def breakdown(score: float, reason: str = "") -> dict:
     return row
 
 
+def intent_details_citation_unavailable_breakdown() -> dict:
+    row = breakdown(
+        0.0,
+        "Intent Details verification unavailable: review could not complete",
+    )
+    row["verifier_gate_receipts"] = [
+        {"gate": "company_fit", "decision": "match"},
+        {
+            "gate": "intent_details",
+            "decision": "unavailable",
+            "failure_class": "intent_details_citation_unavailable",
+            "failure_reason_code": "malformed_response",
+        },
+    ]
+    return row
+
+
 def test_failure_reason_projection_drops_arbitrary_values_without_failing():
     expected = scoring.build_scoring_failure("run-reason", "judge_error")
     assert scoring.build_scoring_failure(
@@ -1162,6 +1179,547 @@ def test_retry_exhaustion_isolates_source_blocked_company_and_keeps_success():
         ["Scored Co 1"],
         ["Scored Co 1"],
     ]
+
+
+@pytest.mark.parametrize("recovers_on_last_attempt", [False, True])
+def test_intent_details_citation_failure_keeps_success_through_last_retry(
+    recovers_on_last_attempt,
+):
+    companies = [scored_company(0), scored_company(1)]
+    accepted = breakdown(91.0)
+    unavailable = intent_details_citation_unavailable_breakdown()
+    recovered = breakdown(73.0)
+    calls = []
+
+    def scorer(batch, _icp, _is_reference_model):
+        calls.append([row["company_name"] for row in batch])
+        if len(calls) == 1:
+            return [accepted, unavailable]
+        if len(calls) == 3 and recovers_on_last_attempt:
+            return [recovered]
+        return [unavailable]
+
+    result = scoring.score_work_item(
+        {"scored_run_id": "run-intent-details-citation-isolation"},
+        icp=_ICPS[0],
+        companies=companies,
+        scorer=scorer,
+        max_retries=3,
+    )
+
+    assert calls == [
+        ["Scored Co 0", "Scored Co 1"],
+        ["Scored Co 1"],
+        ["Scored Co 1"],
+    ]
+    assert result[0] == accepted
+    if recovers_on_last_attempt:
+        assert result[1] == recovered
+        return
+
+    assert [row["final_score"] for row in result] == [91.0, 0.0]
+    assert result[1]["verifier_gate_receipts"][1]["failure_class"] == (
+        "company_verification_exhausted"
+    )
+    public = [verify.redact_breakdown(row) for row in result]
+    published = scoring.build_scoring_output(
+        "run-intent-details-citation-isolation", public
+    )
+    assert [row["final_score"] for row in published["breakdowns"]] == [91.0, 0.0]
+    from qualification.scoring.competition import (
+        scorer_breakdown_has_company_local_verification_failure,
+        scorer_breakdown_is_terminal_company_verification_failure,
+    )
+
+    assert scorer_breakdown_is_terminal_company_verification_failure(public[1])
+    assert scorer_breakdown_has_company_local_verification_failure(public[1])
+
+
+@pytest.mark.parametrize(
+    "receipt_update",
+    [
+        {"failure_class": "intent_details_review_unavailable"},
+        {"gate": "intent_verification"},
+        {"failure_reason_code": "provider_error"},
+    ],
+)
+def test_only_exact_intent_details_citation_failure_is_company_local(
+    receipt_update,
+):
+    from qualification.scoring.competition import (
+        scorer_breakdown_has_company_local_verification_failure,
+    )
+
+    unavailable = intent_details_citation_unavailable_breakdown()
+    unavailable["verifier_gate_receipts"][1].update(receipt_update)
+
+    assert not scorer_breakdown_has_company_local_verification_failure(unavailable)
+    with pytest.raises(scoring.ScoringError):
+        scoring.score_work_item(
+            {"scored_run_id": "run-nonlocal-intent-details-failure"},
+            icp=_ICPS[0],
+            companies=[scored_company(0)],
+            scorer=lambda *_args: [unavailable],
+            max_retries=1,
+        )
+
+    unavailable["verifier_gate_receipts"][1].update({
+        "gate": "intent_details",
+        "decision": "match",
+        "failure_class": "intent_details_citation_unavailable",
+        "failure_reason_code": "malformed_response",
+    })
+    assert not scorer_breakdown_has_company_local_verification_failure(unavailable)
+
+
+def test_intent_details_citation_failure_does_not_mask_systemic_receipt():
+    from qualification.scoring.competition import (
+        scorer_breakdown_has_company_local_verification_failure,
+    )
+
+    unavailable = intent_details_citation_unavailable_breakdown()
+    unavailable["verifier_gate_receipts"].append({
+        "gate": "contact",
+        "decision": "unavailable",
+        "failure_class": "contact_provider_unavailable",
+        "failure_reason_code": "provider_error",
+    })
+    unavailable_detail = intent_details_citation_unavailable_breakdown()
+    unavailable_detail["intent_signals_detail"] = [{
+        "matched_icp_signal": 0,
+        "after_decay": 0.0,
+        "judge_verdict": {
+            "decision": "rejected_verifier_error",
+            "pipeline_decision": "unavailable",
+            "failure_reason_code": "provider_error",
+        },
+    }]
+
+    for mixed in (unavailable, unavailable_detail):
+        assert not scorer_breakdown_has_company_local_verification_failure(mixed)
+        with pytest.raises(scoring.ScoringError):
+            scoring.score_work_item(
+                {"scored_run_id": "run-mixed-intent-details-failure"},
+                icp=_ICPS[0],
+                companies=[scored_company(0)],
+                scorer=lambda *_args: [mixed],
+                max_retries=1,
+            )
+
+
+def test_intent_details_citation_failure_preserves_sparse_integrity_indexes():
+    companies = [
+        scored_company(0),
+        scored_company(1, bucket="10,001+"),
+        scored_company(2),
+    ]
+    calls = []
+
+    def scorer(batch, _icp, _is_reference_model):
+        calls.append([row["company_name"] for row in batch])
+        failed = intent_details_citation_unavailable_breakdown()
+        failed.update({
+            "company_index": 2 if len(calls) == 1 else 0,
+            "company_identity_key": "domain:scored2.example.com",
+            "company_identity_alias_keys": ["domain:scored2.example.com"],
+            "company_qualified": False,
+            "duplicate_company": False,
+        })
+        if len(calls) == 1:
+            accepted = breakdown(81.0)
+            accepted.update({
+                "company_index": 0,
+                "company_identity_key": "domain:scored0.example.com",
+                "company_identity_alias_keys": ["domain:scored0.example.com"],
+                "company_qualified": True,
+                "duplicate_company": False,
+            })
+            return [accepted, failed]
+        return [failed]
+
+    scorer.integrity_policy = True
+    result = scoring.score_work_item(
+        {"scored_run_id": "run-sparse-intent-details-citation"},
+        icp=_ICPS[0],
+        companies=companies,
+        scorer=scorer,
+        max_retries=2,
+    )
+
+    assert calls == [
+        ["Scored Co 0", "Scored Co 1", "Scored Co 2"],
+        ["Scored Co 2"],
+    ]
+    assert [row["company_index"] for row in result] == [0, 2]
+    assert [row["final_score"] for row in result] == [81.0, 0.0]
+
+
+def test_intent_details_citation_retry_keeps_duplicate_identity_rules():
+    companies = [scored_company(0), scored_company(1)]
+    calls = []
+
+    def identity_fields(index):
+        return {
+            "company_index": index,
+            "company_identity_key": "domain:shared.example.com",
+            "company_identity_alias_keys": ["domain:shared.example.com"],
+            "company_qualified": True,
+            "duplicate_company": False,
+        }
+
+    def scorer(batch, _icp, _is_reference_model):
+        calls.append([row["company_name"] for row in batch])
+        if len(calls) == 1:
+            accepted = breakdown(82.0)
+            accepted.update(identity_fields(0))
+            accepted["verifier_gate_receipts"] = [
+                {"gate": "company_fit", "decision": "match"}
+            ]
+            failed = intent_details_citation_unavailable_breakdown()
+            failed.update(identity_fields(1))
+            failed["company_qualified"] = False
+            return [accepted, failed]
+        recovered = breakdown(74.0)
+        recovered.update(identity_fields(0))
+        recovered["verifier_gate_receipts"] = [
+            {"gate": "company_fit", "decision": "match"}
+        ]
+        return [recovered]
+
+    scorer.integrity_policy = True
+    result = scoring.score_work_item(
+        {"scored_run_id": "run-duplicate-intent-details-citation"},
+        icp=_ICPS[0],
+        companies=companies,
+        scorer=scorer,
+        max_retries=2,
+    )
+
+    assert calls == [
+        ["Scored Co 0", "Scored Co 1"],
+        ["Scored Co 1"],
+    ]
+    assert [row["final_score"] for row in result] == [82.0, 0.0]
+    assert result[1]["duplicate_company"] is True
+    assert result[1]["failure_reason"] == "duplicate_company_identity"
+
+
+def test_duplicate_names_keep_citation_failure_on_whole_batch_retries():
+    companies = [
+        scored_company(0, name="Same Name"),
+        scored_company(1, name="Same Name"),
+    ]
+    calls = []
+
+    def scorer(batch, _icp, _is_reference_model):
+        calls.append([row["company_website"] for row in batch])
+        return [
+            breakdown(80.0 + len(calls)),
+            intent_details_citation_unavailable_breakdown(),
+        ]
+
+    result = scoring.score_work_item(
+        {"scored_run_id": "run-duplicate-name-intent-details-citation"},
+        icp=_ICPS[0],
+        companies=companies,
+        scorer=scorer,
+        max_retries=2,
+    )
+
+    assert calls == [
+        ["https://scored0.example.com", "https://scored1.example.com"],
+        ["https://scored0.example.com", "https://scored1.example.com"],
+    ]
+    assert [row["final_score"] for row in result] == [82.0, 0.0]
+
+
+def test_real_citation_receipt_reaches_bundle_persistence_and_cost_count(
+    monkeypatch,
+):
+    from lab_arena import scorer_entrypoint
+    from lab_arena.service import ArenaService
+    from qualification.scoring import intent_details, verification_helpers
+
+    held_response = {
+        "unit_grounding": [{
+            "unit_id": 0,
+            "contains_factual_claim": True,
+            "status": "VERIFIED",
+            "evidence": [],
+        }],
+        "signal_coverage": [],
+        **{name: True for name in intent_details._CHECKS},
+    }
+    validation_calls = {"n": 0}
+
+    def validate_review(_response, _document):
+        validation_calls["n"] += 1
+        if validation_calls["n"] == 1:
+            raise intent_details._CitationRepairNeeded(
+                {0: {"missing_evidence"}}, held_response
+            )
+        raise ValueError("citation remains unbound")
+
+    async def openrouter_chat(*_args, **_kwargs):
+        return json.dumps({
+            "repairs": [{"unit_id": 0, "evidence": []}],
+        })
+
+    monkeypatch.setattr(
+        intent_details,
+        "review_evidence",
+        lambda *_args, **_kwargs: {
+            "admitted_evidence": [],
+            "non_qualifying_signals": [],
+        },
+    )
+    monkeypatch.setattr(
+        intent_details, "_validate_review_response", validate_review
+    )
+    monkeypatch.setattr(
+        verification_helpers, "openrouter_chat", openrouter_chat
+    )
+    emitted = asyncio.run(intent_details.review_intent_details({}, {}, [], {}))
+    assert {
+        key: emitted[key]
+        for key in ("gate", "decision", "failure_class", "failure_reason_code")
+    } == {
+        "gate": "intent_details",
+        "decision": "unavailable",
+        "failure_class": "intent_details_citation_unavailable",
+        "failure_reason_code": "malformed_response",
+    }
+
+    policy = scoring.build_scorer_policy(
+        scoring_adapter_version="qualification_integrity_v2"
+    )
+    companies = [scored_company(0), scored_company(1)]
+    input_document = scoring.build_scoring_input(
+        scored_run_id="citation-transition-0",
+        icp=_ICPS[0],
+        companies=companies,
+        policy=policy,
+        evaluation_date="2026-09-26",
+    )
+    scorer_calls = []
+
+    def lab_scorer(_policy):
+        def scorer(batch, _icp, _is_reference_model):
+            scorer_calls.append([row["company_name"] for row in batch])
+            if len(scorer_calls) == 1:
+                accepted = breakdown(91.0)
+                accepted.update({
+                    "company_index": 0,
+                    "company_identity_key": "domain:scored0.example.com",
+                    "company_identity_alias_keys": [
+                        "domain:scored0.example.com"
+                    ],
+                    "company_qualified": True,
+                    "duplicate_company": False,
+                })
+                failed = intent_details_citation_unavailable_breakdown()
+                failed["verifier_gate_receipts"][1] = dict(emitted)
+                failed.update({
+                    "company_index": 1,
+                    "company_identity_key": "domain:scored1.example.com",
+                    "company_identity_alias_keys": [
+                        "domain:scored1.example.com"
+                    ],
+                    "company_qualified": False,
+                    "duplicate_company": False,
+                })
+                return [accepted, failed]
+            failed = intent_details_citation_unavailable_breakdown()
+            failed["verifier_gate_receipts"][1] = dict(emitted)
+            failed.update({
+                "company_index": 0,
+                "company_identity_key": "domain:scored1.example.com",
+                "company_identity_alias_keys": ["domain:scored1.example.com"],
+                "company_qualified": False,
+                "duplicate_company": False,
+            })
+            return [failed]
+
+        scorer.integrity_policy = True
+        return scorer
+
+    monkeypatch.setattr(
+        scorer_entrypoint.scoring,
+        "apply_policy_to_environment",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(scorer_entrypoint.scoring, "lab_scorer", lab_scorer)
+    monkeypatch.setenv(scorer_entrypoint.shim.TRUSTED_SCORER_ENV, "1")
+    output = scorer_entrypoint.score_input(input_document)
+    persisted_output = scoring.validate_scoring_output_document(
+        json.loads(json.dumps(output))
+    )
+    assert scorer_calls == [
+        ["Scored Co 0", "Scored Co 1"],
+        ["Scored Co 1"],
+        ["Scored Co 1"],
+    ]
+    assert [row["final_score"] for row in persisted_output["breakdowns"]] == [
+        91.0,
+        0.0,
+    ]
+
+    stage_runs = runs_for(["citation-transition"])
+    plan = scoring.build_scoring_plan(
+        round_id=ROUND,
+        stage=1,
+        runs=stage_runs,
+    )
+    outputs_by_run = {
+        item["scored_run_id"]: companies for item in plan["work_items"]
+    }
+    breakdowns_by_item = {
+        item["scored_run_id"]: persisted_output["breakdowns"]
+        for item in plan["work_items"]
+    }
+    bundle = scoring.build_stage_scores(
+        plan=plan,
+        policy=policy,
+        icps_by_position=_ICPS,
+        outputs_by_run=outputs_by_run,
+        breakdowns_by_item=breakdowns_by_item,
+    )
+    stored = scoring.run_scores_for_store(bundle, stage_runs)
+    assert len(stored) == 10
+    assert all(record["per_icp_score"] == 91.0 / 5 for record in stored)
+    assert all(record["qualification_doc"] == {
+        "companies": [
+            {
+                "company_index": 0,
+                "company_identity_key": "domain:scored0.example.com",
+                "company_qualified": True,
+                "duplicate_company": False,
+            },
+            {
+                "company_index": 1,
+                "company_identity_key": "domain:scored1.example.com",
+                "company_qualified": False,
+                "duplicate_company": False,
+            },
+        ]
+    } for record in stored)
+
+    service = object.__new__(ArenaService)
+    output_bytes = contracts.canonical_json({
+        "schema_version": contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION,
+        "companies": companies,
+    }).encode("utf-8")
+    service._objects = type("Objects", (), {
+        "get_bounded": staticmethod(lambda _ref, _limit: output_bytes),
+    })()
+    service.evaluation_icps = lambda _round_id: [_ICPS[0]]
+    service._scoring_outputs = lambda _round_id, _stage: {
+        stage_runs[0]["run_id"]: {"status": "accepted"},
+    }
+    service._verified_breakdowns = (
+        lambda _judge, **_kwargs: persisted_output["breakdowns"]
+    )
+    persisted_run = {
+        **stage_runs[0],
+        **stored[0],
+    }
+    qualified = service._qualified_company_count(
+        {
+            "round_id": ROUND,
+            "configuration_doc": {"scorer_policy": policy},
+        },
+        "citation-transition",
+        [persisted_run],
+        positions=[0],
+    )
+    assert qualified == 1
+
+
+def test_company_quality_cache_keeps_typed_citation_exhaustion_terminal():
+    from lab_arena import company_judgments
+
+    company = scored_company(0)
+    policy = scoring.build_scorer_policy(
+        scoring_adapter_version="qualification_integrity_v2",
+        company_quality=True,
+        intent_details=True,
+    )
+    scoring_input = scoring.build_scoring_input(
+        scored_run_id="quality-citation-transition",
+        icp=_ICPS[0],
+        companies=[company],
+        policy=policy,
+        evaluation_date="2026-09-26",
+    )
+    ref = company_judgments.build_company_scopes(
+        scoring_input=scoring_input,
+        round_id=ROUND,
+        network_name="finney",
+        netuid=71,
+        scorer_image_digest="sha256:" + "a" * 64,
+        scorer_image_reference="registry/scorer@sha256:" + "a" * 64,
+        integrity_policy="arena_integrity_v1",
+        company_quality_policy="company_quality_v1",
+    )[0]
+    lease = {
+        "schema_version": company_judgments.LEASE_SCHEMA_VERSION,
+        "hits": [],
+        "misses": [{
+            "company_index": ref["company_index"],
+            "cache_key": ref["cache_key"],
+            "company_input_hash": ref["company_input_hash"],
+            "authority_slot": 0,
+        }],
+    }
+    identity_receipt = {
+        "decision": "match",
+        "evidence_source": "company_web_reverification",
+        "submitted_name": "Scored Co 0",
+        "submitted_domain": "scored0.example.com",
+        "submitted_linkedin_slug": "scored-co-0",
+        "observed_name": "Scored Co 0",
+        "observed_domain": "scored0.example.com",
+        "observed_linkedin_slug": "scored-co-0",
+    }
+    calls = {"n": 0}
+
+    def scorer(_batch, _icp, _is_reference_model):
+        calls["n"] += 1
+        failed = intent_details_citation_unavailable_breakdown()
+        failed["verifier_gate_receipts"][0] = {
+            "gate": "company_fit",
+            "decision": "match",
+            "dimension_evidence": {
+                "identity": {"web_identity_receipt": identity_receipt},
+            },
+        }
+        failed.update({
+            "company_index": 0,
+            "company_identity_key": "domain:scored0.example.com",
+            "company_identity_alias_keys": ["domain:scored0.example.com"],
+            "company_qualified": False,
+            "duplicate_company": False,
+        })
+        return [failed]
+
+    scorer.company_quality = True
+    scorer.integrity_policy = True
+    scorer.contacts_required = False
+    rows, new_judgments = scoring.score_quality_work_item(
+        {"scored_run_id": "quality-citation-transition"},
+        icp=_ICPS[0],
+        companies=[company],
+        scorer=scorer,
+        cache_context=lease,
+    )
+
+    assert calls["n"] == 3
+    assert rows[0]["final_score"] == 0.0
+    assert rows[0]["company_qualified"] is False
+    assert len(new_judgments) == 1
+    assert company_judgments.raw_judgment_is_cacheable(
+        new_judgments[0]["raw_judgment"]
+    )
 
 
 def _exact_target_crawl_failure_breakdown(statuses):

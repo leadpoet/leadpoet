@@ -63,10 +63,14 @@ def _require_hash(value: Any, field: str) -> str:
     return text
 
 
-def _input_fields(policy: Mapping[str, Any]) -> tuple[str, ...]:
+def _input_fields(
+    policy: Mapping[str, Any], document: Mapping[str, Any]
+) -> tuple[str, ...]:
     fields = _BASE_SCORING_INPUT_FIELDS
     if contact_policy.scorer_enabled(policy):
         fields += ("contact_source_evidence",)
+    if "provider_observations" in document:
+        fields += ("provider_observations",)
     return fields
 
 
@@ -82,7 +86,7 @@ def effective_company_inputs(document: Mapping[str, Any]) -> list[Dict[str, Any]
         str(policy.get("scoring_adapter_version") or "")
     ):
         raise CompanyJudgmentError("company quality requires integrity scoring")
-    if tuple(document.keys()) != _input_fields(policy):
+    if tuple(document.keys()) != _input_fields(policy, document):
         raise CompanyJudgmentError("scoring input fields or field order changed")
     if document.get("schema_version") != "leadpoet.lab_arena.scoring_input.v1":
         raise CompanyJudgmentError("scoring input schema changed")
@@ -103,6 +107,7 @@ def effective_company_inputs(document: Mapping[str, Any]) -> list[Dict[str, Any]
             icp,
             contacts_required=contact_policy.scorer_enabled(policy),
             contact_source_evidence=document.get("contact_source_evidence"),
+            provider_observations=document.get("provider_observations"),
             company_quality=True,
         )
     except (TypeError, ValueError) as exc:

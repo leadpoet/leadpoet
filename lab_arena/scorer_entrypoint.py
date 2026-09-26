@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict
 
-from lab_arena import contracts, scoring, shim
+from lab_arena import contracts, provider_observations, scoring, shim
 from qualification.scoring.evaluation_clock import use_evaluation_date
 
 PLACEHOLDER_CREDENTIALS = {name: "arena-placeholder-" + name.lower() for name in scoring.CREDENTIAL_ENV_NAMES}
@@ -33,6 +33,13 @@ def score_input(document: Dict[str, Any]) -> Dict[str, Any]:
     if not scored_run_id:
         raise scoring.ScoringError("scored_run_id is invalid")
     policy = contracts.validate_scorer_policy(document["scorer_policy"])
+    if (
+        "provider_observations" in document
+        and not provider_observations.enabled(policy)
+    ):
+        raise scoring.ScoringError(
+            "provider observations are not enabled by the frozen scorer policy"
+        )
     icp = dict(document["icp"])
     companies = [dict(item) for item in document["companies"]]
     os.environ[shim.TRUSTED_SCORER_ENV] = "1"
@@ -42,7 +49,17 @@ def score_input(document: Dict[str, Any]) -> Dict[str, Any]:
         credentials=dict(PLACEHOLDER_CREDENTIALS),
     )
     from lab_arena import contact_policy, quality_policy
-    scorer = scoring.lab_scorer(policy, **({"contact_source_evidence": document.get("contact_source_evidence")} if contact_policy.scorer_enabled(policy) else {}))
+    scorer = scoring.lab_scorer(
+        policy,
+        **(
+            {"contact_source_evidence": document.get("contact_source_evidence")}
+            if contact_policy.scorer_enabled(policy) else {}
+        ),
+        **(
+            {"provider_observations": document["provider_observations"]}
+            if "provider_observations" in document else {}
+        ),
+    )
     item = {"scored_run_id": scored_run_id}
     try:
         with use_evaluation_date(str(document.get("evaluation_date") or "")):

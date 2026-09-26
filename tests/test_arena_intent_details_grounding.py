@@ -12,6 +12,7 @@ from qualification.intent_details import validate_intent_details_text
 from qualification.scoring import intent_details, verification_helpers, lead_scorer
 from qualification.scoring.company_fit_decision import company_fit_match
 from qualification.scoring.competition import scorer_breakdown_has_retryable_infrastructure_failure
+from qualification.scoring.evaluation_clock import use_evaluation_date
 
 
 PARAGRAPH = (
@@ -225,6 +226,94 @@ def test_review_keeps_non_qualifying_findings_separate_from_verified_coverage():
     assert _admitted_for_refs(result, company_refs)[0]["admitted_text"] == [
         "Acme provides reporting software."
     ]
+
+
+def test_authenticated_provider_observation_is_explicit_and_not_an_event_date():
+    company, icp, results, fit = inputs()
+    fit = deepcopy(fit)
+    fit["dimension_evidence"]["identity"] = {
+        "decision": "match",
+        "web_identity_receipt": {
+            "decision": "match",
+            "observed_domain": "acme.example",
+        },
+    }
+    observation = {
+        "matched_icp_signal": 0,
+        "source_url": "https://acme.example/platform",
+        "first_observed_date": "2026-08-22",
+    }
+
+    with use_evaluation_date("2026-09-25"):
+        document = intent_details.review_evidence(
+            company,
+            icp,
+            results,
+            fit,
+            authenticated_provider_observation=observation,
+        )
+
+    admitted = [
+        item for item in document["admitted_evidence"]
+        if item["evidence_kind"] == "authenticated_provider_observation"
+    ]
+    assert admitted == [{
+        "source_index": admitted[0]["source_index"],
+        "evidence_kind": "authenticated_provider_observation",
+        "matched_icp_signal": 0,
+        "source_url": "https://acme.example/platform",
+        "admitted_text": [
+            "The provider first observed this listing on 2026-08-22; "
+            "this does not establish the posting, publication, or opening date."
+        ],
+    }]
+    assert "observed_dates" not in admitted[0]
+    signal_dates = [
+        item.get("observed_dates")
+        for item in document["admitted_evidence"]
+        if item["evidence_kind"] == "verified_signal_observation"
+    ]
+    assert signal_dates == [
+        [{"date": "2026-09-01", "basis": "event"}],
+        [{"date": "2026-09-03", "basis": "event"}],
+    ]
+    assert "does not change the event date, freshness" in (
+        intent_details._PROVIDER_OBSERVATION_SYSTEM_APPENDIX
+    )
+
+
+@pytest.mark.parametrize("mutation", ["wrong_url", "wrong_company", "future"])
+def test_authenticated_provider_observation_requires_verified_binding(mutation):
+    company, icp, results, fit = inputs()
+    fit = deepcopy(fit)
+    fit["dimension_evidence"]["identity"] = {
+        "decision": "match",
+        "web_identity_receipt": {
+            "decision": "match",
+            "observed_domain": (
+                "other.example" if mutation == "wrong_company" else "acme.example"
+            ),
+        },
+    }
+    observation = {
+        "matched_icp_signal": 0,
+        "source_url": (
+            "https://acme.example/unverified"
+            if mutation == "wrong_url" else "https://acme.example/platform"
+        ),
+        "first_observed_date": (
+            "2026-09-26" if mutation == "future" else "2026-08-22"
+        ),
+    }
+
+    with use_evaluation_date("2026-09-25"), pytest.raises(ValueError):
+        intent_details.review_evidence(
+            company,
+            icp,
+            results,
+            fit,
+            authenticated_provider_observation=observation,
+        )
 
 
 def test_non_qualifying_projection_requires_an_independent_terminal_receipt():
@@ -1179,6 +1268,62 @@ def test_scorer_checks_paragraph_after_signals_and_preserves_arithmetic(monkeypa
     assert result["final_score"] == (100.0 if decision == "match" else 0.0)
     assert result["verifier_gate_receipts"][-1]["decision"] == decision
     assert scorer_breakdown_has_retryable_infrastructure_failure(result, integrity_policy=True) == (decision == "unavailable")
+
+
+def test_provider_observation_reaches_only_paragraph_review_after_score(monkeypatch):
+    company, icp, results, fit = inputs()
+    fit = deepcopy(fit)
+    fit["dimension_evidence"]["identity"] = {
+        "decision": "match",
+        "web_identity_receipt": {
+            "decision": "match",
+            "evidence_source": "company_web_reverification",
+            "observed_domain": "acme.example",
+        },
+    }
+    captured = {}
+
+    async def verify_company(*args, **kwargs):
+        return company_fit_match(
+            "verified", details={"dimension_evidence": fit["dimension_evidence"]}
+        )
+
+    async def verify_signals(*args, **kwargs):
+        assert "provider_observation" not in kwargs
+        return 100.0, 100.0, 1.0, 100, False, results
+
+    async def review(*args, **kwargs):
+        captured.update(kwargs)
+        return {"gate": "intent_details", "decision": "match"}
+
+    monkeypatch.setattr(lead_scorer, "_verify_company_fit", verify_company)
+    monkeypatch.setattr(
+        lead_scorer, "score_company_competition_intent_signal", verify_signals
+    )
+    monkeypatch.setattr(intent_details, "review_intent_details", review)
+    with use_evaluation_date("2026-09-25"):
+        result = asyncio.run(lead_scorer.score_company_competition_intent(
+            company,
+            icp,
+            0,
+            0,
+            set(),
+            integrity_policy=True,
+            provider_observation={
+                "company_domain": "acme.example",
+                "source_url": "https://acme.example/platform",
+                "first_observed_date": "2026-08-22",
+            },
+        )).model_dump(mode="json")
+
+    assert result["intent_signal_raw"] == 100.0
+    assert result["time_decay_multiplier"] == 1.0
+    assert result["intent_signal_final"] == 100.0
+    assert captured["authenticated_provider_observation"] == {
+        "matched_icp_signal": 0,
+        "source_url": "https://acme.example/platform",
+        "first_observed_date": "2026-08-22",
+    }
 
 
 def test_unverified_primary_does_not_spend_on_prose(monkeypatch):

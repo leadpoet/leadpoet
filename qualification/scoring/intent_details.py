@@ -13,6 +13,7 @@ import json
 import re
 from datetime import date
 from typing import Any, Mapping, Sequence
+from urllib.parse import urlsplit
 
 from qualification.intent_details import validate_intent_details_text
 
@@ -305,6 +306,15 @@ exhaustive list of every rejected attempt. Its omission of a claim is not
 positive support for that claim.
 """
 
+_PROVIDER_OBSERVATION_SYSTEM_APPENDIX = """
+
+AUTHENTICATED PROVIDER OBSERVATION:
+An authenticated provider observation proves only when that provider first
+observed the exact listing. It can support only "first observed" wording. It
+does not establish when the listing was posted, published, opened, or filled,
+and it does not change the event date, freshness, or date uncertainty.
+"""
+
 
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
@@ -552,6 +562,30 @@ def _project_admitted_evidence(document: dict[str, Any]) -> None:
             "evidence_source_indexes": references,
         })
 
+    raw_observation = document.pop("authenticated_provider_observation", None)
+    if isinstance(raw_observation, Mapping):
+        matched = raw_observation.get("matched_icp_signal")
+        source_url = raw_observation.get("source_url")
+        observed_date = raw_observation.get("first_observed_date")
+        sentence = (
+            f"The provider first observed this listing on {observed_date}; "
+            "this does not establish the posting, publication, or opening date."
+        )
+        observation_index = append_source(
+            kind="authenticated_provider_observation",
+            admitted_text=[sentence],
+            matched_icp_signal=matched,
+            source_url=source_url,
+        )
+        if observation_index is not None:
+            for signal in verified_projection:
+                if (
+                    signal.get("matched_icp_signal") == matched
+                    and source_url in signal.get("source_urls", [])
+                ):
+                    signal["evidence_source_indexes"].append(observation_index)
+                    break
+
     non_qualifying_projection: list[dict[str, Any]] = []
     for raw_finding in document.get("non_qualifying_signals") or []:
         if not isinstance(raw_finding, Mapping):
@@ -739,6 +773,7 @@ def review_evidence(
     company: Any, icp: Any, signal_results: Sequence[Mapping[str, Any]],
     company_fit_receipt: Mapping[str, Any],
     *, company_source_contexts: Sequence[Mapping[str, str]] | None = None,
+    authenticated_provider_observation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Project verified observations and bounded text from their fetched sources."""
     verified = []
@@ -874,6 +909,60 @@ def review_evidence(
         })
     if not verified or not any(item["matched_icp_signal"] == 0 for item in verified):
         raise ValueError("Intent Details requires verified primary evidence")
+    provider_observation = None
+    if authenticated_provider_observation is not None:
+        raw = authenticated_provider_observation
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "matched_icp_signal", "source_url", "first_observed_date"
+        }:
+            raise ValueError("invalid authenticated provider observation")
+        matched = raw.get("matched_icp_signal")
+        source_url = raw.get("source_url")
+        observed_date = raw.get("first_observed_date")
+        try:
+            from qualification.scoring.evaluation_clock import evaluation_date
+
+            parsed_date = date.fromisoformat(observed_date)
+            source_host = (urlsplit(source_url).hostname or "").casefold().removeprefix("www.")
+            company_host = (
+                urlsplit(str(company.company_website or "")).hostname or ""
+            ).casefold().removeprefix("www.")
+        except (TypeError, ValueError):
+            raise ValueError("invalid authenticated provider observation date")
+        identity = _mapping(
+            _mapping(company_fit_receipt.get("dimension_evidence")).get(
+                "identity"
+            )
+        )
+        identity_receipt = _mapping(identity.get("web_identity_receipt"))
+        observed_domain = str(
+            identity_receipt.get("observed_domain") or ""
+        ).casefold().removeprefix("www.")
+        if (
+            type(matched) is not int
+            or matched < 0
+            or not isinstance(source_url, str)
+            or len(source_url) > 2_000
+            or parsed_date > evaluation_date()
+            or identity_receipt.get("decision") != "match"
+            or not observed_domain
+            or company_host != observed_domain
+            or not (
+                source_host == observed_domain
+                or source_host.endswith("." + observed_domain)
+            )
+            or not any(
+                item["matched_icp_signal"] == matched
+                and source_url in item["source_urls"]
+                for item in verified
+            )
+        ):
+            raise ValueError("unbound authenticated provider observation")
+        provider_observation = {
+            "matched_icp_signal": matched,
+            "source_url": source_url,
+            "first_observed_date": observed_date,
+        }
     company_facts = {}
     dimensions = _mapping(company_fit_receipt.get("dimension_evidence"))
     for dimension, raw in dimensions.items():
@@ -1025,6 +1114,10 @@ def review_evidence(
             if non_qualifying else {}
         ),
         "verified_company_evidence": company_facts,
+        **(
+            {"authenticated_provider_observation": provider_observation}
+            if provider_observation is not None else {}
+        ),
     }
     # Keep the existing review bound. Extra source context must not make a
     # previously valid review request too large.
@@ -1315,6 +1408,7 @@ async def review_intent_details(
     company: Any, icp: Any, signal_results: Sequence[Mapping[str, Any]],
     company_fit_receipt: Mapping[str, Any],
     *, company_source_contexts: Sequence[Mapping[str, str]] | None = None,
+    authenticated_provider_observation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a bounded match/mismatch/unavailable gate receipt.
 
@@ -1334,6 +1428,9 @@ missing review into an accepted paragraph or a terminal company mismatch.
             signal_results,
             company_fit_receipt,
             company_source_contexts=company_source_contexts,
+            authenticated_provider_observation=(
+                authenticated_provider_observation
+            ),
         )
         prompt = json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     except (TypeError, ValueError, AttributeError):
@@ -1343,6 +1440,15 @@ missing review into an accepted paragraph or a terminal company mismatch.
     system_prompt = _SYSTEM + (
         _NON_QUALIFYING_SYSTEM_APPENDIX
         if document.get("non_qualifying_signals")
+        else ""
+    ) + (
+        _PROVIDER_OBSERVATION_SYSTEM_APPENDIX
+        if any(
+            isinstance(item, Mapping)
+            and item.get("evidence_kind")
+            == "authenticated_provider_observation"
+            for item in document.get("admitted_evidence") or []
+        )
         else ""
     )
     loop = asyncio.get_running_loop()

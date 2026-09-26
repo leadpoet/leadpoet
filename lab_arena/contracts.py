@@ -1183,6 +1183,8 @@ def validate_submission_finalize_body(body: Any) -> Dict[str, Any]:
 
 SCORE_NORMALIZATION_BINDING = "ARENA_SCORE_NORMALIZATION"
 AVAILABLE_INTENT_CAP_NORMALIZATION = "available_intent_cap_v1"
+PROVIDER_OBSERVATION_HANDOFF_BINDING = "ARENA_PROVIDER_OBSERVATION_HANDOFF"
+AUTHENTICATED_PROVIDER_OBSERVATION_HANDOFF = "authenticated_first_observed_v1"
 
 SCORER_POLICY_FIELDS = (
     F("schema_version", "str", choices=(SCORER_POLICY_SCHEMA_VERSION,)),
@@ -1222,6 +1224,16 @@ def validate_scorer_policy(document: Any) -> Dict[str, Any]:
             raise ArenaContractError("unsupported score normalization")
         if policy["scoring_adapter_version"] not in ("qualification_integrity_v2", "qualification_contacts_v3"):
             raise ArenaContractError("intent score normalization requires integrity scoring")
+    if PROVIDER_OBSERVATION_HANDOFF_BINDING in policy["env_bindings"]:
+        if (
+            policy["env_bindings"][PROVIDER_OBSERVATION_HANDOFF_BINDING]
+            != AUTHENTICATED_PROVIDER_OBSERVATION_HANDOFF
+        ):
+            raise ArenaContractError("unsupported provider observation handoff")
+        if not policy.get("intent_details_policy"):
+            raise ArenaContractError(
+                "provider observation handoff requires intent details"
+            )
     return policy
 
 

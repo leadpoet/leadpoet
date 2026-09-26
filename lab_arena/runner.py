@@ -2584,6 +2584,7 @@ class AssignmentExecutor:
                     scored_run_id=str(lease["scored_run_id"]), icp=icp, companies=list((lease.get("scored_output") or {}).get("companies") or []),
                     policy=lease["scorer_policy"], evaluation_date=evaluation_date,
                     contact_source_evidence=lease.get("contact_source_evidence"),
+                    provider_observations=lease.get("provider_observations"),
                     company_judgment_cache=lease.get("company_judgment_cache"),
                 )
                 extra_environment = {shim.TRUSTED_SCORER_ENV: "1"}

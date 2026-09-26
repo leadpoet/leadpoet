@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, quality_policy
+from lab_arena import code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy
 from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
@@ -984,6 +984,7 @@ class ArenaService:
                 ],
                 company_quality=quality_policy.enabled(document),
                 intent_details=True,
+                provider_observation_handoff=True,
             )
         if defaults.normalize_intent_scale and integrity.enabled(document):
             document["scorer_policy"] = dict(document["scorer_policy"], env_bindings={
@@ -2060,6 +2061,16 @@ class ArenaService:
                     policy=policy,
                     evaluation_date=str(round_row.get("evaluation_date") or ""),
                     contact_source_evidence=(contact_evidence.resolve_sources(self._store, run, companies) if contact_policy.enabled(configuration) else None),
+                    provider_observations=(
+                        provider_observations.resolve_observations(
+                            self._store, run, companies,
+                            str(round_row.get("evaluation_date") or ""),
+                        )
+                        if (
+                            intent_details_policy.enabled(configuration)
+                            and provider_observations.enabled(policy)
+                        ) else None
+                    ),
                 )
                 if company_quality_cache:
                     work_item["company_judgment_refs"] = (
@@ -3685,6 +3696,22 @@ class ArenaService:
                     ),
                 )["companies"]
                 lease["contact_source_evidence"] = contact_evidence.resolve_sources(self._store, scored, companies)
+            if (
+                intent_details_policy.enabled(configuration)
+                and provider_observations.enabled(configuration["scorer_policy"])
+            ):
+                companies = validate_output_document(
+                    output,
+                    expected_schema_version=contact_policy.output_schema(
+                        configuration
+                    ),
+                )["companies"]
+                lease["provider_observations"] = (
+                    provider_observations.resolve_observations(
+                        self._store, scored, companies,
+                        str(round_row.get("evaluation_date") or ""),
+                    )
+                )
             return lease
         # An execution uses the participant's private source archive under the
         # same trusted Python image as every other agent.

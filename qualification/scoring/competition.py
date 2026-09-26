@@ -364,6 +364,7 @@ def effective_competition_input(
     *,
     contacts_required: bool = False,
     contact_source_evidence: Mapping[str, Any] | None = None,
+    provider_observations: Sequence[Mapping[str, Any]] | None = None,
     company_quality: bool = False,
 ) -> dict[str, Any]:
     """Project the same normalized first-N inputs consumed by the adapter.
@@ -376,7 +377,7 @@ def effective_competition_input(
     from gateway.qualification.models import CompanyOutput
 
     rows = []
-    for company in list(companies)[:_company_goal(icp)]:
+    for company_index, company in enumerate(list(companies)[:_company_goal(icp)]):
         observed = company.get("employee_count")
         bucket = normalize_employee_count_bucket(observed, default=None) or normalize_observed_employee_count_bucket(observed, default=None)
         if bucket not in buckets and not company_quality:
@@ -429,6 +430,11 @@ def effective_competition_input(
             effective.update(
                 _effective_contact_input(company, contact_source_evidence)
             )
+        observation = _effective_provider_observation(
+            provider_observations, company_index
+        )
+        if observation is not None:
+            effective["provider_observation"] = observation
         rows.append(effective)
     effective_icp = _normalized_icp(icp)
     if contacts_required:
@@ -534,6 +540,22 @@ def _effective_contact_input(
             "email_source": effective_source,
         },
         "contact_source_evidence_hash": _semantic_hash(source_semantics),
+    }
+
+
+def _effective_provider_observation(
+    observations: Sequence[Mapping[str, Any]] | None,
+    company_index: int,
+) -> dict[str, str] | None:
+    from lab_arena.provider_observations import company_observation
+
+    observation = company_observation(observations, company_index)
+    if observation is None:
+        return None
+    return {
+        "company_domain": observation["company_domain"],
+        "source_url": observation["source_url"],
+        "first_observed_date": observation["first_observed_date"],
     }
 
 
@@ -862,6 +884,7 @@ class CompetitionCompanyScorer:
         *,
         contacts_required: bool = False,
         contact_source_evidence: Mapping[str, Any] | None = None,
+        provider_observations: Sequence[Mapping[str, Any]] | None = None,
         company_quality: bool = False,
         evidence_investigator: bool = False,
         scorer_policy: Mapping[str, Any] | None = None,
@@ -874,6 +897,12 @@ class CompetitionCompanyScorer:
             dict(contact_source_evidence)
             if isinstance(contact_source_evidence, Mapping)
             else {}
+        )
+        self.provider_observations = (
+            [dict(item) for item in provider_observations]
+            if isinstance(provider_observations, Sequence)
+            and not isinstance(provider_observations, (str, bytes, bytearray))
+            else []
         )
         self.scorer_policy = json.loads(json.dumps(
             dict(scorer_policy or {}),
@@ -1048,6 +1077,9 @@ class CompetitionCompanyScorer:
                 )
                 if isinstance(intent_cache, MutableMapping):
                     intent_terminal_retry_cache = intent_cache
+            provider_observation = _effective_provider_observation(
+                self.provider_observations, company_index
+            )
             result = await score_company(
                 company=company_model,
                 icp=icp_model,
@@ -1062,6 +1094,10 @@ class CompetitionCompanyScorer:
                 ),
                 intent_terminal_retry_cache=intent_terminal_retry_cache,
                 retry_evidence_context_key=retry_evidence_context_key,
+                **(
+                    {"provider_observation": provider_observation}
+                    if provider_observation is not None else {}
+                ),
                 **({"company_quality": True} if self.company_quality else {}),
             )
             breakdown = (

@@ -42,7 +42,7 @@ def _company(name: str) -> dict:
     }
 
 
-def _input(*, contacts: bool = False) -> dict:
+def _input(*, contacts: bool = False, observation_handoff: bool = False) -> dict:
     companies = [_company(name) for name in ("A", "B", "C", "D", "E")]
     icp = _icp()
     evidence = None
@@ -97,7 +97,10 @@ def _input(*, contacts: bool = False) -> dict:
         icp=icp,
         companies=companies,
         policy=scoring.build_scorer_policy(
-            scoring_adapter_version=adapter, company_quality=True
+            scoring_adapter_version=adapter,
+            company_quality=True,
+            intent_details=observation_handoff,
+            provider_observation_handoff=observation_handoff,
         ),
         evaluation_date="2026-09-11",
         contact_source_evidence=evidence,
@@ -229,6 +232,53 @@ def test_contact_source_semantics_change_but_transport_metadata_does_not():
         "email"
     ] = "different@acme.com"
     assert _refs(semantic)[0]["cache_key"] != original
+
+
+def test_provider_observation_binds_only_its_company_cache_key():
+    legacy = _input(observation_handoff=True)
+    legacy_refs = _refs(legacy)
+    observed = _input(observation_handoff=True)
+    observed["provider_observations"] = [{
+        "company_index": 0,
+        "company_domain": "a.example",
+        "source_url": "https://a.example/launch",
+        "first_observed_date": "2026-08-22",
+    }]
+    observed_refs = _refs(observed)
+
+    assert observed_refs[0]["cache_key"] != legacy_refs[0]["cache_key"]
+    assert [item["cache_key"] for item in observed_refs[1:]] == [
+        item["cache_key"] for item in legacy_refs[1:]
+    ]
+    changed = copy.deepcopy(observed)
+    changed["provider_observations"][0]["first_observed_date"] = "2026-08-23"
+    assert _refs(changed)[0]["cache_key"] != observed_refs[0]["cache_key"]
+
+
+def test_invalid_observation_cannot_poison_an_unrelated_company_cache_key():
+    legacy_refs = _refs(_input(observation_handoff=True))
+    observed = _input(observation_handoff=True)
+    observed["provider_observations"] = [
+        {
+            "company_index": 0,
+            "company_domain": "a.example",
+            "source_url": "https://a.example/launch",
+            "first_observed_date": "invalid",
+        },
+        {
+            "company_index": 1,
+            "company_domain": "b.example",
+            "source_url": "https://b.example/launch",
+            "first_observed_date": "2026-08-22",
+        },
+    ]
+    observed_refs = _refs(observed)
+
+    assert observed_refs[0]["cache_key"] == legacy_refs[0]["cache_key"]
+    assert observed_refs[1]["cache_key"] != legacy_refs[1]["cache_key"]
+    assert [item["cache_key"] for item in observed_refs[2:]] == [
+        item["cache_key"] for item in legacy_refs[2:]
+    ]
 
 
 def test_contact_key_binds_claimed_and_actual_broker_call_identity():

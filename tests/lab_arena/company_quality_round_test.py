@@ -222,8 +222,19 @@ def test_quality_round_publishes_coverage_winner_after_restart(
     harness.sandbox.run_icp = run_icp
     harness.clock.now = datetime.now(timezone.utc)
     round_id = "arena-2026-12-02-qualitycomplete"
-    harness.service.create_round(harness.clock.now + timedelta(hours=12), round_id=round_id)
+    configuration = harness.service.create_round(
+        harness.clock.now + timedelta(minutes=30), round_id=round_id
+    )
     harness.round_id = round_id
+    # Code review starts only when source replacements close. Keep submission
+    # inside its window while making the synchronous review helper eligible.
+    harness.clock.now = (
+        datetime.strptime(
+            configuration["schedule"]["submission_cutoff"],
+            "%Y-%m-%dT%H:%M:%SZ",
+        ).replace(tzinfo=timezone.utc)
+        - timedelta(minutes=15)
+    )
     broad = harness.submit("Broad", round_id)
     sparse = harness.submit("Sparse", round_id)
     padded = harness.submit("Padded", round_id)

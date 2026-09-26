@@ -47,7 +47,12 @@ def effective_scoring_input(document: Mapping[str, Any]) -> Dict[str, Any]:
 
     from lab_arena import contact_policy
     has_contacts = isinstance(document, Mapping) and contact_policy.scorer_enabled(document.get("scorer_policy") or {})
-    fields = _SCORING_INPUT_FIELDS + (("contact_source_evidence",) if has_contacts else ())
+    has_observations = isinstance(document, Mapping) and "provider_observations" in document
+    fields = (
+        _SCORING_INPUT_FIELDS
+        + (("contact_source_evidence",) if has_contacts else ())
+        + (("provider_observations",) if has_observations else ())
+    )
     if not isinstance(document, Mapping) or tuple(document.keys()) != fields:
         raise JudgmentCacheError("scoring input fields or field order changed")
     if document.get("schema_version") != "leadpoet.lab_arena.scoring_input.v1":
@@ -56,11 +61,19 @@ def effective_scoring_input(document: Mapping[str, Any]) -> Dict[str, Any]:
     del copied["scored_run_id"]
     from qualification.scoring.competition import effective_competition_input
 
+    observations = copied.pop("provider_observations", None)
     if has_contacts:
         evidence = copied.pop("contact_source_evidence")
-        copied.update(effective_competition_input(copied["companies"], copied["icp"], contacts_required=True, contact_source_evidence=evidence))
+        copied.update(effective_competition_input(
+            copied["companies"], copied["icp"], contacts_required=True,
+            contact_source_evidence=evidence,
+            provider_observations=observations,
+        ))
     else:
-        copied.update(effective_competition_input(copied["companies"], copied["icp"]))
+        copied.update(effective_competition_input(
+            copied["companies"], copied["icp"],
+            provider_observations=observations,
+        ))
     return copied
 
 

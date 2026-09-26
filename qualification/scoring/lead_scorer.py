@@ -7023,6 +7023,76 @@ def _matched_company_source_contexts(
     return contexts or None
 
 
+def _matched_provider_observation(
+    company: CompanyOutput,
+    company_fit: CompanyFitDecisionResult,
+    signal_results: Sequence[Mapping[str, Any]],
+    observation: Optional[Mapping[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """Bind one provider date to verified company identity and signal URL."""
+
+    if not isinstance(observation, Mapping) or set(observation) != {
+        "company_domain", "source_url", "first_observed_date"
+    }:
+        return None
+    domain = str(observation.get("company_domain") or "").casefold().removeprefix("www.")
+    source_url = observation.get("source_url")
+    first_observed_date = observation.get("first_observed_date")
+    if not domain or not isinstance(source_url, str) or not isinstance(
+        first_observed_date, str
+    ):
+        return None
+    try:
+        if date.fromisoformat(first_observed_date) > evaluation_date():
+            return None
+    except ValueError:
+        return None
+    try:
+        source_host = (urlsplit(source_url).hostname or "").casefold().removeprefix("www.")
+        submitted_host = (
+            urlsplit(str(company.company_website or "")).hostname or ""
+        ).casefold().removeprefix("www.")
+    except ValueError:
+        return None
+    if not (
+        submitted_host == domain
+        and (source_host == domain or source_host.endswith("." + domain))
+    ):
+        return None
+    identity_receipt = verified_identity_receipt(
+        [company_fit.receipt("company_fit")]
+    )
+    if (
+        not isinstance(identity_receipt, Mapping)
+        or str(identity_receipt.get("observed_domain") or "").casefold().removeprefix("www.")
+        != domain
+    ):
+        return None
+    matches: list[int] = []
+    for result in signal_results:
+        verdict = result.get("judge_verdict") if isinstance(result, Mapping) else None
+        urls = result.get("evidence_urls") if isinstance(result, Mapping) else None
+        matched = result.get("matched_icp_signal") if isinstance(result, Mapping) else None
+        if (
+            float(result.get("after_decay") or 0) > 0
+            and isinstance(verdict, Mapping)
+            and verdict.get("decision") == "verified"
+            and verdict.get("client_ready") is True
+            and isinstance(urls, list)
+            and source_url in urls
+            and type(matched) is int
+            and matched >= 0
+        ):
+            matches.append(matched)
+    if len(set(matches)) != 1:
+        return None
+    return {
+        "matched_icp_signal": matches[0],
+        "source_url": source_url,
+        "first_observed_date": first_observed_date,
+    }
+
+
 async def score_company_competition_intent(
     company: CompanyOutput,
     icp: ICPPrompt,
@@ -7039,6 +7109,7 @@ async def score_company_competition_intent(
     ] = None,
     intent_terminal_retry_cache: Optional[MutableMapping[str, Any]] = None,
     retry_evidence_context_key: str = "",
+    provider_observation: Optional[Mapping[str, Any]] = None,
 ) -> LeadScoreBreakdown:
     """Score one Arena company with binary fit gates and 0-100 intent score.
 
@@ -7118,6 +7189,12 @@ async def score_company_competition_intent(
     if final_score > 0 and getattr(company, "intent_details", None) is not None:
         from qualification.scoring.intent_details import review_intent_details
 
+        matched_provider_observation = _matched_provider_observation(
+            company,
+            company_fit,
+            signal_results,
+            provider_observation,
+        )
         details_receipt = await review_intent_details(
             company,
             icp,
@@ -7127,6 +7204,13 @@ async def score_company_competition_intent(
                 company_fit,
                 required_attribute_retry_source_cache,
                 linkedin_profile_source_candidate,
+            ),
+            **(
+                {
+                    "authenticated_provider_observation":
+                        matched_provider_observation
+                }
+                if matched_provider_observation is not None else {}
             ),
         )
         gate_receipts.append(details_receipt)

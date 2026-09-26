@@ -81,6 +81,7 @@ def build_scorer_policy(
     scoring_adapter_version: str = SCORING_ADAPTER_VERSION_V1,
     company_quality: bool = False,
     intent_details: bool = False,
+    provider_observation_handoff: bool = False,
     normalize_intent_scale: bool = False,
 ) -> Dict[str, Any]:
     """Return the plain scorer settings used for every participant."""
@@ -99,10 +100,16 @@ def build_scorer_policy(
         "provider_profile": provider_profile,
         "pre_slice_rule": "first_n_model_order",
         "employee_bucket_rule": "lab_relaxed_buckets",
-        "env_bindings": ({
-            contracts.SCORE_NORMALIZATION_BINDING:
-                contracts.AVAILABLE_INTENT_CAP_NORMALIZATION,
-        } if normalize_intent_scale else {}),
+        "env_bindings": {
+            **({
+                contracts.SCORE_NORMALIZATION_BINDING:
+                    contracts.AVAILABLE_INTENT_CAP_NORMALIZATION,
+            } if normalize_intent_scale else {}),
+            **({
+                contracts.PROVIDER_OBSERVATION_HANDOFF_BINDING:
+                    contracts.AUTHENTICATED_PROVIDER_OBSERVATION_HANDOFF,
+            } if provider_observation_handoff else {}),
+        },
     })
 
 
@@ -274,7 +281,12 @@ Scorer = Callable[[Sequence[Mapping[str, Any]], Mapping[str, Any], bool], Any]
 _SCOPED_RETRY_EVIDENCE_RUNNER = "_score_with_retry_evidence"
 
 
-def lab_scorer(policy: Mapping[str, Any], *, contact_source_evidence: Optional[Mapping[str, Any]] = None) -> Scorer:
+def lab_scorer(
+    policy: Mapping[str, Any],
+    *,
+    contact_source_evidence: Optional[Mapping[str, Any]] = None,
+    provider_observations: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> Scorer:
     """The Lab scorer on its host path, constructed after the policy is applied.
 
     ``is_reference_model`` is always False: the king is a competitor, not the
@@ -291,6 +303,7 @@ def lab_scorer(policy: Mapping[str, Any], *, contact_source_evidence: Optional[M
         integrity_policy=contact_policy.integrity_adapter(adapter),
         contacts_required=contact_policy.scorer_enabled(validated),
         contact_source_evidence=contact_source_evidence,
+        provider_observations=provider_observations,
         company_quality=quality_policy.scorer_enabled(validated),
         evidence_investigator=True,
         scorer_policy=validated,
@@ -719,8 +732,17 @@ def _require_run_id(value: Any) -> str:
     return value
 
 
-def build_scoring_input(*, scored_run_id: str, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], policy: Mapping[str, Any], evaluation_date: str, contact_source_evidence: Optional[Mapping[str, Any]] = None, company_judgment_cache: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+def build_scoring_input(
+    *, scored_run_id: str, icp: Mapping[str, Any],
+    companies: Sequence[Mapping[str, Any]], policy: Mapping[str, Any],
+    evaluation_date: str,
+    contact_source_evidence: Optional[Mapping[str, Any]] = None,
+    provider_observations: Optional[Sequence[Mapping[str, Any]]] = None,
+    company_judgment_cache: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
     """The judge sandbox's input: one ICP, one output, and the scorer policy."""
+
+    from lab_arena import provider_observations as observation_policy
 
     document = {
         "schema_version": SCORING_INPUT_SCHEMA_VERSION,
@@ -731,6 +753,13 @@ def build_scoring_input(*, scored_run_id: str, icp: Mapping[str, Any], companies
         "evaluation_date": str(evaluation_date),
         **({"contact_source_evidence": dict(contact_source_evidence or {})}
            if policy.get("scoring_adapter_version") == "qualification_contacts_v3" else {}),
+        **(
+            {"provider_observations": [dict(item) for item in provider_observations]}
+            if (
+                provider_observations is not None
+                and observation_policy.enabled(policy)
+            ) else {}
+        ),
     }
     if company_judgment_cache is not None:
         from lab_arena import company_judgments, quality_policy

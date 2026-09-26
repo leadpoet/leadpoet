@@ -323,6 +323,9 @@ def test_company_only_ten_icp_baseline_and_miner_complete_full_lifecycle(
     assert (configuration["scorer_policy"]["env_bindings"].get(
         contracts.SCORE_NORMALIZATION_BINDING
     ) == contracts.AVAILABLE_INTENT_CAP_NORMALIZATION) is normalized_scale
+    assert configuration["scorer_policy"]["env_bindings"].get(
+        contracts.PROVIDER_OBSERVATION_HANDOFF_BINDING
+    ) == contracts.AUTHENTICATED_PROVIDER_OBSERVATION_HANDOFF
     assert configuration["intent_details_policy"] == intent_details_policy.POLICY
     assert (configuration.get("company_quality_policy") == quality_policy.POLICY) is (
         company_quality

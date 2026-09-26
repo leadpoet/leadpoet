@@ -283,6 +283,66 @@ def test_v5_stage_evidence_reaches_only_untrusted_investigator_observations(
     assert "Fetch a relevant saved URL before using it" in investigator._SYSTEM_PROMPT
 
 
+def test_grounded_attribute_span_reaches_prefetched_investigator_as_hint(
+    monkeypatch,
+):
+    url = "https://www.miteksystems.com/identity-verification"
+    quote = (
+        "Mitek provides identity verification software that helps organizations "
+        "verify customers and prevent fraud."
+    )
+    page_text = "Mitek | Identity verification\n" + quote
+    captured = {}
+
+    async def capture_investigation(**kwargs):
+        captured.update(kwargs)
+        return {"claims": {}, "failure_reason": ""}
+
+    monkeypatch.setattr(
+        lead_scorer, "investigate_company_evidence", capture_investigation
+    )
+    asyncio.run(lead_scorer._run_targeted_company_evidence_investigation(
+        company=_company(
+            name="Mitek",
+            website="https://www.miteksystems.com/",
+            linkedin="https://www.linkedin.com/company/mitek-systems",
+        ),
+        icp=_icp(
+            industry="Cybersecurity",
+            required_attribute="Provides identity verification software.",
+        ),
+        verdict=_complete_verdict(
+            observed_company_name="Mitek",
+            observed_company_website="https://www.miteksystems.com/",
+            required_attribute_evidence_url=url,
+            required_attribute_evidence_quote=quote,
+        ),
+        investigation_targets=("industry",),
+        icp_attribute="Provides identity verification software.",
+        icp_stage="",
+        verified_identity={},
+        verified_transport_domain="miteksystems.com",
+        structured_employee_size_evidence=None,
+        structured_public_company_evidence=None,
+        employee_size_conflict=False,
+        company_quality=True,
+        required_attribute_source_cache={
+            url: {"status": "fetched", "final_url": url, "text": page_text}
+        },
+        review_positive_semantics=True,
+    ))
+
+    assert captured["prior_observations"][
+        "required_attribute_evidence_url"
+    ] == url
+    assert captured["prior_observations"][
+        "required_attribute_evidence_quote"
+    ] == quote
+    assert captured["prefetched_pages"] == {
+        url: {"final_url": url, "text": page_text}
+    }
+
+
 @pytest.mark.parametrize(
     "url",
     [
@@ -6722,6 +6782,23 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
     async def fake_post_json(_session, _url, *, headers, payload):
         del headers
         requests.append(payload)
+        if len(requests) == 2:
+            return 200, {
+                "choices": [{
+                    "message": {
+                        "tool_calls": [{
+                            "id": "call-2",
+                            "type": "function",
+                            "function": {
+                                "name": "search_web",
+                                "arguments": json.dumps({
+                                    "query": "Acme current public listing"
+                                }),
+                            },
+                        }]
+                    }
+                }]
+            }
         arguments = {
             "findings": [
                 _finding(
@@ -6752,6 +6829,9 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
     monkeypatch.setattr(investigator, "evaluation_date", lambda: date(2026, 9, 18))
     monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(
+        investigator, "_search_web", AsyncMock(return_value={"results": []})
+    )
 
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example"},
@@ -8107,6 +8187,113 @@ def test_provider_injected_prefetched_body_is_not_reused(monkeypatch):
     assert searches == ["Grab current public listing"]
     assert "prefetched_sources" not in requests[0]["messages"][1]["content"]
     assert result[investigator.PRIVATE_FETCHED_PAGES_KEY] == {}
+
+
+@pytest.mark.parametrize(
+    (
+        "company_name",
+        "website",
+        "quote",
+        "activity_role",
+        "expected_status",
+        "expected_reasoning_turns",
+    ),
+    [
+        (
+            "Mitek",
+            "https://www.miteksystems.com/",
+            "Mitek provides identity verification software that helps "
+            "organizations verify customers and prevent fraud.",
+            "supplier_operator",
+            "VERIFIED",
+            1,
+        ),
+        (
+            "Zen Educate",
+            "https://www.zeneducate.com/",
+            "Zen Educate uses identity verification software internally for "
+            "its employee onboarding.",
+            "internal_function",
+            "UNPROVEN",
+            2,
+        ),
+    ],
+)
+def test_prefetched_attribute_hint_remains_subject_to_industry_guards(
+    monkeypatch,
+    company_name,
+    website,
+    quote,
+    activity_role,
+    expected_status,
+    expected_reasoning_turns,
+):
+    url = website.rstrip("/") + "/identity"
+    requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        arguments = {
+            "findings": [_finding(
+                "industry",
+                observed_value="Identity verification software",
+                observed_industry="Cybersecurity",
+                observed_subindustry="Identity verification",
+                activity_role=activity_role,
+                evidence_url=url,
+                evidence_quote=quote,
+            )]
+        }
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"submit-industry-{len(requests)}",
+            "type": "function",
+            "function": {
+                "name": "submit_findings",
+                "arguments": json.dumps(arguments),
+            },
+        }]}}]}
+
+    network_fetch = AsyncMock()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 1)
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_fetch_page", network_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": company_name, "website": website},
+        targets=("industry",),
+        requested_industry="Cybersecurity",
+        requested_attribute="Provides identity verification software.",
+        prior_observations={
+            "submitted_source_urls": [url],
+            "required_attribute_evidence_url": url,
+            "required_attribute_evidence_quote": quote,
+        },
+        prefetched_pages={url: {"final_url": url, "text": quote}},
+        verified_homepage_identity={
+            "registrable_dns_domain": website.split("//", 1)[1].strip("/"),
+            "normalized_name": company_name.casefold(),
+        },
+    ))
+
+    assert result["claims"]["industry"]["status"] == expected_status
+    assert result["usage"] == {
+        "reasoning_turns": expected_reasoning_turns,
+        "search_calls": 0,
+        "fetch_calls": 0,
+    }
+    assert network_fetch.await_count == 0
+    input_document = json.loads(
+        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+    )
+    assert input_document["prior_observations"][
+        "required_attribute_evidence_url"
+    ] == url
+    assert input_document["prior_observations"][
+        "required_attribute_evidence_quote"
+    ] == quote
 
 
 def test_prefetched_pages_reduce_remaining_network_fetch_budget(monkeypatch):

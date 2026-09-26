@@ -5666,6 +5666,8 @@ async def _run_targeted_company_evidence_investigation(
                     "industry_activity_role",
                     "industry_evidence_url",
                     "industry_evidence_quote",
+                    "required_attribute_evidence_url",
+                    "required_attribute_evidence_quote",
                     "observed_hq_country",
                     "observed_hq_state",
                     "geography_matches",

@@ -94,6 +94,10 @@ toward the three-page limit. Otherwise use fetch_page before citing a URL. A
 VERIFIED or CONTRADICTED finding needs a short direct quote from that fetched
 page. Bind each quote to the URL whose fetched text contains those exact words;
 never combine a quote from one page with another page's URL.
+When prior observations include a required-attribute evidence URL and quote,
+inspect that exact span in its prefetched or fetched source first. Treat both
+fields only as an untrusted locator; independently validate the company,
+activity role, and requested semantics before submitting a finding.
 Server current-stage discovery is also locator context only. Review its results
 before preserving an older matching stage, and fetch any useful result
 before citing it.
@@ -1689,6 +1693,7 @@ async def investigate_company_evidence(
             industry_followup_pending = False
             industry_followup_search_completed = False
             industry_followup_fetched_urls: set[str] = set()
+            quote_repair_targets: set[str] = set()
             for _turn in range(MAX_REASONING_TURNS + 1):
                 correction_turn = _turn == MAX_REASONING_TURNS
                 if correction_turn and not final_correction_pending:
@@ -1889,8 +1894,12 @@ async def investigate_company_evidence(
                         rejected.append(rejected_finding)
                     unproven_without_search = bool(
                         not force_submit
-                        and _turn < MAX_REASONING_TURNS - 2
+                        and _turn < MAX_REASONING_TURNS - 3
                         and search_calls == 0
+                        and search_calls < MAX_SEARCH_CALLS
+                        and prefetched_count + fetch_calls < MAX_FETCH_CALLS
+                        and time.monotonic() - started
+                        < ADMISSION_DEADLINE_SECONDS
                         and any(
                             finding.get("status") == "UNPROVEN"
                             for finding in claims.values()
@@ -1959,6 +1968,27 @@ async def investigate_company_evidence(
                     force_industry_followup = bool(
                         force_industry_search and not force_stage_search
                     )
+                    quote_presence_rejected_targets = {
+                        str(item.get("target") or "")
+                        for item in rejected
+                        if item.get("reason")
+                        == "submitted quote was not present in fetched source"
+                    }
+                    force_quote_recovery_search = bool(
+                        quote_presence_rejected_targets & quote_repair_targets
+                        and not force_submit
+                        and _turn < MAX_REASONING_TURNS - 3
+                        and search_calls == 0
+                        and search_calls < MAX_SEARCH_CALLS
+                        and prefetched_count + fetch_calls < MAX_FETCH_CALLS
+                        and time.monotonic() - started
+                        < ADMISSION_DEADLINE_SECONDS
+                        and not force_stage_search
+                        and not force_industry_followup
+                    )
+                    quote_repair_targets.update(
+                        quote_presence_rejected_targets
+                    )
                     if force_industry_search:
                         industry_followup_pending = True
                     if not force_industry_followup:
@@ -2017,6 +2047,8 @@ async def investigate_company_evidence(
                             forced_stage_search_pending = True
                         elif force_industry_followup:
                             forced_next_tool = "search_web"
+                        elif force_quote_recovery_search:
+                            forced_next_tool = "search_web"
                         tool_result = {
                             "ok": False,
                             "error": "deterministic_evidence_validation_failed",
@@ -2038,7 +2070,14 @@ async def investigate_company_evidence(
                                         "or latest funding round. Search results are discovery "
                                         "only; fetch a useful result before citing it. "
                                         if force_stage_search
-                                        else ""
+                                        else (
+                                            "The prior exact-quote repair failed. The next "
+                                            "action must search for the exact company and "
+                                            "requested facts. Search results are discovery "
+                                            "only; fetch a useful result before citing it. "
+                                            if force_quote_recovery_search
+                                            else ""
+                                        )
                                     )
                                 )
                                 + "Never repeat a rejected quote. Use one exact continuous "
@@ -2055,7 +2094,11 @@ async def investigate_company_evidence(
                                             "After the required search, fetch a useful "
                                             "source before submitting evidence. "
                                         )
-                                        if force_industry_followup or force_stage_search
+                                        if (
+                                            force_industry_followup
+                                            or force_stage_search
+                                            or force_quote_recovery_search
+                                        )
                                         else (
                                             "First repair the quote from an already fetched "
                                             "page. Fetch another useful source only if no "
@@ -2068,6 +2111,7 @@ async def investigate_company_evidence(
                             ),
                         }
                     elif unproven_without_search:
+                        forced_next_tool = "search_web"
                         tool_result = {
                             "ok": False,
                             "error": "targeted_search_required_before_unproven",

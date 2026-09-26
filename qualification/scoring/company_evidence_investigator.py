@@ -135,7 +135,10 @@ platform without being the company's main business or a standalone product,
 unless the exact criterion explicitly requires either condition. Distinguish
 controls that customers operate in the sold product from the vendor's internal
 compliance, internal use, or badges. Prove every requested function and
-conjunct; missing discussion is not a contradiction.
+conjunct, preserving the criterion's explicit AND/OR structure. For alternatives
+joined by OR, evidence for one qualifying alternative is sufficient; do not
+require all alternatives. For requirements joined by AND, prove each one.
+Missing discussion is not a contradiction.
 CONTRADICTED requires direct customer, internal-function, or third-party
 evidence; a page that describes only a different business is UNPROVEN because
 it does not prove absence of another activity.

@@ -194,6 +194,14 @@ def test_public_source_selection_prefers_supplied_issuer_evidence_within_limits(
     assert "server-required current-stage search" in prompt
     assert "absence of a contradicting search result" in prompt
     assert "does not establish current Public status" in prompt
+    assert "Public listing is a continuing state" in prompt
+    assert "needs same-day reaffirmation" in prompt
+    assert "failed optional fetch of a newer page does not erase" in prompt
+    assert "concrete material conflict that cannot be resolved" in prompt
+    assert (
+        "historical IPO-completion announcement alone remains insufficient"
+        in prompt
+    )
     assert (
         investigator.MAX_REASONING_TURNS,
         investigator.MAX_SEARCH_CALLS,

@@ -215,6 +215,15 @@ submitted URL or site navigation. Cite fetched company-bound text. An old
 listing quote alone, or the absence of a contradicting search result, does not
 establish current Public status. The word "latest" in an old article does not
 prove that its round or listing is still the company's current stage.
+Public listing is a continuing state, not a fact that needs same-day
+reaffirmation. After the required current-status search and review of later
+events, a dated issuer, exchange, or current SEC statement that the exact
+company's shares are listed or traded can still establish current Public when
+no later completed delisting, take-private, or controlling acquisition is
+found. A failed optional fetch of a newer page does not erase that valid
+listing evidence by itself. It does require UNPROVEN when its available
+locator exposes a concrete material conflict that cannot be resolved. A
+historical IPO-completion announcement alone remains insufficient.
 When prior observations contain exact structured `Privately Held` company-type
 evidence, first seek current first-party take-private, delisting, or listing
 evidence. An archived SEC filing cover page is a historical snapshot and cannot
@@ -640,7 +649,14 @@ def _public_stage_submitted_source_to_prefetch(
 
     def has_strong_market_hint(url: str) -> bool:
         return any(
-            _public_quote_has_bound_market_locator(text, tuple(identity_names))
+            # Submitted snippets sometimes wrap the whole sentence in a
+            # quotation mark. Ignore that wrapper only for choosing which
+            # source to fetch. Evidence validation still uses the unchanged
+            # fetched text and strict quote gates.
+            _public_quote_has_bound_market_locator(
+                re.sub(r'^\s*["“”‘’]\s*', '', text, count=1),
+                tuple(identity_names),
+            )
             for text in submitted_source_hints.get(url, ())
         )
 
@@ -662,8 +678,6 @@ def _public_stage_submitted_source_to_prefetch(
         return ""
 
     submitted_candidates = [url for url in submitted_source_urls if eligible(url)]
-    if any(fetched_page_is_stage_capable(url) for url in submitted_candidates):
-        return ""
     strong_candidates = [
         url for url in submitted_candidates
         if has_strong_market_hint(url) and url not in fetched_pages
@@ -673,6 +687,8 @@ def _public_stage_submitted_source_to_prefetch(
             return url
     if strong_candidates:
         return strong_candidates[0]
+    if any(fetched_page_is_stage_capable(url) for url in submitted_candidates):
+        return ""
 
     # Preserve the existing safe first-party fallback when no strong submitted
     # hint exists. A prefetched first-party page still suppresses only this

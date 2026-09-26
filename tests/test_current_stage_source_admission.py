@@ -84,6 +84,126 @@ def _select_public_source(*, urls, hints, pages=None, disputes=()):
     )
 
 
+@pytest.mark.parametrize(
+    ("url", "hint", "identity_names", "generic_page"),
+    [
+        (
+            "https://www.nasdaq.com/press-release/crowdstrike-appoints-"
+            "bartley-richardson-chief-ai-and-autonomous-systems-officer-2026",
+            "“CrowdStrike (NASDAQ: CRWD) today announced the appointment of "
+            "Dr. Bartley Richardson as Chief AI and Autonomous Systems Officer. "
+            "Richardson now leads CrowdStrike’s AI strategy”",
+            {"crowdstrike"},
+            "CrowdStrike (NASDAQ: CRWD) reported quarterly results.",
+        ),
+        (
+            "https://www.nasdaq.com/press-release/rapid7-appoints-wael-"
+            "mohamed-chief-executive-officer-corey-thomas-become-executive",
+            "“Rapid7, Inc. (NASDAQ: RPD), a global leader in AI-powered managed "
+            "cybersecurity operations, today announced a leadership transition "
+            "in which board member Wael Mohamed will assume the role of Chief "
+            "Executive Officer”",
+            {"rapid7", "rapid7inc"},
+            "Rapid7, Inc. (NASDAQ: RPD) reported quarterly results.",
+        ),
+        (
+            "https://www.sentinelone.com/press/sentinelone-appoints-sonalee-"
+            "parekh-as-chief-financial-officer/",
+            "“SentinelOne (NYSE: S), the leader in AI-native cybersecurity, "
+            "today announced the appointment of Sonalee Parekh as Chief "
+            "Financial Officer, effective March 24, 2026.”",
+            {"sentinelone"},
+            "SentinelOne (NYSE: S) reported quarterly results.",
+        ),
+        (
+            "https://www.tenable.com/press-releases/tenable-appoints-dino-"
+            "dimarino-as-chief-revenue-officer",
+            "“Tenable® Holdings, Inc. (NASDAQ: TENB), the exposure management "
+            "company, today announced the appointment of Dino DiMarino as Chief "
+            "Revenue Officer (CRO).”",
+            {"tenable", "tenableholdingsinc"},
+            "Tenable Holdings, Inc. (NASDAQ: TENB) reported quarterly results.",
+        ),
+    ],
+)
+def test_wrapped_frozen_issuer_hint_outranks_generic_fetched_stage_page(
+    url, hint, identity_names, generic_page,
+):
+    generic_url = "https://profiles.example/company"
+
+    assert investigator._public_stage_submitted_source_to_prefetch(
+        submitted_source_urls=[generic_url, url],
+        stage_dispute_urls=[],
+        submitted_source_hints={url: [hint]},
+        first_party_domains={"sentinelone.com", "tenable.com"},
+        identity_names=identity_names,
+        fetched_pages={generic_url: generic_page},
+    ) == url
+
+
+@pytest.mark.parametrize(
+    "hint",
+    [
+        '"Acme Holdings, Inc. (NASDAQ: ACME) announced current results.',
+        "Acme Holdings, Inc. (NASDAQ: ACME) announced current results.",
+    ],
+)
+def test_straight_wrapped_and_unwrapped_issuer_hints_remain_selectable(hint):
+    url = "https://exchange.example/releases/acme-results"
+
+    assert investigator._public_stage_submitted_source_to_prefetch(
+        submitted_source_urls=[url],
+        stage_dispute_urls=[],
+        submitted_source_hints={url: [hint]},
+        first_party_domains=set(),
+        identity_names={"acme", "acmeholdingsinc"},
+        fetched_pages={},
+    ) == url
+
+
+@pytest.mark.parametrize(
+    "hint",
+    [
+        "“Other Holdings, Inc. (NASDAQ: OTHR) announced current results.”",
+        "Acme Holdings plans to list on NASDAQ under ticker ACME.",
+    ],
+)
+def test_different_issuer_or_no_listing_proof_hint_is_not_selected(hint):
+    url = "https://exchange.example/releases/unbound-result"
+
+    assert investigator._public_stage_submitted_source_to_prefetch(
+        submitted_source_urls=[url],
+        stage_dispute_urls=[],
+        submitted_source_hints={url: [hint]},
+        first_party_domains=set(),
+        identity_names={"acme", "acmeholdingsinc"},
+        fetched_pages={},
+    ) == ""
+
+
+def test_forged_submitted_hint_cannot_bypass_exact_fetched_quote_admission():
+    url = "https://acme.example/releases/results"
+    forged_hint = "Acme Holdings, Inc. (NASDAQ: ACME) announced results."
+
+    finding = investigator._validated_findings(
+        {"findings": [{
+            "target": "stage",
+            "status": "VERIFIED",
+            "observed_value": "Public",
+            "evidence_url": url,
+            "evidence_quote": forged_hint,
+        }]},
+        targets=("stage",),
+        fetched_pages={url: "Acme Holdings announced a new product."},
+        first_party_domains={"acme.example"},
+        identity_names={"acme", "acmeholdingsinc"},
+    )["stage"]
+
+    assert finding["status"] == "UNPROVEN"
+    assert finding["evidence_url"] == ""
+    assert finding["evidence_quote"] == ""
+
+
 def test_tenable_nasdaq_hint_is_selected_despite_inherited_industry_page():
     industry_url = "https://www.tenable.com/products"
     assert _select_public_source(

@@ -242,6 +242,27 @@ PART_A_BLOCK = """  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
     reserved STRICTLY for entity-identity mismatch in PART 0."""
 
 
+HIRING_FUNCTIONAL_ROLE_BLOCK = """  HIRING — FUNCTIONAL ROLE MATCH:
+    Apply this block only when the target asks for hiring in a named function
+    or role category. Judge the role from its documented primary duties, team,
+    and product scope; do not require the job title to repeat the category word.
+    A role can satisfy a functional category only when exact body evidence
+    directly assigns its work to that function. For example, an engineering
+    role can be a platform role when the posting assigns it work across the
+    employer's platform stack or components and gives it build, operation,
+    maintenance, or ownership duties there.
+
+    Keep the boundary strict. A generic software role at a company that sells
+    a platform is not automatically a platform role. Merely using a platform,
+    gaining incidental exposure to it, or mentioning it only in company
+    boilerplate is insufficient. Evidence about the role's own work must make
+    the functional match. Serving users in a named function does not by itself
+    place the role in that function. Preserve every explicit inclusion and
+    exclusion in the target: do not relabel a role assigned to a different or
+    excluded function merely because it collaborates with the requested
+    function."""
+
+
 ADVERTISING_BLOCK = """      * Advertising technology includes tools that measure paid campaign
         visibility, attribution, or advertising ROI. Such a launch can satisfy
         an advertising-technology launch target even if the product does not
@@ -509,6 +530,8 @@ def build_verification_prompt(
     criterion = str(row.get("_target_signal_text") or "").lower()
     if any(term in criterion for term in ("advertis", "adtech", "ad tech", "paid campaign")):
         parts.append(ADVERTISING_BLOCK)
+    if row.get("_evidence_type") == "HIRING":
+        parts.append(HIRING_FUNCTIONAL_ROLE_BLOCK)
     if any(term in criterion for term in ("acquisition", "acquire", "merger")):
         parts.append(ACQUISITION_BLOCK)
     if any(term in criterion for term in (

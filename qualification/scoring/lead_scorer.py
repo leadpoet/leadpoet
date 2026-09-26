@@ -349,15 +349,22 @@ _VENTURE_STAGE_STATEMENT_PATTERNS = {
     "series c+": _series_stage_statement_patterns(r"series\s+[c-z]"),
 }
 _PUBLIC_COMPANY_ALIAS_RE = re.compile(
-    r'\("[^"()\r\n]{1,80}"\s+or\s+the\s+"Company"\)\s+'
+    r"\((?:"
+    r'"(?!(?i:[^"\r\n]{0,80}\b(?:formerly|previously|not|never|'
+    r'no\s+longer|planned|proposed|expected)\b))'
+    r'[A-Za-z0-9][A-Za-z0-9&,.’\'+/-]*(?:\s+[A-Za-z0-9][A-Za-z0-9&,.’\'+/-]*){0,7}"|'
+    r'“(?!(?i:[^”\r\n]{0,80}\b(?:formerly|previously|not|never|'
+    r'no\s+longer|planned|proposed|expected)\b))'
+    r'[A-Za-z0-9][A-Za-z0-9&,.’\'+/-]*(?:\s+[A-Za-z0-9][A-Za-z0-9&,.’\'+/-]*){0,7}”)'
+    r'(?:\s+or\s+the\s+(?:"Company"|“Company”))?\)\s+'
     r'(?=\((?i:nasdaq|nyse)\s*:\s*[A-Z][A-Z0-9.-]{0,9}\))'
 )
 _PUBLIC_STAGE_PROOF_PATTERNS = (
     re.compile(r"\bpublicly\s+traded\b", re.I),
     re.compile(r"\bpublicly\s+listed\s+(?:shares?|stock)\b", re.I),
     re.compile(
-        r"(?:^|[.!?;:\n]\s*)"
-        r"(?:(?:[A-Z][A-Za-z0-9&,.'’+-]*|[&+])\s+){1,8}"
+        r"(?:^|[.!?;:\n]\s*|(?:--|[–—])\s*)"
+        r"(?:(?:[A-Z][A-Za-z0-9&,.'’+®-]*|[&+])\s+){1,8}"
         r"\((?i:nasdaq|nyse)\s*:\s*[A-Z][A-Z0-9.-]{0,9}\)",
     ),
     re.compile(

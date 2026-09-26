@@ -2652,6 +2652,81 @@ def _runtime_log_events(
     return events
 
 
+def _record_runtime_failure(
+    config: RunnerConfig,
+    lease: Mapping[str, Any],
+    lease_token: str,
+    state: RunState,
+    exc: BaseException,
+    *,
+    failure_stage: str,
+    result: Optional[runtime.SandboxResult] = None,
+    status: str = "abandoned",
+) -> None:
+    """Best-effort private failure boundary without exception prose."""
+
+    if failure_stage not in ("setup", "runtime", "cleanup"):
+        failure_stage = "runtime"
+    observed_at = _timestamp(config.clock)
+    try:
+        events = [
+            *_provider_error_events(state),
+            trajectory.event(
+                "runtime.error",
+                {
+                    "status": status,
+                    "failure_stage": failure_stage,
+                    "error_class": type(exc).__name__[:64],
+                },
+                occurred_at=observed_at,
+            ),
+            *_runtime_log_events(result, lease_token, observed_at),
+        ]
+    except Exception as observation_exc:
+        try:
+            print(
+                "Arena runtime error trajectory capture failed: %s"
+                % type(observation_exc).__name__,
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception:
+            pass
+        return
+    _record_trajectory(config, lease, lease_token, events)
+
+
+def _record_cleanup_failure(
+    config: RunnerConfig,
+    lease: Mapping[str, Any],
+    lease_token: str,
+    exc: BaseException,
+) -> None:
+    """Best-effort secondary cleanup boundary without replacing the cause."""
+
+    try:
+        event = trajectory.event(
+            "runtime.cleanup_error",
+            {
+                "failure_stage": "cleanup",
+                "error_class": type(exc).__name__[:64],
+            },
+            occurred_at=_timestamp(config.clock),
+        )
+    except Exception as observation_exc:
+        try:
+            print(
+                "Arena cleanup trajectory capture failed: %s"
+                % type(observation_exc).__name__,
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception:
+            pass
+        return
+    _record_trajectory(config, lease, lease_token, [event])
+
+
 class AssignmentExecutor:
     def __init__(self, config: RunnerConfig) -> None:
         self._config = config
@@ -2661,57 +2736,95 @@ class AssignmentExecutor:
 
         config = self._config
         state = RunState(lease=dict(lease), lease_token=lease_token)
-        run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=str(config.work_dir)))
-        input_dir = run_dir / "input"
-        output_dir = run_dir / "output"
-        input_dir.mkdir()
-        output_dir.mkdir()
-        # Unix socket paths are limited to about 100 bytes, so the worker
-        # socket lives in a short directory of its own, never under the run dir.
-        socket_dir = Path(tempfile.mkdtemp(prefix="la", dir=str(config.socket_root)))
-        socket_path = socket_dir / runtime.SANDBOX_SOCKET_NAME
-        if len(str(socket_path).encode("utf-8")) > MAX_SOCKET_PATH_BYTES:
-            shutil.rmtree(socket_dir, ignore_errors=True)
-            shutil.rmtree(run_dir, ignore_errors=True)
-            raise RunnerError("worker socket path exceeds %d bytes; set a shorter socket_root" % MAX_SOCKET_PATH_BYTES)
         started_at = _timestamp(config.clock)
-        kind = str(lease.get("kind") or "execute")
-        scoring_run = kind == "score"
-        checkpoint_policy = lease.get("checkpoint_deadline_policy")
-        if checkpoint_policy is not None and checkpoint_policy not in contracts.CHECKPOINT_DEADLINE_PROFILES:
-            raise RunnerError("lease checkpoint deadline policy is unsupported")
-        if checkpoint_policy is not None:
-            checkpoint_wall, checkpoint_lease = (
-                contracts.CHECKPOINT_DEADLINE_PROFILES[checkpoint_policy]
-            )
+        run_dir: Optional[Path] = None
+        socket_dir: Optional[Path] = None
+        try:
+            kind = str(lease.get("kind") or "execute")
+            scoring_run = kind == "score"
+            checkpoint_policy = lease.get("checkpoint_deadline_policy")
             if (
-                lease.get("icp_wall_clock_seconds") != checkpoint_wall
-                or lease.get("lease_ttl_seconds") != checkpoint_lease
+                checkpoint_policy is not None
+                and checkpoint_policy not in contracts.CHECKPOINT_DEADLINE_PROFILES
             ):
-                raise RunnerError("lease checkpoint deadline differs from its signed round")
-        signed_wall = lease.get(
-            "scoring_wall_clock_seconds" if scoring_run else "icp_wall_clock_seconds"
-        )
-        if signed_wall is not None and (
-            isinstance(signed_wall, bool)
-            or not isinstance(signed_wall, int)
-            or signed_wall < 30
-        ):
-            raise RunnerError("lease sandbox duration is invalid")
-        wall_clock_seconds = (
-            signed_wall if signed_wall is not None else (
-                contracts.SCORING_WALL_CLOCK_SECONDS if scoring_run
-                else config.wall_clock_seconds
+                raise RunnerError("lease checkpoint deadline policy is unsupported")
+            if checkpoint_policy is not None:
+                checkpoint_wall, checkpoint_lease = (
+                    contracts.CHECKPOINT_DEADLINE_PROFILES[checkpoint_policy]
+                )
+                if (
+                    lease.get("icp_wall_clock_seconds") != checkpoint_wall
+                    or lease.get("lease_ttl_seconds") != checkpoint_lease
+                ):
+                    raise RunnerError(
+                        "lease checkpoint deadline differs from its signed round"
+                    )
+            signed_wall = lease.get(
+                "scoring_wall_clock_seconds"
+                if scoring_run else "icp_wall_clock_seconds"
             )
-        )
-        server = WorkerSocketServer(
-            socket_path,
-            config.api,
-            state,
-            quota_snapshot_upstream_limit=_quota_snapshot_upstream_limit(
-                wall_clock_seconds
-            ),
-        )
+            if signed_wall is not None and (
+                isinstance(signed_wall, bool)
+                or not isinstance(signed_wall, int)
+                or signed_wall < 30
+            ):
+                raise RunnerError("lease sandbox duration is invalid")
+            wall_clock_seconds = (
+                signed_wall if signed_wall is not None else (
+                    contracts.SCORING_WALL_CLOCK_SECONDS if scoring_run
+                    else config.wall_clock_seconds
+                )
+            )
+            run_dir = Path(
+                tempfile.mkdtemp(prefix="run-", dir=str(config.work_dir))
+            )
+            input_dir = run_dir / "input"
+            output_dir = run_dir / "output"
+            input_dir.mkdir()
+            output_dir.mkdir()
+            # Keep the Unix socket under the short dedicated root.
+            socket_dir = Path(
+                tempfile.mkdtemp(prefix="la", dir=str(config.socket_root))
+            )
+            socket_path = socket_dir / runtime.SANDBOX_SOCKET_NAME
+            if len(str(socket_path).encode("utf-8")) > MAX_SOCKET_PATH_BYTES:
+                raise RunnerError(
+                    "worker socket path exceeds %d bytes; set a shorter socket_root"
+                    % MAX_SOCKET_PATH_BYTES
+                )
+            server = WorkerSocketServer(
+                socket_path,
+                config.api,
+                state,
+                quota_snapshot_upstream_limit=_quota_snapshot_upstream_limit(
+                    wall_clock_seconds
+                ),
+            )
+        except Exception as exc:
+            try:
+                _record_trajectory(config, lease, lease_token, [trajectory.event(
+                    "runtime.started",
+                    {"status": "starting", "runtime": "runsc"},
+                    occurred_at=started_at,
+                )])
+            except Exception as observation_exc:
+                try:
+                    print(
+                        "Arena runtime start trajectory capture failed: %s"
+                        % type(observation_exc).__name__,
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                except Exception:
+                    pass
+            _record_runtime_failure(
+                config, lease, lease_token, state, exc, failure_stage="setup"
+            )
+            if run_dir is not None:
+                shutil.rmtree(run_dir, ignore_errors=True)
+            if socket_dir is not None:
+                shutil.rmtree(socket_dir, ignore_errors=True)
+            raise
 
         def valid_checkpoint(candidate: bytes) -> bool:
             try:
@@ -2735,6 +2848,8 @@ class AssignmentExecutor:
         checkpoint_transition: Optional[Dict[str, Any]] = None
         web_server = None
         worker = None
+        runtime_entered = False
+        primary_exception: Optional[BaseException] = None
         evaluation_date = str(lease.get("evaluation_date") or config.evaluation_date)
         try:
             _record_trajectory(config, lease, lease_token, [trajectory.event(
@@ -2890,6 +3005,7 @@ class AssignmentExecutor:
                     extra_environment=extra_environment,
                 )
                 server.start()
+                runtime_entered = True
                 result = config.sandbox_runtime.run_icp(spec)
                 if not scoring_run:
                     execution_diagnostic = _execution_diagnostic_from_stderr(
@@ -3092,6 +3208,15 @@ class AssignmentExecutor:
                     failure_diagnostic = None
         except DependencyInstallInfrastructureError as exc:
             if scoring_run:  # the trusted scorer has no submitted dependency tree
+                primary_exception = exc
+                _record_runtime_failure(
+                    config,
+                    lease,
+                    lease_token,
+                    state,
+                    exc,
+                    failure_stage="setup",
+                )
                 raise
             terminal = "provider_error"
             output_document = None
@@ -3102,31 +3227,86 @@ class AssignmentExecutor:
             }
             _log_dependency_failure(str(lease["run_id"]), exc)
             _record_trajectory(config, lease, lease_token, [trajectory.event(
-                "runtime.error", {"status": terminal, "error_class": type(exc).__name__},
+                "runtime.error",
+                {"status": terminal, "failure_stage": "setup",
+                 "error_class": type(exc).__name__},
                 occurred_at=_timestamp(config.clock),
             )])
         except AgentDependencyError as exc:
             if scoring_run:  # the trusted scorer has no submitted dependency tree
+                primary_exception = exc
+                _record_runtime_failure(
+                    config,
+                    lease,
+                    lease_token,
+                    state,
+                    exc,
+                    failure_stage="setup",
+                )
                 raise
             terminal = "model_error"
             output_document = None
             _log_dependency_failure(str(lease["run_id"]), exc)
             _record_trajectory(config, lease, lease_token, [trajectory.event(
-                "runtime.error", {"status": terminal, "error_class": type(exc).__name__},
+                "runtime.error",
+                {"status": terminal, "failure_stage": "setup",
+                 "error_class": type(exc).__name__},
                 occurred_at=_timestamp(config.clock),
             )])
         except Exception as exc:
-            observed_at = _timestamp(config.clock)
-            _record_trajectory(config, lease, lease_token, [
-                *_provider_error_events(state), trajectory.event(
-                "runtime.error", {"status": "abandoned", "error_class": type(exc).__name__},
-                occurred_at=observed_at,
-            ), *_runtime_log_events(result, lease_token, observed_at)])
+            primary_exception = exc
+            if (
+                isinstance(exc, runtime.SandboxCleanupError)
+                and exc.result is not None
+            ):
+                result = exc.result
+            _record_runtime_failure(
+                config,
+                lease,
+                lease_token,
+                state,
+                exc,
+                failure_stage=(
+                    "cleanup"
+                    if isinstance(exc, runtime.SandboxCleanupError)
+                    else "runtime" if runtime_entered else "setup"
+                ),
+                result=result,
+            )
             raise
         finally:
-            server.stop()
+            pending_exception = primary_exception
+            stop_exception = None
+            try:
+                server.stop()
+            except Exception as exc:
+                stop_exception = exc
             shutil.rmtree(run_dir, ignore_errors=True)
             shutil.rmtree(socket_dir, ignore_errors=True)
+            if stop_exception is not None:
+                if pending_exception is None:
+                    _record_runtime_failure(
+                        config,
+                        lease,
+                        lease_token,
+                        state,
+                        stop_exception,
+                        failure_stage="cleanup",
+                        result=result,
+                    )
+                    raise stop_exception
+                _record_cleanup_failure(
+                    config, lease, lease_token, stop_exception
+                )
+                try:
+                    print(
+                        "Arena worker cleanup failed: %s"
+                        % type(stop_exception).__name__,
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                except Exception:
+                    pass
         finished_at = _timestamp(config.clock)
         round_id = str(lease.get("round_id") or config.round_id or "")
         run_result = {

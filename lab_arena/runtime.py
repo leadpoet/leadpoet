@@ -128,6 +128,12 @@ class SandboxOutputError(ArenaRuntimeError):
 class SandboxCleanupError(ArenaRuntimeError):
     """Sandbox, mount, or bundle cleanup did not complete."""
 
+    def __init__(
+        self, message: str, *, result: Optional["SandboxResult"] = None,
+    ) -> None:
+        super().__init__(message)
+        self.result = result
+
 
 # ---------------------------------------------------------------------------
 # Specifications
@@ -1115,7 +1121,10 @@ def run_sandbox(
             except OSError as exc:
                 cleanup_errors.append("rmtree %s: %s" % (directory.name, type(exc).__name__))
         if cleanup_errors:
-            raise SandboxCleanupError("sandbox cleanup incomplete: " + "; ".join(cleanup_errors))
+            raise SandboxCleanupError(
+                "sandbox cleanup incomplete: " + "; ".join(cleanup_errors),
+                result=result,
+            )
     assert result is not None
     return result
 

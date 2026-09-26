@@ -729,6 +729,7 @@ def test_cleanup_failures_are_reported_after_every_step_runs(tmp_path):
     with pytest.raises(rt.SandboxCleanupError) as excinfo:
         rt.run_sandbox(config, spec, process_runner=runner, clock=clock, sleep=clock.sleep, rusage=lambda: (0.0, 0))
     assert "delete" in str(excinfo.value) and "umount" in str(excinfo.value)
+    assert excinfo.value.result is not None
     assert runner.kinds() == ["mount", "run", "delete", "umount"]
     assert not spec.output_dir.exists()
     assert list((tmp_path / "work").iterdir()) == []

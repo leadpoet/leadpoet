@@ -26,7 +26,12 @@ from leadpoet_canonical.arena_weights import (
 from lab_arena.contracts import ArenaContractError, ArenaSignatureError
 from lab_arena.output import MAX_OUTPUT_BYTES, OutputInvalid, validate_output_document
 from lab_arena.owner_admission import OwnerAdmissionError, resolve_finalized_owner
-from lab_arena.store import ArenaStore, ArenaStoreError, hash_lease_token
+from lab_arena.store import (
+    ArenaStore,
+    ArenaStoreError,
+    ArenaStoreUnavailable,
+    hash_lease_token,
+)
 from gateway.utils.hotkey_roles import (
     ValidatorIneligible, permitted_validator_uid, validator_uid,
 )
@@ -4059,14 +4064,25 @@ class ArenaService:
         operation = operations.OPERATIONS.get(operation_id)
 
         def persist_provider_event(document: Mapping[str, Any]) -> None:
-            persisted = self._store.append_trajectory_events(
-                run_id, context.lease_token_hash, [document]
-            )
-            if (
-                persisted.get("status") != "accepted"
-                or persisted.get("accepted") != 1
-            ):
-                raise ArenaStoreError("provider trajectory was not accepted")
+            # A fixed event UUID makes one replay safe when the first RPC
+            # committed and only its response was lost. Contract, cap, and
+            # stale-lease denials are not transport failures and are not retried.
+            for attempt in range(2):
+                try:
+                    persisted = self._store.append_trajectory_events(
+                        run_id, context.lease_token_hash, [document]
+                    )
+                    if (
+                        persisted.get("status") != "accepted"
+                        or persisted.get("accepted") != 1
+                    ):
+                        raise ArenaStoreError(
+                            "provider trajectory was not accepted"
+                        )
+                    return
+                except ArenaStoreUnavailable:
+                    if attempt:
+                        raise
 
         try:
             request_content = trajectory.provider_request_content(frame)
@@ -4106,13 +4122,18 @@ class ArenaService:
             raise
         document = result.to_document()
         try:
+            response_content = trajectory.provider_response_content(
+                document,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+            )
+            if len(result.attempt_trace) > 1:
+                response_content["provider_attempts"] = [
+                    dict(item) for item in result.attempt_trace[:4]
+                ]
             persist_provider_event(
                 trajectory.event(
                     "provider.response",
-                    trajectory.provider_response_content(
-                        document,
-                        elapsed_ms=int((time.monotonic() - started) * 1000),
-                    ),
+                    response_content,
                 )
             )
         except Exception as exc:

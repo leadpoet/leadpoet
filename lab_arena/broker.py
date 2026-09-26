@@ -1557,6 +1557,9 @@ class BrokerResult:
     headers: Dict[str, str]
     body: bytes
     call: Dict[str, Any]
+    # Gateway-private diagnostics for bounded champion credential retries.
+    # The worker document deliberately excludes this field.
+    attempt_trace: Tuple[Dict[str, Any], ...] = ()
 
     def to_document(self) -> Dict[str, Any]:
         return {
@@ -1565,6 +1568,46 @@ class BrokerResult:
             "body_b64": base64.b64encode(self.body).decode("ascii"),
             "call": dict(self.call),
         }
+
+
+def _provider_attempt_summary(
+    result: BrokerResult,
+    *,
+    provider_attempt: int,
+    occurred_at: str,
+    elapsed_ms: int,
+) -> Dict[str, Any]:
+    """Project one retry into safe gateway-private diagnostic metadata."""
+
+    summary: Dict[str, Any] = {
+        "occurred_at": occurred_at,
+        "elapsed_ms": max(0, min(int(elapsed_ms), 3_600_000)),
+        "http_status": max(0, min(int(result.status), 999)),
+        "provider_attempt": max(1, min(int(provider_attempt), 4)),
+    }
+    call = result.call if isinstance(result.call, Mapping) else {}
+    text_fields = {
+        "call_identity": (r"^sha256:[0-9a-f]{64}$", 71),
+        "operation_id": (r"^[a-z0-9][a-z0-9._-]{0,79}$", 80),
+        "provider": (r"^[a-z][a-z0-9_-]{0,31}$", 32),
+        "error_code": (r"^[a-z][a-z0-9_]{0,63}$", 64),
+    }
+    for name, (pattern, limit) in text_fields.items():
+        value = call.get(name)
+        if (
+            isinstance(value, str)
+            and len(value) <= limit
+            and re.fullmatch(pattern, value)
+        ):
+            summary[name] = value
+    provider_status = call.get("provider_status")
+    if (
+        isinstance(provider_status, int)
+        and not isinstance(provider_status, bool)
+        and 0 <= provider_status <= 999
+    ):
+        summary["provider_status"] = provider_status
+    return summary
 
 
 class CallStore(Protocol):
@@ -2467,9 +2510,28 @@ class Broker:
                 "broker_unavailable", {"operation_id": str(operation_id)}
             )
         last_result: Optional[BrokerResult] = None
+        attempt_trace: list[Dict[str, Any]] = []
+
+        def final_result(result: BrokerResult) -> BrokerResult:
+            """Attach private retry metadata without changing the worker document."""
+
+            if len(attempt_trace) <= 1:
+                return result
+            try:
+                return BrokerResult(
+                    result.status,
+                    result.headers,
+                    result.body,
+                    result.call,
+                    tuple(dict(item) for item in attempt_trace[:4]),
+                )
+            except Exception:
+                return result
+
         account_provider_status: Optional[int] = None
         base_call_identity: Optional[str] = None
         for provider_attempt in range(1, CHAMPION_CREDENTIAL_PROVIDER_ATTEMPTS + 1):
+            provider_attempt_started = time.monotonic()
             result = self._execute_once(
                 context,
                 operation_id=operation_id,
@@ -2482,15 +2544,31 @@ class Broker:
                 cancel_requested=cancel_requested,
             )
             last_result = result
+            try:
+                attempt_trace.append(
+                    _provider_attempt_summary(
+                        result,
+                        provider_attempt=provider_attempt,
+                        occurred_at=datetime.now(timezone.utc).isoformat(
+                            timespec="milliseconds"
+                        ).replace("+00:00", "Z"),
+                        elapsed_ms=int(
+                            (time.monotonic() - provider_attempt_started) * 1000
+                        ),
+                    )
+                )
+            except Exception:
+                # Observation must not affect provider retry or result behavior.
+                pass
             if result.call.get("provider_fallback_required") is True:
-                return result
+                return final_result(result)
             if not (
                 retry_miner_credential
                 and result.call.get("funding_source") == "miner_key"
                 and result.call.get("error_code")
                 == "miner_credentials_unavailable"
             ):
-                return result
+                return final_result(result)
             if result.call.get("provider_status") in (401, 402, 403, 429):
                 account_provider_status = int(result.call["provider_status"])
             if isinstance(result.call.get("base_call_identity"), str):
@@ -2499,7 +2577,7 @@ class Broker:
                 continue
             provider = str(result.call.get("provider") or "")
             if not provider or self._mark_provider_fallback is None:
-                return BrokerResult(
+                return final_result(BrokerResult(
                     result.status,
                     result.headers,
                     result.body,
@@ -2508,7 +2586,7 @@ class Broker:
                         champion_credential_attempts=provider_attempt,
                         provider_fallback_required=True,
                     ),
-                )
+                ))
             evidence = {
                 "error_class": "account_credential_failure",
                 "provider_status": account_provider_status,
@@ -2521,14 +2599,14 @@ class Broker:
                     context, provider, evidence
                 )
             except Exception:
-                return _error_result(
+                return final_result(_error_result(
                     "broker_unavailable",
                     dict(
                         result.call,
                         champion_credential_attempts=provider_attempt,
                         provider_fallback_required=True,
                     ),
-                )
+                ))
             if not isinstance(marked, Mapping) or marked.get("status") not in (
                 "marked",
                 "existing",
@@ -2537,15 +2615,15 @@ class Broker:
                     isinstance(marked, Mapping)
                     and marked.get("status") == "stale"
                 ) else "broker_unavailable"
-                return _error_result(
+                return final_result(_error_result(
                     code,
                     dict(
                         result.call,
                         champion_credential_attempts=provider_attempt,
                         provider_fallback_required=True,
                     ),
-                )
-            return BrokerResult(
+                ))
+            return final_result(BrokerResult(
                 result.status,
                 result.headers,
                 result.body,
@@ -2555,9 +2633,9 @@ class Broker:
                     provider_fallback_required=True,
                     provider_fallback_marked=True,
                 ),
-            )
+            ))
         assert last_result is not None
-        return last_result
+        return final_result(last_result)
 
     def _execute_once(
         self,

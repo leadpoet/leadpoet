@@ -69,8 +69,6 @@ def _input_fields(
     fields = _BASE_SCORING_INPUT_FIELDS
     if contact_policy.scorer_enabled(policy):
         fields += ("contact_source_evidence",)
-    if "provider_observations" in document:
-        fields += ("provider_observations",)
     return fields
 
 
@@ -99,15 +97,19 @@ def effective_company_inputs(document: Mapping[str, Any]) -> list[Dict[str, Any]
     ):
         raise CompanyJudgmentError("scoring companies or ICP are invalid")
 
+    from lab_arena import provider_observations
     from qualification.scoring.competition import effective_competition_input
 
     try:
+        effective_icp, observations = provider_observations.extract_scoring_icp(
+            icp, policy
+        )
         effective = effective_competition_input(
             companies,
-            icp,
+            effective_icp,
             contacts_required=contact_policy.scorer_enabled(policy),
             contact_source_evidence=document.get("contact_source_evidence"),
-            provider_observations=document.get("provider_observations"),
+            provider_observations=observations,
             company_quality=True,
         )
     except (TypeError, ValueError) as exc:

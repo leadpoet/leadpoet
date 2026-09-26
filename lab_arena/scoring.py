@@ -747,19 +747,14 @@ def build_scoring_input(
     document = {
         "schema_version": SCORING_INPUT_SCHEMA_VERSION,
         "scored_run_id": _require_run_id(scored_run_id),
-        "icp": dict(icp),
+        "icp": observation_policy.scoring_icp(
+            icp, policy, provider_observations
+        ),
         "companies": [dict(company) for company in companies],
         "scorer_policy": contracts.validate_scorer_policy(policy),
         "evaluation_date": str(evaluation_date),
         **({"contact_source_evidence": dict(contact_source_evidence or {})}
            if policy.get("scoring_adapter_version") == "qualification_contacts_v3" else {}),
-        **(
-            {"provider_observations": [dict(item) for item in provider_observations]}
-            if (
-                provider_observations is not None
-                and observation_policy.enabled(policy)
-            ) else {}
-        ),
     }
     if company_judgment_cache is not None:
         from lab_arena import company_judgments, quality_policy

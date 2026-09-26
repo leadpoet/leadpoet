@@ -33,14 +33,14 @@ def score_input(document: Dict[str, Any]) -> Dict[str, Any]:
     if not scored_run_id:
         raise scoring.ScoringError("scored_run_id is invalid")
     policy = contracts.validate_scorer_policy(document["scorer_policy"])
-    if (
-        "provider_observations" in document
-        and not provider_observations.enabled(policy)
-    ):
-        raise scoring.ScoringError(
-            "provider observations are not enabled by the frozen scorer policy"
+    if "provider_observations" in document:
+        raise scoring.ScoringError("provider observations use an unsupported transport")
+    try:
+        icp, observations = provider_observations.extract_scoring_icp(
+            document["icp"], policy
         )
-    icp = dict(document["icp"])
+    except ValueError as exc:
+        raise scoring.ScoringError(str(exc)) from exc
     companies = [dict(item) for item in document["companies"]]
     os.environ[shim.TRUSTED_SCORER_ENV] = "1"
     scoring.apply_policy_to_environment(
@@ -56,8 +56,8 @@ def score_input(document: Dict[str, Any]) -> Dict[str, Any]:
             if contact_policy.scorer_enabled(policy) else {}
         ),
         **(
-            {"provider_observations": document["provider_observations"]}
-            if "provider_observations" in document else {}
+            {"provider_observations": observations}
+            if observations is not None else {}
         ),
     )
     item = {"scored_run_id": scored_run_id}

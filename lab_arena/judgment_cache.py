@@ -47,11 +47,9 @@ def effective_scoring_input(document: Mapping[str, Any]) -> Dict[str, Any]:
 
     from lab_arena import contact_policy
     has_contacts = isinstance(document, Mapping) and contact_policy.scorer_enabled(document.get("scorer_policy") or {})
-    has_observations = isinstance(document, Mapping) and "provider_observations" in document
     fields = (
         _SCORING_INPUT_FIELDS
         + (("contact_source_evidence",) if has_contacts else ())
-        + (("provider_observations",) if has_observations else ())
     )
     if not isinstance(document, Mapping) or tuple(document.keys()) != fields:
         raise JudgmentCacheError("scoring input fields or field order changed")
@@ -61,7 +59,14 @@ def effective_scoring_input(document: Mapping[str, Any]) -> Dict[str, Any]:
     del copied["scored_run_id"]
     from qualification.scoring.competition import effective_competition_input
 
-    observations = copied.pop("provider_observations", None)
+    from lab_arena import provider_observations
+    try:
+        effective_icp, observations = provider_observations.extract_scoring_icp(
+            copied["icp"], copied["scorer_policy"]
+        )
+    except ValueError as exc:
+        raise JudgmentCacheError(str(exc)) from exc
+    copied["icp"] = effective_icp
     if has_contacts:
         evidence = copied.pop("contact_source_evidence")
         copied.update(effective_competition_input(

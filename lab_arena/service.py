@@ -3706,11 +3706,13 @@ class ArenaService:
                         configuration
                     ),
                 )["companies"]
-                lease["provider_observations"] = (
+                lease["icp"] = provider_observations.scoring_icp(
+                    lease["icp"],
+                    configuration["scorer_policy"],
                     provider_observations.resolve_observations(
                         self._store, scored, companies,
                         str(round_row.get("evaluation_date") or ""),
-                    )
+                    ),
                 )
             return lease
         # An execution uses the participant's private source archive under the

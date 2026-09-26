@@ -3,8 +3,16 @@ from __future__ import annotations
 import copy
 
 import pytest
+from pydantic import ValidationError
 
-from lab_arena import company_judgments, contracts, scorer_entrypoint, scoring
+from lab_arena import (
+    company_judgments,
+    contracts,
+    provider_observations,
+    scorer_entrypoint,
+    scoring,
+)
+from qualification.competition_models import CompetitionCompany
 
 
 def _icp() -> dict:
@@ -145,6 +153,19 @@ def _raw(score: float = 81.0) -> dict:
     }
 
 
+def test_miner_company_cannot_forge_provider_observation_transport():
+    company = _company("A")
+    company[provider_observations.SCORING_ICP_KEY] = [{
+        "company_index": 0,
+        "company_domain": "a.example",
+        "source_url": "https://a.example/launch",
+        "first_observed_date": "2026-08-22",
+    }]
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        CompetitionCompany.model_validate(company)
+
+
 def _miss(ref: dict, *, slot: int = 0) -> dict:
     return {
         "company_index": ref["company_index"],
@@ -238,7 +259,7 @@ def test_provider_observation_binds_only_its_company_cache_key():
     legacy = _input(observation_handoff=True)
     legacy_refs = _refs(legacy)
     observed = _input(observation_handoff=True)
-    observed["provider_observations"] = [{
+    observed["icp"][provider_observations.SCORING_ICP_KEY] = [{
         "company_index": 0,
         "company_domain": "a.example",
         "source_url": "https://a.example/launch",
@@ -251,14 +272,16 @@ def test_provider_observation_binds_only_its_company_cache_key():
         item["cache_key"] for item in legacy_refs[1:]
     ]
     changed = copy.deepcopy(observed)
-    changed["provider_observations"][0]["first_observed_date"] = "2026-08-23"
+    changed["icp"][provider_observations.SCORING_ICP_KEY][0][
+        "first_observed_date"
+    ] = "2026-08-23"
     assert _refs(changed)[0]["cache_key"] != observed_refs[0]["cache_key"]
 
 
 def test_invalid_observation_cannot_poison_an_unrelated_company_cache_key():
     legacy_refs = _refs(_input(observation_handoff=True))
     observed = _input(observation_handoff=True)
-    observed["provider_observations"] = [
+    observed["icp"][provider_observations.SCORING_ICP_KEY] = [
         {
             "company_index": 0,
             "company_domain": "a.example",

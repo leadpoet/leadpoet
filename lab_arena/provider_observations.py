@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
 import json
 from datetime import date, datetime, timezone
 from typing import Any, Mapping, Sequence
@@ -13,6 +14,7 @@ from lab_arena import contracts
 
 
 TOOL = "predictleads_company_job_openings"
+SCORING_ICP_KEY = "_arena_provider_observations"
 
 
 def enabled(policy: Mapping[str, Any]) -> bool:
@@ -22,6 +24,44 @@ def enabled(policy: Mapping[str, Any]) -> bool:
     return isinstance(bindings, Mapping) and bindings.get(
         contracts.PROVIDER_OBSERVATION_HANDOFF_BINDING
     ) == contracts.AUTHENTICATED_PROVIDER_OBSERVATION_HANDOFF
+
+
+def scoring_icp(
+    icp: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    observations: Any = None,
+) -> dict[str, Any]:
+    """Carry gateway-owned observations through legacy scoring runners."""
+
+    if not isinstance(icp, Mapping):
+        raise ValueError("scoring ICP must be an object")
+    result = copy.deepcopy(dict(icp))
+    present = SCORING_ICP_KEY in result
+    handoff_enabled = enabled(policy)
+    if present and not handoff_enabled:
+        raise ValueError(
+            "provider observations are not enabled by the frozen scorer policy"
+        )
+    if observations is not None and handoff_enabled:
+        if present:
+            raise ValueError("provider observations are duplicated")
+        try:
+            result[SCORING_ICP_KEY] = json.loads(
+                contracts.canonical_json(observations)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("provider observations are invalid") from exc
+    return result
+
+
+def extract_scoring_icp(
+    icp: Mapping[str, Any], policy: Mapping[str, Any]
+) -> tuple[dict[str, Any], Any]:
+    """Remove the reserved transport field before ICP model validation."""
+
+    transported = scoring_icp(icp, policy)
+    observations = transported.pop(SCORING_ICP_KEY, None)
+    return transported, observations
 
 
 _MAX_RESPONSE_BYTES = 1024 * 1024

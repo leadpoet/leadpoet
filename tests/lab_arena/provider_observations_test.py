@@ -241,6 +241,7 @@ def test_new_gateway_preserves_old_frozen_scorer_input_and_hash():
     attempted = _scoring_input(policy, _resolve(_rows()))
 
     assert "provider_observations" not in attempted
+    assert provider_observations.SCORING_ICP_KEY not in attempted["icp"]
     assert attempted == legacy
     assert contracts.document_hash(attempted) == contracts.document_hash(legacy)
 
@@ -273,11 +274,76 @@ def test_new_scorer_accepts_old_gateway_input_without_observation_field(
 
 def test_scorer_rejects_observations_without_frozen_capability():
     document = _scoring_input(_policy(handoff=False))
-    document["provider_observations"] = _resolve(_rows())
+    document["icp"][provider_observations.SCORING_ICP_KEY] = _resolve(_rows())
 
     with pytest.raises(
         scoring.ScoringError, match="not enabled by the frozen scorer policy"
     ):
+        scorer_entrypoint.score_input(document)
+
+
+def test_legacy_runner_input_shape_transports_observation_to_new_scorer(
+    monkeypatch,
+):
+    policy = _policy(handoff=True)
+    observations = _resolve(_rows())
+    lease_icp = provider_observations.scoring_icp(
+        {"intent_signals": ["Hiring"]}, policy, observations
+    )
+    # Preserve the field projection used by legacy build_scoring_input.
+    document = {
+        "schema_version": scoring.SCORING_INPUT_SCHEMA_VERSION,
+        "scored_run_id": RUN_ID,
+        "icp": dict(lease_icp),
+        "companies": [_company()],
+        "scorer_policy": contracts.validate_scorer_policy(policy),
+        "evaluation_date": "2026-09-25",
+    }
+    calls = []
+    monkeypatch.setattr(
+        scorer_entrypoint.scoring, "apply_policy_to_environment",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        scorer_entrypoint.scoring, "lab_scorer",
+        lambda *args, **kwargs: calls.append(kwargs) or object(),
+    )
+    monkeypatch.setattr(
+        scorer_entrypoint.scoring, "score_work_item",
+        lambda *args, **kwargs: [],
+    )
+
+    result = scorer_entrypoint.score_input(document)
+
+    assert calls == [{"provider_observations": observations}]
+    assert result["breakdowns"] == []
+    assert provider_observations.SCORING_ICP_KEY not in document["companies"][0]
+
+
+def test_scoring_transport_does_not_mutate_original_icp_or_observations():
+    policy = _policy(handoff=True)
+    icp = {"intent_signals": ["Hiring"]}
+    observations = _resolve(_rows())
+    original_icp = deepcopy(icp)
+    original_observations = deepcopy(observations)
+
+    transported = provider_observations.scoring_icp(
+        icp, policy, observations
+    )
+    transported["intent_signals"].append("Changed")
+    transported[provider_observations.SCORING_ICP_KEY][0][
+        "first_observed_date"
+    ] = "2026-08-23"
+
+    assert icp == original_icp
+    assert observations == original_observations
+
+
+def test_scorer_rejects_legacy_top_level_observation_transport():
+    document = _scoring_input(_policy(handoff=True))
+    document["provider_observations"] = _resolve(_rows())
+
+    with pytest.raises(scoring.ScoringError, match="unsupported transport"):
         scorer_entrypoint.score_input(document)
 
 

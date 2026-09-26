@@ -73,12 +73,12 @@ async def _verify(monkeypatch, responses, *, body, links=()):
     "March 3, 2026", "Mar. 3, 2026", "3 March 2026", "3 Mar 2026",
     "Sept. 15, 2026", "15 Sept 2026",
 ])
-def test_page_dateline_separate_from_event_quote_is_not_event_timing(source_date):
+def test_common_body_date_formats_suppress_unneeded_recovery(source_date):
     canonical = "2026-09-15" if "Sept" in source_date else "2026-03-03"
     item = _response(notes=[f"source_event_date:{canonical}"])["answer"][
         "signal_evaluations"
     ][0]
-    assert not verifier._has_grounded_source_event_date(
+    assert verifier._has_grounded_source_event_date(
         item, f"Published {source_date}. {CLAIM}"
     )
     assert item["risk_notes"] == [f"source_event_date:{canonical}"]
@@ -87,14 +87,9 @@ def test_page_dateline_separate_from_event_quote_is_not_event_timing(source_date
 @pytest.mark.asyncio
 async def test_old_no_comma_date_remains_out_of_window_without_followup(monkeypatch):
     old_note = "source_event_date:2024-09-12"
-    source = "Acme announced Atlas on September 12 2024."
     result, calls = await _verify(
-        monkeypatch, [_response(
-            quote=source,
-            notes=[old_note, "source_event_date_binding:verified"],
-            date_match="consistent",
-        )],
-        body=source,
+        monkeypatch, [_response(notes=[old_note], date_match="consistent")],
+        body="Acme announced Atlas on September 12 2024.",
     )
     item = result["verdict"]["signal_evaluations"][0]
     event_date, publications = source_dates_from_verdict(item)
@@ -104,29 +99,20 @@ async def test_old_no_comma_date_remains_out_of_window_without_followup(monkeypa
     )
     assert calls.await_count == 1
     assert "source_resolution" not in result
-    assert item["risk_notes"] == [
-        old_note, "source_event_date_binding:verified",
-    ]
+    assert item["risk_notes"] == [old_note]
     assert freshness.verdict == "out_of_window"
 
 
 @pytest.mark.asyncio
 async def test_unfamiliar_valid_source_date_remains_supported(monkeypatch):
     note = "source_event_date:2024-09-12"
-    source = "Acme announced Atlas on the 12th of September, 2024."
     result, calls = await _verify(
-        monkeypatch, [_response(
-            quote=source,
-            notes=[note, "source_event_date_binding:verified"],
-            date_match="consistent",
-        )],
-        body=source,
+        monkeypatch, [_response(notes=[note], date_match="consistent")],
+        body="Acme announced Atlas on the 12th of September, 2024.",
     )
     assert calls.await_count == 1
     assert result["decision"] == "approve"
-    assert result["verdict"]["signal_evaluations"][0]["risk_notes"] == [
-        note, "source_event_date_binding:verified",
-    ]
+    assert result["verdict"]["signal_evaluations"][0]["risk_notes"] == [note]
 
 
 @pytest.mark.asyncio
@@ -155,7 +141,7 @@ async def test_text_ungrounded_date_can_attempt_bounded_recovery(
 
 
 @pytest.mark.asyncio
-async def test_unproven_link_drops_unbound_original_date(monkeypatch):
+async def test_unproven_link_keeps_original_old_date_and_verdict(monkeypatch):
     old_note = "source_event_date:2024-09-12"
     result, calls = await _verify(
         monkeypatch, [
@@ -171,8 +157,8 @@ async def test_unproven_link_drops_unbound_original_date(monkeypatch):
     item = result["verdict"]["signal_evaluations"][0]
     assert calls.await_count == 2
     assert result["source_resolution"]["status"] == "unproven"
-    assert item["risk_notes"] == []
-    assert source_dates_from_verdict(item) == (None, [])
+    assert item["risk_notes"] == [old_note]
+    assert source_dates_from_verdict(item) == ("2024-09-12", [])
 
 
 @pytest.mark.asyncio

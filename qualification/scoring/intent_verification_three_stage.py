@@ -3021,16 +3021,13 @@ def _build_final_judge_prompt(
     if row.get("_same_event_resolution") is True:
         suffix += (
             "\n\nONE-HOP SAME-EVENT SOURCE RESOLUTION:\n"
-            "The additional URL or URLs are bounded locators from visible links "
-            "on the exact submitted page or from one disputed-date search. A "
-            "locator or search result is not evidence. Approve only if fetched "
-            "linked-page text independently "
+            "The additional URL or URLs were selected only from visible links "
+            "on the exact submitted page. That link relationship is a locator, "
+            "not evidence. Approve only if fetched linked-page text independently "
             "binds the target company, the exact same event in miner_claim, and "
             "the target ICP signal. Cite at least one linked URL and an exact "
-            "grounded quote from it. Bind source_event_date or "
-            "source_event_month to that same event page and add "
-            "source_event_date_binding:verified. Use a publication "
-            "date only with source_event_publication_binding:verified. A newer article, "
+            "grounded quote from it. Bind any source_event_date or "
+            "source_publication_date to that same event page. A newer article, "
             "funding story, category page, or different event must not replace or "
             "rejuvenate the submitted event. Return contradicted only when exact "
             "linked-page text disproves the submitted claim or its ICP alignment; "
@@ -3740,8 +3737,6 @@ def _same_event_link_candidates(
             # Overlap ranks bounded locators only. It is not an eligibility or
             # evidence rule; the source-grounded judge proves the event.
             seen.add(key)
-            if score == 0:
-                continue
             ranked.append((score, {"url": url, "label": label}))
     ranked.sort(key=lambda pair: (-pair[0], pair[1]["url"]))
     return [link for _score, link in ranked[:12]]
@@ -3809,7 +3804,6 @@ def _bind_approximate_event_month(
         return ""
     month = next(iter(event_months))
     notes.append(f"source_event_month:{month}")
-    notes.append("source_event_date_binding:verified")
     item["risk_notes"] = notes
     return month
 
@@ -3828,12 +3822,10 @@ def _date_is_grounded_in_text(value: str, source_text: str) -> bool:
     abbreviated_month = "Sept?" if parsed.month == 9 else month[:3]
     patterns = (
         rf"(?<!\d){re.escape(normalized)}(?!\d)",
-        rf"\b{month}\s+0?{parsed.day},?\s+{parsed.year}\b",
-        rf"\b{abbreviated_month}\.?\s+0?{parsed.day},?\s+{parsed.year}\b",
+        rf"\b{month}\s+0?{parsed.day},\s+{parsed.year}\b",
+        rf"\b{abbreviated_month}\.?\s+0?{parsed.day},\s+{parsed.year}\b",
         rf"\b0?{parsed.day}\s+{month}\s+{parsed.year}\b",
         rf"\b0?{parsed.day}\s+{abbreviated_month}\.?\s+{parsed.year}\b",
-        rf"\b(?:the\s+)?0?{parsed.day}(?:st|nd|rd|th)\s+of\s+"
-        rf"{month},?\s+{parsed.year}\b",
     )
     return any(re.search(pattern, source_text, re.IGNORECASE) for pattern in patterns)
 
@@ -3841,15 +3833,10 @@ def _date_is_grounded_in_text(value: str, source_text: str) -> bool:
 def _has_grounded_source_event_date(
     item: Mapping[str, Any], source_text: str,
 ) -> bool:
-    """Require semantic same-event binding plus a literal source date."""
+    """Return whether a judge date note has a literal fetched-source basis."""
 
-    notes = [str(note or "").strip() for note in item.get("risk_notes") or []]
-    if not (
-        "source_event_date_binding:verified" in notes
-        or "same_event_as_submitted:verified" in notes
-    ):
-        return False
-    for note in notes:
+    for raw_note in item.get("risk_notes") or []:
+        note = str(raw_note or "").strip()
         prefix, _, value = note.partition(":")
         if prefix == "source_event_date" and _date_is_grounded_in_text(
             value, source_text
@@ -3875,124 +3862,6 @@ def _has_grounded_source_event_date(
         ):
             return True
     return False
-
-
-def _date_attribution_needs_clarification(
-    item: Mapping[str, Any], source_text: str,
-) -> bool:
-    """Find a claimed event date that is only a dateline or unrelated date."""
-
-    notes = [str(note or "").strip() for note in item.get("risk_notes") or []]
-    claimed_event_date = any(note.startswith((
-        "source_event_date:", "source_event_month:",
-    )) for note in notes)
-    return bool(
-        claimed_event_date
-        and not _has_grounded_source_event_date(item, source_text)
-    )
-
-
-def _has_verified_event_publication_binding(
-    item: Mapping[str, Any], publication_dates: Sequence[str],
-) -> bool:
-    """Accept a page date only after the reviewer binds it to the same event."""
-
-    notes = [str(note or "").strip() for note in item.get("risk_notes") or []]
-    if (
-        "source_event_publication_binding:verified" not in notes
-        or "source_event_date_disputed" in notes
-    ):
-        return False
-    grounded = {
-        _source_publication_date(value) for value in publication_dates
-        if _source_publication_date(value)
-    }
-    cited = {
-        _source_publication_date(note.split(":", 1)[1])
-        for note in notes if note.startswith("source_publication_date:")
-    }
-    return bool(grounded & cited)
-
-
-def _normalize_event_date_notes(
-    item: Dict[str, Any], source_text: str,
-    publication_dates: Sequence[str],
-) -> None:
-    """Remove date tags that the exact source evidence did not bind."""
-
-    keep_event_date = _has_grounded_source_event_date(item, source_text)
-    keep_publication = _has_verified_event_publication_binding(
-        item, publication_dates,
-    )
-    normalized = []
-    for raw_note in item.get("risk_notes") or []:
-        note = str(raw_note or "").strip()
-        if note.startswith(("source_event_date:", "source_event_month:")):
-            if not keep_event_date:
-                continue
-        elif note.startswith("source_publication_date:"):
-            if not keep_publication:
-                continue
-        elif note == "source_event_publication_binding:verified":
-            if not keep_publication:
-                continue
-        elif note == "source_event_date_binding:verified":
-            if not keep_event_date:
-                continue
-        normalized.append(note)
-    item["risk_notes"] = normalized
-
-
-def _has_bound_event_timing(
-    item: Mapping[str, Any], source_text: str,
-    publication_dates: Sequence[str],
-) -> bool:
-    return bool(
-        _has_grounded_source_event_date(item, source_text)
-        or _has_verified_event_publication_binding(
-            item,
-            publication_dates,
-        )
-    )
-
-
-async def _bounded_same_event_date_search(
-    *, company_name: str, miner_claim: str,
-) -> list[str]:
-    """Return at most two locators for an affirmatively disputed event date."""
-
-    exa_key = str(os.environ.get("EXA_API_KEY") or "").strip()
-    if not exa_key:
-        return []
-    import aiohttp
-    from qualification.scoring.company_evidence_investigator import _search_web
-
-    try:
-        timeout = aiohttp.ClientTimeout(total=30)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            discovery = await _search_web(
-                session,
-                f'"{company_name}" "{miner_claim}" event date official',
-                key=exa_key,
-            )
-    except (
-        aiohttp.ClientError,
-        asyncio.TimeoutError,
-        RuntimeError,
-        TimeoutError,
-        ValueError,
-    ):
-        return []
-    urls = []
-    for result in discovery.get("results") or []:
-        if not isinstance(result, Mapping):
-            continue
-        url = _prompt_exact_url_or_empty(result.get("url"))
-        if url and _normalize_url(url) not in {_normalize_url(item) for item in urls}:
-            urls.append(url)
-        if len(urls) == 2:
-            break
-    return urls
 
 
 def _same_event_resolution_outcome(
@@ -4048,17 +3917,51 @@ def _same_event_resolution_outcome(
     quotes = item.get("supporting_quotes") or []
     if not any(_grounded_exact_text(linked_text, quote) for quote in quotes):
         return "unproven"
-    publication_dates = [
+    grounded_claim_evidence = "\n".join(
+        str(value or "").strip(" \t\r\n\"'\u2018\u2019\u201c\u201d")
+        for value in [item.get("claim"), *quotes]
+        if _grounded_exact_text(linked_text, value)
+    )
+    notes = [str(note or "") for note in (item.get("risk_notes") or [])]
+    event_dates = []
+    claimed_event_date = False
+    for note in notes:
+        if note.startswith("source_event_date:"):
+            claimed_event_date = True
+            value = note.split(":", 1)[1]
+            if _date_is_grounded_in_text(value, grounded_claim_evidence):
+                event_dates.append(value)
+        elif note.startswith("source_event_month:"):
+            claimed_event_date = True
+            value = note.split(":", 1)[1]
+            if re.fullmatch(r"\d{4}-\d{2}", value):
+                try:
+                    parsed = date.fromisoformat(value + "-01")
+                except ValueError:
+                    continue
+                month_name = (
+                    "January", "February", "March", "April", "May", "June",
+                    "July", "August", "September", "October", "November", "December",
+                )[parsed.month - 1]
+                if re.search(
+                    rf"\b{month_name}\s+{parsed.year}\b",
+                    grounded_claim_evidence,
+                    re.IGNORECASE,
+                ):
+                    event_dates.append(value)
+    publication_dates = {
         str(result.get("source_publication_date") or "")
         for result in linked_results
         if _normalize_url(result.get("url") or "") in cited_linked
         and str(result.get("source_publication_date") or "")
-    ]
-    if _has_bound_event_timing(
-        item,
-        linked_text,
-        publication_dates,
-    ):
+    }
+    cited_publications = {
+        note.split(":", 1)[1]
+        for note in notes if note.startswith("source_publication_date:")
+    }
+    if claimed_event_date and not event_dates:
+        return "unproven"
+    if event_dates or publication_dates & cited_publications:
         return "verified"
     return "unproven"
 
@@ -4593,9 +4496,7 @@ async def verify_three_stage(
             )
         )
     )
-    # Careers hosts also publish company news. Job-body anchors protect
-    # hiring claims; other event types still face the source-grounded judge.
-    if is_hiring_claim and is_job_board and not has_linkedin_structured:
+    if is_job_board and not has_linkedin_structured:
         combined_for_gate = "\n".join(
             (r.get("text") or "") for r in (contents.get("results") or [])
         )
@@ -4742,88 +4643,8 @@ async def verify_three_stage(
     s3_verdict = _apply_guardrails(row, s3_verdict_raw)
     s3_item = ((s3_verdict.get("signal_evaluations") or [{}]) or [{}])[0]
     _bind_approximate_event_month(s3_item, combined_text, str(row["claim"]))
-    same_event_candidates = _same_event_link_candidates(contents, row)
-    date_attribution_clarification: Optional[Dict[str, Any]] = None
-    needs_date_clarification = bool(
-        integrity_policy
-        and not is_hiring_claim
-        and s3_item.get("signal_status") in {
-            "supported", "partially_supported", "unable_to_verify",
-        }
-        and s3_item.get("same_entity_check") == "pass"
-        and not s3_item.get("contradicting_quotes")
-        and not same_event_candidates
-        and _date_attribution_needs_clarification(s3_item, combined_text)
-    )
-    if needs_date_clarification:
-        date_prompt = s3_prompt + (
-            "\n\nONE BOUNDED EVENT-DATE ATTRIBUTION CLARIFICATION:\n"
-            "The prior result may have treated a page dateline or an unrelated "
-            "date as the claimed event's date. Re-read only the exact supplied "
-            "source context and return one complete fresh schema-valid verdict. "
-            "Keep claim support separate from timing. Use source_event_date or "
-            "source_event_month only when the source semantically establishes "
-            "that timing for the claimed event; then also add "
-            "source_event_date_binding:verified. A page publication, update, "
-            "or first-observed timestamp is not itself event timing. If this is "
-            "the original announcement and its body semantically ties the same "
-            "event to the dateline, retain source_publication_date and add "
-            "source_event_publication_binding:verified. Ordinary announcement "
-            "language can establish that relation; the literal word today is "
-            "not required. Add source_event_date_disputed only when the source "
-            "contains affirmative older, retrospective, republished, updated, "
-            "or conflicting chronology. Missing timing alone is not a dispute. "
-            "Do not change an otherwise supported signal_status only because "
-            "event timing is missing or uncertain."
-        )
-        date_envelope = await _call_openrouter(
-            client, selected_stage3_model, date_prompt, max_attempts=1
-        )
-        date_attribution_clarification = {
-            "attempted": True,
-            "resolved": False,
-            "provider_error": bool(date_envelope.get("_error")),
-        }
-        if not date_envelope.get("_error"):
-            date_verdict = _apply_guardrails(
-                row, date_envelope.get("answer") or {}
-            )
-            date_items = date_verdict.get("signal_evaluations") or []
-            if isinstance(date_items, list) and len(date_items) == 1:
-                s3_prompt = date_prompt
-                s3_envelope = date_envelope
-                s3_verdict = date_verdict
-                s3_item = date_items[0]
-                _bind_approximate_event_month(
-                    s3_item, combined_text, str(row["claim"])
-                )
-                date_attribution_clarification["resolved"] = True
-    if integrity_policy and not is_hiring_claim:
-        _normalize_event_date_notes(
-            s3_item,
-            combined_text,
-            source_publication_dates,
-        )
-    date_disputed = bool(
-        "source_event_date_disputed" in (s3_item.get("risk_notes") or [])
-    )
     same_event_resolution: Optional[Dict[str, Any]] = None
-    used_dispute_search = False
-    if date_disputed and not same_event_candidates:
-        searched_urls = await _bounded_same_event_date_search(
-            company_name=company_name, miner_claim=miner_claim
-        )
-        used_dispute_search = bool(searched_urls)
-        seen_candidates = {
-            _normalize_url(candidate["url"]) for candidate in same_event_candidates
-        } | {_normalize_url(url) for url in row["claimed_source_urls"]}
-        for url in searched_urls:
-            if _normalize_url(url) not in seen_candidates:
-                same_event_candidates.append({
-                    "url": url,
-                    "label": "bounded disputed-date discovery",
-                })
-                seen_candidates.add(_normalize_url(url))
+    same_event_candidates = _same_event_link_candidates(contents, row)
     has_grounded_event_date = (
         _has_grounded_source_event_date(s3_item, combined_text)
         if integrity_policy
@@ -4846,18 +4667,13 @@ async def verify_three_stage(
         # source-grounded judge must still prove same company, event, quote,
         # and date from the fetched page.
         selected_urls = [
-            candidate["url"]
-            for candidate in same_event_candidates[:(2 if used_dispute_search else 1)]
+            candidate["url"] for candidate in same_event_candidates[:1]
         ]
         same_event_resolution = {
             "attempted": True,
             "status": "unproven",
             "selected_urls": selected_urls,
-            "reason": (
-                "disputed_date_bounded_same_event_sources"
-                if used_dispute_search
-                else "ranked_visible_same_host_links"
-            ),
+            "reason": "ranked_visible_same_host_links",
         }
         if selected_urls:
             linked_fetched = await _fetch_sd_then_exa(selected_urls)
@@ -4916,16 +4732,6 @@ async def verify_three_stage(
                     )
                     _bind_approximate_event_month(
                         chain_item, chain_text, str(chain_row["claim"])
-                    )
-                    linked_publication_dates = [
-                        str(item.get("source_publication_date") or "")
-                        for item in linked_results
-                        if str(item.get("source_publication_date") or "")
-                    ]
-                    _normalize_event_date_notes(
-                        chain_item,
-                        chain_text,
-                        linked_publication_dates,
                     )
                     outcome = _same_event_resolution_outcome(
                         chain_verdict, linked_results, fetched_selected_urls,
@@ -5181,11 +4987,6 @@ async def verify_three_stage(
         **(
             {"source_resolution": same_event_resolution}
             if same_event_resolution is not None
-            else {}
-        ),
-        **(
-            {"date_attribution_clarification": date_attribution_clarification}
-            if date_attribution_clarification is not None
             else {}
         ),
     }

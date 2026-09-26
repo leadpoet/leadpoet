@@ -147,10 +147,7 @@ async def test_max_retail_index_follows_only_selected_same_event_link(monkeypatc
             claim=MAX_CLAIM,
             url=MAX_INDEX,
             quote=MAX_CLAIM,
-            risk_notes=[
-                "source_publication_date:2024-06-05",
-                "source_event_publication_binding:verified",
-            ],
+            risk_notes=["source_publication_date:2024-06-05"],
         ),
         _verdict(
             claim=("Max Retail released its RICS point-of-sale integration." if summarized else MAX_CLAIM),
@@ -232,10 +229,7 @@ async def test_unproven_link_fetch_preserves_original_stale_date(monkeypatch):
             claim=MAX_CLAIM,
             url=MAX_INDEX,
             quote=MAX_CLAIM,
-            risk_notes=[
-                "source_publication_date:2024-06-05",
-                "source_event_publication_binding:verified",
-            ],
+            risk_notes=["source_publication_date:2024-06-05"],
         ),
     ])
 
@@ -340,10 +334,7 @@ async def test_phia_older_event_month_overrides_newer_article_metadata(monkeypat
     )
 
     item = result["verdict"]["signal_evaluations"][0]
-    assert item["risk_notes"] == [
-        "source_event_month:2025-04",
-        "source_event_date_binding:verified",
-    ]
+    assert item["risk_notes"] == ["source_event_month:2025-04"]
     assert "source_event_month:YYYY-MM" in calls.await_args_list[0].args[2]
     event, publications = source_dates_from_verdict(
         item, result["source_publication_dates"]

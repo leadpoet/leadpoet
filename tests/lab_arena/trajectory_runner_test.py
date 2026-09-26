@@ -1,12 +1,14 @@
 """Runtime log delivery preserves provider, completion and secret boundaries."""
 
 import json
+import os
 from dataclasses import replace
+from datetime import datetime, timezone
 
 import httpx
 import pytest
 
-from lab_arena import runner, runtime, trajectory
+from lab_arena import runner, runtime, shim, trajectory
 from tests.lab_arena.test_lab_arena_runner import (
     BridgingRuntime, FakeApi, lease, make_config, valid_company,
 )
@@ -31,6 +33,50 @@ class LoggingApi(FakeApi):
     def complete(self, envelope):
         self.order.append("complete")
         return super().complete(envelope)
+
+
+class ProviderFailureApi(LoggingApi):
+    def __init__(self, *, provider_failures=1, logging_failures=0):
+        super().__init__(failures=logging_failures)
+        self.provider_failures = provider_failures
+        self.provider_attempts = []
+
+    def provider(self, run_id, lease_token, frame):
+        self.provider_attempts.append(dict(frame))
+        if self.provider_failures:
+            self.provider_failures -= 1
+            raise runner.RunnerError(
+                "private transport failure detail",
+                http_status=503,
+                denial_code="round_unknown",
+            )
+        return super().provider(run_id, lease_token, frame)
+
+
+class RecoveringProviderRuntime:
+    def __init__(self, *, calls=1, raise_after=False):
+        self.calls = calls
+        self.raise_after = raise_after
+        self.failures = 0
+
+    def run_icp(self, spec, **_):
+        os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
+        try:
+            for _ in range(self.calls):
+                try:
+                    shim.dispatch(
+                        "deepline.execute",
+                        {"tool": "exa_search", "payload": {"query": "fintech"}},
+                        5000,
+                    )
+                except (shim.ShimProviderError, shim.ShimTransportError):
+                    self.failures += 1
+        finally:
+            os.environ.pop(shim.WORKER_SOCKET_ENV, None)
+        if self.raise_after:
+            raise ValueError("private runtime failure detail")
+        output = json.dumps({"companies": [valid_company(1)]}).encode()
+        return runtime.fake_result(output_bytes=output)
 
 
 def run_model(tmp_path, api, sandbox):
@@ -59,6 +105,102 @@ def test_runtime_events_precede_accepted_completion_and_retry_same_ids(tmp_path)
     assert api.order[-1] == "complete"
     assert api.completions[0]["body"]["result"]["terminal_status"] == "accepted"
     assert all(set(event) == {"kind", "event_id", "occurred_at", "content"} for event in events)
+
+
+def test_pre_gateway_provider_failure_is_logged_before_recovered_completion(tmp_path):
+    api = ProviderFailureApi()
+    sandbox = RecoveringProviderRuntime()
+    before = datetime.now(timezone.utc)
+    run_model(tmp_path, api, sandbox)
+    after = datetime.now(timezone.utc)
+
+    events = [event for batch in api.batches for event in batch["events"]]
+    provider_error = next(
+        event for event in events if event["kind"] == "runtime.provider_error"
+    )
+    assert provider_error["content"] == {
+        "operation_id": "deepline.execute",
+        "action_sequence": 0,
+        "outcome": "unknown",
+        "error_class": "RunnerError",
+        "error_code": "broker_unavailable",
+        "provider": "deepline",
+        "http_status": 503,
+        "denial_code": "round_unknown",
+    }
+    occurred_at = datetime.fromisoformat(
+        provider_error["occurred_at"].replace("Z", "+00:00")
+    )
+    assert before <= occurred_at <= after
+    assert [event["kind"] for event in events] == [
+        "runtime.started", "runtime.provider_error", "runtime.finished",
+    ]
+    assert sandbox.failures == 1
+    assert api.order[-1] == "complete"
+    result = api.completions[0]["body"]["result"]
+    assert result["terminal_status"] == "accepted"
+    assert result["resource_summary"]["provider_call_count"] == 1
+    assert "private transport failure detail" not in json.dumps(events)
+
+
+def test_provider_error_event_construction_failure_is_fail_open(
+    tmp_path, capsys, monkeypatch,
+):
+    def fail_observation(*_args):
+        raise ValueError("private observation failure detail")
+
+    monkeypatch.setattr(runner, "_provider_error_event", fail_observation)
+    api = ProviderFailureApi()
+    worker = run_model(tmp_path, api, RecoveringProviderRuntime())
+
+    events = [event for batch in api.batches for event in batch["events"]]
+    assert worker.abandoned == 0
+    assert api.completions[0]["body"]["result"]["terminal_status"] == "accepted"
+    assert api.completions[0]["body"]["result"]["resource_summary"][
+        "provider_call_count"
+    ] == 1
+    assert all(event["kind"] != "runtime.provider_error" for event in events)
+    diagnostic = capsys.readouterr().err
+    assert "Arena provider error trajectory capture failed: ValueError" in diagnostic
+    assert "private observation failure detail" not in diagnostic
+
+
+def test_provider_error_buffer_is_capped_and_logging_failure_is_fail_open(
+    tmp_path, capsys,
+):
+    api = ProviderFailureApi(provider_failures=35, logging_failures=100)
+    sandbox = RecoveringProviderRuntime(calls=35)
+    worker = run_model(tmp_path, api, sandbox)
+
+    assert worker.abandoned == 0
+    assert len(api.completions) == 1
+    assert api.completions[0]["body"]["result"]["terminal_status"] == "accepted"
+    assert api.completions[0]["body"]["result"]["resource_summary"][
+        "provider_call_count"
+    ] == 35
+    attempted = api.batches[-1]["events"]
+    provider_errors = [
+        event for event in attempted if event["kind"] == "runtime.provider_error"
+    ]
+    assert len(provider_errors) == runner.MAX_BUFFERED_PROVIDER_ERROR_EVENTS
+    assert provider_errors[-1]["content"]["dropped"] is True
+    assert provider_errors[-1]["content"]["dropped_count"] == 3
+    assert api.batches[-2] == api.batches[-1]
+    assert "Arena trajectory upload failed: RunnerError" in capsys.readouterr().err
+
+
+def test_provider_error_buffer_flushes_on_abandon(tmp_path):
+    api = ProviderFailureApi()
+    worker = run_model(tmp_path, api, RecoveringProviderRuntime(raise_after=True))
+    events = [event for batch in api.batches for event in batch["events"]]
+    assert worker.abandoned == 1
+    assert [event["kind"] for event in events] == [
+        "runtime.started", "runtime.provider_error", "runtime.error",
+    ]
+    assert events[-1]["content"] == {
+        "status": "abandoned", "error_class": "ValueError",
+    }
+    assert "private runtime failure detail" not in json.dumps(events)
 
 
 def test_logging_outage_does_not_lose_model_completion(tmp_path, capsys):

@@ -60,6 +60,7 @@ CHECKPOINT_MODULE_PATH = Path(__file__).with_name("lab_arena_checkpoint.py").res
 CODEX_MODULE_PATH = Path(__file__).with_name("lab_arena_codex.py").resolve()
 WEB_BRIDGE_PATH = Path(__file__).with_name("web_egress_bridge.py").resolve()
 MAX_REFUSED_FRAMES = 25  # after this many refused calls the worker answers a run's frames locally
+MAX_BUFFERED_PROVIDER_ERROR_EVENTS = 32
 QUOTA_SNAPSHOT_SCHEMA_VARIANTS = 2
 QUOTA_SNAPSHOT_STARTUP_REQUESTS = 2
 QUOTA_SNAPSHOT_CACHE_MILLISECONDS = 1000
@@ -1604,6 +1605,8 @@ class RunState:
     lease: Dict[str, Any]
     lease_token: str
     calls: List[Dict[str, Any]] = field(default_factory=list)
+    provider_error_events: List[Dict[str, Any]] = field(default_factory=list)
+    provider_error_events_dropped: int = 0
     recovered_responses_retry_call_identities: set[str] = field(
         default_factory=set
     )
@@ -1622,6 +1625,46 @@ class RunState:
     quota_condition: threading.Condition = field(
         default_factory=threading.Condition, repr=False
     )
+
+
+def _provider_error_event(
+    operation_id: str, action_sequence: int, exc: RunnerError,
+) -> Dict[str, Any]:
+    content: Dict[str, Any] = {
+        "operation_id": operation_id,
+        "action_sequence": action_sequence,
+        "outcome": "unknown",
+        "error_class": type(exc).__name__[:64],
+        "error_code": "broker_unavailable",
+    }
+    operation = operations.OPERATIONS.get(operation_id)
+    if operation is not None:
+        content["provider"] = operation.provider
+    if exc.http_status is not None:
+        content["http_status"] = exc.http_status
+    if exc.denial_code is not None:
+        content["denial_code"] = exc.denial_code
+    return trajectory.event("runtime.provider_error", content)
+
+
+def _buffer_provider_error_event_locked(
+    state: RunState, provider_event: Dict[str, Any],
+) -> None:
+    if len(state.provider_error_events) < MAX_BUFFERED_PROVIDER_ERROR_EVENTS:
+        state.provider_error_events.append(provider_event)
+        return
+    state.provider_error_events_dropped += 1
+    content = state.provider_error_events[-1]["content"]
+    content["dropped"] = True
+    content["dropped_count"] = state.provider_error_events_dropped
+
+
+def _provider_error_events(state: RunState) -> List[Dict[str, Any]]:
+    with state.lock:
+        return [
+            {**item, "content": dict(item["content"])}
+            for item in state.provider_error_events
+        ]
 
 
 def _timestamp(clock: Callable[[], datetime]) -> str:
@@ -1919,9 +1962,17 @@ class WorkerSocketServer:
                 document = self._api.provider(
                     state.lease["run_id"], state.lease_token, frame
                 )
-            except RunnerError:
+            except RunnerError as exc:
                 # A gateway failure can occur before dispatch, after dispatch,
                 # or after settlement. Never replay an unknown outcome.
+                provider_event = None
+                observation_error = None
+                try:
+                    provider_event = _provider_error_event(
+                        operation_id, sequence, exc
+                    )
+                except Exception as observation_exc:
+                    observation_error = type(observation_exc).__name__
                 with state.lock:
                     state.calls.append(
                         {
@@ -1931,6 +1982,23 @@ class WorkerSocketServer:
                             "error_code": "broker_unavailable",
                         }
                     )
+                    if provider_event is not None:
+                        try:
+                            _buffer_provider_error_event_locked(
+                                state, provider_event
+                            )
+                        except Exception as observation_exc:
+                            observation_error = type(observation_exc).__name__
+                if observation_error is not None:
+                    try:
+                        print(
+                            "Arena provider error trajectory capture failed: %s"
+                            % observation_error,
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    except Exception:
+                        pass
                 return "worker_unavailable", None
             if not self._temporary_hold(document, operation_id, sequence):
                 break
@@ -3049,7 +3117,8 @@ class AssignmentExecutor:
             )])
         except Exception as exc:
             observed_at = _timestamp(config.clock)
-            _record_trajectory(config, lease, lease_token, [trajectory.event(
+            _record_trajectory(config, lease, lease_token, [
+                *_provider_error_events(state), trajectory.event(
                 "runtime.error", {"status": "abandoned", "error_class": type(exc).__name__},
                 occurred_at=observed_at,
             ), *_runtime_log_events(result, lease_token, observed_at)])
@@ -3128,7 +3197,8 @@ class AssignmentExecutor:
                 str(lease["run_id"]), execution_diagnostic, result
             )
         body = {"run_id": lease["run_id"], "result": run_result, "output": output_document, "lease_token": lease_token}
-        _record_trajectory(config, lease, lease_token, [trajectory.event(
+        _record_trajectory(config, lease, lease_token, [
+            *_provider_error_events(state), trajectory.event(
             "runtime.finished",
             {"status": terminal, "resource_summary": run_result["resource_summary"],
              "started_at": started_at, "finished_at": finished_at,

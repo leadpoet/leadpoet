@@ -9011,7 +9011,10 @@ def test_final_rejected_stage_quote_gets_one_bounded_search_and_source_fetch(
         "BigTime current private equity ownership",
     ]
     assert fetched_urls == [strong_url]
-    assert requests[1]["tool_choice"] == "required"
+    assert requests[1]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "search_web"},
+    }
     assert requests[-1]["tool_choice"]["function"]["name"] == "submit_findings"
 
 
@@ -9123,7 +9126,10 @@ def test_missing_saved_stage_quote_uses_only_bounded_stage_search(
     assert len(fetched_urls) == fetch_count
     if "search_current" in actions:
         search_index = actions.index("search_current")
-        assert requests[search_index]["tool_choice"] == "required"
+        assert requests[search_index]["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "search_web"},
+        }
 
 
 def test_stage_repair_owns_overlapping_industry_followup_search(monkeypatch):
@@ -9163,7 +9169,7 @@ def test_stage_repair_owns_overlapping_industry_followup_search(monkeypatch):
             ]}
         elif turn == 2:
             name, args = "search_web", {
-                "query": "Acme Software company activity"
+                "query": "Acme current private equity ownership"
             }
         elif turn == 3:
             name, args = "fetch_page", {"url": strong_stage_url}
@@ -9245,7 +9251,7 @@ def test_stage_repair_owns_overlapping_industry_followup_search(monkeypatch):
     }
     assert search_queries == [
         "Acme acme.example current owner completed acquisition majority private equity",
-        "Acme Software company activity",
+        "Acme current private equity ownership",
     ]
     assert fetched_urls == [strong_stage_url]
     assert requests[1]["tool_choice"] == {
@@ -9254,7 +9260,8 @@ def test_stage_repair_owns_overlapping_industry_followup_search(monkeypatch):
     }
     feedback = json.loads(requests[1]["messages"][-1]["content"])
     assert "Never repeat a rejected quote" in feedback["instruction"]
-    assert "requested industry, product/service" in feedback["instruction"]
+    assert "current stage, ownership, listing" in feedback["instruction"]
+    assert "requested industry, product/service" not in feedback["instruction"]
 
 
 def test_bigtime_stage_repair_does_not_turn_old_projector_intent_positive(

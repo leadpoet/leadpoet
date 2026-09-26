@@ -1935,7 +1935,10 @@ async def investigate_company_evidence(
                         rejected
                         and normalized_requested_stage
                         and not correction_turn
-                        and search_calls == 0
+                        and (
+                            search_calls == 0
+                            or requested_private_equity_stage
+                        )
                         and search_calls < MAX_SEARCH_CALLS
                         and prefetched_count + fetch_calls < MAX_FETCH_CALLS
                         and time.monotonic() - started

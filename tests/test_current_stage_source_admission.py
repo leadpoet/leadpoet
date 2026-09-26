@@ -208,3 +208,145 @@ def test_private_equity_request_gets_existing_bounded_stage_discovery(monkeypatc
     document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
     assert document["server_current_stage_discovery"]["query"] == expected_query
     assert document["investigation_limits"]["remaining_search_calls"] == 1
+
+
+def test_pe_rejected_prefetch_uses_remaining_search_and_fetch(monkeypatch):
+    weak_url = "https://www.bigtime.net/about-us/"
+    strong_url = "https://www.bigtime.net/news/current-owner"
+    weak_quote = "BigTime Software is a private equity-funded company."
+    strong_quote = (
+        "BigTime Software is owned by Vista Equity Partners, a private equity firm."
+    )
+    requests = []
+    searches = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        turn = len(requests)
+        if turn == 1:
+            name, arguments = "submit_findings", {"findings": [{
+                "target": "stage", "status": "VERIFIED",
+                "observed_value": "Private Equity",
+                "evidence_url": weak_url, "evidence_quote": weak_quote,
+            }]}
+        elif turn == 2:
+            name, arguments = "search_web", {
+                "query": "BigTime current controlling private equity owner",
+            }
+        elif turn == 3:
+            name, arguments = "fetch_page", {"url": strong_url}
+        else:
+            name, arguments = "submit_findings", {"findings": [{
+                "target": "stage", "status": "VERIFIED",
+                "observed_value": "Private Equity",
+                "evidence_url": strong_url, "evidence_quote": strong_quote,
+            }]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{turn}", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_search(_session, query, *, key):
+        del key
+        searches.append(query)
+        return {"results": [{"url": strong_url}]}
+
+    fetch = AsyncMock(return_value={
+        "ok": True, "url": strong_url, "final_url": strong_url,
+        "text": strong_quote,
+    })
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "BigTime", "website": "https://bigtime.net"},
+        targets=("stage",),
+        requested_stage="Private Equity",
+        prior_observations={"submitted_source_urls": [weak_url]},
+        prefetched_pages={
+            weak_url: {"final_url": weak_url, "text": weak_quote},
+        },
+    ))
+
+    assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["usage"] == {
+        "reasoning_turns": 4, "search_calls": 2, "fetch_calls": 1,
+    }
+    assert len(searches) == investigator.MAX_SEARCH_CALLS
+    fetch.assert_awaited_once()
+    assert requests[1]["tool_choice"] == {
+        "type": "function", "function": {"name": "search_web"},
+    }
+
+
+def test_pe_rejected_prefetch_does_not_exceed_full_fetch_budget(monkeypatch):
+    weak_url = "https://bigtime.example/about"
+    other_urls = (
+        "https://bigtime.example/platform",
+        "https://bigtime.example/company",
+    )
+    weak_quote = "BigTime Software is a private equity-funded company."
+    requests = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        if len(requests) == 1:
+            finding = {
+                "target": "stage", "status": "VERIFIED",
+                "observed_value": "Private Equity",
+                "evidence_url": weak_url, "evidence_quote": weak_quote,
+            }
+        else:
+            finding = {
+                "target": "stage", "status": "UNPROVEN",
+                "observed_value": None, "reason": "no controlling owner proof",
+            }
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{len(requests)}", "type": "function",
+            "function": {
+                "name": "submit_findings",
+                "arguments": json.dumps({"findings": [finding]}),
+            },
+        }]}}]}
+
+    search = AsyncMock(return_value={"results": []})
+    fetch = AsyncMock()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_search_web", search)
+    monkeypatch.setattr(investigator, "_fetch_page", fetch)
+
+    pages = {
+        weak_url: {"final_url": weak_url, "text": weak_quote},
+        **{
+            url: {"final_url": url, "text": "BigTime Software page."}
+            for url in other_urls
+        },
+    }
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "BigTime Software", "website": "https://bigtime.example",
+        },
+        targets=("stage",),
+        requested_stage="Private Equity",
+        prior_observations={
+            "submitted_source_urls": [weak_url, *other_urls],
+        },
+        prefetched_pages=pages,
+    ))
+
+    assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["usage"] == {
+        "reasoning_turns": 2, "search_calls": 1, "fetch_calls": 0,
+    }
+    search.assert_awaited_once()
+    fetch.assert_not_awaited()
+    assert requests[1]["tool_choice"] == "required"
+    document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
+    assert document["investigation_limits"]["remaining_fetch_calls"] == 0

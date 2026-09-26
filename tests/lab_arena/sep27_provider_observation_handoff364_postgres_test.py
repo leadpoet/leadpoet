@@ -15,7 +15,7 @@ from tests.lab_arena.test_lab_arena_contracts import base_round_configuration
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MIGRATION = ROOT / "scripts/363-arena-2026-09-27-provider-observation-handoff.sql"
+MIGRATION = ROOT / "scripts/364-arena-2026-09-27-provider-observation-handoff.sql"
 ROUND_ID = "arena-2026-09-27"
 BINDING = contracts.PROVIDER_OBSERVATION_HANDOFF_BINDING
 CAPABILITY = contracts.AUTHENTICATED_PROVIDER_OBSERVATION_HANDOFF

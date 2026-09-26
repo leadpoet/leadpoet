@@ -34,7 +34,10 @@ def _provider_answer(status: str) -> dict:
                 "claim_matches_miner_date": "consistent",
                 "supporting_quotes": [SUPPORTING_QUOTE],
                 "unsupported_parts": [],
-                "risk_notes": ["source_publication_date:2026-09-14"],
+                "risk_notes": [
+                    "source_publication_date:2026-09-14",
+                    "source_event_publication_binding:verified",
+                ],
             }],
             "overall_verdict": (
                 "qualified" if status == "supported" else "unverified"

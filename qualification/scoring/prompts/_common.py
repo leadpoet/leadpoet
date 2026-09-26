@@ -469,16 +469,29 @@ ARENA_INTEGRITY_DATE_BLOCK = """ARENA INTEGRITY DATE POLICY (applies to this eva
   reason to reject otherwise supported evidence.
 - Identify the date of the SAME EVENT established by the exact source. When the
   body states one unambiguous event date, add exactly
-  "source_event_date:YYYY-MM-DD" to risk_notes.
+  "source_event_date:YYYY-MM-DD" and
+  "source_event_date_binding:verified" to risk_notes. The binding is a semantic
+  assertion that the date belongs to the claimed event, not only the page.
 - When the exact submitted claim and an exact supporting source quote both
   identify that event only by month and year, add exactly
-  "source_event_month:YYYY-MM" instead. Do not invent a day. A later article
-  publication date must not replace that older event month.
-- If no event date is stated and the exact page is clearly the original record
-  or announcement of that same event, you may use supplied page/provider
-  publication metadata as the event proxy and add exactly
-  "source_publication_date:YYYY-MM-DD" to risk_notes. Do not use publication
-  metadata for ongoing pages, secondary retrospectives, or unrelated updates.
+  "source_event_month:YYYY-MM" plus
+  "source_event_date_binding:verified" instead. Do not invent a day. A later
+  article publication date must not replace that older event month.
+- A page publication, update, or first-observed timestamp is not by itself an
+  event date. If the exact page is the original announcement of the same event
+  and its body semantically ties that event to the page dateline, add both
+  "source_publication_date:YYYY-MM-DD" and
+  "source_event_publication_binding:verified" to risk_notes. This includes a
+  normal current announcement whose body says the company announced, launched,
+  opened, or completed the event in the announcement's present context; it
+  does not require the literal word "today". Never add the binding for an
+  ongoing page, retrospective, republished article, unrelated update,
+  first-seen observation, or a page whose body describes an older event.
+- When source content affirmatively indicates that a page dateline may not be
+  the claimed event date, add exactly "source_event_date_disputed" to
+  risk_notes. Examples are an explicit older event date, retrospective or
+  update wording, or internal chronology that conflicts with the dateline.
+  Missing timing alone is not a dispute.
 - An event date outranks publication or update metadata. Never use a newer
   publication/update date to rejuvenate an older event described in the body.
 - Missing, approximate, conflicting, or uncertain dates do not disprove the

@@ -2,6 +2,10 @@
 -- Run identity always comes from the active lease row.  Callers can only
 -- append sanitized event documents through the lease-scoped RPC.
 BEGIN;
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
+-- Ownership transfer requires CREATE for the target owner on managed Postgres.
+GRANT CREATE ON SCHEMA public TO lab_arena_owner;
 
 CREATE TABLE IF NOT EXISTS public.lab_arena_trajectory_events (
   trajectory_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -222,5 +226,6 @@ REVOKE ALL ON FUNCTION public.lab_arena_append_trajectory_events_v1(TEXT, TEXT, 
 GRANT EXECUTE ON FUNCTION public.lab_arena_append_trajectory_events_v1(TEXT, TEXT, JSONB)
   TO lab_arena_service;
 
+REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
 NOTIFY pgrst, 'reload schema';
 COMMIT;

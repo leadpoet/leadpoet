@@ -9,6 +9,7 @@ from qualification.scoring import lead_scorer
 from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
     COMPANY_FIT_UNAVAILABLE,
+    company_fit_match,
     company_fit_unavailable,
     evaluate_company_identity,
 )
@@ -105,6 +106,27 @@ def _rapid7_web_identity() -> dict[str, str]:
     return receipt
 
 
+def _rapid7_homepage_identity():
+    receipt = evaluate_company_identity(
+        submitted_name="Rapid7",
+        submitted_website="https://rapid7.com",
+        submitted_linkedin=RAPID7_NUMERIC_URL,
+        observed_name="Rapid7",
+        observed_website="https://www.rapid7.com",
+        observed_linkedin=RAPID7_NUMERIC_URL,
+        evidence_source="company_homepage",
+        company_quality=True,
+    )
+    assert receipt["decision"] == COMPANY_FIT_MATCH
+    return company_fit_match(
+        "verified first-party homepage identity",
+        details={
+            "identity": receipt,
+            "verified_homepage_transport_domain": "rapid7.com",
+        },
+    )
+
+
 def _rapid7_structured_identity(**changes: str) -> dict[str, str]:
     evidence = {
         "name": "Rapid7, Inc.",
@@ -153,6 +175,47 @@ def test_numeric_linkedin_alias_requires_structured_id_and_vanity_binding():
     assert resolved["reason_code"] == (
         "structured_numeric_linkedin_alias_verified"
     )
+
+
+def test_numeric_homepage_anchor_defers_to_structured_alias_recovery():
+    homepage = lead_scorer._verified_homepage_identity_anchor(
+        _rapid7_homepage_identity()
+    )
+    web = _rapid7_web_identity()
+
+    assert homepage["linkedin_company_slug"] == "39624"
+    assert lead_scorer._structured_profile_identity_anchor(
+        homepage,
+        web,
+        "rapid7.com",
+    ) == {}
+    assert lead_scorer._alias_unresolved_structured_profile_lookup(
+        web,
+        "rapid7.com",
+    )["requested_profile_url"] == RAPID7_NUMERIC_URL
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"reason_code": "identity_not_proven"},
+        {"observed_domain": "other.example"},
+        {"observed_name": "other company"},
+        {"observed_linkedin_slug": "393624"},
+        {"submitted_linkedin_slug": "393624"},
+    ],
+)
+def test_homepage_anchor_is_preserved_without_exact_numeric_alias(changes):
+    homepage = lead_scorer._verified_homepage_identity_anchor(
+        _rapid7_homepage_identity()
+    )
+    web = {**_rapid7_web_identity(), **changes}
+
+    assert lead_scorer._structured_profile_identity_anchor(
+        homepage,
+        web,
+        "rapid7.com",
+    ) == homepage
 
 
 @pytest.mark.parametrize(
@@ -288,6 +351,93 @@ def test_numeric_linkedin_alias_unlocks_full_company_fit_gate(monkeypatch):
                     "verified_homepage_transport_domain": "rapid7.com",
                 },
             ),
+            company_quality=True,
+        )
+    )
+
+    assert calls == {"structured": 1}
+    assert result.decision == COMPANY_FIT_MATCH, result.details
+    assert result.details["identity_receipt"]["reason_code"] == (
+        "structured_numeric_linkedin_alias_verified"
+    )
+
+
+def test_numeric_homepage_identity_runs_full_structured_alias_gate(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    calls = {"structured": 0}
+
+    async def provider(**_kwargs):
+        return {
+            "observed_company_name": "Rapid7, Inc.",
+            "observed_company_website": "https://www.rapid7.com",
+            "observed_company_linkedin": RAPID7_VANITY_URL,
+            "observed_employee_count": "1,001-5,000",
+            "employee_size_matches": True,
+            "employee_size_evidence_url": RAPID7_VANITY_URL,
+            "employee_size_evidence_quote": "Company size 1,001-5,000 employees",
+            "observed_industry": "Food and Beverage Manufacturing",
+            "observed_subindustry": "",
+            "industry_matches": True,
+            "industry_activity_role": "supplier_operator",
+            "industry_evidence_url": "https://rapid7.com/company/about",
+            "industry_evidence_quote": "Rapid7 develops food brands.",
+            "observed_hq_country": "United States",
+            "observed_hq_state": "Massachusetts",
+            "geography_matches": True,
+            "geography_evidence_url": "https://rapid7.com/company/about",
+            "geography_evidence_quote": "Rapid7 is based in Boston.",
+            "reason": "All requested dimensions match.",
+        }, ""
+
+    async def structured_profile(
+        domain,
+        url,
+        *,
+        company_identity_evidence,
+        company_identity_observed_profile_url,
+        **_kwargs,
+    ):
+        calls["structured"] += 1
+        assert (domain, url) == ("rapid7.com", RAPID7_NUMERIC_URL)
+        assert company_identity_observed_profile_url == RAPID7_VANITY_URL
+        company_identity_evidence.update(
+            _rapid7_redirected_structured_identity()
+        )
+        return {
+            "employee_count": "1,001-5,000",
+            "provider": "harvestapi_get_company",
+            "source_field": "employeeCountRange",
+            "url": RAPID7_VANITY_URL,
+            "website": "https://rapid7.com/",
+        }
+
+    async def current_profile(url, **_kwargs):
+        assert url == RAPID7_VANITY_URL
+        return {"outcome": "insufficient_evidence", "url": url}
+
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_structured_linkedin_company_size",
+        structured_profile,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "fetch_current_linkedin_company_size",
+        current_profile,
+    )
+    result = asyncio.run(
+        lead_scorer._llm_reverify_company(
+            _rapid7_company().model_copy(update={
+                "employee_count": "1,001-5,000",
+            }),
+            _icp().model_copy(update={
+                "employee_count": "1,001-5,000",
+                "geography": "United States",
+                "country": "United States",
+            }),
+            require_company_fit_dimensions=True,
+            verified_homepage_identity=_rapid7_homepage_identity(),
             company_quality=True,
         )
     )

@@ -3897,7 +3897,38 @@ def _structured_profile_identity_anchor(
     """
 
     if homepage_identity:
-        return homepage_identity
+        homepage_name = _company_name(homepage_identity.get("normalized_name"))
+        homepage_domain = str(
+            homepage_identity.get("registrable_dns_domain") or ""
+        ).strip()
+        homepage_slug = str(
+            homepage_identity.get("linkedin_company_slug") or ""
+        ).strip().casefold()
+        web_submitted_slug = str(
+            web_identity.get("submitted_linkedin_slug") or ""
+        ).strip().casefold()
+        web_observed_slug = str(
+            web_identity.get("observed_linkedin_slug") or ""
+        ).strip().casefold()
+        numeric_alias_recovery_needed = (
+            web_identity.get("decision") == COMPANY_FIT_UNAVAILABLE
+            and web_identity.get("reason_code")
+            == "identity_linkedin_alias_unresolved"
+            and web_identity.get("evidence_source")
+            == "company_web_reverification"
+            and homepage_domain == transport_domain
+            and web_identity.get("submitted_domain") == transport_domain
+            and web_identity.get("observed_domain") == transport_domain
+            and homepage_slug.isdigit()
+            and web_submitted_slug == homepage_slug
+            and bool(web_observed_slug)
+            and not web_observed_slug.isdigit()
+            and bool(homepage_name)
+            and homepage_name == _company_name(web_identity.get("submitted_name"))
+            and homepage_name == _company_name(web_identity.get("observed_name"))
+        )
+        if not numeric_alias_recovery_needed:
+            return homepage_identity
     if (
         web_identity.get("decision") != COMPANY_FIT_MATCH
         or web_identity.get("evidence_source") != "company_web_reverification"

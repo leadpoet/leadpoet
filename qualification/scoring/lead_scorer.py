@@ -5968,9 +5968,12 @@ async def _run_targeted_company_evidence_investigation(
         else {}
     )
     if (
-        preserve_matched_industry
-        and required_attribute_source_cache is not None
+        required_attribute_source_cache is not None
         and icp_attribute
+        and prior_result is not None
+        and isinstance(prior_result.details, Mapping)
+        and prior_result.details.get("required_attribute_decision")
+        == COMPANY_FIT_UNAVAILABLE
     ):
         _hydrate_verified_required_attribute_recovery_source(
             required_attribute_source_cache,

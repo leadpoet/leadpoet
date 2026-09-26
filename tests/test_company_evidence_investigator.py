@@ -1306,11 +1306,13 @@ def test_investigator_hydrates_only_matching_failed_attribute_source():
     "mode",
     [
         "unverified",
-        "wrong_role",
-        "wrong_company",
+        "customer_role",
+        "internal_role",
+        "unrelated_domain",
         "invalid_url",
         "unfetched",
-        "quote_absent",
+        "absent_quote",
+        "wrong_quote",
         "redirected_off_domain",
         "budget_exhausted",
     ],
@@ -1321,15 +1323,21 @@ def test_alternate_attribute_recovery_source_stays_fail_closed(mode):
     claim = _finding(
         "industry",
         status="UNPROVEN" if mode == "unverified" else "VERIFIED",
-        activity_role="customer_user" if mode == "wrong_role" else "supplier_operator",
+        activity_role=(
+            "customer_user"
+            if mode == "customer_role"
+            else "internal_function"
+            if mode == "internal_role"
+            else "supplier_operator"
+        ),
         evidence_url=(
             "https://other.example/happyrobot"
-            if mode == "wrong_company"
+            if mode == "unrelated_domain"
             else "http://www.happyrobot.ai/blog/series-c"
             if mode == "invalid_url"
             else alternate_url
         ),
-        evidence_quote=quote,
+        evidence_quote="" if mode == "absent_quote" else quote,
     )
     fetched_url = claim["evidence_url"]
     investigation = {
@@ -1342,7 +1350,7 @@ def test_alternate_attribute_recovery_source_stays_fail_closed(mode):
                 ),
                 "text": (
                     "HappyRobot announced a financing round."
-                    if mode == "quote_absent"
+                    if mode == "wrong_quote"
                     else quote
                 ),
             }
@@ -2047,6 +2055,298 @@ def test_typesafe_investigator_fetch_repairs_same_attribute_source_only(
     )
 
 
+@pytest.mark.parametrize(
+    ("repair_proves_required_function", "expected_decision"),
+    [
+        (True, COMPANY_FIT_MATCH),
+        (False, COMPANY_FIT_UNAVAILABLE),
+    ],
+)
+def test_crowdstrike_stage_industry_source_can_repair_required_attribute(
+    monkeypatch,
+    repair_proves_required_function,
+    expected_decision,
+):
+    submitted_url = (
+        "https://www.nasdaq.com/press-release/"
+        "crowdstrike-appoints-bartley-richardson-chief-ai-and-autonomous-"
+        "systems-officer-2026"
+    )
+    source_url = (
+        "https://www.crowdstrike.com/en-us/press-releases/"
+        "crowdstrike-agentic-identity-provider-foundation-for-ai-agent-"
+        "identity-security/"
+    )
+    stage_quote = (
+        "CrowdStrike (NASDAQ: CRWD) today introduced the CrowdStrike "
+        "Agentic Identity Provider."
+    )
+    attribute_quote = (
+        "The Falcon platform stops breaches and protects identities, "
+        "endpoints, infrastructure, and sensitive data."
+    )
+    source_text = f"{stage_quote} {attribute_quote}"
+    company = _company(
+        name="CrowdStrike",
+        website="https://www.crowdstrike.com/",
+        linkedin="https://www.linkedin.com/company/crowdstrike",
+    ).model_copy(update={
+        "industry": "Computer and Network Security",
+        "employee_count": "5,001-10,000",
+        "company_stage": "Public",
+    })
+    icp = _icp(
+        industry="Privacy and Security",
+        sub_industry="Cloud security and identity protection",
+        employee_count="5,001-10,000",
+        company_stage="Public",
+        product_service=(
+            "Security software that helps organizations protect accounts, "
+            "infrastructure, endpoints, or sensitive data."
+        ),
+        required_attribute=(
+            "Sells security software or services used to detect, prevent, or "
+            "respond to privacy or cybersecurity risk."
+        ),
+    )
+
+    def verdict(*, repaired=False):
+        candidate = _complete_verdict(
+            observed_company_name="CrowdStrike",
+            observed_company_website="https://www.crowdstrike.com/",
+            observed_company_linkedin=(
+                "https://www.linkedin.com/company/crowdstrike"
+            ),
+            observed_employee_count="5,001-10,000",
+            employee_size_evidence_url=(
+                "https://www.linkedin.com/company/crowdstrike"
+            ),
+            employee_size_evidence_quote="Company size 5,001-10,000 employees",
+            observed_industry="Computer and Network Security",
+            observed_subindustry="Cloud security and identity protection",
+            industry_matches=True,
+            industry_activity_role="supplier_operator",
+            industry_evidence_url="https://www.crowdstrike.com/",
+            industry_evidence_quote=(
+                "CrowdStrike provides cloud security and identity protection."
+            ),
+            observed_company_stage="",
+            stage_matches=None,
+            stage_evidence_url="",
+            stage_evidence_quote="",
+            attribute_satisfied=True,
+            required_attribute_evidence_url=(
+                source_url if repaired else submitted_url
+            ),
+            required_attribute_evidence_quote=(
+                attribute_quote
+                if repaired
+                else "CrowdStrike is the platform of record for stopping breaches."
+            ),
+        )
+        if repaired and not repair_proves_required_function:
+            lead_scorer._clear_required_attribute_evidence(candidate)
+        return candidate
+
+    responses = [verdict(), verdict(repaired=True)]
+    prompts = []
+
+    async def provider(**kwargs):
+        prompts.append(kwargs["prompt"])
+        return responses.pop(0), ""
+
+    async def keep_employee_observation(candidate, *_args, **_kwargs):
+        return candidate
+
+    async def bounded_investigation(*, targets, **_kwargs):
+        assert targets == ("stage", "industry")
+        stage = _finding(
+            "stage",
+            observed_value="Public",
+            evidence_url=source_url,
+            evidence_quote=stage_quote,
+        )
+        return {
+            "claims": {
+                "stage": stage,
+                "industry": _finding(
+                    "industry",
+                    observed_value="Cloud security software",
+                    observed_industry="Privacy and Security",
+                    observed_subindustry=(
+                        "Cloud security and identity protection"
+                    ),
+                    activity_role="supplier_operator",
+                    evidence_url=source_url,
+                    evidence_quote=attribute_quote,
+                ),
+            },
+            "_validated_stage_finding": stage,
+            "failure_reason": "",
+            "usage": {
+                "reasoning_turns": 2,
+                "search_calls": 0,
+                "fetch_calls": 1,
+            },
+            investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                source_url: {
+                    "final_url": source_url,
+                    "text": source_text,
+                }
+            },
+        }
+
+    verified_homepage = lead_scorer.company_fit_match(
+        "homepage identity verified",
+        details={
+            "identity": {
+                "decision": COMPANY_FIT_MATCH,
+                "evidence_source": "company_homepage",
+                "observed_name": "crowdstrike",
+                "observed_domain": "crowdstrike.com",
+                "observed_linkedin_slug": "crowdstrike",
+            },
+            "verified_homepage_transport_domain": "crowdstrike.com",
+        },
+    )
+    source_fetch = AsyncMock(side_effect=lead_scorer.aiohttp.ClientError)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", source_fetch)
+    monkeypatch.setattr(
+        lead_scorer,
+        "_refresh_linkedin_employee_size_observation",
+        keep_employee_observation,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "investigate_company_evidence",
+        bounded_investigation,
+    )
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        company,
+        icp,
+        require_company_fit_dimensions=True,
+        verified_homepage_identity=verified_homepage,
+        company_quality=True,
+        evidence_investigator=True,
+    ))
+
+    assert result.decision == expected_decision
+    assert source_fetch.await_count == 1
+    assert len(prompts) == 2
+    assert "<untrusted_required_attribute_source>" in prompts[1]
+    assert attribute_quote in prompts[1]
+    grounding = result.details["required_attribute_grounding"]
+    assert grounding["cache_hit"] is repair_proves_required_function
+    assert grounding["status"] == (
+        "grounded"
+        if expected_decision == COMPANY_FIT_MATCH
+        else "invalid_evidence"
+    )
+
+
+def test_rapid7_unproven_stage_and_industry_cannot_repair_attribute_source(
+    monkeypatch,
+):
+    submitted_url = "https://www.rapid7.com/about/press-releases/example/"
+    company = _company(
+        name="Rapid7",
+        website="https://www.rapid7.com/",
+        linkedin="https://www.linkedin.com/company/rapid7",
+    ).model_copy(update={"company_stage": "Public"})
+    icp = _icp(
+        company_stage="Public",
+        required_attribute=(
+            "Sells security software used to prevent or respond to "
+            "cybersecurity risk."
+        ),
+    )
+    unresolved = _complete_verdict(
+        observed_company_name="Rapid7",
+        observed_company_website="https://www.rapid7.com/",
+        observed_company_linkedin="https://www.linkedin.com/company/rapid7",
+        observed_company_stage="",
+        stage_matches=None,
+        stage_evidence_url="",
+        stage_evidence_quote="",
+        attribute_satisfied=True,
+        required_attribute_evidence_url=submitted_url,
+        required_attribute_evidence_quote=(
+            "Rapid7 provides cybersecurity risk software."
+        ),
+    )
+    repaired = dict(unresolved)
+    lead_scorer._clear_required_attribute_evidence(repaired)
+    responses = [unresolved, repaired]
+    prompts = []
+
+    async def provider(**kwargs):
+        prompts.append(kwargs["prompt"])
+        return responses.pop(0), ""
+
+    async def keep_employee_observation(candidate, *_args, **_kwargs):
+        return candidate
+
+    async def unproven_investigation(*, targets, **_kwargs):
+        assert targets == ("stage", "industry")
+        return {
+            "claims": {
+                target: _finding(
+                    target,
+                    status="UNPROVEN",
+                    observed_value=None,
+                    evidence_url="",
+                    evidence_quote="",
+                    reason="bounded research did not establish the fact",
+                )
+                for target in targets
+            },
+            "failure_reason": "",
+            "usage": {
+                "reasoning_turns": 9,
+                "search_calls": 1,
+                "fetch_calls": 2,
+            },
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "_fetch_bounded_html",
+        AsyncMock(side_effect=lead_scorer.aiohttp.ClientError),
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "_refresh_linkedin_employee_size_observation",
+        keep_employee_observation,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "investigate_company_evidence",
+        unproven_investigation,
+    )
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        company,
+        icp,
+        require_company_fit_dimensions=True,
+        company_quality=True,
+        evidence_investigator=True,
+    ))
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["required_attribute_decision"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+    assert all(
+        "<untrusted_required_attribute_source>" not in prompt
+        for prompt in prompts
+    )
+
+
 def test_non_fit_reverification_never_starts_targeted_investigation(monkeypatch):
     weak_stage = _complete_verdict(
         observed_company_stage="",
@@ -2389,7 +2689,7 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
             "supported", "alternate_supported"
         } else 1,
         "investigator": 1,
-        "direct_fetch": 2 if investigator_mode == "alternate_supported" else 1,
+        "direct_fetch": 1,
     }
     assert result.decision == expected_decision
     assert result.details["company_fit_dimensions"]["industry"] == (
@@ -2413,7 +2713,9 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
         if expected_decision == COMPANY_FIT_MATCH
         else "source_unavailable"
     )
-    assert attribute_receipt["cache_hit"] is (investigator_mode == "supported")
+    assert attribute_receipt["cache_hit"] is (
+        investigator_mode in {"supported", "alternate_supported"}
+    )
     assert investigator.PRIVATE_FETCHED_PAGES_KEY not in str(
         result.details["supporting_receipts"]
     )

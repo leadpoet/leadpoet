@@ -3297,6 +3297,58 @@ def test_plain_text_removes_nonvisible_blocks_before_clipping():
     assert len(text) <= investigator.MAX_PAGE_CHARACTERS
 
 
+def test_mislabeled_pdf_body_is_rejected_before_plain_text_extraction(
+    monkeypatch,
+):
+    url = "https://ir.acme.example/annual-report"
+    pdf_body = "%PDF-1.7\n" + ("binary-pdf-payload\x00" * 65_000)
+    bounded_fetch = AsyncMock(return_value=(200, url, pdf_body))
+    monkeypatch.setattr(investigator, "_fetch_bounded_html", bounded_fetch)
+
+    result = asyncio.run(investigator._fetch_page(object(), url))
+
+    assert len(pdf_body) > 1_200_000
+    assert investigator._plain_text(pdf_body) == ""
+    assert result == {"ok": False, "error": "unsupported_binary_content"}
+
+
+@pytest.mark.parametrize(
+    ("text", "expect_full_text"),
+    [
+        ("Acme multilingual evidence: é漢字🙂 " * 600, True),
+        ("Acme exact quote. " + ("\x00\x01" * 12_000), False),
+    ],
+)
+def test_message_json_bounds_multilingual_and_control_text(
+    text,
+    expect_full_text,
+):
+    value = {
+        "ok": True,
+        "url": "https://acme.example/evidence",
+        "text": text,
+    }
+    content = investigator._bounded_message_json(value)
+    decoded = json.loads(content)
+
+    assert len(content) < arena_operations.OPENROUTER_MAX_CONTENT_CHARS
+    assert text.startswith(decoded["text"])
+    assert decoded["text"].startswith("Acme")
+    assert (decoded["text"] == text) is expect_full_text
+    assert decoded["ok"] is True
+    assert decoded["url"] == value["url"]
+
+
+def test_plain_text_keeps_valid_html_quote_after_binary_guard():
+    quote = "Acme supplies enrollment software to universities worldwide."
+    text = investigator._plain_text(
+        f"<html><body><main><p>{quote}</p></main></body></html>"
+    )
+
+    assert quote in text
+    assert investigator._quote_occurs(quote, text)
+
+
 def test_plain_text_extracts_realpage_article_before_navigation_cap():
     exact_quote = (
         "RealPage, Inc. (NASDAQ: RP), a leading global provider of software "
@@ -7704,6 +7756,181 @@ def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatc
         request["tool_choice"] == "required"
         for request in reasoning_requests
     )
+
+
+def test_fetch_tool_result_is_bounded_without_truncating_stored_evidence(monkeypatch):
+    url = "https://acme.example/platform"
+    quote = "Acme supplies enrollment software to universities worldwide."
+    full_text = (quote + " " + ("\x00\x01" * 12_000))[
+        :investigator.MAX_PAGE_CHARACTERS
+    ]
+    requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        arena_operations.validate_operation_request("openrouter.chat", payload)
+        requests.append(payload)
+        if len(requests) == 1:
+            name = "fetch_page"
+            arguments = {"url": url}
+        else:
+            name = "submit_findings"
+            arguments = {"findings": [_finding(
+                "industry",
+                observed_value="University enrollment software",
+                observed_industry="Education",
+                observed_subindustry="Higher education services",
+                activity_role="supplier_operator",
+                evidence_url=url,
+                evidence_quote=quote,
+            )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{len(requests)}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_fetch(_session, requested_url):
+        assert requested_url == url
+        return {
+            "ok": True,
+            "url": url,
+            "final_url": url,
+            "text": full_text,
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("industry",),
+        requested_industry="Education",
+        requested_subindustry="Higher education services",
+        requested_product_service="Enrollment software for universities",
+        verified_homepage_identity={
+            "normalized_name": "acme",
+            "registrable_dns_domain": "acme.example",
+        },
+    ))
+
+    tool_content = requests[1]["messages"][-1]["content"]
+    shown_tool_result = json.loads(tool_content)
+    assert len(tool_content) < arena_operations.OPENROUTER_MAX_CONTENT_CHARS
+    assert full_text.startswith(shown_tool_result["text"])
+    assert shown_tool_result["text"].startswith(quote)
+    assert len(shown_tool_result["text"]) < len(full_text)
+    assert result["claims"]["industry"]["status"] == "VERIFIED"
+    assert result["claims"]["industry"]["evidence_quote"] == quote
+    assert result[investigator.PRIVATE_FETCHED_PAGES_KEY][url]["text"] == full_text
+    assert result["usage"] == {
+        "reasoning_turns": 2,
+        "search_calls": 0,
+        "fetch_calls": 1,
+    }
+
+
+def test_multiple_prefetched_pages_fit_initial_message_and_keep_exact_quotes(
+    monkeypatch,
+):
+    urls = [f"https://acme.example/evidence-{index}" for index in range(3)]
+    quote = "Acme supplies enrollment software to universities worldwide."
+    page_texts = {
+        url: (f"{quote} Source {index}. " + ("\x00\x01" * 12_000))[
+            :investigator.MAX_PAGE_CHARACTERS
+        ]
+        for index, url in enumerate(urls)
+    }
+    requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        arena_operations.validate_operation_request("openrouter.chat", payload)
+        requests.append(payload)
+        arguments = {"findings": [_finding(
+            "industry",
+            observed_value="University enrollment software",
+            observed_industry="Education",
+            observed_subindustry="Higher education services",
+            activity_role="supplier_operator",
+            evidence_url=urls[-1],
+            evidence_quote=quote,
+        )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {
+                "name": "submit_findings",
+                "arguments": json.dumps(arguments),
+            },
+        }]}}]}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("industry",),
+        requested_industry="Education",
+        requested_subindustry="Higher education services",
+        requested_product_service="Enrollment software for universities",
+        prior_observations={"submitted_source_urls": urls},
+        verified_homepage_identity={
+            "normalized_name": "acme",
+            "registrable_dns_domain": "acme.example",
+        },
+        prefetched_pages={
+            url: {"final_url": url, "text": text}
+            for url, text in page_texts.items()
+        },
+    ))
+
+    content = requests[0]["messages"][1]["content"]
+    input_document = json.loads(content.split("\n", 1)[1])
+    shown_pages = input_document["prefetched_sources"]
+    assert len(content) < arena_operations.OPENROUTER_MAX_CONTENT_CHARS
+    assert len(shown_pages) == 3
+    assert all(page["text"].startswith(quote) for page in shown_pages)
+    assert all(
+        page_texts[page["url"]].startswith(page["text"])
+        for page in shown_pages
+    )
+    assert result["claims"]["industry"]["status"] == "VERIFIED"
+    assert result["claims"]["industry"]["evidence_quote"] == quote
+    assert {
+        url: page["text"]
+        for url, page in result[investigator.PRIVATE_FETCHED_PAGES_KEY].items()
+    } == page_texts
+    assert result["usage"]["fetch_calls"] == 0
+
+
+def test_local_message_bound_failure_is_malformed_not_provider_error(monkeypatch):
+    diagnostic = {}
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(
+        investigator,
+        "_bounded_message_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("investigation_message_metadata_too_large")
+        ),
+    )
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("industry",),
+        requested_industry="Education",
+        diagnostic=diagnostic,
+    ))
+
+    assert result == {
+        "claims": {},
+        "failure_reason": MALFORMED_RESPONSE_FAILURE_REASON,
+    }
+    assert diagnostic[VERIFIER_FAILURE_REASON_KEY] == MALFORMED_RESPONSE_FAILURE_REASON
 
 
 def test_saved_doctronic_case_script_discovers_and_fetches_current_series_b(

@@ -6,6 +6,8 @@ import asyncio
 import json
 from unittest.mock import AsyncMock
 
+import pytest
+
 from qualification.scoring import company_evidence_investigator as investigator
 
 
@@ -45,6 +47,71 @@ def _response(turn: int, name: str, arguments: dict):
 def _set_keys(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+
+
+@pytest.mark.parametrize("source_proves_claim", [True, False])
+def test_repeated_quote_failure_can_use_second_existing_search(
+    monkeypatch, source_proves_claim,
+):
+    first_url = "https://www.crowdstrike.com/"
+    recovered_url = "https://www.crowdstrike.com/about-us/"
+    quote = "CrowdStrike supplies cybersecurity software that protects endpoints."
+    requests = []
+    searches = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        requests.append(payload)
+        turn = len(requests)
+        if turn in {1, 4}:
+            return _response(turn, "search_web", {
+                "query": "CrowdStrike cybersecurity software company",
+            })
+        if turn == 5:
+            return _response(turn, "fetch_page", {"url": recovered_url})
+        return _response(turn, "submit_findings", {"findings": [
+            _finding(
+                "industry", evidence_url=(first_url if turn < 5 else recovered_url),
+                evidence_quote=quote,
+            ),
+        ]})
+
+    async def fake_search(_session, query, *, key):
+        searches.append(query)
+        return {"results": [{"url": recovered_url}]}
+
+    fetch = AsyncMock(return_value={
+        "ok": True, "url": recovered_url, "final_url": recovered_url,
+        "text": quote if source_proves_claim else "CrowdStrike careers and offices.",
+    })
+    _set_keys(monkeypatch)
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", fetch)
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "CrowdStrike", "website": first_url},
+        targets=("industry",), requested_industry="Privacy and Security",
+        requested_attribute="Sells cybersecurity software or services.",
+        prior_observations={"submitted_source_urls": [first_url]},
+        prefetched_pages={first_url: {
+            "final_url": first_url, "text": "CrowdStrike. We stop breaches.",
+        }},
+        verified_homepage_identity={
+            "normalized_name": "CrowdStrike",
+            "registrable_dns_domain": "crowdstrike.com",
+        },
+    ))
+
+    assert result["claims"]["industry"]["status"] == (
+        "VERIFIED" if source_proves_claim else "UNPROVEN"
+    )
+    assert len(searches) == result["usage"]["search_calls"] == 2
+    assert result["usage"]["fetch_calls"] == 1
+    fetch.assert_awaited_once()
+    assert requests[3]["tool_choice"] == {
+        "type": "function", "function": {"name": "search_web"},
+    }
+    if source_proves_claim:
+        assert result["usage"]["reasoning_turns"] == 6
 
 
 def test_ciso_quote_repair_failure_forces_one_remaining_search_and_fetch(monkeypatch):

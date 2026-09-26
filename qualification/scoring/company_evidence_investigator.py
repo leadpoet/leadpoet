@@ -2052,7 +2052,6 @@ async def investigate_company_evidence(
                         quote_presence_rejected_targets & quote_repair_targets
                         and not force_submit
                         and _turn < MAX_REASONING_TURNS - 3
-                        and search_calls == 0
                         and search_calls < MAX_SEARCH_CALLS
                         and prefetched_count + fetch_calls < MAX_FETCH_CALLS
                         and time.monotonic() - started

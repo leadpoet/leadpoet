@@ -143,8 +143,9 @@ hypotheses, not source observations. The supplier_operator role establishes
 only the company's relationship to the cited activity; it does not establish
 that the activity satisfies the requested criterion. Return VERIFIED only when
 the fetched source directly supports every active requested sub-industry
-constraint and at least one qualifying product/service or required-attribute
-alternative under the criterion's explicit AND/OR structure. Equivalent source
+constraint and the active product/service and required-attribute constraints.
+Preserve each criterion's explicit AND/OR structure: prove every required
+conjunct and one supported alternative for each OR clause. Equivalent source
 language is sufficient; do not require literal taxonomy labels. An adjacent
 activity for the same customer group is UNPROVEN. Populate observed industry,
 sub-industry, and value only from the source; never copy a prior or requested

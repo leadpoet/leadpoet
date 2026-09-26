@@ -7623,6 +7623,10 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
     system_prompt = " ".join(requests[0]["messages"][0]["content"].split())
     assert "prior positive labels as untrusted hypotheses" in system_prompt
     assert "supplier_operator role establishes" in system_prompt
+    assert (
+        "active product/service and required-attribute constraints" in system_prompt
+    )
+    assert "one supported alternative for each OR clause" in system_prompt
     assert "Equivalent source language is sufficient" in system_prompt
 
 

@@ -56,6 +56,9 @@ ADMISSION_DEADLINE_SECONDS = 110.0
 BROKER_SETTLEMENT_TIMEOUT_SECONDS = 125.0
 TARGETS = frozenset({"stage", "rebrand", "headcount", "industry", "geography"})
 STATUSES = frozenset({"VERIFIED", "CONTRADICTED", "UNPROVEN"})
+_NON_SUPPLIER_ACTIVITY_ROLES = frozenset({
+    "customer_user", "internal_function", "third_party",
+})
 INDUSTRY_RELATIONSHIP_UNPROVEN_REASON = (
     "source did not prove the company's relationship to the activity"
 )
@@ -1487,6 +1490,9 @@ async def investigate_company_evidence(
             }]
             final_correction_pending = False
             forced_next_tool = ""
+            industry_followup_pending = False
+            industry_followup_search_completed = False
+            industry_followup_fetched_urls: set[str] = set()
             for _turn in range(MAX_REASONING_TURNS + 1):
                 correction_turn = _turn == MAX_REASONING_TURNS
                 if correction_turn and not final_correction_pending:
@@ -1661,8 +1667,27 @@ async def investigate_company_evidence(
                             for finding in claims.values()
                         )
                     )
+                    submitted_industry = submitted_findings.get("industry", {})
+                    industry_finding = claims.get("industry") or {}
+                    non_supplier_industry_contradiction = bool(
+                        industry_finding.get("status") == "CONTRADICTED"
+                        and industry_finding.get("activity_role")
+                        in _NON_SUPPLIER_ACTIVITY_ROLES
+                    )
+                    rejected_other_activity_contradiction = any(
+                        item.get("target") == "industry"
+                        and item.get("reason")
+                        == INDUSTRY_RELATIONSHIP_UNPROVEN_REASON
+                        and submitted_industry.get("status") == "CONTRADICTED"
+                        and submitted_industry.get("activity_role")
+                        == "supplier_operator"
+                        for item in rejected
+                    )
                     force_industry_search = bool(
-                        rejected
+                        (
+                            non_supplier_industry_contradiction
+                            or rejected_other_activity_contradiction
+                        )
                         and not force_submit
                         and _turn < MAX_REASONING_TURNS - 3
                         and search_calls == 0
@@ -1670,19 +1695,29 @@ async def investigate_company_evidence(
                         and prefetched_count + fetch_calls < MAX_FETCH_CALLS
                         and time.monotonic() - started
                         < ADMISSION_DEADLINE_SECONDS
-                        and any(
-                            item.get("target") == "industry"
-                            and item.get("reason")
-                            == INDUSTRY_RELATIONSHIP_UNPROVEN_REASON
-                            and submitted_findings.get("industry", {}).get("status")
-                            == "CONTRADICTED"
-                            and submitted_findings.get("industry", {}).get(
-                                "activity_role"
-                            )
-                            == "supplier_operator"
-                            for item in rejected
-                        )
                     )
+                    if force_industry_search:
+                        industry_followup_pending = True
+                    elif (
+                        non_supplier_industry_contradiction
+                        and search_calls == 0
+                    ):
+                        claims["industry"] = _unproven_findings(
+                            ("industry",),
+                            "requested industry absence was not established before "
+                            "the bounded targeted follow-up search",
+                        )["industry"]
+                    elif (
+                        industry_followup_pending
+                        and non_supplier_industry_contradiction
+                        and industry_finding.get("evidence_url")
+                        not in industry_followup_fetched_urls
+                    ):
+                        claims["industry"] = _unproven_findings(
+                            ("industry",),
+                            "requested industry absence was not proven by a source "
+                            "fetched after the targeted follow-up search",
+                        )["industry"]
                     stage_finding = claims.get("stage") or {}
                     matching_venture_stage = bool(
                         requested_venture_stage
@@ -1701,7 +1736,7 @@ async def investigate_company_evidence(
                             "current venture stage was not established by a successful "
                             "company-bound discovery search",
                         )["stage"]
-                    if rejected and not correction_turn:
+                    if (rejected or force_industry_search) and not correction_turn:
                         final_correction_pending = force_submit
                         if force_industry_search:
                             forced_next_tool = "search_web"
@@ -1711,8 +1746,8 @@ async def investigate_company_evidence(
                             "rejected_findings": rejected,
                             "instruction": (
                                 (
-                                    "The submitted industry contradiction proved the "
-                                    "company operates another activity, but it did not "
+                                    "The submitted industry contradiction proved another "
+                                    "activity or non-supplier relationship, but it did not "
                                     "prove the requested activity absent. The next action "
                                     "must search for the exact company and requested "
                                     "industry, product/service, and attribute. Search "
@@ -1812,6 +1847,19 @@ async def investigate_company_evidence(
                             tool_result = await _search_web(
                                 session, query.strip(), key=exa_key
                             )
+                            if required_tool == "search_web" and industry_followup_pending:
+                                industry_followup_search_completed = True
+                                search_results = (
+                                    tool_result.get("results")
+                                    if isinstance(tool_result, Mapping)
+                                    else None
+                                )
+                                if (
+                                    isinstance(search_results, list)
+                                    and search_results
+                                    and prefetched_count + fetch_calls < MAX_FETCH_CALLS
+                                ):
+                                    forced_next_tool = "fetch_page"
                 elif name == "fetch_page":
                     if time.monotonic() - started >= ADMISSION_DEADLINE_SECONDS:
                         return {
@@ -1831,6 +1879,10 @@ async def investigate_company_evidence(
                             fetched_pages[str(tool_result["url"])] = str(
                                 tool_result["text"]
                             )
+                            if industry_followup_search_completed:
+                                industry_followup_fetched_urls.add(
+                                    str(tool_result["url"])
+                                )
                             fetched_final_urls[str(tool_result["url"])] = str(
                                 tool_result.get("final_url")
                                 or tool_result["url"]

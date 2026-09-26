@@ -6695,29 +6695,10 @@ def test_curated_armada_relationship_rejection_forces_targeted_research(
     assert "Search results are discovery only" in feedback["instruction"]
 
 
-@pytest.mark.parametrize(
-    ("status", "activity_role", "quote"),
-    [
-        (
-            "VERIFIED",
-            "supplier_operator",
-            "Armada provides cloud software for IT teams.",
-        ),
-        (
-            "CONTRADICTED",
-            "customer_user",
-            "Armada uses cloud software supplied by ExampleCo.",
-        ),
-        (
-            "CONTRADICTED",
-            "third_party",
-            "Armada's partner ExampleCo provides cloud software.",
-        ),
-    ],
-)
-def test_valid_industry_relationship_findings_do_not_force_research(
-    monkeypatch, status, activity_role, quote,
-):
+def test_verified_supplier_industry_finding_does_not_force_research(monkeypatch):
+    status = "VERIFIED"
+    activity_role = "supplier_operator"
+    quote = "Armada provides cloud software for IT teams."
     url = "https://www.armada.ai/platform"
     requests = []
 
@@ -6770,6 +6751,252 @@ def test_valid_industry_relationship_findings_do_not_force_research(
     assert result["claims"]["industry"]["status"] == status
     assert len(requests) == 2
     search.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    (
+        "company_name",
+        "company_domain",
+        "requested_industry",
+        "initial_quote",
+        "followup_path",
+        "followup_quote",
+        "final_status",
+        "final_role",
+    ),
+    [
+        pytest.param(
+            "IDP",
+            "idp.com",
+            "Education",
+            "IDP helps students apply to universities around the world.",
+            "english-schools",
+            "IDP operates English-language schools for international students.",
+            "VERIFIED",
+            "supplier_operator",
+            id="other-activity-page-recovers-requested-role",
+        ),
+        pytest.param(
+            "Dimer Health",
+            "dimerhealth.com",
+            "Software",
+            "Dimer Health is a medical practice that treats patients online.",
+            "technology",
+            "Dimer Health uses scheduling software supplied by Example Systems.",
+            "CONTRADICTED",
+            "customer_user",
+            id="medical-practice-remains-not-software-vendor",
+        ),
+        pytest.param(
+            "RetailCo",
+            "retail.example",
+            "Payments",
+            "RetailCo sells clothing through its online store.",
+            "checkout",
+            "RetailCo's partner ExamplePay supplies payment processing at checkout.",
+            "CONTRADICTED",
+            "third_party",
+            id="synthetic-wrong-role-remains-rejected",
+        ),
+    ],
+)
+def test_no_search_customer_role_gets_one_bounded_industry_followup(
+    monkeypatch,
+    company_name,
+    company_domain,
+    requested_industry,
+    initial_quote,
+    followup_path,
+    followup_quote,
+    final_status,
+    final_role,
+):
+    """Other activity is not absence; repeated customer evidence remains negative."""
+
+    homepage_url = f"https://{company_domain}/about"
+    followup_url = f"https://{company_domain}/{followup_path}"
+    requests = []
+    search_queries = []
+    fetched_urls = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        turn = len(requests)
+        if turn == 1:
+            name, arguments = "fetch_page", {"url": homepage_url}
+        elif turn == 2:
+            name, arguments = "submit_findings", {
+                "findings": [_finding(
+                    "industry",
+                    status="CONTRADICTED",
+                    observed_industry="Other activity",
+                    observed_subindustry="Other business role",
+                    activity_role="customer_user",
+                    evidence_url=homepage_url,
+                    evidence_quote=initial_quote,
+                )]
+            }
+        elif turn == 3:
+            name, arguments = "search_web", {
+                "query": f"{company_name} {requested_industry} company activity"
+            }
+        elif turn == 4:
+            name, arguments = "fetch_page", {"url": followup_url}
+        else:
+            name, arguments = "submit_findings", {
+                "findings": [_finding(
+                    "industry",
+                    status=final_status,
+                    observed_industry=requested_industry,
+                    observed_subindustry=(
+                        "English-language schools"
+                        if final_role == "supplier_operator"
+                        else "Customer use"
+                    ),
+                    activity_role=final_role,
+                    evidence_url=followup_url,
+                    evidence_quote=followup_quote,
+                )]
+            }
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{turn}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_search(_session, query, *, key):
+        del key
+        search_queries.append(query)
+        return {"results": [{"url": followup_url}]}
+
+    async def fake_fetch(_session, url):
+        fetched_urls.append(url)
+        return {
+            "ok": True,
+            "url": url,
+            "final_url": url,
+            "text": initial_quote if url == homepage_url else followup_quote,
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": company_name,
+            "website": f"https://{company_domain}",
+        },
+        targets=("industry",),
+        requested_industry=requested_industry,
+        verified_homepage_identity={
+            "normalized_name": company_name,
+            "registrable_dns_domain": company_domain,
+        },
+    ))
+
+    assert result["claims"]["industry"]["status"] == final_status
+    assert result["claims"]["industry"]["activity_role"] == final_role
+    assert result["usage"] == {
+        "reasoning_turns": 5,
+        "search_calls": 1,
+        "fetch_calls": 2,
+    }
+    assert search_queries == [
+        f"{company_name} {requested_industry} company activity"
+    ]
+    assert fetched_urls == [homepage_url, followup_url]
+    assert requests[2]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "search_web"},
+    }
+    assert requests[3]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "fetch_page"},
+    }
+
+
+def test_successful_targeted_search_does_not_add_industry_followup_calls(
+    monkeypatch,
+):
+    url = "https://dimerhealth.com/technology"
+    quote = "Dimer Health uses scheduling software supplied by Example Systems."
+    requests = []
+    search_queries = []
+    fetched_urls = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        turn = len(requests)
+        if turn == 1:
+            name, arguments = "search_web", {"query": "Dimer Health software"}
+        elif turn == 2:
+            name, arguments = "fetch_page", {"url": url}
+        else:
+            name, arguments = "submit_findings", {
+                "findings": [_finding(
+                    "industry",
+                    status="CONTRADICTED",
+                    observed_industry="Software",
+                    observed_subindustry="Customer use",
+                    activity_role="customer_user",
+                    evidence_url=url,
+                    evidence_quote=quote,
+                )]
+            }
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{turn}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_search(_session, query, *, key):
+        del key
+        search_queries.append(query)
+        return {"results": [{"url": url}]}
+
+    async def fake_fetch(_session, requested_url):
+        fetched_urls.append(requested_url)
+        return {
+            "ok": True,
+            "url": requested_url,
+            "final_url": requested_url,
+            "text": quote,
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "Dimer Health",
+            "website": "https://dimerhealth.com",
+        },
+        targets=("industry",),
+        requested_industry="Software",
+        verified_homepage_identity={
+            "normalized_name": "Dimer Health",
+            "registrable_dns_domain": "dimerhealth.com",
+        },
+    ))
+
+    assert result["claims"]["industry"]["status"] == "CONTRADICTED"
+    assert result["claims"]["industry"]["activity_role"] == "customer_user"
+    assert result["usage"] == {
+        "reasoning_turns": 3,
+        "search_calls": 1,
+        "fetch_calls": 1,
+    }
+    assert search_queries == ["Dimer Health software"]
+    assert fetched_urls == [url]
+    assert len(requests) == 3
 
 
 @pytest.mark.parametrize(
@@ -6877,6 +7104,8 @@ def test_forced_industry_search_does_not_accept_an_unfetched_result(monkeypatch)
         elif turn == 3:
             name, arguments = "search_web", {"query": "Armada cloud software"}
         elif turn == 4:
+            name, arguments = "fetch_page", {"url": software_url}
+        elif turn == 5:
             name, arguments = "submit_findings", {
                 "findings": [_finding(
                     "industry",
@@ -6925,7 +7154,7 @@ def test_forced_industry_search_does_not_accept_an_unfetched_result(monkeypatch)
 
     assert result["claims"]["industry"]["status"] == "UNPROVEN"
     assert result["claims"]["industry"]["evidence_url"] == ""
-    assert fetched_urls == [infrastructure_url]
+    assert fetched_urls == [infrastructure_url, software_url]
 
 
 @pytest.mark.parametrize("exhausted_budget", ["search", "fetch"])

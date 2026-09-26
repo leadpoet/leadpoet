@@ -78,6 +78,10 @@ def build_parser() -> argparse.ArgumentParser:
             help="replay accepted nonempty outputs from a published round dated today; no fresh sourcing",
         )
         command.add_argument(
+            "--replay-assignment", action="append",
+            help="limit replay to this submission_id:ICP_position; repeat for each saved case",
+        )
+        command.add_argument(
             "--status-file",
             type=Path,
             help="atomic JSON evidence path; defaults to /tmp/<round-id>.json",
@@ -113,7 +117,10 @@ def _validate_round_id(round_id: str) -> str:
     return str(round_id)
 
 
-def _saved_output_replay(built: Any, source_round_id: str, round_id: str) -> dict[str, Any]:
+def _saved_output_replay(
+    built: Any, source_round_id: str, round_id: str,
+    *, assignments: list[str] | None = None,
+) -> dict[str, Any]:
     """Read immutable accepted inputs for a new, explicitly labelled shadow run."""
 
     from lab_arena import contact_policy, contracts, integrity, source_bundle
@@ -213,8 +220,22 @@ def _saved_output_replay(built: Any, source_round_id: str, round_id: str) -> dic
     omitted_failed_origins = expected_origins - seen
     if not omitted_failed_origins.issubset(failed_origins):
         raise VerificationError("replay source assignments are not terminal")
+    selected = None
+    if assignments is not None:
+        selected = set()
+        for assignment in assignments:
+            submission_id, separator, position = str(assignment).rpartition(":")
+            if not separator or not position.isascii() or not position.isdecimal():
+                raise VerificationError("replay assignment must be submission_id:ICP_position")
+            origin = (submission_id, int(position))
+            if origin not in expected_origins or origin in selected:
+                raise VerificationError("replay assignment is unknown or duplicated")
+            selected.add(origin)
+        if not selected:
+            raise VerificationError("replay assignment selection is empty")
     accepted.sort(key=lambda item: (item[0], item[1]))
     empty_output_count = 0
+    unselected_output_count = 0
     for submission_id, source_position, run in accepted:
         document = json.loads(built._objects.get_bounded(run["output_ref"], MAX_OUTPUT_BYTES))
         validated = validate_output_document(
@@ -239,6 +260,9 @@ def _saved_output_replay(built: Any, source_round_id: str, round_id: str) -> dic
         if not document["companies"]:
             empty_output_count += 1
             continue
+        if selected is not None and (submission_id, source_position) not in selected:
+            unselected_output_count += 1
+            continue
         position = len(icps)
         original_icp = benchmark_icps[source_position]
         if not isinstance(original_icp, Mapping):
@@ -261,6 +285,8 @@ def _saved_output_replay(built: Any, source_round_id: str, round_id: str) -> dic
             "companies_hash": contracts.document_hash(document["companies"]),
             "company_count": len(document["companies"]),
         })
+    if selected is not None and len(origins) != len(selected):
+        raise VerificationError("replay selection must contain accepted nonempty outputs")
     if not 2 <= len(icps) <= contracts.MAX_BENCHMARK_ICP_COUNT:
         raise VerificationError("replay nonempty assignment count is unsupported")
     input_hash = contracts.document_hash({"icps": icps, "outputs": outputs})
@@ -305,7 +331,13 @@ def _saved_output_replay(built: Any, source_round_id: str, round_id: str) -> dic
             }),
             "replayed_group_count": len(origins),
             "replayed_company_count": sum(item["company_count"] for item in origins),
-            "selection_scope": "all_published_participant_accepted_nonempty_execute_outputs",
+            "selection_scope": (
+                "selected_published_participant_accepted_nonempty_execute_outputs"
+                if selected is not None else
+                "all_published_participant_accepted_nonempty_execute_outputs"
+            ),
+            **({"omitted_unselected_output_count": unselected_output_count}
+               if selected is not None else {}),
             "origins": origins,
         },
     }
@@ -350,9 +382,14 @@ def _validate_replay_source_archive(
         raise VerificationError("replay source archive differs")
 
 
-def _build_pinned_service(round_id: str, *, replay_published_round: str | None = None):
+def _build_pinned_service(
+    round_id: str, *, replay_published_round: str | None = None,
+    replay_assignments: list[str] | None = None,
+):
     """Use production dependencies with a process-local shadow ownership gate."""
 
+    if replay_assignments is not None and not replay_published_round:
+        raise VerificationError("replay assignments require a published source round")
     source_mode = os.environ.get("LAB_ARENA_MODE", "").strip().lower()
     if source_mode != "live":
         raise VerificationError("the source environment must be the live gateway environment")
@@ -362,7 +399,9 @@ def _build_pinned_service(round_id: str, *, replay_published_round: str | None =
 
     built, _unused_app = build_service_from_environment("shadow")
     replay = (
-        _saved_output_replay(built, replay_published_round, round_id)
+        _saved_output_replay(
+            built, replay_published_round, round_id, assignments=replay_assignments
+        )
         if replay_published_round else None
     )
     defaults = replace(
@@ -1388,7 +1427,8 @@ def main(argv: list[str] | None = None) -> int:
         load_scoped_environment(args.environment_file)
         args.round_id = _validate_round_id(args.round_id)
         service, app = _build_pinned_service(
-            args.round_id, replay_published_round=args.replay_published_round
+            args.round_id, replay_published_round=args.replay_published_round,
+            replay_assignments=args.replay_assignment,
         )
         checks = service.startup_checks()
         print(

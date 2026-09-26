@@ -211,6 +211,73 @@ def test_saved_output_replay_rejects_noncanonical_or_mismatched_source_hash(monk
         )
 
 
+def test_selected_replay_preserves_original_inputs_and_binds_only_selected_outputs(monkeypatch):
+    import io
+    import tarfile
+
+    built, _runs, _documents = _replay_source_fixture(monkeypatch)
+    replay = verification._saved_output_replay(
+        built, REPLAY_SOURCE_ROUND_ID, REPLAY_TARGET_ROUND_ID,
+        assignments=["source-b:1", "source-a:0"],
+    )
+    evidence = replay["evidence"]
+    assert evidence["selection_scope"].startswith("selected_published_")
+    assert evidence["replayed_group_count"] == 2
+    assert evidence["source_accepted_output_count"] == 4
+    assert evidence["omitted_unselected_output_count"] == 1
+    assert evidence["omitted_empty_output_count"] == 1
+    assert [(o["source_submission_id"], o["source_icp_position"])
+            for o in evidence["origins"]] == [("source-a", 0), ("source-b", 1)]
+    assert [o["position"] for o in evidence["origins"]] == [0, 1]
+    assert [icp["prompt"] for icp in replay["icps"]] == ["First ICP", "Second ICP"]
+    with tarfile.open(fileobj=io.BytesIO(replay["archive"]), mode="r:gz") as archive:
+        member = next(m for m in archive.getmembers() if m.name.endswith("outputs.json"))
+        outputs = json.load(archive.extractfile(member))
+    assert set(outputs) == {icp["icp_id"] for icp in replay["icps"]}
+    assert [companies[0]["company_name"] for companies in outputs.values()] == ["Acme", "Cedar"]
+    for icp, origin in zip(replay["icps"], evidence["origins"]):
+        assert contracts.document_hash(outputs[icp["icp_id"]]) == origin["companies_hash"]
+        assert origin["source_output_hash"] == origin["target_output_hash"]
+
+
+@pytest.mark.parametrize("assignments", [
+    [], ["source-a:0", "source-a:0"], ["unknown:0"], ["source-a:9"],
+    ["source-a:-1"], ["source-a"], ["source-a:0", "source-a:1"],
+    ["source-a:0", "source-c:0"], ["source-a:0"],
+])
+def test_selected_replay_rejects_invalid_empty_failed_or_undersized_selection(monkeypatch, assignments):
+    built, _runs, _documents = _replay_source_fixture(monkeypatch)
+    with pytest.raises(verification.VerificationError):
+        verification._saved_output_replay(
+            built, REPLAY_SOURCE_ROUND_ID, REPLAY_TARGET_ROUND_ID,
+            assignments=assignments,
+        )
+
+
+def test_selected_replay_does_not_skip_source_integrity_checks(monkeypatch):
+    built, runs, _documents = _replay_source_fixture(monkeypatch)
+    runs[0]["output_hash"] = "sha256:" + "0" * 64
+    with pytest.raises(verification.VerificationError, match="output hash"):
+        verification._saved_output_replay(
+            built, REPLAY_SOURCE_ROUND_ID, REPLAY_TARGET_ROUND_ID,
+            assignments=["source-b:0", "source-b:1"],
+        )
+
+
+def test_replay_assignment_requires_published_source_and_parser_preserves_selection():
+    args = verification.build_parser().parse_args([
+        "serve", "--round-id", REPLAY_TARGET_ROUND_ID,
+        "--environment-file", "/tmp/gateway.env",
+        "--replay-published-round", REPLAY_SOURCE_ROUND_ID,
+        "--replay-assignment", "source-a:0", "--replay-assignment", "source-b:1",
+    ])
+    assert args.replay_assignment == ["source-a:0", "source-b:1"]
+    with pytest.raises(verification.VerificationError, match="published source round"):
+        verification._build_pinned_service(
+            REPLAY_TARGET_ROUND_ID, replay_assignments=args.replay_assignment,
+        )
+
+
 def test_specialized_shadow_verifier_preserves_current_count_and_margin(monkeypatch):
     from lab_arena import api, service, wiring
 

@@ -53,6 +53,9 @@ COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS = "company_verification_exhausted"
 REQUIRED_ATTRIBUTE_QUOTE_ABSENT_FAILURE_CLASS = (
     "required_attribute_quote_absent"
 )
+INTENT_DETAILS_CITATION_UNAVAILABLE_FAILURE_CLASS = (
+    "intent_details_citation_unavailable"
+)
 _NON_RETRYABLE_UNAVAILABLE_FAILURE_CLASSES = frozenset({
     "insufficient_fit_evidence",
     _MODEL_CONTRACT_INCOMPATIBLE_FAILURE_CLASS,
@@ -1380,6 +1383,14 @@ def scorer_breakdown_has_company_local_verification_failure(
             ):
                 source_local = True
                 continue
+            if (
+                receipt.get("gate") == "intent_details"
+                and failure_class
+                == INTENT_DETAILS_CITATION_UNAVAILABLE_FAILURE_CLASS
+                and receipt.get("failure_reason_code") == "malformed_response"
+            ):
+                source_local = True
+                continue
             if failure_class in _NON_RETRYABLE_UNAVAILABLE_FAILURE_CLASSES:
                 continue
             # An unavailable gate without explicit source-local evidence can
@@ -1493,6 +1504,15 @@ def terminal_company_verification_breakdown(
                 or receipt.get("failure_class")
                 == REQUIRED_ATTRIBUTE_QUOTE_ABSENT_FAILURE_CLASS
             )
+        ):
+            receipt["failure_class"] = COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS
+            marked = True
+        elif (
+            receipt.get("gate") == "intent_details"
+            and receipt.get("decision") == "unavailable"
+            and receipt.get("failure_class")
+            == INTENT_DETAILS_CITATION_UNAVAILABLE_FAILURE_CLASS
+            and receipt.get("failure_reason_code") == "malformed_response"
         ):
             receipt["failure_class"] = COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS
             marked = True

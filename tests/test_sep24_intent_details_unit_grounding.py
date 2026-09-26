@@ -421,7 +421,7 @@ def test_incomplete_or_duplicate_unit_ids_remain_retryable(monkeypatch, mutation
 
 
 @pytest.mark.parametrize(
-    "invalid", ["paragraph_self_quote", "source_index", "source_url"]
+    "invalid", ["paragraph_self_quote", "source_index_type", "source_url"]
 )
 def test_unbound_or_invalid_source_evidence_is_retryable(monkeypatch, invalid):
     paragraph = "Example claims an undocumented API capability."
@@ -432,8 +432,8 @@ def test_unbound_or_invalid_source_evidence_is_retryable(monkeypatch, invalid):
         unit = _verified_unit(document, 0, quote)
         if invalid == "paragraph_self_quote":
             unit["evidence"][0]["quote"] = paragraph
-        elif invalid == "source_index":
-            unit["evidence"][0]["source_index"] = 999
+        elif invalid == "source_index_type":
+            unit["evidence"][0]["source_index"] = True
         else:
             unit["evidence"][0]["quote"] = "https://example.test/news"
         return _response(document, [unit], facts_supported=True)
@@ -638,7 +638,10 @@ def test_company_fact_quotes_keep_their_paired_locators():
     ]
 
 
-def test_existing_but_wrong_source_index_is_retryable(monkeypatch):
+@pytest.mark.parametrize("index_kind", ["existing", "missing"])
+def test_unique_exact_quote_repairs_its_source_index_without_a_call(
+    monkeypatch, index_kind,
+):
     paragraph = "Example launched its analytics product."
     body_quote = "Example launched its analytics product."
     inputs = _inputs(
@@ -647,7 +650,10 @@ def test_existing_but_wrong_source_index_is_retryable(monkeypatch):
         supporting_quote="Example raised a Series A.",
     )
 
+    calls = []
+
     def response(document):
+        calls.append(document)
         body_binding = _binding(document, body_quote)
         other_indexes = [
             source_index
@@ -655,7 +661,9 @@ def test_existing_but_wrong_source_index_is_retryable(monkeypatch):
             if source_index != body_binding["source_index"]
         ]
         assert other_indexes
-        body_binding["source_index"] = other_indexes[0]
+        body_binding["source_index"] = (
+            other_indexes[0] if index_kind == "existing" else 999
+        )
         unit = {
             "unit_id": 0,
             "contains_factual_claim": True,
@@ -665,8 +673,65 @@ def test_existing_but_wrong_source_index_is_retryable(monkeypatch):
         return _response(document, [unit], facts_supported=True)
 
     receipt = _review(monkeypatch, inputs, response)
-    assert receipt["decision"] == "unavailable"
-    assert receipt["failure_reason_code"] == "malformed_response"
+    assert receipt["decision"] == "match"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("status", ["CONTRADICTED", "UNPROVEN"])
+def test_source_index_recovery_does_not_change_a_negative_verdict(monkeypatch, status):
+    quote = "Example has not launched its analytics product."
+    inputs = _inputs(
+        "Example launched its analytics product.", quote, supporting_quote=quote,
+    )
+
+    def response(document):
+        unit = _verified_unit(document, 0, quote)
+        unit["status"] = status
+        unit["evidence"][0]["source_index"] = 999
+        return _response(document, [unit], facts_supported=False)
+
+    receipt = _review(monkeypatch, inputs, response)
+    assert receipt["decision"] == "mismatch"
+    assert receipt["checks"]["facts_supported"] is False
+
+
+@pytest.mark.parametrize("defect", [
+    "ambiguous", "metadata_only", "negation", "number", "date", "duplicate",
+])
+def test_source_index_recovery_requires_unique_unchanged_admitted_text(defect):
+    quote = "Example opened a 20,000 square foot office in 2026."
+    source_text = quote
+    if defect == "negation":
+        source_text = "Example has not opened a 20,000 square foot office in 2026."
+    elif defect == "number":
+        source_text = quote.replace("20,000", "2,000")
+    elif defect == "date":
+        source_text = quote.replace("2026", "2025")
+    elif defect == "metadata_only":
+        source_text = "The source gives no office-opening evidence."
+    document = {
+        "intent_details_units": [{"unit_id": 0, "text": quote}],
+        "verified_signals": [{"matched_icp_signal": 0, "description": quote}],
+        "admitted_evidence": [
+            {"source_index": 0, "admitted_text": [source_text]},
+            {"source_index": 1, "admitted_text": [
+                quote if defect == "ambiguous" else "Unrelated source text."
+            ]},
+            {"source_index": 2, "admitted_text": ["Example's homepage."]},
+        ],
+    }
+    evidence = [{"source_index": 2, "quote": quote}]
+    if defect == "duplicate":
+        evidence.append({"source_index": 0, "quote": quote})
+    response = _response(document, [{
+        "unit_id": 0, "contains_factual_claim": True,
+        "status": "VERIFIED", "evidence": evidence,
+    }], facts_supported=True)
+    with pytest.raises(intent_details._CitationRepairNeeded) as raised:
+        intent_details._validate_review_response(json.dumps(response), document)
+    assert ("duplicate_quote" if defect == "duplicate" else "nonexact_quote") in (
+        raised.value.issues[0]
+    )
 
 
 @pytest.mark.parametrize(
@@ -727,7 +792,6 @@ def test_more_than_two_exact_evidence_bindings_is_retryable(monkeypatch):
     "defect,category",
     [
         ("missing", "missing_evidence"),
-        ("invalid_index", "invalid_source_index"),
         ("empty", "empty_quote"),
         ("duplicate", "duplicate_quote"),
         ("overcap", "quote_over_cap"),
@@ -776,8 +840,6 @@ def test_one_local_repair_can_replace_a_citation_only_defect(
         evidence = [binding]
         if defect == "missing":
             evidence = []
-        elif defect == "invalid_index":
-            evidence[0]["source_index"] = 999
         elif defect == "empty":
             evidence[0]["quote"] = "   "
         elif defect == "duplicate":
@@ -1126,7 +1188,7 @@ def test_typed_citation_repair_requires_every_flagged_unit_id(
     assert receipt["failure_reason_code"] == "malformed_response"
 
 
-def test_saved_sentinelone_repair_ignores_an_extra_known_unit(monkeypatch):
+def test_saved_sentinelone_reference_is_recovered_without_a_paid_repair(monkeypatch):
     appointment = (
         "SentinelOne (NYSE: S), the leader in AI-native cybersecurity, today "
         "announced the appointment of Sonalee Parekh as Chief Financial "
@@ -1227,12 +1289,12 @@ def test_saved_sentinelone_repair_ignores_an_extra_known_unit(monkeypatch):
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     receipt = asyncio.run(intent_details.review_intent_details(*inputs))
 
-    assert calls == 2
+    assert calls == 1
     assert receipt["decision"] == "match"
 
 
 @pytest.mark.parametrize("repair_defect", ["wrong_source", "unsupported_quote"])
-def test_extra_unit_tolerance_does_not_weaken_flagged_citation_validation(
+def test_repair_rebinds_exact_text_but_rejects_an_unsupported_quote(
     monkeypatch, repair_defect,
 ):
     quote = "Example raised a Series A."
@@ -1274,8 +1336,12 @@ def test_extra_unit_tolerance_does_not_weaken_flagged_citation_validation(
     receipt = asyncio.run(intent_details.review_intent_details(*inputs))
 
     assert calls == 2
-    assert receipt["decision"] == "unavailable"
-    assert receipt["failure_reason_code"] == "malformed_response"
+    if repair_defect == "wrong_source":
+        assert receipt["decision"] == "match"
+    else:
+        assert receipt["decision"] == "unavailable"
+        assert receipt["failure_class"] == "intent_details_citation_unavailable"
+        assert receipt["failure_reason_code"] == "malformed_response"
 
 
 def test_frozen_verified_unit_with_empty_repair_evidence_is_unavailable(
@@ -1337,6 +1403,10 @@ def test_failed_local_citation_repair_remains_unavailable(
     assert receipt["failure_reason_code"] == (
         "provider_error" if second_result == "provider_error"
         else "malformed_response"
+    )
+    assert receipt["failure_class"] == (
+        "intent_details_provider_unavailable" if second_result == "provider_error"
+        else "intent_details_citation_unavailable"
     )
 
 

@@ -8,7 +8,7 @@ import pytest
 from scripts import verify_arena_trajectory as verification
 
 
-ROUND = "arena-2026-09-25-trajectory-live"
+ROUND = "arena-2026-09-25-trajectoryp1"
 
 
 def _specs():
@@ -126,6 +126,76 @@ def test_parser_requires_explicit_trajectory_round_suffix():
             "--environment-file", "/tmp/env", "--status-file", "/tmp/out",
             "--run", "baseline:primary:run-1",
         ])
+
+
+def test_parser_round_id_matches_production_contract():
+    from lab_arena import contracts
+
+    args = verification.parser().parse_args([
+        "verify", "--round-id", ROUND,
+        "--environment-file", "/tmp/env", "--status-file", "/tmp/out",
+        "--run", "baseline:primary:run-1",
+    ])
+    assert args.round_id == ROUND
+    assert contracts.ROUND_ID_RE.fullmatch(args.round_id)
+
+
+@pytest.mark.parametrize("round_id", [
+    "arena-2026-09-25-trajectory-live",
+    "arena-2026-09-25-trajectory",
+    "arena-2026-09-25-trajectoryabcdefg",
+])
+def test_parser_rejects_noncanonical_trajectory_round_ids(round_id):
+    with pytest.raises(SystemExit):
+        verification.parser().parse_args([
+            "verify", "--round-id", round_id,
+            "--environment-file", "/tmp/env", "--status-file", "/tmp/out",
+            "--run", "baseline:primary:run-1",
+        ])
+
+
+def test_fixture_resume_requires_exact_existing_binding():
+    expected = {
+        "round_id": ROUND, "miner_hotkey": "miner-a",
+        "source_ref": "arena/source.tar.gz", "source_size_bytes": 3,
+        "submission_doc": {"source_content_md5": "checksum"},
+    }
+    assert verification._require_fixture_identity(
+        expected, round_id=ROUND, miner_hotkey="miner-a",
+        source_ref="arena/source.tar.gz", source_size_bytes=3,
+        source_content_md5="checksum",
+    ) is expected
+    incompatible = deepcopy(expected)
+    incompatible["miner_hotkey"] = "miner-b"
+    with pytest.raises(verification.VerificationError, match="identity differs"):
+        verification._require_fixture_identity(
+            incompatible, round_id=ROUND, miner_hotkey="miner-a",
+            source_ref="arena/source.tar.gz", source_size_bytes=3,
+            source_content_md5="checksum",
+        )
+
+
+def test_fixture_credential_binding_uses_store_rpc_contract():
+    verification._require_credential_binding({
+        "status": "ok", "submission_status": "accepted",
+    })
+    verification._require_credential_binding({
+        "status": "existing", "submission_status": "frozen",
+    })
+    with pytest.raises(verification.VerificationError, match="binding failed"):
+        verification._require_credential_binding({"status": "accepted"})
+
+
+def test_fixture_archive_retry_never_overwrites_different_bytes(tmp_path):
+    from lab_arena.contracts import ArenaContractError
+    from lab_arena.service import LocalObjectStore
+
+    objects = LocalObjectStore(tmp_path)
+    objects.put("arena/source.tar.gz", b"one")
+    objects.put("arena/source.tar.gz", b"one")
+    with pytest.raises(ArenaContractError, match="different bytes"):
+        objects.put("arena/source.tar.gz", b"two")
+    assert objects.get("arena/source.tar.gz") == b"one"
 
 
 def test_runner_environment_rejects_ambient_database_and_provider_secrets(

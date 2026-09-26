@@ -10,7 +10,7 @@ import pytest
 
 from lab_arena import runner, runtime, shim, trajectory
 from tests.lab_arena.test_lab_arena_runner import (
-    BridgingRuntime, FakeApi, lease, make_config, valid_company,
+    BridgingRuntime, FakeApi, lease, make_config, scoring_lease, valid_company,
 )
 
 
@@ -198,7 +198,8 @@ def test_provider_error_buffer_flushes_on_abandon(tmp_path):
         "runtime.started", "runtime.provider_error", "runtime.error",
     ]
     assert events[-1]["content"] == {
-        "status": "abandoned", "error_class": "ValueError",
+        "status": "abandoned", "failure_stage": "runtime",
+        "error_class": "ValueError",
     }
     assert "private runtime failure detail" not in json.dumps(events)
 
@@ -221,8 +222,191 @@ def test_runtime_crash_retains_error_without_exposing_exception_text(tmp_path):
     assert worker.abandoned == 1
     events = [event for batch in api.batches for event in batch["events"]]
     assert events[-1]["kind"] == "runtime.error"
-    assert events[-1]["content"] == {"status": "abandoned", "error_class": "ValueError"}
+    assert events[-1]["content"] == {
+        "status": "abandoned", "failure_stage": "runtime",
+        "error_class": "ValueError",
+    }
     assert "secret-private-exception-payload" not in json.dumps(events)
+
+
+def test_preflight_failure_records_setup_boundary_and_removes_directories(tmp_path):
+    bad_lease = lease()
+    bad_lease["checkpoint_deadline_policy"] = "unsupported-policy"
+    api = LoggingApi()
+    api.leases = [bad_lease]
+    (tmp_path / "work").mkdir()
+    config = make_config(
+        tmp_path, api, BridgingRuntime(output={"companies": []})
+    )
+    config.socket_root = tmp_path / "sockets"
+    config.socket_root.mkdir()
+    worker = runner.Runner(config)
+    try:
+        assert worker.run_once() == 1
+    finally:
+        worker.close()
+
+    events = [event for batch in api.batches for event in batch["events"]]
+    assert [event["kind"] for event in events] == [
+        "runtime.started", "runtime.error",
+    ]
+    assert events[-1]["content"] == {
+        "status": "abandoned", "failure_stage": "setup",
+        "error_class": "RunnerError",
+    }
+    assert worker.abandoned == 1 and api.completions == []
+    assert list((tmp_path / "work").iterdir()) == []
+    assert list(config.socket_root.iterdir()) == []
+
+
+def test_worker_stop_failure_records_cleanup_boundary_and_runtime_logs(
+    tmp_path, monkeypatch,
+):
+    original_stop = runner.WorkerSocketServer.stop
+
+    def fail_after_stop(server):
+        original_stop(server)
+        raise OSError("private cleanup detail")
+
+    monkeypatch.setattr(runner.WorkerSocketServer, "stop", fail_after_stop)
+    api = LoggingApi()
+    worker = run_model(
+        tmp_path, api, BridgingRuntime(output={"companies": [valid_company(1)]})
+    )
+    events = [event for batch in api.batches for event in batch["events"]]
+    assert [event["kind"] for event in events] == [
+        "runtime.started", "runtime.error", "runtime.stdout",
+    ]
+    assert events[1]["content"] == {
+        "status": "abandoned", "failure_stage": "cleanup",
+        "error_class": "OSError",
+        "resource_summary": {
+            "wall_seconds": 1.0,
+            "cpu_seconds": 0.5,
+            "max_rss_bytes": 1024 * 1024,
+            "stdout_bytes": len(b"model log line\n"),
+            "stderr_bytes": 0,
+            "provider_call_count": 1,
+        },
+        "exit_code": 0,
+        "timed_out": False,
+    }
+    assert events[2]["content"]["text"] == "model log line\n"
+    assert worker.abandoned == 1 and api.completions == []
+    assert "private cleanup detail" not in json.dumps(events)
+
+
+def test_worker_stop_failure_does_not_replace_runtime_failure(
+    tmp_path, monkeypatch,
+):
+    class FailingRuntime:
+        @staticmethod
+        def run_icp(_spec):
+            raise ValueError("primary detail")
+
+    original_stop = runner.WorkerSocketServer.stop
+
+    def fail_after_stop(server):
+        original_stop(server)
+        raise OSError("private cleanup detail")
+
+    monkeypatch.setattr(runner.WorkerSocketServer, "stop", fail_after_stop)
+    api = LoggingApi()
+    worker = run_model(tmp_path, api, FailingRuntime())
+    events = [event for batch in api.batches for event in batch["events"]]
+    assert [event["kind"] for event in events] == [
+        "runtime.started", "runtime.error", "runtime.cleanup_error",
+    ]
+    assert events[1]["content"] == {
+        "status": "abandoned", "failure_stage": "runtime",
+        "error_class": "ValueError",
+    }
+    assert events[2]["content"] == {
+        "failure_stage": "cleanup", "error_class": "OSError",
+    }
+    assert worker.abandoned == 1 and api.completions == []
+    assert "primary detail" not in json.dumps(events)
+    assert "private cleanup detail" not in json.dumps(events)
+
+
+@pytest.mark.parametrize(
+    ("failure", "error_class"),
+    (
+        (
+            runner.DependencyInstallInfrastructureError("network_error"),
+            "DependencyInstallInfrastructureError",
+        ),
+        (
+            runner.AgentDependencyError("private dependency detail"),
+            "AgentDependencyError",
+        ),
+    ),
+)
+def test_scoring_dependency_failure_records_setup_boundary(
+    tmp_path, failure, error_class,
+):
+    class FailingImageCache:
+        @staticmethod
+        def acquire(*_args, **_kwargs):
+            raise failure
+
+    api = LoggingApi()
+    api.leases = [scoring_lease()]
+    (tmp_path / "work").mkdir()
+    config = make_config(tmp_path, api, BridgingRuntime())
+    config.image_cache = FailingImageCache()
+    worker = runner.Runner(config)
+    try:
+        assert worker.run_once() == 1
+    finally:
+        worker.close()
+
+    events = [event for batch in api.batches for event in batch["events"]]
+    assert [event["kind"] for event in events] == [
+        "runtime.started", "runtime.error",
+    ]
+    assert events[1]["content"] == {
+        "status": "abandoned", "failure_stage": "setup",
+        "error_class": error_class,
+    }
+    assert worker.abandoned == 1 and api.completions == []
+    assert "private dependency detail" not in json.dumps(events)
+
+
+def test_runsc_cleanup_failure_retains_captured_result_for_trajectory(tmp_path):
+    class CleanupFailureRuntime:
+        def run_icp(self, _spec):
+            result = runtime.fake_result(
+                stdout=b"captured stdout", stderr=b"captured stderr"
+            )
+            raise runtime.SandboxCleanupError(
+                "private cleanup detail", result=result
+            )
+
+    api = LoggingApi()
+    worker = run_model(tmp_path, api, CleanupFailureRuntime())
+    events = [event for batch in api.batches for event in batch["events"]]
+    assert [event["kind"] for event in events] == [
+        "runtime.started", "runtime.error", "runtime.stdout", "runtime.stderr",
+    ]
+    assert events[1]["content"] == {
+        "status": "abandoned", "failure_stage": "cleanup",
+        "error_class": "SandboxCleanupError",
+        "resource_summary": {
+            "wall_seconds": 1.0,
+            "cpu_seconds": 0.5,
+            "max_rss_bytes": 1024 * 1024,
+            "stdout_bytes": len(b"captured stdout"),
+            "stderr_bytes": len(b"captured stderr"),
+            "provider_call_count": 0,
+        },
+        "exit_code": 0,
+        "timed_out": False,
+    }
+    assert events[2]["content"]["text"] == "captured stdout"
+    assert events[3]["content"]["text"] == "captured stderr"
+    assert worker.abandoned == 1 and api.completions == []
+    assert "private cleanup detail" not in json.dumps(events)
 
 
 @pytest.mark.parametrize("text", ["\x00" * 65536, "\U0001f600" * 16384, "line\n" * 13108], ids=["control", "unicode", "lines"])

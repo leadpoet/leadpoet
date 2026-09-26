@@ -188,6 +188,49 @@ def test_large_provider_response_keeps_latest_output_and_usage_metadata():
     trajectory.event("provider.response", response)
 
 
+def test_provider_projection_retains_compact_error_and_job_metadata():
+    body = {
+        "job_id": "job-123", "requestId": "search-123", "status": "failed",
+        "code": "invalid_request", "message": "No matching page",
+        "detail": "api_key=never-retain-this", "success": False,
+        "data": {"progress": 2, "secret": "never-retain-this-either"},
+        "results": [{"url": str(index)} for index in range(9)],
+    }
+    content = trajectory.provider_response_content(
+        {"status": 400, "body_b64": base64.b64encode(json.dumps(body).encode()).decode()},
+        elapsed_ms=10,
+    )
+    projected = content["response"]
+    assert projected["job_id"] == "job-123"
+    assert projected["requestId"] == "search-123"
+    assert projected["code"] == "invalid_request"
+    assert projected["message"] == "No matching page"
+    assert projected["success"] is False
+    assert projected["data"]["progress"] == 2
+    assert projected["results"]["omitted_items"] == 6
+    assert "never-retain" not in json.dumps(content)
+    trajectory.event("provider.response", content)
+
+
+def test_provider_projection_marks_omissions_and_metadata_fallback():
+    request = trajectory.provider_request_content({
+        "operation_id": "openrouter.chat", "parameters": {
+            "messages": [{"role": "user", "content": "text"}] * 12,
+        },
+    })
+    assert request["parameters"]["messages"]["omitted_items"] == 9
+    for raw, expected in ((b"<html>page</html>", "non_json_or_invalid_encoding"),
+                          (b"x" * 300_000, "body_limit")):
+        content = trajectory.provider_response_content(
+            {"status": 200, "body_b64": base64.b64encode(raw).decode()},
+            elapsed_ms=1,
+        )
+        assert content["response_omitted"] == expected
+    assert trajectory._fit_content(
+        {"one": "x" * 4096, "two": "y" * 4096}, {"http_status": 200}
+    ) == {"http_status": 200, "projection_fallback": True}
+
+
 def _service_for_trajectory(store, broker=None):
     service = object.__new__(ArenaService)
     service._store = store

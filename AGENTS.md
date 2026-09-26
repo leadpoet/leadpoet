@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: September 26 trajectory audit
+
+On 2026-09-26 the user renewed authority for a deep production audit of the
+minimal Arena trajectory path and the smallest fixes for confirmed data gaps.
+This includes protected inspection, exact committed Supabase migrations,
+focused tests, real provider-backed baseline/miner runs through the shared
+production validator/runtime, pushes, and canonical paired deployment through
+the overnight procedures. Verify external-validator compatibility through the
+same lease-authenticated path without requiring access to external hosts or
+new secrets/configuration. Preserve scoring, costs, frozen results, rewards,
+credentials and concurrent work. Do not add a larger observability system.
+This scope ends after fixes and end-to-end persistence are verified.
+
 ## Scoped production authorization: September 26 remaining verifier audit
 
 On 2026-09-26 the user authorized investigating Tenable evidence retrieval,

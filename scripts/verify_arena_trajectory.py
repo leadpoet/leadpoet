@@ -15,7 +15,7 @@ from collections import Counter, defaultdict
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -25,7 +25,7 @@ SCHEMA = "leadpoet.lab_arena.trajectory_verification.v1"
 ROLES = ("baseline", "miner")
 PATHS = ("primary", "external-like")
 PROVIDERS = ("openrouter", "deepline", "scrapingdog")
-ROUND_RE = re.compile(r"^arena-\d{4}-\d{2}-\d{2}-trajectory(?:-[a-z0-9]+)+$")
+ROUND_RE = re.compile(r"^arena-\d{4}-\d{2}-\d{2}-trajectory[a-z0-9]{1,6}$")
 IDENTITY_FIELDS = (
     "run_id", "round_id", "submission_id", "miner_hotkey", "runner_hotkey",
     "assignment_id", "stage", "icp_position", "attempt",
@@ -37,15 +37,36 @@ class VerificationError(RuntimeError):
 
 
 def _round_id(value: str) -> str:
-    if ROUND_RE.fullmatch(value or "") is None:
+    from lab_arena import contracts
+
+    if (
+        ROUND_RE.fullmatch(value or "") is None
+        or contracts.ROUND_ID_RE.fullmatch(value or "") is None
+    ):
         raise argparse.ArgumentTypeError(
-            "round id must be arena-YYYY-MM-DD-trajectory-<label>"
+            "round id must be arena-YYYY-MM-DD-trajectory followed by 1-6 alphanumerics"
         )
     try:
         datetime.strptime(value[:16], "arena-%Y-%m-%d")
     except ValueError as exc:
         raise argparse.ArgumentTypeError("round id date is invalid") from exc
     return value
+
+
+def _require_fixture_identity(
+    fixture: Optional[Mapping[str, Any]], *, round_id: str, miner_hotkey: str,
+    source_ref: str, source_size_bytes: int, source_content_md5: str,
+) -> Mapping[str, Any]:
+    if (
+        not fixture or fixture.get("round_id") != round_id
+        or fixture.get("miner_hotkey") != miner_hotkey
+        or fixture.get("source_ref") != source_ref
+        or int(fixture.get("source_size_bytes") or 0) != source_size_bytes
+        or (fixture.get("submission_doc") or {}).get("source_content_md5")
+        != source_content_md5
+    ):
+        raise VerificationError("fixture miner identity differs")
+    return fixture
 
 
 def _run_spec(value: str) -> tuple[str, str, str]:
@@ -414,6 +435,12 @@ def _fixture_service(args: argparse.Namespace):
     if existing is None:
         cutoff = datetime.now(timezone.utc) + timedelta(minutes=args.cutoff_minutes)
         service.create_round(cutoff, round_id=args.round_id)
+        existing = service.store.get_round(args.round_id)
+    fixture = service.store.get_submission(submission_id)
+    if fixture is None:
+        if not existing or existing.get("status") != "open":
+            raise VerificationError("fixture miner can only be seeded in an open round")
+        # ObjectStore.put is create-only and permits only a byte-identical retry.
         service._objects.put(source_ref, payload)
         owner = resolve_finalized_owner(service.config.chain, str(old["miner_hotkey"]))
         registered = service.store.register_submission(
@@ -427,8 +454,22 @@ def _fixture_service(args: argparse.Namespace):
             },
             owner_admission=owner,
         )
-        if registered.get("status") != "registered":
+        if registered.get("status") not in ("registered", "existing"):
             raise VerificationError("fixture miner registration failed")
+        fixture = service.store.get_submission(submission_id)
+    fixture = _require_fixture_identity(
+        fixture, round_id=args.round_id, miner_hotkey=str(old["miner_hotkey"]),
+        source_ref=source_ref, source_size_bytes=len(payload),
+        source_content_md5=checksum,
+    )
+    stored_payload = service._objects.get_bounded(
+        source_ref, source_bundle.MAX_SOURCE_ARCHIVE_BYTES
+    )
+    if stored_payload != payload:
+        raise VerificationError("fixture miner source archive differs")
+    if fixture.get("status") == "uploading":
+        if not existing or existing.get("status") != "open":
+            raise VerificationError("fixture credentials can only bind in an open round")
         manager = service.config.credential_manager
         if manager is None:
             raise VerificationError("credential manager is unavailable")
@@ -451,15 +492,14 @@ def _fixture_service(args: argparse.Namespace):
         )
         if accepted.get("status") not in ("accepted", "existing"):
             raise VerificationError("fixture miner credential binding failed")
-    fixture = service.store.get_submission(submission_id)
-    if (
-        not fixture or fixture.get("round_id") != args.round_id
-        or fixture.get("miner_hotkey") != old.get("miner_hotkey")
-        or fixture.get("source_ref") != source_ref
-        or int(fixture.get("source_size_bytes") or 0) != len(payload)
-        or (fixture.get("submission_doc") or {}).get("source_content_md5") != checksum
-    ):
-        raise VerificationError("fixture miner identity differs")
+        fixture = service.store.get_submission(submission_id)
+    if not fixture or fixture.get("status") not in ("accepted", "frozen"):
+        raise VerificationError("fixture miner is not accepted")
+    for provider in PROVIDERS:
+        if service.store.get_submission_credential(
+            submission_id, str(old["miner_hotkey"]), provider
+        ) is None:
+            raise VerificationError("fixture miner credential binding is incomplete")
     if (
         fixture.get("code_review_status") != "passed"
         and (service.store.get_round(args.round_id) or {}).get("status") == "open"

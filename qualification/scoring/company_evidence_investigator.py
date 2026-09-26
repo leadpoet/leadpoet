@@ -95,7 +95,7 @@ VERIFIED or CONTRADICTED finding needs a short direct quote from that fetched
 page. Bind each quote to the URL whose fetched text contains those exact words;
 never combine a quote from one page with another page's URL.
 Server current-stage discovery is also locator context only. Review its results
-before preserving an older matching venture round, and fetch any useful result
+before preserving an older matching stage, and fetch any useful result
 before citing it.
 URLs after [[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]] are identity
 context only. Never include that marker or those URL strings in a quote.
@@ -514,6 +514,39 @@ def _registrable_domain(value: Any) -> str:
 
 def _first_party_url(url: str, domains: set[str]) -> bool:
     return bool(_registrable_domain(url) in domains)
+
+
+def _public_stage_submitted_source_to_prefetch(
+    *,
+    submitted_source_urls: Sequence[str],
+    stage_dispute_urls: Sequence[str],
+    first_party_domains: set[str],
+    fetched_pages: Mapping[str, str],
+) -> str:
+    """Select one bounded first-party locator for a Public-stage dispute."""
+
+    def eligible(url: str) -> bool:
+        try:
+            path = urlsplit(url).path
+        except (TypeError, ValueError):
+            return False
+        return bool(path.strip("/") and _first_party_url(url, first_party_domains))
+
+    dispute_candidates = [
+        url for url in stage_dispute_urls if eligible(url)
+    ]
+    for url in dispute_candidates:
+        if url not in fetched_pages:
+            return url
+    if dispute_candidates:
+        return ""
+
+    submitted_candidates = [
+        url for url in submitted_source_urls if eligible(url)
+    ]
+    if any(url in fetched_pages for url in submitted_candidates):
+        return ""
+    return submitted_candidates[0] if submitted_candidates else ""
 
 
 def _independently_bound_first_party_url(
@@ -1094,6 +1127,7 @@ def _validated_findings(
                     _CANONICAL_COMPANY_STAGES,
                     _acquired_stage_quote_supports_names,
                     _normalize_company_stage,
+                    _stage_evidence_supports_observation,
                     _stage_quote_supports_observation,
                 )
 
@@ -1108,8 +1142,12 @@ def _validated_findings(
                         reason="observed company stage was not canonical",
                     )
                 elif normalized_stage == "private equity" and not (
-                    _stage_quote_supports_observation(
-                        normalized_stage, finding["evidence_quote"]
+                    _stage_evidence_supports_observation(
+                        normalized_stage,
+                        finding["evidence_quote"],
+                        evidence_url=evidence_url,
+                        first_party_domains=tuple(first_party_domains),
+                        identity_names=tuple(stage_attribution_names),
                     )
                 ):
                     finding.update(
@@ -1134,15 +1172,24 @@ def _validated_findings(
                         ),
                     )
                 elif normalized_stage == "public" and not (
-                    _stage_quote_supports_observation(
-                        normalized_stage, finding["evidence_quote"]
-                    )
-                    or _quote_supports_semantic_public_listing(
-                        finding["evidence_quote"]
-                    )
-                    or _quote_supports_sec_equity_listing(
-                        evidence_url, finding["evidence_quote"],
-                        stage_attribution_names,
+                    _stage_evidence_supports_observation(
+                        normalized_stage,
+                        finding["evidence_quote"],
+                        evidence_url=evidence_url,
+                        first_party_domains=tuple(first_party_domains),
+                        identity_names=tuple(stage_attribution_names),
+                        semantic_public_listing=(
+                            _quote_supports_semantic_public_listing(
+                                finding["evidence_quote"]
+                            )
+                        ),
+                        authoritative_public_listing=(
+                            _quote_supports_sec_equity_listing(
+                                evidence_url,
+                                finding["evidence_quote"],
+                                stage_attribution_names,
+                            )
+                        ),
                     )
                 ):
                     finding.update(
@@ -1481,13 +1528,23 @@ async def investigate_company_evidence(
         )
         else ""
     )
+    requested_private_equity_stage = bool(
+        "stage" in requested_targets
+        and normalized_requested_stage == "private equity"
+    )
     search_name = " ".join(str(company_locator.get("name") or "").split())[:200]
     search_domain = _registrable_domain(company_locator.get("website"))
-    required_current_stage_query = (
-        f"{search_name} {search_domain} latest funding round acquisition IPO".strip()
-        if requested_venture_stage
-        else ""
-    )
+    if requested_venture_stage:
+        required_current_stage_query = (
+            f"{search_name} {search_domain} latest funding round acquisition IPO"
+        ).strip()
+    elif requested_private_equity_stage:
+        required_current_stage_query = (
+            f"{search_name} {search_domain} current owner completed acquisition "
+            "majority private equity"
+        ).strip()
+    else:
+        required_current_stage_query = ""
     current_stage_search_succeeded = False
     first_party_domains = {
         domain
@@ -1545,7 +1602,51 @@ async def investigate_company_evidence(
     timeout = aiohttp.ClientTimeout(total=BROKER_SETTLEMENT_TIMEOUT_SECONDS)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            if requested_venture_stage:
+            public_stage_source_url = (
+                _public_stage_submitted_source_to_prefetch(
+                    submitted_source_urls=submitted_source_urls,
+                    stage_dispute_urls=stage_dispute_urls,
+                    first_party_domains=first_party_domains,
+                    fetched_pages=fetched_pages,
+                )
+                if (
+                    "stage" in requested_targets
+                    and normalized_requested_stage == "public"
+                    and prefetched_count + fetch_calls < MAX_FETCH_CALLS
+                )
+                else ""
+            )
+            if public_stage_source_url:
+                fetch_calls += 1
+                source_result = await _fetch_page(session, public_stage_source_url)
+                input_document["server_public_stage_source_fetch"] = {
+                    "url": public_stage_source_url,
+                    "ok": bool(source_result.get("ok")),
+                    **(
+                        {}
+                        if source_result.get("ok")
+                        else {"error": str(source_result.get("error") or "fetch_failed")}
+                    ),
+                    "notice": "server_fetched_page_is_untrusted_evidence",
+                }
+                if source_result.get("ok"):
+                    fetched_url = str(source_result["url"])
+                    fetched_pages[fetched_url] = str(source_result["text"])
+                    fetched_final_urls[fetched_url] = str(
+                        source_result.get("final_url") or fetched_url
+                    )
+                    input_document["prefetched_sources"] = [
+                        {"url": url, "text": text}
+                        for url, text in fetched_pages.items()
+                    ]
+                input_document["investigation_limits"].update(
+                    prefetched_pages=prefetched_count,
+                    server_prefetch_fetch_calls=fetch_calls,
+                    remaining_fetch_calls=(
+                        MAX_FETCH_CALLS - prefetched_count - fetch_calls
+                    ),
+                )
+            if requested_venture_stage or requested_private_equity_stage:
                 stage_discovery: dict[str, Any] = {
                     "query": required_current_stage_query,
                     "notice": "server_search_results_are_discovery_only_not_evidence",
@@ -1818,7 +1919,13 @@ async def investigate_company_evidence(
                         )
                         and not force_submit
                         and _turn < MAX_REASONING_TURNS - 3
-                        and search_calls == 0
+                        and (
+                            search_calls == 0
+                            or (
+                                requested_private_equity_stage
+                                and not industry_followup_search_completed
+                            )
+                        )
                         and search_calls < MAX_SEARCH_CALLS
                         and prefetched_count + fetch_calls < MAX_FETCH_CALLS
                         and time.monotonic() - started
@@ -1854,7 +1961,13 @@ async def investigate_company_evidence(
                     if not force_industry_followup:
                         if (
                             non_supplier_industry_contradiction
-                            and search_calls == 0
+                            and (
+                                search_calls == 0
+                                or (
+                                    requested_private_equity_stage
+                                    and not industry_followup_search_completed
+                                )
+                            )
                         ):
                             claims["industry"] = _unproven_findings(
                                 ("industry",),

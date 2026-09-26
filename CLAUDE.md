@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: September 26 remaining verifier audit
+
+On 2026-09-26 the user authorized investigating Tenable evidence retrieval,
+Zen Educate qualification, historical exhausted judgments, and the latest
+available baseline/miner outputs, including independent company and intent
+research. Confirmed issues may receive only narrow general fixes, exact-case
+and positive/negative control tests through real Arena scoring, pushes, scorer
+image publication, and canonical paired gateway/normal-validator deployment
+through the overnight skills. Preserve qualification standards, deterministic
+scoring, budgets, credential/cost boundaries, frozen results, and concurrent
+work. Do not add company exceptions or a new verifier architecture. This scope
+ends when confirmed fixes and production validation are complete.
+
 ## Scoped production authorization: minimal Arena trajectories
 
 On 2026-09-25 the user authorized a simple private Arena trajectory event log

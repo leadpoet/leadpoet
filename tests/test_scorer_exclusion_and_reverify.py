@@ -813,7 +813,7 @@ def test_web_dimension_boolean_must_agree_with_canonical_observation(
             "Public",
             True,
             "Old National Bancorp (NASDAQ: ONB)",
-            COMPANY_FIT_MATCH,
+            COMPANY_FIT_UNAVAILABLE,
         ),
         (
             "Public",
@@ -827,14 +827,14 @@ def test_web_dimension_boolean_must_agree_with_canonical_observation(
             "Public",
             True,
             "GXO Logistics, Inc. (NYSE: GXO)",
-            COMPANY_FIT_MATCH,
+            COMPANY_FIT_UNAVAILABLE,
         ),
         (
             "Public",
             "Public",
             True,
             "Ticker/ISIN: FISV(NASDAQ)/US3377381088 · Type of Organization: Public",
-            COMPANY_FIT_MATCH,
+            COMPANY_FIT_UNAVAILABLE,
         ),
         (
             "Public",
@@ -1318,7 +1318,7 @@ def test_exchange_listing_statement_preserves_current_public_stage_guards(quote,
     assert _stage_quote_supports_observation("public", quote) is expected
 
 
-def test_sprouts_raw_verdict_accepts_current_active_nasdaq_trading_proof():
+def test_secondary_exchange_claim_without_issuer_identity_is_unavailable():
     verdict = {
         "observed_company_stage": "Public",
         "stage_matches": True,
@@ -1329,7 +1329,9 @@ def test_sprouts_raw_verdict_accepts_current_active_nasdaq_trading_proof():
         "stage_evidence_quote": "trades on the NASDAQ",
     }
 
-    assert _decision_from_observed_stage(verdict, "public") == COMPANY_FIT_MATCH
+    assert _decision_from_observed_stage(verdict, "public") == (
+        COMPANY_FIT_UNAVAILABLE
+    )
 
 
 @pytest.mark.parametrize(

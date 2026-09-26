@@ -208,7 +208,7 @@ def test_unrelated_repair_cannot_attach_old_stage_proof_to_new_dbs_entity(
 
     async def investigator(**kwargs):
         calls["investigator"] += 1
-        assert kwargs["targets"] == ("stage",)
+        assert kwargs["targets"] == ("stage", "industry")
         finding = {
             "target": "stage",
             "status": "VERIFIED",
@@ -231,7 +231,21 @@ def test_unrelated_repair_cannot_attach_old_stage_proof_to_new_dbs_entity(
             "reason": "verified",
         }
         return {
-            "claims": {"stage": finding},
+            "claims": {
+                "stage": finding,
+                "industry": {
+                    **finding,
+                    "target": "industry",
+                    "observed_value": "Banking and payment services",
+                    "observed_industry": "Financial Services",
+                    "observed_subindustry": "Banking",
+                    "activity_role": "supplier_operator",
+                    "evidence_url": "https://www.dbs.com/about",
+                    "evidence_quote": (
+                        "DBS provides banking services and launched a payment product."
+                    ),
+                },
+            },
             "_validated_stage_finding": finding,
             "failure_reason": "",
             "usage": {

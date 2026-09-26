@@ -1869,9 +1869,26 @@ def test_typesafe_investigator_fetch_repairs_same_attribute_source_only(
     async def keep_employee_observation(candidate, *_args, **_kwargs):
         return candidate
 
-    async def bounded_investigation(**_kwargs):
+    async def bounded_investigation(*, targets, **_kwargs):
+        assert targets == ("stage", "industry")
         return {
-            "claims": {"stage": stage_finding},
+            "claims": {
+                "stage": stage_finding,
+                "industry": _finding(
+                    "industry",
+                    observed_value="Developer AI software platform",
+                    observed_industry="Software",
+                    observed_subindustry="SaaS",
+                    activity_role="supplier_operator",
+                    evidence_url=requested_source_url,
+                    evidence_quote=(
+                        "TypeSafe is building a new class of intelligence "
+                        "designed to give developers reliable, efficient "
+                        "intelligence they can integrate directly into "
+                        "software systems."
+                    ),
+                ),
+            },
             "_validated_stage_finding": stage_finding,
             "failure_reason": "",
             "usage": {
@@ -2162,8 +2179,10 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
 
     async def direct_fetch(_session, url):
         calls["direct_fetch"] += 1
-        assert url == source_url
-        return 403, url, ""
+        if url == source_url:
+            return 403, url, ""
+        assert url == alternate_url
+        return 200, url, alternate_quote
 
     async def investigate(*, targets, prior_observations, **_kwargs):
         calls["investigator"] += 1
@@ -2198,51 +2217,47 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
             if investigator_mode.startswith("alternate_")
             else source_url
         )
+        semantic_verified = investigator_mode in {
+            "supported", "alternate_supported"
+        }
+        semantic_contradicted = investigator_mode == "wrong_company"
+        resolved = semantic_verified or semantic_contradicted
         result = {
-            "claims": {"industry": _finding(
-                "industry",
-                status=(
-                    "UNPROVEN" if investigator_mode == "still_blocked"
-                    else "VERIFIED" if (
-                        investigator_mode == "unfetched_positive"
-                        or investigator_mode.startswith("alternate_")
-                    )
-                    else "CONTRADICTED"
-                ),
-                observed_industry=(
-                    "" if investigator_mode == "still_blocked"
-                    else "Artificial Intelligence" if (
-                        investigator_mode == "unfetched_positive"
-                        or investigator_mode.startswith("alternate_")
-                    )
-                    else "Other business"
-                ),
-                observed_subindustry=(
-                    "" if investigator_mode == "still_blocked"
-                    else "AI agent platform" if (
-                        investigator_mode == "unfetched_positive"
-                        or investigator_mode.startswith("alternate_")
-                    )
-                    else "Customer use"
-                ),
-                activity_role=(
-                    "unresolved" if investigator_mode == "still_blocked"
-                    else "supplier_operator" if (
-                        investigator_mode == "unfetched_positive"
-                        or investigator_mode.startswith("alternate_")
-                    )
-                    else "customer_user"
-                ),
-                evidence_url=(
-                    "" if investigator_mode == "still_blocked" else claim_url
-                ),
-                evidence_quote=(
-                    attribute_quote
-                    if investigator_mode == "unfetched_positive"
-                    else "" if investigator_mode == "still_blocked"
-                    else page_text
-                ),
-            )},
+            "claims": {
+                "industry": _finding(
+                    "industry",
+                    status=(
+                        "VERIFIED"
+                        if semantic_verified
+                        else "CONTRADICTED"
+                        if semantic_contradicted
+                        else "UNPROVEN"
+                    ),
+                    observed_industry=(
+                        "Artificial Intelligence"
+                        if semantic_verified
+                        else "Other business"
+                        if semantic_contradicted
+                        else ""
+                    ),
+                    observed_subindustry=(
+                        "AI agent platform"
+                        if semantic_verified
+                        else "Customer use"
+                        if semantic_contradicted
+                        else ""
+                    ),
+                    activity_role=(
+                        "supplier_operator"
+                        if semantic_verified
+                        else "customer_user"
+                        if semantic_contradicted
+                        else "unresolved"
+                    ),
+                    evidence_url=claim_url if resolved else "",
+                    evidence_quote=page_text if resolved else "",
+                )
+            },
             "usage": {"reasoning_turns": 2, "search_calls": 0, "fetch_calls": 1},
             "failure_reason": "",
         }
@@ -2276,31 +2291,36 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
         evidence_investigator=True,
     ))
 
-    assert calls == {"provider": 2, "investigator": 1, "direct_fetch": 1}
+    assert calls == {
+        "provider": 2 if investigator_mode in {
+            "supported", "alternate_supported"
+        } else 1,
+        "investigator": 1,
+        "direct_fetch": 2 if investigator_mode == "alternate_supported" else 1,
+    }
     assert result.decision == expected_decision
     assert result.details["company_fit_dimensions"]["industry"] == (
         COMPANY_FIT_MATCH
+        if investigator_mode in {"supported", "alternate_supported"}
+        else COMPANY_FIT_MISMATCH
+        if investigator_mode == "wrong_company"
+        else COMPANY_FIT_UNAVAILABLE
     )
-    assert result.details["required_attribute_decision"] == expected_decision
+    assert result.details["required_attribute_decision"] == (
+        COMPANY_FIT_MATCH
+        if expected_decision == COMPANY_FIT_MATCH
+        else COMPANY_FIT_UNAVAILABLE
+    )
     attribute_receipt = next(
         receipt for receipt in result.details["supporting_receipts"]
         if receipt["gate"] == "required_attribute_source"
     )
     assert attribute_receipt["status"] == (
         "grounded"
-        if expected_decision in {COMPANY_FIT_MATCH, COMPANY_FIT_MISMATCH}
-        else (
-            "quote_absent"
-            if investigator_mode == "quote_absent"
-            else "invalid_evidence"
-            if investigator_mode.startswith("alternate_")
-            else "source_unavailable"
-        )
+        if expected_decision == COMPANY_FIT_MATCH
+        else "source_unavailable"
     )
-    assert attribute_receipt["cache_hit"] is (
-        not investigator_mode.startswith("alternate_")
-        or investigator_mode == "alternate_supported"
-    )
+    assert attribute_receipt["cache_hit"] is (investigator_mode == "supported")
     assert investigator.PRIVATE_FETCHED_PAGES_KEY not in str(
         result.details["supporting_receipts"]
     )
@@ -2310,7 +2330,7 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
     ("attribute_satisfied", "expected_decision"),
     [(True, COMPANY_FIT_MATCH), (False, COMPANY_FIT_MISMATCH)],
 )
-def test_grounded_attribute_outcome_skips_investigator_full_path(
+def test_grounded_positive_attribute_gets_semantic_investigator_review(
     monkeypatch, attribute_satisfied, expected_decision
 ):
     source_url = "https://acme.example/platform"
@@ -2348,9 +2368,24 @@ def test_grounded_attribute_outcome_skips_investigator_full_path(
         assert url == source_url
         return 200, url, quote
 
-    async def must_not_investigate(**_kwargs):
+    async def investigate(*, targets, **_kwargs):
         calls["investigator"] += 1
-        raise AssertionError("grounded attribute reopened investigation")
+        assert attribute_satisfied is True
+        assert targets == ("industry",)
+        return {
+            "claims": {
+                "industry": _finding(
+                    "industry",
+                    observed_value="Production AI workflow software",
+                    observed_industry="Software",
+                    observed_subindustry="SaaS",
+                    activity_role="supplier_operator",
+                    evidence_url=source_url,
+                    evidence_quote=quote,
+                )
+            },
+            "failure_reason": "",
+        }
 
     async def keep_employee(candidate, *_args, **_kwargs):
         return candidate
@@ -2361,7 +2396,7 @@ def test_grounded_attribute_outcome_skips_investigator_full_path(
     monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
     monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", source_fetch)
     monkeypatch.setattr(
-        lead_scorer, "investigate_company_evidence", must_not_investigate
+        lead_scorer, "investigate_company_evidence", investigate
     )
     monkeypatch.setattr(
         lead_scorer, "_refresh_linkedin_employee_size_observation", keep_employee
@@ -2380,7 +2415,11 @@ def test_grounded_attribute_outcome_skips_investigator_full_path(
 
     assert result.decision == expected_decision
     assert result.details["required_attribute_decision"] == expected_decision
-    assert calls == {"provider": 1, "fetch": 1, "investigator": 0}
+    assert calls == {
+        "provider": 1,
+        "fetch": 1,
+        "investigator": 1 if attribute_satisfied else 0,
+    }
 
 
 @pytest.mark.parametrize(
@@ -5330,7 +5369,7 @@ def test_oxpay_schema_repair_recomputes_stale_employee_conflict(monkeypatch):
 
     async def bounded_investigation(*, targets, **_kwargs):
         calls["investigator"] += 1
-        assert targets == ("geography",)
+        assert targets == ("geography", "industry")
         return {
             "claims": {
                 "geography": _finding(
@@ -5340,7 +5379,21 @@ def test_oxpay_schema_repair_recomputes_stale_employee_conflict(monkeypatch):
                     evidence_url="",
                     evidence_quote="",
                     reason="No independent headquarters label was found.",
-                )
+                ),
+                "industry": _finding(
+                    "industry",
+                    observed_value="Merchant payments platform",
+                    observed_industry="Payments",
+                    observed_subindustry=(
+                        "Payments infrastructure and merchant acquiring"
+                    ),
+                    activity_role="supplier_operator",
+                    evidence_url="https://oxpayfinancial.com/about-us/",
+                    evidence_quote=(
+                        "OxPay provides merchant payment services through an "
+                        "integrated platform."
+                    ),
+                ),
             },
             "failure_reason": "",
             "usage": {"reasoning_turns": 1, "search_calls": 0, "fetch_calls": 0},
@@ -7629,6 +7682,59 @@ def test_successful_targeted_search_does_not_add_industry_followup_calls(
     assert len(requests) == 3
 
 
+def test_non_pe_customer_contradiction_stays_unproven_when_search_is_exhausted(
+    monkeypatch,
+):
+    url = "https://dimerhealth.com/technology"
+    quote = "Dimer Health uses scheduling software supplied by Example Systems."
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers, payload
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {
+                "name": "submit_findings",
+                "arguments": json.dumps({"findings": [_finding(
+                    "industry",
+                    status="CONTRADICTED",
+                    observed_industry="Software",
+                    observed_subindustry="Customer use",
+                    activity_role="customer_user",
+                    evidence_url=url,
+                    evidence_quote=quote,
+                )]}),
+            },
+        }]}}]}
+
+    search = AsyncMock()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 1)
+    monkeypatch.setattr(investigator, "MAX_SEARCH_CALLS", 0)
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_search_web", search)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "Dimer Health", "website": "https://dimerhealth.com",
+        },
+        targets=("industry",),
+        requested_industry="Software",
+        prefetched_pages={url: {"final_url": url, "text": quote}},
+        verified_homepage_identity={
+            "normalized_name": "Dimer Health",
+            "registrable_dns_domain": "dimerhealth.com",
+        },
+    ))
+
+    assert result["claims"]["industry"]["status"] == "UNPROVEN"
+    assert result["usage"] == {
+        "reasoning_turns": 2, "search_calls": 0, "fetch_calls": 0,
+    }
+    search.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     "forced_response",
     ["wrong_tool", "malformed_arguments", "overlong_query"],
@@ -8280,6 +8386,7 @@ def test_final_noncontiguous_quote_correction_stays_unproven(monkeypatch):
         "Acme is now a privately held company."
     )
     reasoning_requests = []
+    search = AsyncMock(return_value={"results": []})
 
     async def fake_post_json(_session, _url, *, headers, payload):
         del headers
@@ -8311,6 +8418,7 @@ def test_final_noncontiguous_quote_correction_stays_unproven(monkeypatch):
     monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 2)
     monkeypatch.setattr(investigator, "_post_json", fake_post_json)
     monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    monkeypatch.setattr(investigator, "_search_web", search)
 
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example"},
@@ -8327,9 +8435,13 @@ def test_final_noncontiguous_quote_correction_stays_unproven(monkeypatch):
     assert result["_validated_stage_finding"] == {}
     assert result["usage"] == {
         "reasoning_turns": 3,
-        "search_calls": 0,
+        "search_calls": 1,
         "fetch_calls": 1,
     }
+    search.assert_awaited_once()
+    assert search.await_args.args[1] == (
+        "Acme acme.example current owner completed acquisition majority private equity"
+    )
     assert len(reasoning_requests) == 3
     assert "do not paraphrase, join passages, or insert ellipses" in json.loads(
         reasoning_requests[-1]["messages"][-1]["content"]
@@ -8891,22 +9003,25 @@ def test_final_rejected_stage_quote_gets_one_bounded_search_and_source_fetch(
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["usage"] == {
         "reasoning_turns": 4,
-        "search_calls": 1,
+        "search_calls": 2,
         "fetch_calls": 1,
     }
-    assert search_queries == ["BigTime current private equity ownership"]
+    assert search_queries == [
+        "BigTime bigtime.net current owner completed acquisition majority private equity",
+        "BigTime current private equity ownership",
+    ]
     assert fetched_urls == [strong_url]
-    assert requests[1]["tool_choice"]["function"]["name"] == "search_web"
+    assert requests[1]["tool_choice"] == "required"
     assert requests[-1]["tool_choice"]["function"]["name"] == "submit_findings"
 
 
 @pytest.mark.parametrize(
     ("target", "outcome", "expected_status", "search_count", "fetch_count"),
     [
-        ("stage", "verified", "VERIFIED", 1, 1),
-        ("stage", "future", "UNPROVEN", 1, 1),
+        ("stage", "verified", "VERIFIED", 2, 1),
+        ("stage", "future", "UNPROVEN", 2, 1),
         ("stage", "search_exhausted", "UNPROVEN", 1, 0),
-        ("stage", "fetch_exhausted", "UNPROVEN", 0, 0),
+        ("stage", "fetch_exhausted", "UNPROVEN", 1, 0),
         ("industry", "wrong_target", "UNPROVEN", 0, 0),
     ],
 )
@@ -9008,7 +9123,7 @@ def test_missing_saved_stage_quote_uses_only_bounded_stage_search(
     assert len(fetched_urls) == fetch_count
     if "search_current" in actions:
         search_index = actions.index("search_current")
-        assert requests[search_index]["tool_choice"]["function"]["name"] == "search_web"
+        assert requests[search_index]["tool_choice"] == "required"
 
 
 def test_stage_repair_owns_overlapping_industry_followup_search(monkeypatch):
@@ -9048,7 +9163,7 @@ def test_stage_repair_owns_overlapping_industry_followup_search(monkeypatch):
             ]}
         elif turn == 2:
             name, args = "search_web", {
-                "query": "Acme current private equity ownership"
+                "query": "Acme Software company activity"
             }
         elif turn == 3:
             name, args = "fetch_page", {"url": strong_stage_url}
@@ -9125,15 +9240,21 @@ def test_stage_repair_owns_overlapping_industry_followup_search(monkeypatch):
     assert result["claims"]["industry"]["status"] == "UNPROVEN"
     assert result["usage"] == {
         "reasoning_turns": 4,
-        "search_calls": 1,
+        "search_calls": 2,
         "fetch_calls": 1,
     }
-    assert search_queries == ["Acme current private equity ownership"]
+    assert search_queries == [
+        "Acme acme.example current owner completed acquisition majority private equity",
+        "Acme Software company activity",
+    ]
     assert fetched_urls == [strong_stage_url]
-    assert requests[1]["tool_choice"]["function"]["name"] == "search_web"
+    assert requests[1]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "search_web"},
+    }
     feedback = json.loads(requests[1]["messages"][-1]["content"])
-    assert "current stage, ownership, listing" in feedback["instruction"]
-    assert "requested industry, product/service" not in feedback["instruction"]
+    assert "Never repeat a rejected quote" in feedback["instruction"]
+    assert "requested industry, product/service" in feedback["instruction"]
 
 
 def test_bigtime_stage_repair_does_not_turn_old_projector_intent_positive(

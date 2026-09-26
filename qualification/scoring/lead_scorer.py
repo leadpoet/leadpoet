@@ -477,6 +477,12 @@ _PRIVATE_EQUITY_STAGE_PROOF_PATTERNS = (
         r"[^.!?\n]{0,30}\b(?:close|complete|completion|closing)\b)",
         re.I,
     ),
+    re.compile(
+        rf"\b{_PRIVATE_EQUITY_LABEL}\b"
+        r"(?:(?!\b(?:sold|exited|divested)\b)[\s\S]){0,220}?"
+        r"\bactive\s+majority\s+investments?\s+in\b",
+        re.I,
+    ),
     _COMPLETED_PRIVATE_EQUITY_ACQUISITION_RE,
 )
 _PUBLIC_STAGE_SUPERSESSION_PATTERNS = (
@@ -706,6 +712,120 @@ def _stage_quote_supports_observation(observed: str, quote: str) -> bool:
     ):
         return False
     return observed_category == latest
+
+
+_ACTIVE_MAJORITY_INVESTMENT_RE = re.compile(
+    r"\bactive\s+majority\s+investments?\s+in\s+"
+    r"(?P<targets>[\s\S]{1,600}?)"
+    r"(?=\band\s+other\s+investments?\s+(?:sold|exited|divested)\b|[.!?\n]|$)",
+    re.I,
+)
+_PUBLIC_SEMANTIC_LISTING_RE = re.compile(
+    r"\b(?:is|are|remains)\s+(?:currently\s+)?listed\s+on\b"
+    r"[^.!?;\n]{0,100}\b(?:exchange|stock\s+code|ticker)\b",
+    re.I,
+)
+_PUBLIC_STRONG_CURRENT_PATTERNS = (
+    _PUBLIC_STAGE_PROOF_PATTERNS[2],
+    *_PUBLIC_STAGE_PROOF_PATTERNS[4:6],
+    *_PUBLIC_EXCHANGE_TRADING_STAGE_PROOF_PATTERNS,
+    *_PUBLIC_TICKER_STAGE_PROOF_PATTERNS,
+    _PUBLIC_SEMANTIC_LISTING_RE,
+)
+
+
+def _public_quote_has_bound_market_locator(
+    quote: str,
+    identity_names: Sequence[str],
+) -> bool:
+    """Require a named current market locator near the investigated issuer."""
+
+    names = {
+        compact
+        for value in identity_names
+        if (compact := _compact_company_name(value))
+    }
+    for pattern in _PUBLIC_STRONG_CURRENT_PATTERNS:
+        for match in pattern.finditer(quote):
+            if not names:
+                return False
+            # Parenthetical exchange forms name the issuer inside the match.
+            if re.search(r"\((?:nasdaq|nyse)\s*:", match.group(0), re.I):
+                candidate = match.group(0)
+            else:
+                prefix = quote[max(0, match.start() - 180):match.start()]
+                prefix = re.sub(
+                    r",\s*((?:inc|incorporated|ltd|limited|corp|corporation|co)\.?)",
+                    r" \1",
+                    prefix,
+                    flags=re.I,
+                )
+                candidate = re.split(r"[,;.!?\n]|\bwhose\b", prefix, flags=re.I)[-1]
+                if re.search(
+                    r"\b(?:parent(?:\s+company)?|investor|owner|sponsor)\b",
+                    candidate,
+                    re.I,
+                ):
+                    continue
+            compact_candidate = _compact_company_name(candidate)
+            if any(name in compact_candidate for name in names):
+                return True
+    return False
+
+
+def _stage_evidence_supports_observation(
+    observed: str,
+    quote: str,
+    *,
+    evidence_url: str = "",
+    first_party_domains: Sequence[str] = (),
+    identity_names: Sequence[str] = (),
+    semantic_public_listing: bool = False,
+    authoritative_public_listing: bool = False,
+) -> bool:
+    """Apply source and entity guards that require more than quote text."""
+
+    normalized_stage = _normalize_company_stage(observed)
+    lexical_support = _stage_quote_supports_observation(normalized_stage, quote)
+    if normalized_stage == "private equity":
+        if _ACTIVE_MAJORITY_INVESTMENT_RE.search(quote):
+            try:
+                source_domain = _registrable_domain(evidence_url)
+            except (NormalizationError, TypeError, ValueError):
+                source_domain = ""
+            sponsor = _compact_company_name(source_domain.split(".", 1)[0])
+            names = {_compact_company_name(value) for value in identity_names}
+            return bool(
+                lexical_support and len(sponsor) >= 4
+                and sponsor in _compact_company_name(quote)
+                and any(
+                    name and name in _compact_company_name(match.group("targets"))
+                    for match in _ACTIVE_MAJORITY_INVESTMENT_RE.finditer(quote)
+                    for name in names
+                )
+            )
+        return lexical_support
+    if normalized_stage != "public":
+        return lexical_support
+    if authoritative_public_listing:
+        return True
+    if not lexical_support and not semantic_public_listing:
+        return False
+    try:
+        source_domain = _registrable_domain(evidence_url)
+    except (NormalizationError, TypeError, ValueError):
+        source_domain = ""
+    if source_domain and source_domain in set(first_party_domains):
+        return bool(
+            re.search(
+                r"\bpublicly\s+(?:traded|listed\s+(?:shares?|stock))\b",
+                quote,
+                re.I,
+            )
+            or any(pattern.search(quote) for pattern in _PUBLIC_STRONG_CURRENT_PATTERNS)
+            or semantic_public_listing
+        )
+    return _public_quote_has_bound_market_locator(quote, identity_names)
 
 
 _BOUND_ACQUISITION_SUBJECT_PATTERNS = (
@@ -1451,6 +1571,22 @@ def _decision_from_observed_stage(
         return COMPANY_FIT_UNAVAILABLE
     flag = strict_company_fit_boolean(verdict.get("stage_matches"))
     stage_evidence = _dimension_web_evidence(verdict, "stage")
+    stage_first_party_domains: set[str] = set()
+    for candidate in (
+        getattr(company, "company_website", ""),
+        verdict.get("observed_company_website"),
+    ):
+        try:
+            if candidate:
+                stage_first_party_domains.add(_registrable_domain(str(candidate)))
+        except (NormalizationError, TypeError, ValueError):
+            continue
+    stage_identity_names = tuple(
+        value for value in (
+            getattr(company, "company_name", ""),
+            verdict.get("observed_company_name"),
+        ) if value
+    )
     stage_quote_is_bound = (
         _acquired_stage_quote_supports_company(
             company,
@@ -1458,7 +1594,13 @@ def _decision_from_observed_stage(
             stage_evidence["quote"],
         )
         if observed == "acquired"
-        else _stage_quote_supports_observation(observed, stage_evidence["quote"])
+        else _stage_evidence_supports_observation(
+            observed,
+            stage_evidence["quote"],
+            evidence_url=stage_evidence["url"],
+            first_party_domains=tuple(stage_first_party_domains),
+            identity_names=stage_identity_names,
+        )
     )
     investigator_stage_matches = _validated_investigator_stage_matches_verdict(
         verdict,
@@ -5036,6 +5178,93 @@ def _targeted_company_investigation_dimensions(
     return tuple(targets)
 
 
+def _positive_semantic_review_needed(
+    result: CompanyFitDecisionResult,
+    icp: ICPPrompt,
+    investigation_targets: Sequence[str],
+) -> bool:
+    """Audit a narrow positive that could still become an eligible company."""
+
+    active_attribute = str(
+        getattr(icp, "required_attribute", "") or ""
+    ).strip()
+    if not active_attribute:
+        return False
+    details = result.details if isinstance(result.details, Mapping) else {}
+    raw_dimensions = details.get("dimension_decisions")
+    dimensions = raw_dimensions if isinstance(raw_dimensions, Mapping) else {}
+    if dimensions.get("industry") != COMPANY_FIT_MATCH:
+        return False
+    attribute_decision = details.get("required_attribute_decision")
+    if attribute_decision not in {
+        COMPANY_FIT_MATCH,
+        COMPANY_FIT_UNAVAILABLE,
+    }:
+        return False
+    if result.decision in {COMPANY_FIT_MATCH, COMPANY_FIT_UNAVAILABLE}:
+        return True
+
+    target_dimensions = {
+        {
+            "stage": "stage",
+            "headcount": "employee_size",
+            "rebrand": "identity",
+            "industry": "industry",
+            "geography": "geography",
+        }[target]
+        for target in investigation_targets
+    }
+    mismatches = {
+        dimension
+        for dimension, decision in dimensions.items()
+        if decision == COMPANY_FIT_MISMATCH
+    }
+    if details.get("identity_decision") == COMPANY_FIT_MISMATCH:
+        mismatches.add("identity")
+    if details.get("required_attribute_decision") == COMPANY_FIT_MISMATCH:
+        mismatches.add("required_attribute")
+    return bool(mismatches) and mismatches.issubset(target_dimensions)
+
+
+def _positive_semantic_finding_resolved(
+    finding: Optional[Mapping[str, Any]],
+) -> bool:
+    """Return whether a bounded finding can replace a reopened positive."""
+
+    value = finding or {}
+    status = value.get("status")
+    role = _strict_industry_activity_role(value.get("activity_role"))
+    if status not in {"VERIFIED", "CONTRADICTED"}:
+        return False
+    if role in {None, "unresolved"}:
+        return False
+    if status == "VERIFIED" and role != "supplier_operator":
+        return False
+    return bool(
+        str(value.get("observed_industry") or "").strip()
+        and _valid_web_evidence_url(value.get("evidence_url"))
+        and str(value.get("evidence_quote") or "").strip()
+    )
+
+
+def _clear_reopened_positive_semantics(
+    verdict: Mapping[str, Any],
+    *,
+    active_attribute: bool,
+) -> dict[str, Any]:
+    """Fail a reopened positive closed without erasing its audit evidence."""
+
+    cleared = dict(verdict)
+    cleared.update(
+        industry_matches=None,
+        industry_activity_role="unresolved",
+        reason="positive semantic company-fit review did not verify the requested activity",
+    )
+    if active_attribute:
+        cleared["attribute_satisfied"] = None
+    return cleared
+
+
 def _project_investigator_stage(
     verdict: Mapping[str, Any],
     finding: Optional[Mapping[str, Any]],
@@ -5321,6 +5550,7 @@ async def _run_targeted_company_evidence_investigation(
         dict[str, dict[str, Any]]
     ] = None,
     preserve_matched_industry: bool = False,
+    review_positive_semantics: bool = False,
 ) -> Tuple[
     dict[str, Any],
     CompanyFitDecisionResult,
@@ -5343,7 +5573,15 @@ async def _run_targeted_company_evidence_investigation(
     source_candidates = [
         *(
             (required_attribute_source_cache or {}).keys()
-            if preserve_matched_industry
+            if preserve_matched_industry or review_positive_semantics
+            else []
+        ),
+        *(
+            [
+                verdict.get("required_attribute_evidence_url"),
+                verdict.get("industry_evidence_url"),
+            ]
+            if review_positive_semantics
             else []
         ),
         *(item.get("url") for item in stage_evidence),
@@ -5527,6 +5765,7 @@ async def _run_targeted_company_evidence_investigation(
         "claims": dict(claims),
         "usage": dict(investigation.get("usage") or {}),
         "failure_reason": str(investigation.get("failure_reason") or ""),
+        "positive_semantic_review": review_positive_semantics,
     }
     if not claims:
         unavailable = _with_verifier_failure_reason(
@@ -5593,6 +5832,15 @@ async def _run_targeted_company_evidence_investigation(
         icp=icp,
         existing_conflict=employee_size_conflict,
     )
+    positive_semantic_resolved = (
+        not review_positive_semantics
+        or _positive_semantic_finding_resolved(industry_claim)
+    )
+    if not positive_semantic_resolved:
+        projected = _clear_reopened_positive_semantics(
+            projected,
+            active_attribute=bool(icp_attribute),
+        )
     if not preserve_matched_industry:
         projected = _project_investigator_industry(
             projected,
@@ -5634,6 +5882,9 @@ async def _run_targeted_company_evidence_investigation(
         company_quality=company_quality,
     )
     investigation_receipt["projected_decision"] = projected_result.decision
+    investigation_receipt["positive_semantic_review_resolved"] = (
+        positive_semantic_resolved
+    )
     projected_result.details["investigation_receipt"] = investigation_receipt
     return (
         projected,
@@ -6110,6 +6361,19 @@ async def _llm_reverify_company(
         if require_company_fit_dimensions and evidence_investigator
         else ()
     )
+    positive_semantic_review = bool(
+        require_company_fit_dimensions
+        and evidence_investigator
+        and _positive_semantic_review_needed(
+            result,
+            icp,
+            investigation_targets,
+        )
+    )
+    if positive_semantic_review:
+        investigation_targets = tuple(
+            dict.fromkeys((*investigation_targets, "industry"))
+        )
     required_attribute_source_recovery = bool(
         require_company_fit_dimensions
         and evidence_investigator
@@ -6163,9 +6427,27 @@ async def _llm_reverify_company(
                 required_attribute_retry_source_cache
             ),
             preserve_matched_industry=required_attribute_source_recovery,
+            review_positive_semantics=positive_semantic_review,
         )
         if not claims:
             return result
+        if (
+            positive_semantic_review
+            and not _positive_semantic_finding_resolved(
+                claims.get("industry")
+                if isinstance(claims.get("industry"), Mapping)
+                else None
+            )
+        ):
+            return company_fit_unavailable(
+                result.reason,
+                details={
+                    **result.details,
+                    "failure_class": (
+                        INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS
+                    ),
+                },
+            )
     incomplete = _incomplete_company_reverify_dimensions(
         result,
         icp_attribute=icp_attribute,
@@ -6479,6 +6761,19 @@ async def _llm_reverify_company(
                 company=company,
             )
         )
+        post_repair_positive_semantic_review = (
+            _positive_semantic_review_needed(
+                repaired_result,
+                icp,
+                post_repair_investigation_targets,
+            )
+        )
+        if post_repair_positive_semantic_review:
+            post_repair_investigation_targets = tuple(
+                dict.fromkeys(
+                    (*post_repair_investigation_targets, "industry")
+                )
+            )
         if post_repair_investigation_targets:
             (
                 repaired_verdict,
@@ -6518,9 +6813,31 @@ async def _llm_reverify_company(
                 successful_required_attribute_source_sink=(
                     required_attribute_retry_source_cache
                 ),
+                review_positive_semantics=(
+                    post_repair_positive_semantic_review
+                ),
             )
             if not post_repair_claims:
                 return repaired_result
+            if (
+                post_repair_positive_semantic_review
+                and not _positive_semantic_finding_resolved(
+                    post_repair_claims.get("industry")
+                    if isinstance(
+                        post_repair_claims.get("industry"), Mapping
+                    )
+                    else None
+                )
+            ):
+                return company_fit_unavailable(
+                    repaired_result.reason,
+                    details={
+                        **repaired_result.details,
+                        "failure_class": (
+                            INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS
+                        ),
+                    },
+                )
             investigation_targets = post_repair_investigation_targets
             claims = post_repair_claims
     repaired_incomplete = _incomplete_company_reverify_dimensions(

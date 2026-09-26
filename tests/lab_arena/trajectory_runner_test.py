@@ -280,6 +280,16 @@ def test_worker_stop_failure_records_cleanup_boundary_and_runtime_logs(
     assert events[1]["content"] == {
         "status": "abandoned", "failure_stage": "cleanup",
         "error_class": "OSError",
+        "resource_summary": {
+            "wall_seconds": 1.0,
+            "cpu_seconds": 0.5,
+            "max_rss_bytes": 1024 * 1024,
+            "stdout_bytes": len(b"model log line\n"),
+            "stderr_bytes": 0,
+            "provider_call_count": 1,
+        },
+        "exit_code": 0,
+        "timed_out": False,
     }
     assert events[2]["content"]["text"] == "model log line\n"
     assert worker.abandoned == 1 and api.completions == []
@@ -382,6 +392,16 @@ def test_runsc_cleanup_failure_retains_captured_result_for_trajectory(tmp_path):
     assert events[1]["content"] == {
         "status": "abandoned", "failure_stage": "cleanup",
         "error_class": "SandboxCleanupError",
+        "resource_summary": {
+            "wall_seconds": 1.0,
+            "cpu_seconds": 0.5,
+            "max_rss_bytes": 1024 * 1024,
+            "stdout_bytes": len(b"captured stdout"),
+            "stderr_bytes": len(b"captured stderr"),
+            "provider_call_count": 0,
+        },
+        "exit_code": 0,
+        "timed_out": False,
     }
     assert events[2]["content"]["text"] == "captured stdout"
     assert events[3]["content"]["text"] == "captured stderr"

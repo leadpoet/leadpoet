@@ -2669,15 +2669,29 @@ def _record_runtime_failure(
         failure_stage = "runtime"
     observed_at = _timestamp(config.clock)
     try:
+        error_content: Dict[str, Any] = {
+            "status": status,
+            "failure_stage": failure_stage,
+            "error_class": type(exc).__name__[:64],
+        }
+        if result is not None:
+            error_content.update({
+                "resource_summary": {
+                    "wall_seconds": float(result.wall_seconds),
+                    "cpu_seconds": float(result.cpu_seconds),
+                    "max_rss_bytes": int(result.max_rss_bytes),
+                    "stdout_bytes": len(result.stdout),
+                    "stderr_bytes": len(result.stderr),
+                    "provider_call_count": len(state.calls),
+                },
+                "exit_code": result.exit_code,
+                "timed_out": bool(result.timed_out),
+            })
         events = [
             *_provider_error_events(state),
             trajectory.event(
                 "runtime.error",
-                {
-                    "status": status,
-                    "failure_stage": failure_stage,
-                    "error_class": type(exc).__name__[:64],
-                },
+                error_content,
                 occurred_at=observed_at,
             ),
             *_runtime_log_events(result, lease_token, observed_at),

@@ -1381,25 +1381,32 @@ def _merge_citation_repairs(
     if not isinstance(repair, dict) or set(repair) != {"repairs"}:
         raise ValueError("invalid Intent Details citation repair")
     items = repair["repairs"]
-    if not isinstance(items, list) or len(items) != len(expected_unit_ids):
+    if not isinstance(items, list):
         raise ValueError("incomplete Intent Details citation repair")
+    known_unit_ids = {
+        item.get("unit_id")
+        for item in held_response.get("unit_grounding", [])
+        if isinstance(item, Mapping) and type(item.get("unit_id")) is int
+    }
     evidence_by_id: dict[int, list[Any]] = {}
     for item in items:
         if (
             not isinstance(item, dict)
             or set(item) != {"unit_id", "evidence"}
             or type(item["unit_id"]) is not int
-            or item["unit_id"] not in expected_unit_ids
+            or item["unit_id"] not in known_unit_ids
             or item["unit_id"] in evidence_by_id
             or not isinstance(item["evidence"], list)
         ):
             raise ValueError("invalid Intent Details citation repair unit")
         evidence_by_id[item["unit_id"]] = item["evidence"]
-    if set(evidence_by_id) != expected_unit_ids:
+    if not expected_unit_ids.issubset(evidence_by_id):
         raise ValueError("incomplete Intent Details citation repair")
     merged = copy.deepcopy(held_response)
     for unit in merged["unit_grounding"]:
-        if unit["unit_id"] in evidence_by_id:
+        # Unit IDs are dynamic and cannot be constrained by the JSON schema.
+        # Ignore known extras without letting them alter an unflagged verdict.
+        if unit["unit_id"] in expected_unit_ids:
             unit["evidence"] = copy.deepcopy(evidence_by_id[unit["unit_id"]])
     return merged
 

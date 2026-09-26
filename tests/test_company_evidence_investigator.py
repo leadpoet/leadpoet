@@ -26,6 +26,7 @@ from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
     COMPANY_FIT_MISMATCH,
     COMPANY_FIT_UNAVAILABLE,
+    company_fit_match,
 )
 from qualification.scoring.evaluation_clock import use_evaluation_date
 from qualification.scoring.linkedin_company_size import (
@@ -3848,10 +3849,82 @@ def test_investigator_can_accept_semantic_acculon_retrospective_receipt():
         targets=("stage",),
         fetched_pages={url: quote},
         first_party_domains={"acculonenergy.com"},
-        identity_names={"acculonenergy", "acculon"},
+        identity_names={"acculonenergy"},
+        identity_anchor={
+            "submitted_domain": "acculonenergy.com",
+            "verified_domain": "acculonenergy.com",
+        },
     )["stage"]
 
     assert finding["status"] == "VERIFIED"
+
+
+def test_acculon_retrospective_receipt_requires_live_current_stage_discovery(
+    monkeypatch,
+):
+    url = "https://www.acculonenergy.com/resources/facility-opening"
+    quote = (
+        "The facility’s opening follows a period of rapid growth for Acculon, "
+        "including a Series A investment led by Terex Corporation and the "
+        "expansion of its Acculon Labs testing division."
+    )
+    search_queries = []
+
+    async def fake_search(_session, query, *, key):
+        del key
+        search_queries.append(query)
+        return {"results": []}
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers, payload
+        arguments = {"findings": [_finding(
+            "stage",
+            observed_value="Series A",
+            evidence_url=url,
+            evidence_quote=quote,
+        )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "submit-1",
+            "type": "function",
+            "function": {
+                "name": "submit_findings",
+                "arguments": json.dumps(arguments),
+            },
+        }]}}]}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "Acculon Energy",
+            "website": "https://www.acculonenergy.com",
+        },
+        targets=("stage",),
+        requested_stage="Series A",
+        prior_observations={
+            "observed_company_name": "Acculon",
+            "observed_company_website": "https://www.acculonenergy.com",
+            "submitted_source_urls": [url],
+        },
+        verified_homepage_identity={
+            "normalized_name": "acculonenergy",
+            "registrable_dns_domain": "acculonenergy.com",
+        },
+        prefetched_pages={url: {"final_url": url, "text": quote}},
+    ))
+
+    assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["usage"] == {
+        "reasoning_turns": 1,
+        "search_calls": 1,
+        "fetch_calls": 0,
+    }
+    assert search_queries == [
+        "Acculon Energy acculonenergy.com latest funding round acquisition IPO"
+    ]
 
 
 def test_submit_tool_requires_one_exact_continuous_quote_span():
@@ -5928,6 +6001,22 @@ def test_public_stage_needs_listing_proof_not_labels_or_plans():
     assert not _stage_quote_supports_observation(
         "public", "The company plans an initial public offering next year."
     )
+    url = "https://www.linkedin.com/company/acme"
+    label_quote = "Acme Company type: Public Company"
+    finding = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            observed_value="Public",
+            evidence_url=url,
+            evidence_quote=label_quote,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: label_quote},
+        first_party_domains={"acme.example"},
+        identity_names={"acme"},
+    )["stage"]
+    assert finding["status"] == "UNPROVEN"
+    assert finding["reason"] == "source quote did not prove current public listing"
 
 
 def test_acculon_retrospective_series_a_statement_requires_recipient_binding():
@@ -8146,6 +8235,294 @@ def test_extra_turn_is_only_a_rejected_submission_correction(monkeypatch, reject
     assert len(searches) == (0 if reject_submission else 1)
     assert result["failure_reason"] == MALFORMED_RESPONSE_FAILURE_REASON
     assert result["claims"] == {}
+
+
+def test_industry_only_investigation_keeps_original_turn_threshold(monkeypatch):
+    requests = []
+
+    async def unavailable_provider(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        return 500, {}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 4)
+    monkeypatch.setattr(investigator, "_post_json", unavailable_provider)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("industry",),
+        requested_stage="Public",
+        requested_industry="Software",
+    ))
+
+    assert requests[0]["tool_choice"] == "required"
+    assert result["failure_reason"] == PROVIDER_ERROR_FAILURE_REASON
+
+
+def test_final_rejected_stage_quote_gets_one_bounded_search_and_source_fetch(
+    monkeypatch,
+):
+    weak_url = "https://www.bigtime.net/about-us/"
+    strong_url = "https://www.bigtime.net/news/current-owner"
+    weak_quote = "BigTime Software is a private equity-funded company."
+    strong_quote = (
+        "BigTime Software is owned by Vista Equity Partners, a private equity firm."
+    )
+    requests = []
+    search_queries = []
+    fetched_urls = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        turn = len(requests)
+        if turn == 1:
+            name, args = "submit_findings", {"findings": [_finding(
+                "stage",
+                observed_value="Private Equity",
+                evidence_url=weak_url,
+                evidence_quote=weak_quote,
+            )]}
+        elif turn == 2:
+            name, args = "search_web", {
+                "query": "BigTime current private equity ownership"
+            }
+        elif turn == 3:
+            name, args = "fetch_page", {"url": strong_url}
+        else:
+            name, args = "submit_findings", {"findings": [_finding(
+                "stage",
+                observed_value="Private Equity",
+                evidence_url=strong_url,
+                evidence_quote=strong_quote,
+            )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(turn),
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)},
+        }]}}]}
+
+    async def fake_search(_session, query, *, key):
+        del key
+        search_queries.append(query)
+        return {"results": [{"url": strong_url}]}
+
+    async def fake_fetch(_session, url):
+        fetched_urls.append(url)
+        return {"ok": True, "url": url, "final_url": url, "text": strong_quote}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 4)
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "BigTime", "website": "https://www.bigtime.net"},
+        targets=("stage",),
+        requested_stage="Private Equity",
+        prior_observations={"submitted_source_urls": [weak_url]},
+        prefetched_pages={
+            weak_url: {"final_url": weak_url, "text": weak_quote}
+        },
+    ))
+
+    assert "stage" in result["claims"], result
+    assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["usage"] == {
+        "reasoning_turns": 4,
+        "search_calls": 1,
+        "fetch_calls": 1,
+    }
+    assert search_queries == ["BigTime current private equity ownership"]
+    assert fetched_urls == [strong_url]
+    assert requests[1]["tool_choice"]["function"]["name"] == "search_web"
+    assert requests[-1]["tool_choice"]["function"]["name"] == "submit_findings"
+
+
+def test_stage_repair_owns_overlapping_industry_followup_search(monkeypatch):
+    weak_stage_url = "https://acme.example/about"
+    strong_stage_url = "https://acme.example/current-owner"
+    industry_url = "https://acme.example/operations"
+    weak_stage_quote = "Acme is a private equity-funded company."
+    strong_stage_quote = (
+        "Acme is owned by Example Capital, a private equity firm."
+    )
+    industry_quote = "Acme uses scheduling software supplied by Example Systems."
+    requests = []
+    search_queries = []
+    fetched_urls = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        turn = len(requests)
+        if turn == 1:
+            name, args = "submit_findings", {"findings": [
+                _finding(
+                    "stage",
+                    observed_value="Private Equity",
+                    evidence_url=weak_stage_url,
+                    evidence_quote=weak_stage_quote,
+                ),
+                _finding(
+                    "industry",
+                    status="CONTRADICTED",
+                    observed_industry="Health Care",
+                    observed_subindustry="Medical practice",
+                    activity_role="customer_user",
+                    evidence_url=industry_url,
+                    evidence_quote=industry_quote,
+                ),
+            ]}
+        elif turn == 2:
+            name, args = "search_web", {
+                "query": "Acme current private equity ownership"
+            }
+        elif turn == 3:
+            name, args = "fetch_page", {"url": strong_stage_url}
+        else:
+            name, args = "submit_findings", {"findings": [
+                _finding(
+                    "stage",
+                    observed_value="Private Equity",
+                    evidence_url=strong_stage_url,
+                    evidence_quote=strong_stage_quote,
+                ),
+                _finding(
+                    "industry",
+                    status="CONTRADICTED",
+                    observed_industry="Health Care",
+                    observed_subindustry="Medical practice",
+                    activity_role="customer_user",
+                    evidence_url=industry_url,
+                    evidence_quote=industry_quote,
+                ),
+            ]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(turn),
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)},
+        }]}}]}
+
+    async def fake_search(_session, query, *, key):
+        del key
+        search_queries.append(query)
+        return {"results": [{"url": strong_stage_url}]}
+
+    async def fake_fetch(_session, url):
+        fetched_urls.append(url)
+        return {
+            "ok": True,
+            "url": url,
+            "final_url": url,
+            "text": strong_stage_quote,
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 8)
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("stage", "industry"),
+        requested_stage="Private Equity",
+        requested_industry="Software",
+        prior_observations={
+            "submitted_source_urls": [weak_stage_url, industry_url],
+        },
+        verified_homepage_identity={
+            "normalized_name": "Acme",
+            "registrable_dns_domain": "acme.example",
+        },
+        prefetched_pages={
+            weak_stage_url: {
+                "final_url": weak_stage_url,
+                "text": weak_stage_quote,
+            },
+            industry_url: {
+                "final_url": industry_url,
+                "text": industry_quote,
+            },
+        },
+    ))
+
+    assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["claims"]["industry"]["status"] == "UNPROVEN"
+    assert result["usage"] == {
+        "reasoning_turns": 4,
+        "search_calls": 1,
+        "fetch_calls": 1,
+    }
+    assert search_queries == ["Acme current private equity ownership"]
+    assert fetched_urls == [strong_stage_url]
+    assert requests[1]["tool_choice"]["function"]["name"] == "search_web"
+    feedback = json.loads(requests[1]["messages"][-1]["content"])
+    assert "current stage, ownership, listing" in feedback["instruction"]
+    assert "requested industry, product/service" not in feedback["instruction"]
+
+
+def test_bigtime_stage_repair_does_not_turn_old_projector_intent_positive(
+    monkeypatch,
+):
+    async def verified_fit(*_args, **_kwargs):
+        return company_fit_match("current controlling private-equity ownership verified")
+
+    rejected_intent = {
+        "raw": 0.0,
+        "after_decay": 0.0,
+        "matched_icp_signal": 0,
+        "judge_verdict": {
+            "decision": "rejected_three_stage",
+            "pipeline_decision": "reject",
+            "rejection_reason": "evidence_outside_allowed_window",
+        },
+    }
+
+    async def old_intent(*_args, **_kwargs):
+        return 0.0, 0.0, 0.0, 0, True, [rejected_intent]
+
+    monkeypatch.setattr(lead_scorer, "_verify_company_fit", verified_fit)
+    monkeypatch.setattr(
+        lead_scorer,
+        "score_company_competition_intent_signal",
+        old_intent,
+    )
+    company = _company(
+        name="BigTime Software",
+        website="https://www.bigtime.net",
+        linkedin="https://www.linkedin.com/company/bigtime-software",
+    ).model_copy(update={
+        "company_stage": "Private Equity",
+        "intent_signals": [{
+            "description": "Projector was acquired by BigTime Software in 2022.",
+            "source": "company news",
+            "url": "https://www.bigtime.net/news/projector-acquisition",
+            "date": "2022-01-01",
+            "snippet": "BigTime Software acquired Projector in 2022.",
+        }],
+    })
+
+    result = asyncio.run(lead_scorer.score_company_competition_intent(
+        company,
+        _icp(
+            company_stage="Private Equity",
+            intent_signals=["Recent acquisition activity"],
+        ),
+        0.0,
+        0.0,
+        set(),
+    ))
+
+    assert result.final_score == 0.0
+    assert result.intent_signal_final == 0.0
+    assert result.failure_reason.startswith("Primary intent evidence unverified")
 
 
 def test_final_invalid_target_does_not_erase_independent_valid_stage(monkeypatch):

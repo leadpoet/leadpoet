@@ -116,7 +116,6 @@ from qualification.scoring.linkedin_company_size import (
     STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD,
     STRUCTURED_PROFILE_PRIVATE_COMPANY_TYPE,
     STRUCTURED_PROFILE_PROVIDER,
-    STRUCTURED_PROFILE_PUBLIC_COMPANY_TYPE,
     STRUCTURED_PROFILE_SOURCE_FIELD,
 )
 
@@ -479,20 +478,6 @@ _PUBLIC_STAGE_SUPERSESSION_PATTERNS = (
     re.compile(r"\b(?:ceased|stopped)\s+trading\b", re.I),
     _COMPLETED_PRIVATE_EQUITY_ACQUISITION_RE,
 )
-_CURRENT_NONPUBLIC_STAGE_PROOF_PATTERNS = (
-    re.compile(
-        r"\b(?:is|remains)\s+(?:currently\s+)?(?:an?\s+)?privately\s+held\b",
-        re.I,
-    ),
-    re.compile(
-        r"\b(?:is|remains)\s+(?:currently\s+)?(?:an?\s+)?private\s+company\b",
-        re.I,
-    ),
-)
-_CURRENT_NOT_PUBLICLY_TRADED_RE = re.compile(
-    r"\b(?:is|remains)\s+(?:not|no\s+longer)\s+publicly\s+traded\b",
-    re.I,
-)
 _ACQUIRED_STAGE_PROOF_PATTERNS = (
     re.compile(
         r"\b(?:was|has\s+been)\s+(?:fully\s+|wholly\s+)?acquired\s+by\b",
@@ -506,6 +491,12 @@ _ACQUIRED_STAGE_PROOF_PATTERNS = (
     re.compile(
         r"\bis\s+(?:now\s+)?(?:an?\s+)?(?:wholly[- ]owned\s+|"
         r"majority[- ]owned\s+)?subsidiary\s+of\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:completed|completes)\s+"
+        r"(?:(?:the|its|an?)\s+)?(?:previously\s+announced\s+)?"
+        r"acquisition\s+of\b",
         re.I,
     ),
 )
@@ -717,7 +708,7 @@ _BOUND_ACQUISITION_SUBJECT_PATTERNS = (
         re.I,
     ),
     re.compile(
-        r"\bcompleted\s+(?:(?:the|its|an?)\s+)?"
+        r"\b(?:completed|completes)\s+(?:(?:the|its|an?)\s+)?"
         r"(?:previously\s+announced\s+)?acquisition\s+of\s+"
         r"(?P<subject>[a-z0-9&.'’+ -]{2,120}?)"
         r"(?=\s+(?:on|for|after|from|in)\b|[,;.!?\n]|$)",
@@ -777,6 +768,12 @@ _BOUND_PUBLIC_SUPERSESSION_SUBJECT_PATTERNS = (
         r"(?:publicly\s+)?listed\b",
         re.I,
     ),
+    re.compile(
+        r"(?:^|[,;.!?]\s+)(?P<subject>[a-z0-9&.'’+ -]{2,120}?)(?:['’]s)?\s+"
+        r"(?:common\s+)?(?:shares?|stock)\s+(?:has\s+)?"
+        r"(?:ceased|stopped)\s+trading\b",
+        re.I,
+    ),
 )
 
 
@@ -807,7 +804,8 @@ def _bound_public_supersession_supports_company(
                 flags=re.I,
             )[-1]
             explicit_negative_listing = bool(re.search(
-                r"\b(?:no\s+longer|not)\s+(?:publicly\s+)?listed\b",
+                r"\b(?:no\s+longer|not)\s+(?:publicly\s+)?listed\b|"
+                r"\b(?:ceased|stopped)\s+trading\b",
                 match.group(0),
                 re.I,
             ))
@@ -3361,19 +3359,6 @@ def _is_bound_structured_linkedin_company_type_evidence(
     )
 
 
-def _is_bound_structured_linkedin_public_company_evidence(
-    evidence: Any,
-    verified_homepage_identity: Optional[Mapping[str, str]],
-) -> bool:
-    """Validate the exact structured Public receipt against the homepage."""
-
-    return _is_bound_structured_linkedin_company_type_evidence(
-        evidence,
-        verified_homepage_identity,
-        expected_company_type=STRUCTURED_PROFILE_PUBLIC_COMPANY_TYPE,
-    )
-
-
 def _is_bound_structured_linkedin_private_company_evidence(
     evidence: Any,
     verified_homepage_identity: Optional[Mapping[str, str]],
@@ -3385,53 +3370,6 @@ def _is_bound_structured_linkedin_private_company_evidence(
         verified_homepage_identity,
         expected_company_type=STRUCTURED_PROFILE_PRIVATE_COMPANY_TYPE,
     )
-
-
-def _structured_linkedin_public_stage_matches(
-    evidence: Any,
-    *,
-    icp_stage: str,
-    identity_decision: str,
-    stage_decision: str,
-    stage_evidence: Mapping[str, str],
-    verified_homepage_identity: Optional[Mapping[str, str]],
-) -> bool:
-    """Accept exact current Public metadata only for the bound company."""
-
-    if (
-        _normalize_company_stage(icp_stage) != "public"
-        or identity_decision != COMPANY_FIT_MATCH
-        or stage_decision != COMPANY_FIT_UNAVAILABLE
-        or not _is_bound_structured_linkedin_public_company_evidence(
-            evidence,
-            verified_homepage_identity,
-        )
-    ):
-        return False
-    quote = str(stage_evidence.get("quote") or "")
-    if _has_affirmed_stage_proof(
-        quote,
-        _PUBLIC_STAGE_SUPERSESSION_PATTERNS,
-        reject_future_will=True,
-    ) or _has_affirmed_stage_proof(
-        quote,
-        _CURRENT_NONPUBLIC_STAGE_PROOF_PATTERNS,
-        reject_historical=True,
-    ) or _CURRENT_NOT_PUBLICLY_TRADED_RE.search(quote):
-        return False
-    if any(
-        _stage_quote_supports_observation(nonpublic_stage, quote)
-        for nonpublic_stage in (
-            "seed",
-            "series a",
-            "series b",
-            "series c+",
-            "private equity",
-        )
-    ):
-        return False
-    return True
-
 
 async def _refresh_linkedin_employee_size_observation(
     verdict: Mapping[str, Any],
@@ -3970,14 +3908,6 @@ def _reverify_decision(
         identity_receipt,
         verified_homepage_transport_domain,
     )
-    structured_public_stage = _structured_linkedin_public_stage_matches(
-        structured_public_company_evidence,
-        icp_stage=icp_stage,
-        identity_decision=identity_decision,
-        stage_decision=observed_stage_decision,
-        stage_evidence=stage_evidence,
-        verified_homepage_identity=profile_identity,
-    )
     structured_private_stage_conflict = bool(
         _normalize_company_stage(icp_stage) == "public"
         and identity_decision == COMPANY_FIT_MATCH
@@ -4021,11 +3951,7 @@ def _reverify_decision(
         "stage": (
             COMPANY_FIT_UNAVAILABLE
             if structured_private_stage_conflict
-            else (
-                COMPANY_FIT_MATCH
-                if structured_public_stage
-                else observed_stage_decision
-            )
+            else observed_stage_decision
         ),
     }
     active_dimensions = {"employee_size", "industry", "geography"}
@@ -4040,7 +3966,7 @@ def _reverify_decision(
         evidence["stage"] = stage_evidence
     if structured_employee_size_decision != COMPANY_FIT_UNAVAILABLE:
         evidence["employee_size"] = dict(structured_employee_size_evidence or {})
-    if structured_public_stage or structured_private_stage_conflict:
+    if structured_private_stage_conflict:
         evidence["stage"] = dict(structured_public_company_evidence or {})
     if strict_web_proof:
         for dimension in active_dimensions:
@@ -4049,9 +3975,7 @@ def _reverify_decision(
                 and structured_employee_size_decision != COMPANY_FIT_UNAVAILABLE
             ):
                 continue
-            if dimension == "stage" and (
-                structured_public_stage or structured_private_stage_conflict
-            ):
+            if dimension == "stage" and structured_private_stage_conflict:
                 continue
             dimensions[dimension] = _decision_with_web_evidence(
                 dimensions[dimension], evidence[dimension]
@@ -6702,19 +6626,8 @@ async def _verify_company_fit(
             == observed_decision
             and observed_decision in {COMPANY_FIT_MATCH, COMPANY_FIT_MISMATCH}
         )
-        structured_public_stage_proof = (
-            dimension == "stage"
-            and observed_decision == COMPANY_FIT_MATCH
-            and _normalize_company_stage(icp.company_stage) == "public"
-            and web_identity_decision == COMPANY_FIT_MATCH
-            and _is_bound_structured_linkedin_public_company_evidence(
-                web_evidence,
-                profile_identity,
-            )
-        )
         if dimension in active_web_dimensions and (
             not structured_employee_proof
-            and not structured_public_stage_proof
             and (
                 not _valid_web_evidence_url(web_evidence.get("url"))
                 or not str(web_evidence.get("quote") or "").strip()

@@ -701,6 +701,26 @@ def _quote_names_compatible_venture_stage(
     return True
 
 
+def _quote_supports_semantic_public_listing(quote: str) -> bool:
+    """Allow explicit exchange listings while rejecting profile labels and plans."""
+
+    normalized = _normalized_span(quote)
+    if re.search(
+        r"\b(?:plan(?:s|ned)?|intend(?:s|ed)?|propos(?:e|ed)|may|might|"
+        r"could|will|would|subject\s+to|expected)\b",
+        normalized,
+    ) or re.search(
+        r"\b(?:ceased|stopped)\s+trading\b|\bdelisted\b|"
+        r"\b(?:taken|went|became)\s+private\b",
+        normalized,
+    ):
+        return False
+    return bool(
+        re.search(r"\b(?:is|are|remains)\s+(?:currently\s+)?listed\s+on\b", normalized)
+        and re.search(r"\b(?:exchange|stock\s+code|ticker)\b", normalized)
+    )
+
+
 def _quote_supports_headcount(quote: str, observed_value: Any) -> bool:
     """Bind the submitted count to company-wide text without inventing freshness."""
 
@@ -1056,6 +1076,20 @@ def _validated_findings(
                             "source quote did not prove the investigated company "
                             "was the completed acquisition target"
                         ),
+                    )
+                elif normalized_stage == "public" and not (
+                    _stage_quote_supports_observation(
+                        normalized_stage, finding["evidence_quote"]
+                    )
+                    or _quote_supports_semantic_public_listing(
+                        finding["evidence_quote"]
+                    )
+                ):
+                    finding.update(
+                        status="UNPROVEN",
+                        evidence_url="",
+                        evidence_quote="",
+                        reason="source quote did not prove current public listing",
                     )
                 elif not _quote_names_compatible_venture_stage(
                     normalized_stage,
@@ -1490,6 +1524,7 @@ async def investigate_company_evidence(
             }]
             final_correction_pending = False
             forced_next_tool = ""
+            forced_stage_search_pending = False
             industry_followup_pending = False
             industry_followup_search_completed = False
             industry_followup_fetched_urls: set[str] = set()
@@ -1512,8 +1547,32 @@ async def investigate_company_evidence(
                             "fetch_calls": fetch_calls,
                         },
                     }
-                force_submit = _turn >= MAX_REASONING_TURNS - 1
                 required_tool = forced_next_tool
+                stage_search_reserve = bool(
+                    "stage" in requested_targets
+                    and normalized_requested_stage
+                    and search_calls == 0
+                )
+                force_submit = bool(
+                    correction_turn
+                    or (
+                        not required_tool
+                        and _turn >= (
+                            MAX_REASONING_TURNS - 4
+                            if stage_search_reserve
+                            else MAX_REASONING_TURNS - 1
+                        )
+                    )
+                )
+                forced_stage_search_call = bool(
+                    required_tool == "search_web"
+                    and forced_stage_search_pending
+                )
+                forced_industry_search_call = bool(
+                    required_tool == "search_web"
+                    and industry_followup_pending
+                    and not forced_stage_search_pending
+                )
                 status, body = await _post_json(
                     session,
                     "https://openrouter.ai/api/v1/chat/completions",
@@ -1614,6 +1673,14 @@ async def investigate_company_evidence(
                     or len(arguments["query"]) > 500
                 ):
                     raise ValueError("reasoning_forced_tool_arguments_malformed")
+                if forced_stage_search_call:
+                    normalized_query = _normalized_span(arguments["query"])
+                    normalized_search_name = _normalized_span(search_name)
+                    if (
+                        normalized_search_name not in normalized_query
+                        and search_domain not in normalized_query
+                    ):
+                        raise ValueError("reasoning_forced_tool_arguments_malformed")
                 canonical_call = {
                     "id": call_id,
                     "type": "function",
@@ -1624,6 +1691,7 @@ async def investigate_company_evidence(
                 }
                 if required_tool:
                     forced_next_tool = ""
+                    forced_stage_search_pending = False
                 if name == "submit_findings":
                     claims = _validated_findings(
                         arguments,
@@ -1696,28 +1764,53 @@ async def investigate_company_evidence(
                         and time.monotonic() - started
                         < ADMISSION_DEADLINE_SECONDS
                     )
+                    force_stage_search = bool(
+                        rejected
+                        and normalized_requested_stage
+                        and not correction_turn
+                        and search_calls == 0
+                        and search_calls < MAX_SEARCH_CALLS
+                        and prefetched_count + fetch_calls < MAX_FETCH_CALLS
+                        and time.monotonic() - started
+                        < ADMISSION_DEADLINE_SECONDS
+                        and any(
+                            item.get("target") == "stage"
+                            and item.get("reason") in {
+                                "source quote did not prove current private-equity ownership",
+                                "source quote did not prove current public listing",
+                            }
+                            for item in rejected
+                        )
+                    )
+                    # A rejected stage quote owns the one forced search action.
+                    # Do not count that stage query as the required targeted
+                    # industry follow-up when both conditions occur together.
+                    force_industry_followup = bool(
+                        force_industry_search and not force_stage_search
+                    )
                     if force_industry_search:
                         industry_followup_pending = True
-                    elif (
-                        non_supplier_industry_contradiction
-                        and search_calls == 0
-                    ):
-                        claims["industry"] = _unproven_findings(
-                            ("industry",),
-                            "requested industry absence was not established before "
-                            "the bounded targeted follow-up search",
-                        )["industry"]
-                    elif (
-                        industry_followup_pending
-                        and non_supplier_industry_contradiction
-                        and industry_finding.get("evidence_url")
-                        not in industry_followup_fetched_urls
-                    ):
-                        claims["industry"] = _unproven_findings(
-                            ("industry",),
-                            "requested industry absence was not proven by a source "
-                            "fetched after the targeted follow-up search",
-                        )["industry"]
+                    if not force_industry_followup:
+                        if (
+                            non_supplier_industry_contradiction
+                            and search_calls == 0
+                        ):
+                            claims["industry"] = _unproven_findings(
+                                ("industry",),
+                                "requested industry absence was not established before "
+                                "the bounded targeted follow-up search",
+                            )["industry"]
+                        elif (
+                            industry_followup_pending
+                            and non_supplier_industry_contradiction
+                            and industry_finding.get("evidence_url")
+                            not in industry_followup_fetched_urls
+                        ):
+                            claims["industry"] = _unproven_findings(
+                                ("industry",),
+                                "requested industry absence was not proven by a source "
+                                "fetched after the targeted follow-up search",
+                            )["industry"]
                     stage_finding = claims.get("stage") or {}
                     matching_venture_stage = bool(
                         requested_venture_stage
@@ -1736,9 +1829,16 @@ async def investigate_company_evidence(
                             "current venture stage was not established by a successful "
                             "company-bound discovery search",
                         )["stage"]
-                    if (rejected or force_industry_search) and not correction_turn:
-                        final_correction_pending = force_submit
-                        if force_industry_search:
+                    if (
+                        rejected or force_industry_followup
+                    ) and not correction_turn:
+                        final_correction_pending = bool(
+                            force_submit and not force_stage_search
+                        )
+                        if force_stage_search:
+                            forced_next_tool = "search_web"
+                            forced_stage_search_pending = True
+                        elif force_industry_followup:
                             forced_next_tool = "search_web"
                         tool_result = {
                             "ok": False,
@@ -1753,8 +1853,16 @@ async def investigate_company_evidence(
                                     "industry, product/service, and attribute. Search "
                                     "results are discovery only; fetch a useful result "
                                     "before citing it. "
-                                    if force_industry_search
-                                    else ""
+                                    if force_industry_followup
+                                    else (
+                                        "The stage quote failed deterministic validation. "
+                                        "The next action must search for the exact company "
+                                        "and its current stage, ownership, listing, acquisition, "
+                                        "or latest funding round. Search results are discovery "
+                                        "only; fetch a useful result before citing it. "
+                                        if force_stage_search
+                                        else ""
+                                    )
                                 )
                                 + "Never repeat a rejected quote. Use one exact continuous "
                                 "company-bound span from a fetched page; do not paraphrase, "
@@ -1764,13 +1872,13 @@ async def investigate_company_evidence(
                                 + (
                                     "This is the single final submit-only correction; "
                                     "do not search or fetch. "
-                                    if force_submit
+                                    if force_submit and not force_stage_search
                                     else (
                                         (
                                             "After the required search, fetch a useful "
                                             "source before submitting evidence. "
                                         )
-                                        if force_industry_search
+                                        if force_industry_followup or force_stage_search
                                         else (
                                             "First repair the quote from an already fetched "
                                             "page. Fetch another useful source only if no "
@@ -1847,7 +1955,9 @@ async def investigate_company_evidence(
                             tool_result = await _search_web(
                                 session, query.strip(), key=exa_key
                             )
-                            if required_tool == "search_web" and industry_followup_pending:
+                            if forced_stage_search_call:
+                                current_stage_search_succeeded = True
+                            if forced_industry_search_call:
                                 industry_followup_search_completed = True
                                 search_results = (
                                     tool_result.get("results")

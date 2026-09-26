@@ -150,6 +150,15 @@ sub-industry, product/service, and required-attribute context. A company that
 sells software to a requested industry is not itself in that industry unless
 the exact criterion says that vendors to that industry qualify. For industry,
 VERIFIED means direct supplier/operator evidence for the requested activity.
+A first-party URL, site ownership, footer, navigation, logo, URL path, or page
+title does not by itself establish that a quoted capability is supplied by the
+investigated company. Decide the activity role from the fetched page body.
+Customer stories, partner pages, marketplace or vendor entries, integration
+pages describing another company's capability, recruiting pages, and internal
+tool use remain customer_user, third_party, or internal_function unless the
+body directly supports the investigated company's own external supply. Page
+context outside the exact quote may resolve who supplies the capability, but it
+cannot replace the exact quote that proves the capability itself.
 A qualifying customer-facing commercial capability can be sold within a larger
 platform without being the company's main business or a standalone product,
 unless the exact criterion explicitly requires either condition. Distinguish
@@ -262,10 +271,14 @@ Use submit_findings when research is complete. If deterministic validation
 rejects it and returns feedback, correct it within the remaining limits and
 resubmit. A quote must be one continuous, exact span from its fetched page;
 never join separate passages or insert an ellipsis. When the decisive sentence
-does not name the company, extend the quote to one continuous adjacent span
-that includes both the company name and the decisive sentence. When a rejected
-quote paraphrases or joins fetched text, repair it from the already fetched page
-before spending another fetch. UNPROVEN must have empty
+does not name the company, extend the quote to one continuous adjacent span that
+includes both the company name and the decisive sentence when such a span
+exists. For industry only, a shorter exact capability quote may omit the company
+name when the supplied complete verified homepage identity and the fetched
+first-party page body independently establish that the investigated company is
+the supplier_operator. Never add the name to source text or splice separate
+passages. When a rejected quote paraphrases or joins fetched text, repair it
+from the already fetched page before spending another fetch. UNPROVEN must have empty
 evidence_url and evidence_quote fields. Return one finding for every requested
 target and no other target.
 VERIFIED means the requested claim is proven. CONTRADICTED means a different
@@ -817,6 +830,46 @@ def _independently_bound_first_party_url(
     )
 
 
+def _complete_verified_first_party_identity(
+    url: str,
+    domains: set[str],
+    identity: Mapping[str, Any],
+) -> bool:
+    """Bind an unnamed industry quote to one fully verified company identity."""
+
+    domain = _registrable_domain(url)
+    identity_domains = (
+        identity.get("submitted_domain"),
+        identity.get("observed_domain"),
+        identity.get("verified_domain"),
+    )
+    identity_names = tuple(
+        re.sub(r"[^a-z0-9]+", "", _normalized_span(identity.get(key)))
+        for key in ("submitted_name", "observed_name", "verified_name")
+    )
+    submitted_slug = str(
+        identity.get("submitted_linkedin_slug") or ""
+    ).strip().casefold()
+    observed_slug = str(
+        identity.get("observed_linkedin_slug") or ""
+    ).strip().casefold()
+    verified_slug = str(
+        identity.get("verified_linkedin_slug") or ""
+    ).strip().casefold()
+    return bool(
+        domain
+        and _first_party_url(url, domains)
+        and all(value for value in identity_domains)
+        and len(set(identity_domains)) == 1
+        and identity_domains[0] == domain
+        and all(identity_names)
+        and len(set(identity_names)) == 1
+        and observed_slug
+        and observed_slug == verified_slug
+        and (not submitted_slug or submitted_slug == verified_slug)
+    )
+
+
 def _same_domain_name_alias(identity: Mapping[str, Any]) -> bool:
     """Identify the narrow independent anchor for a disputed company name."""
 
@@ -1355,6 +1408,16 @@ def _validated_findings(
                 and not (
                     target == "stage"
                     and _independently_bound_first_party_url(
+                        evidence_url,
+                        first_party_domains,
+                        identity_anchor or {},
+                    )
+                )
+                and not (
+                    target == "industry"
+                    and status == "VERIFIED"
+                    and finding["activity_role"] == "supplier_operator"
+                    and _complete_verified_first_party_identity(
                         evidence_url,
                         first_party_domains,
                         identity_anchor or {},

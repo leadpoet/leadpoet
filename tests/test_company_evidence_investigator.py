@@ -3173,6 +3173,318 @@ def test_activity_and_headquarters_findings_require_bound_direct_evidence():
     )
 
 
+def _complete_rapid7_identity_anchor(**updates):
+    anchor = {
+        "submitted_name": "Rapid7",
+        "submitted_domain": "rapid7.com",
+        "submitted_linkedin_slug": "",
+        "observed_name": "rapid7",
+        "observed_domain": "rapid7.com",
+        "observed_linkedin_slug": "rapid7",
+        "verified_name": "rapid7",
+        "verified_domain": "rapid7.com",
+        "verified_linkedin_slug": "rapid7",
+    }
+    anchor.update(updates)
+    return anchor
+
+
+def _unnamed_rapid7_industry_finding(*, role="supplier_operator", quote=None):
+    return _finding(
+        "industry",
+        observed_value="Cloud Security",
+        observed_industry="Cloud Security",
+        observed_subindustry="Identity Analysis",
+        activity_role=role,
+        evidence_url=(
+            "https://docs.rapid7.com/insightcloudsec/identity-analysis/"
+        ),
+        evidence_quote=quote or (
+            "Identify and prioritize cloud identity risk through key risk "
+            "indicators like overly permissive access and privilege escalation."
+        ),
+    )
+
+
+def test_complete_identity_binds_exact_unnamed_first_party_industry_quote():
+    finding = _unnamed_rapid7_industry_finding()
+    result = _validated_findings(
+        {"findings": [finding]},
+        targets=("industry",),
+        fetched_pages={
+            finding["evidence_url"]: (
+                "Review Identity Analysis | Cloud Security Documentation. "
+                "Identity Analysis provides a unified location to explore "
+                "cloud accounts and permissions. " + finding["evidence_quote"]
+            ),
+        },
+        first_party_domains={"rapid7.com"},
+        identity_names={"rapid7"},
+        identity_anchor=_complete_rapid7_identity_anchor(),
+    )
+
+    assert result["industry"]["status"] == "VERIFIED"
+    assert result["industry"]["evidence_quote"] == finding["evidence_quote"]
+    assert result["industry"]["activity_role"] == "supplier_operator"
+
+
+def test_retained_rapid7_shape_reaches_unnamed_industry_attribution(
+    monkeypatch,
+):
+    finding = _unnamed_rapid7_industry_finding()
+    page = (
+        "Review Identity Analysis | Cloud Security Documentation. Identity "
+        "Analysis provides a unified location to explore cloud accounts and "
+        "permissions. " + finding["evidence_quote"]
+    )
+    requests = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {
+                "name": "submit_findings",
+                "arguments": json.dumps({"findings": [finding]}),
+            },
+        }]}}]}
+
+    search = AsyncMock()
+    fetch = AsyncMock()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_search_web", search)
+    monkeypatch.setattr(investigator, "_fetch_page", fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "Rapid7",
+            "website": "https://www.rapid7.com/",
+            "linkedin": "",
+        },
+        targets=("industry",),
+        requested_industry="Cloud Security",
+        requested_subindustry="Identity Protection",
+        requested_product_service="Cloud security platform",
+        requested_attribute="Identity risk detection",
+        positive_semantic_review=True,
+        prior_observations={
+            "observed_company_name": "rapid7",
+            "observed_company_website": "https://rapid7.com",
+            "observed_company_linkedin": (
+                "https://www.linkedin.com/company/rapid7"
+            ),
+            "submitted_source_urls": [finding["evidence_url"]],
+        },
+        verified_homepage_identity={
+            "normalized_name": "rapid7",
+            "registrable_dns_domain": "rapid7.com",
+            "linkedin_company_slug": "rapid7",
+        },
+        prefetched_pages={
+            finding["evidence_url"]: {
+                "final_url": finding["evidence_url"],
+                "text": page,
+            },
+        },
+    ))
+
+    assert result["claims"]["industry"]["status"] == "VERIFIED"
+    assert result["claims"]["industry"]["evidence_quote"] == (
+        finding["evidence_quote"]
+    )
+    assert result["usage"] == {
+        "reasoning_turns": 1,
+        "search_calls": 0,
+        "fetch_calls": 0,
+    }
+    input_document = json.loads(
+        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+    )
+    assert input_document["company_locator"]["linkedin"] == ""
+    assert input_document["verified_homepage_identity"][
+        "linkedin_company_slug"
+    ] == "rapid7"
+    search.assert_not_awaited()
+    fetch.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "identity_updates",
+    [
+        pytest.param(
+            {"observed_linkedin_slug": ""},
+            id="incomplete-linkedin-anchor",
+        ),
+        pytest.param(
+            {"verified_linkedin_slug": "other-company"},
+            id="mismatched-linkedin-anchor",
+        ),
+        pytest.param(
+            {"submitted_linkedin_slug": "other-company"},
+            id="conflicting-optional-submitted-linkedin-anchor",
+        ),
+        pytest.param(
+            {"verified_name": "Other Company"},
+            id="mismatched-name-anchor",
+        ),
+        pytest.param(
+            {"verified_domain": "other.example"},
+            id="mismatched-domain-anchor",
+        ),
+    ],
+)
+def test_unnamed_industry_quote_rejects_incomplete_or_mismatched_identity(
+    identity_updates,
+):
+    finding = _unnamed_rapid7_industry_finding()
+    result = _validated_findings(
+        {"findings": [finding]},
+        targets=("industry",),
+        fetched_pages={finding["evidence_url"]: finding["evidence_quote"]},
+        first_party_domains={"rapid7.com"},
+        identity_names={"rapid7"},
+        identity_anchor=_complete_rapid7_identity_anchor(**identity_updates),
+    )
+
+    assert result["industry"]["status"] == "UNPROVEN"
+    assert result["industry"]["evidence_url"] == ""
+
+
+@pytest.mark.parametrize(
+    ("url", "domains", "identity_updates"),
+    [
+        pytest.param(
+            "https://marketplace.example/vendors/rapid7",
+            {"rapid7.com"},
+            {},
+            id="external-marketplace-domain",
+        ),
+        pytest.param(
+            "https://newrapid7.example/platform",
+            {"rapid7.com", "newrapid7.example"},
+            {
+                "submitted_domain": "newrapid7.example",
+                "observed_domain": "newrapid7.example",
+            },
+            id="unproven-rebrand-domain",
+        ),
+    ],
+)
+def test_unnamed_industry_quote_rejects_unbound_or_rebrand_domain(
+    url,
+    domains,
+    identity_updates,
+):
+    finding = {
+        **_unnamed_rapid7_industry_finding(),
+        "evidence_url": url,
+    }
+    result = _validated_findings(
+        {"findings": [finding]},
+        targets=("industry",),
+        fetched_pages={url: finding["evidence_quote"]},
+        first_party_domains=domains,
+        identity_names={"rapid7"},
+        identity_anchor=_complete_rapid7_identity_anchor(**identity_updates),
+    )
+
+    assert result["industry"]["status"] == "UNPROVEN"
+
+
+@pytest.mark.parametrize(
+    "role",
+    ["customer_user", "internal_function", "third_party", "unresolved"],
+)
+def test_complete_identity_does_not_override_wrong_industry_role(role):
+    finding = _unnamed_rapid7_industry_finding(role=role)
+    result = _validated_findings(
+        {"findings": [finding]},
+        targets=("industry",),
+        fetched_pages={finding["evidence_url"]: finding["evidence_quote"]},
+        first_party_domains={"rapid7.com"},
+        identity_names={"rapid7"},
+        identity_anchor=_complete_rapid7_identity_anchor(),
+    )
+
+    assert result["industry"]["status"] == "UNPROVEN"
+
+
+def test_complete_identity_does_not_admit_fabricated_industry_quote():
+    finding = _unnamed_rapid7_industry_finding(
+        quote="Detect every cloud identity risk before an attacker can act.",
+    )
+    result = _validated_findings(
+        {"findings": [finding]},
+        targets=("industry",),
+        fetched_pages={
+            finding["evidence_url"]: (
+                "Identify and prioritize cloud identity risk through key risk "
+                "indicators like overly permissive access."
+            ),
+        },
+        first_party_domains={"rapid7.com"},
+        identity_names={"rapid7"},
+        identity_anchor=_complete_rapid7_identity_anchor(),
+    )
+
+    assert result["industry"]["status"] == "UNPROVEN"
+    assert result["industry"]["reason"] == (
+        "submitted quote was not present in fetched source"
+    )
+
+
+@pytest.mark.parametrize(
+    ("target", "finding"),
+    [
+        pytest.param(
+            "headcount",
+            _finding(
+                "headcount",
+                observed_value=42,
+                evidence_url="https://rapid7.com/about",
+                evidence_quote="We employ 42 people across our offices.",
+            ),
+            id="headcount",
+        ),
+        pytest.param(
+            "geography",
+            _finding(
+                "geography",
+                observed_value="Massachusetts, United States",
+                observed_country="United States",
+                observed_state="Massachusetts",
+                evidence_url="https://rapid7.com/about",
+                evidence_quote=(
+                    "Our headquarters is in Massachusetts, United States."
+                ),
+            ),
+            id="geography",
+        ),
+    ],
+)
+def test_complete_identity_keeps_nonindustry_literal_company_binding(
+    target,
+    finding,
+):
+    result = _validated_findings(
+        {"findings": [finding]},
+        targets=(target,),
+        fetched_pages={finding["evidence_url"]: finding["evidence_quote"]},
+        first_party_domains={"rapid7.com"},
+        identity_names={"rapid7"},
+        identity_anchor=_complete_rapid7_identity_anchor(),
+    )
+
+    assert result[target]["status"] == "UNPROVEN"
+    assert result[target]["reason"] == (
+        "source quote did not identify the investigated company"
+    )
+
+
 def test_activity_and_hq_reject_same_name_wrong_domain_and_accept_bound_company():
     wrong_domain = "https://abec.co.uk/about"
     wrong_industry = _finding(
@@ -7926,6 +8238,15 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
     )
     assert "one supported alternative for each OR clause" in system_prompt
     assert "Equivalent source language is sufficient" in system_prompt
+    assert (
+        "footer, navigation, logo, URL path, or page title does not by itself"
+        in system_prompt
+    )
+    assert "marketplace or vendor entries" in system_prompt
+    assert "recruiting pages, and internal tool use" in system_prompt
+    assert "Never add the name to source text or splice separate passages" in (
+        system_prompt
+    )
 
 
 @pytest.mark.parametrize(

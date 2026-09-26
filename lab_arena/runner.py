@@ -41,6 +41,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from lab_arena import integrity, contact_policy, intent_details_policy, quality_policy
+from lab_arena import trajectory
 from lab_arena import contracts, images, lab_arena_checkpoint, leased_images, operations, runtime, scoring, shim, source_bundle
 from lab_arena.contracts import ArenaContractError
 from lab_arena.output import (
@@ -615,6 +616,8 @@ class ArenaApiClient(Protocol):
 
     def complete(self, envelope: Mapping[str, Any]) -> Dict[str, Any]: ...
 
+    def trajectory(self, run_id: str, lease_token: str, events: Sequence[Mapping[str, Any]]) -> Dict[str, Any]: ...
+
     def source(self, run_id: str, lease_token: str) -> bytes: ...
 
     def image_access(self, run_id: str, lease_token: str) -> Dict[str, Any]: ...
@@ -709,6 +712,21 @@ class HttpArenaApiClient:
             "/arena/v1/runs/claim",
             envelope,
             preserve_http_status=True,
+        )
+
+    def trajectory(
+        self, run_id: str, lease_token: str,
+        events: Sequence[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        if not isinstance(run_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9._:-]{1,200}", run_id
+        ):
+            raise RunnerError("run trajectory is unavailable")
+        return self._post(
+            "/arena/v1/runs/%s/trajectory" % run_id,
+            {"events": list(events)},
+            headers={"x-lab-arena-lease": lease_token},
+            timeout_seconds=5.0,
         )
 
     def provider(self, run_id: str, lease_token: str, frame: Mapping[str, Any]) -> Dict[str, Any]:
@@ -2492,6 +2510,80 @@ def _attempt_web_egress(server: Any, worker: Any) -> Iterator[Any]:
             raise
 
 
+def _record_trajectory(
+    config: RunnerConfig, lease: Mapping[str, Any], lease_token: str,
+    events: Sequence[Mapping[str, Any]],
+) -> None:
+    """Best-effort bounded delivery, independent of completion and scoring.
+
+    Replay the same event IDs once on transport failure. A diagnostics outage
+    must not turn completed model work into a failed assignment.
+    """
+    send = getattr(config.api, "trajectory", None)
+    if not callable(send):  # embedded clients can predate this optional API
+        return
+    try:
+        batches: List[List[Mapping[str, Any]]] = [[]]
+        size = 20
+        for item in events:
+            # Match the server's conservative escaped-JSON size check.
+            item_size = len(json.dumps(item, separators=(",", ":")).encode("utf-8")) + 1
+            if batches[-1] and (len(batches[-1]) >= 32 or size + item_size > 48_000):
+                batches.append([])
+                size = 20
+            batches[-1].append(item)
+            size += item_size
+        deadline = time.monotonic() + 15.0
+        for batch in batches:
+            if not batch:
+                continue
+            for attempt in range(2):
+                if time.monotonic() >= deadline:
+                    raise RunnerError("trajectory upload deadline")
+                try:
+                    response = send(str(lease["run_id"]), lease_token, batch)
+                except Exception:
+                    if attempt == 0:
+                        continue
+                    raise
+                if not isinstance(response, Mapping) or response.get("accepted") != len(batch):
+                    raise RunnerError("trajectory upload rejected")
+                break
+    except Exception as exc:
+        # No response body, lease, model text or exception prose in host logs.
+        print("Arena trajectory upload failed: %s" % type(exc).__name__, file=sys.stderr, flush=True)
+
+
+def _runtime_log_events(
+    result: Optional[runtime.SandboxResult], lease_token: str, observed_at: str,
+) -> List[Dict[str, Any]]:
+    if result is None:
+        return []
+    events = []
+    for stream in ("stdout", "stderr"):
+        raw = getattr(result, stream)[:runtime.MAX_LOG_BYTES]
+        # Redact before splitting so credentials cannot span stored chunks.
+        text = trajectory.redact_text(raw.decode("utf-8", errors="replace"), secrets=(lease_token,))
+        encoded = text.encode("utf-8")
+        truncated = bool(getattr(result, stream + "_truncated")) or len(encoded) > runtime.MAX_LOG_BYTES
+        text = encoded[:runtime.MAX_LOG_BYTES].decode("utf-8", errors="replace")
+        sequence = 0
+        while text:
+            count = min(1024, len(text))
+            while len(json.dumps(text[:count]).encode("utf-8")) > 6000:
+                count //= 2
+            chunk, text = text[:count], text[count:]
+            events.append(trajectory.event(
+                "runtime." + stream,
+                {"text": chunk, "sequence": sequence,
+                 "truncated": truncated,
+                 "captured_bytes": len(raw)},
+                occurred_at=observed_at,
+            ))
+            sequence += 1
+    return events
+
+
 class AssignmentExecutor:
     def __init__(self, config: RunnerConfig) -> None:
         self._config = config
@@ -2577,6 +2669,11 @@ class AssignmentExecutor:
         worker = None
         evaluation_date = str(lease.get("evaluation_date") or config.evaluation_date)
         try:
+            _record_trajectory(config, lease, lease_token, [trajectory.event(
+                "runtime.started", {"status": "starting", "runtime": "runsc",
+                                    "wall_clock_limit_seconds": wall_clock_seconds},
+                occurred_at=started_at,
+            )])
             if scoring_run:
                 # A scoring assignment runs the Arena judge image on one accepted
                 # output; the judge's provider calls cross the same socket.
@@ -2936,12 +3033,27 @@ class AssignmentExecutor:
                 "reason": "provider_error",
             }
             _log_dependency_failure(str(lease["run_id"]), exc)
+            _record_trajectory(config, lease, lease_token, [trajectory.event(
+                "runtime.error", {"status": terminal, "error_class": type(exc).__name__},
+                occurred_at=_timestamp(config.clock),
+            )])
         except AgentDependencyError as exc:
             if scoring_run:  # the trusted scorer has no submitted dependency tree
                 raise
             terminal = "model_error"
             output_document = None
             _log_dependency_failure(str(lease["run_id"]), exc)
+            _record_trajectory(config, lease, lease_token, [trajectory.event(
+                "runtime.error", {"status": terminal, "error_class": type(exc).__name__},
+                occurred_at=_timestamp(config.clock),
+            )])
+        except Exception as exc:
+            observed_at = _timestamp(config.clock)
+            _record_trajectory(config, lease, lease_token, [trajectory.event(
+                "runtime.error", {"status": "abandoned", "error_class": type(exc).__name__},
+                occurred_at=observed_at,
+            ), *_runtime_log_events(result, lease_token, observed_at)])
+            raise
         finally:
             server.stop()
             shutil.rmtree(run_dir, ignore_errors=True)
@@ -3016,6 +3128,16 @@ class AssignmentExecutor:
                 str(lease["run_id"]), execution_diagnostic, result
             )
         body = {"run_id": lease["run_id"], "result": run_result, "output": output_document, "lease_token": lease_token}
+        _record_trajectory(config, lease, lease_token, [trajectory.event(
+            "runtime.finished",
+            {"status": terminal, "resource_summary": run_result["resource_summary"],
+             "started_at": started_at, "finished_at": finished_at,
+             "exit_code": result.exit_code if result else None,
+             "timed_out": bool(result and result.timed_out),
+             "company_count": len((output_document or {}).get("companies") or []),
+             "failure_diagnostic": failure_diagnostic},
+            occurred_at=finished_at,
+        ), *_runtime_log_events(result, lease_token, finished_at)])
         return contracts.build_signed_request(
             scope=contracts.SCOPE_COMPLETE,
             round_id=round_id,

@@ -31,6 +31,36 @@ evaluation gate. Queued, incomplete, and cancelled evaluations do not release
 submitted code. Provider credentials are never public. The CLI's public-rerun
 consent covers source disclosure.
 
+## Private execution trajectories
+
+Migration `365-lab-arena-trajectories.sql` adds one private table,
+`lab_arena_trajectory_events`. It contains runtime start, finish, failure,
+stdout and stderr events, plus provider request, response and error events for
+OpenRouter, Deepline and ScrapingDog. Each row names the round, submission,
+assignment, ICP position, run, attempt and validator. `model_role` distinguishes
+the baseline from a miner; `run_kind` distinguishes execution from judging.
+`icp_identifier` is the stable round ID plus ICP position.
+
+The gateway attaches these identities from the stored run. Validators upload
+runtime events to `/arena/v1/runs/{run_id}/trajectory` with their existing lease.
+They need no Supabase key, provider key, new environment setting or additional
+signature. The gateway records provider events where it makes the real calls.
+Anonymous and publishable-key clients cannot read or write this table. Use the
+existing private gateway database access for operator reads.
+
+Runtime output is uploaded after the sandbox stops, in ordered chunks. Each
+stream retains at most 64 KiB, with a truncation flag when needed. Provider
+content is a bounded, redacted preview with operation, model, call sequence,
+status, timing and billing metadata. Credentials and hidden reasoning fields
+are removed. Events have UUIDs so upload retries do not duplicate them. These
+events are diagnostics, not scoring evidence or validator attestations.
+
+Uploads have bounded retries. A logging failure produces a private warning and
+does not change model results, provider retries, billing or scoring. A killed
+validator can lose its final buffered runtime output; provider events already
+stored by the gateway remain available. This first version adds no log viewer
+or automatic retention deletion.
+
 ## Competition boundary
 
 A miner submits one local source directory. The helper:

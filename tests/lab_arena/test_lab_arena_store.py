@@ -384,6 +384,7 @@ def test_store_boundary_contains_only_current_arena_durable_state():
         "lab_arena_submissions",
         "lab_arena_runs",
         "lab_arena_ledger",
+        "lab_arena_trajectory_events",
         "lab_arena_accepted_weight_states",
         "lab_arena_chain_outcomes",
         "lab_arena_judgment_cache",

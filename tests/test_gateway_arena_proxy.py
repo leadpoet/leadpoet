@@ -149,6 +149,31 @@ def test_proxy_uses_the_shared_larger_limit_only_for_completions(monkeypatch):
     ).status_code == 413
 
 
+def test_proxy_applies_compact_trajectory_limit(monkeypatch):
+    observed = {}
+
+    async def forward(method, path, *, query, body, headers):
+        observed.update(method=method, path=path, body=body, headers=dict(headers))
+        return httpx.Response(200, json={"status": "accepted"})
+
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setattr(arena_proxy, "_request_sidecar", forward)
+    client = _app()
+    accepted = client.post(
+        "/arena/v1/runs/r1/trajectory",
+        content=b"{}",
+        headers={"x-lab-arena-lease": "a" * 64},
+    )
+    assert accepted.status_code == 200
+    assert observed["path"] == "v1/runs/r1/trajectory"
+    assert observed["headers"] == {"x-lab-arena-lease": "a" * 64}
+    refused = client.post(
+        "/arena/v1/runs/r1/trajectory",
+        content=b"x" * (arena_proxy._MAX_TRAJECTORY_REQUEST_BYTES + 1),
+    )
+    assert refused.status_code == 413
+
+
 def test_proxy_contains_sidecar_failure(monkeypatch):
     async def fail(*_args, **_kwargs):
         raise httpx.ConnectError("unavailable")

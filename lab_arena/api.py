@@ -13,7 +13,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
-from lab_arena import contracts, source_bundle
+from lab_arena import contracts, source_bundle, trajectory
 from lab_arena.contracts import ArenaContractError
 from lab_arena.service import ArenaService, ServiceError
 from lab_arena.store import ArenaStoreUnavailable
@@ -238,6 +238,27 @@ def create_app(service: ArenaService) -> FastAPI:
             lease_token,
             frame,
             disconnected,
+        )
+
+    @app.post("/arena/v1/runs/{run_id}/trajectory")
+    async def append_trajectory(
+        run_id: str,
+        request: Request,
+        x_lab_arena_lease: Optional[str] = Header(default=None),
+    ) -> Any:
+        lease_token = _lease_header(x_lab_arena_lease)
+        document = await _read_json(
+            request,
+            limits=contracts.StrictLimits(
+                max_depth=trajectory.MAX_DEPTH + 2,
+                max_list_items=trajectory.MAX_EVENTS_PER_REQUEST,
+                max_object_keys=trajectory.MAX_KEYS,
+                max_string_bytes=trajectory.MAX_EVENT_BYTES,
+                max_total_bytes=trajectory.MAX_REQUEST_BYTES,
+            ),
+        )
+        return await run_in_threadpool(
+            service.handle_trajectory, run_id, lease_token, document
         )
 
     @app.get("/arena/v1/runs/{run_id}/quota")

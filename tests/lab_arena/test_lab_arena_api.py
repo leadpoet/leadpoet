@@ -117,6 +117,15 @@ class StubService:
             self.calls["provider_has_event_loop"] = False
         return {"status": 200, "headers": {}, "body_b64": "e30=", "call": {}}
 
+    def handle_trajectory(self, run_id, lease_token, document):
+        self.calls["trajectory"] = (run_id, lease_token, document)
+        return {
+            "status": "accepted",
+            "accepted": len(document["events"]),
+            "inserted": len(document["events"]),
+            "existing": 0,
+        }
+
     def handle_source(self, run_id, lease_token):
         self.calls["source"] = (run_id, lease_token)
         return b"source archive"
@@ -395,6 +404,33 @@ def test_provider_frames_carry_the_judges_long_prompts(client):
     from lab_arena import contracts as c
 
     c.check_strict_document(frame, c.PROVIDER_FRAME_LIMITS)  # the service applies these to the frame
+
+
+def test_trajectory_route_requires_lease_and_bounds_body(client):
+    http, service = client
+    document = {
+        "events": [{
+            "event_id": "ad4fb146-937d-4dd4-a16d-e8ae8fb6bada",
+            "kind": "runtime.started",
+            "occurred_at": "2026-09-25T12:00:00Z",
+            "content": {"status": "started"},
+        }]
+    }
+    denied = http.post("/arena/v1/runs/r1/trajectory", json=document)
+    assert denied.status_code == 401
+    accepted = http.post(
+        "/arena/v1/runs/r1/trajectory",
+        json=document,
+        headers={"x-lab-arena-lease": "a" * 64},
+    )
+    assert accepted.status_code == 200
+    assert service.calls["trajectory"] == ("r1", "a" * 64, document)
+    oversized = http.post(
+        "/arena/v1/runs/r1/trajectory",
+        content=b"x" * (64 * 1024 + 1),
+        headers={"x-lab-arena-lease": "a" * 64},
+    )
+    assert oversized.status_code == 413
 
 
 def test_scorer_image_access_is_lease_scoped_and_never_cacheable(client):

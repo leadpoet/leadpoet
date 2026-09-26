@@ -92,6 +92,13 @@ def test_unibuddy_source_and_functional_role_rule_reach_stage_three() -> None:
     assert UNIBUDDY_TEXT in prompt
     assert "do not require the job title to repeat the category word" in prompt
     assert "work across the\n    employer's platform stack or components" in prompt
+    assert "A submitted claim quote is not the complete evidentiary window" in prompt
+    assert "Direct\n    functional duties established there take precedence" in prompt
+    assert (
+        "Incidental exposure\n    alone is insufficient only when no direct "
+        "functional duties are established"
+    ) in prompt
+    assert "elsewhere in that same job body" in prompt
 
 
 @pytest.mark.parametrize(
@@ -154,3 +161,20 @@ def test_functional_hiring_guidance_is_bounded_to_hiring_evidence() -> None:
     ):
         assert "HIRING — FUNCTIONAL ROLE MATCH" not in prompt
         assert "job title to repeat the category word" not in prompt
+
+
+def test_functional_role_precedence_does_not_import_unrelated_evidence() -> None:
+    source_text = (
+        "This role gains exposure to the Acme platform. A separate sales role "
+        "operates the platform. About Acme: our platform powers global teams."
+    )
+
+    prompt = _stage_three_prompt(_row(), source_text)
+
+    assert source_text in prompt
+    assert (
+        "Do not replace missing duties with evidence\n    from another role or "
+        "hiring event, or with company boilerplate"
+    ) in prompt
+    assert "Merely using a platform" in prompt
+    assert "generic software role" in prompt

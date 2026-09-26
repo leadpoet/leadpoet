@@ -252,6 +252,15 @@ HIRING_FUNCTIONAL_ROLE_BLOCK = """  HIRING — FUNCTIONAL ROLE MATCH:
     employer's platform stack or components and gives it build, operation,
     maintenance, or ownership duties there.
 
+    Inspect all supplied body evidence for the same role before applying this
+    boundary. A submitted claim quote is not the complete evidentiary window:
+    inspect that role's own duties elsewhere in the same job body. Direct
+    functional duties established there take precedence over introductory
+    wording that says the candidate will gain exposure. Incidental exposure
+    alone is insufficient only when no direct functional duties are established
+    elsewhere in that same job body. Do not replace missing duties with evidence
+    from another role or hiring event, or with company boilerplate.
+
     Keep the boundary strict. A generic software role at a company that sells
     a platform is not automatically a platform role. Merely using a platform,
     gaining incidental exposure to it, or mentioning it only in company

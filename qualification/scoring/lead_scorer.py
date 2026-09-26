@@ -5237,12 +5237,17 @@ def _targeted_company_investigation_dimensions(
         and dimensions.get("stage") == COMPANY_FIT_MATCH
         and _submitted_intent_stage_conflicts(company, icp_stage)
     )
+    current_public_stage_check = bool(
+        _normalize_company_stage(icp_stage) == "public"
+        and dimensions.get("stage") == COMPANY_FIT_MATCH
+    )
     if (
         icp_stage
         and (
             dimensions.get("stage")
             in {COMPANY_FIT_MISMATCH, COMPANY_FIT_UNAVAILABLE}
             or submitted_stage_conflict
+            or current_public_stage_check
         )
     ):
         targets.append("stage")
@@ -6003,6 +6008,19 @@ async def _run_targeted_company_evidence_investigation(
         "failure_reason": str(investigation.get("failure_reason") or ""),
         "positive_semantic_review": review_positive_semantics,
     }
+    if not prior_dimensions:
+        prior_dimensions = (
+            prior_result.details.get("dimension_decisions", {})
+            if prior_result is not None
+            and isinstance(prior_result.details, Mapping)
+            else {}
+        )
+    reopened_public_stage = bool(
+        "stage" in investigation_targets
+        and _normalize_company_stage(icp_stage) == "public"
+        and isinstance(prior_dimensions, Mapping)
+        and prior_dimensions.get("stage") == COMPANY_FIT_MATCH
+    )
     if not claims:
         unavailable = _with_verifier_failure_reason(
             company_fit_unavailable(
@@ -6014,17 +6032,26 @@ async def _run_targeted_company_evidence_investigation(
             ),
             investigation_diagnostic.get(VERIFIER_FAILURE_REASON_KEY),
         )
-        return dict(verdict), unavailable, {}, {}, {}
+        unavailable_verdict = dict(verdict)
+        if reopened_public_stage:
+            unavailable_verdict.update(
+                observed_company_stage="",
+                stage_matches=None,
+                stage_evidence_url="",
+                stage_evidence_quote="",
+            )
+            if isinstance(unavailable_verdict.get("dimension_evidence"), Mapping):
+                unavailable_verdict["dimension_evidence"] = {
+                    key: value
+                    for key, value in unavailable_verdict[
+                        "dimension_evidence"
+                    ].items()
+                    if key != "stage"
+                }
+        return unavailable_verdict, unavailable, {}, {}, {}
     validated_stage_finding = investigation.get("_validated_stage_finding")
     if not isinstance(validated_stage_finding, Mapping):
         validated_stage_finding = {}
-    if not prior_dimensions:
-        prior_dimensions = (
-            prior_result.details.get("dimension_decisions", {})
-            if prior_result is not None
-            and isinstance(prior_result.details, Mapping)
-            else {}
-        )
     reopened_matching_stage = bool(
         "stage" in investigation_targets
         and isinstance(prior_dimensions, Mapping)
@@ -6057,10 +6084,15 @@ async def _run_targeted_company_evidence_investigation(
             investigation,
         )
     )
-    if reopened_matching_stage and not reopened_stage_resolved:
-        # The submitted conflict is only a trigger. Once it reopens a positive
-        # stage, failure to independently validate the current stage must not
-        # retain the stale positive verdict.
+    reopened_public_stage_resolved = bool(
+        reopened_public_stage and validated_stage_finding
+    )
+    if (
+        (reopened_matching_stage and not reopened_stage_resolved)
+        or (reopened_public_stage and not reopened_public_stage_resolved)
+    ):
+        # Once a conflict or mandatory current-Public check reopens a positive
+        # stage, failure to validate it must not retain the stale verdict.
         projected.update(
             observed_company_stage="",
             stage_matches=None,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -142,6 +143,245 @@ def test_completed_take_private_dispute_precedes_old_ticker_hint():
     ) == dispute_url
 
 
+def test_solarwinds_old_ticker_match_reopens_public_stage_without_submitted_conflict():
+    result = SimpleNamespace(details={
+        "dimension_decisions": {
+            "stage": lead_scorer.COMPANY_FIT_MATCH,
+            "industry": lead_scorer.COMPANY_FIT_MATCH,
+        },
+        "provider_observations": {},
+    })
+
+    assert lead_scorer._targeted_company_investigation_dimensions(
+        result,
+        icp_stage="Public",
+        employee_size_conflict=False,
+        company=_company("SolarWinds", "https://solarwinds.com"),
+    ) == ("stage",)
+
+
+def test_public_request_gets_bounded_current_stage_discovery(monkeypatch):
+    requests = []
+    search = AsyncMock(return_value={"results": []})
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {
+                "name": "submit_findings",
+                "arguments": json.dumps({"findings": [{
+                    "target": "stage",
+                    "status": "UNPROVEN",
+                    "observed_value": None,
+                    "reason": "no current listing or supersession source fetched",
+                }]}),
+            },
+        }]}}]}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_search_web", search)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "SolarWinds", "website": "https://solarwinds.com",
+        },
+        targets=("stage",),
+        requested_stage="Public",
+    ))
+
+    expected_query = (
+        "SolarWinds solarwinds.com current public listing "
+        "completed take-private acquisition delisting"
+    )
+    search.assert_awaited_once()
+    assert search.await_args.args[1] == expected_query
+    assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["usage"]["search_calls"] == 1
+    document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
+    assert document["server_current_stage_discovery"]["query"] == expected_query
+    assert document["server_current_stage_discovery"]["ok"] is True
+    assert document["investigation_limits"]["remaining_search_calls"] == 1
+
+
+def test_matching_public_requires_successful_current_status_search(monkeypatch):
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers, payload
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {
+                "name": "submit_findings",
+                "arguments": json.dumps({"findings": [{
+                    "target": "stage",
+                    "status": "VERIFIED",
+                    "observed_value": "Public",
+                    "evidence_url": TENB_FIRST_PARTY_URL,
+                    "evidence_quote": TENB_QUOTE,
+                }]}),
+            },
+        }]}}]}
+
+    search = AsyncMock(side_effect=RuntimeError("search unavailable"))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_search_web", search)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Tenable", "website": "https://tenable.com"},
+        targets=("stage",),
+        requested_stage="Public",
+        prior_observations={
+            "submitted_source_urls": [TENB_FIRST_PARTY_URL],
+        },
+        prefetched_pages={
+            TENB_FIRST_PARTY_URL: {
+                "final_url": TENB_FIRST_PARTY_URL,
+                "text": TENB_QUOTE,
+            },
+        },
+    ))
+
+    search.assert_awaited_once()
+    assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["claims"]["stage"]["reason"] == (
+        "current public stage was not established after a successful "
+        "company-bound current-status discovery"
+    )
+    assert result["_validated_stage_finding"] == {}
+
+
+def test_current_tenable_public_proof_survives_successful_current_search(monkeypatch):
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers, payload
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {
+                "name": "submit_findings",
+                "arguments": json.dumps({"findings": [{
+                    "target": "stage",
+                    "status": "VERIFIED",
+                    "observed_value": "Public",
+                    "evidence_url": TENB_FIRST_PARTY_URL,
+                    "evidence_quote": TENB_QUOTE,
+                }]}),
+            },
+        }]}}]}
+
+    search = AsyncMock(return_value={"results": []})
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_search_web", search)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Tenable", "website": "https://tenable.com"},
+        targets=("stage",),
+        requested_stage="Public",
+        prior_observations={
+            "submitted_source_urls": [TENB_FIRST_PARTY_URL],
+        },
+        prefetched_pages={
+            TENB_FIRST_PARTY_URL: {
+                "final_url": TENB_FIRST_PARTY_URL,
+                "text": TENB_QUOTE,
+            },
+        },
+    ))
+
+    search.assert_awaited_once()
+    assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["claims"]["stage"]["observed_value"] == "Public"
+    assert result["_validated_stage_finding"] == result["claims"]["stage"]
+
+
+def test_completed_solarwinds_take_private_is_a_deterministic_contradiction(
+    monkeypatch,
+):
+    source_url = (
+        "https://www.solarwinds.com/company/newsroom/press-releases/"
+        "turnriver-completes-acquisition-of-solarwinds"
+    )
+    quote = (
+        "Turn/River Capital has completed the acquisition of SolarWinds "
+        "Corporation. With the closing of the transaction, SolarWinds common "
+        "stock has ceased trading on the New York Stock Exchange."
+    )
+    requests = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        if len(requests) == 1:
+            name = "fetch_page"
+            arguments = {"url": source_url}
+        else:
+            name = "submit_findings"
+            arguments = {"findings": [{
+                "target": "stage",
+                "status": "CONTRADICTED",
+                "observed_value": "Acquired",
+                "evidence_url": source_url,
+                "evidence_quote": quote,
+            }]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{len(requests)}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    search = AsyncMock(return_value={"results": [{"url": source_url}]})
+    fetch = AsyncMock(return_value={
+        "ok": True,
+        "url": source_url,
+        "final_url": source_url,
+        "text": quote,
+    })
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_search_web", search)
+    monkeypatch.setattr(investigator, "_fetch_page", fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "SolarWinds", "website": "https://solarwinds.com",
+        },
+        targets=("stage",),
+        requested_stage="Public",
+    ))
+
+    search.assert_awaited_once()
+    fetch.assert_awaited_once()
+    assert result["claims"]["stage"]["status"] == "CONTRADICTED"
+    assert result["claims"]["stage"]["observed_value"] == "Acquired"
+    assert result["usage"] == {
+        "reasoning_turns": 2,
+        "search_calls": 1,
+        "fetch_calls": 1,
+    }
+
+
+@pytest.mark.parametrize("quote", [
+    "Turn/River Capital proposed an acquisition of SolarWinds Corporation.",
+    "Turn/River Capital completed the acquisition of Another Company.",
+])
+def test_proposal_or_wrong_entity_cannot_contradict_solarwinds_public_stage(quote):
+    finding = _validate_stage(
+        "SolarWinds",
+        "Acquired",
+        "https://news.example/transaction",
+        quote,
+    )
+    assert finding["status"] == "UNPROVEN"
+
+
 def test_tenable_nasdaq_hint_fetches_within_budget_and_exact_quote_admits(monkeypatch):
     industry_url = "https://www.tenable.com/products"
     requests = []
@@ -170,7 +410,7 @@ def test_tenable_nasdaq_hint_fetches_within_budget_and_exact_quote_admits(monkey
         "final_url": TENB_NASDAQ_URL,
         "text": TENB_QUOTE,
     })
-    search = AsyncMock()
+    search = AsyncMock(return_value={"results": [{"url": TENB_NASDAQ_URL}]})
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
     monkeypatch.setattr(investigator, "_post_json", fake_post)
@@ -203,15 +443,16 @@ def test_tenable_nasdaq_hint_fetches_within_budget_and_exact_quote_admits(monkey
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["usage"] == {
         "reasoning_turns": 1,
-        "search_calls": 0,
+        "search_calls": 1,
         "fetch_calls": 1,
     }
     fetch.assert_awaited_once()
-    search.assert_not_awaited()
+    search.assert_awaited_once()
     document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
     assert document["investigation_limits"]["prefetched_pages"] == 1
     assert document["investigation_limits"]["server_prefetch_fetch_calls"] == 1
     assert document["investigation_limits"]["remaining_fetch_calls"] == 1
+    assert document["investigation_limits"]["remaining_search_calls"] == 1
 
 
 def test_tenable_hint_cannot_admit_quote_absent_from_fetched_source():

@@ -66,7 +66,9 @@ def test_public_stage_prefetches_exact_tenable_submitted_release(monkeypatch):
     fetch = AsyncMock(return_value={
         "ok": True, "url": url, "final_url": url, "text": quote,
     })
-    search = AsyncMock()
+    search = AsyncMock(return_value={
+        "results": [{"url": "https://www.nasdaq.com/market-activity/stocks/tenb"}],
+    })
     _set_keys(monkeypatch)
     monkeypatch.setattr(investigator, "_post_json", fake_post)
     monkeypatch.setattr(investigator, "_fetch_page", fetch)
@@ -86,11 +88,11 @@ def test_public_stage_prefetches_exact_tenable_submitted_release(monkeypatch):
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["claims"]["stage"]["evidence_url"] == url
     assert result["usage"] == {
-        "reasoning_turns": 1, "search_calls": 0, "fetch_calls": 1,
+        "reasoning_turns": 1, "search_calls": 1, "fetch_calls": 1,
     }
     fetch.assert_awaited_once()
     assert fetch.await_args.args[1] == url
-    search.assert_not_awaited()
+    search.assert_awaited_once()
     document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
     assert document["server_public_stage_source_fetch"]["url"] == url
     assert document["investigation_limits"]["remaining_fetch_calls"] == 2
@@ -167,6 +169,11 @@ def test_failed_public_stage_prefetch_keeps_remaining_fetch_budget(monkeypatch):
     _set_keys(monkeypatch)
     monkeypatch.setattr(investigator, "_post_json", fake_post)
     monkeypatch.setattr(investigator, "_fetch_page", fetch)
+    monkeypatch.setattr(
+        investigator,
+        "_search_web",
+        AsyncMock(return_value={"results": [{"url": exchange_url}]}),
+    )
 
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example/"},
@@ -281,6 +288,11 @@ def test_existing_first_party_prefetch_preserves_two_fetch_slots(monkeypatch):
     _set_keys(monkeypatch)
     monkeypatch.setattr(investigator, "_post_json", fake_post)
     monkeypatch.setattr(investigator, "_fetch_page", fetch)
+    monkeypatch.setattr(
+        investigator,
+        "_search_web",
+        AsyncMock(return_value={"results": [{"url": second_url}]}),
+    )
 
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example/"},
@@ -327,6 +339,11 @@ def test_public_stage_auto_prefetch_plus_two_model_fetches_stops_fourth(monkeypa
     _set_keys(monkeypatch)
     monkeypatch.setattr(investigator, "_post_json", fake_post)
     monkeypatch.setattr(investigator, "_fetch_page", fetch)
+    monkeypatch.setattr(
+        investigator,
+        "_search_web",
+        AsyncMock(return_value={"results": [{"url": second_url}]}),
+    )
 
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example/"},
@@ -438,6 +455,6 @@ def test_historical_ipo_only_remains_unproven(monkeypatch):
 
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
     assert result["usage"] == {
-        "reasoning_turns": 3, "search_calls": 1, "fetch_calls": 1,
+        "reasoning_turns": 3, "search_calls": 2, "fetch_calls": 1,
     }
-    search.assert_awaited_once()
+    assert search.await_count == 2

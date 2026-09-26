@@ -204,13 +204,17 @@ Acquired and does not supersede the buyer's funding stage. Only an acquisition
 OF the investigated company can do that. Thus a later
 Series C, controlling acquisition, or IPO can contradict an earlier Series B;
 later debt alone cannot. Conflicting labels without chronology are UNPROVEN.
-For a requested Seed, Series A, Series B, or Series C+ stage, a matching old
-completed-round source is not enough by itself. Before returning VERIFIED for
-that matching stage, complete the server-required current-stage search for the
-exact company. The search covers later funding, acquisition, and IPO/listing
-events. Search results remain discovery only, so fetch a useful result before
-citing it. The word "latest" in an old article does not prove that its round is
-still the company's current stage.
+For a requested Seed, Series A, Series B, Series C+, or Public stage, a matching
+old round or listing source is not enough by itself. Before returning VERIFIED
+for that matching stage, complete the server-required current-stage search for
+the exact company. For Public, review current listing and later completed
+take-private, acquisition, and delisting results before retaining an older
+ticker quote. Search results remain discovery only, so fetch a useful result
+when one is relevant. Current company or exchange proof may also come from a
+submitted URL or site navigation. Cite fetched company-bound text. An old
+listing quote alone, or the absence of a contradicting search result, does not
+establish current Public status. The word "latest" in an old article does not
+prove that its round or listing is still the company's current stage.
 When prior observations contain exact structured `Privately Held` company-type
 evidence, first seek current first-party take-private, delisting, or listing
 evidence. An archived SEC filing cover page is a historical snapshot and cannot
@@ -1702,6 +1706,10 @@ async def investigate_company_evidence(
         "stage" in requested_targets
         and normalized_requested_stage == "private equity"
     )
+    requested_public_stage = bool(
+        "stage" in requested_targets
+        and normalized_requested_stage == "public"
+    )
     search_name = " ".join(str(company_locator.get("name") or "").split())[:200]
     search_domain = _registrable_domain(company_locator.get("website"))
     if requested_venture_stage:
@@ -1712,6 +1720,11 @@ async def investigate_company_evidence(
         required_current_stage_query = (
             f"{search_name} {search_domain} current owner completed acquisition "
             "majority private equity"
+        ).strip()
+    elif requested_public_stage:
+        required_current_stage_query = (
+            f"{search_name} {search_domain} current public listing "
+            "completed take-private acquisition delisting"
         ).strip()
     else:
         required_current_stage_query = ""
@@ -1818,7 +1831,11 @@ async def investigate_company_evidence(
                         MAX_FETCH_CALLS - prefetched_count - fetch_calls
                     ),
                 )
-            if requested_venture_stage or requested_private_equity_stage:
+            if (
+                requested_venture_stage
+                or requested_private_equity_stage
+                or requested_public_stage
+            ):
                 stage_discovery: dict[str, Any] = {
                     "query": required_current_stage_query,
                     "notice": "server_search_results_are_discovery_only_not_evidence",
@@ -2208,6 +2225,23 @@ async def investigate_company_evidence(
                             ("stage",),
                             "current venture stage was not established by a successful "
                             "company-bound discovery search",
+                        )["stage"]
+                    matching_public_stage = bool(
+                        requested_public_stage
+                        and stage_finding.get("status")
+                        in {"VERIFIED", "CONTRADICTED"}
+                        and _company_stage_matches(
+                            _normalize_company_stage(
+                                stage_finding.get("observed_value")
+                            ),
+                            "public",
+                        )
+                    )
+                    if matching_public_stage and not current_stage_search_succeeded:
+                        claims["stage"] = _unproven_findings(
+                            ("stage",),
+                            "current public stage was not established after a "
+                            "successful company-bound current-status discovery",
                         )["stage"]
                     if (
                         rejected or force_industry_followup

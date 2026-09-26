@@ -190,6 +190,10 @@ def test_public_source_selection_prefers_supplied_issuer_evidence_within_limits(
     assert "This source order does not establish current stage" in prompt
     assert "still require a fetched company-bound quote" in prompt
     assert "later completed take-private, acquisition, or delisting evidence" in prompt
+    assert "Series C+, or Public stage" in prompt
+    assert "server-required current-stage search" in prompt
+    assert "absence of a contradicting search result" in prompt
+    assert "does not establish current Public status" in prompt
     assert (
         investigator.MAX_REASONING_TURNS,
         investigator.MAX_SEARCH_CALLS,
@@ -5816,9 +5820,18 @@ def test_oxpay_schema_repair_recomputes_stale_employee_conflict(monkeypatch):
 
     async def bounded_investigation(*, targets, **_kwargs):
         calls["investigator"] += 1
-        assert targets == ("geography", "industry")
+        assert targets == ("stage", "geography", "industry")
+        stage = _finding(
+            "stage",
+            observed_value="Public",
+            evidence_url="https://oxpayfinancial.com/investor-relations/",
+            evidence_quote=(
+                "OxPay ordinary shares are listed on SGX under ticker TVV."
+            ),
+        )
         return {
             "claims": {
+                "stage": stage,
                 "geography": _finding(
                     "geography",
                     status="UNPROVEN",
@@ -5842,6 +5855,7 @@ def test_oxpay_schema_repair_recomputes_stale_employee_conflict(monkeypatch):
                     ),
                 ),
             },
+            "_validated_stage_finding": stage,
             "failure_reason": "",
             "usage": {"reasoning_turns": 1, "search_calls": 0, "fetch_calls": 0},
         }
@@ -6273,9 +6287,16 @@ def test_sentinelone_style_industry_repair_preserves_valid_public_stage(
         return (initial if len(provider_calls) == 1 else repaired), ""
 
     async def bounded_investigation(*, targets, **_kwargs):
-        assert targets == ("industry",)
+        assert targets == ("stage", "industry")
+        stage = _finding(
+            "stage",
+            observed_value="Public",
+            evidence_url=public_url,
+            evidence_quote=public_quote,
+        )
         return {
             "claims": {
+                "stage": stage,
                 "industry": _finding(
                     "industry",
                     observed_value="Endpoint security",
@@ -6289,6 +6310,7 @@ def test_sentinelone_style_industry_repair_preserves_valid_public_stage(
                     ),
                 )
             },
+            "_validated_stage_finding": stage,
             "failure_reason": "",
         }
 
@@ -6427,6 +6449,79 @@ def _crowdstrike_stage_retention_fixture():
         ),
     )
     return company, icp, identity, prior_result, weak, strong_url, strong_quote
+
+
+@pytest.mark.parametrize("missing_claim", [False, True])
+def test_reopened_public_stage_unproven_or_missing_clears_prior_match(
+    monkeypatch, missing_claim,
+):
+    company, icp, identity, prior_result, current, _url, _quote = (
+        _crowdstrike_stage_retention_fixture()
+    )
+
+    async def unresolved_current_stage(**kwargs):
+        assert kwargs["targets"] == ("stage", "industry")
+        if missing_claim:
+            return {"claims": {}, "failure_reason": "provider unavailable"}
+        return {
+            "claims": {
+                "stage": _finding(
+                    "stage",
+                    status="UNPROVEN",
+                    observed_value=None,
+                    reason="current Public stage was not independently proven",
+                ),
+                "industry": _finding(
+                    "industry",
+                    observed_value="Endpoint security",
+                    observed_industry="Cybersecurity",
+                    observed_subindustry="Endpoint security",
+                    activity_role="supplier_operator",
+                    evidence_url="https://www.crowdstrike.com/platform/",
+                    evidence_quote=(
+                        "CrowdStrike provides a cloud-native cybersecurity platform."
+                    ),
+                ),
+            },
+            "_validated_stage_finding": {},
+            "failure_reason": "",
+        }
+
+    monkeypatch.setattr(
+        lead_scorer,
+        "investigate_company_evidence",
+        unresolved_current_stage,
+    )
+    projected, result, _claims, _rebrand, _stage = asyncio.run(
+        lead_scorer._run_targeted_company_evidence_investigation(
+            company=company,
+            icp=icp,
+            verdict=current,
+            investigation_targets=("stage", "industry"),
+            icp_attribute="",
+            icp_stage="public",
+            verified_identity=identity,
+            verified_transport_domain="crowdstrike.com",
+            structured_employee_size_evidence=None,
+            structured_public_company_evidence=None,
+            employee_size_conflict=False,
+            company_quality=True,
+            prior_result=prior_result,
+            review_positive_semantics=True,
+        )
+    )
+
+    assert projected["observed_company_stage"] == ""
+    assert projected["stage_matches"] is None
+    assert projected["stage_evidence_url"] == ""
+    assert projected["stage_evidence_quote"] == ""
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    if missing_claim:
+        assert result.details["investigation_targets"] == ["stage", "industry"]
+    else:
+        assert result.details["dimension_decisions"]["stage"] == (
+            COMPANY_FIT_UNAVAILABLE
+        )
 
 
 def test_crowdstrike_industry_investigation_retains_prior_strong_public_source(
@@ -7665,6 +7760,7 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
         "search_calls": 2,
         "fetch_calls": 3,
         "admission_deadline_seconds": 110.0,
+        "remaining_search_calls": 1,
     }
     assert "official company investor-relations pages" in (
         requests[0]["messages"][0]["content"]
@@ -7801,8 +7897,6 @@ def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatc
         reasoning_requests.append(payload)
         turn = len(reasoning_requests)
         if turn == 1:
-            name, arguments = "search_web", {"query": "Acme current stock listing"}
-        elif turn == 2:
             name, arguments = "fetch_page", {"url": url}
         else:
             name, arguments = "submit_findings", {
@@ -7841,7 +7935,7 @@ def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatc
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["claims"]["stage"]["evidence_quote"] == quote
     assert result["usage"] == {
-        "reasoning_turns": 3,
+        "reasoning_turns": 2,
         "search_calls": 1,
         "fetch_calls": 1,
     }
@@ -7849,7 +7943,10 @@ def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatc
         url: {"final_url": url, "text": quote}
     }
     assert investigator.PRIVATE_FETCHED_PAGES_KEY not in result["claims"]
-    assert search_queries == ["Acme current stock listing"]
+    assert search_queries == [
+        "Acme acme.example current public listing completed take-private "
+        "acquisition delisting"
+    ]
     assert fetched_urls == [url]
     assert all(
         request["model"] == investigator.INVESTIGATOR_MODEL
@@ -9180,6 +9277,11 @@ def test_prefetched_grab_source_requires_independent_exact_stage_submission(
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
     monkeypatch.setattr(investigator, "_post_json", fake_post_json)
     monkeypatch.setattr(investigator, "_fetch_page", network_fetch)
+    monkeypatch.setattr(
+        investigator,
+        "_search_web",
+        AsyncMock(return_value={"results": [{"url": url}]}),
+    )
 
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Grab", "website": "https://grab.com/"},
@@ -9204,7 +9306,7 @@ def test_prefetched_grab_source_requires_independent_exact_stage_submission(
     assert _stage_quote_supports_observation("public", quote)
     assert result["usage"] == {
         "reasoning_turns": 1,
-        "search_calls": 0,
+        "search_calls": 1,
         "fetch_calls": 0,
     }
     assert result[investigator.PRIVATE_FETCHED_PAGES_KEY] == {
@@ -9277,7 +9379,11 @@ def test_provider_injected_prefetched_body_is_not_reused(monkeypatch):
     ))
 
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
-    assert searches == ["Grab current public listing"]
+    assert searches == [
+        "Grab grab.com current public listing completed take-private "
+        "acquisition delisting",
+        "Grab current public listing",
+    ]
     assert "prefetched_sources" not in requests[0]["messages"][1]["content"]
     assert result[investigator.PRIVATE_FETCHED_PAGES_KEY] == {}
 
@@ -9426,6 +9532,11 @@ def test_prefetched_pages_reduce_remaining_network_fetch_budget(monkeypatch):
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
     monkeypatch.setattr(investigator, "_post_json", fake_post_json)
     monkeypatch.setattr(investigator, "_fetch_page", network_fetch)
+    monkeypatch.setattr(
+        investigator,
+        "_search_web",
+        AsyncMock(return_value={"results": [{"url": third_url}]}),
+    )
 
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example"},
@@ -9492,6 +9603,11 @@ def test_harness_accepts_semantic_stage_finding_after_source_checks(monkeypatch)
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
     monkeypatch.setattr(investigator, "_post_json", fake_post_json)
     monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    monkeypatch.setattr(
+        investigator,
+        "_search_web",
+        AsyncMock(return_value={"results": [{"url": url}]}),
+    )
 
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={
@@ -9507,7 +9623,7 @@ def test_harness_accepts_semantic_stage_finding_after_source_checks(monkeypatch)
     assert result["_validated_stage_finding"] == result["claims"]["stage"]
     assert result["usage"] == {
         "reasoning_turns": 2,
-        "search_calls": 0,
+        "search_calls": 1,
         "fetch_calls": 1,
     }
     assert len(reasoning_requests) == 2
@@ -10624,6 +10740,13 @@ def test_final_invalid_target_does_not_erase_independent_valid_stage(monkeypatch
     monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 2)
     monkeypatch.setattr(investigator, "_post_json", fake_post)
     monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    monkeypatch.setattr(
+        investigator,
+        "_search_web",
+        AsyncMock(return_value={
+            "results": [{"url": "https://acme.example/investors"}],
+        }),
+    )
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example"},
         targets=("stage", "industry"), requested_stage="Public",

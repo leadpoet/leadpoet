@@ -6377,6 +6377,148 @@ def test_sentinelone_style_industry_repair_preserves_valid_public_stage(
     )
 
 
+def test_schema_repair_cannot_restore_public_after_current_stage_is_unproven(
+    monkeypatch,
+):
+    company = _company(
+        name="Generic Security",
+        website="https://genericsecurity.example/",
+        linkedin="https://www.linkedin.com/company/generic-security",
+    ).model_copy(update={
+        "industry": "Cybersecurity",
+        "company_stage": "Public",
+    })
+    icp = _icp(
+        industry="Cybersecurity",
+        sub_industry="Endpoint security",
+        company_stage="Public",
+        required_attribute="Provides an endpoint security platform.",
+    )
+    old_listing_url = "https://genericsecurity.example/news/old-listing"
+    old_listing_quote = "Generic Security, Inc. (NASDAQ: GSEC) announced results."
+    initial = _complete_verdict(
+        observed_company_name="Generic Security",
+        observed_company_website="https://genericsecurity.example/",
+        observed_company_linkedin=(
+            "https://www.linkedin.com/company/generic-security"
+        ),
+        observed_industry="Cybersecurity",
+        observed_subindustry="Endpoint security",
+        industry_matches=True,
+        industry_activity_role="supplier_operator",
+        industry_evidence_url="https://genericsecurity.example/platform/",
+        industry_evidence_quote=(
+            "Generic Security provides an endpoint security platform."
+        ),
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url=old_listing_url,
+        stage_evidence_quote=old_listing_quote,
+        attribute_satisfied=None,
+        required_attribute_evidence_url="",
+        required_attribute_evidence_quote="",
+    )
+    repaired = dict(
+        initial,
+        attribute_satisfied=True,
+        required_attribute_evidence_url=(
+            "https://genericsecurity.example/platform/"
+        ),
+        required_attribute_evidence_quote=(
+            "Generic Security provides an endpoint security platform."
+        ),
+    )
+    provider_calls = []
+    investigator_calls = []
+
+    async def provider(**kwargs):
+        provider_calls.append(kwargs["telemetry_purpose"])
+        return (initial if len(provider_calls) == 1 else repaired), ""
+
+    async def investigate(**kwargs):
+        investigator_calls.append(kwargs["targets"])
+        return {
+            "claims": {
+                "stage": _finding(
+                    "stage",
+                    status="UNPROVEN",
+                    observed_value=None,
+                    reason="current Public status was not proven",
+                ),
+                "industry": _finding(
+                    "industry",
+                    observed_value="Endpoint security",
+                    observed_industry="Cybersecurity",
+                    observed_subindustry="Endpoint security",
+                    activity_role="supplier_operator",
+                    evidence_url="https://genericsecurity.example/platform/",
+                    evidence_quote=(
+                        "Generic Security provides an endpoint security platform."
+                    ),
+                ),
+            },
+            "_validated_stage_finding": {},
+            "failure_reason": "",
+        }
+
+    async def keep_observation(verdict, *_args, **_kwargs):
+        return verdict
+
+    async def keep_attribute(verdict, **_kwargs):
+        return verdict, {}
+
+    homepage_identity = lead_scorer.company_fit_match(
+        "homepage identity verified",
+        details={
+            "identity": {
+                "decision": COMPANY_FIT_MATCH,
+                "evidence_source": "company_homepage",
+                "observed_name": "genericsecurity",
+                "observed_domain": "genericsecurity.example",
+                "observed_linkedin_slug": "generic-security",
+            },
+            "verified_homepage_transport_domain": "genericsecurity.example",
+        },
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "investigate_company_evidence",
+        investigate,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "_refresh_linkedin_employee_size_observation",
+        keep_observation,
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "_ground_required_attribute_evidence",
+        keep_attribute,
+    )
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        company,
+        icp,
+        require_company_fit_dimensions=True,
+        verified_homepage_identity=homepage_identity,
+        company_quality=True,
+        evidence_investigator=True,
+    ))
+
+    assert provider_calls == [
+        "lead_scorer_reverify",
+        "lead_scorer_reverify_schema_repair",
+    ]
+    assert investigator_calls == [("stage", "industry")]
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["dimension_decisions"]["stage"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+    assert result.details["required_attribute_decision"] == COMPANY_FIT_MATCH
+
+
 def _crowdstrike_stage_retention_fixture():
     company = _company(
         name="CrowdStrike",

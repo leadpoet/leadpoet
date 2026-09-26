@@ -6986,6 +6986,26 @@ async def _llm_reverify_company(
         ),
         icp_stage=icp_stage,
     )
+    if (
+        "stage" in investigation_targets
+        and _normalize_company_stage(icp_stage) == "public"
+        and not validated_stage_finding
+    ):
+        # A broader schema repair may fill another incomplete dimension, but
+        # it cannot replace the mandatory current-Public investigation that
+        # already returned no validated stage finding.
+        repaired_verdict.update(
+            observed_company_stage="",
+            stage_matches=None,
+            stage_evidence_url="",
+            stage_evidence_quote="",
+        )
+        if isinstance(repaired_verdict.get("dimension_evidence"), Mapping):
+            repaired_verdict["dimension_evidence"] = {
+                key: value
+                for key, value in repaired_verdict["dimension_evidence"].items()
+                if key != "stage"
+            }
     repaired_verdict = _project_investigator_headcount(
         repaired_verdict,
         (

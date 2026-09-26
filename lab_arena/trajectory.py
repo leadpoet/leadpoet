@@ -22,7 +22,7 @@ MAX_EVENT_BYTES = 8 * 1024
 MAX_STRING_CHARS = 4096
 MAX_DEPTH = 6
 MAX_KEYS = 256
-MAX_EVENTS_PER_RUN = 10_000
+MAX_EVENTS_PER_RUN = 16_384
 MAX_RUNTIME_EVENTS_PER_RUN = 512
 
 _KIND_RE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+){0,7}$")
@@ -282,8 +282,11 @@ def provider_response_content(
             decoded = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
             decoded = None
+            projected["response_omitted"] = "non_json_or_invalid_encoding"
         if decoded is not None:
             projected["response"] = _provider_response_projection(decoded)
+    elif isinstance(body_b64, str):
+        projected["response_omitted"] = "body_limit"
     return _fit_content(
         projected,
         {
@@ -302,16 +305,19 @@ def _provider_request_projection(parameters: Mapping[str, Any]) -> Dict[str, Any
         if key in {"messages", "input"} and isinstance(value, list):
             projected[key] = {
                 "count": len(value),
+                "omitted_items": max(0, len(value) - 3),
                 "latest": value[-3:],
             }
         elif key == "tools" and isinstance(value, list):
             projected[key] = {
                 "count": len(value),
+                "omitted_items": max(0, len(value) - 12),
                 "items": value[:12],
             }
         elif isinstance(value, list):
             projected[key] = {
                 "count": len(value),
+                "omitted_items": max(0, len(value) - 8),
                 "items": value[:8],
             }
         else:
@@ -326,7 +332,8 @@ def _provider_response_projection(value: Any) -> Any:
         return _bounded_projection(value)
     projected: Dict[str, Any] = {"keys": sorted(str(key)[:64] for key in value)[:64]}
     for key in (
-        "id", "object", "status", "model", "error", "usage",
+        "id", "job_id", "requestId", "object", "status", "model",
+        "error", "code", "message", "detail", "success", "usage",
         "output_text", "result", "answer",
     ):
         if key in value:
@@ -336,8 +343,11 @@ def _provider_response_projection(value: Any) -> Any:
         if isinstance(items, list):
             projected[key] = {
                 "count": len(items),
+                "omitted_items": max(0, len(items) - 3),
                 "latest": items[-3:],
             }
+        elif isinstance(items, Mapping):
+            projected[key] = items
     return _bounded_projection(projected)
 
 
@@ -348,7 +358,9 @@ def _fit_content(
     encoded = json.dumps(
         content, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
-    return content if len(encoded) <= 6000 else sanitize_content(fallback)
+    if len(encoded) <= 6000:
+        return content
+    return sanitize_content(dict(fallback, projection_fallback=True))
 
 
 def _bounded_projection(value: Any) -> Any:

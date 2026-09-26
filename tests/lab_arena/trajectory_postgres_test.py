@@ -16,6 +16,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
 
 
 MIGRATION = "365-lab-arena-trajectories.sql"
+CAPACITY_MIGRATION = "366-lab-arena-trajectory-capacity.sql"
 ROUND = "arena-2099-01-01-trajectory"
 SUBMISSION = "trajectory-submission"
 RUN = "trajectory-run"
@@ -27,7 +28,7 @@ LEASE = "trajectory-lease-token"
 @pytest.fixture(scope="module")
 def database():
     yield from database_with_lab_arena_migration(
-        CURRENT_SERVICE_MIGRATIONS + (MIGRATION,)
+        CURRENT_SERVICE_MIGRATIONS + (MIGRATION, CAPACITY_MIGRATION)
     )
 
 
@@ -89,6 +90,9 @@ def test_migration_replays_and_append_is_idempotent_with_derived_identity(seeded
     with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
         cursor.execute(migration)
         cursor.execute(migration)
+        capacity = (Path(__file__).resolve().parents[2] / "scripts" / CAPACITY_MIGRATION).read_text()
+        cursor.execute(capacity)
+        cursor.execute(capacity)
 
     store = _connect_store(psycopg2, dsn)
     document = trajectory.event(
@@ -181,3 +185,50 @@ def test_stale_lease_and_unprivileged_roles_cannot_append_or_read(seeded):
                 )
     finally:
         connection.close()
+
+
+def test_legal_runtime_burst_and_maximum_provider_volume_fit_without_dropping(seeded):
+    psycopg2, dsn = seeded
+    run_id = RUN + "-capacity"
+    with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO public.lab_arena_runs("
+            "run_id,assignment_id,round_id,submission_id,miner_hotkey,stage,"
+            "icp_position,attempt,kind,status,runner_hotkey,lease_token_hash,"
+            "lease_generation,stage_generation,lease_expires_at) "
+            "SELECT %s,assignment_id||'-capacity',round_id,submission_id,"
+            "miner_hotkey,stage,icp_position,attempt,'execute','leased',runner_hotkey,"
+            "lease_token_hash,lease_generation,stage_generation,"
+            "clock_timestamp()+interval '1 hour' FROM public.lab_arena_runs "
+            "WHERE run_id=%s", (run_id, RUN),
+        )
+        # Seed near the hard bound in this disposable database. All rows are
+        # current, so a former 600/minute check would reject the next append.
+        cursor.execute(
+            "INSERT INTO public.lab_arena_trajectory_events("
+            "run_id,event_id,round_id,submission_id,miner_hotkey,runner_hotkey,"
+            "assignment_id,icp_identifier,stage,icp_position,attempt,run_kind,"
+            "model_role,event_kind,occurred_at,content) "
+            "SELECT r.run_id,md5('capacity-'||n)::uuid,r.round_id,r.submission_id,"
+            "r.miner_hotkey,r.runner_hotkey,r.assignment_id,r.round_id||':icp:3',"
+            "r.stage,r.icp_position,r.attempt,r.kind,'baseline','provider.request',"
+            "clock_timestamp(),'{}'::jsonb FROM public.lab_arena_runs r "
+            "CROSS JOIN generate_series(1,15871) n WHERE r.run_id=%s", (run_id,),
+        )
+    store = _connect_store(psycopg2, dsn)
+    token_hash = hash_lease_token(LEASE)
+    final_provider = trajectory.event("provider.response", {"http_status": 200})
+    assert store.append_trajectory_events(run_id, token_hash, [final_provider])["inserted"] == 1
+    assert store.append_trajectory_events(run_id, token_hash, [final_provider])["existing"] == 1
+    with pytest.raises(ArenaStoreError, match="provider_limit"):
+        store.append_trajectory_events(run_id, token_hash, [trajectory.event("provider.request", {})])
+    # 290 is the actual maximum current burst: 256 worst-case log chunks,
+    # 32 buffered provider errors, and both lifecycle boundaries. Prove all
+    # 512 bounded runtime slots are available independently of provider volume.
+    for start in range(0, 512, 32):
+        events = [trajectory.event("runtime.stdout", {"sequence": i}) for i in range(start, start + 32)]
+        assert store.append_trajectory_events(run_id, token_hash, events)["inserted"] == 32
+    with pytest.raises(ArenaStoreError, match="runtime_limit"):
+        store.append_trajectory_events(run_id, token_hash, [trajectory.event("runtime.stdout", {})])
+    assert len(store.list_trajectory_events(run_id)) == trajectory.MAX_EVENTS_PER_RUN
+    store.close()

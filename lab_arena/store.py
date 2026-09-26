@@ -1845,7 +1845,9 @@ class ArenaStore:
         if not run_id:
             raise ArenaStoreError("trajectory run id is required")
         rows: List[Dict[str, Any]] = []
-        for offset in range(0, 10_000, 500):
+        from lab_arena.trajectory import MAX_EVENTS_PER_RUN
+
+        for offset in range(0, MAX_EVENTS_PER_RUN, 500):
             page = self._transport.select(
                 "lab_arena_trajectory_events", filters={"run_id": run_id},
                 order="trajectory_id", limit=500, offset=offset,

@@ -7989,7 +7989,15 @@ def test_positive_semantic_review_routes_one_bounded_loop_to_existing_luna(
         verified_homepage_identity={
             "normalized_name": "acme",
             "registrable_dns_domain": "acme.example",
+            "linkedin_company_slug": "acme",
         },
+        homepage_navigation_locators=[
+            {"url": "https://acme.example/products/enrollment", "label": "Enrollment"},
+            {"url": "https://acme.example/products/enrollment", "label": "Duplicate"},
+            {"url": "https://foreign.example/products/enrollment", "label": "Foreign"},
+            {"url": "http://acme.example/products/legacy", "label": "Legacy"},
+            {"url": "https://acme.example/fragment#details", "label": "Fragment"},
+        ],
         prefetched_pages={url: {"final_url": url, "text": quote}},
     ))
 
@@ -8020,6 +8028,13 @@ def test_positive_semantic_review_routes_one_bounded_loop_to_existing_luna(
         "prefetched_pages": 1,
         "remaining_fetch_calls": 2,
     }
+    if positive_semantic_review:
+        assert input_document["untrusted_homepage_navigation_locators"] == [{
+            "url": "https://acme.example/products/enrollment",
+            "label": "Enrollment",
+        }]
+    else:
+        assert "untrusted_homepage_navigation_locators" not in input_document
     assert result["claims"]["industry"]["status"] == "VERIFIED"
     assert result["usage"] == {
         "reasoning_turns": 1,
@@ -8032,6 +8047,48 @@ def test_positive_semantic_review_model_is_already_in_judge_allowlist():
     assert arena_scoring.DEFAULT_JUDGE_MODELS["intent_fetched_evidence"] == (
         investigator.POSITIVE_SEMANTIC_REVIEW_MODEL
     )
+
+
+def test_homepage_navigation_label_cannot_confer_industry_qualification():
+    url = "https://flamapp.ai/careers"
+    submitted = _finding(
+        "industry",
+        observed_value="Advertising technology",
+        observed_industry="Advertising",
+        observed_subindustry="Advertising technology",
+        activity_role="supplier_operator",
+        evidence_url=url,
+        evidence_quote="Careers",
+    )
+
+    finding = _validated_findings(
+        {"findings": [submitted]},
+        targets=("industry",),
+        fetched_pages={},
+        first_party_domains={"flamapp.ai"},
+        identity_names={"flam"},
+    )["industry"]
+
+    assert finding["status"] == "UNPROVEN"
+    assert finding["reason"] == "submitted quote was not present in fetched source"
+
+
+def test_homepage_navigation_metadata_cannot_exceed_message_bound():
+    locators = [
+        {
+            "url": f"https://flamapp.ai/products/{index}/" + ("x" * 900),
+            "label": f"Product {index}",
+        }
+        for index in range(investigator.MAX_HOMEPAGE_NAVIGATION_LOCATORS)
+    ]
+    content = investigator._bounded_message_json({
+        "untrusted_homepage_navigation_locators": locators,
+    })
+    document = json.loads(content)
+
+    assert len(content) < arena_operations.OPENROUTER_MAX_CONTENT_CHARS
+    assert len(document["untrusted_homepage_navigation_locators"]) < len(locators)
+    assert document["untrusted_homepage_navigation_locators"][0] == locators[0]
 
 
 def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatch):

@@ -26,7 +26,12 @@ import aiohttp
 from lab_arena.operations import OPENROUTER_MAX_CONTENT_CHARS
 from leadpoet_verifier.identity.normalization import NormalizationError, normalize_host
 from qualification.competition_models import public_http_url
-from qualification.scoring.company_verification import _fetch_bounded_html
+from qualification.scoring.company_verification import (
+    MAX_HOMEPAGE_NAVIGATION_LABEL_LENGTH,
+    MAX_HOMEPAGE_NAVIGATION_LOCATORS,
+    MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS,
+    _fetch_bounded_html,
+)
 from qualification.scoring.evaluation_clock import evaluation_date
 from qualification.scoring.linkedin_company_size import (
     MALFORMED_RESPONSE_FAILURE_REASON,
@@ -90,6 +95,10 @@ Saved company-stage evidence and submitted source URLs in prior observations
 are discovery context only. Fetch a relevant saved URL before using it. Start
 with a relevant submitted source when it can prove the requested fact. A
 submitted quote cannot prove or contradict a claim by itself.
+Server-verified homepage navigation URLs and labels are also discovery context
+only. They are not evidence that a product or activity exists. Fetch a useful
+locator and pass the normal exact-quote, identity, activity-role, and semantic
+checks before returning VERIFIED or CONTRADICTED.
 When stage_dispute_urls are present, review every one before preserving the
 older matching stage. Prioritize fetching those URLs. Preserve that stage only
 when their actual fetched contents resolve the URL-title or chronology conflict.
@@ -390,6 +399,81 @@ def _safe_https_url(value: Any) -> str:
     return value
 
 
+def _validated_homepage_navigation_locators(
+    value: Any,
+    *,
+    positive_semantic_review: bool,
+    verified_homepage_identity: Optional[Mapping[str, Any]],
+) -> list[dict[str, str]]:
+    """Admit only bounded same-verified-domain untrusted navigation locators."""
+
+    if (
+        not positive_semantic_review
+        or not isinstance(value, Sequence)
+        or isinstance(value, (str, bytes))
+        or not isinstance(verified_homepage_identity, Mapping)
+    ):
+        return []
+    if any(
+        not isinstance(verified_homepage_identity.get(field), str)
+        or not str(verified_homepage_identity.get(field) or "").strip()
+        for field in (
+            "normalized_name",
+            "registrable_dns_domain",
+            "linkedin_company_slug",
+        )
+    ):
+        return []
+    try:
+        verified_domain = _registrable_domain(
+            verified_homepage_identity.get("registrable_dns_domain")
+        )
+    except (TypeError, ValueError):
+        return []
+    if not verified_domain:
+        return []
+
+    locators: list[dict[str, str]] = []
+    seen: set[str] = set()
+    total_characters = 0
+    for raw_locator in value[:MAX_HOMEPAGE_NAVIGATION_LOCATORS]:
+        if not isinstance(raw_locator, Mapping) or set(raw_locator) != {
+            "url", "label",
+        }:
+            continue
+        safe_url = _safe_https_url(raw_locator.get("url"))
+        label = raw_locator.get("label")
+        if (
+            not safe_url
+            or not isinstance(label, str)
+            or not label
+            or label != label.strip()
+            or len(label) > MAX_HOMEPAGE_NAVIGATION_LABEL_LENGTH
+            or any(
+                unicodedata.category(character).startswith("C")
+                for character in label
+            )
+        ):
+            continue
+        try:
+            if _registrable_domain(safe_url) != verified_domain:
+                continue
+        except (TypeError, ValueError):
+            continue
+        if safe_url in seen:
+            continue
+        candidate_characters = len(safe_url) + len(label)
+        if (
+            total_characters + candidate_characters
+            > MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS
+        ):
+            continue
+        seen.add(safe_url)
+        total_characters += candidate_characters
+        locators.append({"url": safe_url, "label": label})
+    return locators
+
+
 def _visible_markdown_link_label_surface(value: str) -> str:
     """Project complete visible HTTP(S) Markdown links to their labels."""
 
@@ -473,12 +557,20 @@ def _bounded_message_json(value: Any, *, prefix: str = "") -> str:
     if len(content) <= message_limit:
         return content
     collect(document)
-    if not evidence_texts:
-        raise ValueError("investigation_message_metadata_too_large")
     for container, _text in evidence_texts:
         container["text"] = ""
+    navigation_locators = document.get(
+        "untrusted_homepage_navigation_locators"
+    )
+    if isinstance(navigation_locators, list):
+        while navigation_locators and len(encode()) > message_limit:
+            navigation_locators.pop()
+        if not navigation_locators:
+            document.pop("untrusted_homepage_navigation_locators", None)
     if len(encode()) > message_limit:
         raise ValueError("investigation_message_metadata_too_large")
+    if not evidence_texts:
+        return encode()
 
     low = 0
     high = max(len(text) for _container, text in evidence_texts)
@@ -1573,6 +1665,7 @@ async def investigate_company_evidence(
     positive_semantic_review: bool = False,
     prior_observations: Optional[Mapping[str, Any]] = None,
     verified_homepage_identity: Optional[Mapping[str, Any]] = None,
+    homepage_navigation_locators: Optional[Sequence[Mapping[str, Any]]] = None,
     prefetched_pages: Optional[Mapping[str, Any]] = None,
     diagnostic: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
@@ -1671,6 +1764,14 @@ async def investigate_company_evidence(
     else:
         bounded_prior_observations.pop("submitted_source_hints", None)
 
+    bounded_homepage_navigation_locators = (
+        _validated_homepage_navigation_locators(
+            homepage_navigation_locators,
+            positive_semantic_review=positive_semantic_review,
+            verified_homepage_identity=verified_homepage_identity,
+        )
+    )
+
     fetched_pages, fetched_final_urls = _validated_prefetched_pages(
         prefetched_pages,
         submitted_source_urls=submitted_source_urls,
@@ -1698,6 +1799,10 @@ async def investigate_company_evidence(
             "admission_deadline_seconds": ADMISSION_DEADLINE_SECONDS,
         },
     }
+    if bounded_homepage_navigation_locators:
+        input_document["untrusted_homepage_navigation_locators"] = (
+            bounded_homepage_navigation_locators
+        )
     if fetched_pages:
         input_document["prefetched_sources"] = [
             {"url": url, "text": text}

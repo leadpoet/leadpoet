@@ -5680,6 +5680,7 @@ async def _run_targeted_company_evidence_investigation(
     ] = None,
     preserve_matched_industry: bool = False,
     review_positive_semantics: bool = False,
+    homepage_navigation_locators: Sequence[Mapping[str, Any]] = (),
 ) -> Tuple[
     dict[str, Any],
     CompanyFitDecisionResult,
@@ -5946,6 +5947,9 @@ async def _run_targeted_company_evidence_investigation(
             ),
         },
         verified_homepage_identity=verified_identity,
+        homepage_navigation_locators=(
+            homepage_navigation_locators if review_positive_semantics else ()
+        ),
         prefetched_pages=_investigator_prefetched_pages(
             required_attribute_source_cache or {},
             submitted_source_urls,
@@ -6183,6 +6187,7 @@ async def _llm_reverify_company(
     *,
     require_company_fit_dimensions: bool = False,
     verified_homepage_identity: Optional[CompanyFitDecisionResult] = None,
+    verified_homepage_navigation_locators: Sequence[Mapping[str, Any]] = (),
     company_quality: bool = False,
     evidence_investigator: bool = False,
     required_attribute_retry_source_cache: Optional[
@@ -6710,6 +6715,9 @@ async def _llm_reverify_company(
             ),
             preserve_matched_industry=required_attribute_source_recovery,
             review_positive_semantics=positive_semantic_review,
+            homepage_navigation_locators=(
+                verified_homepage_navigation_locators
+            ),
         )
         if not claims:
             return result
@@ -7117,6 +7125,9 @@ async def _llm_reverify_company(
                 ),
                 review_positive_semantics=(
                     post_repair_positive_semantic_review
+                ),
+                homepage_navigation_locators=(
+                    verified_homepage_navigation_locators
                 ),
             )
             if not post_repair_claims:
@@ -7539,6 +7550,7 @@ async def _verify_company_fit(
         )
 
     identity_exception_reason = ""
+    homepage_navigation_locators: list[dict[str, str]] = []
     try:
         identity = await verify_company_exists(
             company.company_name,
@@ -7546,6 +7558,7 @@ async def _verify_company_fit(
             company_linkedin=company.company_linkedin,
             require_https_transport=require_https_transport,
             company_quality=company_quality,
+            homepage_navigation_locator_sink=homepage_navigation_locators,
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("Company identity verification raised: %s", exc)
@@ -7588,6 +7601,7 @@ async def _verify_company_fit(
         verified_homepage_identity=(
             identity
         ),
+        verified_homepage_navigation_locators=homepage_navigation_locators,
         company_quality=company_quality,
         evidence_investigator=evidence_investigator,
         required_attribute_retry_source_cache=(

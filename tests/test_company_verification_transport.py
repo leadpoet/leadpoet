@@ -14,6 +14,8 @@ from qualification.scoring.company_fit_decision import (
     evaluate_company_identity,
 )
 from qualification.scoring.company_verification import (
+    MAX_HOMEPAGE_NAVIGATION_LOCATORS,
+    _homepage_navigation_locators,
     _upgrade_plain_http_company_url,
     verify_company_exists,
 )
@@ -1836,3 +1838,83 @@ def test_invalid_submitted_linkedin_suffix_spoof_is_mismatch():
         )
     )
     assert result.decision == COMPANY_FIT_MISMATCH
+
+
+def test_verified_flam_homepage_exposes_safe_navigation_locators(monkeypatch):
+    from qualification.scoring import company_verification
+
+    homepage = """
+        <html><head><title>Flam</title>
+        <meta property="og:site_name" content="Flam"></head><body>
+        <a href="https://www.linkedin.com/company/flamapp">LinkedIn</a>
+        <nav>
+          <a href="/products/flicks"><span>Flicks</span></a>
+          <a href="//flamapp.ai/en-US/products/airboards"> Airboards </a>
+          <a href="https://labs.flamapp.ai/product/demo">Product demo</a>
+          <a href="/products/flicks">Duplicate Flicks</a>
+          <a href="http://flamapp.ai/insecure">Insecure</a>
+          <a href="https://foreign.example/product">Foreign</a>
+          <a href="javascript:alert(1)">Script</a>
+          <a href="mailto:sales@flamapp.ai">Email</a>
+          <a href="#products">Fragment</a>
+          <a href="https://flamapp.ai:bad/products">Malformed</a>
+          <a href="/hidden" hidden>Hidden</a>
+          <div hidden><a href="/hidden-parent">Hidden parent</a></div>
+        </nav></body></html>
+    """
+
+    async def fetch(_session, _url):
+        return 200, "https://flamapp.ai/", homepage
+
+    monkeypatch.setattr(company_verification, "_fetch_bounded_html", fetch)
+    locators = [{"url": "https://stale.example", "label": "stale"}]
+    result = asyncio.run(verify_company_exists(
+        "Flam",
+        "https://flamapp.ai/",
+        company_linkedin="https://www.linkedin.com/company/flamapp",
+        require_https_transport=True,
+        homepage_navigation_locator_sink=locators,
+    ))
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert locators == [
+        {"url": "https://flamapp.ai/products/flicks", "label": "Flicks"},
+        {
+            "url": "https://flamapp.ai/en-US/products/airboards",
+            "label": "Airboards",
+        },
+        {
+            "url": "https://labs.flamapp.ai/product/demo",
+            "label": "Product demo",
+        },
+    ]
+
+    mismatched_locators = [{"url": "https://stale.example", "label": "stale"}]
+    mismatch = asyncio.run(verify_company_exists(
+        "Other Company",
+        "https://flamapp.ai/",
+        company_linkedin="https://www.linkedin.com/company/other-company",
+        require_https_transport=True,
+        homepage_navigation_locator_sink=mismatched_locators,
+    ))
+    assert mismatch.decision != COMPANY_FIT_MATCH
+    assert mismatched_locators == []
+
+
+def test_homepage_navigation_locator_count_is_bounded():
+    links = "".join(
+        f'<a href="/product/{index}">Product {index}</a>'
+        for index in range(MAX_HOMEPAGE_NAVIGATION_LOCATORS + 5)
+    )
+
+    locators = _homepage_navigation_locators(
+        links,
+        final_url="https://flamapp.ai/",
+        verified_domain="flamapp.ai",
+    )
+
+    assert len(locators) == MAX_HOMEPAGE_NAVIGATION_LOCATORS
+    assert locators[-1] == {
+        "url": "https://flamapp.ai/product/39",
+        "label": "Product 39",
+    }

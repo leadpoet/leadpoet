@@ -10,6 +10,8 @@ from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
     COMPANY_FIT_MISMATCH,
     COMPANY_FIT_UNAVAILABLE,
+    company_fit_match,
+    company_fit_unavailable,
 )
 
 
@@ -268,6 +270,51 @@ def test_positive_review_reopens_industry_during_attribute_source_recovery():
     assert lead_scorer._positive_semantic_review_needed(result, icp, targets)
 
 
+def test_verified_homepage_navigation_sink_reaches_reverification(monkeypatch):
+    locators = [{
+        "url": "https://peer.example/platform/enrollment",
+        "label": "Enrollment platform",
+    }]
+    captured = {}
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match()
+
+    async def homepage(*_args, **kwargs):
+        kwargs["homepage_navigation_locator_sink"].extend(locators)
+        return company_fit_match(details={
+            "identity": {
+                "decision": COMPANY_FIT_MATCH,
+                "evidence_source": "company_homepage",
+                "observed_name": "PeerConnect",
+                "observed_domain": "peer.example",
+                "observed_linkedin_slug": "peerconnect",
+            },
+            "verified_homepage_transport_domain": "peer.example",
+        })
+
+    async def web(*_args, **kwargs):
+        captured.update(kwargs)
+        return company_fit_unavailable("bounded test stop")
+
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(lead_scorer, "_llm_reverify_company", web)
+
+    asyncio.run(lead_scorer._verify_company_fit(
+        _company(),
+        _icp(),
+        0.0,
+        1.0,
+        set(),
+        require_https_transport=True,
+        company_quality=True,
+        evidence_investigator=True,
+    ))
+
+    assert captured["verified_homepage_navigation_locators"] == locators
+
+
 @pytest.mark.parametrize(
     ("industry_finding", "expected_decision", "semantic_resolved"),
     [
@@ -361,12 +408,20 @@ def test_stage_recovery_and_positive_semantics_share_one_investigation(
             company_quality=True,
             prior_result=prior,
             review_positive_semantics=True,
+            homepage_navigation_locators=[{
+                "url": "https://peer.example/platform/enrollment",
+                "label": "Enrollment platform",
+            }],
         )
     )
 
     assert len(calls) == 1
     assert calls[0]["targets"] == ("stage", "industry")
     assert calls[0]["positive_semantic_review"] is True
+    assert calls[0]["homepage_navigation_locators"] == [{
+        "url": "https://peer.example/platform/enrollment",
+        "label": "Enrollment platform",
+    }]
     assert claims["industry"] == industry_finding
     assert result.decision == expected_decision
     assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MATCH

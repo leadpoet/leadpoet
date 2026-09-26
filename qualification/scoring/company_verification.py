@@ -38,7 +38,7 @@ from html.parser import HTMLParser
 import json
 import logging
 import re
-from typing import Mapping
+from typing import Mapping, Optional
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import aiohttp
@@ -68,6 +68,9 @@ _TRANSIENT_FETCH_ATTEMPTS = 2
 _TRANSIENT_FETCH_RETRY_DELAY_SECS = 0.25
 _MAX_ORGANIZATION_LEGAL_NAME_ALIASES = 3
 _MAX_ORGANIZATION_NAME_LENGTH = 200
+MAX_HOMEPAGE_NAVIGATION_LOCATORS = 40
+MAX_HOMEPAGE_NAVIGATION_LABEL_LENGTH = 200
+MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS = 6_000
 _HTML_ENCODING_SNIFF_BYTES = 1024
 _MIN_NON_HTML_HOMEPAGE_CHARS = 50
 _IDENTITY_SOURCE_HOST_LABELS = frozenset({"media", "news", "newsroom", "press"})
@@ -599,6 +602,153 @@ class _HomepageIdentityParser(HTMLParser):
         return " ".join(self._title_parts).strip()[:300]
 
 
+class _HomepageNavigationParser(HTMLParser):
+    """Collect bounded visible anchor targets and labels in document order."""
+
+    _HIDDEN_ELEMENTS = frozenset({"script", "style", "template", "noscript"})
+    _VOID_ELEMENTS = frozenset({
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    })
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.links: list[tuple[str, str]] = []
+        self._stack: list[tuple[str, bool]] = []
+        self._hidden_depth = 0
+        self._href = ""
+        self._label_parts: list[str] = []
+
+    @staticmethod
+    def _attributes(attrs) -> dict[str, str]:
+        values: dict[str, str] = {}
+        for key, value in attrs:
+            values.setdefault(
+                str(key or "").casefold(), str(value or "").strip()
+            )
+        return values
+
+    @staticmethod
+    def _element_is_hidden(attributes: Mapping[str, str]) -> bool:
+        style = re.sub(r"\s+", "", attributes.get("style", "").casefold())
+        return bool(
+            "hidden" in attributes
+            or attributes.get("aria-hidden", "").casefold() in {"true", "1"}
+            or "display:none" in style
+            or "visibility:hidden" in style
+        )
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        tag_name = tag.casefold()
+        attributes = self._attributes(attrs)
+        if tag_name in self._VOID_ELEMENTS:
+            return
+        hidden = bool(
+            tag_name in self._HIDDEN_ELEMENTS
+            or self._element_is_hidden(attributes)
+        )
+        self._stack.append((tag_name, hidden))
+        if hidden:
+            self._hidden_depth += 1
+        if (
+            tag_name == "a"
+            and not self._hidden_depth
+        ):
+            self._href = attributes.get("href", "")
+            self._label_parts = []
+
+    def handle_endtag(self, tag: str) -> None:
+        tag_name = tag.casefold()
+        if tag_name in self._VOID_ELEMENTS:
+            return
+        if tag_name == "a" and self._href:
+            if len(self.links) < 500:
+                self.links.append((self._href, " ".join(self._label_parts)))
+            self._href = ""
+            self._label_parts = []
+        match = next(
+            (
+                index for index in range(len(self._stack) - 1, -1, -1)
+                if self._stack[index][0] == tag_name
+            ),
+            None,
+        )
+        if match is None:
+            return
+        popped = self._stack[match:]
+        del self._stack[match:]
+        self._hidden_depth -= sum(hidden for _tag, hidden in popped)
+        self._hidden_depth = max(0, self._hidden_depth)
+
+    def handle_data(self, data: str) -> None:
+        if self._href and not self._hidden_depth:
+            self._label_parts.append(data)
+
+
+def _homepage_navigation_locators(
+    page_text: str,
+    *,
+    final_url: str,
+    verified_domain: str,
+) -> list[dict[str, str]]:
+    """Resolve visible same-domain homepage links as untrusted locators."""
+
+    parser = _HomepageNavigationParser()
+    try:
+        parser.feed(str(page_text or "")[:_MAX_BYTES])
+        parser.close()
+    except Exception:
+        return []
+
+    locators: list[dict[str, str]] = []
+    seen: set[str] = set()
+    total_characters = 0
+    for href, raw_label in parser.links:
+        label = " ".join(str(raw_label or "").split())
+        if not label or len(label) > MAX_HOMEPAGE_NAVIGATION_LABEL_LENGTH:
+            continue
+        try:
+            absolute = urljoin(final_url, str(href or "").strip())
+            parsed = urlsplit(absolute)
+            port = parsed.port
+        except (TypeError, ValueError):
+            continue
+        if (
+            parsed.scheme.casefold() != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+            or (port is not None and port != 443)
+            or len(absolute) > 2000
+            or not absolute.isascii()
+            or any(character.isspace() for character in absolute)
+        ):
+            continue
+        canonical = urlunsplit(
+            ("https", parsed.netloc.casefold(), parsed.path, parsed.query, "")
+        )
+        try:
+            if _registrable_domain(canonical) != verified_domain:
+                continue
+        except Exception:
+            continue
+        if canonical in seen:
+            continue
+        candidate_characters = len(canonical) + len(label)
+        if (
+            total_characters + candidate_characters
+            > MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS
+        ):
+            continue
+        seen.add(canonical)
+        total_characters += candidate_characters
+        locators.append({"url": canonical, "label": label})
+        if len(locators) >= MAX_HOMEPAGE_NAVIGATION_LOCATORS:
+            break
+    return locators
+
+
 def _homepage_company_names(page_text: str) -> list[str]:
     """Return names actually observed in title or first-party metadata."""
 
@@ -753,6 +903,7 @@ async def verify_company_exists(
     company_linkedin: str = "",
     require_https_transport: bool = False,
     company_quality: bool = False,
+    homepage_navigation_locator_sink: Optional[list[dict[str, str]]] = None,
 ) -> CompanyFitDecisionResult:
     """Verify that ``company_website`` is a real page for ``company_name``.
 
@@ -763,6 +914,8 @@ async def verify_company_exists(
       * ``"website is a parked / for-sale page"``
       * ``"website unreachable: ..."``
     """
+    if homepage_navigation_locator_sink is not None:
+        homepage_navigation_locator_sink.clear()
     submitted_identity = evaluate_company_identity(
         submitted_name=company_name,
         submitted_website=company_website,
@@ -988,6 +1141,14 @@ async def verify_company_exists(
         )
         if legal_name_aliases:
             matched_receipt["verified_legal_name_aliases"] = legal_name_aliases
+        if homepage_navigation_locator_sink is not None:
+            homepage_navigation_locator_sink.extend(
+                _homepage_navigation_locators(
+                    text,
+                    final_url=observed_url,
+                    verified_domain=str(matched["observed_domain"]),
+                )
+            )
         return _identity_result(
             matched_receipt,
             "verified: independently observed first-party name, final domain, "

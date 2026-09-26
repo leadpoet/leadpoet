@@ -6107,6 +6107,85 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
     )
 
 
+def test_industry_prompt_separates_business_role_from_required_attribute():
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+
+    assert (
+        "The requested attribute is a separate gate: missing attribute proof "
+        "must not change the industry role"
+    ) in prompt
+    assert (
+        "Do not claim that the attribute is absent."
+    ) in prompt
+    assert (
+        "directly delivers a requested service to users or beneficiaries is "
+        "its supplier/operator, not its customer/user"
+    ) in prompt
+    assert (
+        "supplier_operator requires direct evidence that the company offers "
+        "that product externally"
+    ) in prompt
+    assert (
+        'Vague terms such as "powers", "platform", "technology", or '
+        '"AI-enabled" do not prove an external software offering'
+    ) in prompt
+    assert (
+        "A mixed-activity company can still qualify when the quote directly "
+        "proves the requested external offering."
+    ) in prompt
+
+
+def test_industry_role_contract_preserves_external_saas_and_mixed_activity():
+    saas_url = "https://www.atlassian.com/software/jira"
+    saas_quote = (
+        "Atlassian offers Jira software to teams for project and issue tracking."
+    )
+    saas = _validated_findings(
+        {"findings": [_finding(
+            "industry",
+            observed_industry="Software",
+            observed_subindustry="Project management software",
+            activity_role="supplier_operator",
+            evidence_url=saas_url,
+            evidence_quote=saas_quote,
+        )]},
+        targets=("industry",),
+        fetched_pages={saas_url: saas_quote},
+        first_party_domains={"atlassian.com"},
+        identity_names={"atlassian"},
+        identity_anchor={
+            "submitted_domain": "atlassian.com",
+            "observed_domain": "atlassian.com",
+        },
+    )
+    assert saas["industry"]["status"] == "VERIFIED"
+    assert saas["industry"]["activity_role"] == "supplier_operator"
+
+    mixed_url = "https://care.example/about"
+    mixed_quote = "Care Example uses AI in its own patient-care workflow."
+    mixed = _validated_findings(
+        {"findings": [_finding(
+            "industry",
+            status="CONTRADICTED",
+            observed_industry="Health Care",
+            observed_subindustry="Technology-enabled care delivery",
+            activity_role="internal_function",
+            evidence_url=mixed_url,
+            evidence_quote=mixed_quote,
+        )]},
+        targets=("industry",),
+        fetched_pages={mixed_url: mixed_quote},
+        first_party_domains={"care.example"},
+        identity_names={"careexample"},
+        identity_anchor={
+            "submitted_domain": "care.example",
+            "observed_domain": "care.example",
+        },
+    )
+    assert mixed["industry"]["status"] == "CONTRADICTED"
+    assert mixed["industry"]["activity_role"] == "internal_function"
+
+
 def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatch):
     url = "https://acme.example/investors"
     quote = "Acme common stock is listed on NASDAQ under ticker ACME."

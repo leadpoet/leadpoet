@@ -175,6 +175,17 @@ def test_fixture_resume_requires_exact_existing_binding():
         )
 
 
+def test_fixture_credential_binding_uses_store_rpc_contract():
+    verification._require_credential_binding({
+        "status": "ok", "submission_status": "accepted",
+    })
+    verification._require_credential_binding({
+        "status": "existing", "submission_status": "frozen",
+    })
+    with pytest.raises(verification.VerificationError, match="binding failed"):
+        verification._require_credential_binding({"status": "accepted"})
+
+
 def test_fixture_archive_retry_never_overwrites_different_bytes(tmp_path):
     from lab_arena.contracts import ArenaContractError
     from lab_arena.service import LocalObjectStore

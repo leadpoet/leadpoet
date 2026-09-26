@@ -553,11 +553,18 @@ def score_work_item(
                             canonical_by_alias.setdefault(alias, breakdown["company_identity_key"])
                         verified_indexes.add(index)
             return result
-        if failed:
-            last_failure_reason = _retryable_breakdown_failure_reason(failed[0])
+        unresolved_set = set(unresolved)
+        unresolved_failures = [
+            breakdown
+            for position, breakdown in zip(invoked_positions, breakdowns)
+            if position in unresolved_set
+        ]
+        if unresolved_failures:
+            failure = unresolved_failures[0]
+            last_failure_reason = _retryable_breakdown_failure_reason(failure)
             last_error = ScoringError(
                 "judge reported a retryable verifier failure: %s"
-                % str(failed[0].get("failure_reason") or "")[:200],
+                % str(failure.get("failure_reason") or "")[:200],
                 failure_reason=last_failure_reason,
             )
             continue

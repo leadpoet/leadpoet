@@ -20,6 +20,10 @@ from qualification.scoring.competition import (
 JOB_ID = "9787c187-a03f-491b-a852-30452bbf5a3c"
 URL = f"https://jobs.ashbyhq.com/vanta/{JOB_ID}"
 OTHER_ID = "12345678-1234-1234-1234-123456789abc"
+BUSINESSWIRE_URL = (
+    "https://www.businesswire.com/news/home/20260303812541/en/"
+    "SentinelOne-Appoints-Sonalee-Parekh-as-Chief-Financial-Officer"
+)
 
 
 def listing(*, job_id=OTHER_ID, tenant="vanta", **extra):
@@ -91,6 +95,56 @@ def unavailable_detail(contents):
             },
         },
     }
+
+
+def company(name):
+    return {
+        "company_name": name,
+        "company_website": f"https://{name.lower()}.example",
+        "industry": "Software",
+        "employee_count": "51-200",
+        "country": "United States",
+        "intent_signals": [],
+    }
+
+
+def retryable_breakdown(*, reason, receipt_reason, detail=None):
+    return {
+        "final_score": 0.0,
+        "company_qualified": False,
+        "failure_reason": reason,
+        "intent_signals_detail": [detail] if detail else [],
+        "verifier_gate_receipts": [{
+            "gate": "intent_verification",
+            "decision": "error",
+            "failure_reason_code": receipt_reason,
+        }],
+    }
+
+
+def businesswire_local_breakdown():
+    detail = unavailable_detail({
+        "results": [],
+        "failures": [],
+        "statuses": [{
+            "url": BUSINESSWIRE_URL,
+            "source": "none",
+            "sd_stage": "all_tiers_exhausted:body_too_short",
+            "exa_stage": "exa_no_results",
+        }],
+    })
+    return retryable_breakdown(
+        reason="Intent verification unavailable: source blocked",
+        receipt_reason="source_blocked",
+        detail=detail,
+    )
+
+
+def systemic_breakdown():
+    return retryable_breakdown(
+        reason="Intent verification unavailable: verifier provider error",
+        receipt_reason="provider_error",
+    )
 
 
 @pytest.mark.asyncio
@@ -175,14 +229,7 @@ def test_native_retry_retains_sibling_and_only_zeros_local_exhaustion(
     assert scorer_breakdown_has_company_local_verification_failure(failed) is (
         not systemic
     )
-    companies = [{
-        "company_name": name,
-        "company_website": f"https://{name.lower()}.example",
-        "industry": "Software",
-        "employee_count": "51-200",
-        "country": "United States",
-        "intent_signals": [],
-    } for name in ("Good", "Missing")]
+    companies = [company(name) for name in ("Good", "Missing")]
     calls = []
 
     def scorer(batch, _icp, _reference):
@@ -225,3 +272,94 @@ def test_native_retry_retains_sibling_and_only_zeros_local_exhaustion(
         artifact = scoring.build_scoring_output("fixture", result)
         assert scoring.validate_scoring_output_document(artifact) == artifact
     assert calls == [["Good", "Missing"], ["Missing"], ["Missing"]]
+
+
+@pytest.mark.parametrize(
+    "failed_names",
+    [("BusinessWire Local", "Systemic"), ("Systemic", "BusinessWire Local")],
+)
+def test_terminal_local_failure_does_not_mask_remaining_systemic_reason(
+    failed_names,
+):
+    companies = [company("Complete"), *(company(name) for name in failed_names)]
+    calls = []
+
+    def scorer(batch, _icp, _reference):
+        calls.append([item["company_name"] for item in batch])
+        results = []
+        for index, item in enumerate(batch):
+            name = item["company_name"]
+            if name == "BusinessWire Local":
+                row = businesswire_local_breakdown()
+            elif name == "Systemic":
+                row = systemic_breakdown()
+            else:
+                row = {
+                    "final_score": 60.0,
+                    "company_qualified": True,
+                    "intent_signals_detail": [],
+                    "verifier_gate_receipts": [],
+                }
+            row["company_index"] = index
+            row["company_identity_key"] = item["company_website"]
+            row["company_identity_alias_keys"] = [item["company_website"]]
+            results.append(row)
+        return results
+
+    scorer.integrity_policy = True
+    with pytest.raises(scoring.ScoringError) as raised:
+        scoring.score_work_item(
+            {"scored_run_id": "businesswire-mixed"},
+            icp={"icp_id": "fixture", "employee_count": ["51-200"],
+                 "max_companies": 5},
+            companies=companies,
+            scorer=scorer,
+            max_retries=3,
+        )
+    assert raised.value.failure_reason == "provider_error"
+    assert calls == [
+        ["Complete", *failed_names],
+        list(failed_names),
+        list(failed_names),
+    ]
+
+
+def test_terminal_stage_mismatch_does_not_mask_remaining_systemic_reason():
+    companies = [company("SolarWinds"), company("Rapid7")]
+    calls = []
+
+    def scorer(batch, _icp, _reference):
+        calls.append([item["company_name"] for item in batch])
+        results = []
+        for index, item in enumerate(batch):
+            if item["company_name"] == "SolarWinds":
+                row = {
+                    "final_score": 0.0,
+                    "company_qualified": False,
+                    "failure_reason": "company stage mismatch: Acquired",
+                    "intent_signals_detail": [],
+                    "verifier_gate_receipts": [{
+                        "gate": "company_fit",
+                        "decision": "mismatch",
+                    }],
+                }
+            else:
+                row = systemic_breakdown()
+            row["company_index"] = index
+            row["company_identity_key"] = item["company_website"]
+            row["company_identity_alias_keys"] = [item["company_website"]]
+            results.append(row)
+        return results
+
+    scorer.integrity_policy = True
+    with pytest.raises(scoring.ScoringError) as raised:
+        scoring.score_work_item(
+            {"scored_run_id": "position-20"},
+            icp={"icp_id": "fixture", "employee_count": ["51-200"],
+                 "max_companies": 5},
+            companies=companies,
+            scorer=scorer,
+            max_retries=3,
+        )
+    assert raised.value.failure_reason == "provider_error"
+    assert calls == [["SolarWinds", "Rapid7"], ["Rapid7"], ["Rapid7"]]

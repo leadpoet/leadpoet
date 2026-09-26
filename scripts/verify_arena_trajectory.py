@@ -69,6 +69,16 @@ def _require_fixture_identity(
     return fixture
 
 
+def _require_credential_binding(result: Mapping[str, Any]) -> None:
+    outcome = (result.get("status"), result.get("submission_status"))
+    if outcome not in {
+        ("ok", "accepted"),
+        ("existing", "accepted"),
+        ("existing", "frozen"),
+    }:
+        raise VerificationError("fixture miner credential binding failed")
+
+
 def _run_spec(value: str) -> tuple[str, str, str]:
     parts = value.split(":", 2)
     if (
@@ -490,8 +500,7 @@ def _fixture_service(args: argparse.Namespace):
         accepted = service.store.accept_submission_with_credentials(
             args.round_id, submission_id, str(old["miner_hotkey"]), encrypted
         )
-        if accepted.get("status") not in ("accepted", "existing"):
-            raise VerificationError("fixture miner credential binding failed")
+        _require_credential_binding(accepted)
         fixture = service.store.get_submission(submission_id)
     if not fixture or fixture.get("status") not in ("accepted", "frozen"):
         raise VerificationError("fixture miner is not accepted")

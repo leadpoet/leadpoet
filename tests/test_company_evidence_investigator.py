@@ -179,6 +179,41 @@ def test_investigator_prompt_preserves_equity_stage_across_later_debt():
     assert "validated different completed stage may still be" in prompt
 
 
+def test_public_source_selection_prefers_supplied_issuer_evidence_within_limits():
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+
+    assert (
+        "prefer a relevant supplied recent issuer announcement or filing that "
+        "names the investigated company with an exchange ticker"
+    ) in prompt
+    assert "fetch it before a stock-quote or chart page" in prompt
+    assert "This source order does not establish current stage" in prompt
+    assert "still require a fetched company-bound quote" in prompt
+    assert "later completed take-private, acquisition, or delisting evidence" in prompt
+    assert (
+        investigator.MAX_REASONING_TURNS,
+        investigator.MAX_SEARCH_CALLS,
+        investigator.MAX_FETCH_CALLS,
+    ) == (8, 2, 3)
+
+
+@pytest.mark.parametrize(
+    ("quote", "expected"),
+    [
+        ("Acme Holdings, Inc. (NASDAQ: ACME)", True),
+        ("Acme Holdings plans to list on NASDAQ under ticker ACME.", False),
+        ("Formerly Acme Holdings, Inc. (NASDAQ: ACME)", False),
+        (
+            "Acme Holdings, Inc. (NASDAQ: ACME), then was taken private in 2025.",
+            False,
+        ),
+        ("Acme Holdings bonds (NASDAQ: ACME)", False),
+    ],
+)
+def test_public_source_selection_does_not_relax_stage_quote_gates(quote, expected):
+    assert _stage_quote_supports_observation("public", quote) is expected
+
+
 def test_v5_stage_evidence_reaches_only_untrusted_investigator_observations(
     monkeypatch,
 ):

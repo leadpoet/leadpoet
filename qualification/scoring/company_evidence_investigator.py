@@ -102,8 +102,13 @@ context only. Never include that marker or those URL strings in a quote.
 
 You have at most 8 reasoning turns, 2 searches, and 3 page fetches across all
 requested targets. Prioritize official company investor-relations pages for
-public listing, official company rebrand or FAQ pages for rebrand continuity,
-and first-party sources for completed stage events. If a saved source does not
+public listing. For Public, prefer a relevant supplied recent issuer
+announcement or filing that names the investigated company with an exchange
+ticker, and fetch it before a stock-quote or chart page. This source order does
+not establish current stage: still require a fetched company-bound quote and
+compare later completed take-private, acquisition, or delisting evidence.
+Prioritize official company rebrand or FAQ pages for rebrand continuity and
+first-party sources for completed stage events. If a saved source does not
 prove the fact, use at least one targeted search before returning UNPROVEN when
 search budget remains. An unavailable page does not prove the fact absent.
 

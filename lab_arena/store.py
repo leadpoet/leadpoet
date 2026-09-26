@@ -386,10 +386,27 @@ class PostgrestTransport(StoreTransport):
                     self.deadlock_retries += 1
                     time.sleep(0.01 * (attempt + 1))
                     continue
+            if (
+                function == "lab_arena_append_trajectory_events_v1"
+                and response.status_code in (502, 503, 504)
+            ):
+                # This RPC is idempotent by (run_id, event_id), so its caller
+                # can safely replay one ambiguous upstream availability result.
+                # Other mutating RPCs retain the no-replay policy.
+                raise ArenaStoreUnavailable(
+                    "rpc %s temporarily unavailable: HTTP %d"
+                    % (function, response.status_code)
+                )
             self._raise_for_status(response, "rpc %s" % function)
             try:
                 return response.json()
             except ValueError as exc:
+                if function == "lab_arena_append_trajectory_events_v1":
+                    # A successful non-JSON response can follow a committed
+                    # insert. Replaying the same event UUID is idempotent.
+                    raise ArenaStoreUnavailable(
+                        "rpc %s returned non-JSON" % function
+                    ) from exc
                 raise ArenaStoreError("rpc %s returned non-JSON" % function) from exc
         raise ArenaStoreError("rpc %s failed after deadlock retries" % function)
 

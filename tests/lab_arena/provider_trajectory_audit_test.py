@@ -6,9 +6,17 @@ import json
 from datetime import datetime
 from types import SimpleNamespace
 
+import httpx
+import pytest
+
 from lab_arena import broker as broker_module
 from lab_arena.broker import BrokerResult, RunContext
-from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable
+from lab_arena.store import (
+    ArenaStore,
+    ArenaStoreError,
+    ArenaStoreUnavailable,
+    PostgrestTransport,
+)
 from tests.lab_arena.trajectory_test import _run, _service_for_trajectory
 
 
@@ -195,6 +203,103 @@ def test_provider_trajectory_does_not_retry_nontransport_denial():
 
     assert service.handle_provider("run-1", "lease-token", FRAME) == expected.to_document()
     assert Store.calls == 2  # One request and one response, with no denial replay.
+
+
+@pytest.mark.parametrize("first_reply", [502, 503, 504, "invalid_json"])
+def test_postgrest_trajectory_availability_retries_same_uuid(first_reply):
+    rpc_events = []
+    persisted = {}
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json=[_run()])
+        payload = json.loads(request.content)
+        event = payload["p_events"][0]
+        rpc_events.append(event)
+        if len(rpc_events) == 1:
+            if first_reply == "invalid_json":
+                persisted[event["event_id"]] = event
+                return httpx.Response(200, content=b"not-json")
+            return httpx.Response(
+                first_reply, json={"message": "upstream unavailable"}
+            )
+        existed = event["event_id"] in persisted
+        persisted.setdefault(event["event_id"], event)
+        return httpx.Response(
+            200,
+            json={
+                "status": "accepted", "accepted": 1,
+                "inserted": 0 if existed else 1,
+                "existing": 1 if existed else 0,
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        store = ArenaStore(PostgrestTransport(
+            "https://database.example",
+            service_key="sb_secret_scoped-test",
+            http_client=http,
+        ))
+        expected = _result(provider_attempt=1, error=False)
+        service = _service_for_trajectory(
+            store, SimpleNamespace(execute=lambda *_args, **_kwargs: expected)
+        )
+
+        assert service.handle_provider(
+            "run-1", "lease-token", FRAME
+        ) == expected.to_document()
+
+    assert rpc_events[0]["event_id"] == rpc_events[1]["event_id"]
+    assert len({event["event_id"] for event in rpc_events}) == 2
+    assert sorted(event["kind"] for event in persisted.values()) == [
+        "provider.request", "provider.response",
+    ]
+
+
+def test_postgrest_trajectory_contract_denial_and_other_rpc_are_not_retried():
+    trajectory_calls = 0
+
+    def handler(request):
+        nonlocal trajectory_calls
+        if request.method == "GET":
+            return httpx.Response(200, json=[_run()])
+        if request.url.path.endswith("/lab_arena_append_trajectory_events_v1"):
+            trajectory_calls += 1
+            return httpx.Response(
+                400,
+                json={
+                    "code": "54000",
+                    "message": "lab_arena_trajectory_provider_limit",
+                },
+            )
+        return httpx.Response(503, json={"message": "unavailable"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        transport = PostgrestTransport(
+            "https://database.example",
+            service_key="sb_secret_scoped-test",
+            http_client=http,
+        )
+        store = ArenaStore(transport)
+        expected = _result(provider_attempt=1, error=False)
+        service = _service_for_trajectory(
+            store, SimpleNamespace(execute=lambda *_args, **_kwargs: expected)
+        )
+
+        assert service.handle_provider(
+            "run-1", "lease-token", FRAME
+        ) == expected.to_document()
+        with pytest.raises(ArenaStoreError) as caught:
+            transport.rpc(
+                "lab_arena_run_quota_snapshot_v1",
+                {
+                    "p_run_id": "run-1",
+                    "p_lease_token_hash": "sha256:" + "a" * 64,
+                },
+            )
+
+    assert trajectory_calls == 2  # One denied request and one denied response.
+    assert type(caught.value) is ArenaStoreError
 
 
 def test_retry_trace_fits_terminal_event_and_is_not_returned_to_worker(monkeypatch):

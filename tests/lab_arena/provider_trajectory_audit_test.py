@@ -205,6 +205,105 @@ def test_provider_trajectory_does_not_retry_nontransport_denial():
     assert Store.calls == 2  # One request and one response, with no denial replay.
 
 
+def test_provider_response_keeps_frame_correlation_when_broker_call_omits_it():
+    class Store:
+        persisted = []
+        get_run = staticmethod(lambda _run_id: _run())
+
+        @classmethod
+        def append_trajectory_events(cls, _run_id, _lease_hash, events):
+            cls.persisted.extend(events)
+            return {
+                "status": "accepted", "accepted": len(events),
+                "inserted": len(events), "existing": 0,
+            }
+
+    early_error = BrokerResult(
+        503,
+        {},
+        b'{"error":{"code":"broker_unavailable"}}',
+        {"error_code": "broker_unavailable"},
+    )
+    service = _service_for_trajectory(
+        Store(), SimpleNamespace(execute=lambda *_args, **_kwargs: early_error)
+    )
+
+    assert service.handle_provider(
+        "run-1", "lease-token", FRAME
+    ) == early_error.to_document()
+    terminal = Store.persisted[-1]
+    assert terminal["kind"] == "provider.response"
+    assert terminal["content"]["operation_id"] == FRAME["operation_id"]
+    assert terminal["content"]["action_sequence"] == FRAME["action_sequence"]
+
+
+def test_provider_exception_keeps_frame_correlation():
+    class Store:
+        persisted = []
+        get_run = staticmethod(lambda _run_id: _run())
+
+        @classmethod
+        def append_trajectory_events(cls, _run_id, _lease_hash, events):
+            cls.persisted.extend(events)
+            return {
+                "status": "accepted", "accepted": len(events),
+                "inserted": len(events), "existing": 0,
+            }
+
+    failure = ArenaStoreUnavailable("provider ledger unavailable")
+    provider = broker_module.Broker.__new__(broker_module.Broker)
+    provider._retry_miner_credential_for = lambda _context: True
+    provider._mark_provider_fallback = None
+    attempt = 0
+
+    def execute_once(*_args, **_kwargs):
+        nonlocal attempt
+        attempt += 1
+        if attempt == 1:
+            return _result(provider_attempt=1, error=True)
+        raise failure
+
+    provider._execute_once = execute_once
+    service = _service_for_trajectory(Store(), provider)
+
+    with pytest.raises(ArenaStoreUnavailable) as caught:
+        service.handle_provider("run-1", "lease-token", FRAME)
+    assert caught.value is failure
+    terminal = Store.persisted[-1]
+    assert terminal["kind"] == "provider.error"
+    assert terminal["content"]["operation_id"] == FRAME["operation_id"]
+    assert terminal["content"]["action_sequence"] == FRAME["action_sequence"]
+    attempts = terminal["content"]["provider_attempts"]
+    assert [item["provider_attempt"] for item in attempts] == [1, 2]
+    assert attempts[0]["provider_status"] == 401
+    assert attempts[1]["error_class"] == "ArenaStoreUnavailable"
+
+
+def test_exception_trace_instrumentation_failure_preserves_original_exception():
+    class LockedFailure(ArenaStoreUnavailable):
+        def __setattr__(self, _name, _value):
+            raise RuntimeError("metadata disabled")
+
+    failure = LockedFailure("provider ledger unavailable")
+    provider = broker_module.Broker.__new__(broker_module.Broker)
+    provider._retry_miner_credential_for = lambda _context: False
+    provider._mark_provider_fallback = None
+    provider._execute_once = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        failure
+    )
+
+    with pytest.raises(LockedFailure) as caught:
+        provider.execute(
+            _context(),
+            operation_id=FRAME["operation_id"],
+            parameters=FRAME["parameters"],
+            action_sequence=FRAME["action_sequence"],
+            timeout_ms=FRAME["timeout_ms"],
+        )
+
+    assert caught.value is failure
+
+
 @pytest.mark.parametrize("first_reply", [502, 503, 504, "invalid_json"])
 def test_postgrest_trajectory_availability_retries_same_uuid(first_reply):
     rpc_events = []

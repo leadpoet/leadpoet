@@ -2532,17 +2532,40 @@ class Broker:
         base_call_identity: Optional[str] = None
         for provider_attempt in range(1, CHAMPION_CREDENTIAL_PROVIDER_ATTEMPTS + 1):
             provider_attempt_started = time.monotonic()
-            result = self._execute_once(
-                context,
-                operation_id=operation_id,
-                parameters=parameters,
-                action_sequence=action_sequence,
-                timeout_ms=timeout_ms,
-                provider_attempt=provider_attempt,
-                champion_credential_retry=retry_miner_credential,
-                api_started_at=api_started_at,
-                cancel_requested=cancel_requested,
-            )
+            try:
+                result = self._execute_once(
+                    context,
+                    operation_id=operation_id,
+                    parameters=parameters,
+                    action_sequence=action_sequence,
+                    timeout_ms=timeout_ms,
+                    provider_attempt=provider_attempt,
+                    champion_credential_retry=retry_miner_credential,
+                    api_started_at=api_started_at,
+                    cancel_requested=cancel_requested,
+                )
+            except Exception as exc:
+                try:
+                    failed_attempt = {
+                        "occurred_at": datetime.now(timezone.utc).isoformat(
+                            timespec="milliseconds"
+                        ).replace("+00:00", "Z"),
+                        "elapsed_ms": int(
+                            (time.monotonic() - provider_attempt_started) * 1000
+                        ),
+                        "provider_attempt": provider_attempt,
+                        "operation_id": str(operation_id),
+                        "error_class": type(exc).__name__,
+                    }
+                    setattr(
+                        exc,
+                        "_arena_trajectory_attempts",
+                        tuple([*attempt_trace, failed_attempt][-4:]),
+                    )
+                except Exception:
+                    # Observation must not replace the provider exception.
+                    pass
+                raise
             last_result = result
             try:
                 attempt_trace.append(

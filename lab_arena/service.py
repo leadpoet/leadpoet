@@ -4114,6 +4114,13 @@ class ArenaService:
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error_class": type(exc).__name__,
                 }
+                attempts = getattr(exc, "_arena_trajectory_attempts", ())
+                if isinstance(attempts, (list, tuple)):
+                    error_content["provider_attempts"] = [
+                        dict(item)
+                        for item in attempts[:4]
+                        if isinstance(item, Mapping)
+                    ]
                 persist_provider_event(
                     trajectory.event("provider.error", error_content)
                 )
@@ -4126,6 +4133,10 @@ class ArenaService:
                 document,
                 elapsed_ms=int((time.monotonic() - started) * 1000),
             )
+            # The admitted frame is the stable correlation source. Early
+            # broker errors may not have a call identity or repeat these fields.
+            response_content["operation_id"] = operation_id
+            response_content["action_sequence"] = frame["action_sequence"]
             if len(result.attempt_trace) > 1:
                 response_content["provider_attempts"] = [
                     dict(item) for item in result.attempt_trace[:4]

@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: September 26 Arena monitoring and audit
+
+On 2026-09-25 the user authorized monitoring the September 26 production
+baseline and subsequent miner scoring through publication, promotion and
+weights, including independent web audits and the narrowest safe fixes for
+confirmed scoring or verifier bugs. Use the overnight operational skills.
+Authority includes protected inspection, focused tests, exact committed
+migrations when needed, pushes, scorer-image publication and canonical paired
+deployment at a safe boundary. Preserve active work, frozen banks, submitted
+sources, accepted results, qualification requirements, deterministic scoring,
+cost rules and credential boundaries. Do not reset completed rounds or
+fabricate scores. This scope ends when the September 26 cycle and any needed
+fixes are verified end to end.
+
 ## Scoped production authorization: September 25 daily Arena monitoring
 
 On 2026-09-25 the user authorized end-to-end monitoring of the real September

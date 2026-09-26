@@ -135,6 +135,78 @@ def _finding(target: str, **overrides):
     return values
 
 
+def _saved_higher_ed_case(
+    *,
+    name: str,
+    domain: str,
+    linkedin_slug: str,
+    industry_quote: str,
+    attribute_quote: str,
+):
+    website = f"https://{domain}/"
+    linkedin = f"https://www.linkedin.com/company/{linkedin_slug}"
+    company = _company().model_copy(update={
+        "company_name": name,
+        "company_website": website,
+        "company_linkedin": linkedin,
+        "employee_count": "201-500",
+        "country": "United Kingdom",
+        "state": "",
+        "intent_signals": [],
+    })
+    verdict = _verdict(
+        observed_company_name=name,
+        observed_company_website=website,
+        observed_company_linkedin=linkedin,
+        observed_company_stage="Series B",
+        stage_matches=True,
+        stage_evidence_url=f"https://{domain}/funding",
+        stage_evidence_quote=f"{name} announced its Series B funding round.",
+        observed_employee_count="201-500",
+        employee_size_matches=True,
+        employee_size_evidence_url=linkedin,
+        employee_size_evidence_quote="Company size 201-500 employees",
+        observed_industry="Education",
+        observed_subindustry="Higher education services",
+        industry_matches=True,
+        industry_activity_role="supplier_operator",
+        industry_evidence_url=website,
+        industry_evidence_quote=industry_quote,
+        attribute_satisfied=True,
+        required_attribute_evidence_url=website,
+        required_attribute_evidence_quote=attribute_quote,
+        observed_hq_country="United Kingdom",
+        observed_hq_state="",
+        geography_matches=True,
+        geography_evidence_url=linkedin,
+        geography_evidence_quote=(
+            f"{name} is headquartered in London, United Kingdom."
+        ),
+    )
+    identity = {
+        "normalized_name": name.casefold().replace(" ", ""),
+        "registrable_dns_domain": domain,
+        "linkedin_company_slug": linkedin_slug,
+    }
+    icp = _icp().model_copy(update={
+        "employee_count": "201-500",
+        "company_stage": "Series B",
+        "geography": "United Kingdom",
+    })
+    prior = lead_scorer._reverify_decision(
+        verdict,
+        icp.required_attribute,
+        "series b",
+        icp=icp,
+        company=company,
+        verified_homepage_identity=identity,
+        verified_homepage_transport_domain=domain,
+        company_quality=True,
+    )
+    assert prior.decision == COMPANY_FIT_MATCH
+    return company, icp, verdict, identity, prior
+
+
 def test_positive_review_is_added_when_recoverable_stage_is_unavailable():
     icp = _icp()
     result = _initial_result()
@@ -294,6 +366,7 @@ def test_stage_recovery_and_positive_semantics_share_one_investigation(
 
     assert len(calls) == 1
     assert calls[0]["targets"] == ("stage", "industry")
+    assert calls[0]["positive_semantic_review"] is True
     assert claims["industry"] == industry_finding
     assert result.decision == expected_decision
     assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MATCH
@@ -308,6 +381,140 @@ def test_stage_recovery_and_positive_semantics_share_one_investigation(
         assert result.details["required_attribute_decision"] == (
             COMPANY_FIT_UNAVAILABLE
         )
+
+
+def test_zen_adjacent_staffing_positive_review_fails_closed(monkeypatch):
+    industry_quote = (
+        "Find the perfect teachers, TAs and support staff for your school - "
+        "with Zen Educate, the only tech-enabled supplier on the Crown "
+        "Commercial Service framework."
+    )
+    company, icp, verdict, identity, prior = _saved_higher_ed_case(
+        name="Zen Educate",
+        domain="zeneducate.com",
+        linkedin_slug="zen-educate",
+        industry_quote=industry_quote,
+        attribute_quote="Welcome to the UK's leading digital staffing platform for educators",
+    )
+    calls = []
+
+    async def investigate(**kwargs):
+        calls.append(kwargs)
+        return {
+            "claims": {"industry": _finding(
+                "industry",
+                status="UNPROVEN",
+                observed_value=None,
+                activity_role="supplier_operator",
+                evidence_url="https://zeneducate.com/",
+                evidence_quote=industry_quote,
+                reason=(
+                    "The source proves education staffing, not the requested "
+                    "higher-education enrollment, learning, communication, or "
+                    "campus-operations activity."
+                ),
+            )},
+            "failure_reason": "",
+            "usage": {"reasoning_turns": 2, "search_calls": 0, "fetch_calls": 1},
+        }
+
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
+    projected, result, claims, _, _ = asyncio.run(
+        lead_scorer._run_targeted_company_evidence_investigation(
+            company=company,
+            icp=icp,
+            verdict=verdict,
+            investigation_targets=("industry",),
+            icp_attribute=icp.required_attribute,
+            icp_stage="series b",
+            verified_identity=identity,
+            verified_transport_domain="zeneducate.com",
+            structured_employee_size_evidence=None,
+            structured_public_company_evidence=None,
+            employee_size_conflict=False,
+            company_quality=True,
+            prior_result=prior,
+            review_positive_semantics=True,
+        )
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["targets"] == ("industry",)
+    assert calls[0]["positive_semantic_review"] is True
+    assert claims["industry"]["status"] == "UNPROVEN"
+    assert projected["industry_matches"] is None
+    assert projected["attribute_satisfied"] is None
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["dimension_decisions"]["industry"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+    assert result.details["required_attribute_decision"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+
+
+def test_unibuddy_direct_higher_ed_evidence_projects_as_match(monkeypatch):
+    industry_quote = (
+        "Our platform boosts enrollment by building trust and confidence through "
+        "scalable peer-to-peer & community engagement. It generates connection—and "
+        "unique, real-time insights to help higher ed understand student behavior "
+        "and optimize their strategy. See why higher ed institutions love Unibuddy"
+    )
+    company, icp, verdict, identity, prior = _saved_higher_ed_case(
+        name="Unibuddy",
+        domain="unibuddy.com",
+        linkedin_slug="unibuddy",
+        industry_quote=industry_quote,
+        attribute_quote=(
+            "Unibuddy allows prospective university applicants to chat with "
+            "existing students and staff."
+        ),
+    )
+
+    async def investigate(**kwargs):
+        assert kwargs["targets"] == ("industry",)
+        assert kwargs["positive_semantic_review"] is True
+        return {
+            "claims": {"industry": _finding(
+                "industry",
+                observed_value="Higher education enrollment platform",
+                observed_industry="Education",
+                observed_subindustry="Higher education services",
+                activity_role="supplier_operator",
+                evidence_url="https://unibuddy.com/",
+                evidence_quote=industry_quote,
+            )},
+            "failure_reason": "",
+            "usage": {"reasoning_turns": 3, "search_calls": 0, "fetch_calls": 1},
+        }
+
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
+    projected, result, claims, _, _ = asyncio.run(
+        lead_scorer._run_targeted_company_evidence_investigation(
+            company=company,
+            icp=icp,
+            verdict=verdict,
+            investigation_targets=("industry",),
+            icp_attribute=icp.required_attribute,
+            icp_stage="series b",
+            verified_identity=identity,
+            verified_transport_domain="unibuddy.com",
+            structured_employee_size_evidence=None,
+            structured_public_company_evidence=None,
+            employee_size_conflict=False,
+            company_quality=True,
+            prior_result=prior,
+            review_positive_semantics=True,
+        )
+    )
+
+    assert claims["industry"]["status"] == "VERIFIED"
+    assert projected["industry_evidence_quote"] == industry_quote
+    assert projected["industry_matches"] is True
+    assert projected["attribute_satisfied"] is True
+    assert result.decision == COMPANY_FIT_MATCH
+    assert result.details["dimension_decisions"]["industry"] == COMPANY_FIT_MATCH
+    assert result.details["required_attribute_decision"] == COMPANY_FIT_MATCH
 
 
 def test_positive_review_provider_failure_is_fail_closed(monkeypatch):

@@ -5872,6 +5872,7 @@ async def _run_targeted_company_evidence_investigation(
         requested_product_service=str(icp.product_service or ""),
         requested_attribute=str(icp.required_attribute or ""),
         requested_geography=str(icp.geography or icp.country or ""),
+        positive_semantic_review=review_positive_semantics,
         prior_observations={
             **{
                 key: verdict.get(key)

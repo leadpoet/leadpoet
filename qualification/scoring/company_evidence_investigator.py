@@ -138,6 +138,18 @@ compliance, internal use, or badges. Preserve the criterion's explicit AND/OR
 structure. Prove each conjunct. For alternatives joined by OR, evidence for one
 qualifying alternative is sufficient; do not require all alternatives.
 Missing discussion is not a contradiction.
+When positive_semantic_review is true, treat prior positive labels as untrusted
+hypotheses, not source observations. The supplier_operator role establishes
+only the company's relationship to the cited activity; it does not establish
+that the activity satisfies the requested criterion. Return VERIFIED only when
+the fetched source directly supports every active requested sub-industry
+constraint and at least one qualifying product/service or required-attribute
+alternative under the criterion's explicit AND/OR structure. Equivalent source
+language is sufficient; do not require literal taxonomy labels. An adjacent
+activity for the same customer group is UNPROVEN. Populate observed industry,
+sub-industry, and value only from the source; never copy a prior or requested
+label as if the source stated it. In reason, concisely explain which concrete
+sold capability and customer scope the evidence proves or fails to prove.
 CONTRADICTED requires direct customer, internal-function, or third-party
 evidence; a page that describes only a different business is UNPROVEN because
 it does not prove absence of another activity.
@@ -1458,6 +1470,7 @@ async def investigate_company_evidence(
     requested_product_service: str = "",
     requested_attribute: str = "",
     requested_geography: str = "",
+    positive_semantic_review: bool = False,
     prior_observations: Optional[Mapping[str, Any]] = None,
     verified_homepage_identity: Optional[Mapping[str, Any]] = None,
     prefetched_pages: Optional[Mapping[str, Any]] = None,
@@ -1575,6 +1588,7 @@ async def investigate_company_evidence(
         "requested_product_service": str(requested_product_service or "")[:500],
         "requested_attribute": str(requested_attribute or "")[:500],
         "requested_geography": str(requested_geography or "")[:300],
+        "positive_semantic_review": bool(positive_semantic_review),
         "prior_observations": bounded_prior_observations,
         "verified_homepage_identity": dict(verified_homepage_identity or {}),
         "investigation_limits": {

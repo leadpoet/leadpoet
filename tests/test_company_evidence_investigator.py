@@ -7591,6 +7591,7 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
         requested_subindustry="Education Technology",
         requested_product_service="Platforms that enable online learning",
         requested_attribute="Sells a university learning platform",
+        positive_semantic_review=True,
     ))
 
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
@@ -7606,6 +7607,7 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
     assert input_document["requested_attribute"] == (
         "Sells a university learning platform"
     )
+    assert input_document["positive_semantic_review"] is True
     assert input_document["investigation_limits"] == {
         "reasoning_turns": 8,
         "search_calls": 2,
@@ -7618,6 +7620,10 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
     assert "never combine a quote from one page" in (
         requests[0]["messages"][0]["content"]
     )
+    system_prompt = " ".join(requests[0]["messages"][0]["content"].split())
+    assert "prior positive labels as untrusted hypotheses" in system_prompt
+    assert "supplier_operator role establishes" in system_prompt
+    assert "Equivalent source language is sufficient" in system_prompt
 
 
 def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatch):

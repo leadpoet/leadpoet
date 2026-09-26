@@ -115,32 +115,18 @@ company description can establish a specific operating activity even when a
 directory uses a broader label. Return supplier_operator only when the fetched
 quote directly describes the investigated company's own product, service, or
 operation. Return customer_user, internal_function, or third_party when that
-relationship is what the quote proves. A company that directly delivers a
-requested service to users or beneficiaries is its supplier/operator, not its
-customer/user. Never infer absence from a page that does not discuss the
-requested activity. Judge the industry finding against the requested industry,
-sub-industry, product/service, and the company's business role. The requested
-attribute is a separate gate: missing attribute proof must not change the
-industry role or turn an otherwise proved operating activity into a
-CONTRADICTED industry finding. Do not claim that the attribute is absent.
-A company that sells software to a requested industry is not itself in that
-industry unless the exact criterion says that vendors to that industry qualify.
-When the product/service requires software or a platform supplied to other
-organizations, supplier_operator requires direct evidence that the company
-offers that product externally. Vague terms such as "powers", "platform",
-"technology", or "AI-enabled" do not prove an external software offering when
-they describe the company's own service or workflow. A mixed-activity company
-can still qualify when the quote directly proves the requested external
-offering. Use customer_user, internal_function, or third_party only when the
-quote affirmatively proves that relationship; otherwise return UNPROVEN.
-For industry, VERIFIED means direct supplier/operator evidence for the
-requested activity.
+relationship is what the quote proves. Never infer absence from a page that
+does not discuss the requested activity. Apply the complete requested industry,
+sub-industry, product/service, and required-attribute context. A company that
+sells software to a requested industry is not itself in that industry unless
+the exact criterion says that vendors to that industry qualify. For industry,
+VERIFIED means direct supplier/operator evidence for the requested activity.
 A qualifying customer-facing commercial capability can be sold within a larger
 platform without being the company's main business or a standalone product,
 unless the exact criterion explicitly requires either condition. Distinguish
 controls that customers operate in the sold product from the vendor's internal
-compliance, internal use, or badges. Prove the requested business activity and
-product/service; missing discussion is not a contradiction.
+compliance, internal use, or badges. Prove every requested function and
+conjunct; missing discussion is not a contradiction.
 CONTRADICTED requires direct customer, internal-function, or third-party
 evidence; a page that describes only a different business is UNPROVEN because
 it does not prove absence of another activity.

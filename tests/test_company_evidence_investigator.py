@@ -1057,6 +1057,7 @@ def test_doctronic_submitted_later_round_uses_validated_fetch(
         stage_evidence_quote="Doctronic today announced a $20 million Series A round.",
     )
     turns = []
+    searches = []
 
     async def broad_provider(**_kwargs):
         return initial, ""
@@ -1069,6 +1070,23 @@ def test_doctronic_submitted_later_round_uses_validated_fetch(
         turns.append(payload)
         if len(turns) == 1:
             name, arguments = "fetch_page", {"url": source_url}
+        elif (
+            isinstance(payload.get("tool_choice"), dict)
+            and payload["tool_choice"].get("function", {}).get("name")
+            == "search_web"
+        ):
+            name, arguments = "search_web", {
+                "query": "Doctronic current funding acquisition IPO",
+            }
+        elif len(searches) >= 2:
+            name, arguments = "submit_findings", {"findings": [_finding(
+                "stage",
+                status="UNPROVEN",
+                observed_value=None,
+                evidence_url="",
+                evidence_quote="",
+                reason="submitted source unavailable and no replacement found",
+            )]}
         else:
             name, arguments = "submit_findings", {"findings": [_finding(
                 "stage",
@@ -1091,7 +1109,8 @@ def test_doctronic_submitted_later_round_uses_validated_fetch(
         return {"ok": True, "url": requested_url, "text": page_text}
 
     async def fake_search(_session, query, *, key):
-        del query, key
+        del key
+        searches.append(query)
         return {"results": []}
 
     base_company = _company(
@@ -1130,6 +1149,8 @@ def test_doctronic_submitted_later_round_uses_validated_fetch(
 
     assert result.decision == expected_decision
     assert result.details["dimension_decisions"]["stage"] == expected_decision
+    assert len(turns) <= investigator.MAX_REASONING_TURNS + 1
+    assert len(searches) <= investigator.MAX_SEARCH_CALLS
     assert result.details["dimension_decisions"]["employee_size"] == COMPANY_FIT_MATCH
     assert result.details["dimension_decisions"]["industry"] == COMPANY_FIT_MATCH
     assert result.details["dimension_decisions"]["geography"] == COMPANY_FIT_MATCH
@@ -5978,6 +5999,299 @@ def test_sentinelone_style_industry_repair_preserves_valid_public_stage(
         if repair_attribute
         else COMPANY_FIT_MISMATCH
     )
+
+
+def _crowdstrike_stage_retention_fixture():
+    company = _company(
+        name="CrowdStrike",
+        website="https://www.crowdstrike.com/",
+        linkedin="https://www.linkedin.com/company/crowdstrike",
+    ).model_copy(update={
+        "industry": "Cybersecurity",
+        "company_stage": "Public",
+    })
+    icp = _icp(
+        industry="Cybersecurity",
+        sub_industry="Endpoint security",
+        company_stage="Public",
+    )
+    identity = {
+        "normalized_name": "crowdstrike",
+        "registrable_dns_domain": "crowdstrike.com",
+        "linkedin_company_slug": "crowdstrike",
+    }
+    strong_url = (
+        "https://ir.crowdstrike.com/news-releases/news-release-details/"
+        "crowdstrike-webcast-investor-briefing-3"
+    )
+    strong_quote = (
+        "CrowdStrike (NASDAQ: CRWD), a global cybersecurity leader."
+    )
+    prior = _complete_verdict(
+        observed_company_name="CrowdStrike",
+        observed_company_website="https://www.crowdstrike.com/",
+        observed_company_linkedin=(
+            "https://www.linkedin.com/company/crowdstrike"
+        ),
+        observed_industry="Cybersecurity",
+        observed_subindustry="Endpoint security",
+        industry_matches=True,
+        industry_activity_role="supplier_operator",
+        industry_evidence_url="https://www.crowdstrike.com/platform/",
+        industry_evidence_quote=(
+            "CrowdStrike provides a cloud-native cybersecurity platform."
+        ),
+        observed_company_stage="Public",
+        stage_matches=True,
+        stage_evidence_url=strong_url,
+        stage_evidence_quote=strong_quote,
+    )
+    prior_result = _reverify_decision(
+        prior,
+        "",
+        "public",
+        icp=icp,
+        company=company,
+        verified_homepage_identity=identity,
+        verified_homepage_transport_domain="crowdstrike.com",
+        company_quality=True,
+    )
+    assert prior_result.details["dimension_decisions"]["stage"] == (
+        COMPANY_FIT_MATCH
+    )
+    weak = dict(prior)
+    weak.update(
+        observed_industry="",
+        observed_subindustry="",
+        industry_matches=None,
+        industry_activity_role="unresolved",
+        industry_evidence_url="",
+        industry_evidence_quote="",
+        stage_evidence_url="http://www.linkedin.com/company/crowdstrike",
+        stage_evidence_quote=(
+            "Public Company · Founded 2011 · 5001-10,000 employees"
+        ),
+    )
+    return company, icp, identity, prior_result, weak, strong_url, strong_quote
+
+
+def test_crowdstrike_industry_investigation_retains_prior_strong_public_source(
+    monkeypatch,
+):
+    company, icp, identity, prior_result, weak, strong_url, strong_quote = (
+        _crowdstrike_stage_retention_fixture()
+    )
+
+    async def industry_only(**kwargs):
+        assert kwargs["targets"] == ("industry",)
+        return {
+            "claims": {"industry": _finding(
+                "industry",
+                observed_value="Endpoint security",
+                observed_industry="Cybersecurity",
+                observed_subindustry="Endpoint security",
+                activity_role="supplier_operator",
+                evidence_url="https://www.crowdstrike.com/platform/",
+                evidence_quote=(
+                    "CrowdStrike provides a cloud-native cybersecurity platform."
+                ),
+            )},
+            "failure_reason": "",
+        }
+
+    monkeypatch.setattr(
+        lead_scorer,
+        "investigate_company_evidence",
+        industry_only,
+    )
+    projected, result, _claims, _rebrand, _stage = asyncio.run(
+        lead_scorer._run_targeted_company_evidence_investigation(
+            company=company,
+            icp=icp,
+            verdict=weak,
+            investigation_targets=("industry",),
+            icp_attribute="",
+            icp_stage="public",
+            verified_identity=identity,
+            verified_transport_domain="crowdstrike.com",
+            structured_employee_size_evidence=None,
+            structured_public_company_evidence=None,
+            employee_size_conflict=False,
+            company_quality=True,
+            prior_result=prior_result,
+        )
+    )
+
+    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MATCH
+    assert projected["stage_evidence_url"] == strong_url
+    assert projected["stage_evidence_quote"] == strong_quote
+    assert projected["stage_evidence_url"].startswith("https://")
+
+
+def test_current_strong_public_source_is_kept_when_prior_proof_is_incomplete(
+    monkeypatch,
+):
+    company, icp, identity, prior_result, current, _strong_url, _strong_quote = (
+        _crowdstrike_stage_retention_fixture()
+    )
+    prior_result.details["dimension_evidence"]["stage"] = {
+        "url": "",
+        "quote": "",
+    }
+    current_url = (
+        "https://www.nasdaq.com/press-release/"
+        "crowdstrike-announces-current-financial-results"
+    )
+    current_quote = (
+        "CrowdStrike Holdings, Inc. (NASDAQ: CRWD) today announced "
+        "current financial results."
+    )
+    current.update(
+        stage_evidence_url=current_url,
+        stage_evidence_quote=current_quote,
+    )
+
+    async def industry_only(**kwargs):
+        assert kwargs["targets"] == ("industry",)
+        return {
+            "claims": {"industry": _finding(
+                "industry",
+                observed_value="Endpoint security",
+                observed_industry="Cybersecurity",
+                observed_subindustry="Endpoint security",
+                activity_role="supplier_operator",
+                evidence_url="https://www.crowdstrike.com/platform/",
+                evidence_quote=(
+                    "CrowdStrike provides a cloud-native cybersecurity platform."
+                ),
+            )},
+            "failure_reason": "",
+        }
+
+    monkeypatch.setattr(
+        lead_scorer,
+        "investigate_company_evidence",
+        industry_only,
+    )
+    projected, result, _claims, _rebrand, _stage = asyncio.run(
+        lead_scorer._run_targeted_company_evidence_investigation(
+            company=company,
+            icp=icp,
+            verdict=current,
+            investigation_targets=("industry",),
+            icp_attribute="",
+            icp_stage="public",
+            verified_identity=identity,
+            verified_transport_domain="crowdstrike.com",
+            structured_employee_size_evidence=None,
+            structured_public_company_evidence=None,
+            employee_size_conflict=False,
+            company_quality=True,
+            prior_result=prior_result,
+        )
+    )
+
+    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MATCH
+    assert projected["stage_evidence_url"] == current_url
+    assert projected["stage_evidence_quote"] == current_quote
+
+
+@pytest.mark.parametrize(
+    "unsafe_case",
+    [
+        "stage_targeted",
+        "identity_drift",
+        "false_flag",
+        "private",
+        "acquired",
+        "no_proof",
+    ],
+)
+def test_prior_public_stage_is_not_retained_when_boundary_is_unsafe(
+    monkeypatch,
+    unsafe_case,
+):
+    company, icp, identity, prior_result, weak, strong_url, _strong_quote = (
+        _crowdstrike_stage_retention_fixture()
+    )
+    targets = ("stage",) if unsafe_case == "stage_targeted" else ("industry",)
+    structured_private = None
+    if unsafe_case == "identity_drift":
+        weak["observed_company_website"] = "https://different.example/"
+    elif unsafe_case == "false_flag":
+        weak["stage_matches"] = False
+    elif unsafe_case == "private":
+        structured_private = {
+            "company_type": "Privately Held",
+            "provider": "harvestapi_get_company",
+            "source_field": "companyType",
+            "url": "https://www.linkedin.com/company/crowdstrike",
+            "website": "https://www.crowdstrike.com/",
+        }
+    elif unsafe_case == "acquired":
+        weak.update(
+            observed_company_stage="Acquired",
+            stage_matches=False,
+            stage_evidence_url="https://news.example/crowdstrike-acquired",
+            stage_evidence_quote=(
+                "CrowdStrike was acquired by Another Security Company."
+            ),
+        )
+    elif unsafe_case == "no_proof":
+        prior_result.details["dimension_evidence"]["stage"] = {
+            "url": "",
+            "quote": "",
+        }
+
+    async def bounded_research(**kwargs):
+        assert "stage" in kwargs["targets"]
+        claims = {
+            "stage": _finding(
+                "stage",
+                status="UNPROVEN",
+                observed_value=None,
+                reason="current Public stage was not independently proven",
+            ),
+        }
+        if "industry" in kwargs["targets"]:
+            claims["industry"] = _finding(
+                "industry",
+                observed_value="Endpoint security",
+                observed_industry="Cybersecurity",
+                observed_subindustry="Endpoint security",
+                activity_role="supplier_operator",
+                evidence_url="https://www.crowdstrike.com/platform/",
+                evidence_quote=(
+                    "CrowdStrike provides a cloud-native cybersecurity platform."
+                ),
+            )
+        return {"claims": claims, "failure_reason": ""}
+
+    monkeypatch.setattr(
+        lead_scorer,
+        "investigate_company_evidence",
+        bounded_research,
+    )
+    projected, result, _claims, _rebrand, _stage = asyncio.run(
+        lead_scorer._run_targeted_company_evidence_investigation(
+            company=company,
+            icp=icp,
+            verdict=weak,
+            investigation_targets=targets,
+            icp_attribute="",
+            icp_stage="public",
+            verified_identity=identity,
+            verified_transport_domain="crowdstrike.com",
+            structured_employee_size_evidence=None,
+            structured_public_company_evidence=structured_private,
+            employee_size_conflict=False,
+            company_quality=True,
+            prior_result=prior_result,
+        )
+    )
+
+    assert projected["stage_evidence_url"] != strong_url
+    assert result.details["dimension_decisions"]["stage"] != COMPANY_FIT_MATCH
 
 
 def _stage_repair_guard_fixture():

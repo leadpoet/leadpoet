@@ -3539,6 +3539,114 @@ def _preserve_unrelated_validated_stage_evidence(
     return projected
 
 
+def _prior_result_public_stage_evidence_for_unrelated_investigation(
+    verdict: Mapping[str, Any],
+    prior_result: Optional[CompanyFitDecisionResult],
+    current_identity: Mapping[str, Any],
+    *,
+    company: CompanyOutput,
+    icp_stage: str,
+    verified_homepage_identity: Optional[Mapping[str, Any]],
+) -> Optional[dict[str, str]]:
+    """Return exact accepted Public proof safe to retain across another target."""
+
+    details = (
+        prior_result.details
+        if prior_result is not None and isinstance(prior_result.details, Mapping)
+        else {}
+    )
+    dimensions = details.get("dimension_decisions")
+    prior_identity = details.get("identity_receipt")
+    if (
+        _normalize_company_stage(icp_stage) != "public"
+        or not isinstance(dimensions, Mapping)
+        or dimensions.get("stage") != COMPANY_FIT_MATCH
+        or not isinstance(prior_identity, Mapping)
+        or prior_identity.get("decision") != COMPANY_FIT_MATCH
+        or current_identity.get("decision") != COMPANY_FIT_MATCH
+        or _normalize_company_stage(verdict.get("observed_company_stage"))
+        != "public"
+        or strict_company_fit_boolean(verdict.get("stage_matches")) is not True
+    ):
+        return None
+    identity_fields = (
+        "observed_name",
+        "observed_domain",
+        "observed_linkedin_slug",
+    )
+    prior_identity_key = tuple(
+        str(prior_identity.get(field) or "").strip().casefold()
+        for field in identity_fields
+    )
+    current_identity_key = tuple(
+        str(current_identity.get(field) or "").strip().casefold()
+        for field in identity_fields
+    )
+    if not all(prior_identity_key) or current_identity_key != prior_identity_key:
+        return None
+
+    raw_dimension_evidence = details.get("dimension_evidence")
+    raw_stage_evidence = (
+        raw_dimension_evidence.get("stage")
+        if isinstance(raw_dimension_evidence, Mapping)
+        else None
+    )
+    prior_evidence = _atomic_stage_evidence_for_schema_repair({
+        "dimension_evidence": {"stage": raw_stage_evidence},
+    })
+    if not prior_evidence or not prior_evidence.get("url"):
+        return None
+    first_party_domains: set[str] = set()
+    for value in (
+        company.company_website,
+        verdict.get("observed_company_website"),
+        (verified_homepage_identity or {}).get("registrable_dns_domain"),
+    ):
+        candidate = str(value or "").strip()
+        if not candidate:
+            continue
+        try:
+            domain = _registrable_domain(
+                candidate if "://" in candidate else f"https://{candidate}"
+            )
+        except (NormalizationError, TypeError, ValueError):
+            continue
+        if domain:
+            first_party_domains.add(domain)
+    if not _stage_evidence_supports_observation(
+        "public",
+        prior_evidence["quote"],
+        evidence_url=prior_evidence["url"],
+        first_party_domains=tuple(first_party_domains),
+        identity_names=(
+            company.company_name,
+            verdict.get("observed_company_name"),
+        ),
+    ) or not _evidence_has_no_established_source_conflict(
+        prior_evidence,
+        verified_homepage_identity=verified_homepage_identity,
+    ):
+        return None
+
+    current_evidence = _atomic_stage_evidence_for_schema_repair(verdict)
+    if current_evidence is None:
+        return None
+    if (
+        current_evidence.get("quote")
+        and _bound_public_supersession_supports_company(
+            company,
+            verdict.get("observed_company_name"),
+            current_evidence["quote"],
+        )
+    ) or _first_party_ownership_conflicts_with_stage(
+        company,
+        verdict,
+        "public",
+    ):
+        return None
+    return prior_evidence
+
+
 def _without_employee_size_observation(verdict: Mapping[str, Any]) -> dict[str, Any]:
     """Copy a verdict while making only employee-size proof unavailable."""
 
@@ -5580,6 +5688,78 @@ async def _run_targeted_company_evidence_investigation(
         _normalize_icp_employee_buckets(icp.employee_count)
     )
     investigation_diagnostic: dict[str, str] = {}
+    prior_dimensions: Mapping[str, Any] = {}
+    retention_candidate = False
+    current_identity: Mapping[str, Any] = {}
+    current_profile_identity: Mapping[str, Any] = {}
+    current_public_stage_is_valid = False
+    retained_public_stage_evidence: Optional[dict[str, str]] = None
+    if "stage" not in investigation_targets:
+        prior_dimensions = (
+            prior_result.details.get("dimension_decisions", {})
+            if prior_result is not None
+            and isinstance(prior_result.details, Mapping)
+            else {}
+        )
+        retention_candidate = bool(
+            _normalize_company_stage(icp_stage) == "public"
+            and isinstance(prior_dimensions, Mapping)
+            and prior_dimensions.get("stage") == COMPANY_FIT_MATCH
+        )
+    if retention_candidate:
+        current_identity = _web_identity_receipt(
+            company,
+            verdict,
+            verified_homepage_identity=verified_identity,
+            verified_homepage_transport_domain=verified_transport_domain,
+            verified_structured_identity=structured_profile_identity_evidence,
+            company_quality=company_quality,
+        )
+        current_profile_identity = _structured_profile_identity_anchor(
+            verified_identity,
+            current_identity,
+            verified_transport_domain,
+        )
+        structured_private_conflict = (
+            _is_bound_structured_linkedin_private_company_evidence(
+                structured_public_company_evidence,
+                current_profile_identity,
+            )
+        )
+        current_stage_evidence = _dimension_web_evidence(verdict, "stage")
+        current_public_stage_is_valid = bool(
+            not structured_private_conflict
+            and current_identity.get("decision") == COMPANY_FIT_MATCH
+            and _decision_from_observed_stage(
+                dict(verdict),
+                icp_stage,
+                company=company,
+                evidence_attributed=(
+                    _evidence_has_no_established_source_conflict(
+                        current_stage_evidence,
+                        verified_homepage_identity=verified_identity,
+                    )
+                ),
+            )
+            == COMPANY_FIT_MATCH
+        )
+        if not current_public_stage_is_valid and not structured_private_conflict:
+            retained_public_stage_evidence = (
+                _prior_result_public_stage_evidence_for_unrelated_investigation(
+                    verdict,
+                    prior_result,
+                    current_identity,
+                    company=company,
+                    icp_stage=icp_stage,
+                    verified_homepage_identity=verified_identity,
+                )
+            )
+    if (
+        retention_candidate
+        and not current_public_stage_is_valid
+        and retained_public_stage_evidence is None
+    ):
+        investigation_targets = tuple(dict.fromkeys((*investigation_targets, "stage")))
     stage_evidence = (
         [item.model_dump(mode="json") for item in company.company_stage_evidence]
         if "stage" in investigation_targets
@@ -5834,11 +6014,13 @@ async def _run_targeted_company_evidence_investigation(
     validated_stage_finding = investigation.get("_validated_stage_finding")
     if not isinstance(validated_stage_finding, Mapping):
         validated_stage_finding = {}
-    prior_dimensions = (
-        prior_result.details.get("dimension_decisions", {})
-        if prior_result is not None and isinstance(prior_result.details, Mapping)
-        else {}
-    )
+    if not prior_dimensions:
+        prior_dimensions = (
+            prior_result.details.get("dimension_decisions", {})
+            if prior_result is not None
+            and isinstance(prior_result.details, Mapping)
+            else {}
+        )
     reopened_matching_stage = bool(
         "stage" in investigation_targets
         and isinstance(prior_dimensions, Mapping)
@@ -5850,6 +6032,18 @@ async def _run_targeted_company_evidence_investigation(
         claims.get("stage") if isinstance(claims.get("stage"), Mapping) else None,
         icp_stage=icp_stage,
     )
+    if retained_public_stage_evidence is not None:
+        projected.update(
+            observed_company_stage="public",
+            stage_matches=True,
+            stage_evidence_url=retained_public_stage_evidence["url"],
+            stage_evidence_quote=retained_public_stage_evidence["quote"],
+        )
+        if isinstance(projected.get("dimension_evidence"), Mapping):
+            projected["dimension_evidence"] = {
+                **projected["dimension_evidence"],
+                "stage": dict(retained_public_stage_evidence),
+            }
     reopened_stage_resolved = bool(
         reopened_matching_stage
         and _reopened_stage_dispute_resolved(

@@ -144,6 +144,7 @@ def _finding():
 
 def test_exact_multiverse_description_reaches_real_investigator(monkeypatch):
     requests = []
+    searches = []
     assert len(DESCRIPTION) == 791
     assert hashlib.sha256(DESCRIPTION.encode()).hexdigest() == (
         "17f99f769b9f67b2631dd4233101fe6e14552edac0c3814926517bc5ef601a75"
@@ -166,9 +167,15 @@ def test_exact_multiverse_description_reaches_real_investigator(monkeypatch):
             }]
         }
 
+    async def fake_search(_session, query, *, key):
+        del key
+        searches.append(query)
+        return {"results": []}
+
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
     monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
     prior = lead_scorer._reverify_decision(
         _verdict(),
         "",
@@ -201,6 +208,9 @@ def test_exact_multiverse_description_reaches_real_investigator(monkeypatch):
     )
 
     assert len(requests) == 1
+    assert searches == [
+        "Multiverse multiverse.io latest funding round acquisition IPO"
+    ]
     user_document = json.loads(
         requests[0]["messages"][1]["content"].split("\n", 1)[1]
     )
@@ -216,7 +226,7 @@ def test_exact_multiverse_description_reaches_real_investigator(monkeypatch):
     assert result.decision == "match"
     receipt = result.details["investigation_receipt"]
     assert receipt["usage"] == {
-        "search_calls": 0,
+        "search_calls": 1,
         "fetch_calls": 0,
         "reasoning_turns": 1,
     }

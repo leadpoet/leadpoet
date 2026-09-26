@@ -1300,7 +1300,13 @@ def _validate_review_response(
         any_factual_claim,
         citation_issues,
     ) = _validate_unit_grounding(unit_grounding, document)
-    if checks["facts_supported"] is not unit_facts_supported:
+    facts_aggregate_conflict = (
+        checks["facts_supported"] is not unit_facts_supported
+    )
+    # A negative unit verdict is the detailed, fail-closed result.  It can
+    # safely correct a conflicting positive aggregate, but a negative
+    # aggregate must never be promoted from the unit summaries.
+    if facts_aggregate_conflict and unit_facts_supported:
         raise ValueError("factual aggregate conflicts with unit grounding")
     coverage = checks.pop("signal_coverage")
     if not isinstance(coverage, list) or any(
@@ -1329,8 +1335,11 @@ def _validate_review_response(
         raise ValueError("covered verified signals require a factual paragraph unit")
     if citation_issues and not coverage_aggregate_consistent:
         raise ValueError("coverage aggregate conflicts during citation repair")
+    if citation_issues and facts_aggregate_conflict:
+        raise ValueError("factual aggregate conflicts during citation repair")
     if citation_issues:
         raise _CitationRepairNeeded(citation_issues, raw_checks)
+    checks["facts_supported"] = unit_facts_supported
     return {name: checks[name] for name in _CHECKS}
 
 

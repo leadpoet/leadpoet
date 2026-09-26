@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from lab_arena import scoring as arena_scoring
 from qualification.scoring import intent_details, verification_helpers
 from qualification.scoring.competition import (
     scorer_breakdown_has_retryable_infrastructure_failure,
@@ -1674,21 +1675,167 @@ def test_two_unbound_positive_citations_are_never_accepted(monkeypatch):
     assert receipt["failure_reason_code"] == "malformed_response"
 
 
-def test_flat_boolean_cannot_override_an_unproven_unit(monkeypatch):
+@pytest.mark.parametrize("status", ["UNPROVEN", "CONTRADICTED"])
+def test_positive_flat_boolean_cannot_override_a_negative_unit(
+    monkeypatch, status,
+):
     paragraph = "Example claims an undocumented API capability."
     quote = "Example raised a Series A."
     inputs = _inputs(paragraph, quote, supporting_quote=quote)
+    calls = 0
 
-    def response(document):
-        return _response(
+    async def judge(prompt, **_kwargs):
+        nonlocal calls
+        calls += 1
+        document = _prompt_document(prompt)
+        unit = _unproven_unit(0)
+        if status == "CONTRADICTED":
+            unit = _verified_unit(document, 0, quote)
+            unit["status"] = "CONTRADICTED"
+        return json.dumps(_response(
             document,
-            [_unproven_unit(0)],
+            [unit],
             facts_supported=True,
-        )
+        ))
 
-    receipt = _review(monkeypatch, inputs, response)
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(*inputs))
+
+    assert calls == 1
+    assert receipt["decision"] == "mismatch"
+    assert receipt["checks"]["facts_supported"] is False
+    assert not scorer_breakdown_has_retryable_infrastructure_failure({
+        "verifier_gate_receipts": [receipt],
+    })
+
+
+def test_negative_flat_boolean_cannot_be_promoted_by_verified_units(monkeypatch):
+    quote = "Example raised a Series A."
+    inputs = _inputs(quote, quote, supporting_quote=quote)
+    calls = 0
+
+    async def judge(prompt, **_kwargs):
+        nonlocal calls
+        calls += 1
+        document = _prompt_document(prompt)
+        return json.dumps(_response(
+            document,
+            [_verified_unit(document, 0, quote)],
+            facts_supported=False,
+        ))
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(*inputs))
+
+    assert calls == 1
     assert receipt["decision"] == "unavailable"
     assert receipt["failure_reason_code"] == "malformed_response"
+
+
+def test_negative_unit_with_bad_optional_citation_stays_unavailable(monkeypatch):
+    quote = "Example raised a Series A."
+    inputs = _inputs(
+        "Example claims an undocumented API capability.",
+        quote,
+        supporting_quote=quote,
+    )
+    calls = 0
+
+    async def judge(prompt, **_kwargs):
+        nonlocal calls
+        calls += 1
+        document = _prompt_document(prompt)
+        unit = _unproven_unit(0)
+        unit["evidence"] = [{
+            "source_index": 0,
+            "quote": "UNBOUND OPTIONAL CITATION",
+        }]
+        return json.dumps(_response(
+            document, [unit], facts_supported=True,
+        ))
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(*inputs))
+
+    assert calls == 1
+    assert receipt["decision"] == "unavailable"
+    assert receipt["failure_reason_code"] == "malformed_response"
+
+
+def test_score_work_item_keeps_paragraph_negative_and_healthy_sibling(
+    monkeypatch,
+):
+    quote = "Example announced a supported security activity."
+    inputs = _inputs(
+        "Example announced a supported security activity. It also claimed "
+        "an undocumented product outcome.",
+        quote,
+        supporting_quote=quote,
+    )
+    review_calls = 0
+
+    async def judge(prompt, **_kwargs):
+        nonlocal review_calls
+        review_calls += 1
+        document = _prompt_document(prompt)
+        return json.dumps(_response(
+            document,
+            [
+                _verified_unit(document, 0, quote),
+                _unproven_unit(1),
+            ],
+            facts_supported=True,
+        ))
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(*inputs))
+    assert receipt["decision"] == "mismatch"
+    score_calls = []
+
+    def scorer(companies, _icp, _is_reference_model):
+        names = [company["company_name"] for company in companies]
+        score_calls.append(names)
+        return [{
+            "final_score": 0.0,
+            "failure_reason": (
+                "Intent Details do not satisfy the grounded client paragraph "
+                "contract"
+            ),
+            "intent_signals_detail": [],
+            "verifier_gate_receipts": [receipt],
+        }, {
+            "final_score": 54.0,
+            "failure_reason": None,
+            "intent_signals_detail": [],
+            "verifier_gate_receipts": [
+                {"gate": "company_fit", "decision": "match"},
+                {"gate": "intent_details", "decision": "match"},
+            ],
+        }]
+
+    result = arena_scoring.score_work_item(
+        {"scored_run_id": "paragraph-negative-with-healthy-sibling"},
+        icp={
+            "employee_count": ["1001-5000", "201-500"],
+            "max_companies": 2,
+        },
+        companies=[
+            {
+                "company_name": "Unsupported Paragraph",
+                "employee_count": "1001-5000",
+            },
+            {"company_name": "Healthy Control", "employee_count": "201-500"},
+        ],
+        scorer=scorer,
+        max_retries=3,
+    )
+
+    assert review_calls == 1
+    # The scorer stub isolates score_work_item retry behavior. The first row's
+    # semantic receipt above came from the real Intent Details validator.
+    assert score_calls == [["Unsupported Paragraph", "Healthy Control"]]
+    assert [row["final_score"] for row in result] == [0.0, 54.0]
+    assert result[0]["verifier_gate_receipts"][-1]["decision"] == "mismatch"
 
 
 def test_six_unit_two_binding_response_fits_existing_output_bound():

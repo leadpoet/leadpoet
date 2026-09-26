@@ -16,6 +16,9 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from qualification.intent_details import validate_intent_details_text
+from qualification.scoring.linkedin_company_size import (
+    linkedin_company_page_slug,
+)
 
 
 REVIEW_MODEL = "anthropic/claude-sonnet-4.5"  # Existing pinned intent_signal_judge.
@@ -315,9 +318,80 @@ does not establish when the listing was posted, published, opened, or filled,
 and it does not change the event date, freshness, or date uncertainty.
 """
 
+_STRUCTURED_EMPLOYEE_RANGE_SYSTEM_APPENDIX = """
+
+STRUCTURED PROVIDER OBSERVATION:
+A structured provider observation for employeeCountRange proves only the
+company's canonical employee-count range shown in that field. It is a typed
+provider field/value, not a verbatim webpage quotation. It does not establish
+an event, date, company stage, growth, hiring, or any other company fact.
+"""
+
 
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _verified_structured_employee_range(
+    company: Any,
+    icp: Any,
+    company_fit_receipt: Mapping[str, Any],
+) -> dict[str, str] | None:
+    """Admit only a final matched range bound to the verified company identity."""
+
+    from qualification.scoring.company_evidence_investigator import (
+        _registrable_domain,
+    )
+    from qualification.scoring.lead_scorer import (
+        _structured_employee_size_decision,
+    )
+
+    if company_fit_receipt.get("decision") != "match":
+        return None
+    dimensions = _mapping(company_fit_receipt.get("dimension_evidence"))
+    employee_size = _mapping(dimensions.get("employee_size"))
+    if (
+        employee_size.get("decision") != "match"
+        or employee_size.get("submitted_decision") != "match"
+        or employee_size.get("observed_decision") != "match"
+    ):
+        return None
+    evidence = employee_size.get("web_evidence")
+    if (
+        _structured_employee_size_decision(evidence, icp) != "match"
+    ):
+        return None
+
+    identity = _mapping(dimensions.get("identity"))
+    identity_receipt = _mapping(identity.get("web_identity_receipt"))
+    observed_slug = identity_receipt.get("observed_linkedin_slug")
+    evidence_slug = linkedin_company_page_slug(evidence.get("url"))
+    if (
+        identity.get("decision") != "match"
+        or identity_receipt.get("decision") != "match"
+        or not isinstance(observed_slug, str)
+        or not observed_slug
+        or observed_slug.casefold() != evidence_slug
+    ):
+        return None
+
+    candidate_domain = _registrable_domain(
+        getattr(company, "company_website", None)
+    )
+    identity_domain = _registrable_domain(
+        identity_receipt.get("observed_domain")
+    )
+    evidence_domain = _registrable_domain(evidence.get("website"))
+    if (
+        not candidate_domain
+        or candidate_domain != identity_domain
+        or candidate_domain != evidence_domain
+    ):
+        return None
+    return {
+        "employee_count": str(evidence["employee_count"]),
+        "url": str(evidence["url"]),
+    }
 
 
 def _texts(value: Any, *, maximum: int, length: int) -> list[str]:
@@ -586,6 +660,10 @@ def _project_admitted_evidence(document: dict[str, Any]) -> None:
                     signal["evidence_source_indexes"].append(observation_index)
                     break
 
+    structured_employee_range = document.pop(
+        "structured_employee_range_observation", None,
+    )
+
     non_qualifying_projection: list[dict[str, Any]] = []
     for raw_finding in document.get("non_qualifying_signals") or []:
         if not isinstance(raw_finding, Mapping):
@@ -688,6 +766,29 @@ def _project_admitted_evidence(document: dict[str, Any]) -> None:
                 ],
                 "evidence_source_indexes": references,
             }
+
+    if isinstance(structured_employee_range, Mapping):
+        employee_count = structured_employee_range.get("employee_count")
+        source_url = structured_employee_range.get("url")
+        observation_index = append_source(
+            kind="structured_provider_observation",
+            admitted_text=[
+                "Structured provider observation (employeeCountRange): "
+                f"{employee_count}"
+            ],
+            dimension="employee_size",
+            source_url=source_url,
+        )
+        if observation_index is not None:
+            employee_projection = company_projection.setdefault(
+                "employee_size",
+                {"source_urls": [], "evidence_source_indexes": []},
+            )
+            employee_projection["evidence_source_indexes"].append(
+                observation_index
+            )
+            if source_url not in employee_projection["source_urls"]:
+                employee_projection["source_urls"].append(source_url)
 
     document["verified_signals"] = verified_projection
     if non_qualifying_projection:
@@ -965,6 +1066,11 @@ def review_evidence(
         }
     company_facts = {}
     dimensions = _mapping(company_fit_receipt.get("dimension_evidence"))
+    structured_employee_range = _verified_structured_employee_range(
+        company,
+        icp,
+        company_fit_receipt,
+    )
     for dimension, raw in dimensions.items():
         evidence = _mapping(raw)
         # Only the fit gate's own independently observed source fields are
@@ -1117,6 +1223,13 @@ def review_evidence(
         **(
             {"authenticated_provider_observation": provider_observation}
             if provider_observation is not None else {}
+        ),
+        **(
+            {
+                "structured_employee_range_observation":
+                    structured_employee_range
+            }
+            if structured_employee_range is not None else {}
         ),
     }
     # Keep the existing review bound. Extra source context must not make a
@@ -1479,6 +1592,14 @@ missing review into an accepted paragraph or a terminal company mismatch.
             isinstance(item, Mapping)
             and item.get("evidence_kind")
             == "authenticated_provider_observation"
+            for item in document.get("admitted_evidence") or []
+        )
+        else ""
+    ) + (
+        _STRUCTURED_EMPLOYEE_RANGE_SYSTEM_APPENDIX
+        if any(
+            isinstance(item, Mapping)
+            and item.get("evidence_kind") == "structured_provider_observation"
             for item in document.get("admitted_evidence") or []
         )
         else ""

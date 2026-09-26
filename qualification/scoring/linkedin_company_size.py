@@ -7,12 +7,18 @@ import logging
 import os
 import re
 import unicodedata
+from types import SimpleNamespace
 from typing import Any, Literal, Mapping, Optional, TypedDict, Union
 from urllib.parse import urlsplit
 
 import aiohttp
 
 from gateway.qualification.models import candidate_linkedin_prompt_slug
+from lab_arena.scoring_provider_compat import (
+    CompatibilityResponseError,
+    _firecrawl_response,
+)
+from qualification.competition_models import public_http_url
 from leadpoet_verifier.identity.normalization import (
     NormalizationError,
     normalize_host,
@@ -414,8 +420,12 @@ def project_structured_linkedin_company_identity(
     requested_domain: str,
     requested_profile_url: str,
     payload: Any,
-) -> Optional[StructuredLinkedInCompanyIdentityEvidence]:
-    """Project the main profile's exact name, website, and LinkedIn slug."""
+    *,
+    observed_profile_url: str = "",
+    expected_company_name: str = "",
+    allow_website_redirect: bool = False,
+) -> Optional[dict[str, str]]:
+    """Project one exact main profile, including a proved numeric-ID alias."""
 
     domain = _canonical_company_domain(requested_domain)
     profile_url = _strict_linkedin_company_profile_url(requested_profile_url)
@@ -429,24 +439,148 @@ def project_structured_linkedin_company_identity(
     returned_profile = _strict_linkedin_company_profile_url(
         element.get("linkedinUrl") or element.get("linkedin_url")
     )
+    returned_slug = linkedin_company_page_slug(returned_profile)
     name = element.get("name")
+    website_matches = _structured_company_domain_matches(
+        domain, element.get("website")
+    )
     if (
-        not _structured_company_domain_matches(domain, element.get("website"))
-        or linkedin_company_page_slug(returned_profile) != requested_slug
-        or not isinstance(name, str)
+        not isinstance(name, str)
         or name != name.strip()
         or not name
         or len(name) > 200
         or any(ord(character) < 32 for character in name)
     ):
         return None
-    return {
+    if returned_slug == requested_slug:
+        if not website_matches:
+            return None
+        return {
+            "name": name,
+            "provider": STRUCTURED_PROFILE_PROVIDER,
+            "source_field": STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD,
+            "url": profile_url,
+            "website": f"https://{domain}/",
+        }
+    observed_profile = _strict_linkedin_company_profile_url(observed_profile_url)
+    observed_slug = linkedin_company_page_slug(observed_profile)
+    raw_company_id = element.get("id")
+    if isinstance(raw_company_id, int) and not isinstance(raw_company_id, bool):
+        company_id = str(raw_company_id)
+    elif (
+        isinstance(raw_company_id, str)
+        and raw_company_id == raw_company_id.strip()
+        and raw_company_id.isdigit()
+    ):
+        company_id = raw_company_id
+    else:
+        company_id = ""
+    if (
+        not requested_slug.isdigit()
+        or company_id != requested_slug
+        or not observed_slug
+        or observed_slug.isdigit()
+        or returned_profile != observed_profile
+        or _company_name(name) != _company_name(expected_company_name)
+        or not _company_name(expected_company_name)
+    ):
+        return None
+    evidence = {
         "name": name,
         "provider": STRUCTURED_PROFILE_PROVIDER,
         "source_field": STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD,
-        "url": profile_url,
+        "url": returned_profile,
         "website": f"https://{domain}/",
+        "company_id": company_id,
+        "requested_url": profile_url,
     }
+    if website_matches:
+        return evidence
+    try:
+        provider_website = public_http_url(element.get("website"))
+    except (TypeError, ValueError):
+        return None
+    if not allow_website_redirect or urlsplit(provider_website).scheme != "https":
+        return None
+    evidence["provider_website_url"] = provider_website
+    return evidence
+
+
+def _firecrawl_data(payload: Any) -> Optional[Mapping[str, Any]]:
+    current = payload
+    for _ in range(8):
+        if not isinstance(current, Mapping):
+            return None
+        if "rawHtml" in current or "metadata" in current:
+            return current
+        for key in ("toolResponse", "rawV2", "raw", "result", "data", "output"):
+            child = current.get(key)
+            if isinstance(child, Mapping) and child is not current:
+                current = child
+                break
+        else:
+            return None
+    return None
+
+
+async def _verified_provider_website_redirect(
+    key: str,
+    requested_domain: str,
+    requested_url: str,
+) -> str:
+    """Return a Firecrawl-proved final URL on the verified company domain."""
+
+    try:
+        source_url = public_http_url(requested_url)
+    except (TypeError, ValueError):
+        return ""
+    if source_url != requested_url or urlsplit(source_url).scheme != "https":
+        return ""
+    payload = {
+        "url": source_url,
+        "formats": ["rawHtml"],
+        "onlyMainContent": False,
+        "maxAge": 0,
+        "timeout": 30_000,
+        "storeInCache": False,
+    }
+    try:
+        timeout = aiohttp.ClientTimeout(total=STRUCTURED_PROFILE_TIMEOUT_SECONDS)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                "https://code.deepline.com/api/v2/integrations/"
+                "firecrawl_scrape/execute",
+                json={"payload": payload},
+                headers={
+                    "Authorization": "Bearer " + key,
+                    "Content-Type": "application/json",
+                },
+            ) as response:
+                if response.status != 200:
+                    return ""
+                body = await response.json()
+        data = _firecrawl_data(body)
+        if data is None:
+            return ""
+        status, _headers, _raw, final_url = _firecrawl_response(
+            SimpleNamespace(requested_parameters={"url": source_url}),
+            data,
+        )
+    except (
+        aiohttp.ClientError,
+        aiohttp.ContentTypeError,
+        asyncio.TimeoutError,
+        CompatibilityResponseError,
+        TypeError,
+        ValueError,
+    ):
+        return ""
+    return (
+        final_url
+        if status == 200
+        and _structured_company_domain_matches(requested_domain, final_url)
+        else ""
+    )
 
 
 def project_structured_linkedin_company_description(
@@ -558,6 +692,7 @@ async def fetch_structured_linkedin_company_size(
     diagnostic: Optional[dict[str, str]] = None,
     public_company_evidence: Optional[dict[str, str]] = None,
     company_identity_evidence: Optional[dict[str, str]] = None,
+    company_identity_observed_profile_url: str = "",
     company_description_evidence: Optional[dict[str, str]] = None,
     expected_company_name: str = "",
 ) -> Optional[StructuredLinkedInCompanySizeEvidence]:
@@ -603,25 +738,58 @@ async def fetch_structured_linkedin_company_size(
     if not _structured_company_elements(body):
         _set_failure_reason(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)
         return None
-    public_evidence = project_structured_linkedin_company_type(
-        domain,
-        canonical_profile,
-        body,
-    )
-    if public_company_evidence is not None and public_evidence is not None:
-        public_company_evidence.update(public_evidence)
     identity_evidence = project_structured_linkedin_company_identity(
         domain,
         canonical_profile,
         body,
+        observed_profile_url=company_identity_observed_profile_url,
+        expected_company_name=expected_company_name,
+        allow_website_redirect=bool(company_identity_observed_profile_url),
     )
+    projection_body = body
+    provider_website_url = str(
+        (identity_evidence or {}).get("provider_website_url") or ""
+    )
+    if provider_website_url:
+        final_url = await _verified_provider_website_redirect(
+            key,
+            domain,
+            provider_website_url,
+        )
+        if final_url:
+            identity_evidence = dict(identity_evidence or {})
+            identity_evidence.update(
+                provider_website_requested_url=provider_website_url,
+                provider_website_final_url=final_url,
+            )
+            projection_body = {
+                "status": 200,
+                "element": {
+                    **dict(_structured_company_elements(body)[0]),
+                    "website": f"https://{domain}/",
+                },
+            }
+        else:
+            identity_evidence = None
+    projected_profile = (
+        str(identity_evidence.get("url") or "")
+        if isinstance(identity_evidence, Mapping)
+        else canonical_profile
+    )
+    public_evidence = project_structured_linkedin_company_type(
+        domain,
+        projected_profile,
+        projection_body,
+    )
+    if public_company_evidence is not None and public_evidence is not None:
+        public_company_evidence.update(public_evidence)
     if company_identity_evidence is not None and identity_evidence is not None:
         company_identity_evidence.update(identity_evidence)
     description_evidence = project_structured_linkedin_company_description(
         domain,
-        canonical_profile,
+        projected_profile,
         expected_company_name,
-        body,
+        projection_body,
     )
     if (
         company_description_evidence is not None
@@ -630,8 +798,8 @@ async def fetch_structured_linkedin_company_size(
         company_description_evidence.update(description_evidence)
     evidence = project_structured_linkedin_company_size(
         domain,
-        canonical_profile,
-        body,
+        projected_profile,
+        projection_body,
     )
     if evidence is None:
         # A valid one-company reply that lacks the requested exact identity or

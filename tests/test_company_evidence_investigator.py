@@ -447,6 +447,7 @@ def test_submitted_later_round_hint_reopens_matching_stage(monkeypatch):
     async def bounded_investigation(*, targets, prior_observations, **_kwargs):
         calls["investigator"] += 1
         assert targets == ("stage",)
+        assert "submitted_source_hints" not in prior_observations
         assert any(
             "Series-B" in url
             for url in prior_observations["submitted_source_urls"]
@@ -1608,6 +1609,10 @@ def test_grab_prefetch_repairs_only_stage_and_stays_out_of_receipt(monkeypatch):
         "date": "2026-09-15",
         "snippet": acquisition_quote,
     }]
+    company_values["company_stage_evidence"] = [{
+        "url": url,
+        "quote": stage_quote,
+    }]
     company = CompanyOutput.model_validate(company_values)
     stage_finding = _finding(
         "stage",
@@ -1620,6 +1625,13 @@ def test_grab_prefetch_repairs_only_stage_and_stays_out_of_receipt(monkeypatch):
         assert kwargs["prefetched_pages"] == {
             url: {"final_url": url, "text": source_text}
         }
+        assert kwargs["prior_observations"]["submitted_source_hints"] == [
+            {"url": url, "text": stage_quote},
+            {
+                "url": url,
+                "text": "Grab announced the proposed Atome acquisition.",
+            },
+        ]
         return {
             "claims": {"stage": stage_finding},
             "_validated_stage_finding": stage_finding,

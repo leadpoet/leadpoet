@@ -58,6 +58,189 @@ def _company(name, website):
     )
 
 
+TENB_NASDAQ_URL = (
+    "https://www.nasdaq.com/press-release/"
+    "tenable-appoints-dino-dimarino-chief-revenue-officer-2026-03-12"
+)
+TENB_FIRST_PARTY_URL = (
+    "https://www.tenable.com/press-releases/"
+    "tenable-appoints-dino-dimarino-as-chief-revenue-officer"
+)
+TENB_QUOTE = (
+    "Tenable Holdings, Inc. (NASDAQ: TENB), the exposure management company, "
+    "today announced the appointment of Dino DiMarino as Chief Revenue Officer."
+)
+
+
+def _select_public_source(*, urls, hints, pages=None, disputes=()):
+    return investigator._public_stage_submitted_source_to_prefetch(
+        submitted_source_urls=urls,
+        stage_dispute_urls=disputes,
+        submitted_source_hints=hints,
+        first_party_domains={"tenable.com"},
+        identity_names={"tenable", "tenableholdingsinc"},
+        fetched_pages=pages or {},
+    )
+
+
+def test_tenable_nasdaq_hint_is_selected_despite_inherited_industry_page():
+    industry_url = "https://www.tenable.com/products"
+    assert _select_public_source(
+        urls=[industry_url, TENB_NASDAQ_URL],
+        hints={TENB_NASDAQ_URL: [TENB_QUOTE]},
+        pages={industry_url: "Tenable provides exposure management software."},
+    ) == TENB_NASDAQ_URL
+
+
+def test_strong_first_party_public_hint_precedes_secondary_hint():
+    assert _select_public_source(
+        urls=[TENB_NASDAQ_URL, TENB_FIRST_PARTY_URL],
+        hints={
+            TENB_NASDAQ_URL: [TENB_QUOTE],
+            TENB_FIRST_PARTY_URL: [TENB_QUOTE],
+        },
+    ) == TENB_FIRST_PARTY_URL
+
+
+def test_actual_prefetched_public_page_avoids_duplicate_fetch():
+    assert _select_public_source(
+        urls=[TENB_NASDAQ_URL],
+        hints={TENB_NASDAQ_URL: [TENB_QUOTE]},
+        pages={TENB_NASDAQ_URL: TENB_QUOTE},
+    ) == ""
+
+
+@pytest.mark.parametrize("hint", [
+    "Unanet is publicly traded.",
+    "Unanet received financing from ParentCo (NASDAQ: PCO).",
+    "Unanet raised funding from Onex, whose shares are listed on the Toronto Stock Exchange.",
+])
+def test_unanet_weak_or_other_issuer_hint_is_not_selected(hint):
+    url = "https://profiles.example/unanet"
+    assert investigator._public_stage_submitted_source_to_prefetch(
+        submitted_source_urls=[url],
+        stage_dispute_urls=[],
+        submitted_source_hints={url: [hint]},
+        first_party_domains={"unanet.com"},
+        identity_names={"unanet"},
+        fetched_pages={},
+    ) == ""
+
+
+def test_completed_take_private_dispute_precedes_old_ticker_hint():
+    dispute_url = "https://news.example/solarwinds-take-private-completed"
+    ticker_url = "https://markets.example/solarwinds-old-listing"
+    assert investigator._public_stage_submitted_source_to_prefetch(
+        submitted_source_urls=[ticker_url, dispute_url],
+        stage_dispute_urls=[dispute_url],
+        submitted_source_hints={
+            ticker_url: ["SolarWinds Corporation (NYSE: SWI) announced results."],
+        },
+        first_party_domains={"solarwinds.com"},
+        identity_names={"solarwinds", "solarwindscorporation"},
+        fetched_pages={},
+    ) == dispute_url
+
+
+def test_tenable_nasdaq_hint_fetches_within_budget_and_exact_quote_admits(monkeypatch):
+    industry_url = "https://www.tenable.com/products"
+    requests = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {
+                "name": "submit_findings",
+                "arguments": json.dumps({"findings": [{
+                    "target": "stage",
+                    "status": "VERIFIED",
+                    "observed_value": "Public",
+                    "evidence_url": TENB_NASDAQ_URL,
+                    "evidence_quote": TENB_QUOTE,
+                }]}),
+            },
+        }]}}]}
+
+    fetch = AsyncMock(return_value={
+        "ok": True,
+        "url": TENB_NASDAQ_URL,
+        "final_url": TENB_NASDAQ_URL,
+        "text": TENB_QUOTE,
+    })
+    search = AsyncMock()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_fetch_page", fetch)
+    monkeypatch.setattr(investigator, "_search_web", search)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Tenable", "website": "https://tenable.com"},
+        targets=("stage",),
+        requested_stage="Public",
+        prior_observations={
+            "submitted_source_urls": [industry_url, TENB_NASDAQ_URL],
+            "submitted_source_hints": [{
+                "url": TENB_NASDAQ_URL,
+                "text": TENB_QUOTE,
+            }],
+        },
+        prefetched_pages={
+            industry_url: {
+                "final_url": industry_url,
+                "text": "Tenable provides exposure management software.",
+            },
+        },
+        verified_homepage_identity={
+            "normalized_name": "Tenable",
+            "registrable_dns_domain": "tenable.com",
+        },
+    ))
+
+    assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["usage"] == {
+        "reasoning_turns": 1,
+        "search_calls": 0,
+        "fetch_calls": 1,
+    }
+    fetch.assert_awaited_once()
+    search.assert_not_awaited()
+    document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
+    assert document["investigation_limits"]["prefetched_pages"] == 1
+    assert document["investigation_limits"]["server_prefetch_fetch_calls"] == 1
+    assert document["investigation_limits"]["remaining_fetch_calls"] == 1
+
+
+def test_tenable_hint_cannot_admit_quote_absent_from_fetched_source():
+    finding = _validate_stage(
+        "Tenable",
+        "Public",
+        TENB_NASDAQ_URL,
+        TENB_QUOTE,
+    )
+    assert finding["status"] == "VERIFIED"
+    rejected = investigator._validated_findings(
+        {"findings": [{
+            "target": "stage",
+            "status": "VERIFIED",
+            "observed_value": "Public",
+            "evidence_url": TENB_NASDAQ_URL,
+            "evidence_quote": TENB_QUOTE,
+        }]},
+        targets=("stage",),
+        fetched_pages={
+            TENB_NASDAQ_URL: "Tenable announced a leadership appointment."
+        },
+        first_party_domains={"tenable.com"},
+        identity_names={"tenable", "tenableholdingsinc"},
+    )["stage"]
+    assert rejected["status"] == "UNPROVEN"
+    assert rejected["reason"] == "submitted quote was not present in fetched source"
+
+
 def test_vista_active_majority_list_proves_only_targets_before_sold_boundary():
     assert _validate_stage(
         "Acumatica", "Private Equity", VISTA_URL, VISTA_QUOTE,
@@ -164,8 +347,10 @@ def test_sec_registered_equity_path_remains_accepted():
 
 
 def test_private_equity_request_gets_existing_bounded_stage_discovery(monkeypatch):
+    hinted_url = "https://markets.example/acumatica"
     requests = []
     search = AsyncMock(return_value={"results": [{"url": VISTA_URL}]})
+    fetch = AsyncMock()
 
     async def fake_post(_session, _url, *, headers, payload):
         del headers
@@ -188,7 +373,7 @@ def test_private_equity_request_gets_existing_bounded_stage_discovery(monkeypatc
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
     monkeypatch.setattr(investigator, "_post_json", fake_post)
     monkeypatch.setattr(investigator, "_search_web", search)
-    monkeypatch.setattr(investigator, "_fetch_page", AsyncMock())
+    monkeypatch.setattr(investigator, "_fetch_page", fetch)
 
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={
@@ -196,6 +381,13 @@ def test_private_equity_request_gets_existing_bounded_stage_discovery(monkeypatc
         },
         targets=("stage",),
         requested_stage="Private Equity",
+        prior_observations={
+            "submitted_source_urls": [hinted_url],
+            "submitted_source_hints": [{
+                "url": hinted_url,
+                "text": "Acumatica Holdings, Inc. (NASDAQ: ACME) announced results.",
+            }],
+        },
     ))
 
     expected_query = (
@@ -203,9 +395,12 @@ def test_private_equity_request_gets_existing_bounded_stage_discovery(monkeypatc
         "majority private equity"
     )
     search.assert_awaited_once()
+    fetch.assert_not_awaited()
     assert search.await_args.args[1] == expected_query
     assert result["usage"]["search_calls"] == 1
     document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
+    assert "submitted_source_hints" not in document["prior_observations"]
+    assert "server_public_stage_source_fetch" not in document
     assert document["server_current_stage_discovery"]["query"] == expected_query
     assert document["investigation_limits"]["remaining_search_calls"] == 1
 

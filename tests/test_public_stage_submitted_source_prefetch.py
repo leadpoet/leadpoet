@@ -99,11 +99,19 @@ def test_public_stage_prefetches_exact_tenable_submitted_release(monkeypatch):
 def test_irrelevant_first_party_page_does_not_prove_public_stage(monkeypatch):
     url = "https://acme.example/news/new-chief-revenue-officer"
     text = "Acme appointed a new chief revenue officer."
+    requests = []
 
     async def fake_post(_session, _url, *, headers, payload):
-        del headers, payload
+        del headers
+        requests.append(payload)
+        if len(requests) == 2:
+            return _tool_response(
+                "search_web", {"query": "Acme current public listing"}, 2,
+            )
         return _tool_response(
-            "submit_findings", {"findings": [_finding(status="UNPROVEN")]},
+            "submit_findings",
+            {"findings": [_finding(status="UNPROVEN")]},
+            len(requests),
         )
 
     fetch = AsyncMock(return_value={
@@ -112,6 +120,11 @@ def test_irrelevant_first_party_page_does_not_prove_public_stage(monkeypatch):
     _set_keys(monkeypatch)
     monkeypatch.setattr(investigator, "_post_json", fake_post)
     monkeypatch.setattr(investigator, "_fetch_page", fetch)
+    monkeypatch.setattr(
+        investigator,
+        "_search_web",
+        AsyncMock(return_value={"results": []}),
+    )
 
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example/"},
@@ -207,17 +220,30 @@ def test_public_stage_prefetch_transport_failure_stays_provider_failure(monkeypa
 
 def test_unrelated_submitted_domain_is_not_server_prefetched(monkeypatch):
     url = "https://unrelated.example/news/acme"
+    requests = []
 
     async def fake_post(_session, _url, *, headers, payload):
-        del headers, payload
+        del headers
+        requests.append(payload)
+        if len(requests) == 2:
+            return _tool_response(
+                "search_web", {"query": "Acme current public listing"}, 2,
+            )
         return _tool_response(
-            "submit_findings", {"findings": [_finding(status="UNPROVEN")]},
+            "submit_findings",
+            {"findings": [_finding(status="UNPROVEN")]},
+            len(requests),
         )
 
     fetch = AsyncMock()
     _set_keys(monkeypatch)
     monkeypatch.setattr(investigator, "_post_json", fake_post)
     monkeypatch.setattr(investigator, "_fetch_page", fetch)
+    monkeypatch.setattr(
+        investigator,
+        "_search_web",
+        AsyncMock(return_value={"results": []}),
+    )
 
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example/"},

@@ -5569,6 +5569,35 @@ async def _run_targeted_company_evidence_investigation(
         if "stage" in investigation_targets
         else []
     )
+    submitted_source_hints: list[dict[str, str]] = []
+    if (
+        "stage" in investigation_targets
+        and _normalize_company_stage(icp_stage) == "public"
+    ):
+        hint_candidates = [
+            *((item.get("url"), item.get("quote")) for item in stage_evidence),
+            *((signal.url, signal.description) for signal in company.intent_signals),
+            *(
+                [(company.required_attribute.evidence_url,
+                  company.required_attribute.evidence_quote)]
+                if company.required_attribute is not None
+                else []
+            ),
+        ]
+        for hint_url, hint_text in hint_candidates:
+            safe_hint_url = _valid_web_evidence_url(hint_url)
+            if (
+                safe_hint_url
+                and isinstance(hint_text, str)
+                and hint_text == hint_text.strip()
+                and 1 <= len(hint_text) <= 2000
+            ):
+                submitted_source_hints.append({
+                    "url": safe_hint_url,
+                    "text": hint_text,
+                })
+            if len(submitted_source_hints) >= MAX_SUBMITTED_SOURCE_URLS:
+                break
     submitted_source_urls: list[str] = []
     source_candidates = [
         *(
@@ -5683,6 +5712,11 @@ async def _run_targeted_company_evidence_investigation(
             **(
                 {"submitted_source_urls": submitted_source_urls}
                 if submitted_source_urls
+                else {}
+            ),
+            **(
+                {"submitted_source_hints": submitted_source_hints}
+                if submitted_source_hints
                 else {}
             ),
             **(

@@ -134,10 +134,9 @@ A qualifying customer-facing commercial capability can be sold within a larger
 platform without being the company's main business or a standalone product,
 unless the exact criterion explicitly requires either condition. Distinguish
 controls that customers operate in the sold product from the vendor's internal
-compliance, internal use, or badges. Prove every requested function and
-conjunct, preserving the criterion's explicit AND/OR structure. For alternatives
-joined by OR, evidence for one qualifying alternative is sufficient; do not
-require all alternatives. For requirements joined by AND, prove each one.
+compliance, internal use, or badges. Preserve the criterion's explicit AND/OR
+structure. Prove each conjunct. For alternatives joined by OR, evidence for one
+qualifying alternative is sufficient; do not require all alternatives.
 Missing discussion is not a contradiction.
 CONTRADICTED requires direct customer, internal-function, or third-party
 evidence; a page that describes only a different business is UNPROVEN because
@@ -527,17 +526,37 @@ def _public_stage_submitted_source_to_prefetch(
     *,
     submitted_source_urls: Sequence[str],
     stage_dispute_urls: Sequence[str],
+    submitted_source_hints: Mapping[str, Sequence[str]],
     first_party_domains: set[str],
+    identity_names: set[str],
     fetched_pages: Mapping[str, str],
 ) -> str:
-    """Select one bounded first-party locator for a Public-stage dispute."""
+    """Select one bounded submitted locator for a Public-stage dispute."""
+
+    from qualification.scoring.lead_scorer import (
+        _public_quote_has_bound_market_locator,
+    )
 
     def eligible(url: str) -> bool:
         try:
             path = urlsplit(url).path
         except (TypeError, ValueError):
             return False
-        return bool(path.strip("/") and _first_party_url(url, first_party_domains))
+        return bool(path.strip("/"))
+
+    def has_strong_market_hint(url: str) -> bool:
+        return any(
+            _public_quote_has_bound_market_locator(text, tuple(identity_names))
+            for text in submitted_source_hints.get(url, ())
+        )
+
+    def fetched_page_is_stage_capable(url: str) -> bool:
+        return bool(
+            url in fetched_pages
+            and _public_quote_has_bound_market_locator(
+                fetched_pages[url], tuple(identity_names)
+            )
+        )
 
     dispute_candidates = [
         url for url in stage_dispute_urls if eligible(url)
@@ -548,12 +567,29 @@ def _public_stage_submitted_source_to_prefetch(
     if dispute_candidates:
         return ""
 
-    submitted_candidates = [
-        url for url in submitted_source_urls if eligible(url)
-    ]
-    if any(url in fetched_pages for url in submitted_candidates):
+    submitted_candidates = [url for url in submitted_source_urls if eligible(url)]
+    if any(fetched_page_is_stage_capable(url) for url in submitted_candidates):
         return ""
-    return submitted_candidates[0] if submitted_candidates else ""
+    strong_candidates = [
+        url for url in submitted_candidates
+        if has_strong_market_hint(url) and url not in fetched_pages
+    ]
+    for url in strong_candidates:
+        if _first_party_url(url, first_party_domains):
+            return url
+    if strong_candidates:
+        return strong_candidates[0]
+
+    # Preserve the existing safe first-party fallback when no strong submitted
+    # hint exists. A prefetched first-party page still suppresses only this
+    # fallback, not a stage-capable hinted locator above.
+    first_party_candidates = [
+        url for url in submitted_candidates
+        if _first_party_url(url, first_party_domains)
+    ]
+    if any(url in fetched_pages for url in first_party_candidates):
+        return ""
+    return first_party_candidates[0] if first_party_candidates else ""
 
 
 def _independently_bound_first_party_url(
@@ -1443,6 +1479,16 @@ async def investigate_company_evidence(
         _record_failure(diagnostic, PROVIDER_ERROR_FAILURE_REASON)
         return {"claims": {}, "failure_reason": PROVIDER_ERROR_FAILURE_REASON}
 
+    from qualification.scoring.lead_scorer import (
+        _company_stage_matches,
+        _normalize_company_stage,
+    )
+
+    normalized_requested_stage = _normalize_company_stage(requested_stage)
+    public_source_hints_enabled = bool(
+        "stage" in requested_targets and normalized_requested_stage == "public"
+    )
+
     bounded_prior_observations = dict(prior_observations or {})
     # Reserved server-only data can enter only through the explicit private
     # argument. Never reuse a similarly named provider-controlled field.
@@ -1482,6 +1528,35 @@ async def investigate_company_evidence(
         bounded_prior_observations["stage_dispute_urls"] = stage_dispute_urls
     else:
         bounded_prior_observations.pop("stage_dispute_urls", None)
+    raw_source_hints = (
+        bounded_prior_observations.get("submitted_source_hints")
+        if public_source_hints_enabled
+        else None
+    )
+    submitted_source_hints: dict[str, list[str]] = {}
+    if isinstance(raw_source_hints, Sequence) and not isinstance(
+        raw_source_hints, (str, bytes)
+    ):
+        for raw_hint in raw_source_hints[:MAX_SUBMITTED_SOURCE_URLS]:
+            if not isinstance(raw_hint, Mapping):
+                continue
+            safe_url = _safe_https_url(raw_hint.get("url"))
+            text = raw_hint.get("text")
+            if (
+                safe_url in submitted_source_urls
+                and isinstance(text, str)
+                and text == text.strip()
+                and 1 <= len(text) <= 2000
+            ):
+                submitted_source_hints.setdefault(safe_url, []).append(text)
+    if submitted_source_hints:
+        bounded_prior_observations["submitted_source_hints"] = [
+            {"url": url, "text": text}
+            for url, texts in submitted_source_hints.items()
+            for text in texts
+        ][:MAX_SUBMITTED_SOURCE_URLS]
+    else:
+        bounded_prior_observations.pop("submitted_source_hints", None)
 
     fetched_pages, fetched_final_urls = _validated_prefetched_pages(
         prefetched_pages,
@@ -1520,12 +1595,6 @@ async def investigate_company_evidence(
         )
     search_calls = 0
     fetch_calls = 0
-    from qualification.scoring.lead_scorer import (
-        _company_stage_matches,
-        _normalize_company_stage,
-    )
-
-    normalized_requested_stage = _normalize_company_stage(requested_stage)
     requested_venture_stage = (
         normalized_requested_stage
         if (
@@ -1613,7 +1682,9 @@ async def investigate_company_evidence(
                 _public_stage_submitted_source_to_prefetch(
                     submitted_source_urls=submitted_source_urls,
                     stage_dispute_urls=stage_dispute_urls,
+                    submitted_source_hints=submitted_source_hints,
                     first_party_domains=first_party_domains,
+                    identity_names=identity_names,
                     fetched_pages=fetched_pages,
                 )
                 if (

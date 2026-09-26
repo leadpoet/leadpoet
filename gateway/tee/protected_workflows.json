@@ -807,7 +807,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:021aa1382c817de3765da55e9bb01ee8a82066533dfe7c05b360a05df14b2c38",
-  "protected_source_commit": "d6de7e533",
+  "manifest_hash": "sha256:bb25f056d3c6857eee54b5631e9dd09238cd0a14e719ffd8d369b0bce1531c47",
+  "protected_source_commit": "d6de7e53316c19d15defc2b1f423102820d1ef6d",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

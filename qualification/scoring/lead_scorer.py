@@ -739,6 +739,54 @@ _PUBLIC_STRONG_CURRENT_PATTERNS = (
     *_PUBLIC_TICKER_STAGE_PROOF_PATTERNS,
     _PUBLIC_SEMANTIC_LISTING_RE,
 )
+_PUBLIC_CURRENT_EXCHANGE_PROFILE_RE = re.compile(
+    r"(?:(?:nyse|nasdaq)\s*/\s*(?P<slash_ticker>[A-Z][A-Z0-9.-]{0,9})\s+"
+    r"(?P<slash_issuer>[A-Z][A-Z0-9&.'’+ -]{2,100})|"
+    r"(?P<label_issuer>[A-Z][A-Za-z0-9&.'’+ -]{2,100}?)\s+"
+    r"(?P<exchange>New\s+York\s+Stock\s+Exchange|NYSE|NASDAQ)\s*:\s*"
+    r"(?P<label_ticker>[A-Z][A-Z0-9.-]{0,9}))",
+    re.I,
+)
+
+
+def _current_exchange_profile_names_issuer(
+    quote: str,
+    identity_names: Sequence[str],
+) -> bool:
+    """Bind a current exchange quote-card layout to its named issuer."""
+
+    if re.search(
+        r"\b(?:delisted|no\s+longer\s+listed|ceased|stopped)\s+trading\b|"
+        r"\b(?:taken|went|became)\s+private\b",
+        quote,
+        re.I,
+    ) or not re.search(
+        r"\b(?:today|last|open|prev\.?\s*close|volume|market\s+cap|"
+        r"stock\s+price|price\s+(?:increased|decreased))\b",
+        quote,
+        re.I,
+    ):
+        return False
+    names = {
+        compact for value in identity_names
+        if (compact := _compact_company_name(value))
+    }
+    for match in _PUBLIC_CURRENT_EXCHANGE_PROFILE_RE.finditer(quote):
+        issuer = str(match.group("slash_issuer") or match.group("label_issuer") or "")
+        if match.group("slash_issuer"):
+            issuer = re.split(r"\s+\d", issuer, maxsplit=1)[0]
+        compact_issuer = _compact_company_name(issuer)
+        issuer_initials = "".join(
+            token[0] for token in re.findall(r"[A-Za-z0-9]+", issuer)
+            if token.casefold() not in {"inc", "incorporated", "corp", "corporation"}
+        ).casefold()
+        if any(
+            name in compact_issuer
+            or (len(name) >= 3 and name == issuer_initials)
+            for name in names
+        ):
+            return True
+    return False
 
 
 def _public_claims_share_clause(
@@ -841,17 +889,21 @@ def _stage_evidence_supports_observation(
         return lexical_support
     if normalized_stage != "public":
         return lexical_support
+    current_exchange_profile = _current_exchange_profile_names_issuer(
+        quote, identity_names,
+    )
     if authoritative_public_listing:
         return True
     if (
         _PUBLIC_IPO_COMPLETION_EVENT_RE.search(quote)
         and not _public_quote_has_bound_market_locator(quote, identity_names)
+        and not current_exchange_profile
     ):
         # An IPO-completion announcement proves a historical event. Its old
         # exchange/ticker parenthetical is not current-stage proof unless this
         # exact quote also contains a separate issuer-bound market statement.
         return False
-    if not lexical_support and not semantic_public_listing:
+    if not lexical_support and not semantic_public_listing and not current_exchange_profile:
         return False
     try:
         source_domain = _registrable_domain(evidence_url)
@@ -866,8 +918,15 @@ def _stage_evidence_supports_observation(
             )
             or any(pattern.search(quote) for pattern in _PUBLIC_STRONG_CURRENT_PATTERNS)
             or semantic_public_listing
+            or current_exchange_profile
         )
-    return _public_quote_has_bound_market_locator(quote, identity_names)
+    return bool(
+        _public_quote_has_bound_market_locator(quote, identity_names)
+        or (
+            source_domain in {"nyse.com", "nasdaq.com"}
+            and current_exchange_profile
+        )
+    )
 
 
 _BOUND_ACQUISITION_SUBJECT_PATTERNS = (

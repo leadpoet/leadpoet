@@ -121,6 +121,49 @@ still incur charges. Arena reward activation is a separate setting: disabling
 rewards prevents champion allocation, while scoring and competition execution
 remain separate configuration behavior.
 
+## Decision summaries
+
+New or updated model harnesses should report short decision summaries through
+Arena's existing checkpoint helper. Use the same format as the public baseline:
+
+```python
+from lab_arena_checkpoint import log_decision
+
+log_decision(
+    objective="Check whether this company fits the requested industry.",
+    candidate="example.com",
+    decision="accept",
+    evidence=["https://example.com/products"],
+    rationale="The product page identifies the requested software category.",
+    next_action="Check the required intent signal.",
+)
+```
+
+Report the initial approach, material candidate accept/reject/defer decisions,
+and the final outcome. Explain the decision briefly using the evidence actually
+observed. Do not send hidden reasoning, credentials, full page bodies, or invented
+explanations. Supported decisions are `investigate`, `accept`, `reject`, `defer`
+and `finish`. Evidence references are informational model claims; the judge
+continues to verify company evidence independently.
+
+The helper sends a bounded record to the local worker socket. The shared
+validator batches it into the existing private trajectory table with the
+lease-derived round, submission, ICP, attempt and validator identity. Models
+cannot set those identities. No Supabase or provider key is needed in the model
+or validator, and no new environment setting is required.
+
+Logging is best effort and does not change company outputs, admission, scoring,
+provider quotas or rewards. A return value of `False` means the record was not
+accepted by the local worker; it is not a provider failure and must not cause a
+research retry. Old validators can continue to run models that use the helper
+with a guarded import; upgraded validators are required to capture decisions.
+The trajectory includes an explicit coverage summary when a model supplies no
+records or reaches the capture limit. Existing frozen submissions are not
+rewritten or assigned explanations they did not supply.
+
+See [the decision capture contract](arena-decision-logging.md) for exact limits,
+privacy, failure behavior and examples.
+
 ## Operator setup
 
 Use this deployment order. Do not apply migration 185 while a service that

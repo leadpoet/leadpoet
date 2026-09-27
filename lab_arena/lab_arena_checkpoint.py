@@ -10,6 +10,7 @@ import json
 import os
 import socket
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -31,10 +32,155 @@ QUOTA_COST_CONTROL_FRAME = {
 QUOTA_PROVIDERS = ("scrapingdog", "deepline", "openrouter")
 MAX_QUOTA_RESPONSE_BYTES = 4096
 QUOTA_SOCKET_TIMEOUT_SECONDS = 35.0
+DECISION_SCHEMA_VERSION = "leadpoet.lab_arena.decision.v1"
+DECISION_CONTROL = "decision"
+DECISION_CHOICES = frozenset(
+    {"investigate", "accept", "reject", "defer", "finish"}
+)
+MAX_DECISION_TEXT_CHARS = 500
+MAX_DECISION_EVIDENCE_ITEMS = 5
+MAX_DECISION_FRAME_BYTES = 4096
+DECISION_SOCKET_TIMEOUT_SECONDS = 2.0
 
 
 class QuotaUnavailable(RuntimeError):
     """The passive quota snapshot could not be read safely."""
+
+
+def validate_decision_frame(value: Any) -> dict[str, Any]:
+    """Validate one closed, bounded model-reported decision control frame."""
+
+    required = {
+        "schema_version",
+        "control",
+        "objective",
+        "evidence",
+        "rationale",
+        "next_action",
+        "decision",
+    }
+    if not isinstance(value, Mapping) or not required <= set(value) <= (
+        required | {"candidate"}
+    ):
+        raise ValueError("decision frame is invalid")
+    if (
+        value.get("schema_version") != DECISION_SCHEMA_VERSION
+        or value.get("control") != DECISION_CONTROL
+        or value.get("decision") not in DECISION_CHOICES
+    ):
+        raise ValueError("decision frame is invalid")
+
+    normalized = dict(value)
+    for field in ("objective", "rationale", "next_action"):
+        text = normalized.get(field)
+        if (
+            not isinstance(text, str)
+            or not text.strip()
+            or len(text) > MAX_DECISION_TEXT_CHARS
+        ):
+            raise ValueError("decision frame is invalid")
+    candidate = normalized.get("candidate")
+    if "candidate" in normalized and (
+        not isinstance(candidate, str)
+        or not candidate.strip()
+        or len(candidate) > MAX_DECISION_TEXT_CHARS
+    ):
+        raise ValueError("decision frame is invalid")
+    evidence = normalized.get("evidence")
+    if (
+        not isinstance(evidence, list)
+        or len(evidence) > MAX_DECISION_EVIDENCE_ITEMS
+        or any(
+            not isinstance(item, str)
+            or not item.strip()
+            or len(item) > MAX_DECISION_TEXT_CHARS
+            for item in evidence
+        )
+    ):
+        raise ValueError("decision frame is invalid")
+    encoded = json.dumps(
+        normalized,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    if len(encoded) > MAX_DECISION_FRAME_BYTES:
+        raise ValueError("decision frame is invalid")
+    return normalized
+
+
+def _recv_decision_response(
+    connection: socket.socket, size: int, deadline: float,
+) -> bytes:
+    output = bytearray()
+    while len(output) < size:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("decision response deadline")
+        connection.settimeout(remaining)
+        chunk = connection.recv(min(4096, size - len(output)))
+        if not chunk:
+            raise OSError("decision response closed")
+        output.extend(chunk)
+    return bytes(output)
+
+
+def log_decision(
+    *,
+    objective: str,
+    evidence: list[str],
+    rationale: str,
+    next_action: str,
+    decision: str,
+    candidate: str | None = None,
+) -> bool:
+    """Best-effort capture of one explicit model decision for private audit."""
+
+    frame: dict[str, Any] = {
+        "schema_version": DECISION_SCHEMA_VERSION,
+        "control": DECISION_CONTROL,
+        "objective": objective,
+        "evidence": evidence,
+        "rationale": rationale,
+        "next_action": next_action,
+        "decision": decision,
+    }
+    if candidate is not None:
+        frame["candidate"] = candidate
+    try:
+        normalized = validate_decision_frame(frame)
+        encoded = json.dumps(
+            normalized,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        path = str(os.environ.get(WORKER_SOCKET_ENV) or "").strip()
+        if not path.startswith("/"):
+            return False
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            deadline = time.monotonic() + DECISION_SOCKET_TIMEOUT_SECONDS
+            connection.settimeout(DECISION_SOCKET_TIMEOUT_SECONDS)
+            connection.connect(path)
+            connection.sendall(len(encoded).to_bytes(4, "big") + encoded)
+            size = int.from_bytes(
+                _recv_decision_response(connection, 4, deadline), "big"
+            )
+            if size < 2 or size > MAX_QUOTA_RESPONSE_BYTES:
+                return False
+            response = json.loads(
+                _recv_decision_response(connection, size, deadline).decode("utf-8")
+            )
+            return response == {"recorded": True}
+        finally:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
+    except Exception:
+        return False
 
 
 def _recv_exact(connection: socket.socket, size: int) -> bytes:

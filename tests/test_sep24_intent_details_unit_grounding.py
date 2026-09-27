@@ -73,6 +73,11 @@ def test_private_response_schema_orders_grounding_before_aggregates():
     assert repair_item["properties"]["evidence"]["items"]["properties"][
         "quote"
     ]["maxLength"] == 500
+    semantic_item = intent_details._SEMANTIC_REPAIR_RESPONSE_FORMAT[
+        "json_schema"
+    ]["schema"]["properties"]["repairs"]["items"]
+    assert set(semantic_item["properties"]) == {"unit_id", "status", "evidence"}
+    assert semantic_item["required"] == ["unit_id", "status", "evidence"]
 
 
 def _inputs(
@@ -158,6 +163,14 @@ def _response(document, unit_grounding, *, facts_supported):
 
 def _repair_response(unit_id: int, evidence: list[dict]) -> dict:
     return {"repairs": [{"unit_id": unit_id, "evidence": evidence}]}
+
+
+def _semantic_repair_response(
+    unit_id: int, status: str, evidence: list[dict],
+) -> dict:
+    return {"repairs": [{
+        "unit_id": unit_id, "status": status, "evidence": evidence,
+    }]}
 
 
 def _verified_unit(document, unit_id: int, quote: str) -> dict:
@@ -903,7 +916,12 @@ def test_local_repair_can_supply_missing_contradiction_evidence(monkeypatch):
         evidence = [] if calls == 1 else [_binding(document, quote)]
         if calls == 2:
             assert "missing_evidence" in kwargs["system_prompt"]
-            return json.dumps(_repair_response(0, evidence))
+            assert kwargs["response_format"] == (
+                intent_details._SEMANTIC_REPAIR_RESPONSE_FORMAT
+            )
+            return json.dumps(_semantic_repair_response(
+                0, "CONTRADICTED", evidence,
+            ))
         return json.dumps(_response(
             document,
             [{
@@ -921,6 +939,170 @@ def test_local_repair_can_supply_missing_contradiction_evidence(monkeypatch):
     assert calls == 2
     assert receipt["decision"] == "mismatch"
     assert receipt["checks"]["facts_supported"] is False
+
+
+def test_bounded_semantic_repair_accepts_distinct_additional_financing(
+    monkeypatch,
+):
+    prior = "In January 2025, Render raised $80M in Series C funding."
+    additional = (
+        "In February 2026, we raised an additional $100M in Series C "
+        "financing, bringing our total funding to $260M"
+    )
+    inputs = _inputs(
+        "Render raised an additional $100M in Series C financing in February 2026.",
+        f"Render company page. {prior} {additional}.",
+        supporting_quote=additional,
+    )
+    inputs[0].company_name = "Render"
+    calls = []
+
+    async def judge(prompt, **kwargs):
+        calls.append((prompt, kwargs))
+        document = _prompt_document(prompt)
+        if len(calls) == 1:
+            return json.dumps(_response(document, [{
+                "unit_id": 0,
+                "contains_factual_claim": True,
+                "status": "CONTRADICTED",
+                "evidence": [],
+            }], facts_supported=False))
+        control = json.loads(prompt)["bounded_unit_repair_control"]
+        assert control["units"] == [{
+            "unit_id": 0,
+            "contains_factual_claim": True,
+            "status": "CONTRADICTED",
+            "citation_errors": ["missing_evidence"],
+            "semantic_recheck_allowed": True,
+        }]
+        assert "actor, action, object, number, date and event" in kwargs[
+            "system_prompt"
+        ]
+        return json.dumps(_semantic_repair_response(
+            0, "VERIFIED", [_binding(document, additional)],
+        ))
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(*inputs))
+
+    assert len(calls) == 2
+    assert receipt["decision"] == "match"
+    assert receipt["checks"]["facts_supported"] is True
+
+
+@pytest.mark.parametrize("defect", ["wrong_amount", "wrong_date", "wrong_entity"])
+def test_bounded_semantic_repair_keeps_conflicting_financing_negative(
+    monkeypatch, defect,
+):
+    actual = (
+        "In February 2026, Render raised an additional $100M in Series C "
+        "financing."
+    )
+    claims = {
+        "wrong_amount": "Render raised an additional $10M in February 2026.",
+        "wrong_date": "Render raised an additional $100M in February 2025.",
+        "wrong_entity": "Rival raised an additional $100M in February 2026.",
+    }
+    inputs = _inputs(claims[defect], actual, supporting_quote=actual)
+    calls = 0
+
+    async def judge(prompt, **_kwargs):
+        nonlocal calls
+        calls += 1
+        document = _prompt_document(prompt)
+        if calls == 1:
+            return json.dumps(_response(document, [{
+                "unit_id": 0,
+                "contains_factual_claim": True,
+                "status": "CONTRADICTED",
+                "evidence": [],
+            }], facts_supported=False))
+        return json.dumps(_semantic_repair_response(
+            0, "CONTRADICTED", [_binding(document, actual)],
+        ))
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(*inputs))
+
+    assert calls == 2
+    assert receipt["decision"] == "mismatch"
+    assert receipt["checks"]["facts_supported"] is False
+
+
+@pytest.mark.parametrize("attack", ["change_unrelated_status", "inject_unit"])
+def test_bounded_semantic_repair_rejects_unrelated_unit_changes(
+    monkeypatch, attack,
+):
+    financing = "Example raised an additional $100M in February 2026."
+    product = "Example provides business software."
+    inputs = _inputs(
+        f"{financing} {product}", f"{financing} {product}",
+        supporting_quote=financing,
+    )
+    calls = 0
+
+    async def judge(prompt, **_kwargs):
+        nonlocal calls
+        calls += 1
+        document = _prompt_document(prompt)
+        if calls == 1:
+            return json.dumps(_response(document, [
+                {
+                    "unit_id": 0,
+                    "contains_factual_claim": True,
+                    "status": "CONTRADICTED",
+                    "evidence": [],
+                },
+                _verified_unit(document, 1, product),
+            ], facts_supported=False))
+        repairs = _semantic_repair_response(
+            0, "VERIFIED", [_binding(document, financing)],
+        )
+        if attack == "change_unrelated_status":
+            repairs["repairs"].append({
+                "unit_id": 1, "status": "UNPROVEN", "evidence": [],
+            })
+        else:
+            repairs["repairs"].append({
+                "unit_id": 99, "status": "VERIFIED",
+                "evidence": [_binding(document, product)],
+            })
+        return json.dumps(repairs)
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(*inputs))
+
+    assert calls == 2
+    assert receipt["decision"] == "unavailable"
+    assert receipt["failure_reason_code"] == "malformed_response"
+
+
+def test_bounded_semantic_repair_never_uses_a_third_review_call(monkeypatch):
+    quote = "Example raised an additional $100M in February 2026."
+    inputs = _inputs(quote, quote, supporting_quote=quote)
+    calls = 0
+
+    async def judge(prompt, **_kwargs):
+        nonlocal calls
+        calls += 1
+        document = _prompt_document(prompt)
+        if calls == 1:
+            return json.dumps(_response(document, [{
+                "unit_id": 0,
+                "contains_factual_claim": True,
+                "status": "CONTRADICTED",
+                "evidence": [],
+            }], facts_supported=False))
+        return json.dumps(_semantic_repair_response(
+            0, "VERIFIED", [{"source_index": 0, "quote": "invented"}],
+        ))
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(*inputs))
+
+    assert calls == 2
+    assert receipt["decision"] == "unavailable"
+    assert receipt["failure_reason_code"] == "malformed_response"
 
 
 def test_literal_citation_repair_preserves_an_unproven_unit(monkeypatch):

@@ -20,6 +20,7 @@ from qualification.scoring.competition import (
 from qualification.scoring import company_evidence_investigator as investigator
 from qualification.scoring import company_verification
 from qualification.scoring import lead_scorer
+from qualification.scoring import verification_helpers
 from qualification.scoring.company_evidence_investigator import (
     _validated_findings,
 )
@@ -3876,9 +3877,7 @@ def test_plain_text_extracts_realpage_article_before_navigation_cap():
     assert hidden["stage"]["status"] == "UNPROVEN"
 
 
-def test_plain_text_exposes_realpage_link_labels_as_exact_quote_surface(
-    monkeypatch,
-):
+def test_plain_text_exposes_realpage_link_labels_as_exact_quote_surface():
     quote = (
         "RealPage, Inc., a leading provider of AI-enabled software and data "
         "analytics to the real estate industry, today announced it has "
@@ -3886,25 +3885,14 @@ def test_plain_text_exposes_realpage_link_labels_as_exact_quote_surface(
         "company trusted by institutional owners, investment managers, and "
         "operators worldwide."
     )
-    retained_article = (
-        "Realpage Newsroom Combination connects property-level operations with "
-        "institutional portfolio intelligence. RICHARDSON, TX and NEW YORK, "
-        "NY - [RealPage, Inc](https://www.realpage.com/)., a leading provider "
-        "of AI-enabled software and data analytics to the real estate industry, "
-        "today announced it has completed its acquisition of "
-        "[Cherre](https://cherre.com/), a real estate data intelligence company "
-        "trusted by institutional owners, investment managers, and operators "
-        "worldwide."
-    )
     raw = """<html><body><article>
       <a href="https://www.realpage.com/">RealPage, Inc</a>., a leading provider
-      acquired <a href="https://cherre.com/">Cherre</a>.
+      of AI-enabled software and data analytics to the real estate industry,
+      today announced it has completed its acquisition of
+      <a href="https://cherre.com/">Cherre</a>, a real estate data intelligence
+      company trusted by institutional owners, investment managers, and
+      operators worldwide.
     </article></body></html>"""
-    monkeypatch.setattr(
-        investigator,
-        "extract_article_body",
-        lambda _value: retained_article,
-    )
 
     text = investigator._plain_text(raw)
 
@@ -11212,6 +11200,61 @@ def test_only_exact_http_400_provider_hint_requests_stealth_retry(
     assert result["ok"] is False
     assert result["error"] == "http_400"
     assert result.get("_retry_with_stealth", False) is expects_retry
+
+
+def test_company_page_text_keeps_visible_pricing_features_without_hidden_noise():
+    raw = """<html><head><style>.secret { display: none; }</style></head><body>
+      <nav>Documentation Customers Pricing</nav>
+      <main>
+        <h1>Secure software pricing</h1>
+        <table><tr><th>Business</th><th>Enterprise</th></tr>
+          <tr><td>Console to manage images and users</td>
+              <td><a href="https://acme.example/contact">Contact sales</a></td></tr>
+        </table>
+        <div hidden>Hidden enterprise proof</div>
+        <div aria-hidden="true">ARIA hidden proof</div>
+        <div style="visibility: hidden">Inline hidden proof</div>
+        <div class="secret">CSS hidden proof</div>
+        <script>window.secret = 'script proof'</script>
+      </main>
+      <section class="related-articles">Related customer proof</section>
+    </body></html>"""
+
+    text = investigator._plain_text(raw)
+    quote_surface = investigator._visible_quote_surface(text)
+
+    assert "Console to manage images and users" in quote_surface
+    assert "Contact sales" in quote_surface
+    assert "Documentation Customers Pricing" not in quote_surface
+    assert "hidden proof" not in quote_surface.casefold()
+    assert "script proof" not in quote_surface
+    assert "Related customer proof" not in quote_surface
+    assert "https://acme.example/contact" not in quote_surface
+    assert len(text) <= investigator.MAX_PAGE_CHARACTERS
+
+
+def test_article_extraction_default_still_uses_relevance_extractor(monkeypatch):
+    article = "Acme announced its new product. " * 20
+    pricing = "Console to manage images and users"
+
+    class _ArticleExtractor:
+        @staticmethod
+        def extract(_content, **_kwargs):
+            return article
+
+    monkeypatch.setattr(verification_helpers, "_TRAFILATURA_AVAILABLE", True)
+    monkeypatch.setattr(
+        verification_helpers, "_trafilatura", _ArticleExtractor, raising=False
+    )
+    raw = f"""<html><body><main><h1>Acme product announcement</h1>
+      <article>{article}</article><table><tr><td>{pricing}</td></tr></table>
+    </main></body></html>"""
+
+    extracted = verification_helpers.extract_article_body(raw)
+
+    assert extracted == article
+    assert pricing not in extracted
+    assert pricing in verification_helpers.visible_html_text(raw)
 
 
 def test_bounded_reader_joins_fragmented_provider_body_and_forwards_params():

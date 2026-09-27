@@ -224,7 +224,9 @@ def _visible_html_document(content: str) -> tuple[str, str, str]:
     return text, heading, heading_prefix
 
 
-def _visible_html_text(content: str) -> str:
+def visible_html_text(content: str) -> str:
+    """Return sanitized visible page text without article relevance pruning."""
+
     return _visible_html_document(content)[0]
 
 

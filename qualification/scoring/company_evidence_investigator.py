@@ -42,8 +42,8 @@ from qualification.scoring.linkedin_company_size import (
     linkedin_company_page_slug,
 )
 from qualification.scoring.verification_helpers import (
-    extract_article_body,
     visible_html_links,
+    visible_html_text,
 )
 
 # Use only scorer models already pinned by the signed Arena policy. This does
@@ -559,11 +559,11 @@ def _plain_text(value: str) -> str:
         for match in visible_html_links(value)
         if re.fullmatch(r"https?://[^\s'\"<>]+", match, flags=re.I)
     )
-    # Extract the visible main body before applying the investigator's fixed
-    # character bound. Navigation-heavy pages can otherwise displace the
-    # article that the model must quote. The shared extractor also excludes
-    # hidden, executable, fallback, navigation, and related-page markup.
-    decoded = html.unescape(extract_article_body(value))
+    # Company and product pages often put decisive product or pricing facts in
+    # tables and feature grids that an article extractor considers boilerplate.
+    # Keep their full visible surface. The shared parser still excludes hidden,
+    # executable, fallback, navigation, and related-page markup.
+    decoded = html.unescape(visible_html_text(value))
     # Script and style bodies are not visible page evidence. Remove them before
     # applying the fixed page-text bound so they cannot displace visible text.
     for tag in ("script", "style"):
@@ -575,6 +575,9 @@ def _plain_text(value: str) -> str:
         )
     without_markup = re.sub(r"<[^>]+>", " ", decoded)
     visible_quote_text = _visible_markdown_link_label_surface(without_markup)
+    # HTML text nodes can split at inline elements immediately before
+    # punctuation. Restore the visible punctuation boundary for exact quotes.
+    visible_quote_text = re.sub(r"\s+([,.;:!?])", r"\1", visible_quote_text)
     combined = visible_quote_text
     if linked_urls:
         combined += f" {_IDENTITY_LINK_CONTEXT_MARKER} {linked_urls}"

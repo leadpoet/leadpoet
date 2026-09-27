@@ -267,6 +267,14 @@ HIRING_FUNCTIONAL_ROLE_BLOCK = """  HIRING — FUNCTIONAL ROLE MATCH:
     target instead asks for the employer's own platform, infrastructure,
     an internal developer platform, or another narrower scope, preserve that qualifier.
 
+    Identify the same-role product or component scope and the direct-duty evidence
+    separately in the summary and supporting quotes; combine them only when the
+    source links both to that role. For a broad platform target, product ownership,
+    upkeep, maintenance, or performance duties count as direct platform work when
+    the same-role body establishes that the product or component is within the
+    platform. Do not invent an internal-infrastructure requirement unless the target
+    asks for it. Platform exposure alone does not supply the required duties.
+
     Keep the boundary strict. A generic software role at a company that sells a
     platform is not automatically a platform role. Generic presales, customer
     support, merely using a platform, gaining incidental exposure to it, or

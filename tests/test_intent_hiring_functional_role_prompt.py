@@ -121,6 +121,21 @@ def test_unibuddy_source_and_functional_role_rule_reach_stage_three() -> None:
         "the direct duties"
     ) in normalized_prompt
     assert "The duty sentence need not repeat the platform name" in normalized_prompt
+    assert (
+        "Identify the same-role product or component scope and the direct-duty "
+        "evidence separately"
+    ) in normalized_prompt
+    assert (
+        "product ownership, upkeep, maintenance, or performance duties count "
+        "as direct platform work"
+    ) in normalized_prompt
+    assert (
+        "combine them only when the source links both to that role"
+        in normalized_prompt
+    )
+    assert "Platform exposure alone does not supply the required duties" in (
+        normalized_prompt
+    )
     assert "an internal developer platform" in prompt
     assert (
         "When miner_claim is an exact quote grounded in the supplied source, bind "

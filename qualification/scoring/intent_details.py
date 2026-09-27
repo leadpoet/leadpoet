@@ -1320,7 +1320,7 @@ def review_evidence(
 def _validate_unit_grounding(
     grounding: Any,
     document: Mapping[str, Any],
-) -> tuple[bool, bool, dict[int, set[str]]]:
+) -> tuple[bool, bool, dict[int, set[str]], set[int]]:
     units = document.get("intent_details_units")
     if not isinstance(units, list):
         raise ValueError("missing Intent Details statement units")
@@ -1341,6 +1341,7 @@ def _validate_unit_grounding(
     all_factual_units_verified = True
     any_factual_claim = False
     citation_issues: dict[int, set[str]] = {}
+    contradicted_unit_ids: set[int] = set()
     for item in grounding:
         if (
             not isinstance(item, dict)
@@ -1420,17 +1421,25 @@ def _validate_unit_grounding(
             citation_issues.setdefault(unit_id, set()).add("missing_evidence")
         if status != "VERIFIED":
             all_factual_units_verified = False
+        if status == "CONTRADICTED":
+            contradicted_unit_ids.add(unit_id)
 
     if observed_ids != set(expected_units):
         raise ValueError("incomplete Intent Details unit grounding")
-    return all_factual_units_verified, any_factual_claim, citation_issues
+    return (
+        all_factual_units_verified,
+        any_factual_claim,
+        citation_issues,
+        contradicted_unit_ids,
+    )
 
 
-class _CitationRepairNeeded(ValueError):
+class _BoundedReviewRepairNeeded(ValueError):
     def __init__(
         self,
         issues: Mapping[int, set[str]],
         held_response: Mapping[str, Any],
+        semantic_unit_ids: set[int],
     ):
         if any(
             category not in _CITATION_REPAIR_CATEGORIES
@@ -1443,12 +1452,19 @@ class _CitationRepairNeeded(ValueError):
             for unit_id, categories in sorted(issues.items())
         }
         self.held_response = copy.deepcopy(held_response)
-        super().__init__("Intent Details citations require local repair")
+        self.semantic_unit_ids = set(semantic_unit_ids)
+        super().__init__("Intent Details requires one bounded local review")
+
+
+# Preserve the private test seam used by citation validation controls.
+_CitationRepairNeeded = _BoundedReviewRepairNeeded
 
 
 def _validate_review_response(
     response: str,
     document: Mapping[str, Any],
+    *,
+    initial_review: bool = True,
 ) -> dict[str, bool]:
     raw_checks = json.loads(response)
     if not isinstance(raw_checks, dict) or set(raw_checks) != {
@@ -1461,6 +1477,7 @@ def _validate_review_response(
         unit_facts_supported,
         any_factual_claim,
         citation_issues,
+        contradicted_unit_ids,
     ) = _validate_unit_grounding(unit_grounding, document)
     facts_aggregate_conflict = (
         checks["facts_supported"] is not unit_facts_supported
@@ -1499,8 +1516,14 @@ def _validate_review_response(
         raise ValueError("coverage aggregate conflicts during citation repair")
     if citation_issues and facts_aggregate_conflict:
         raise ValueError("factual aggregate conflicts during citation repair")
-    if citation_issues:
-        raise _CitationRepairNeeded(citation_issues, raw_checks)
+    if citation_issues or (initial_review and contradicted_unit_ids):
+        repair_issues = {
+            unit_id: set(citation_issues.get(unit_id, set()))
+            for unit_id in sorted(set(citation_issues) | contradicted_unit_ids)
+        }
+        raise _BoundedReviewRepairNeeded(
+            repair_issues, raw_checks, contradicted_unit_ids,
+        )
     checks["facts_supported"] = unit_facts_supported
     return {name: checks[name] for name in _CHECKS}
 
@@ -1559,45 +1582,6 @@ def _citation_repair_user_prompt(
     return prompt
 
 
-def _semantic_repair_unit_ids(
-    issues: Mapping[int, Sequence[str]],
-    held_response: Mapping[str, Any],
-    document: Mapping[str, Any],
-) -> set[int]:
-    """Return contradicted units whose response supplied no valid citation."""
-
-    sources = _bound_evidence_sources(document)
-    held_units = {
-        item.get("unit_id"): item
-        for item in held_response.get("unit_grounding", [])
-        if isinstance(item, Mapping) and type(item.get("unit_id")) is int
-    }
-    eligible: set[int] = set()
-    for unit_id in issues:
-        unit = held_units.get(unit_id)
-        if not isinstance(unit, Mapping) or unit.get("status") != "CONTRADICTED":
-            continue
-        valid_citation = False
-        for binding in unit.get("evidence", []):
-            if not isinstance(binding, Mapping):
-                continue
-            source_index = binding.get("source_index")
-            quote = binding.get("quote")
-            if (
-                type(source_index) is int
-                and source_index in sources
-                and isinstance(quote, str)
-                and quote.strip()
-                and len(quote) <= _MAX_UNIT_EVIDENCE_QUOTE_LENGTH
-                and _quote_is_bound(quote, sources[source_index])
-            ):
-                valid_citation = True
-                break
-        if not valid_citation:
-            eligible.add(unit_id)
-    return eligible
-
-
 def _semantic_repair_prompt(
     system_prompt: str,
     issues: Mapping[int, Sequence[str]],
@@ -1610,10 +1594,10 @@ def _semantic_repair_prompt(
     return system_prompt + """
 
 TRUSTED SERVER BOUNDED UNIT REPAIR:
-The prior response passed the complete unit, coverage and Boolean structure, but
-the server found the citation errors listed below. Reassess only a unit marked
-semantic_recheck_allowed=true. Its prior CONTRADICTED status had no valid bound
-conflicting citation. Decide that unit again from review_document.admitted_evidence,
+The prior response passed the complete unit, coverage and Boolean structure.
+Reassess only a unit marked semantic_recheck_allowed=true. Its prior
+CONTRADICTED status requires one bounded semantic adjudication even when its
+citation was validly bound. Decide that unit again from review_document.admitted_evidence,
 checking the exact actor, action, object, number, date and event. Similar or earlier
 events are not interchangeable. Do not accept a claim from lexical overlap.
 For every other listed unit, preserve its supplied status and repair only its
@@ -1821,14 +1805,12 @@ missing review into an accepted paragraph or a terminal company mismatch.
     citation_failure = False
     try:
         checks = _validate_review_response(response, document)
-    except _CitationRepairNeeded as exc:
-        # The original semantic verdict and response structure were valid.
-        # Exhaustion here belongs to this company's citations, not the whole
-        # scoring batch. Provider failures below remain infrastructure errors.
-        citation_failure = True
-        semantic_unit_ids = _semantic_repair_unit_ids(
-            exc.issues, exc.held_response, document,
-        )
+    except _BoundedReviewRepairNeeded as exc:
+        # The original response structure was valid. Recheck exact
+        # contradicted units and repair any citations in the same final call.
+        # Provider failures below remain infrastructure errors.
+        citation_failure = any(exc.issues.values())
+        semantic_unit_ids = exc.semantic_unit_ids
         try:
             if semantic_unit_ids:
                 repair_prompt = _semantic_repair_user_prompt(
@@ -1878,6 +1860,7 @@ missing review into an accepted paragraph or a terminal company mismatch.
                 checks = _validate_review_response(
                     json.dumps(merged, ensure_ascii=False, separators=(",", ":")),
                     document,
+                    initial_review=False,
                 )
             except (TypeError, ValueError):
                 checks = None

@@ -1075,6 +1075,26 @@ def test_levanta_shaped_contradicted_claim_reaches_factual_review(monkeypatch):
 
     async def judge(prompt, **kwargs):
         document = json.loads(prompt)
+        if "bounded_unit_repair_control" in document:
+            unit = document["bounded_unit_repair_control"]["units"][0]
+            assert unit["status"] == "CONTRADICTED"
+            source = next(
+                item for item in document["review_document"]["admitted_evidence"]
+                if any(
+                    "Levanta announced a $22 million" in text
+                    for text in item["admitted_text"]
+                )
+            )
+            return json.dumps({"repairs": [{
+                "unit_id": unit["unit_id"],
+                "status": "CONTRADICTED",
+                "evidence": [{
+                    "source_index": source["source_index"],
+                    "quote": source["admitted_text"][0][
+                        :intent_details._MAX_UNIT_EVIDENCE_QUOTE_LENGTH
+                    ],
+                }],
+            }]})
         finding = document["non_qualifying_signals"][0]
         assert "verifier_status" not in finding
         assert "prior_verifier_unsupported_parts" not in finding

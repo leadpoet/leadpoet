@@ -64,6 +64,8 @@ MAX_SUBMITTED_SOURCE_URLS = 8
 PRIVATE_FETCHED_PAGES_KEY = "_server_fetched_pages"
 REJECTED_QUOTE_CONTEXT_BEFORE_CHARACTERS = 1_000
 REJECTED_QUOTE_CONTEXT_AFTER_CHARACTERS = 500
+ALTERNATIVE_PUBLIC_STAGE_CONTEXT_CHARACTERS = 1_500
+MAX_ALTERNATIVE_PUBLIC_STAGE_CONTEXTS = 2
 ADMISSION_DEADLINE_SECONDS = 110.0
 # Reserve the final 30 seconds of the unchanged admission window for judgment
 # over loaded evidence. Provider calls already admitted may settle under the
@@ -915,6 +917,64 @@ def _fetched_bound_public_market_sources(
             _visible_quote_surface(text), tuple(identity_names)
         )
     )
+
+
+def _untrusted_alternative_public_stage_context(
+    *,
+    source_urls: Sequence[str],
+    fetched_pages: Mapping[str, str],
+    identity_names: set[str],
+    excluded_urls: Sequence[str],
+) -> list[dict[str, str]]:
+    """Return exact bounded excerpts from other issuer-bound market sources."""
+
+    from qualification.scoring.lead_scorer import (
+        _public_quote_has_bound_market_locator,
+    )
+
+    excluded = {
+        safe_url
+        for value in excluded_urls
+        if (safe_url := _safe_https_url(value))
+    }
+    contexts: list[dict[str, str]] = []
+    for value in source_urls:
+        source_url = _safe_https_url(value)
+        fetched_text = fetched_pages.get(source_url, "")
+        if not source_url or source_url in excluded or not fetched_text:
+            continue
+        visible_text = _visible_quote_surface(fetched_text)
+        for offset in range(
+            0,
+            len(visible_text),
+            ALTERNATIVE_PUBLIC_STAGE_CONTEXT_CHARACTERS // 3,
+        ):
+            start = offset
+            if start:
+                boundary = visible_text.find(" ", start)
+                start = boundary + 1 if boundary >= 0 else start
+            end = min(
+                len(visible_text),
+                start + ALTERNATIVE_PUBLIC_STAGE_CONTEXT_CHARACTERS,
+            )
+            if end < len(visible_text):
+                boundary = visible_text.rfind(" ", start, end)
+                end = boundary if boundary > start else end
+            excerpt = visible_text[start:end].strip()
+            if (
+                _public_quote_has_bound_market_locator(
+                    excerpt, tuple(identity_names)
+                )
+                and _quote_occurs(excerpt, fetched_text)
+            ):
+                contexts.append({
+                    "source_url": source_url,
+                    "source_context": excerpt,
+                })
+                break
+        if len(contexts) >= MAX_ALTERNATIVE_PUBLIC_STAGE_CONTEXTS:
+            break
+    return contexts
 
 
 def _independently_bound_first_party_url(
@@ -2804,6 +2864,27 @@ async def investigate_company_evidence(
                         if requested_public_stage
                         else ()
                     )
+                    public_stage_quote_rejected = bool(
+                        requested_public_stage
+                        and submitted_stage.get("status")
+                        in {"VERIFIED", "CONTRADICTED"}
+                        and any(
+                            item.get("target") == "stage"
+                            for item in rejected
+                        )
+                    )
+                    alternative_public_stage_context = (
+                        _untrusted_alternative_public_stage_context(
+                            source_urls=bound_public_sources,
+                            fetched_pages=fetched_pages,
+                            identity_names=identity_names,
+                            excluded_urls=(
+                                str(submitted_stage.get("evidence_url") or ""),
+                            ),
+                        )
+                        if public_stage_quote_rejected
+                        else []
+                    )
                     force_public_stage_rereview = bool(
                         requested_public_stage
                         and submitted_stage.get("status") == "UNPROVEN"
@@ -2855,6 +2936,15 @@ async def investigate_company_evidence(
                                 if non_rejected_source_context
                                 else {}
                             ),
+                            **(
+                                {
+                                    "untrusted_alternative_public_stage_context": (
+                                        alternative_public_stage_context
+                                    ),
+                                }
+                                if alternative_public_stage_context
+                                else {}
+                            ),
                             "instruction": (
                                 (
                                     "The submitted industry contradiction proved another "
@@ -2888,17 +2978,27 @@ async def investigate_company_evidence(
                                 "CONTRADICTED require that exact quote and its fetched URL. "
                                 "UNPROVEN requires empty evidence_url and evidence_quote. "
                                 + (
+                                    "The feedback includes untrusted exact excerpts from "
+                                    "other already fetched issuer-bound market sources. "
+                                    "They are candidate evidence only and do not establish "
+                                    "current Public status. Re-review current chronology and "
+                                    "all loaded evidence. Use one exact continuous span from "
+                                    "its source URL only if it supports the final finding. "
+                                    "A later completed delisting, take-private, controlling "
+                                    "acquisition, or current private status overrides stale "
+                                    "listing evidence and must remain UNPROVEN or support the "
+                                    "different stage. "
+                                    if alternative_public_stage_context
+                                    else ""
+                                )
+                                + (
                                     "The feedback includes untrusted source-bound context "
                                     "for non-rejected targets. Re-review it; prior statuses "
                                     "and observations are not authoritative. If you revise "
                                     "one of those targets, address its cited exact evidence "
                                     "in the new reason. You may keep it, return a supported "
                                     "CONTRADICTED finding, or return UNPROVEN; the context "
-                                    "does not force acceptance. When that evidence still "
-                                    "supports the same target, reuse its supplied exact "
-                                    "evidence_url and evidence_quote instead of composing a "
-                                    "replacement span. Otherwise revise the finding or return "
-                                    "UNPROVEN. For a broad industry, "
+                                    "does not force acceptance. For a broad industry, "
                                     "product/service, or attribute criterion, assess whether "
                                     "the cited concrete customer-facing functions directly "
                                     "perform every requested capability instead of requiring "

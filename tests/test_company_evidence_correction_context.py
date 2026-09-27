@@ -39,6 +39,23 @@ NASDAQ_QUOTE = (
     "Rapid7, Inc. (NASDAQ: RPD), a global leader in AI-powered managed "
     "cybersecurity operations, today announced a leadership transition"
 )
+SEC_URL = (
+    "https://www.sec.gov/Archives/edgar/data/1560327/"
+    "000156032726000043/rp-20260807.htm"
+)
+SEC_TEXT = (
+    "Rapid7, Inc. filed a current report on August 7, 2026. The filing's "
+    "registered-securities table uses exact text different from the submitted "
+    "joined quote."
+)
+LONG_SEC_RECOMPOSED_QUOTE = " ".join((
+    (
+        "Rapid7, Inc. Exact name of registrant as specified in its charter "
+        "Delaware Commission File Number IRS Employer Identification Number"
+    ),
+    "Securities registered pursuant to Section 12(b) of the Act " * 16,
+    "Common Stock Trading Symbol RPD The Nasdaq Stock Market LLC",
+))
 CUSTOMER_QUOTE = (
     "Rapid7 uses Example Payroll to administer employee payroll and benefits."
 )
@@ -132,6 +149,102 @@ def test_non_rejected_context_excludes_unbound_or_rejected_findings(control):
         rejected_findings=rejected,
         fetched_pages={RAPID7_PRODUCT_URL: RAPID7_INDUSTRY_QUOTE},
         excluded_targets=excluded,
+    ) == []
+
+
+def test_alternative_public_stage_context_is_exact_bounded_and_excludes_rejected():
+    nasdaq_text = " ".join((
+        "Background details. " * 10,
+        NASDAQ_QUOTE,
+        "transaction context " * 12,
+        (
+            "Rapid7 was taken private in a completed transaction and is no "
+            "longer publicly listed."
+        ),
+        "later filing details " * 200,
+    ))
+    second_url = "https://market.example/rapid7"
+    second_text = "Rapid7 common stock is listed on NASDAQ under ticker RPD."
+    third_url = "https://exchange.example/rapid7"
+    third_text = "Rapid7, Inc. (NASDAQ: RPD) announced an executive transition."
+
+    contexts = investigator._untrusted_alternative_public_stage_context(
+        source_urls=(SEC_URL, NASDAQ_URL, second_url, third_url),
+        fetched_pages={
+            SEC_URL: "Rapid7 common stock is listed on NASDAQ under ticker RPD.",
+            NASDAQ_URL: nasdaq_text,
+            second_url: second_text,
+            third_url: third_text,
+        },
+        identity_names={"rapid7"},
+        excluded_urls=(SEC_URL,),
+    )
+
+    assert [item["source_url"] for item in contexts] == [
+        NASDAQ_URL, second_url,
+    ]
+    assert all(
+        len(item["source_context"])
+        <= investigator.ALTERNATIVE_PUBLIC_STAGE_CONTEXT_CHARACTERS
+        for item in contexts
+    )
+    assert all(
+        investigator._quote_occurs(
+            item["source_context"],
+            {NASDAQ_URL: nasdaq_text, second_url: second_text}[item["source_url"]],
+        )
+        for item in contexts
+    )
+    assert "taken private in a completed transaction" in (
+        contexts[0]["source_context"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "identity_names"),
+    [
+        (
+            "OtherCo, Inc. (NASDAQ: OTHR) announced an executive transition.",
+            {"rapid7"},
+        ),
+        (
+            "Rapid7 completed its initial public offering on NASDAQ under "
+            "ticker RPD.",
+            {"rapid7"},
+        ),
+    ],
+)
+def test_alternative_public_stage_context_rejects_identity_or_historical_ipo(
+    text, identity_names,
+):
+    url = "https://market.example/company"
+    assert investigator._untrusted_alternative_public_stage_context(
+        source_urls=(url,),
+        fetched_pages={url: text},
+        identity_names=identity_names,
+        excluded_urls=(),
+    ) == []
+
+
+def test_alternative_public_stage_context_rejects_hidden_or_missing_source():
+    url = "https://market.example/rapid7"
+    hidden_locator = " ".join((
+        "Rapid7 investor relations page. " * 100,
+        investigator._IDENTITY_LINK_CONTEXT_MARKER,
+        "Rapid7, Inc. (NASDAQ: RPD) announced an executive transition.",
+    ))
+
+    assert investigator._untrusted_alternative_public_stage_context(
+        source_urls=(url,),
+        fetched_pages={url: hidden_locator},
+        identity_names={"rapid7"},
+        excluded_urls=(),
+    ) == []
+    assert investigator._untrusted_alternative_public_stage_context(
+        source_urls=(url,),
+        fetched_pages={},
+        identity_names={"rapid7"},
+        excluded_urls=(),
     ) == []
 
 
@@ -269,9 +382,8 @@ def test_stage_quote_correction_keeps_untrusted_industry_source_context(
             findings = [
                 _finding(
                     "stage",
-                    evidence_quote=(
-                        "Rapid7, Inc. common stock is currently listed on Nasdaq."
-                    ),
+                    evidence_url=SEC_URL,
+                    evidence_quote=LONG_SEC_RECOMPOSED_QUOTE,
                 ),
                 _industry_finding(),
             ]
@@ -339,15 +451,21 @@ def test_stage_quote_correction_keeps_untrusted_industry_source_context(
         prior_observations={
             "observed_company_name": "Rapid7",
             "observed_company_website": "https://rapid7.com",
-            "submitted_source_urls": [NASDAQ_URL, RAPID7_PRODUCT_URL],
+            "observed_company_linkedin": (
+                "https://www.linkedin.com/company/rapid7"
+            ),
+            "submitted_source_urls": [
+                NASDAQ_URL, SEC_URL, RAPID7_PRODUCT_URL,
+            ],
         },
         verified_homepage_identity={
             "normalized_name": "Rapid7",
             "registrable_dns_domain": "rapid7.com",
-            "linkedin_slug": "rapid7",
+            "linkedin_company_slug": "rapid7",
         },
         prefetched_pages={
             NASDAQ_URL: {"final_url": NASDAQ_URL, "text": NASDAQ_QUOTE},
+            SEC_URL: {"final_url": SEC_URL, "text": SEC_TEXT},
             RAPID7_PRODUCT_URL: {
                 "final_url": RAPID7_PRODUCT_URL,
                 "text": product_page,
@@ -356,10 +474,18 @@ def test_stage_quote_correction_keeps_untrusted_industry_source_context(
     ))
 
     assert len(requests) == 2
+    assert len(LONG_SEC_RECOMPOSED_QUOTE) > 1_000
     correction = json.loads(requests[1]["messages"][-1]["content"])
     assert [item["target"] for item in correction["rejected_findings"]] == [
         "stage"
     ]
+    alternatives = correction["untrusted_alternative_public_stage_context"]
+    assert [item["source_url"] for item in alternatives] == [NASDAQ_URL]
+    assert NASDAQ_QUOTE in alternatives[0]["source_context"]
+    assert SEC_URL not in {item["source_url"] for item in alternatives}
+    assert "candidate evidence only" in correction["instruction"]
+    assert "current chronology" in correction["instruction"]
+    assert "later completed delisting, take-private" in correction["instruction"]
     retained = correction["untrusted_non_rejected_source_context"]
     assert len(retained) == 1
     assert retained[0]["target"] == "industry"
@@ -372,19 +498,95 @@ def test_stage_quote_correction_keeps_untrusted_industry_source_context(
         correction["instruction"]
     )
     assert "does not force acceptance" in correction["instruction"]
-    assert (
-        "reuse its supplied exact evidence_url and evidence_quote instead of "
-        "composing a replacement span"
-    ) in correction["instruction"]
-    assert "Otherwise revise the finding or return UNPROVEN" in (
-        correction["instruction"]
-    )
     assert "perform every requested capability" in correction["instruction"]
     assert "Preserve every AND/OR condition, qualifier, and exclusion" in (
         correction["instruction"]
     )
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["claims"]["industry"]["status"] == expected_status
+    assert result["usage"]["reasoning_turns"] == 2
+    assert result["usage"]["search_calls"] == 1
+    assert result["usage"]["fetch_calls"] == 0
+
+
+def test_rejected_public_stage_quote_without_alternate_keeps_existing_fallback(
+    monkeypatch,
+):
+    requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        arena_operations.validate_operation_request("openrouter.chat", payload)
+        requests.append(payload)
+        if len(requests) == 1:
+            finding = _finding(
+                "stage",
+                evidence_url=SEC_URL,
+                evidence_quote=(
+                    "Rapid7, Inc. common stock is currently listed on Nasdaq."
+                ),
+            )
+        else:
+            finding = _finding(
+                "stage",
+                status="UNPROVEN",
+                observed_value="",
+                evidence_url="",
+                evidence_quote="",
+                reason="No exact current Public evidence remains.",
+            )
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{len(requests)}",
+            "type": "function",
+            "function": {
+                "name": "submit_findings",
+                "arguments": json.dumps({"findings": [finding]}),
+            },
+        }]}}]}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(
+        investigator,
+        "_search_web",
+        AsyncMock(return_value={"results": []}),
+    )
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "Rapid7",
+            "website": "https://rapid7.com",
+            "linkedin": "https://www.linkedin.com/company/rapid7",
+        },
+        targets=("stage",),
+        requested_stage="Public",
+        prior_observations={
+            "observed_company_name": "Rapid7",
+            "observed_company_website": "https://rapid7.com",
+            "observed_company_linkedin": (
+                "https://www.linkedin.com/company/rapid7"
+            ),
+            "submitted_source_urls": [SEC_URL],
+        },
+        verified_homepage_identity={
+            "normalized_name": "Rapid7",
+            "registrable_dns_domain": "rapid7.com",
+            "linkedin_company_slug": "rapid7",
+        },
+        prefetched_pages={
+            SEC_URL: {"final_url": SEC_URL, "text": SEC_TEXT},
+        },
+    ))
+
+    assert len(requests) == 2
+    correction = json.loads(requests[1]["messages"][-1]["content"])
+    assert "untrusted_alternative_public_stage_context" not in correction
+    assert "candidate evidence only" not in correction["instruction"]
+    assert [item["target"] for item in correction["rejected_findings"]] == [
+        "stage"
+    ]
+    assert result["claims"]["stage"]["status"] == "UNPROVEN"
     assert result["usage"]["reasoning_turns"] == 2
     assert result["usage"]["search_calls"] == 1
     assert result["usage"]["fetch_calls"] == 0

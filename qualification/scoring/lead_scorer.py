@@ -2187,6 +2187,8 @@ _PARAGRAPH_COMPANY_CONTEXT_DIMENSIONS = (
 )
 _MAX_PARAGRAPH_COMPANY_CONTEXTS = 2
 _MAX_RETAINED_INVESTIGATOR_CONTEXTS = 4
+_MATCHED_COMPANY_RETRY_IDENTITY_KEY = "verified_identity"
+_MATCHED_COMPANY_RETRY_PAGES_KEY = "pages"
 
 
 def _complete_company_identity(
@@ -2207,6 +2209,98 @@ def _complete_company_identity(
             )
         )
     )
+
+
+def _matched_company_retry_identity(
+    value: Optional[Mapping[str, Any]],
+) -> dict[str, str]:
+    """Project the complete identity that bounds retry-only source reuse."""
+
+    source = value if isinstance(value, Mapping) else {}
+    projected = {
+        "normalized_name": source.get("normalized_name"),
+        "registrable_dns_domain": source.get("registrable_dns_domain"),
+        "linkedin_company_slug": source.get("linkedin_company_slug"),
+    }
+    limits = {
+        "normalized_name": 200,
+        "registrable_dns_domain": 253,
+        "linkedin_company_slug": 200,
+    }
+    if any(
+        not isinstance(raw, str)
+        or not raw.strip()
+        or len(raw.strip()) > limits[key]
+        for key, raw in projected.items()
+    ):
+        return {}
+    return {
+        "normalized_name": str(projected["normalized_name"]).strip(),
+        "registrable_dns_domain": str(
+            projected["registrable_dns_domain"]
+        ).strip().casefold(),
+        "linkedin_company_slug": str(
+            projected["linkedin_company_slug"]
+        ).strip().casefold(),
+    }
+
+
+def _matched_company_result_retry_identity(
+    result: CompanyFitDecisionResult,
+) -> dict[str, str]:
+    """Return one complete final web identity in retry-cache field names."""
+
+    receipt = verified_identity_receipt([result.receipt("company_fit")])
+    if not isinstance(receipt, Mapping):
+        return {}
+    return _matched_company_retry_identity({
+        "normalized_name": receipt.get("observed_name"),
+        "registrable_dns_domain": receipt.get("observed_domain"),
+        "linkedin_company_slug": receipt.get("observed_linkedin_slug"),
+    })
+
+
+def _matched_company_retry_prefetched_pages(
+    retry_cache: Optional[Mapping[str, Any]],
+    verified_identity: Optional[Mapping[str, Any]],
+) -> dict[str, dict[str, str]]:
+    """Load bounded pages only for the same complete verified identity."""
+
+    if (
+        not isinstance(retry_cache, Mapping)
+        or set(retry_cache) != {
+            _MATCHED_COMPANY_RETRY_IDENTITY_KEY,
+            _MATCHED_COMPANY_RETRY_PAGES_KEY,
+        }
+    ):
+        return {}
+    cached_identity = _matched_company_retry_identity(
+        retry_cache.get(_MATCHED_COMPANY_RETRY_IDENTITY_KEY)
+    )
+    current_identity = _matched_company_retry_identity(verified_identity)
+    if (
+        not cached_identity
+        or not current_identity
+        or _company_name(cached_identity["normalized_name"])
+        != _company_name(current_identity["normalized_name"])
+        or cached_identity["registrable_dns_domain"]
+        != current_identity["registrable_dns_domain"]
+        or cached_identity["linkedin_company_slug"]
+        != current_identity["linkedin_company_slug"]
+    ):
+        return {}
+    raw_pages = retry_cache.get(_MATCHED_COMPANY_RETRY_PAGES_KEY)
+    if not isinstance(raw_pages, Mapping):
+        return {}
+    pages, final_urls = _validated_prefetched_pages(
+        raw_pages,
+        submitted_source_urls=tuple(raw_pages),
+    )
+    return {
+        url: {"final_url": final_urls[url], "text": text}
+        for url, text in pages.items()
+        if _registrable_domain(url) == _registrable_domain(final_urls[url])
+    }
 
 
 def _retain_matched_investigator_source_contexts(
@@ -2261,6 +2355,44 @@ def _retain_matched_investigator_source_contexts(
             "final_url": final_url,
             "text": text,
         }
+
+
+def _retain_matched_company_retry_sources(
+    retry_cache: Optional[MutableMapping[str, Any]],
+    source_cache: Mapping[str, Mapping[str, Any]],
+    result: CompanyFitDecisionResult,
+) -> None:
+    """Persist only final matched-dimension pages in one outer retry scope."""
+
+    if retry_cache is None:
+        return
+    identity = _matched_company_result_retry_identity(result)
+    if not identity or not source_cache:
+        return
+    contexts = _matched_investigator_source_contexts(
+        result,
+        source_cache,
+        matched_dimensions_only=True,
+    )
+    admitted = {
+        context["url"]: {
+            "final_url": str(source_cache[context["url"]]["final_url"]),
+            "text": context["text"],
+        }
+        for context in contexts
+    }
+    if not admitted:
+        return
+    retained = _matched_company_retry_prefetched_pages(retry_cache, identity)
+    for url, page in admitted.items():
+        if len(retained) >= MAX_FETCH_CALLS:
+            break
+        retained.setdefault(url, page)
+    retry_cache.clear()
+    retry_cache.update({
+        _MATCHED_COMPANY_RETRY_IDENTITY_KEY: identity,
+        _MATCHED_COMPANY_RETRY_PAGES_KEY: retained,
+    })
 
 
 def _hydrate_verified_required_attribute_recovery_source(
@@ -2438,6 +2570,9 @@ def _investigator_prefetched_pages(
     verified_homepage_pages: Optional[
         Mapping[str, Mapping[str, Any]]
     ] = None,
+    matched_company_retry_pages: Optional[
+        Mapping[str, Mapping[str, Any]]
+    ] = None,
     structured_profile_description_evidence: Optional[Mapping[str, Any]] = None,
     verified_identity: Optional[Mapping[str, Any]] = None,
     include_structured_description: bool = False,
@@ -2453,6 +2588,17 @@ def _investigator_prefetched_pages(
         url: {"final_url": homepage_final_urls[url], "text": text}
         for url, text in homepage_pages.items()
     })
+    retry_pages, retry_final_urls = _validated_prefetched_pages(
+        matched_company_retry_pages,
+        submitted_source_urls=submitted_source_urls,
+    )
+    for url, text in retry_pages.items():
+        if len(candidates) >= MAX_FETCH_CALLS:
+            break
+        candidates.setdefault(
+            url,
+            {"final_url": retry_final_urls[url], "text": text},
+        )
     attribute_pages = _investigator_prefetched_pages_from_attribute_cache(
         source_cache,
         submitted_source_urls,
@@ -6067,6 +6213,7 @@ async def _run_targeted_company_evidence_investigation(
     matched_company_source_sink: Optional[
         dict[str, dict[str, str]]
     ] = None,
+    matched_company_retry_source_cache: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[
     dict[str, Any],
     CompanyFitDecisionResult,
@@ -6187,7 +6334,12 @@ async def _run_targeted_company_evidence_investigation(
             if len(submitted_source_hints) >= MAX_SUBMITTED_SOURCE_URLS:
                 break
     submitted_source_urls: list[str] = []
+    matched_company_retry_pages = _matched_company_retry_prefetched_pages(
+        matched_company_retry_source_cache,
+        verified_identity,
+    )
     source_candidates = [
+        *matched_company_retry_pages.keys(),
         *(
             (verified_homepage_pages or {}).keys()
             if review_positive_semantics
@@ -6354,6 +6506,7 @@ async def _run_targeted_company_evidence_investigation(
             verified_homepage_pages=(
                 verified_homepage_pages if review_positive_semantics else None
             ),
+            matched_company_retry_pages=matched_company_retry_pages,
             structured_profile_description_evidence=(
                 structured_profile_description_evidence
             ),
@@ -6645,6 +6798,7 @@ async def _llm_reverify_company(
     matched_company_source_sink: Optional[
         dict[str, dict[str, str]]
     ] = None,
+    matched_company_retry_source_cache: Optional[Mapping[str, Any]] = None,
 ) -> CompanyFitDecisionResult:
     """Web-grounded re-verification of the model-REPORTED attribute claim and
     stage label — the two dimensions where the scorer otherwise trusts model
@@ -7200,6 +7354,9 @@ async def _llm_reverify_company(
             ),
             verified_homepage_pages=verified_homepage_pages,
             matched_company_source_sink=matched_company_source_sink,
+            matched_company_retry_source_cache=(
+                matched_company_retry_source_cache
+            ),
         )
         if not claims:
             return result
@@ -7613,6 +7770,9 @@ async def _llm_reverify_company(
                 ),
                 verified_homepage_pages=verified_homepage_pages,
                 matched_company_source_sink=matched_company_source_sink,
+                matched_company_retry_source_cache=(
+                    matched_company_retry_source_cache
+                ),
             )
             if not post_repair_claims:
                 return repaired_result
@@ -7923,6 +8083,7 @@ async def _verify_company_fit(
     matched_company_source_sink: Optional[
         dict[str, dict[str, str]]
     ] = None,
+    matched_company_retry_source_cache: Optional[Mapping[str, Any]] = None,
 ) -> CompanyFitDecisionResult:
     """One official public/Research Lab company-fit verifier.
 
@@ -8099,6 +8260,7 @@ async def _verify_company_fit(
         ),
         linkedin_profile_source_sink=linkedin_profile_source_sink,
         matched_company_source_sink=matched_company_source_sink,
+        matched_company_retry_source_cache=matched_company_retry_source_cache,
     )
     web_details = web.details if isinstance(web.details, Mapping) else {}
     if isinstance(web_details.get("investigation_receipt"), Mapping):
@@ -8500,11 +8662,16 @@ def _matched_linkedin_profile_source_context(
 def _matched_investigator_source_contexts(
     company_fit: CompanyFitDecisionResult,
     source_cache: Optional[Mapping[str, Any]],
+    *,
+    matched_dimensions_only: bool = False,
 ) -> list[dict[str, str]]:
     """Bind retained fetched pages back to exact final dimension evidence."""
 
     if (
-        company_fit.decision != COMPANY_FIT_MATCH
+        (
+            company_fit.decision != COMPANY_FIT_MATCH
+            and not matched_dimensions_only
+        )
         or not _complete_company_identity(company_fit)
         or not isinstance(source_cache, Mapping)
         or len(source_cache) > _MAX_RETAINED_INVESTIGATOR_CONTEXTS
@@ -8696,6 +8863,9 @@ async def score_company_competition_intent(
     required_attribute_retry_source_cache: Optional[
         dict[str, dict[str, Any]]
     ] = None,
+    matched_company_retry_source_cache: Optional[
+        MutableMapping[str, Any]
+    ] = None,
     intent_terminal_retry_cache: Optional[MutableMapping[str, Any]] = None,
     retry_evidence_context_key: str = "",
     provider_observation: Optional[Mapping[str, Any]] = None,
@@ -8726,6 +8896,14 @@ async def score_company_competition_intent(
         ),
         linkedin_profile_source_sink=linkedin_profile_source_candidate,
         matched_company_source_sink=matched_company_source_cache,
+        matched_company_retry_source_cache=(
+            matched_company_retry_source_cache
+        ),
+    )
+    _retain_matched_company_retry_sources(
+        matched_company_retry_source_cache,
+        matched_company_source_cache,
+        company_fit,
     )
     gate_receipts = [company_fit.receipt("company_fit")]
     if company_fit.decision != COMPANY_FIT_MATCH:

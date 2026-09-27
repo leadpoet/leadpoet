@@ -1060,6 +1060,7 @@ class CompetitionCompanyScorer:
                 breakdowns.append(incompatible)
                 continue
             required_attribute_retry_source_cache = None
+            matched_company_retry_source_cache = None
             intent_terminal_retry_cache = None
             retry_evidence_context_key = ""
             if isinstance(retry_evidence_scope, MutableMapping):
@@ -1074,6 +1075,12 @@ class CompetitionCompanyScorer:
                 )
                 if isinstance(scoped_cache, MutableMapping):
                     required_attribute_retry_source_cache = scoped_cache
+                matched_source_cache = retry_evidence_scope.setdefault(
+                    f"matched-company-source-v1:{source_scope_key}",
+                    {},
+                )
+                if isinstance(matched_source_cache, MutableMapping):
+                    matched_company_retry_source_cache = matched_source_cache
                 intent_cache = retry_evidence_scope.setdefault(
                     f"intent-terminal-v1:{source_scope_key}",
                     {},
@@ -1094,6 +1101,9 @@ class CompetitionCompanyScorer:
                 evidence_investigator=self.evidence_investigator,
                 required_attribute_retry_source_cache=(
                     required_attribute_retry_source_cache
+                ),
+                matched_company_retry_source_cache=(
+                    matched_company_retry_source_cache
                 ),
                 intent_terminal_retry_cache=intent_terminal_retry_cache,
                 retry_evidence_context_key=retry_evidence_context_key,

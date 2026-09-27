@@ -2258,6 +2258,7 @@ async def investigate_company_evidence(
             forced_next_tool = ""
             forced_stage_search_pending = False
             incomplete_submit_retries = 0
+            incomplete_submit_retry_pending = False
             industry_followup_pending = False
             industry_followup_search_completed = False
             industry_followup_fetched_urls: set[str] = set()
@@ -2311,6 +2312,11 @@ async def investigate_company_evidence(
                     and industry_followup_pending
                     and not forced_stage_search_pending
                 )
+                serialization_retry_request = bool(
+                    incomplete_submit_retry_pending
+                    and required_tool == "submit_findings"
+                )
+                incomplete_submit_retry_pending = False
                 status, body = await _post_json(
                     session,
                     "https://openrouter.ai/api/v1/chat/completions",
@@ -2359,7 +2365,10 @@ async def investigate_company_evidence(
                         "max_tokens": REASONING_MAX_TOKENS,
                         **(
                             {"reasoning": {"effort": "low"}}
-                            if positive_semantic_review
+                            if (
+                                positive_semantic_review
+                                and serialization_retry_request
+                            )
                             else {}
                         ),
                     },
@@ -2435,6 +2444,7 @@ async def investigate_company_evidence(
                     if retry_incomplete_submit:
                         incomplete_submit_retries += 1
                         forced_next_tool = "submit_findings"
+                        incomplete_submit_retry_pending = True
                         assistant_message: dict[str, Any] = {
                             "role": "assistant",
                             "tool_calls": [canonical_call],

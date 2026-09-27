@@ -86,7 +86,7 @@ def _run(monkeypatch, post_json, *, positive_semantic_review: bool = True):
 
 
 @pytest.mark.parametrize("positive_semantic_review", [False, True])
-def test_luna_low_effort_survives_broker_normalization(
+def test_normal_reasoning_request_keeps_existing_provider_default(
     monkeypatch, positive_semantic_review,
 ):
     routed = []
@@ -112,14 +112,9 @@ def test_luna_low_effort_survives_broker_normalization(
     assert result["claims"]["industry"]["status"] == "VERIFIED"
     payload, normalized, outbound = routed[0]
     assert payload["max_tokens"] == normalized["max_tokens"] == 3000
-    if positive_semantic_review:
-        assert payload["reasoning"] == {"effort": "low"}
-        assert normalized["reasoning"] == {"effort": "low"}
-        assert outbound["reasoning"] == {"effort": "low"}
-    else:
-        assert "reasoning" not in payload
-        assert "reasoning" not in normalized
-        assert "reasoning" not in outbound
+    assert "reasoning" not in payload
+    assert "reasoning" not in normalized
+    assert "reasoning" not in outbound
 
 
 @pytest.mark.parametrize(
@@ -170,6 +165,7 @@ def test_incomplete_submit_retries_once_inside_ordinary_turn_budget(
         "type": "function",
         "function": {"name": "submit_findings"},
     }
+    assert "reasoning" not in requests[0]
     assert requests[1]["reasoning"] == {"effort": "low"}
     replayed_arguments = outbound_requests[1]["messages"][-2]["tool_calls"][0][
         "function"
@@ -208,6 +204,9 @@ def test_retry_still_applies_exact_evidence_validation(monkeypatch):
     result = _run(monkeypatch, fake_post_json)
 
     assert len(requests) == 3
+    assert "reasoning" not in requests[0]
+    assert requests[1]["reasoning"] == {"effort": "low"}
+    assert "reasoning" not in requests[2]
     validation_feedback = json.loads(requests[2]["messages"][-1]["content"])
     assert validation_feedback["error"] == "deterministic_evidence_validation_failed"
     assert result["claims"]["industry"]["evidence_quote"] == QUOTE

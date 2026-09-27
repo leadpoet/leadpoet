@@ -4509,6 +4509,58 @@ def test_venture_stage_token_must_match_normalized_category(
     )
 
 
+@pytest.mark.parametrize(
+    ("observed", "quote", "expected"),
+    [
+        ("series b", "UltraSight today announced it has raised $24 million in Series B2 financing.", True),
+        ("series a", "Acme completed its Series A1 financing round.", True),
+        ("series c+", "Acme completed its Series D2 financing round.", True),
+        ("series b", "Acme completed its Series C1 financing round.", False),
+        ("series a", "Acme completed its Series B2 financing round.", False),
+        ("series c+", "Acme completed its Series B2 financing round.", False),
+        ("series b", "Acme completed its Series B2B product.", False),
+        ("series b", "Acme completed its Series B0 financing round.", False),
+    ],
+)
+def test_numbered_venture_rounds_keep_their_canonical_series(observed, quote, expected):
+    assert investigator._quote_names_compatible_venture_stage(observed, quote) is expected
+    assert _stage_quote_supports_observation(observed, quote) is expected
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "Acme plans to raise its Series B2 financing round.",
+        "Acme has not completed its Series B2 financing round.",
+        "Acme launched the Series B2 product edition.",
+        "Acme completed its Series B2 financing round and later completed Series C1 financing.",
+    ],
+)
+def test_numbered_venture_rounds_preserve_completion_and_later_stage_guards(quote):
+    assert not _stage_quote_supports_observation("series b", quote)
+
+
+def test_exact_ultrasight_numbered_round_reaches_existing_stage_gate():
+    url = "https://ultrasight.com/ultrasight-raises-24-million-to-scale-its-ai-guided-cardiac-workflow-platform-across-u-s-health-systems/"
+    quote = "UltraSight, a leader in AI-guided cardiac workflows with its Echosystem platform, today announced it has raised $24 million in Series B2 financing."
+    finding = _validated_findings(
+        {"findings": [_finding(
+            "stage", observed_value="Series B", evidence_url=url, evidence_quote=quote,
+        )]},
+        targets=("stage",), fetched_pages={url: quote},
+        first_party_domains={"ultrasight.com"}, identity_names={"ultrasight"},
+    )["stage"]
+    assert finding["status"] == "VERIFIED"
+    verdict = lead_scorer._project_investigator_stage(
+        _complete_verdict(), finding, icp_stage="series b",
+    )
+    assert verdict["stage_matches"] is True
+    assert verdict["observed_company_stage"] == "series b"
+    assert not lead_scorer._project_investigator_stage(
+        _complete_verdict(), finding, icp_stage="series a",
+    )["stage_matches"]
+
+
 def _domain_styled_stage_finding(
     quote: str,
     *,

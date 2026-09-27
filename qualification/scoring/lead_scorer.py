@@ -756,13 +756,16 @@ def _current_exchange_profile_names_issuer(
     """Bind a current exchange quote-card layout to its named issuer."""
 
     if re.search(
-        r"\b(?:delisted|no\s+longer\s+listed|ceased|stopped)\s+trading\b|"
+        r"\b(?:delisted|no\s+longer\s+listed)\b|"
+        r"\b(?:ceased|stopped)\s+trading\b|"
         r"\b(?:taken|went|became)\s+private\b",
         quote,
         re.I,
     ) or not re.search(
-        r"\b(?:today|last|open|prev\.?\s*close|volume|market\s+cap|"
-        r"stock\s+price|price\s+(?:increased|decreased))\b",
+        r"\b(?:last|open|prev\.?\s*close|volume|market\s+cap)\s*[:$]?\s*"
+        r"\$?\d+(?:\.\d+)?[kmb]?\b|"
+        r"\bstock\s+price\s+(?:increased|decreased)\s+by\s+"
+        r"[+-]?\$?\d+(?:\.\d+)?\b",
         quote,
         re.I,
     ):
@@ -775,15 +778,37 @@ def _current_exchange_profile_names_issuer(
         issuer = str(match.group("slash_issuer") or match.group("label_issuer") or "")
         if match.group("slash_issuer"):
             issuer = re.split(r"\s+\d", issuer, maxsplit=1)[0]
-        compact_issuer = _compact_company_name(issuer)
+        else:
+            issuer = re.sub(
+                r"^(?:quote\s*&\s*chart\s+)?(?:chart\s+)?",
+                "",
+                issuer,
+                flags=re.I,
+            )
+        normalized_issuer = _company_name(issuer)
+        issuer_structural_terms = set(re.findall(
+            r"\b(?:holdings?|subsidiar(?:y|ies)|group)\b",
+            issuer.casefold(),
+        ))
         issuer_initials = "".join(
             token[0] for token in re.findall(r"[A-Za-z0-9]+", issuer)
             if token.casefold() not in {"inc", "incorporated", "corp", "corporation"}
         ).casefold()
         if any(
-            name in compact_issuer
-            or (len(name) >= 3 and name == issuer_initials)
+            (
+                normalized_name == normalized_issuer
+                and issuer_structural_terms == set(re.findall(
+                    r"\b(?:holdings?|subsidiar(?:y|ies)|group)\b",
+                    str(name).casefold(),
+                ))
+            )
+            or (
+                not issuer_structural_terms
+                and len(normalized_name) >= 3
+                and normalized_name == issuer_initials
+            )
             for name in names
+            if (normalized_name := _company_name(name))
         ):
             return True
     return False

@@ -30,18 +30,32 @@ def test_current_exchange_profile_is_bound_public_evidence(
     )
 
 
-@pytest.mark.parametrize("quote", [
-    "NYSE / JLL ACME HOLDINGS INC 321.91 Stock price decreased by 2 dollars",
-    "JLL completed its IPO on July 22, 1997 on the New York Stock Exchange.",
-    "Prologis Inc. New York Stock Exchange: PLD",
-    "Prologis Inc. New York Stock Exchange: PLD ceased trading today.",
-    "Prologis Inc. New York Stock Exchange: PLD became private today.",
+@pytest.mark.parametrize(("quote", "names"), [
+    ("NYSE / JLL ACME HOLDINGS INC 321.91 Stock price decreased by 2 dollars",
+     ("JLL",)),
+    ("JLL completed its IPO on July 22, 1997 on the New York Stock Exchange.",
+     ("JLL",)),
+    ("Prologis Inc. New York Stock Exchange: PLD", ("Prologis",)),
+    ("Prologis Inc. New York Stock Exchange: PLD Last market update pending",
+     ("Prologis",)),
+    ("Prologis Inc. New York Stock Exchange: PLD Last 133.05 ceased trading.",
+     ("Prologis",)),
+    ("Prologis Inc. New York Stock Exchange: PLD Last 133.05 was delisted.",
+     ("Prologis",)),
+    ("Prologis Inc. New York Stock Exchange: PLD Last 133.05 became private.",
+     ("Prologis",)),
+    ("Acme Holdings Inc. New York Stock Exchange: ACME Last 10.00",
+     ("Acme",)),
+    ("Acmeology Inc. New York Stock Exchange: ACMO Last 10.00", ("Acme",)),
+    ("Acme Subsidiary Inc. New York Stock Exchange: SUB Last 10.00", ("Acme",)),
 ])
-def test_exchange_profile_rejects_wrong_issuer_history_static_and_supersession(quote):
+def test_exchange_profile_rejects_wrong_issuer_history_static_and_supersession(
+    quote, names,
+):
     assert not _stage_evidence_supports_observation(
         "Public", quote,
         evidence_url="https://www.nyse.com/quote/XNYS:JLL",
-        identity_names=("JLL",),
+        identity_names=names,
     )
 
 

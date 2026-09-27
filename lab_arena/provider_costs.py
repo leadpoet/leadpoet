@@ -159,6 +159,11 @@ def scrapingdog_cost(operation_id: str, parameters: Mapping[str, Any]) -> Provid
     if operation_id == "scrapingdog.profile" and str(parameters.get("type") or "").lower() == "company":
         credits = Decimal("10")
         basis = "scrapingdog_company_profile"
+    elif operation_id == "scrapingdog.scrape" and parameters.get("stealth_mode") is True:
+        # The existing approved stealth tier costs ten credits per successful
+        # request: https://www.scrapingdog.com/documentation/bypass-captcha/
+        credits = Decimal("10")
+        basis = "scrapingdog_stealth_mode"
     elif operation_id not in _SCRAPINGDOG_CREDITS_BY_OPERATION:
         basis = "scrapingdog_approved_operation_fallback"
     return ProviderCost(

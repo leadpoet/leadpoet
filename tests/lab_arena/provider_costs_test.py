@@ -605,6 +605,8 @@ def test_deepline_history_returns_forward_offset_for_missing_job():
     ("operation_id", "parameters", "credits", "microusd"),
     [
         ("scrapingdog.scrape", {}, "5", 250),
+        ("scrapingdog.scrape", {"stealth_mode": False}, "5", 250),
+        ("scrapingdog.scrape", {"stealth_mode": True}, "10", 500),
         ("scrapingdog.profile", {"type": "profile"}, "100", 5_000),
         ("scrapingdog.profile", {"type": "company"}, "10", 500),
         ("scrapingdog.profile", {"type": "COMPANY"}, "10", 500),

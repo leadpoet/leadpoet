@@ -14,15 +14,18 @@ from tests.test_company_evidence_investigator import _complete_verdict, _finding
 
 
 @pytest.mark.parametrize(
-    ("investigator_status", "expected_decision"),
+    ("investigator_status", "initial_attribute", "expected_decision"),
     [
-        ("UNPROVEN", COMPANY_FIT_UNAVAILABLE),
-        ("VERIFIED", COMPANY_FIT_MATCH),
+        ("UNPROVEN", False, COMPANY_FIT_UNAVAILABLE),
+        ("UNPROVEN", None, COMPANY_FIT_UNAVAILABLE),
+        ("UNPROVEN", True, COMPANY_FIT_UNAVAILABLE),
+        ("VERIFIED", None, COMPANY_FIT_MATCH),
     ],
 )
 def test_micruity_industry_review_controls_schema_repair(
     monkeypatch,
     investigator_status,
+    initial_attribute,
     expected_decision,
 ):
     """Reproduce the frozen Sep. 27 Micruity industry-only receipt."""
@@ -77,9 +80,15 @@ def test_micruity_industry_review_controls_schema_repair(
         observed_hq_country="Canada",
         observed_hq_state="Ontario",
         geography_matches=True,
-        attribute_satisfied=None,
-        required_attribute_evidence_url="",
-        required_attribute_evidence_quote="",
+        attribute_satisfied=initial_attribute,
+        required_attribute_evidence_url=(
+            "https://micruity.com/" if initial_attribute else ""
+        ),
+        required_attribute_evidence_quote=(
+            "END-TO-END Infrastructure powering institutional lifetime income products"
+            if initial_attribute
+            else ""
+        ),
         observed_company_stage="Series A",
         stage_matches=True,
         stage_evidence_url=(

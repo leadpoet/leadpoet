@@ -5517,7 +5517,11 @@ def _industry_attribute_semantic_repair_needed(
         and str(getattr(icp, "required_attribute", "") or "").strip()
         and details.get("identity_decision") == COMPANY_FIT_MATCH
         and details.get("required_attribute_decision")
-        in {COMPANY_FIT_MISMATCH, COMPANY_FIT_UNAVAILABLE}
+        in {
+            COMPANY_FIT_MATCH,
+            COMPANY_FIT_MISMATCH,
+            COMPANY_FIT_UNAVAILABLE,
+        }
     )
 
 

@@ -2385,9 +2385,12 @@ def _retain_matched_company_retry_sources(
         return
     retained = _matched_company_retry_prefetched_pages(retry_cache, identity)
     for url, page in admitted.items():
+        if url in retained:
+            retained[url] = page
+            continue
         if len(retained) >= MAX_FETCH_CALLS:
             break
-        retained.setdefault(url, page)
+        retained[url] = page
     retry_cache.clear()
     retry_cache.update({
         _MATCHED_COMPANY_RETRY_IDENTITY_KEY: identity,
@@ -6333,10 +6336,26 @@ async def _run_targeted_company_evidence_investigation(
                 })
             if len(submitted_source_hints) >= MAX_SUBMITTED_SOURCE_URLS:
                 break
+    investigation_web_identity = _web_identity_receipt(
+        company,
+        verdict,
+        verified_homepage_identity=verified_identity,
+        verified_homepage_transport_domain=verified_transport_domain,
+        verified_structured_identity=structured_profile_identity_evidence,
+        company_quality=company_quality,
+    )
+    investigation_verified_identity, investigation_linkedin = (
+        _investigator_identity_context(
+            company.company_linkedin,
+            verified_identity,
+            investigation_web_identity,
+            verified_transport_domain,
+        )
+    )
     submitted_source_urls: list[str] = []
     matched_company_retry_pages = _matched_company_retry_prefetched_pages(
         matched_company_retry_source_cache,
-        verified_identity,
+        investigation_verified_identity,
     )
     source_candidates = [
         *matched_company_retry_pages.keys(),
@@ -6385,22 +6404,6 @@ async def _run_targeted_company_evidence_investigation(
         submitted_source_urls.append(safe_url)
         if len(submitted_source_urls) >= MAX_SUBMITTED_SOURCE_URLS:
             break
-    investigation_web_identity = _web_identity_receipt(
-        company,
-        verdict,
-        verified_homepage_identity=verified_identity,
-        verified_homepage_transport_domain=verified_transport_domain,
-        verified_structured_identity=structured_profile_identity_evidence,
-        company_quality=company_quality,
-    )
-    investigation_verified_identity, investigation_linkedin = (
-        _investigator_identity_context(
-            company.company_linkedin,
-            verified_identity,
-            investigation_web_identity,
-            verified_transport_domain,
-        )
-    )
     structured_private_stage_evidence = (
         dict(structured_public_company_evidence)
         if "stage" in investigation_targets

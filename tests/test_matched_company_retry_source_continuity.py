@@ -213,6 +213,23 @@ def test_later_matched_page_does_not_replace_first_retry_page():
     assert cache["pages"][PLATFORM_URL]["text"] == PLATFORM_TEXT
 
 
+def test_fresh_same_url_bytes_replace_old_bytes_even_when_cache_is_full():
+    cache = _retry_cache()
+    for index in range(1, MAX_FETCH_CALLS):
+        url = f"https://unibuddy.com/retained-{index}/"
+        cache["pages"][url] = {"final_url": url, "text": f"retained {index}"}
+    updated_text = f"Updated platform page\n{PLATFORM_QUOTE}\nNew exact body."
+
+    lead_scorer._retain_matched_company_retry_sources(
+        cache,
+        {PLATFORM_URL: {"final_url": PLATFORM_URL, "text": updated_text}},
+        _fit_result(decision=COMPANY_FIT_UNAVAILABLE),
+    )
+
+    assert len(cache["pages"]) == MAX_FETCH_CALLS
+    assert cache["pages"][PLATFORM_URL]["text"] == updated_text
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -383,6 +400,151 @@ def test_retry_page_is_untrusted_and_fresh_contradiction_still_wins(monkeypatch)
     assert claims["industry"]["status"] == "CONTRADICTED"
     assert projected["industry_matches"] is False
     assert result.decision == COMPANY_FIT_MISMATCH
+
+
+RAPID7_NUMERIC_LINKEDIN = "https://www.linkedin.com/company/39624"
+RAPID7_VANITY_LINKEDIN = "https://www.linkedin.com/company/rapid7"
+RAPID7_PRODUCT_URL = "https://www.rapid7.com/products/insightcloudsec/"
+RAPID7_PRODUCT_TEXT = (
+    "Rapid7 InsightCloudSec provides cloud infrastructure entitlement "
+    "management and access management."
+)
+
+
+def _rapid7_company() -> CompanyOutput:
+    return CompanyOutput(
+        company_name="Rapid7",
+        company_website="https://rapid7.com/",
+        company_linkedin=RAPID7_NUMERIC_LINKEDIN,
+        industry="Cybersecurity",
+        employee_count="1,001-5,000",
+        country="United States",
+        state="Massachusetts",
+        intent_signals=[{
+            "description": "Rapid7 published a current security update.",
+            "source": "company_website",
+            "url": "https://rapid7.com/news/security-update",
+            "date": "2026-09-01",
+            "snippet": "Rapid7 updated its cloud security platform.",
+        }],
+    )
+
+
+def _rapid7_icp() -> ICPPrompt:
+    return ICPPrompt(
+        icp_id="rapid7-numeric-alias",
+        prompt="Cloud security providers",
+        industry="Cybersecurity",
+        sub_industry="Cloud security",
+        employee_count="1,001-5,000",
+        company_stage="",
+        geography="United States",
+        product_service="Cloud security software",
+        required_attribute="",
+        intent_signals=["Published a current security update"],
+    )
+
+
+def _rapid7_verdict() -> dict:
+    return {
+        "observed_company_name": "Rapid7, Inc.",
+        "observed_company_website": "https://www.rapid7.com/",
+        "observed_company_linkedin": RAPID7_VANITY_LINKEDIN,
+        "observed_industry": "Cybersecurity",
+        "observed_subindustry": "Cloud security",
+        "industry_matches": None,
+        "industry_activity_role": "unresolved",
+        "industry_evidence_url": "",
+        "industry_evidence_quote": "",
+    }
+
+
+def _rapid7_structured_identity(**updates) -> dict:
+    evidence = {
+        "name": "Rapid7, Inc.",
+        "provider": "harvestapi_get_company",
+        "source_field": "name",
+        "url": RAPID7_VANITY_LINKEDIN,
+        "website": "https://rapid7.com/",
+        "company_id": "39624",
+        "requested_url": RAPID7_NUMERIC_LINKEDIN,
+    }
+    evidence.update(updates)
+    return evidence
+
+
+def _rapid7_retry_cache() -> dict:
+    return {
+        "verified_identity": {
+            "normalized_name": "Rapid7, Inc.",
+            "registrable_dns_domain": "rapid7.com",
+            "linkedin_company_slug": "rapid7",
+        },
+        "pages": {
+            RAPID7_PRODUCT_URL: {
+                "final_url": RAPID7_PRODUCT_URL,
+                "text": RAPID7_PRODUCT_TEXT,
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("structured_identity", "expected_prefetch"),
+    [
+        (_rapid7_structured_identity(), True),
+        (None, False),
+        (_rapid7_structured_identity(company_id="99999"), False),
+    ],
+)
+def test_retry_cache_uses_existing_proved_numeric_alias_only(
+    monkeypatch, structured_identity, expected_prefetch
+):
+    captured = []
+
+    async def capture(**kwargs):
+        captured.append(kwargs)
+        return {"claims": {}, "failure_reason": "source unavailable", "usage": {}}
+
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", capture)
+    asyncio.run(lead_scorer._run_targeted_company_evidence_investigation(
+        company=_rapid7_company(),
+        icp=_rapid7_icp(),
+        verdict=_rapid7_verdict(),
+        investigation_targets=("industry",),
+        icp_attribute="",
+        icp_stage="",
+        verified_identity={
+            "normalized_name": "Rapid7",
+            "registrable_dns_domain": "rapid7.com",
+            "linkedin_company_slug": "39624",
+        },
+        verified_transport_domain="rapid7.com",
+        structured_employee_size_evidence=None,
+        structured_public_company_evidence=None,
+        structured_profile_identity_evidence=structured_identity,
+        employee_size_conflict=False,
+        company_quality=True,
+        matched_company_retry_source_cache=_rapid7_retry_cache(),
+        review_positive_semantics=True,
+    ))
+
+    assert len(captured) == 1
+    if expected_prefetch:
+        assert captured[0]["company_locator"]["linkedin"] == (
+            RAPID7_VANITY_LINKEDIN
+        )
+        assert captured[0]["prefetched_pages"] == {
+            RAPID7_PRODUCT_URL: {
+                "final_url": RAPID7_PRODUCT_URL,
+                "text": RAPID7_PRODUCT_TEXT,
+            },
+        }
+    else:
+        assert captured[0]["company_locator"]["linkedin"] == (
+            RAPID7_NUMERIC_LINKEDIN
+        )
+        assert captured[0]["prefetched_pages"] == {}
 
 
 def test_outer_retry_scope_separates_company_icp_date_policy_domain_and_identity():

@@ -50,6 +50,131 @@ def test_evidence_binding_does_not_stitch_across_sources():
     )
 
 
+def test_native_shaped_review_binds_visible_markdown_link_prose():
+    source = (
+        "Published\nJun 3, 2026 8:55am EDT\n"
+        "AUSTIN, Texas--(BUSINESS WIRE)--\n"
+        "[Example Security](https://tracker.example/company?hidden=destination) "
+        "(NASDAQ: EXMP) today announced the appointment of Dr. Avery Chen as "
+        "Chief AI Officer. Avery Chen now leads Example Security's AI strategy. "
+        "The [Sentinel® platform](https://tracker.example/platform) generates "
+        "proprietary, real-time data from customer environments."
+    )
+    document = {
+        "intent_details_units": [{
+            "unit_id": 0,
+            "text": (
+                "Example Security appointed an AI leader and its Sentinel "
+                "platform generates real-time customer data."
+            ),
+        }],
+        "verified_signals": [{"matched_icp_signal": 0}],
+        "admitted_evidence": [{
+            "source_index": 0,
+            "evidence_kind": "verified_source_context",
+            "admitted_text": [source],
+        }],
+    }
+    response = {
+        "unit_grounding": [{
+            "unit_id": 0,
+            "contains_factual_claim": True,
+            "status": "VERIFIED",
+            "evidence": [
+                {
+                    "source_index": 0,
+                    "quote": (
+                        "AUSTIN, Texas--(BUSINESS WIRE)-- Example Security "
+                        "(NASDAQ: EXMP) today announced the appointment of "
+                        "Dr. Avery Chen as Chief AI Officer."
+                    ),
+                },
+                {
+                    "source_index": 0,
+                    "quote": (
+                        "The Sentinel® platform generates proprietary, "
+                        "real-time data from customer environments"
+                    ),
+                },
+            ],
+        }],
+        "signal_coverage": [{"matched_icp_signal": 0, "covered": True}],
+        **{name: True for name in intent_details._CHECKS},
+    }
+
+    checks = intent_details._validate_review_response(
+        json.dumps(response), document,
+    )
+
+    assert all(checks.values())
+
+
+def test_exact_markdown_link_quote_remains_bound_without_trusting_its_url():
+    source = (
+        "[Example Security](https://tracker.example/company) announced "
+        "the [Sentinel platform](https://tracker.example/platform)."
+    )
+
+    assert intent_details._quote_is_bound(source, [source])
+    assert not intent_details._quote_is_bound(
+        source.replace("tracker.example/company", "forged.example/company"),
+        [source],
+    )
+
+
+@pytest.mark.parametrize("quote", [
+    "[Example Security](https://forged.example/company) (NASDAQ: EXMP)",
+    "[Example Security](javascript:alert(1)) (NASDAQ: EXMP)",
+    "hidden-destination-word",
+    "Example Security acquired Hidden Target",
+    "Example Security (NASDAQ: EXMP) did not announce 25 hires.",
+    "Example Security (NASDAQ: EXMP) announced 26 hires.",
+    "example Security (NASDAQ: EXMP) announced 25 hires.",
+    "Example Security (NASDAQ EXMP) announced 25 hires.",
+])
+def test_markdown_projection_does_not_relax_exact_quote_binding(quote):
+    source = (
+        "[Example Security](https://tracker.example/hidden-destination-word) "
+        "(NASDAQ: EXMP) announced 25 hires. "
+        "![Example Security acquired Hidden Target]"
+        "(https://images.example/hidden-acquisition.png)"
+    )
+
+    assert not intent_details._quote_is_bound(quote, [source])
+
+
+def test_visible_markdown_binding_does_not_stitch_separate_snippets():
+    assert not intent_details._quote_is_bound(
+        "Example Security announced the Sentinel platform",
+        [
+            "[Example Security](https://tracker.example/company) announced",
+            "the [Sentinel platform](https://tracker.example/platform)",
+        ],
+    )
+
+
+@pytest.mark.parametrize("source", [
+    "[Hidden claim](javascript:alert(1))",
+    "[Hidden claim](https://broken.example/path with spaces)",
+    "[Hidden claim](https://broken.example/missing-close\nVisible next line.",
+])
+def test_malformed_markdown_links_do_not_expose_labels_or_destinations(source):
+    assert not intent_details._quote_is_bound("Hidden claim", [source])
+    assert not intent_details._quote_is_bound("broken.example", [source])
+
+
+def test_excluded_markdown_image_is_a_non_stitching_boundary():
+    source = (
+        "Example Security ![decorative separator](https://images.example/a.png) "
+        "announced a launch."
+    )
+
+    assert not intent_details._quote_is_bound(
+        "Example Security announced a launch.", [source],
+    )
+    assert not intent_details._quote_is_bound("decorative separator", [source])
+
+
 def test_private_response_schema_orders_grounding_before_aggregates():
     schema = intent_details._RESPONSE_FORMAT["json_schema"]["schema"]
     expected = ["unit_grounding", "signal_coverage", *intent_details._CHECKS]

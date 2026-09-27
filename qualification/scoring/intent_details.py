@@ -61,6 +61,13 @@ _RELATIVE_EVENT_TIMING = re.compile(
     r"partnership|contract|award)\b",
     re.IGNORECASE,
 )
+_MARKDOWN_IMAGE_RE = re.compile(
+    r"!\[[^\[\]\r\n]*\](?:\([^\r\n)]*\)|\[[^\]\r\n]*\])",
+)
+_MARKDOWN_LINK_LIKE_RE = re.compile(
+    r"\[[^\[\]\r\n]+\]\([^\r\n)]*(?:\)|(?=\r?\n)|$)",
+)
+_EXCLUDED_MARKDOWN_BOUNDARY = "\x00"
 _RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {
@@ -879,10 +886,37 @@ def _typography_normalized_span(value: str) -> str:
     return " ".join(value.translate(quote_styles).split())
 
 
+def _visible_admitted_evidence_surface(value: str) -> str:
+    """Project visible Markdown link prose without admitting image text."""
+
+    from qualification.scoring.company_evidence_investigator import (
+        _visible_markdown_link_label_surface,
+    )
+
+    without_images = _MARKDOWN_IMAGE_RE.sub(
+        f" {_EXCLUDED_MARKDOWN_BOUNDARY} ", value,
+    )
+    visible_links = _visible_markdown_link_label_surface(without_images)
+    return _MARKDOWN_LINK_LIKE_RE.sub(
+        f" {_EXCLUDED_MARKDOWN_BOUNDARY} ", visible_links,
+    )
+
+
 def _quote_is_bound(quote: str, evidence_values: Sequence[str]) -> bool:
-    normalized_quote = _typography_normalized_span(quote)
+    quote_surface = _visible_admitted_evidence_surface(quote)
+    if _EXCLUDED_MARKDOWN_BOUNDARY in quote_surface:
+        return False
+    normalized_quote = _typography_normalized_span(quote_surface)
+    raw_normalized_quote = _typography_normalized_span(quote)
+    quote_has_visible_link = quote_surface != quote
     return bool(normalized_quote) and any(
-        normalized_quote in _typography_normalized_span(value)
+        (
+            not quote_has_visible_link
+            or raw_normalized_quote in _typography_normalized_span(value)
+        )
+        and normalized_quote in _typography_normalized_span(
+            _visible_admitted_evidence_surface(value)
+        )
         for value in evidence_values
     )
 

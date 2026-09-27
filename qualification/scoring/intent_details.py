@@ -47,6 +47,20 @@ _CITATION_REPAIR_CATEGORIES = {
     "too_many_quotes",
     "nonexact_quote",
 }
+_RELATIVE_PUBLICATION_TIMING = re.compile(
+    r"\b(?:(?:recent|recently published|recently posted|newly published)\s+"
+    r"(?:coverage|report|article|posting|release|filing|study|press release)"
+    r"|(?:was|is)\s+recently\s+(?:published|posted|released))\b",
+    re.IGNORECASE,
+)
+_RELATIVE_EVENT_TIMING = re.compile(
+    r"\b(?:recent|recently|newly)\s+"
+    r"(?:announced|raised|launched|opened|expanded|hired|appointed|acquired|"
+    r"merged|signed|released|introduced|completed|closed|funding|financing|"
+    r"round|launch|opening|expansion|hire|hiring|appointment|acquisition|merger|"
+    r"partnership|contract|award)\b",
+    re.IGNORECASE,
+)
 _RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {
@@ -1455,6 +1469,62 @@ def _validate_unit_grounding(
     )
 
 
+def _relative_time_recheck_unit_ids(
+    grounding: Any,
+    document: Mapping[str, Any],
+) -> set[int]:
+    """Route undated relative-time claims through the existing second judge."""
+
+    units = {
+        unit.get("unit_id"): unit.get("text", "")
+        for unit in document.get("intent_details_units") or []
+        if isinstance(unit, Mapping) and type(unit.get("unit_id")) is int
+    }
+    dates_by_source: dict[int, set[str]] = {}
+    for source in document.get("admitted_evidence") or []:
+        if not isinstance(source, Mapping):
+            continue
+        source_index = source.get("source_index")
+        if type(source_index) is not int:
+            continue
+        dates_by_source[source_index] = {
+            _typography_normalized_span(raw_date["date"]).strip().casefold()
+            for raw_date in source.get("observed_dates") or []
+            if isinstance(raw_date, Mapping)
+            and isinstance(raw_date.get("date"), str)
+            and raw_date["date"].strip()
+        }
+
+    recheck: set[int] = set()
+    for item in grounding if isinstance(grounding, list) else []:
+        if (
+            not isinstance(item, Mapping)
+            or item.get("contains_factual_claim") is not True
+            or item.get("status") != "VERIFIED"
+            or type(item.get("unit_id")) is not int
+        ):
+            continue
+        unit_id = item["unit_id"]
+        text = units.get(unit_id, "")
+        if not (
+            _RELATIVE_PUBLICATION_TIMING.search(text)
+            or _RELATIVE_EVENT_TIMING.search(text)
+        ):
+            continue
+        has_typed_date_binding = any(
+            type(binding.get("source_index")) is int
+            and _typography_normalized_span(binding.get("quote", ""))
+            .strip().casefold()
+            in dates_by_source.get(binding["source_index"], set())
+            for binding in item.get("evidence") or []
+            if isinstance(binding, Mapping)
+            and isinstance(binding.get("quote"), str)
+        )
+        if not has_typed_date_binding:
+            recheck.add(unit_id)
+    return recheck
+
+
 class _BoundedReviewRepairNeeded(ValueError):
     def __init__(
         self,
@@ -1537,13 +1607,18 @@ def _validate_review_response(
         raise ValueError("coverage aggregate conflicts during citation repair")
     if citation_issues and facts_aggregate_conflict:
         raise ValueError("factual aggregate conflicts during citation repair")
-    if citation_issues or (initial_review and contradicted_unit_ids):
+    relative_time_unit_ids = (
+        _relative_time_recheck_unit_ids(unit_grounding, document)
+        if initial_review else set()
+    )
+    semantic_unit_ids = contradicted_unit_ids | relative_time_unit_ids
+    if citation_issues or (initial_review and semantic_unit_ids):
         repair_issues = {
             unit_id: set(citation_issues.get(unit_id, set()))
-            for unit_id in sorted(set(citation_issues) | contradicted_unit_ids)
+            for unit_id in sorted(set(citation_issues) | semantic_unit_ids)
         }
         raise _BoundedReviewRepairNeeded(
-            repair_issues, raw_checks, contradicted_unit_ids,
+            repair_issues, raw_checks, semantic_unit_ids,
         )
     checks["facts_supported"] = unit_facts_supported
     return {name: checks[name] for name in _CHECKS}
@@ -1562,6 +1637,24 @@ def _citation_repair_machine_fields(
         "status": held_units[unit_id]["status"],
         "citation_errors": list(categories),
     } for unit_id, categories in issues.items()]
+
+
+def _semantic_repair_machine_fields(
+    issues: Mapping[int, Sequence[str]],
+    held_response: Mapping[str, Any],
+    semantic_unit_ids: set[int],
+) -> list[dict[str, Any]]:
+    fields = _citation_repair_machine_fields(issues, held_response)
+    for item in fields:
+        semantic_recheck = item["unit_id"] in semantic_unit_ids
+        item["semantic_recheck_allowed"] = semantic_recheck
+        if semantic_recheck:
+            item["semantic_recheck_reason"] = (
+                "contradicted_verdict"
+                if item["status"] == "CONTRADICTED"
+                else "relative_time_grounding_review"
+            )
+    return fields
 
 
 def _citation_repair_prompt(
@@ -1609,18 +1702,22 @@ def _semantic_repair_prompt(
     held_response: Mapping[str, Any],
     semantic_unit_ids: set[int],
 ) -> str:
-    feedback = _citation_repair_machine_fields(issues, held_response)
-    for item in feedback:
-        item["semantic_recheck_allowed"] = item["unit_id"] in semantic_unit_ids
+    feedback = _semantic_repair_machine_fields(
+        issues, held_response, semantic_unit_ids,
+    )
     return system_prompt + """
 
 TRUSTED SERVER BOUNDED UNIT REPAIR:
 The prior response passed the complete unit, coverage and Boolean structure.
-Reassess only a unit marked semantic_recheck_allowed=true. Its prior
-CONTRADICTED status requires one bounded semantic adjudication even when its
-citation was validly bound. Decide that unit again from review_document.admitted_evidence,
-checking the exact actor, action, object, number, date and event. Similar or earlier
-events are not interchangeable. Do not accept a claim from lexical overlap.
+Reassess only a unit marked semantic_recheck_allowed=true. The supplied
+semantic_recheck_reason is routing control, not evidence or a conclusion that
+support is absent. Decide that unit again from review_document.admitted_evidence,
+checking the exact actor, action, object, number, date and event. For a
+relative_time_grounding_review, independently decide whether the full temporal
+claim is supported; VERIFIED requires a binding to a relevant admitted date,
+either a typed publication or event date or an exact date-bearing source
+excerpt. Similar or earlier events are not interchangeable.
+Do not accept a claim from lexical overlap.
 For every other listed unit, preserve its supplied status and repair only its
 citation. Do not alter or return unrelated units, factual flags, coverage, or
 aggregate checks. Return ONLY
@@ -1638,9 +1735,9 @@ def _semantic_repair_user_prompt(
     held_response: Mapping[str, Any],
     semantic_unit_ids: set[int],
 ) -> str:
-    units = _citation_repair_machine_fields(issues, held_response)
-    for item in units:
-        item["semantic_recheck_allowed"] = item["unit_id"] in semantic_unit_ids
+    units = _semantic_repair_machine_fields(
+        issues, held_response, semantic_unit_ids,
+    )
     prompt = json.dumps({
         "review_document": document,
         "bounded_unit_repair_control": {

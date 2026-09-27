@@ -985,6 +985,7 @@ def test_bounded_semantic_repair_accepts_distinct_additional_financing(
             "status": "CONTRADICTED",
             "citation_errors": [],
             "semantic_recheck_allowed": True,
+            "semantic_recheck_reason": "contradicted_verdict",
         }]
         assert "actor, action, object, number, date and event" in kwargs[
             "system_prompt"
@@ -1259,6 +1260,7 @@ def test_unproven_bad_optional_quote_repairs_to_empty_and_terminal_mismatch(
                     "status": "CONTRADICTED",
                     "citation_errors": [],
                     "semantic_recheck_allowed": True,
+                    "semantic_recheck_reason": "contradicted_verdict",
                 },
                 {
                     "unit_id": 2,

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from qualification.scoring import intent_details, verification_helpers
+from qualification.scoring.evaluation_clock import use_evaluation_date
 
 
 def _inputs(
@@ -87,6 +88,35 @@ def _binding(document: dict, quote: str) -> dict:
     raise AssertionError(f"quote was not admitted: {quote}")
 
 
+def _response(
+    document: dict,
+    unit_specs: list[tuple[bool, str, list[str]]],
+) -> dict:
+    grounding = []
+    for unit, (contains_fact, status, quotes) in zip(
+        document["intent_details_units"], unit_specs,
+    ):
+        grounding.append({
+            "unit_id": unit["unit_id"],
+            "contains_factual_claim": contains_fact,
+            "status": status,
+            "evidence": [_binding(document, quote) for quote in quotes],
+        })
+    return {
+        "unit_grounding": grounding,
+        "signal_coverage": [{"matched_icp_signal": 0, "covered": True}],
+        "facts_supported": all(
+            status == "VERIFIED"
+            for contains_fact, status, _quotes in unit_specs
+            if contains_fact
+        ),
+        "verified_signals_covered": True,
+        "relevance_grounded": True,
+        "connects_icp": True,
+        "natural_paragraph": True,
+    }
+
+
 async def _review(
     monkeypatch,
     inputs,
@@ -96,7 +126,11 @@ async def _review(
 ):
     # Mock only the semantic verdict. The production request construction,
     # evidence binding, response validation, and fail-closed gate all run.
+    calls = 0
+
     async def judge(prompt, **kwargs):
+        nonlocal calls
+        calls += 1
         system = kwargs["system_prompt"]
         assert "latest-known funding-stage wording" in system
         assert "recent coverage, a recently published" in system
@@ -108,36 +142,11 @@ async def _review(
         assert 'such as "is hiring"' in system
         document = json.loads(prompt)
         assert len(document["intent_details_units"]) == len(unit_specs)
-        grounding = []
-        for unit, (contains_fact, status, quotes) in zip(
-            document["intent_details_units"], unit_specs,
-        ):
-            grounding.append({
-                "unit_id": unit["unit_id"],
-                "contains_factual_claim": contains_fact,
-                "status": status,
-                "evidence": [_binding(document, quote) for quote in quotes],
-            })
-        facts_supported = all(
-            status == "VERIFIED"
-            for contains_fact, status, _quotes in unit_specs
-            if contains_fact
-        )
-        return json.dumps({
-            "unit_grounding": grounding,
-            "signal_coverage": [{
-                "matched_icp_signal": 0,
-                "covered": True,
-            }],
-            "facts_supported": facts_supported,
-            "verified_signals_covered": True,
-            "relevance_grounded": True,
-            "connects_icp": True,
-            "natural_paragraph": True,
-        })
+        return json.dumps(_response(document, unit_specs))
 
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     receipt = await intent_details.review_intent_details(*inputs)
+    assert calls == 1
     assert receipt["decision"] == expected_decision, receipt
     assert receipt["checks"]["facts_supported"] is (
         expected_decision == "match"
@@ -292,4 +301,280 @@ async def test_recent_report_is_supported_when_publication_date_is_admitted(
         inputs,
         unit_specs=[(True, "VERIFIED", [source_text, "2026-09-01"])],
         expected_decision="match",
+    )
+
+
+@pytest.mark.asyncio
+async def test_undated_relative_coverage_uses_one_bounded_semantic_recheck(
+    monkeypatch,
+):
+    job_quote = "HarborSoft is actively hiring a Platform Engineer."
+    stage_quote = "HarborSoft is a Series B company."
+    inputs = _inputs(
+        company_name="HarborSoft",
+        paragraph=(
+            f"{job_quote} Recent coverage identifies HarborSoft's latest "
+            "known institutional stage as Series B."
+        ),
+        signal_quote=job_quote,
+        source_text=job_quote,
+        company_dimension="stage",
+        company_quote=stage_quote,
+    )
+    calls = []
+
+    async def judge(prompt, **kwargs):
+        calls.append((prompt, kwargs))
+        payload = json.loads(prompt)
+        document = payload.get("review_document", payload)
+        if len(calls) == 1:
+            return json.dumps(_response(document, [
+                (True, "VERIFIED", [job_quote]),
+                (True, "VERIFIED", [stage_quote]),
+            ]))
+        control = payload["bounded_unit_repair_control"]
+        assert control["units"] == [{
+            "unit_id": 1,
+            "contains_factual_claim": True,
+            "status": "VERIFIED",
+            "citation_errors": [],
+            "semantic_recheck_allowed": True,
+            "semantic_recheck_reason": "relative_time_grounding_review",
+        }]
+        assert "routing control, not evidence or a conclusion" in kwargs[
+            "system_prompt"
+        ]
+        return json.dumps({"repairs": [{
+            "unit_id": 1, "status": "UNPROVEN", "evidence": [],
+        }]})
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = await intent_details.review_intent_details(*inputs)
+
+    assert len(calls) == 2
+    assert receipt["decision"] == "mismatch"
+    assert receipt["checks"]["facts_supported"] is False
+
+
+@pytest.mark.asyncio
+async def test_body_date_can_keep_relative_publication_claim_verified_on_recheck(
+    monkeypatch,
+):
+    dated_excerpt = (
+        "September 1, 2026. HarborSoft published its Workflow Market Outlook."
+    )
+    inputs = _inputs(
+        company_name="HarborSoft",
+        paragraph=(
+            "HarborSoft's Workflow Market Outlook was recently published on "
+            "September 1, 2026."
+        ),
+        signal_quote=dated_excerpt,
+        source_text=dated_excerpt,
+    )
+    calls = []
+
+    async def judge(prompt, **kwargs):
+        calls.append((prompt, kwargs))
+        payload = json.loads(prompt)
+        document = payload.get("review_document", payload)
+        if len(calls) == 1:
+            return json.dumps(_response(
+                document, [(True, "VERIFIED", [dated_excerpt])],
+            ))
+        assert "exact date-bearing source" in kwargs["system_prompt"]
+        assert "excerpt" in kwargs["system_prompt"]
+        return json.dumps({"repairs": [{
+            "unit_id": 0,
+            "status": "VERIFIED",
+            "evidence": [_binding(document, dated_excerpt)],
+        }]})
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = await intent_details.review_intent_details(*inputs)
+
+    assert len(calls) == 2
+    assert receipt["decision"] == "match"
+
+
+@pytest.mark.asyncio
+async def test_typed_date_binding_avoids_relative_time_recheck(monkeypatch):
+    dated_excerpt = "HarborSoft announced a funding round on 2026-09-01."
+    inputs = _inputs(
+        company_name="HarborSoft",
+        paragraph="HarborSoft recently announced a funding round.",
+        signal_quote=dated_excerpt,
+        source_text=dated_excerpt,
+        source_publication_date="2026-09-01",
+    )
+    calls = 0
+
+    async def judge(prompt, **_kwargs):
+        nonlocal calls
+        calls += 1
+        document = json.loads(prompt)
+        return json.dumps(_response(
+            document,
+            [(True, "VERIFIED", [dated_excerpt, "2026-09-01"])],
+        ))
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = await intent_details.review_intent_details(*inputs)
+
+    assert calls == 1
+    assert receipt["decision"] == "match"
+
+
+@pytest.mark.asyncio
+async def test_authenticated_first_observed_date_is_not_publication_recency(
+    monkeypatch,
+):
+    job_quote = "HarborSoft is actively hiring a Platform Engineer."
+    observation_quote = (
+        "The provider first observed this listing on 2026-09-20; this does "
+        "not establish the posting, publication, or opening date."
+    )
+    inputs = _inputs(
+        company_name="HarborSoft",
+        paragraph=f"{job_quote} {observation_quote}",
+        signal_quote=job_quote,
+        source_text=job_quote,
+    )
+    inputs[3]["dimension_evidence"]["identity"] = {
+        "decision": "match",
+        "web_identity_receipt": {
+            "decision": "match",
+            "observed_domain": "harborsoft.example",
+        },
+    }
+    calls = 0
+
+    async def judge(prompt, **_kwargs):
+        nonlocal calls
+        calls += 1
+        document = json.loads(prompt)
+        provider_source = next(
+            source for source in document["admitted_evidence"]
+            if source["evidence_kind"] == "authenticated_provider_observation"
+        )
+        assert "observed_dates" not in provider_source
+        return json.dumps(_response(document, [
+            (True, "VERIFIED", [job_quote]),
+            (True, "VERIFIED", [observation_quote]),
+        ]))
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    with use_evaluation_date("2026-09-27"):
+        receipt = await intent_details.review_intent_details(
+            *inputs,
+            authenticated_provider_observation={
+                "matched_icp_signal": 0,
+                "source_url": inputs[0].intent_signals[0].url,
+                "first_observed_date": "2026-09-20",
+            },
+        )
+
+    assert calls == 1
+    assert receipt["decision"] == "match"
+
+
+@pytest.mark.asyncio
+async def test_citation_and_temporal_findings_share_one_repair(monkeypatch):
+    job_quote = "HarborSoft is actively hiring a Platform Engineer."
+    stage_quote = "HarborSoft is a Series B company."
+    inputs = _inputs(
+        company_name="HarborSoft",
+        paragraph=(
+            f"{job_quote} Recent coverage identifies HarborSoft as a "
+            "Series B company."
+        ),
+        signal_quote=job_quote,
+        source_text=job_quote,
+        company_dimension="stage",
+        company_quote=stage_quote,
+    )
+    calls = []
+
+    async def judge(prompt, **_kwargs):
+        calls.append(prompt)
+        payload = json.loads(prompt)
+        document = payload.get("review_document", payload)
+        if len(calls) == 1:
+            response = _response(document, [
+                (True, "VERIFIED", [job_quote]),
+                (True, "VERIFIED", [stage_quote]),
+            ])
+            response["unit_grounding"][0]["evidence"][0]["quote"] = (
+                "UNBOUND JOB QUOTE"
+            )
+            return json.dumps(response)
+        assert payload["bounded_unit_repair_control"]["units"] == [
+            {
+                "unit_id": 0,
+                "contains_factual_claim": True,
+                "status": "VERIFIED",
+                "citation_errors": ["nonexact_quote"],
+                "semantic_recheck_allowed": False,
+            },
+            {
+                "unit_id": 1,
+                "contains_factual_claim": True,
+                "status": "VERIFIED",
+                "citation_errors": [],
+                "semantic_recheck_allowed": True,
+                "semantic_recheck_reason": "relative_time_grounding_review",
+            },
+        ]
+        return json.dumps({"repairs": [
+            {
+                "unit_id": 0,
+                "status": "VERIFIED",
+                "evidence": [_binding(document, job_quote)],
+            },
+            {"unit_id": 1, "status": "UNPROVEN", "evidence": []},
+        ]})
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = await intent_details.review_intent_details(*inputs)
+
+    assert len(calls) == 2
+    assert receipt["decision"] == "mismatch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repair_result", ["malformed", "provider_error"])
+async def test_temporal_recheck_failure_remains_unavailable(
+    monkeypatch, repair_result,
+):
+    quote = "HarborSoft announced a funding round."
+    inputs = _inputs(
+        company_name="HarborSoft",
+        paragraph="HarborSoft recently announced a funding round.",
+        signal_quote=quote,
+        source_text=quote,
+    )
+    calls = 0
+
+    async def judge(prompt, **_kwargs):
+        nonlocal calls
+        calls += 1
+        document = json.loads(prompt).get(
+            "review_document", json.loads(prompt),
+        )
+        if calls == 2:
+            if repair_result == "provider_error":
+                raise RuntimeError("test provider error")
+            return "{malformed"
+        return json.dumps(_response(
+            document, [(True, "VERIFIED", [quote])],
+        ))
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = await intent_details.review_intent_details(*inputs)
+
+    assert calls == 2
+    assert receipt["decision"] == "unavailable"
+    assert receipt["failure_reason_code"] == (
+        "provider_error" if repair_result == "provider_error"
+        else "malformed_response"
     )

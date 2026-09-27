@@ -2464,15 +2464,27 @@ async def investigate_company_evidence(
                 # an admitted request settles under the broker's own bound.
                 elapsed = time.monotonic() - started
                 if elapsed >= ADMISSION_DEADLINE_SECONDS:
+                    timeout_scoped_targets = active_submit_targets
+                    timeout_preserved = scoped_correction_preserved
+                    if (
+                        not scoped_correction_active
+                        and scoped_correction_candidate_targets
+                    ):
+                        timeout_scoped_targets = (
+                            scoped_correction_candidate_targets
+                        )
+                        timeout_preserved = (
+                            scoped_correction_candidate_preserved
+                        )
                     timeout_claims = _unproven_findings(
-                        active_submit_targets,
+                        timeout_scoped_targets,
                         "investigation admission budget exhausted",
                     )
-                    if scoped_correction_active:
+                    if timeout_preserved:
                         timeout_claims = {
                             target: dict(
                                 timeout_claims.get(target)
-                                or scoped_correction_preserved[target]
+                                or timeout_preserved[target]
                             )
                             for target in requested_targets
                         }
@@ -2716,8 +2728,18 @@ async def investigate_company_evidence(
                                         "Do not search or fetch; re-emit only complete "
                                         "findings from already fetched evidence. "
                                         "Keep each exact evidence quote as short as the "
-                                        "claim permits. Return one finding for every "
-                                        "requested target."
+                                        "claim permits. "
+                                        + (
+                                            "Return one finding for each active correction "
+                                            "target and no other target. Correction targets: "
+                                            + ", ".join(active_submit_targets)
+                                            + "."
+                                            if scoped_correction_active
+                                            else (
+                                                "Return one finding for every requested "
+                                                "target."
+                                            )
+                                        )
                                     ),
                                 }),
                             },

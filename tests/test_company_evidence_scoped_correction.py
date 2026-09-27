@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -260,6 +261,182 @@ def test_malformed_then_unproven_corrections_do_not_erase_valid_industry(
     assert rejected["source_url"] == SEC_URL
     assert rejected["source_context"].startswith("Rapid7, Inc.")
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["claims"]["industry"]["status"] == "VERIFIED"
+    assert result["claims"]["industry"]["evidence_quote"] == PRODUCT_QUOTE
+
+
+@pytest.mark.parametrize("retry_completes", [True, False])
+def test_scoped_incomplete_submit_retry_uses_pending_schema_once(
+    monkeypatch, retry_completes,
+):
+    requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        arena_operations.validate_operation_request("openrouter.chat", payload)
+        requests.append(payload)
+        turn = len(requests)
+        if turn == 1:
+            monkeypatch.setattr(
+                investigator,
+                "JUDGMENT_ADMISSION_RESERVE_SECONDS",
+                investigator.ADMISSION_DEADLINE_SECONDS,
+            )
+            arguments = json.dumps({"findings": _initial_findings()})
+            finish_reason = "tool_calls"
+        elif turn == 2 or not retry_completes:
+            arguments = '{"findings":[{"target":"stage"'
+            finish_reason = "length"
+        else:
+            arguments = json.dumps({"findings": [_finding("stage")]})
+            finish_reason = "tool_calls"
+        return 200, {"choices": [{
+            "finish_reason": finish_reason,
+            "message": {"tool_calls": [{
+                "id": f"call-{turn}",
+                "type": "function",
+                "function": {
+                    "name": "submit_findings",
+                    "arguments": arguments,
+                },
+            }]},
+        }]}
+
+    async def fake_search(_session, _query, *, key):
+        del key
+        return {"results": []}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 3)
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "Rapid7",
+            "website": "https://rapid7.com",
+            "linkedin": "https://www.linkedin.com/company/rapid7",
+        },
+        targets=("stage", "industry"),
+        requested_stage="Public",
+        requested_industry="Security software and services",
+        requested_subindustry="Cloud security and identity protection",
+        positive_semantic_review=True,
+        prior_observations={
+            "observed_company_name": "Rapid7",
+            "observed_company_website": "https://rapid7.com",
+            "observed_company_linkedin": (
+                "https://www.linkedin.com/company/rapid7"
+            ),
+            "submitted_source_urls": [NASDAQ_URL, SEC_URL, PRODUCT_URL],
+        },
+        verified_homepage_identity={
+            "normalized_name": "Rapid7",
+            "registrable_dns_domain": "rapid7.com",
+            "linkedin_company_slug": "rapid7",
+        },
+        prefetched_pages={
+            NASDAQ_URL: {"final_url": NASDAQ_URL, "text": NASDAQ_QUOTE},
+            SEC_URL: {"final_url": SEC_URL, "text": SEC_PAGE},
+            PRODUCT_URL: {"final_url": PRODUCT_URL, "text": PRODUCT_QUOTE},
+        },
+    ))
+
+    assert len(requests) == 3
+    assert requests[0]["tool_choice"] == "required"
+    for request in requests[1:]:
+        schema = _submit_tool(request)["parameters"]["properties"][
+            "findings"
+        ]
+        assert schema["minItems"] == schema["maxItems"] == 1
+        assert schema["items"]["properties"]["target"]["enum"] == [
+            "stage"
+        ]
+    assert requests[2]["reasoning"] == {"effort": "low"}
+    retry_feedback = json.loads(requests[2]["messages"][-1]["content"])
+    assert retry_feedback["error"] == "incomplete_submit_findings"
+    assert "Correction targets: stage." in retry_feedback["instruction"]
+    assert "every requested target" not in retry_feedback["instruction"]
+    if retry_completes:
+        assert result["claims"]["stage"]["status"] == "VERIFIED"
+        assert result["claims"]["industry"]["status"] == "VERIFIED"
+    else:
+        assert result == {
+            "claims": {},
+            "failure_reason": investigator.MALFORMED_RESPONSE_FAILURE_REASON,
+        }
+
+
+def test_scoped_candidate_preserves_valid_finding_on_admission_timeout(
+    monkeypatch,
+):
+    requests = []
+    clock = {"now": 0.0}
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        arena_operations.validate_operation_request("openrouter.chat", payload)
+        requests.append(payload)
+        clock["now"] = investigator.ADMISSION_DEADLINE_SECONDS
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {
+                "name": "submit_findings",
+                "arguments": json.dumps({"findings": _initial_findings()}),
+            },
+        }]}}]}
+
+    async def fake_search(_session, _query, *, key):
+        del key
+        return {"results": []}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 3)
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(
+        investigator,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock["now"]),
+    )
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "Rapid7",
+            "website": "https://rapid7.com",
+            "linkedin": "https://www.linkedin.com/company/rapid7",
+        },
+        targets=("stage", "industry"),
+        requested_stage="Public",
+        prior_observations={
+            "observed_company_name": "Rapid7",
+            "observed_company_website": "https://rapid7.com",
+            "observed_company_linkedin": (
+                "https://www.linkedin.com/company/rapid7"
+            ),
+            "submitted_source_urls": [NASDAQ_URL, SEC_URL, PRODUCT_URL],
+        },
+        verified_homepage_identity={
+            "normalized_name": "Rapid7",
+            "registrable_dns_domain": "rapid7.com",
+            "linkedin_company_slug": "rapid7",
+        },
+        prefetched_pages={
+            NASDAQ_URL: {"final_url": NASDAQ_URL, "text": NASDAQ_QUOTE},
+            SEC_URL: {"final_url": SEC_URL, "text": SEC_PAGE},
+            PRODUCT_URL: {"final_url": PRODUCT_URL, "text": PRODUCT_QUOTE},
+        },
+    ))
+
+    assert len(requests) == 1
+    assert requests[0]["tool_choice"] == "required"
+    assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["claims"]["stage"]["reason"] == (
+        "investigation admission budget exhausted"
+    )
     assert result["claims"]["industry"]["status"] == "VERIFIED"
     assert result["claims"]["industry"]["evidence_quote"] == PRODUCT_QUOTE
 

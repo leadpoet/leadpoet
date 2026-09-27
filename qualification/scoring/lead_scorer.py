@@ -73,6 +73,7 @@ from qualification.scoring.company_evidence_investigator import (
     MAX_PAGE_CHARACTERS,
     MAX_SUBMITTED_SOURCE_URLS,
     PRIVATE_FETCHED_PAGES_KEY,
+    _complete_verified_first_party_identity,
     _plain_text,
     _quote_occurs,
     _same_domain_name_alias,
@@ -2121,7 +2122,7 @@ def _hydrate_verified_required_attribute_recovery_source(
     *,
     verified_transport_domain: str,
     successful_source_sink: Optional[dict[str, dict[str, Any]]] = None,
-) -> None:
+) -> bool:
     """Admit one validated first-party alternate into attribute repair."""
 
     if (
@@ -2129,7 +2130,7 @@ def _hydrate_verified_required_attribute_recovery_source(
         or claim.get("status") != "VERIFIED"
         or claim.get("activity_role") != "supplier_operator"
     ):
-        return
+        return False
     raw_url = claim.get("evidence_url")
     quote = claim.get("evidence_quote")
     fetched_pages = investigation.get(PRIVATE_FETCHED_PAGES_KEY)
@@ -2139,13 +2140,11 @@ def _hydrate_verified_required_attribute_recovery_source(
         or not quote
         or not isinstance(fetched_pages, Mapping)
         or len(fetched_pages) > MAX_FETCH_CALLS
-        or raw_url in source_cache
-        or len(source_cache) >= _MAX_REQUIRED_ATTRIBUTE_SOURCE_URLS
     ):
-        return
+        return False
     raw_page = fetched_pages.get(raw_url)
     if not isinstance(raw_page, Mapping):
-        return
+        return False
     raw_final_url = raw_page.get("final_url")
     page_text = raw_page.get("text")
     if (
@@ -2155,7 +2154,7 @@ def _hydrate_verified_required_attribute_recovery_source(
         or len(page_text) > MAX_PAGE_CHARACTERS
         or not _quote_occurs(quote, page_text)
     ):
-        return
+        return False
     try:
         canonical_url = public_http_url(raw_url)
         final_url = public_http_url(raw_final_url)
@@ -2163,7 +2162,7 @@ def _hydrate_verified_required_attribute_recovery_source(
         final_parts = urlsplit(final_url)
         identity_domain = verified_transport_domain.casefold().rstrip(".")
     except (TypeError, ValueError):
-        return
+        return False
     if (
         canonical_url != raw_url
         or request_parts.scheme.casefold() != "https"
@@ -2178,7 +2177,17 @@ def _hydrate_verified_required_attribute_recovery_source(
         or _registrable_domain(canonical_url) != identity_domain
         or _registrable_domain(final_url) != identity_domain
     ):
-        return
+        return False
+    existing = source_cache.get(canonical_url)
+    if existing is not None and (
+        not isinstance(existing, Mapping)
+        or existing.get("status") != "fetched"
+        or existing.get("final_url") != final_url
+        or existing.get("text") != page_text
+    ):
+        return False
+    if existing is None and len(source_cache) >= _MAX_REQUIRED_ATTRIBUTE_SOURCE_URLS:
+        return False
     hydrated_entry = {
         "status": "fetched",
         "final_url": final_url,
@@ -2191,6 +2200,48 @@ def _hydrate_verified_required_attribute_recovery_source(
         successful_source_sink,
         canonical_url,
         hydrated_entry,
+    )
+    return True
+
+
+def _complete_verified_attribute_recovery_identity(
+    company: CompanyOutput,
+    prior_result: CompanyFitDecisionResult,
+    verified_identity: Mapping[str, Any],
+    evidence_url: str,
+) -> bool:
+    """Require the submitted, observed, and homepage identities to agree."""
+
+    details = (
+        prior_result.details
+        if isinstance(prior_result.details, Mapping)
+        else {}
+    )
+    receipt = details.get("identity_receipt")
+    if (
+        details.get("identity_decision") != COMPANY_FIT_MATCH
+        or not isinstance(receipt, Mapping)
+    ):
+        return False
+    verified_domain = str(
+        verified_identity.get("registrable_dns_domain") or ""
+    ).strip()
+    return _complete_verified_first_party_identity(
+        evidence_url,
+        {verified_domain} if verified_domain else set(),
+        {
+            "submitted_name": receipt.get("submitted_name") or company.company_name,
+            "submitted_domain": receipt.get("submitted_domain"),
+            "submitted_linkedin_slug": receipt.get("submitted_linkedin_slug"),
+            "observed_name": receipt.get("observed_name"),
+            "observed_domain": receipt.get("observed_domain"),
+            "observed_linkedin_slug": receipt.get("observed_linkedin_slug"),
+            "verified_name": verified_identity.get("normalized_name"),
+            "verified_domain": verified_domain,
+            "verified_linkedin_slug": verified_identity.get(
+                "linkedin_company_slug"
+            ),
+        },
     )
 
 
@@ -5355,6 +5406,23 @@ def _positive_semantic_review_needed(
     return bool(mismatches) and mismatches.issubset(target_dimensions)
 
 
+def _industry_attribute_semantic_repair_needed(
+    result: CompanyFitDecisionResult,
+    icp: ICPPrompt,
+    investigation_targets: Sequence[str],
+) -> bool:
+    """Use one already-admitted industry review to resolve its full criterion."""
+
+    details = result.details if isinstance(result.details, Mapping) else {}
+    return bool(
+        "industry" in investigation_targets
+        and str(getattr(icp, "required_attribute", "") or "").strip()
+        and details.get("identity_decision") == COMPANY_FIT_MATCH
+        and details.get("required_attribute_decision")
+        in {COMPANY_FIT_MISMATCH, COMPANY_FIT_UNAVAILABLE}
+    )
+
+
 def _positive_semantic_finding_resolved(
     finding: Optional[Mapping[str, Any]],
 ) -> bool:
@@ -5508,6 +5576,35 @@ def _project_investigator_industry(
     if isinstance(nested, Mapping):
         nested_copy = dict(nested)
         nested_copy["industry"] = {"url": url, "quote": quote}
+        projected["dimension_evidence"] = nested_copy
+    return projected
+
+
+def _project_investigator_required_attribute(
+    verdict: Mapping[str, Any],
+    finding: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Use one strict verified activity finding as required-attribute proof."""
+
+    projected = dict(verdict)
+    url = _valid_web_evidence_url(finding.get("evidence_url"))
+    quote = str(finding.get("evidence_quote") or "").strip()[:2000]
+    if (
+        finding.get("status") != "VERIFIED"
+        or finding.get("activity_role") != "supplier_operator"
+        or not url
+        or not quote
+    ):
+        return projected
+    projected.update(
+        attribute_satisfied=True,
+        required_attribute_evidence_url=url,
+        required_attribute_evidence_quote=quote,
+    )
+    nested = verdict.get("dimension_evidence")
+    if isinstance(nested, Mapping):
+        nested_copy = dict(nested)
+        nested_copy["required_attribute"] = {"url": url, "quote": quote}
         projected["dimension_evidence"] = nested_copy
     return projected
 
@@ -5680,6 +5777,7 @@ async def _run_targeted_company_evidence_investigation(
     ] = None,
     preserve_matched_industry: bool = False,
     review_positive_semantics: bool = False,
+    repair_required_attribute_from_industry: bool = False,
     homepage_navigation_locators: Sequence[Mapping[str, Any]] = (),
 ) -> Tuple[
     dict[str, Any],
@@ -5977,20 +6075,38 @@ async def _run_targeted_company_evidence_investigation(
         if isinstance(claims.get("industry"), Mapping)
         else {}
     )
+    verified_attribute_recovery_source = False
     if (
         required_attribute_source_cache is not None
         and icp_attribute
         and prior_result is not None
         and isinstance(prior_result.details, Mapping)
-        and prior_result.details.get("required_attribute_decision")
-        == COMPANY_FIT_UNAVAILABLE
+        and (
+            prior_result.details.get("required_attribute_decision")
+            == COMPANY_FIT_UNAVAILABLE
+            or repair_required_attribute_from_industry
+        )
     ):
-        _hydrate_verified_required_attribute_recovery_source(
-            required_attribute_source_cache,
-            investigation,
-            industry_claim,
-            verified_transport_domain=verified_transport_domain,
-            successful_source_sink=successful_required_attribute_source_sink,
+        complete_recovery_identity = (
+            not repair_required_attribute_from_industry
+            or _complete_verified_attribute_recovery_identity(
+                company,
+                prior_result,
+                verified_identity,
+                str(industry_claim.get("evidence_url") or ""),
+            )
+        )
+        verified_attribute_recovery_source = bool(
+            complete_recovery_identity
+            and _hydrate_verified_required_attribute_recovery_source(
+                required_attribute_source_cache,
+                investigation,
+                industry_claim,
+                verified_transport_domain=verified_transport_domain,
+                successful_source_sink=(
+                    successful_required_attribute_source_sink
+                ),
+            )
         )
     investigation_receipt = {
         "gate": "company_evidence_investigation",
@@ -6131,6 +6247,27 @@ async def _run_targeted_company_evidence_investigation(
         projected = _project_investigator_industry(
             projected,
             industry_claim,
+        )
+    if (
+        repair_required_attribute_from_industry
+        and review_positive_semantics
+        and positive_semantic_resolved
+        and verified_attribute_recovery_source
+        and required_attribute_source_cache is not None
+    ):
+        projected = _project_investigator_required_attribute(
+            projected,
+            industry_claim,
+        )
+        projected, _unused_repair_source = (
+            await _ground_required_attribute_evidence(
+                projected,
+                active_attribute=True,
+                source_cache=required_attribute_source_cache,
+                successful_source_sink=(
+                    successful_required_attribute_source_sink
+                ),
+            )
         )
     projected = _project_investigator_geography(
         projected,
@@ -6648,13 +6785,25 @@ async def _llm_reverify_company(
         if require_company_fit_dimensions and evidence_investigator
         else ()
     )
-    positive_semantic_review = bool(
+    industry_attribute_semantic_repair = bool(
         require_company_fit_dimensions
         and evidence_investigator
-        and _positive_semantic_review_needed(
+        and _industry_attribute_semantic_repair_needed(
             result,
             icp,
             investigation_targets,
+        )
+    )
+    positive_semantic_review = bool(
+        require_company_fit_dimensions
+        and evidence_investigator
+        and (
+            industry_attribute_semantic_repair
+            or _positive_semantic_review_needed(
+                result,
+                icp,
+                investigation_targets,
+            )
         )
     )
     if positive_semantic_review:
@@ -6715,6 +6864,9 @@ async def _llm_reverify_company(
             ),
             preserve_matched_industry=required_attribute_source_recovery,
             review_positive_semantics=positive_semantic_review,
+            repair_required_attribute_from_industry=(
+                industry_attribute_semantic_repair
+            ),
             homepage_navigation_locators=(
                 verified_homepage_navigation_locators
             ),

@@ -6351,7 +6351,7 @@ def test_oxpay_schema_repair_recomputes_stale_employee_conflict(monkeypatch):
             True,
             COMPANY_FIT_UNAVAILABLE,
             COMPANY_FIT_UNAVAILABLE,
-            2,
+            1,
         ),
         (
             "UNPROVEN",
@@ -6359,9 +6359,9 @@ def test_oxpay_schema_repair_recomputes_stale_employee_conflict(monkeypatch):
             "same",
             True,
             True,
-            COMPANY_FIT_MATCH,
-            COMPANY_FIT_MATCH,
-            2,
+            COMPANY_FIT_UNAVAILABLE,
+            COMPANY_FIT_UNAVAILABLE,
+            1,
         ),
         (
             "VERIFIED",
@@ -6559,6 +6559,242 @@ def test_schema_repair_reconciles_bounded_industry_decision(
         assert result.details["required_attribute_decision"] == (
             COMPANY_FIT_MISMATCH
         )
+
+
+def test_flam_industry_review_can_repair_attribute_from_verified_flicks_page(
+    monkeypatch,
+):
+    company = _company(
+        name="Flam",
+        website="https://flamapp.ai",
+        linkedin="https://www.linkedin.com/company/flamappofficial",
+    )
+    icp = _icp(
+        industry="Advertising",
+        sub_industry="Programmatic advertising platform",
+        product_service=(
+            "A digital advertising platform that helps brands or agencies "
+            "buy, optimize, or measure media across channels."
+        ),
+        required_attribute=(
+            "Runs an advertising, media, or marketing platform used by "
+            "agencies or brands to plan, buy, optimize, or measure campaigns."
+        ),
+    )
+    generic_url = "https://flamapp.ai/en-US"
+    generic_quote = "Omni-channel distribution for massive scale"
+    flicks_url = "https://flamapp.ai/products/flicks"
+    flicks_final_url = "https://flamapp.ai/en-US/products/flicks"
+    flicks_quote = (
+        "Enable faster product discovery and learn user preference to "
+        "optimize next asset."
+    )
+    initial = _complete_verdict(
+        observed_company_name="Flam",
+        observed_company_website="https://flamapp.ai",
+        observed_company_linkedin=(
+            "https://www.linkedin.com/company/flamappofficial"
+        ),
+        observed_industry="Technology, Information and Internet",
+        observed_subindustry="Interactive content platform",
+        industry_matches=None,
+        industry_activity_role="supplier_operator",
+        industry_evidence_url=generic_url,
+        industry_evidence_quote=generic_quote,
+        attribute_satisfied=False,
+        required_attribute_evidence_url=generic_url,
+        required_attribute_evidence_quote=generic_quote,
+    )
+    finding = _finding(
+        "industry",
+        observed_value="Digital advertising platform",
+        observed_industry="Advertising",
+        observed_subindustry="Programmatic advertising platform",
+        activity_role="supplier_operator",
+        evidence_url=flicks_url,
+        evidence_quote=flicks_quote,
+    )
+    calls = {"provider": 0, "investigator": 0, "direct_fetch": 0}
+
+    async def provider(**_kwargs):
+        calls["provider"] += 1
+        return initial, ""
+
+    async def direct_fetch(_session, url):
+        calls["direct_fetch"] += 1
+        assert url == generic_url
+        return 200, generic_url, generic_quote
+
+    async def bounded_investigation(**kwargs):
+        calls["investigator"] += 1
+        assert kwargs["targets"] == ("industry",)
+        assert kwargs["positive_semantic_review"] is True
+        assert kwargs["homepage_navigation_locators"] == ({
+            "url": flicks_url,
+            "label": "Flicks",
+        },)
+        return {
+            "claims": {"industry": finding},
+            investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                flicks_url: {
+                    "final_url": flicks_final_url,
+                    "text": flicks_quote,
+                }
+            },
+            "failure_reason": "",
+            "usage": {"reasoning_turns": 2, "search_calls": 0, "fetch_calls": 1},
+        }
+
+    async def keep_observation(verdict, *_args, **_kwargs):
+        return verdict
+
+    homepage_identity = lead_scorer.company_fit_match(
+        "homepage identity verified",
+        details={
+            "identity": {
+                "decision": COMPANY_FIT_MATCH,
+                "evidence_source": "company_homepage",
+                "observed_name": "flam",
+                "observed_domain": "flamapp.ai",
+                "observed_linkedin_slug": "flamappofficial",
+            },
+            "verified_homepage_transport_domain": "flamapp.ai",
+        },
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", direct_fetch)
+    monkeypatch.setattr(
+        lead_scorer, "investigate_company_evidence", bounded_investigation
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "_refresh_linkedin_employee_size_observation",
+        keep_observation,
+    )
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        company,
+        icp,
+        require_company_fit_dimensions=True,
+        verified_homepage_identity=homepage_identity,
+        verified_homepage_navigation_locators=({
+            "url": flicks_url,
+            "label": "Flicks",
+        },),
+        company_quality=True,
+        evidence_investigator=True,
+    ))
+
+    assert calls == {"provider": 1, "investigator": 1, "direct_fetch": 1}
+    assert result.decision == COMPANY_FIT_MATCH
+    assert result.details["dimension_decisions"]["industry"] == COMPANY_FIT_MATCH
+    assert result.details["required_attribute_decision"] == COMPANY_FIT_MATCH
+    assert result.details["dimension_evidence"]["required_attribute"] == {
+        "url": flicks_url,
+        "quote": flicks_quote,
+    }
+    assert result.details["required_attribute_grounding"]["status"] == "grounded"
+    receipt = result.details["investigation_receipt"]
+    assert receipt["positive_semantic_review"] is True
+    assert receipt["usage"] == {
+        "reasoning_turns": 2,
+        "search_calls": 0,
+        "fetch_calls": 1,
+    }
+
+
+def test_attribute_mismatch_without_industry_gap_stays_terminal(monkeypatch):
+    initial = _complete_verdict(
+        attribute_satisfied=False,
+        required_attribute_evidence_url="https://acme.example/platform",
+        required_attribute_evidence_quote=(
+            "Acme supplies software without the requested capability."
+        ),
+    )
+    calls = {"provider": 0, "investigator": 0}
+
+    async def provider(**_kwargs):
+        calls["provider"] += 1
+        return initial, ""
+
+    async def must_not_investigate(**_kwargs):
+        calls["investigator"] += 1
+        raise AssertionError("an attribute-only mismatch cannot admit research")
+
+    async def keep_observation(verdict, *_args, **_kwargs):
+        return verdict
+
+    async def keep_attribute(verdict, **_kwargs):
+        return verdict, {}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer, "investigate_company_evidence", must_not_investigate
+    )
+    monkeypatch.setattr(
+        lead_scorer,
+        "_refresh_linkedin_employee_size_observation",
+        keep_observation,
+    )
+    monkeypatch.setattr(
+        lead_scorer, "_ground_required_attribute_evidence", keep_attribute
+    )
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _company(),
+        _icp(required_attribute="Offers configurable firewall rules."),
+        require_company_fit_dimensions=True,
+        company_quality=True,
+        evidence_investigator=True,
+    ))
+
+    assert calls == {"provider": 1, "investigator": 0}
+    assert result.decision == COMPANY_FIT_MISMATCH
+    assert result.details["required_attribute_decision"] == COMPANY_FIT_MISMATCH
+
+
+@pytest.mark.parametrize(
+    ("changed_field", "changed_value"),
+    [
+        ("observed_name", "other"),
+        ("observed_domain", "other.example"),
+        ("observed_linkedin_slug", "other"),
+        ("submitted_domain", ""),
+    ],
+)
+def test_attribute_conversion_requires_complete_matching_identity(
+    changed_field, changed_value
+):
+    company = _company()
+    receipt = {
+        "submitted_name": "acme",
+        "submitted_domain": "acme.example",
+        "submitted_linkedin_slug": "acme",
+        "observed_name": "acme",
+        "observed_domain": "acme.example",
+        "observed_linkedin_slug": "acme",
+    }
+    receipt[changed_field] = changed_value
+    prior = lead_scorer.company_fit_mismatch(
+        "attribute mismatch",
+        details={
+            "identity_decision": COMPANY_FIT_MATCH,
+            "identity_receipt": receipt,
+        },
+    )
+
+    assert not lead_scorer._complete_verified_attribute_recovery_identity(
+        company,
+        prior,
+        {
+            "normalized_name": "acme",
+            "registrable_dns_domain": "acme.example",
+            "linkedin_company_slug": "acme",
+        },
+        "https://acme.example/platform",
+    )
 
 
 @pytest.mark.parametrize(

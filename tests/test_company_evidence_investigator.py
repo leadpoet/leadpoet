@@ -11288,8 +11288,74 @@ def test_stealth_transport_preserves_unrelated_target_redirect(monkeypatch):
     assert claims["industry"]["status"] == "UNPROVEN"
 
 
-@pytest.mark.parametrize("blocked_by", ["budget", "deadline"])
-def test_hint_does_not_retry_at_fetch_cap_or_deadline(monkeypatch, blocked_by):
+def test_final_admitted_fetch_hint_allows_one_same_url_stealth_retry(monkeypatch):
+    urls = [f"https://acme.example/source-{index}" for index in range(3)]
+    calls = []
+    model_turns = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers, payload
+        model_turns.append(True)
+        if len(model_turns) <= len(urls):
+            name = "fetch_page"
+            arguments = {"url": urls[len(model_turns) - 1]}
+        else:
+            name = "submit_findings"
+            arguments = {"findings": [_finding(
+                "industry",
+                observed_industry="Software",
+                activity_role="supplier_operator",
+                evidence_url=urls[-1],
+                evidence_quote="Acme sells commercial workflow software.",
+            )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(len(model_turns)), "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_fetch(_session, requested_url, *, stealth_mode=False):
+        calls.append((requested_url, stealth_mode))
+        if requested_url == urls[-1] and not stealth_mode:
+            return {
+                "ok": False,
+                "error": "http_400",
+                "_retry_with_stealth": True,
+            }
+        return {
+            "ok": True,
+            "url": requested_url,
+            "final_url": requested_url,
+            "text": (
+                "Acme sells commercial workflow software."
+                if stealth_mode else "No proof."
+            ),
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("industry",),
+        requested_industry="Software",
+    ))
+
+    assert calls == [
+        (urls[0], False),
+        (urls[1], False),
+        (urls[2], False),
+        (urls[2], True),
+    ]
+    assert result["usage"]["fetch_calls"] == 4
+    assert len(result["usage"]["fetch_outcomes"]) == 4
+    assert result[investigator.PRIVATE_FETCHED_PAGES_KEY][urls[-1]]["text"] == (
+        "Acme sells commercial workflow software."
+    )
+
+
+def test_hint_does_not_retry_after_deadline(monkeypatch):
     url = "https://acme.example/funding"
     calls = []
     model_turns = []
@@ -11316,12 +11382,8 @@ def test_hint_does_not_retry_at_fetch_cap_or_deadline(monkeypatch, blocked_by):
 
     async def fake_fetch(_session, requested_url, *, stealth_mode=False):
         calls.append((requested_url, stealth_mode))
-        if blocked_by == "deadline":
-            expired = real_monotonic() + investigator.ADMISSION_DEADLINE_SECONDS + 1
-            monkeypatch.setattr(
-                investigator.time, "monotonic",
-                lambda: expired,
-            )
+        expired = real_monotonic() + investigator.ADMISSION_DEADLINE_SECONDS + 1
+        monkeypatch.setattr(investigator.time, "monotonic", lambda: expired)
         return {
             "ok": False,
             "error": "http_400",
@@ -11332,9 +11394,6 @@ def test_hint_does_not_retry_at_fetch_cap_or_deadline(monkeypatch, blocked_by):
     monkeypatch.setenv("EXA_API_KEY", "test-key")
     monkeypatch.setattr(investigator, "_post_json", fake_post)
     monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
-    if blocked_by == "budget":
-        monkeypatch.setattr(investigator, "MAX_FETCH_CALLS", 1)
-
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example"},
         targets=("industry",),
@@ -11344,6 +11403,58 @@ def test_hint_does_not_retry_at_fetch_cap_or_deadline(monkeypatch, blocked_by):
     assert calls == [(url, False)]
     assert result["usage"]["fetch_calls"] == 1
     assert len(result["usage"]["fetch_outcomes"]) == 1
+
+
+@pytest.mark.parametrize("hint", [False, True])
+def test_failed_final_fetch_never_admits_an_unrelated_fourth_fetch(monkeypatch, hint):
+    urls = [f"https://acme.example/source-{index}" for index in range(4)]
+    calls = []
+    requests = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers, payload
+        requests.append(True)
+        if len(requests) <= len(urls):
+            name, arguments = "fetch_page", {"url": urls[len(requests) - 1]}
+        else:
+            name, arguments = "submit_findings", {
+                "findings": [_finding("industry", status="UNPROVEN")]
+            }
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(len(requests)), "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_fetch(_session, requested_url, *, stealth_mode=False):
+        calls.append((requested_url, stealth_mode))
+        if requested_url == urls[-2] and not stealth_mode:
+            result = {"ok": False, "error": "http_400"}
+            if hint:
+                result["_retry_with_stealth"] = True
+            return result
+        if stealth_mode:
+            return {"ok": False, "error": "http_400"}
+        return {"ok": True, "url": requested_url, "final_url": requested_url,
+                "text": "No proof."}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("industry",), requested_industry="Software",
+    ))
+
+    assert calls == [
+        (urls[0], False),
+        (urls[1], False),
+        (urls[2], False),
+        *([(urls[2], True)] if hint else []),
+    ]
+    assert result["usage"]["fetch_calls"] == (4 if hint else 3)
+    assert all(call[0] != urls[3] for call in calls)
 
 
 def test_three_fresh_fetch_cap_remains_with_three_prefetched_pages(monkeypatch):

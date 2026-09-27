@@ -2103,7 +2103,11 @@ async def investigate_company_evidence(
                 retry_with_stealth = bool(result.pop("_retry_with_stealth", False))
                 if (
                     retry_with_stealth
-                    and fetch_calls < MAX_FETCH_CALLS
+                    # A normal fetch is admitted only below the three-call
+                    # cap.  If the final admitted call returns ScrapingDog's
+                    # explicit same-URL stealth hint, permit that one bounded
+                    # transport retry to settle the already-admitted fetch.
+                    and fetch_calls <= MAX_FETCH_CALLS
                     and time.monotonic() - started < ADMISSION_DEADLINE_SECONDS
                 ):
                     fetch_calls += 1
@@ -2153,7 +2157,7 @@ async def investigate_company_evidence(
                     prefetched_pages=prefetched_count,
                     server_prefetch_fetch_calls=fetch_calls,
                     remaining_fetch_calls=(
-                        MAX_FETCH_CALLS - fetch_calls
+                        max(0, MAX_FETCH_CALLS - fetch_calls)
                     ),
                 )
             if (

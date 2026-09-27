@@ -20,6 +20,10 @@ PROLOGIS = (
     (JLL, "https://www.nyse.com/quote/XNYS:JLL", (), ("JLL",)),
     (PROLOGIS, "https://ir.prologis.com/stock/quote-chart",
      ("prologis.com",), ("Prologis", "Prologis, Inc.")),
+    (PROLOGIS, "https://ir.prologis.com/stock/quote-chart",
+     ("prologis.com",), ("Prologis, Inc.",)),
+    ("Acme Holdings Inc. New York Stock Exchange: ACME Last 10.00",
+     "https://www.nyse.com/quote/XNYS:ACME", (), ("Acme Holdings",)),
 ])
 def test_current_exchange_profile_is_bound_public_evidence(
     quote, url, domains, names,

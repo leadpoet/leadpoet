@@ -770,10 +770,7 @@ def _current_exchange_profile_names_issuer(
         re.I,
     ):
         return False
-    names = {
-        compact for value in identity_names
-        if (compact := _compact_company_name(value))
-    }
+    names = {str(value).strip() for value in identity_names if str(value or "").strip()}
     for match in _PUBLIC_CURRENT_EXCHANGE_PROFILE_RE.finditer(quote):
         issuer = str(match.group("slash_issuer") or match.group("label_issuer") or "")
         if match.group("slash_issuer"):

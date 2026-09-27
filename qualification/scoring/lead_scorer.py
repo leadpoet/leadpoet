@@ -725,11 +725,13 @@ _PUBLIC_SEMANTIC_LISTING_RE = re.compile(
     r"[^.!?;\n]{0,100}\b(?:exchange|stock\s+code|ticker)\b",
     re.I,
 )
-_PUBLIC_IPO_COMPLETION_EVENT_RE = re.compile(
+_PUBLIC_HISTORICAL_IPO_EVENT_RE = re.compile(
     r"\b(?:completed|closed)\s+(?:(?:its|an?|the)\s+)?"
     r"(?:ipo|initial\s+public\s+offering)\b|"
     r"\b(?:ipo|initial\s+public\s+offering)\s+"
-    r"(?:was\s+|has\s+been\s+)?(?:completed|closed)\b",
+    r"(?:was\s+|has\s+been\s+)?(?:completed|closed)\b|"
+    r"\b(?:in\s+celebration\s+of|celebrat(?:e|es|ed|ing))\s+"
+    r"(?:(?:its|an?|the)\s+)?(?:ipo|initial\s+public\s+offering)\b",
     re.I,
 )
 _PUBLIC_STRONG_CURRENT_PATTERNS = (
@@ -869,7 +871,7 @@ def _public_quote_has_bound_market_locator(
                     and any(
                         _public_claims_share_clause(quote, match, ipo_match)
                         for ipo_match
-                        in _PUBLIC_IPO_COMPLETION_EVENT_RE.finditer(quote)
+                        in _PUBLIC_HISTORICAL_IPO_EVENT_RE.finditer(quote)
                     )
                 )
             ):
@@ -917,11 +919,11 @@ def _stage_evidence_supports_observation(
     if authoritative_public_listing:
         return True
     if (
-        _PUBLIC_IPO_COMPLETION_EVENT_RE.search(quote)
+        _PUBLIC_HISTORICAL_IPO_EVENT_RE.search(quote)
         and not _public_quote_has_bound_market_locator(quote, identity_names)
         and not current_exchange_profile
     ):
-        # An IPO-completion announcement proves a historical event. Its old
+        # An IPO announcement or celebration proves a historical event. Its old
         # exchange/ticker parenthetical is not current-stage proof unless this
         # exact quote also contains a separate issuer-bound market statement.
         return False

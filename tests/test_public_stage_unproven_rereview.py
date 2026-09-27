@@ -20,6 +20,14 @@ TENB_QUOTE = (
     "Tenable Holdings, Inc. (NASDAQ: TENB), the exposure management company, "
     "today announced the appointment of Dino DiMarino as Chief Revenue Officer."
 )
+TENB_2018_IPO_CELEBRATION_QUOTE = (
+    "NEW YORK, July 26, 2018 (GLOBE NEWSWIRE) -- Tenable Holdings "
+    "(Nasdaq: TENB), the Cyber Exposure company, rang The Nasdaq Stock Market "
+    "Closing Bell in Times Square in celebration of its initial public offering "
+    "(IPO). Tenable Holdings, Inc. (Nasdaq: TENB), the Cyber Exposure company, "
+    "visits the Nasdaq MarketSite in Times Square in celebration of its initial "
+    "public offering (IPO)."
+)
 
 
 def _finding(*, status="UNPROVEN", url="", quote="", value=None, reason=""):
@@ -234,8 +242,12 @@ def test_stale_ipo_ticker_does_not_trigger_public_rereview(monkeypatch, quote):
     assert len(requests) == 1
 
 
-def _validated_public_finding(quote):
-    url = "https://www.tenable.com/news/issuer-update"
+def _validated_public_finding(
+    quote,
+    *,
+    url="https://www.tenable.com/news/issuer-update",
+    first_party_domains=("tenable.com",),
+):
     return investigator._validated_findings(
         {"findings": [_finding(
             status="VERIFIED",
@@ -246,7 +258,7 @@ def _validated_public_finding(quote):
         targets=("stage",),
         fetched_pages={url: quote},
         fetched_final_urls={url: url},
-        first_party_domains={"tenable.com"},
+        first_party_domains=set(first_party_domains),
         identity_names={"tenable", "tenableholdings"},
         identity_anchor={
             "submitted_name": "Tenable",
@@ -266,6 +278,92 @@ def _validated_public_finding(quote):
     ),
 ])
 def test_ipo_completion_only_ticker_is_not_current_public_proof(quote):
+    assert not lead_scorer._public_quote_has_bound_market_locator(
+        quote, ("tenable", "tenableholdings"),
+    )
+    assert _validated_public_finding(quote)["status"] == "UNPROVEN"
+
+
+def test_retained_nasdaq_ipo_celebration_is_not_current_public_proof():
+    url = (
+        "https://ir.nasdaq.com/news-releases/news-release-details/"
+        "nasdaq-welcomes-tenable-holdings-nasdaq-tenb-nasdaq-stock-market"
+    )
+
+    assert not lead_scorer._public_quote_has_bound_market_locator(
+        TENB_2018_IPO_CELEBRATION_QUOTE, ("tenable", "tenableholdings"),
+    )
+    assert _validated_public_finding(
+        TENB_2018_IPO_CELEBRATION_QUOTE,
+        url=url,
+        first_party_domains=(),
+    )["status"] == "UNPROVEN"
+
+
+@pytest.mark.parametrize("quote", [
+    "Acme Holdings, Inc. (NASDAQ: ACME) celebrated its initial public offering.",
+    (
+        "Acme Holdings, Inc. (NASDAQ: ACME) rang the opening bell to celebrate "
+        "its IPO."
+    ),
+    (
+        "Acme Holdings, Inc. (NASDAQ: ACME) visits MarketSite in celebration "
+        "of the IPO."
+    ),
+])
+def test_ipo_celebration_parenthetical_is_not_a_current_locator(quote):
+    assert not lead_scorer._public_quote_has_bound_market_locator(
+        quote, ("acme", "acmeholdings"),
+    )
+    assert not lead_scorer._stage_evidence_supports_observation(
+        "Public",
+        quote,
+        evidence_url="https://www.nasdaq.com/market-activity/stocks/acme",
+        identity_names=("acme", "acmeholdings"),
+    )
+
+
+@pytest.mark.parametrize("quote", [
+    (
+        "Tenable Holdings, Inc. (NASDAQ: TENB), today announced quarterly "
+        "results. Tenable rang the closing bell in celebration of its IPO."
+    ),
+    (
+        "Tenable rang the closing bell in celebration of its IPO. Tenable "
+        "Holdings, Inc. (NASDAQ: TENB), today announced quarterly results."
+    ),
+])
+def test_current_issuer_row_survives_ipo_celebration_elsewhere(quote):
+    assert lead_scorer._public_quote_has_bound_market_locator(
+        quote, ("tenable", "tenableholdings"),
+    )
+    assert _validated_public_finding(quote)["status"] == "VERIFIED"
+
+
+def test_same_clause_current_trading_survives_ipo_celebration():
+    quote = (
+        "Tenable Holdings, Inc. (NASDAQ: TENB) rang the closing bell in "
+        "celebration of its IPO and Tenable common stock currently trades on "
+        "Nasdaq under ticker TENB."
+    )
+
+    assert lead_scorer._public_quote_has_bound_market_locator(
+        quote, ("tenable", "tenableholdings"),
+    )
+    assert _validated_public_finding(quote)["status"] == "VERIFIED"
+
+
+@pytest.mark.parametrize("suffix", [
+    "Other Holdings, Inc. (NASDAQ: OTHR), today announced quarterly results.",
+    "Tenable Holdings Inc. NASDAQ: TENB Market data.",
+    "Tenable common stock ceased trading on Nasdaq.",
+])
+def test_wrong_static_or_superseded_text_does_not_rescue_ipo_celebration(suffix):
+    quote = (
+        "Tenable Holdings, Inc. (NASDAQ: TENB) rang the closing bell in "
+        f"celebration of its IPO. {suffix}"
+    )
+
     assert not lead_scorer._public_quote_has_bound_market_locator(
         quote, ("tenable", "tenableholdings"),
     )

@@ -1632,6 +1632,55 @@ def test_attribute_cache_projects_exact_successful_source_for_investigator():
     ) == {url: {"final_url": url, "text": text}}
 
 
+def test_verified_homepage_prefetch_deduplicates_attribute_cache():
+    homepage_url = "https://example.com/"
+    product_url = "https://example.com/product"
+    homepage_text = "Example supplies a cross-channel campaign platform."
+    product_text = "Example measures and optimizes customer campaigns."
+
+    pages = lead_scorer._investigator_prefetched_pages(
+        {
+            homepage_url: {
+                "status": "fetched",
+                "final_url": homepage_url,
+                "text": "stale duplicate cache text",
+            },
+            product_url: {
+                "status": "fetched",
+                "final_url": product_url,
+                "text": product_text,
+            },
+        },
+        [homepage_url, product_url],
+        verified_homepage_pages={
+            homepage_url: {
+                "final_url": homepage_url,
+                "text": homepage_text,
+            }
+        },
+    )
+
+    assert pages == {
+        homepage_url: {"final_url": homepage_url, "text": homepage_text},
+        product_url: {"final_url": product_url, "text": product_text},
+    }
+
+
+def test_oversized_verified_homepage_prefetch_fails_closed():
+    homepage_url = "https://example.com/"
+
+    assert lead_scorer._investigator_prefetched_pages(
+        {},
+        [homepage_url],
+        verified_homepage_pages={
+            homepage_url: {
+                "final_url": homepage_url,
+                "text": "x" * (investigator.MAX_PAGE_CHARACTERS + 1),
+            }
+        },
+    ) == {}
+
+
 def test_grab_prefetch_repairs_only_stage_and_stays_out_of_receipt(monkeypatch):
     url = "https://www.grab.com/sg/press/others/atome-financial/"
     stage_quote = "Grab Holdings Limited (NASDAQ: GRAB) (“Grab”)"
@@ -1727,6 +1776,12 @@ def test_grab_prefetch_repairs_only_stage_and_stays_out_of_receipt(monkeypatch):
                     "status": "fetched",
                     "final_url": url,
                     "text": source_text,
+                }
+            },
+            verified_homepage_pages={
+                "https://grab.com/": {
+                    "final_url": "https://grab.com/",
+                    "text": "Grab homepage text must not enter a stage-only review.",
                 }
             },
         )
@@ -6617,6 +6672,11 @@ def test_flam_industry_review_can_repair_attribute_from_verified_flicks_page(
     )
     generic_url = "https://flamapp.ai/en-US"
     generic_quote = "Omni-channel distribution for massive scale"
+    homepage_url = "https://flamapp.ai/"
+    homepage_text = (
+        "Flam provides omni-channel distribution across digital ads, social "
+        "media, SMS, emails, outdoor ads, CTV, retail stores, and events."
+    )
     flicks_url = "https://flamapp.ai/products/flicks"
     flicks_final_url = "https://flamapp.ai/en-US/products/flicks"
     flicks_quote = (
@@ -6667,6 +6727,16 @@ def test_flam_industry_review_can_repair_attribute_from_verified_flicks_page(
             "url": flicks_url,
             "label": "Flicks",
         },)
+        assert kwargs["prefetched_pages"] == {
+            homepage_url: {
+                "final_url": "https://flamapp.ai/",
+                "text": homepage_text,
+            },
+            generic_url: {
+                "final_url": generic_url,
+                "text": generic_quote,
+            },
+        }
         return {
             "claims": {"industry": finding},
             investigator.PRIVATE_FETCHED_PAGES_KEY: {
@@ -6716,6 +6786,12 @@ def test_flam_industry_review_can_repair_attribute_from_verified_flicks_page(
             "url": flicks_url,
             "label": "Flicks",
         },),
+        verified_homepage_pages={
+            homepage_url: {
+                "final_url": "https://flamapp.ai/",
+                "text": homepage_text,
+            }
+        },
         company_quality=True,
         evidence_investigator=True,
     ))

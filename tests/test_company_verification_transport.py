@@ -13,6 +13,7 @@ from qualification.scoring.company_fit_decision import (
     company_quality_receipt_matches_claim,
     evaluate_company_identity,
 )
+from qualification.scoring.company_evidence_investigator import MAX_PAGE_CHARACTERS
 from qualification.scoring.company_verification import (
     MAX_HOMEPAGE_NAVIGATION_LOCATORS,
     _homepage_navigation_locators,
@@ -1786,16 +1787,24 @@ def test_cross_registrable_domain_redirect_is_identity_conflict(monkeypatch):
             )
         ),
     )
+    homepage_pages = {
+        "https://stale.example/": {
+            "final_url": "https://stale.example/",
+            "text": "stale",
+        }
+    }
     result = asyncio.run(
         verify_company_exists(
             "Example Company",
             "https://example.co.uk",
             company_linkedin="https://linkedin.com/company/example-company",
+            homepage_evidence_sink=homepage_pages,
         )
     )
     assert result.decision == COMPANY_FIT_MISMATCH
     assert result.details["actual_final_url"] == "https://attacker.example/final"
     assert "redirect changed registrable domain" in (result.reason or "")
+    assert homepage_pages == {}
 
 
 def test_unusable_off_domain_redirect_never_supplies_transport_anchor(monkeypatch):
@@ -1868,12 +1877,19 @@ def test_verified_flam_homepage_exposes_safe_navigation_locators(monkeypatch):
 
     monkeypatch.setattr(company_verification, "_fetch_bounded_html", fetch)
     locators = [{"url": "https://stale.example", "label": "stale"}]
+    homepage_pages = {
+        "https://stale.example/": {
+            "final_url": "https://stale.example/",
+            "text": "stale",
+        }
+    }
     result = asyncio.run(verify_company_exists(
         "Flam",
         "https://flamapp.ai/",
         company_linkedin="https://www.linkedin.com/company/flamapp",
         require_https_transport=True,
         homepage_navigation_locator_sink=locators,
+        homepage_evidence_sink=homepage_pages,
     ))
 
     assert result.decision == COMPANY_FIT_MATCH
@@ -1888,17 +1904,94 @@ def test_verified_flam_homepage_exposes_safe_navigation_locators(monkeypatch):
             "label": "Product demo",
         },
     ]
+    assert homepage_pages == {
+        "https://flamapp.ai/": {
+            "final_url": "https://flamapp.ai/",
+            "text": (
+                "Flam LinkedIn "
+                "[[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]] "
+                "https://www.linkedin.com/company/flamapp"
+            ),
+        }
+    }
 
     mismatched_locators = [{"url": "https://stale.example", "label": "stale"}]
+    mismatched_pages = {
+        "https://stale.example/": {
+            "final_url": "https://stale.example/",
+            "text": "stale",
+        }
+    }
     mismatch = asyncio.run(verify_company_exists(
         "Other Company",
         "https://flamapp.ai/",
         company_linkedin="https://www.linkedin.com/company/other-company",
         require_https_transport=True,
         homepage_navigation_locator_sink=mismatched_locators,
+        homepage_evidence_sink=mismatched_pages,
     ))
     assert mismatch.decision != COMPANY_FIT_MATCH
     assert mismatched_locators == []
+    assert mismatched_pages == {}
+
+
+def test_verified_homepage_binary_body_never_enters_evidence_sink(monkeypatch):
+    from qualification.scoring import company_verification
+
+    binary_html = (
+        "%PDF-1.7 "
+        + "x" * 80
+        + "<html><head><title>Flam</title>"
+        '<meta property="og:site_name" content="Flam"></head><body>'
+        '<a href="https://www.linkedin.com/company/flamapp">LinkedIn</a>'
+        "</body></html>"
+    )
+
+    async def fetch(_session, _url):
+        return 200, "https://flamapp.ai/", binary_html
+
+    monkeypatch.setattr(company_verification, "_fetch_bounded_html", fetch)
+    homepage_pages = {}
+    result = asyncio.run(verify_company_exists(
+        "Flam",
+        "https://flamapp.ai/",
+        company_linkedin="https://www.linkedin.com/company/flamapp",
+        require_https_transport=True,
+        homepage_evidence_sink=homepage_pages,
+    ))
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert homepage_pages == {}
+
+
+def test_verified_homepage_evidence_text_uses_existing_page_cap(monkeypatch):
+    from qualification.scoring import company_verification
+
+    visible_text = "Flam " + "campaign measurement " * 2_000
+    homepage = (
+        "<html><head><title>Flam</title>"
+        '<meta property="og:site_name" content="Flam"></head><body>'
+        '<a href="https://www.linkedin.com/company/flamapp">LinkedIn</a>'
+        f"<main>{visible_text}</main></body></html>"
+    )
+
+    async def fetch(_session, _url):
+        return 200, "https://flamapp.ai/", homepage
+
+    monkeypatch.setattr(company_verification, "_fetch_bounded_html", fetch)
+    homepage_pages = {}
+    result = asyncio.run(verify_company_exists(
+        "Flam",
+        "https://flamapp.ai/",
+        company_linkedin="https://www.linkedin.com/company/flamapp",
+        require_https_transport=True,
+        homepage_evidence_sink=homepage_pages,
+    ))
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert len(homepage_pages["https://flamapp.ai/"]["text"]) == (
+        MAX_PAGE_CHARACTERS
+    )
 
 
 def test_homepage_navigation_locator_count_is_bounded():

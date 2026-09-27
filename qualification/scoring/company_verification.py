@@ -44,6 +44,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 import aiohttp
 
 from leadpoet_verifier.identity.normalization import NormalizationError, normalize_url
+from qualification.competition_models import public_http_url
 from qualification.scoring.company_fit_decision import (
     CompanyFitDecisionResult,
     company_fit_match,
@@ -904,6 +905,7 @@ async def verify_company_exists(
     require_https_transport: bool = False,
     company_quality: bool = False,
     homepage_navigation_locator_sink: Optional[list[dict[str, str]]] = None,
+    homepage_evidence_sink: Optional[dict[str, dict[str, str]]] = None,
 ) -> CompanyFitDecisionResult:
     """Verify that ``company_website`` is a real page for ``company_name``.
 
@@ -916,6 +918,8 @@ async def verify_company_exists(
     """
     if homepage_navigation_locator_sink is not None:
         homepage_navigation_locator_sink.clear()
+    if homepage_evidence_sink is not None:
+        homepage_evidence_sink.clear()
     submitted_identity = evaluate_company_identity(
         submitted_name=company_name,
         submitted_website=company_website,
@@ -1149,6 +1153,49 @@ async def verify_company_exists(
                     verified_domain=str(matched["observed_domain"]),
                 )
             )
+        if homepage_evidence_sink is not None:
+            # The investigator owns the exact visible-text and binary guards.
+            # Import here to avoid a module cycle during initialization.
+            from qualification.scoring.company_evidence_investigator import (
+                _plain_text,
+            )
+
+            try:
+                request_domain = _registrable_domain(request_url)
+                final_domain = _registrable_domain(observed_url)
+                canonical_request_url = public_http_url(request_url)
+                canonical_final_url = public_http_url(observed_url)
+                request_parts = urlsplit(canonical_request_url)
+                final_parts = urlsplit(canonical_final_url)
+            except (NormalizationError, TypeError, ValueError):
+                request_domain = ""
+                final_domain = ""
+                canonical_request_url = ""
+                canonical_final_url = ""
+                request_parts = None
+                final_parts = None
+            evidence_text = _plain_text(text)
+            if (
+                evidence_text
+                and request_parts is not None
+                and final_parts is not None
+                and request_parts.scheme.casefold() == "https"
+                and final_parts.scheme.casefold() == "https"
+                and request_parts.username is None
+                and request_parts.password is None
+                and final_parts.username is None
+                and final_parts.password is None
+                and request_parts.fragment == ""
+                and final_parts.fragment == ""
+                and request_parts.port in {None, 443}
+                and final_parts.port in {None, 443}
+                and request_domain == matched["observed_domain"]
+                and final_domain == matched["observed_domain"]
+            ):
+                homepage_evidence_sink[canonical_request_url] = {
+                    "final_url": canonical_final_url,
+                    "text": evidence_text,
+                }
         return _identity_result(
             matched_receipt,
             "verified: independently observed first-party name, final domain, "

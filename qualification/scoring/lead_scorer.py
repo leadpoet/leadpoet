@@ -2276,16 +2276,32 @@ def _investigator_prefetched_pages(
     source_cache: Mapping[str, Mapping[str, Any]],
     submitted_source_urls: Sequence[str],
     *,
+    verified_homepage_pages: Optional[
+        Mapping[str, Mapping[str, Any]]
+    ] = None,
     structured_profile_description_evidence: Optional[Mapping[str, Any]] = None,
     verified_identity: Optional[Mapping[str, Any]] = None,
     include_structured_description: bool = False,
 ) -> dict[str, dict[str, str]]:
     """Return bounded private pages from already validated server sources."""
 
-    candidates = _investigator_prefetched_pages_from_attribute_cache(
+    candidates: dict[str, dict[str, str]] = {}
+    homepage_pages, homepage_final_urls = _validated_prefetched_pages(
+        verified_homepage_pages,
+        submitted_source_urls=submitted_source_urls,
+    )
+    candidates.update({
+        url: {"final_url": homepage_final_urls[url], "text": text}
+        for url, text in homepage_pages.items()
+    })
+    attribute_pages = _investigator_prefetched_pages_from_attribute_cache(
         source_cache,
         submitted_source_urls,
     )
+    for url, page in attribute_pages.items():
+        if len(candidates) >= MAX_FETCH_CALLS:
+            break
+        candidates.setdefault(url, page)
     evidence = structured_profile_description_evidence or {}
     identity = verified_identity or {}
     expected_keys = {
@@ -5779,6 +5795,9 @@ async def _run_targeted_company_evidence_investigation(
     review_positive_semantics: bool = False,
     repair_required_attribute_from_industry: bool = False,
     homepage_navigation_locators: Sequence[Mapping[str, Any]] = (),
+    verified_homepage_pages: Optional[
+        Mapping[str, Mapping[str, Any]]
+    ] = None,
 ) -> Tuple[
     dict[str, Any],
     CompanyFitDecisionResult,
@@ -5900,6 +5919,11 @@ async def _run_targeted_company_evidence_investigation(
                 break
     submitted_source_urls: list[str] = []
     source_candidates = [
+        *(
+            (verified_homepage_pages or {}).keys()
+            if review_positive_semantics
+            else []
+        ),
         *(
             (required_attribute_source_cache or {}).keys()
             if preserve_matched_industry or review_positive_semantics
@@ -6051,6 +6075,9 @@ async def _run_targeted_company_evidence_investigation(
         prefetched_pages=_investigator_prefetched_pages(
             required_attribute_source_cache or {},
             submitted_source_urls,
+            verified_homepage_pages=(
+                verified_homepage_pages if review_positive_semantics else None
+            ),
             structured_profile_description_evidence=(
                 structured_profile_description_evidence
             ),
@@ -6325,6 +6352,9 @@ async def _llm_reverify_company(
     require_company_fit_dimensions: bool = False,
     verified_homepage_identity: Optional[CompanyFitDecisionResult] = None,
     verified_homepage_navigation_locators: Sequence[Mapping[str, Any]] = (),
+    verified_homepage_pages: Optional[
+        Mapping[str, Mapping[str, Any]]
+    ] = None,
     company_quality: bool = False,
     evidence_investigator: bool = False,
     required_attribute_retry_source_cache: Optional[
@@ -6870,6 +6900,7 @@ async def _llm_reverify_company(
             homepage_navigation_locators=(
                 verified_homepage_navigation_locators
             ),
+            verified_homepage_pages=verified_homepage_pages,
         )
         if not claims:
             return result
@@ -7281,6 +7312,7 @@ async def _llm_reverify_company(
                 homepage_navigation_locators=(
                     verified_homepage_navigation_locators
                 ),
+                verified_homepage_pages=verified_homepage_pages,
             )
             if not post_repair_claims:
                 return repaired_result
@@ -7703,6 +7735,7 @@ async def _verify_company_fit(
 
     identity_exception_reason = ""
     homepage_navigation_locators: list[dict[str, str]] = []
+    homepage_evidence_pages: dict[str, dict[str, str]] = {}
     try:
         identity = await verify_company_exists(
             company.company_name,
@@ -7711,6 +7744,7 @@ async def _verify_company_fit(
             require_https_transport=require_https_transport,
             company_quality=company_quality,
             homepage_navigation_locator_sink=homepage_navigation_locators,
+            homepage_evidence_sink=homepage_evidence_pages,
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("Company identity verification raised: %s", exc)
@@ -7754,6 +7788,7 @@ async def _verify_company_fit(
             identity
         ),
         verified_homepage_navigation_locators=homepage_navigation_locators,
+        verified_homepage_pages=homepage_evidence_pages,
         company_quality=company_quality,
         evidence_investigator=evidence_investigator,
         required_attribute_retry_source_cache=(

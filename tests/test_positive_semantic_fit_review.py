@@ -275,6 +275,12 @@ def test_verified_homepage_navigation_sink_reaches_reverification(monkeypatch):
         "url": "https://peer.example/platform/enrollment",
         "label": "Enrollment platform",
     }]
+    homepage_page = {
+        "https://peer.example": {
+            "final_url": "https://peer.example/",
+            "text": "PeerConnect enrollment platform for universities.",
+        }
+    }
     captured = {}
 
     async def prechecks(*_args, **_kwargs):
@@ -282,6 +288,7 @@ def test_verified_homepage_navigation_sink_reaches_reverification(monkeypatch):
 
     async def homepage(*_args, **kwargs):
         kwargs["homepage_navigation_locator_sink"].extend(locators)
+        kwargs["homepage_evidence_sink"].update(homepage_page)
         return company_fit_match(details={
             "identity": {
                 "decision": COMPANY_FIT_MATCH,
@@ -313,6 +320,7 @@ def test_verified_homepage_navigation_sink_reaches_reverification(monkeypatch):
     ))
 
     assert captured["verified_homepage_navigation_locators"] == locators
+    assert captured["verified_homepage_pages"] == homepage_page
 
 
 @pytest.mark.parametrize(

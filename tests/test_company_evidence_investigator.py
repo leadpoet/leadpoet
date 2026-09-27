@@ -10870,13 +10870,16 @@ def test_prefetched_pages_do_not_reduce_fresh_network_fetch_budget(monkeypatch):
         },
     ))
 
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 3,
         "search_calls": 1,
         "fetch_calls": 2,
-        "prefetched_pages": 2,
-        "total_loaded_pages": 4,
     }
+    assert result["usage"]["prefetched_pages"] == 2
+    assert result["usage"]["total_loaded_pages"] == 4
+    assert [item["url_sha256"] for item in result["usage"]["fetch_outcomes"]] == [
+        hashlib.sha256(url.encode()).hexdigest() for url in (third_url, fourth_url)
+    ]
     assert len(result[investigator.PRIVATE_FETCHED_PAGES_KEY]) == 4
 
 
@@ -10971,13 +10974,13 @@ def test_two_prefetches_leave_fresh_fetches_for_stage_and_industry(monkeypatch):
 
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["claims"]["industry"]["status"] == "VERIFIED"
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 3,
         "search_calls": 1,
         "fetch_calls": 2,
-        "prefetched_pages": 2,
-        "total_loaded_pages": 4,
     }
+    assert result["usage"]["prefetched_pages"] == 2
+    assert result["usage"]["total_loaded_pages"] == 4
 
 
 def test_prefetched_cache_hit_does_not_refetch_or_consume_fresh_budget(monkeypatch):
@@ -11026,6 +11029,76 @@ def test_prefetched_cache_hit_does_not_refetch_or_consume_fresh_budget(monkeypat
     assert network_fetch.await_count == 0
     assert result["usage"]["fetch_calls"] == 0
     assert result["usage"]["total_loaded_pages"] == 1
+    assert result["usage"]["fetch_outcomes"] == []
+
+
+def test_failed_fetch_then_success_records_bounded_outcomes(monkeypatch):
+    failed_url = "https://acme.example/unavailable"
+    success_url = "https://acme.example/platform"
+    quote = "Acme sells subscription workflow software to technical teams."
+    actions = [
+        ("fetch_page", {"url": failed_url}),
+        ("fetch_page", {"url": success_url}),
+        ("submit_findings", {"findings": [_finding(
+            "industry",
+            observed_industry="Software",
+            observed_subindustry="Workflow software",
+            activity_role="supplier_operator",
+            evidence_url=success_url,
+            evidence_quote=quote,
+        )]}),
+    ]
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers, payload
+        name, arguments = actions[fake_post.turn]
+        fake_post.turn += 1
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(fake_post.turn),
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    fake_post.turn = 0
+
+    async def fake_fetch(_session, url):
+        if url == failed_url:
+            return {"ok": False, "error": "http_403"}
+        return {"ok": True, "url": url, "final_url": url, "text": quote}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    monkeypatch.setattr(investigator, "_search_web", AsyncMock(return_value={
+        "results": [{"url": failed_url}, {"url": success_url}],
+    }))
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("industry",),
+        requested_industry="Software",
+        verified_homepage_identity={
+            "normalized_name": "acme",
+            "registrable_dns_domain": "acme.example",
+        },
+    ))
+
+    assert result["claims"]["industry"]["status"] == "VERIFIED"
+    assert result["usage"]["fetch_outcomes"] == [
+        {
+            "url_sha256": hashlib.sha256(failed_url.encode()).hexdigest(),
+            "ok": False,
+            "error_class": "http_error",
+            "loaded_text_length": 0,
+        },
+        {
+            "url_sha256": hashlib.sha256(success_url.encode()).hexdigest(),
+            "ok": True,
+            "error_class": "",
+            "loaded_text_length": len(quote),
+        },
+    ]
 
 
 def test_three_fresh_fetch_cap_remains_with_three_prefetched_pages(monkeypatch):

@@ -231,6 +231,7 @@ def test_exact_multiverse_description_reaches_real_investigator(monkeypatch):
         "reasoning_turns": 1,
         "prefetched_pages": 1,
         "total_loaded_pages": 1,
+        "fetch_outcomes": [],
     }
     assert DESCRIPTION not in json.dumps(receipt, sort_keys=True)
     assert "structured_profile_description_evidence" not in json.dumps(

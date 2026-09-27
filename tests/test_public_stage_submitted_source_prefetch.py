@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from unittest.mock import AsyncMock
 
@@ -94,6 +95,12 @@ def test_public_stage_prefetches_exact_tenable_submitted_release(monkeypatch):
     assert _core_usage(result["usage"]) == {
         "reasoning_turns": 1, "search_calls": 1, "fetch_calls": 1,
     }
+    assert result["usage"]["fetch_outcomes"] == [{
+        "url_sha256": hashlib.sha256(url.encode()).hexdigest(),
+        "ok": True,
+        "error_class": "",
+        "loaded_text_length": len(quote),
+    }]
     fetch.assert_awaited_once()
     assert fetch.await_args.args[1] == url
     search.assert_awaited_once()

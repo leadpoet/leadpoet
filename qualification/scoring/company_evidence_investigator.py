@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import html
 import json
 import os
@@ -1345,6 +1346,29 @@ async def _fetch_page(
     }
 
 
+def _fetch_outcome(url: str, result: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a bounded, non-content diagnostic for one fresh fetch."""
+
+    raw_error = str(result.get("error") or "")
+    if not raw_error:
+        error_class = ""
+    elif raw_error.startswith("http_"):
+        error_class = "http_error"
+    elif raw_error in {
+        "invalid_url", "unsupported_binary_content", "empty_page",
+    }:
+        error_class = raw_error
+    else:
+        error_class = "fetch_failed"
+    text = str(result.get("text") or "") if result.get("ok") else ""
+    return {
+        "url_sha256": hashlib.sha256(str(url or "").encode("utf-8")).hexdigest(),
+        "ok": bool(result.get("ok")),
+        "error_class": error_class,
+        "loaded_text_length": len(text),
+    }
+
+
 def _validated_findings(
     arguments: Any,
     *,
@@ -1938,6 +1962,7 @@ async def investigate_company_evidence(
         )
     search_calls = 0
     fetch_calls = 0
+    fetch_outcomes: list[dict[str, Any]] = []
     requested_venture_stage = (
         normalized_requested_stage
         if (
@@ -2049,6 +2074,9 @@ async def investigate_company_evidence(
             if public_stage_source_url:
                 fetch_calls += 1
                 source_result = await _fetch_page(session, public_stage_source_url)
+                fetch_outcomes.append(
+                    _fetch_outcome(public_stage_source_url, source_result)
+                )
                 input_document["server_public_stage_source_fetch"] = {
                     "url": public_stage_source_url,
                     "ok": bool(source_result.get("ok")),
@@ -2145,6 +2173,7 @@ async def investigate_company_evidence(
                             "fetch_calls": fetch_calls,
                             "prefetched_pages": prefetched_count,
                             "total_loaded_pages": len(fetched_pages),
+                            "fetch_outcomes": list(fetch_outcomes),
                         },
                     }
                 required_tool = forced_next_tool
@@ -2600,6 +2629,7 @@ async def investigate_company_evidence(
                                 "fetch_calls": fetch_calls,
                                 "prefetched_pages": prefetched_count,
                                 "total_loaded_pages": len(fetched_pages),
+                                "fetch_outcomes": list(fetch_outcomes),
                             },
                             # Private transport output constructed only from
                             # pages fetched by this loop. The caller may reuse
@@ -2676,6 +2706,9 @@ async def investigate_company_evidence(
                     else:
                         fetch_calls += 1
                         tool_result = await _fetch_page(session, str(safe_url or ""))
+                        fetch_outcomes.append(
+                            _fetch_outcome(str(safe_url or ""), tool_result)
+                        )
                         if tool_result.get("ok"):
                             fetched_pages[str(tool_result["url"])] = str(
                                 tool_result["text"]

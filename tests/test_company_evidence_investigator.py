@@ -5306,6 +5306,10 @@ def test_industry_activity_disjunction_keeps_explicit_and_requirements():
         "Still prove every separate industry, sub-industry, product/service, "
         "required-attribute, or other clause joined by AND"
     ) in prompt
+    assert (
+        "Every business type, object, customer scope, and qualifier that "
+        "governs the OR list applies to each alternative"
+    ) in prompt
 
 
 def test_industry_activity_disjunction_rejects_wrong_industry_control():
@@ -5315,6 +5319,19 @@ def test_industry_activity_disjunction_rejects_wrong_industry_control():
         "An allowed verb in the wrong industry does not satisfy the criterion"
         in prompt
     )
+    assert (
+        "generic homes-delivered or lots-owned metrics do not prove commercial "
+        "property"
+    ) in prompt
+
+
+def test_industry_activity_disjunction_allows_semantic_business_type_proof():
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+
+    assert (
+        "company-bound logistics-warehouse evidence can semantically prove "
+        'commercial real estate without the exact word "commercial"'
+    ) in prompt
 
 
 @pytest.mark.parametrize(

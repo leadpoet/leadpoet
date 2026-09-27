@@ -189,7 +189,12 @@ those activities; never require brokerage after development or management is
 proved. This OR applies only inside that activity clause. Still prove every
 separate industry, sub-industry, product/service, required-attribute, or other
 clause joined by AND. An allowed verb in the wrong industry does not satisfy
-the criterion.
+the criterion. Every business type, object, customer scope, and qualifier that
+governs the OR list applies to each alternative; proving a listed verb alone is
+insufficient. For example, generic homes-delivered or lots-owned metrics do not
+prove commercial property, while company-bound logistics-warehouse evidence
+can semantically prove commercial real estate without the exact word
+"commercial".
 A vendor-supplied paid management console, policy control plane, or workflow
 platform can satisfy a technical operations alternative when customers use it
 to manage infrastructure artifacts, entitlements, build or deployment policy,

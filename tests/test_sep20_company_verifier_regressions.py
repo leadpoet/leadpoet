@@ -1029,6 +1029,39 @@ def test_final_matched_investigator_source_is_retained_for_intent_context():
     ) == [{"dimension": "stage", "url": source_url, "text": body}]
 
 
+def test_final_matched_industry_source_is_retained_for_intent_context():
+    source_url = "https://example.com/products/workflow-platform"
+    quote = "Example Company supplies workflow automation software to manufacturers."
+    body = f"Product platform\n{quote}\nCustomer deployment details."
+    fit = _matched_company_fit_with_sources(
+        source_url=source_url,
+        quote=quote,
+        dimension="industry",
+    )
+    retained = {}
+
+    lead_scorer._retain_matched_investigator_source_contexts(
+        retained,
+        fit,
+        {
+            investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                source_url: {"final_url": source_url, "text": body},
+            },
+        },
+    )
+
+    assert retained == {
+        source_url: {"final_url": source_url, "text": body},
+    }
+    assert lead_scorer._matched_company_source_contexts(
+        fit,
+        None,
+        None,
+        retained,
+        paragraph=quote,
+    ) == [{"dimension": "industry", "url": source_url, "text": body}]
+
+
 def test_intermediate_unavailable_source_survives_final_fit_repair():
     source_url = "https://example.com/news/series-e"
     quote = "Example Company announced a $550 million Series E."
@@ -1144,6 +1177,59 @@ def test_company_context_selection_keeps_two_relevant_bound_sources():
 
     assert [context["dimension"] for context in contexts] == [
         "geography", "stage",
+    ]
+    assert len(contexts) == 2
+
+
+def test_four_retained_dimension_pages_keep_two_relevant_contexts():
+    evidence = {
+        "industry": (
+            "https://example.com/products/platform",
+            "Example Company supplies workflow automation software to manufacturers.",
+        ),
+        "employee_size": (
+            "https://example.com/company/team",
+            "Example Company has 120 employees.",
+        ),
+        "geography": (
+            "https://example.com/company/contact",
+            "Example Company is headquartered in Seattle, Washington.",
+        ),
+        "stage": (
+            "https://example.com/news/series-e",
+            "Example Company raised $175 million in a Series E.",
+        ),
+    }
+    stage_url, stage_quote = evidence["stage"]
+    fit = _matched_company_fit_with_sources(
+        source_url=stage_url,
+        quote=stage_quote,
+    )
+    retained = {}
+    for dimension, (source_url, quote) in evidence.items():
+        fit.details["dimension_evidence"][dimension] = {
+            "decision": COMPANY_FIT_MATCH,
+            "observed_decision": COMPANY_FIT_MATCH,
+            "web_evidence": {"url": source_url, "quote": quote},
+        }
+        retained[source_url] = {
+            "final_url": source_url,
+            "text": f"Page title\n{quote}",
+        }
+
+    contexts = lead_scorer._matched_company_source_contexts(
+        fit,
+        None,
+        None,
+        retained,
+        paragraph=(
+            "Example Company supplies workflow automation software to manufacturers "
+            "and raised $175 million in a Series E."
+        ),
+    )
+
+    assert [context["dimension"] for context in contexts] == [
+        "industry", "stage",
     ]
     assert len(contexts) == 2
 

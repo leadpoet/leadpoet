@@ -2116,11 +2116,13 @@ def _hydrate_required_attribute_source_cache(
 
 _PARAGRAPH_COMPANY_CONTEXT_DIMENSIONS = (
     "required_attribute",
+    "industry",
     "employee_size",
     "geography",
     "stage",
 )
 _MAX_PARAGRAPH_COMPANY_CONTEXTS = 2
+_MAX_RETAINED_INVESTIGATOR_CONTEXTS = 4
 
 
 def _complete_company_identity(
@@ -2157,7 +2159,7 @@ def _retain_matched_investigator_source_contexts(
     if not isinstance(dimensions, Mapping):
         return
     evidence_by_url: dict[str, str] = {}
-    for dimension in ("employee_size", "geography", "stage"):
+    for dimension in ("industry", "employee_size", "geography", "stage"):
         evidence = dimensions.get(dimension)
         if (
             not isinstance(evidence, Mapping)
@@ -5436,17 +5438,26 @@ def _targeted_company_investigation_dimensions(
         if isinstance(dimension_evidence, Mapping)
         else {}
     )
-    unsupported_industry_mismatch = bool(
+    reviewable_industry_mismatch = bool(
         dimensions.get("industry") == COMPANY_FIT_MISMATCH
-        and observations.get("industry_matches") is False
-        and observations.get("industry_activity_role") == "unresolved"
+        and (
+            (
+                observations.get("industry_activity_role") == "unresolved"
+                and observations.get("industry_matches") is False
+            )
+            or (
+                observations.get("industry_activity_role")
+                in _NON_SUPPLIER_INDUSTRY_ACTIVITY_ROLES
+                and observations.get("industry_matches") in {True, False}
+            )
+        )
         and isinstance(industry_evidence, Mapping)
         and industry_evidence.get("url")
         and industry_evidence.get("quote")
     )
     if (
         dimensions.get("industry") == COMPANY_FIT_UNAVAILABLE
-        or unsupported_industry_mismatch
+        or reviewable_industry_mismatch
     ):
         targets.append("industry")
     # A proven outside-region headquarters remains terminal. Research is used
@@ -5512,9 +5523,26 @@ def _industry_attribute_semantic_repair_needed(
     """Use one already-admitted industry review to resolve its full criterion."""
 
     details = result.details if isinstance(result.details, Mapping) else {}
+    dimensions = details.get("dimension_decisions")
+    dimension_evidence = details.get("dimension_evidence")
+    attribute_evidence = (
+        dimension_evidence.get("required_attribute")
+        if isinstance(dimension_evidence, Mapping)
+        else None
+    )
+    grounding = details.get("required_attribute_grounding")
+    grounded_attribute_mismatch = bool(
+        details.get("required_attribute_decision") == COMPANY_FIT_MISMATCH
+        and isinstance(dimensions, Mapping)
+        and dimensions.get("industry") == COMPANY_FIT_MATCH
+        and isinstance(attribute_evidence, Mapping)
+        and _valid_web_evidence_url(attribute_evidence.get("url"))
+        and str(attribute_evidence.get("quote") or "").strip()
+        and isinstance(grounding, Mapping)
+        and grounding.get("status") == "grounded"
+    )
     return bool(
-        "industry" in investigation_targets
-        and str(getattr(icp, "required_attribute", "") or "").strip()
+        str(getattr(icp, "required_attribute", "") or "").strip()
         and details.get("identity_decision") == COMPANY_FIT_MATCH
         and details.get("required_attribute_decision")
         in {
@@ -5522,6 +5550,10 @@ def _industry_attribute_semantic_repair_needed(
             COMPANY_FIT_MISMATCH,
             COMPANY_FIT_UNAVAILABLE,
         }
+        and (
+            "industry" in investigation_targets
+            or grounded_attribute_mismatch
+        )
     )
 
 
@@ -8306,7 +8338,7 @@ def _matched_investigator_source_contexts(
         company_fit.decision != COMPANY_FIT_MATCH
         or not _complete_company_identity(company_fit)
         or not isinstance(source_cache, Mapping)
-        or len(source_cache) > MAX_FETCH_CALLS
+        or len(source_cache) > _MAX_RETAINED_INVESTIGATOR_CONTEXTS
     ):
         return []
     details = company_fit.details if isinstance(company_fit.details, Mapping) else {}
@@ -8314,7 +8346,10 @@ def _matched_investigator_source_contexts(
     if not isinstance(dimensions, Mapping):
         return []
     contexts: list[dict[str, str]] = []
-    for dimension in ("employee_size", "geography", "stage"):
+    # This retained map can contain prefetched pages, which do not consume the
+    # investigator's fresh-fetch allowance. The fixed dimension loop and the
+    # final two-context cap bound the handoff without conflating those budgets.
+    for dimension in ("industry", "employee_size", "geography", "stage"):
         evidence = dimensions.get(dimension)
         if (
             not isinstance(evidence, Mapping)

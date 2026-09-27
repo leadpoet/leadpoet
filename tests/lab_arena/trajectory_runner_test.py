@@ -95,13 +95,17 @@ def test_runtime_events_precede_accepted_completion_and_retry_same_ids(tmp_path)
     assert api.batches[0] == api.batches[1]
     events = [event for batch in api.batches[1:] for event in batch["events"]]
     assert [event["kind"] for event in events] == [
-        "runtime.started", "runtime.finished", "runtime.stdout",
+        "runtime.started", "runtime.decision_capture", "runtime.finished",
+        "runtime.stdout",
     ]
-    finished = events[1]["content"]
+    assert events[1]["content"] == {
+        "status": "not_provided", "recorded": 0, "omitted": 0,
+    }
+    finished = events[2]["content"]
     assert finished["status"] == "accepted"
     assert finished["company_count"] == 1
     assert finished["resource_summary"]["provider_call_count"] == 1
-    assert events[2]["content"]["text"] == "model log line\n"
+    assert events[3]["content"]["text"] == "model log line\n"
     assert api.order[-1] == "complete"
     assert api.completions[0]["body"]["result"]["terminal_status"] == "accepted"
     assert all(set(event) == {"kind", "event_id", "occurred_at", "content"} for event in events)
@@ -133,7 +137,8 @@ def test_pre_gateway_provider_failure_is_logged_before_recovered_completion(tmp_
     )
     assert before <= occurred_at <= after
     assert [event["kind"] for event in events] == [
-        "runtime.started", "runtime.provider_error", "runtime.finished",
+        "runtime.started", "runtime.provider_error",
+        "runtime.decision_capture", "runtime.finished",
     ]
     assert sandbox.failures == 1
     assert api.order[-1] == "complete"
@@ -195,7 +200,8 @@ def test_provider_error_buffer_flushes_on_abandon(tmp_path):
     events = [event for batch in api.batches for event in batch["events"]]
     assert worker.abandoned == 1
     assert [event["kind"] for event in events] == [
-        "runtime.started", "runtime.provider_error", "runtime.error",
+        "runtime.started", "runtime.provider_error",
+        "runtime.decision_capture", "runtime.error",
     ]
     assert events[-1]["content"] == {
         "status": "abandoned", "failure_stage": "runtime",
@@ -248,7 +254,7 @@ def test_preflight_failure_records_setup_boundary_and_removes_directories(tmp_pa
 
     events = [event for batch in api.batches for event in batch["events"]]
     assert [event["kind"] for event in events] == [
-        "runtime.started", "runtime.error",
+        "runtime.started", "runtime.decision_capture", "runtime.error",
     ]
     assert events[-1]["content"] == {
         "status": "abandoned", "failure_stage": "setup",
@@ -275,9 +281,10 @@ def test_worker_stop_failure_records_cleanup_boundary_and_runtime_logs(
     )
     events = [event for batch in api.batches for event in batch["events"]]
     assert [event["kind"] for event in events] == [
-        "runtime.started", "runtime.error", "runtime.stdout",
+        "runtime.started", "runtime.decision_capture", "runtime.error",
+        "runtime.stdout",
     ]
-    assert events[1]["content"] == {
+    assert events[2]["content"] == {
         "status": "abandoned", "failure_stage": "cleanup",
         "error_class": "OSError",
         "resource_summary": {
@@ -291,7 +298,7 @@ def test_worker_stop_failure_records_cleanup_boundary_and_runtime_logs(
         "exit_code": 0,
         "timed_out": False,
     }
-    assert events[2]["content"]["text"] == "model log line\n"
+    assert events[3]["content"]["text"] == "model log line\n"
     assert worker.abandoned == 1 and api.completions == []
     assert "private cleanup detail" not in json.dumps(events)
 
@@ -315,13 +322,14 @@ def test_worker_stop_failure_does_not_replace_runtime_failure(
     worker = run_model(tmp_path, api, FailingRuntime())
     events = [event for batch in api.batches for event in batch["events"]]
     assert [event["kind"] for event in events] == [
-        "runtime.started", "runtime.error", "runtime.cleanup_error",
+        "runtime.started", "runtime.decision_capture", "runtime.error",
+        "runtime.cleanup_error",
     ]
-    assert events[1]["content"] == {
+    assert events[2]["content"] == {
         "status": "abandoned", "failure_stage": "runtime",
         "error_class": "ValueError",
     }
-    assert events[2]["content"] == {
+    assert events[3]["content"] == {
         "failure_stage": "cleanup", "error_class": "OSError",
     }
     assert worker.abandoned == 1 and api.completions == []
@@ -387,9 +395,10 @@ def test_runsc_cleanup_failure_retains_captured_result_for_trajectory(tmp_path):
     worker = run_model(tmp_path, api, CleanupFailureRuntime())
     events = [event for batch in api.batches for event in batch["events"]]
     assert [event["kind"] for event in events] == [
-        "runtime.started", "runtime.error", "runtime.stdout", "runtime.stderr",
+        "runtime.started", "runtime.decision_capture", "runtime.error",
+        "runtime.stdout", "runtime.stderr",
     ]
-    assert events[1]["content"] == {
+    assert events[2]["content"] == {
         "status": "abandoned", "failure_stage": "cleanup",
         "error_class": "SandboxCleanupError",
         "resource_summary": {
@@ -403,8 +412,8 @@ def test_runsc_cleanup_failure_retains_captured_result_for_trajectory(tmp_path):
         "exit_code": 0,
         "timed_out": False,
     }
-    assert events[2]["content"]["text"] == "captured stdout"
-    assert events[3]["content"]["text"] == "captured stderr"
+    assert events[3]["content"]["text"] == "captured stdout"
+    assert events[4]["content"]["text"] == "captured stderr"
     assert worker.abandoned == 1 and api.completions == []
     assert "private cleanup detail" not in json.dumps(events)
 

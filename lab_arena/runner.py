@@ -61,6 +61,7 @@ CODEX_MODULE_PATH = Path(__file__).with_name("lab_arena_codex.py").resolve()
 WEB_BRIDGE_PATH = Path(__file__).with_name("web_egress_bridge.py").resolve()
 MAX_REFUSED_FRAMES = 25  # after this many refused calls the worker answers a run's frames locally
 MAX_BUFFERED_PROVIDER_ERROR_EVENTS = 32
+MAX_BUFFERED_DECISION_EVENTS = 64
 QUOTA_SNAPSHOT_SCHEMA_VARIANTS = 2
 QUOTA_SNAPSHOT_STARTUP_REQUESTS = 2
 QUOTA_SNAPSHOT_CACHE_MILLISECONDS = 1000
@@ -1607,6 +1608,10 @@ class RunState:
     calls: List[Dict[str, Any]] = field(default_factory=list)
     provider_error_events: List[Dict[str, Any]] = field(default_factory=list)
     provider_error_events_dropped: int = 0
+    decision_events: List[Dict[str, Any]] = field(default_factory=list)
+    decision_events_omitted: int = 0
+    decision_nonfinish_recorded: int = 0
+    decision_finish_recorded: bool = False
     recovered_responses_retry_call_identities: set[str] = field(
         default_factory=set
     )
@@ -1665,6 +1670,31 @@ def _provider_error_events(state: RunState) -> List[Dict[str, Any]]:
             {**item, "content": dict(item["content"])}
             for item in state.provider_error_events
         ]
+
+
+def _decision_events_and_summary(
+    state: RunState, observed_at: str,
+) -> List[Dict[str, Any]]:
+    """Snapshot model-reported decisions and one host capture summary."""
+
+    with state.lock:
+        decisions = [
+            {**item, "content": dict(item["content"])}
+            for item in state.decision_events
+        ]
+        omitted = state.decision_events_omitted
+    return [
+        *decisions,
+        trajectory.event(
+            "runtime.decision_capture",
+            {
+                "status": "provided" if decisions or omitted else "not_provided",
+                "recorded": len(decisions),
+                "omitted": omitted,
+            },
+            occurred_at=observed_at,
+        ),
+    ]
 
 
 def _timestamp(clock: Callable[[], datetime]) -> str:
@@ -1895,6 +1925,75 @@ class WorkerSocketServer:
         if snapshot is None:
             return shim.encode_worker_error("quota_unavailable")
         return contracts.canonical_json(snapshot).encode("utf-8")
+
+    def _handle_decision_control(self, raw: bytes) -> Optional[bytes]:
+        """Capture one bounded model report without dispatching a provider call."""
+
+        try:
+            frame = json.loads(bytes(raw).decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return None
+        if not isinstance(frame, Mapping) or frame.get(
+            "schema_version"
+        ) != lab_arena_checkpoint.DECISION_SCHEMA_VERSION:
+            return None
+        if len(raw) > lab_arena_checkpoint.MAX_DECISION_FRAME_BYTES:
+            return contracts.canonical_json({"recorded": False}).encode("utf-8")
+        try:
+            decision = lab_arena_checkpoint.validate_decision_frame(frame)
+        except Exception:
+            return contracts.canonical_json({"recorded": False}).encode("utf-8")
+
+        state = self._state
+        if str(state.lease.get("kind") or "execute") != "execute":
+            return contracts.canonical_json({"recorded": False}).encode("utf-8")
+        try:
+            observed_at = _timestamp(lambda: datetime.now(timezone.utc))
+            with state.lock:
+                is_finish = decision["decision"] == "finish"
+                if (
+                    is_finish and state.decision_finish_recorded
+                    or not is_finish
+                    and state.decision_nonfinish_recorded
+                    >= MAX_BUFFERED_DECISION_EVENTS - 1
+                ):
+                    state.decision_events_omitted += 1
+                    return contracts.canonical_json({"recorded": False}).encode(
+                        "utf-8"
+                    )
+                sequence = len(state.decision_events)
+                content = {
+                    "source": "model_reported",
+                    "sequence": sequence,
+                    "after_action_sequence": state.action_sequence - 1,
+                    "objective": decision["objective"],
+                    "evidence": list(decision["evidence"]),
+                    "rationale": decision["rationale"],
+                    "next_action": decision["next_action"],
+                    "decision": decision["decision"],
+                }
+                if "candidate" in decision:
+                    content["candidate"] = decision["candidate"]
+                redacted = trajectory.sanitize_content(
+                    content, secrets=(state.lease_token,)
+                )
+                state.decision_events.append(
+                    trajectory.event(
+                        "runtime.decision", redacted, occurred_at=observed_at
+                    )
+                )
+                if is_finish:
+                    state.decision_finish_recorded = True
+                else:
+                    state.decision_nonfinish_recorded += 1
+        except Exception:
+            try:
+                with state.lock:
+                    state.decision_events_omitted += 1
+            except Exception:
+                pass
+            return contracts.canonical_json({"recorded": False}).encode("utf-8")
+        return contracts.canonical_json({"recorded": True}).encode("utf-8")
 
     @staticmethod
     def _temporary_hold(
@@ -2273,6 +2372,9 @@ class WorkerSocketServer:
         """The judge shim's transport: one length-prefixed operation frame."""
 
         control_response = self._handle_quota_control(raw)
+        if control_response is not None:
+            return control_response
+        control_response = self._handle_decision_control(raw)
         if control_response is not None:
             return control_response
 
@@ -2689,6 +2791,11 @@ def _record_runtime_failure(
             })
         events = [
             *_provider_error_events(state),
+            *(
+                _decision_events_and_summary(state, observed_at)
+                if str(state.lease.get("kind") or "execute") == "execute"
+                else []
+            ),
             trajectory.event(
                 "runtime.error",
                 error_content,
@@ -3392,7 +3499,10 @@ class AssignmentExecutor:
             )
         body = {"run_id": lease["run_id"], "result": run_result, "output": output_document, "lease_token": lease_token}
         _record_trajectory(config, lease, lease_token, [
-            *_provider_error_events(state), trajectory.event(
+            *_provider_error_events(state), *(
+                _decision_events_and_summary(state, finished_at)
+                if not scoring_run else []
+            ), trajectory.event(
             "runtime.finished",
             {"status": terminal, "resource_summary": run_result["resource_summary"],
              "started_at": started_at, "finished_at": finished_at,

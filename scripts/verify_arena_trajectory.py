@@ -113,6 +113,10 @@ def parser() -> argparse.ArgumentParser:
     serve.add_argument("--environment-file", type=Path, required=True)
     serve.add_argument("--published-icp-round", required=True)
     serve.add_argument("--public-miner-submission", required=True)
+    serve.add_argument(
+        "--operator-miner-source-archive", type=Path,
+        help="Explicit operator test archive for a new, host-funded shadow miner",
+    )
     serve.add_argument("--runner-hotkey", action="append", required=True)
     serve.add_argument("--icp-position", type=int, action="append")
     serve.add_argument("--cutoff-minutes", type=int, default=5)
@@ -405,6 +409,13 @@ def _fixture_service(args: argparse.Namespace):
     payload = built._objects.get_bounded(
         old["source_ref"], source_bundle.MAX_SOURCE_ARCHIVE_BYTES
     )
+    operator_archive = getattr(args, "operator_miner_source_archive", None)
+    if operator_archive is not None:
+        # Never replace an admitted source. This archive gets a separate fixture
+        # identity and is reviewed by the normal admission path below.
+        if operator_archive.stat().st_size > source_bundle.MAX_SOURCE_ARCHIVE_BYTES:
+            raise VerificationError("operator test archive exceeds the source limit")
+        payload = operator_archive.read_bytes()
     facts = source_bundle.validate_source_archive(payload, require_license=True)
     defaults = replace(
         built.config.defaults, benchmark_icp_count=2, rewards_enabled=False,
@@ -419,8 +430,11 @@ def _fixture_service(args: argparse.Namespace):
         },
     )
     service = ArenaService(config)
+    fixture_identity = args.round_id + ":" + args.public_miner_submission
+    if operator_archive is not None:
+        fixture_identity += ":operator:" + contracts.hash_bytes(payload)
     submission_id = "trajectory-" + hashlib.sha256(
-        (args.round_id + ":" + args.public_miner_submission).encode()
+        fixture_identity.encode()
     ).hexdigest()[:24]
     source_ref = "arena/%s/sources/%s.tar.gz" % (args.round_id, submission_id)
     checksum = base64.b64encode(
@@ -460,7 +474,10 @@ def _fixture_service(args: argparse.Namespace):
                 "source_size_bytes": facts["source_size_bytes"],
                 "source_content_md5": checksum,
                 "consent": {"public_rerun": True},
-                "fixture_origin": "public_source_operator_trajectory_probe",
+                "fixture_origin": (
+                    "operator_archive_trajectory_probe" if operator_archive is not None
+                    else "public_source_operator_trajectory_probe"
+                ),
             },
             owner_admission=owner,
         )
@@ -518,7 +535,10 @@ def _fixture_service(args: argparse.Namespace):
     if not fixture or fixture.get("code_review_status") != "passed":
         raise VerificationError("fixture miner code review did not pass")
     service._trajectory_fixture = {
-        "fixture_kind": "operator_public_source_host_funded_miner",
+        "fixture_kind": (
+            "operator_archive_host_funded_miner" if operator_archive is not None
+            else "operator_public_source_host_funded_miner"
+        ),
         "submission_id": submission_id,
         "source_submission_id": args.public_miner_submission,
         "source_archive_hash": contracts.hash_bytes(payload),

@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: September 28 decision capture
+
+On 2026-09-27 the user authorized the smallest useful Arena model decision
+records for baseline and miner executions, push, deployment and production
+runtime validation before the September 28 baseline. Reuse the private
+trajectory table, existing gateway leases and validator setup. Authority covers
+narrow runtime and baseline-model changes, focused tests, exact committed
+migrations only if required, safe pushes/merges and canonical paired restarts
+through the overnight validation procedures. Preserve scoring, budgets,
+credentials, frozen submitted source/results, rewards and concurrent work.
+Record concise model-provided explanations and evidence references; do not
+collect hidden reasoning or invent reasons for uninstrumented models. This
+scope ends after deployment, live persistence proof and September 28 readiness.
+
 ## Scoped production authorization: remaining verifier consistency fixes
 
 On 2026-09-27 the user renewed authority to fix the remaining reproducible

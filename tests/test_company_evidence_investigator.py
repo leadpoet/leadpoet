@@ -5285,6 +5285,55 @@ def test_rebel_headquarters_conflict_requires_dates_or_move_evidence():
     assert "A factory opening cannot prove an HQ move" in prompt
 
 
+def test_prologis_one_activity_or_branch_is_sufficient():
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+
+    assert (
+        '"buys, sells, brokers, develops, or manages property assets" is '
+        "satisfied by company-bound evidence for any one of those activities"
+    ) in prompt
+    assert (
+        "never require brokerage after development or management is proved"
+        in prompt
+    )
+
+
+def test_industry_activity_disjunction_keeps_explicit_and_requirements():
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+
+    assert "This OR applies only inside that activity clause" in prompt
+    assert (
+        "Still prove every separate industry, sub-industry, product/service, "
+        "required-attribute, or other clause joined by AND"
+    ) in prompt
+    assert (
+        "Every business type, object, customer scope, and qualifier that "
+        "governs the OR list applies to each alternative"
+    ) in prompt
+
+
+def test_industry_activity_disjunction_rejects_wrong_industry_control():
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+
+    assert (
+        "An allowed verb in the wrong industry does not satisfy the criterion"
+        in prompt
+    )
+    assert (
+        "generic homes-delivered or lots-owned metrics do not prove commercial "
+        "property"
+    ) in prompt
+
+
+def test_industry_activity_disjunction_allows_semantic_business_type_proof():
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+
+    assert (
+        "company-bound logistics-warehouse evidence can semantically prove "
+        'commercial real estate without the exact word "commercial"'
+    ) in prompt
+
+
 @pytest.mark.parametrize(
     ("name", "domain", "quote", "country", "state", "expected"),
     [
@@ -8680,6 +8729,29 @@ def test_public_stage_needs_listing_proof_not_labels_or_plans():
     )["stage"]
     assert finding["status"] == "UNPROVEN"
     assert finding["reason"] == "source quote did not prove current public listing"
+
+
+def test_current_jll_investor_trading_row_is_admitted_as_public_stage():
+    url = "https://ir.jll.com/overview/default.aspx"
+    quote = (
+        "NYSE: JLL 321.91 -2.49 (-0.77%) Volume: 367,005 "
+        "September 25, 2026 4:00 PM 20 Minute Delay"
+    )
+    finding = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            observed_value="Public",
+            evidence_url=url,
+            evidence_quote=quote,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: quote},
+        first_party_domains={"jll.com"},
+        identity_names={"jll", "joneslanglasalleincorporated"},
+    )["stage"]
+
+    assert finding["status"] == "VERIFIED"
+    assert finding["evidence_quote"] == quote
 
 
 def test_acculon_retrospective_series_a_statement_requires_recipient_binding():

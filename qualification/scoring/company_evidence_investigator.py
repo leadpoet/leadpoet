@@ -33,6 +33,7 @@ from qualification.scoring.company_verification import (
     MAX_HOMEPAGE_NAVIGATION_LOCATORS,
     MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS,
     _fetch_bounded_html,
+    current_exchange_profile_names_issuer,
 )
 from qualification.scoring.evaluation_clock import evaluation_date
 from qualification.scoring.linkedin_company_size import (
@@ -181,6 +182,19 @@ compliance, internal use, or badges. Preserve the criterion's explicit AND/OR
 structure. Prove each conjunct. For alternatives joined by OR, evidence for one
 qualifying alternative is sufficient; do not require all alternatives.
 Missing discussion is not a contradiction.
+Read activity lists literally. For example, a criterion that requires a
+commercial real-estate business that "buys, sells, brokers, develops, or
+manages property assets" is satisfied by company-bound evidence for any one of
+those activities; never require brokerage after development or management is
+proved. This OR applies only inside that activity clause. Still prove every
+separate industry, sub-industry, product/service, required-attribute, or other
+clause joined by AND. An allowed verb in the wrong industry does not satisfy
+the criterion. Every business type, object, customer scope, and qualifier that
+governs the OR list applies to each alternative; proving a listed verb alone is
+insufficient. For example, generic homes-delivered or lots-owned metrics do not
+prove commercial property, while company-bound logistics-warehouse evidence
+can semantically prove commercial real estate without the exact word
+"commercial".
 A vendor-supplied paid management console, policy control plane, or workflow
 platform can satisfy a technical operations alternative when customers use it
 to manage infrastructure artifacts, entitlements, build or deployment policy,
@@ -1672,6 +1686,10 @@ def _validated_findings(
                         semantic_public_listing=(
                             _quote_supports_semantic_public_listing(
                                 finding["evidence_quote"]
+                            )
+                            or current_exchange_profile_names_issuer(
+                                finding["evidence_quote"],
+                                stage_attribution_names,
                             )
                         ),
                         authoritative_public_listing=(

@@ -52,6 +52,8 @@ from qualification.scoring.verification_helpers import (
 INVESTIGATOR_MODEL = "google/gemini-2.5-flash"
 POSITIVE_SEMANTIC_REVIEW_MODEL = "openai/gpt-6-luna"
 MAX_REASONING_TURNS = 8
+MAX_INCOMPLETE_SUBMIT_RETRIES = 1
+REASONING_MAX_TOKENS = 3000
 MAX_SEARCH_CALLS = 2
 MAX_FETCH_CALLS = 3
 MAX_SEARCH_RESULTS = 5
@@ -431,6 +433,25 @@ def _tools(targets: Sequence[str]) -> list[dict[str, Any]]:
 def _record_failure(diagnostic: Optional[dict[str, str]], reason: str) -> None:
     if diagnostic is not None:
         diagnostic[VERIFIER_FAILURE_REASON_KEY] = reason
+
+
+def _response_exhausted_output_budget(
+    body: Mapping[str, Any], *, max_tokens: int
+) -> bool:
+    """Return true only when OpenRouter marks or accounts for output exhaustion."""
+
+    choices = body.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices else {}
+    if isinstance(choice, Mapping) and choice.get("finish_reason") == "length":
+        return True
+    usage = body.get("usage")
+    completion_tokens = (
+        usage.get("completion_tokens") if isinstance(usage, Mapping) else None
+    )
+    return bool(
+        type(completion_tokens) is int
+        and completion_tokens >= max_tokens
+    )
 
 
 def _safe_https_url(value: Any) -> str:
@@ -851,6 +872,25 @@ def _public_stage_submitted_source_to_prefetch(
     if any(url in fetched_pages for url in first_party_candidates):
         return ""
     return first_party_candidates[0] if first_party_candidates else ""
+
+
+def _fetched_bound_public_market_sources(
+    fetched_pages: Mapping[str, str],
+    identity_names: set[str],
+) -> tuple[str, ...]:
+    """Return fetched sources with strong market proof bound to this issuer."""
+
+    from qualification.scoring.lead_scorer import (
+        _public_quote_has_bound_market_locator,
+    )
+
+    return tuple(
+        url
+        for url, text in fetched_pages.items()
+        if _public_quote_has_bound_market_locator(
+            _visible_quote_surface(text), tuple(identity_names)
+        )
+    )
 
 
 def _independently_bound_first_party_url(
@@ -2218,10 +2258,13 @@ async def investigate_company_evidence(
             final_correction_pending = False
             forced_next_tool = ""
             forced_stage_search_pending = False
+            incomplete_submit_retries = 0
+            incomplete_submit_retry_pending = False
             industry_followup_pending = False
             industry_followup_search_completed = False
             industry_followup_fetched_urls: set[str] = set()
             quote_repair_targets: set[str] = set()
+            public_stage_unproven_rereviewed = False
             for _turn in range(MAX_REASONING_TURNS + 1):
                 correction_turn = _turn == MAX_REASONING_TURNS
                 if correction_turn and not final_correction_pending:
@@ -2270,6 +2313,11 @@ async def investigate_company_evidence(
                     and industry_followup_pending
                     and not forced_stage_search_pending
                 )
+                serialization_retry_request = bool(
+                    incomplete_submit_retry_pending
+                    and required_tool == "submit_findings"
+                )
+                incomplete_submit_retry_pending = False
                 status, body = await _post_json(
                     session,
                     "https://openrouter.ai/api/v1/chat/completions",
@@ -2315,7 +2363,15 @@ async def investigate_company_evidence(
                         ),
                         "parallel_tool_calls": False,
                         "temperature": 0.0,
-                        "max_tokens": 3000,
+                        "max_tokens": REASONING_MAX_TOKENS,
+                        **(
+                            {"reasoning": {"effort": "low"}}
+                            if (
+                                positive_semantic_review
+                                and serialization_retry_request
+                            )
+                            else {}
+                        ),
                     },
                 )
                 if status != 200:
@@ -2362,9 +2418,63 @@ async def investigate_company_evidence(
                     or not isinstance(raw_arguments, str)
                 ):
                     raise ValueError("reasoning_tool_call_malformed")
+                canonical_call = {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": raw_arguments,
+                    },
+                }
                 try:
                     arguments = json.loads(raw_arguments or "{}")
                 except (TypeError, ValueError):
+                    ordinary_turn_remains = _turn + 1 < MAX_REASONING_TURNS
+                    retry_incomplete_submit = bool(
+                        name == "submit_findings"
+                        and not correction_turn
+                        and ordinary_turn_remains
+                        and incomplete_submit_retries
+                        < MAX_INCOMPLETE_SUBMIT_RETRIES
+                        and time.monotonic() - started
+                        < ADMISSION_DEADLINE_SECONDS
+                        and _response_exhausted_output_budget(
+                            body, max_tokens=REASONING_MAX_TOKENS
+                        )
+                    )
+                    if retry_incomplete_submit:
+                        incomplete_submit_retries += 1
+                        forced_next_tool = "submit_findings"
+                        incomplete_submit_retry_pending = True
+                        assistant_message: dict[str, Any] = {
+                            "role": "assistant",
+                            "tool_calls": [canonical_call],
+                        }
+                        if isinstance(message.get("content"), str):
+                            assistant_message["content"] = message["content"]
+                        messages.extend([
+                            assistant_message,
+                            {
+                                "role": "tool",
+                                "tool_call_id": call_id,
+                                "name": "submit_findings",
+                                "content": _bounded_message_json({
+                                    "ok": False,
+                                    "error": "incomplete_submit_findings",
+                                    "instruction": (
+                                        "The prior submit_findings arguments ended "
+                                        "before one complete JSON object was returned. "
+                                        "Retry submit_findings once with complete JSON. "
+                                        "Do not search or fetch; re-emit only complete "
+                                        "findings from already fetched evidence. "
+                                        "Keep each exact evidence quote as short as the "
+                                        "claim permits. Return one finding for every "
+                                        "requested target."
+                                    ),
+                                }),
+                            },
+                        ])
+                        continue
                     raise ValueError("reasoning_tool_arguments_malformed") from None
                 if required_tool == "search_web" and (
                     not isinstance(arguments, Mapping)
@@ -2382,14 +2492,6 @@ async def investigate_company_evidence(
                         and search_domain not in normalized_query
                     ):
                         raise ValueError("reasoning_forced_tool_arguments_malformed")
-                canonical_call = {
-                    "id": call_id,
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "arguments": raw_arguments,
-                    },
-                }
                 if required_tool:
                     forced_next_tool = ""
                     forced_stage_search_pending = False
@@ -2588,6 +2690,27 @@ async def investigate_company_evidence(
                             "current public stage was not established after a "
                             "successful company-bound current-status discovery",
                         )["stage"]
+                    submitted_stage = submitted_findings.get("stage", {})
+                    bound_public_sources = (
+                        _fetched_bound_public_market_sources(
+                            fetched_pages,
+                            identity_names,
+                        )
+                        if requested_public_stage
+                        else ()
+                    )
+                    force_public_stage_rereview = bool(
+                        requested_public_stage
+                        and submitted_stage.get("status") == "UNPROVEN"
+                        and stage_finding.get("status") == "UNPROVEN"
+                        and not rejected
+                        and current_stage_search_succeeded
+                        and bound_public_sources
+                        and not public_stage_unproven_rereviewed
+                        and not correction_turn
+                        and not force_submit
+                        and _turn < MAX_REASONING_TURNS - 1
+                    )
                     if (
                         rejected or force_industry_followup
                     ) and not correction_turn:
@@ -2660,6 +2783,29 @@ async def investigate_company_evidence(
                                     )
                                 )
                                 + "Submit one complete finding for every requested target."
+                            ),
+                        }
+                    elif force_public_stage_rereview:
+                        public_stage_unproven_rereviewed = True
+                        forced_next_tool = "submit_findings"
+                        tool_result = {
+                            "ok": False,
+                            "error": "fetched_public_stage_evidence_not_adjudicated",
+                            "issuer_bound_market_source_urls": list(
+                                bound_public_sources
+                            ),
+                            "instruction": (
+                                "Re-review Public stage once using the already fetched "
+                                "issuer-bound market sources and the completed current-status "
+                                "discovery. A failed optional fetch does not by itself erase "
+                                "valid company-bound exchange or ticker evidence. A concrete "
+                                "later completed acquisition, take-private, or delisting is a "
+                                "material conflict and must remain UNPROVEN or support the "
+                                "different stage. Do not infer Public from this correction. "
+                                "Do not search or fetch. VERIFIED or CONTRADICTED still needs "
+                                "one exact continuous quote from its fetched URL and must pass "
+                                "the unchanged deterministic validator. Submit one complete "
+                                "finding for every requested target."
                             ),
                         }
                     elif unproven_without_search:

@@ -51,11 +51,16 @@ def _replay_source_fixture(monkeypatch):
         "stage_2_icp_count": 1,
         "integrity_policy": "arena_integrity_v1",
         "intent_details_policy": intent_details_policy.POLICY,
+        "schedule": {
+            "submission_open": "2026-09-23T00:00:00Z",
+            "submission_cutoff": "2026-09-24T00:00:00Z",
+        },
     }
     participant_ids = ("source-a", "source-b", "source-c")
     source = {
         "round_id": REPLAY_SOURCE_ROUND_ID,
         "status": "published",
+        "icp_set_date": "2026-09-23",
         "evaluation_date": "2026-09-24",
         "benchmark_ref": "arena/source/benchmark.json",
         "configuration_doc": source_configuration,
@@ -272,9 +277,239 @@ def test_replay_assignment_requires_published_source_and_parser_preserves_select
         "--replay-assignment", "source-a:0", "--replay-assignment", "source-b:1",
     ])
     assert args.replay_assignment == ["source-a:0", "source-b:1"]
+    assert args.replay_historical is False
     with pytest.raises(verification.VerificationError, match="published source round"):
         verification._build_pinned_service(
             REPLAY_TARGET_ROUND_ID, replay_assignments=args.replay_assignment,
+        )
+
+
+def test_historical_replay_is_explicit_and_rejects_malformed_or_future_source(monkeypatch):
+    built, _runs, _documents = _replay_source_fixture(monkeypatch)
+    monkeypatch.setattr(
+        verification, "_utc_now",
+        lambda: datetime(2026, 9, 25, tzinfo=timezone.utc),
+    )
+    with pytest.raises(verification.VerificationError, match="today's evaluation date"):
+        verification._saved_output_replay(
+            built, REPLAY_SOURCE_ROUND_ID, "arena-2026-09-25-replay"
+        )
+
+    replay = verification._saved_output_replay(
+        built, REPLAY_SOURCE_ROUND_ID, "arena-2026-09-25-replay",
+        historical=True,
+    )
+    assert replay["evidence"]["evaluation_date"] == "2026-09-24"
+    assert replay["evidence"]["source_schedule"] == {
+        "submission_open": "2026-09-23T00:00:00Z",
+        "submission_cutoff": "2026-09-24T00:00:00Z",
+    }
+
+    source = built.store.get_round(REPLAY_SOURCE_ROUND_ID)
+    source["configuration_doc"]["schedule"]["submission_open"] = "invalid"
+    with pytest.raises(verification.VerificationError, match="schedule is invalid"):
+        verification._saved_output_replay(
+            built, REPLAY_SOURCE_ROUND_ID, "arena-2026-09-25-replay",
+            historical=True,
+        )
+    source["configuration_doc"]["schedule"]["submission_open"] = (
+        "2026-09-23T00:00:00Z"
+    )
+    source["icp_set_date"] = "2026-09-22"
+    with pytest.raises(verification.VerificationError, match="schedule is invalid"):
+        verification._saved_output_replay(
+            built, REPLAY_SOURCE_ROUND_ID, "arena-2026-09-25-replay",
+            historical=True,
+        )
+    source["icp_set_date"] = "2026-09-23"
+    monkeypatch.setattr(
+        verification, "_utc_now",
+        lambda: datetime(2026, 9, 23, 23, 59, tzinfo=timezone.utc),
+    )
+    with pytest.raises(verification.VerificationError, match="schedule is invalid"):
+        verification._saved_output_replay(
+            built, REPLAY_SOURCE_ROUND_ID, "arena-2026-09-23-replay",
+            historical=True,
+        )
+
+
+def test_historical_replay_service_keeps_source_dates_and_current_deadlines(monkeypatch):
+    from lab_arena import api, service, wiring
+
+    built, _runs, _documents = _replay_source_fixture(monkeypatch)
+
+    @dataclass
+    class Defaults:
+        benchmark_icp_count: int = 10
+        promotion_margin: float = 0.5
+        runner_slot_ceiling: int = 10
+        rewards_enabled: bool = True
+        daily_cutoff_hour_utc: int = 0
+        baseline_source_url: str = "example"
+
+    @dataclass
+    class Config:
+        defaults: Defaults
+        mode: str = "live"
+        network_name: str = "finney"
+        netuid: int = 71
+        pinned_round_id: str | None = None
+        reward_signer_factory: object = object()
+        baseline_promoter_factory: object = object()
+        code_reviewer: object = object()
+        baseline_source_fetcher: object = None
+        daily_icp_source: object = None
+
+    class FakeArenaService:
+        def __init__(self, config):
+            self.config = config
+
+        def build_schedule(self, cutoff):
+            cutoff = cutoff.astimezone(timezone.utc)
+            return {
+                "submission_open": (cutoff.replace(day=26)).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                ),
+                "submission_cutoff": cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "benchmark_deadline": cutoff.replace(hour=cutoff.hour + 1).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                ),
+            }
+
+    built.config = Config(Defaults())
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setattr(
+        verification, "_utc_now",
+        lambda: datetime(2026, 9, 27, 1, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        wiring, "build_service_from_environment", lambda _mode: (built, None)
+    )
+    monkeypatch.setattr(service, "ArenaService", FakeArenaService)
+    monkeypatch.setattr(api, "create_app", lambda _service: "test-app")
+    monkeypatch.setattr(
+        verification, "_validate_replay_source_archive",
+        lambda _service, _round_id, *, required: None,
+    )
+
+    replay_service, app = verification._build_pinned_service(
+        "arena-2026-09-27-replay",
+        replay_published_round=REPLAY_SOURCE_ROUND_ID,
+        replay_historical=True,
+    )
+    schedule = replay_service.build_schedule(
+        datetime(2026, 9, 27, 1, tzinfo=timezone.utc)
+    )
+
+    assert app == "test-app"
+    assert schedule == {
+        "submission_open": "2026-09-23T00:00:00Z",
+        "submission_cutoff": "2026-09-24T00:00:00Z",
+        "benchmark_deadline": "2026-09-27T02:00:00Z",
+    }
+    assert replay_service._saved_output_replay["evaluation_date"] == "2026-09-24"
+    assert replay_service._saved_output_replay["icp_set_date"] == "2026-09-23"
+    native_evaluation_date = datetime.strptime(
+        schedule["submission_cutoff"], "%Y-%m-%dT%H:%M:%SZ"
+    ).date().isoformat()
+    assert native_evaluation_date == replay_service._saved_output_replay["evaluation_date"]
+    native_score_input = scoring.build_scoring_input(
+        scored_run_id="historical-replay-run",
+        icp={"prompt": "Historical ICP"},
+        companies=[],
+        policy=scoring.build_scorer_policy(),
+        evaluation_date=native_evaluation_date,
+    )
+    assert native_score_input["evaluation_date"] == "2026-09-24"
+    assert replay_service.config.mode == "shadow"
+    assert replay_service.config.pinned_round_id == "arena-2026-09-27-replay"
+    assert replay_service.config.defaults.rewards_enabled is False
+    assert replay_service.config.reward_signer_factory is None
+    assert replay_service.config.baseline_promoter_factory is None
+    assert replay_service.config.code_reviewer is None
+
+
+def test_historical_replay_requires_source_and_resume_keeps_frozen_schedule():
+    with pytest.raises(verification.VerificationError, match="requires a published source"):
+        verification._build_pinned_service(ROUND_ID, replay_historical=True)
+
+    service = _replay_target_service()
+    target_round_id = "arena-2026-09-16-replay"
+    old_source_ref = (
+        f"arena/{ROUND_ID}/sources/"
+        f"baseline-{ROUND_ID.removeprefix('arena-')}.tar.gz"
+    )
+    new_source_ref = (
+        f"arena/{target_round_id}/sources/"
+        f"baseline-{target_round_id.removeprefix('arena-')}.tar.gz"
+    )
+    service.object_documents[new_source_ref] = service.object_documents.pop(old_source_ref)
+    service.store.row["round_id"] = target_round_id
+    service.store.row["configuration_doc"]["round_id"] = target_round_id
+    service.config.pinned_round_id = target_round_id
+    service.config.defaults.stage_minutes = {
+        "benchmark": 60,
+        "stage_1": 60,
+        "stage_1_scoring": 60,
+        "stage_2": 60,
+        "final_scoring": 60,
+    }
+    runtime_schedule = {
+        "submission_open": "2026-09-14T00:00:00Z",
+        "submission_cutoff": "2026-09-15T00:00:00Z",
+        "benchmark_deadline": "2026-09-16T01:00:00Z",
+        "stage_1_start": "2026-09-16T01:00:01Z",
+        "stage_1_close": "2026-09-16T02:00:01Z",
+        "stage_1_scoring_close": "2026-09-16T03:00:01Z",
+        "stage_2_start": "2026-09-16T03:00:02Z",
+        "stage_2_close": "2026-09-16T04:00:02Z",
+        "final_scoring_close": "2026-09-16T05:00:02Z",
+        "publication_deadline": "2026-09-16T05:00:03Z",
+    }
+    service.store.row["configuration_doc"]["schedule"] = dict(runtime_schedule)
+    service.build_schedule = lambda _cutoff: dict(runtime_schedule)
+    service._saved_output_replay.update({
+        "historical_source": True,
+        "icp_set_date": "2026-09-14",
+        "source_schedule": {
+            "submission_open": "2026-09-14T00:00:00Z",
+            "submission_cutoff": "2026-09-15T00:00:00Z",
+        },
+    })
+    verification._validate_frozen_round(service, service.store.row)
+
+    service.store.row["configuration_doc"]["schedule"]["benchmark_deadline"] = (
+        "2026-09-16T01:00:01Z"
+    )
+    with pytest.raises(verification.VerificationError, match="replay_runtime_schedule"):
+        verification._validate_frozen_round(service, service.store.row)
+    service.store.row["configuration_doc"]["schedule"] = dict(runtime_schedule)
+
+    service.store.row["configuration_doc"]["schedule"]["submission_cutoff"] = (
+        "2026-09-16T00:00:00Z"
+    )
+    with pytest.raises(verification.VerificationError, match="replay_source_schedule"):
+        verification._validate_frozen_round(service, service.store.row)
+    service.store.row["configuration_doc"]["schedule"] = dict(runtime_schedule)
+
+    service.store.row["configuration_doc"]["scorer_image_digest"] = (
+        "sha256:" + "b" * 64
+    )
+    with pytest.raises(verification.VerificationError, match="scorer_image_digest"):
+        verification._validate_frozen_round(service, service.store.row)
+
+
+def test_new_shadow_target_id_must_use_current_utc_date():
+    class EmptyStore:
+        def get_round(self, _round_id):
+            return None
+
+    service = SimpleNamespace(store=EmptyStore())
+    with pytest.raises(verification.VerificationError, match="current UTC date"):
+        verification._create_or_resume(
+            service,
+            "arena-2026-09-26-historical",
+            now=datetime(2026, 9, 27, tzinfo=timezone.utc),
         )
 
 

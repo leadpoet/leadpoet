@@ -16,7 +16,7 @@ import sys
 import tempfile
 import threading
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -82,6 +82,10 @@ def build_parser() -> argparse.ArgumentParser:
             help="limit replay to this submission_id:ICP_position; repeat for each saved case",
         )
         command.add_argument(
+            "--replay-historical", action="store_true",
+            help="allow a published historical source while retaining its frozen evaluation date",
+        )
+        command.add_argument(
             "--status-file",
             type=Path,
             help="atomic JSON evidence path; defaults to /tmp/<round-id>.json",
@@ -119,7 +123,7 @@ def _validate_round_id(round_id: str) -> str:
 
 def _saved_output_replay(
     built: Any, source_round_id: str, round_id: str,
-    *, assignments: list[str] | None = None,
+    *, assignments: list[str] | None = None, historical: bool = False,
 ) -> dict[str, Any]:
     """Read immutable accepted inputs for a new, explicitly labelled shadow run."""
 
@@ -129,7 +133,9 @@ def _saved_output_replay(
     if contracts.ROUND_ID_RE.fullmatch(str(source_round_id or "")) is None:
         raise VerificationError("replay source round id is invalid")
     try:
-        datetime.strptime(str(source_round_id)[:16], "arena-%Y-%m-%d")
+        source_round_date = datetime.strptime(
+            str(source_round_id)[:16], "arena-%Y-%m-%d"
+        ).date()
     except ValueError as exc:
         raise VerificationError("replay source round date is invalid") from exc
     source_round_id = str(source_round_id)
@@ -141,11 +147,42 @@ def _saved_output_replay(
         and resumed_target.get("round_id") == round_id
         and (resumed_target.get("configuration_doc") or {}).get("mode") == "shadow"
     )
+    source_schedule = None
+    if historical and source:
+        schedule = source_config.get("schedule")
+        try:
+            evaluation_date = datetime.strptime(
+                str(source.get("evaluation_date") or ""), "%Y-%m-%d"
+            ).date()
+            icp_set_date = datetime.strptime(
+                str(source.get("icp_set_date") or ""), "%Y-%m-%d"
+            ).date()
+            submission_open = datetime.strptime(
+                str(schedule["submission_open"]), "%Y-%m-%dT%H:%M:%SZ"
+            ).replace(tzinfo=timezone.utc)
+            submission_cutoff = datetime.strptime(
+                str(schedule["submission_cutoff"]), "%Y-%m-%dT%H:%M:%SZ"
+            ).replace(tzinfo=timezone.utc)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise VerificationError("historical replay source schedule is invalid") from exc
+        if (
+            evaluation_date != source_round_date
+            or submission_open.date() != icp_set_date
+            or submission_cutoff.date() != evaluation_date
+            or submission_cutoff - submission_open != timedelta(days=1)
+            or submission_cutoff > _utc_now()
+        ):
+            raise VerificationError("historical replay source schedule is invalid")
+        source_schedule = {
+            "submission_open": schedule["submission_open"],
+            "submission_cutoff": schedule["submission_cutoff"],
+        }
     if (
         not source or source.get("status") != "published"
         or source_round_id == round_id
         or (
             str(source.get("evaluation_date")) != _utc_now().date().isoformat()
+            and not historical
             and not resume_is_bound_shadow
         )
         or source_config.get("network_name") != built.config.network_name
@@ -313,6 +350,7 @@ def _saved_output_replay(
     )
     return {
         "icps": icps, "archive": payload, "source_url": source_url,
+        **({"source_schedule": source_schedule} if source_schedule else {}),
         "evidence": {
             "source_round": source_round_id,
             "input_hash": input_hash,
@@ -338,6 +376,11 @@ def _saved_output_replay(
             ),
             **({"omitted_unselected_output_count": unselected_output_count}
                if selected is not None else {}),
+            **({
+                "historical_source": True,
+                "source_schedule": source_schedule,
+                "icp_set_date": icp_set_date.isoformat(),
+            } if source_schedule else {}),
             "origins": origins,
         },
     }
@@ -385,11 +428,14 @@ def _validate_replay_source_archive(
 def _build_pinned_service(
     round_id: str, *, replay_published_round: str | None = None,
     replay_assignments: list[str] | None = None,
+    replay_historical: bool = False,
 ):
     """Use production dependencies with a process-local shadow ownership gate."""
 
     if replay_assignments is not None and not replay_published_round:
         raise VerificationError("replay assignments require a published source round")
+    if replay_historical and not replay_published_round:
+        raise VerificationError("historical replay requires a published source round")
     source_mode = os.environ.get("LAB_ARENA_MODE", "").strip().lower()
     if source_mode != "live":
         raise VerificationError("the source environment must be the live gateway environment")
@@ -400,7 +446,8 @@ def _build_pinned_service(
     built, _unused_app = build_service_from_environment("shadow")
     replay = (
         _saved_output_replay(
-            built, replay_published_round, round_id, assignments=replay_assignments
+            built, replay_published_round, round_id,
+            assignments=replay_assignments, historical=replay_historical,
         )
         if replay_published_round else None
     )
@@ -433,11 +480,47 @@ def _build_pinned_service(
                 "status": "ready", "set_id": set_id, "icps": replay["icps"],
             },
         )
-    service = ArenaService(config)
+    Service = ArenaService
+    if replay_historical:
+        source_schedule = replay["source_schedule"]
+
+        class HistoricalReplayArenaService(ArenaService):
+            def build_schedule(self, cutoff: datetime) -> dict[str, str]:
+                schedule = super().build_schedule(cutoff)
+                schedule.update(source_schedule)
+                return schedule
+
+        Service = HistoricalReplayArenaService
+    service = Service(config)
     if replay:
         service._saved_output_replay = replay["evidence"]
         _validate_replay_source_archive(service, round_id, required=False)
     return service, create_app(service)
+
+
+def _historical_runtime_schedule_matches(
+    service: Any, round_id: str, configuration: Mapping[str, Any]
+) -> bool:
+    """Bind resumed runtime deadlines to one real target-date schedule."""
+
+    schedule = configuration.get("schedule")
+    try:
+        benchmark_deadline = datetime.strptime(
+            str(schedule["benchmark_deadline"]), "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+        minutes = service.config.defaults.stage_minutes
+        cutoff = benchmark_deadline - timedelta(minutes=minutes["benchmark"])
+        expected = service.build_schedule(cutoff)
+        source_cutoff = datetime.strptime(
+            str(schedule["submission_cutoff"]), "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+    return (
+        round_id.startswith("arena-%s-" % cutoff.date().isoformat())
+        and cutoff >= source_cutoff
+        and schedule == expected
+    )
 
 
 def _validate_frozen_round(service: Any, row: Mapping[str, Any]) -> None:
@@ -502,6 +585,28 @@ def _validate_frozen_round(service: Any, row: Mapping[str, Any]) -> None:
             mismatches.append("replay_company_only_policy")
         if output_schema != replay["output_schema_version"]:
             mismatches.append("replay_output_schema")
+        source_schedule = replay.get("source_schedule")
+        if source_schedule is not None:
+            schedule = configuration.get("schedule") or {}
+            if any(
+                schedule.get(name) != value
+                for name, value in source_schedule.items()
+            ):
+                mismatches.append("replay_source_schedule")
+            if not _historical_runtime_schedule_matches(
+                service, str(row.get("round_id") or ""), configuration
+            ):
+                mismatches.append("replay_runtime_schedule")
+            if (
+                row.get("status") != "open"
+                and str(row.get("evaluation_date")) != replay["evaluation_date"]
+            ):
+                mismatches.append("replay_evaluation_date")
+            if (
+                row.get("status") != "open"
+                and str(row.get("icp_set_date")) != replay["icp_set_date"]
+            ):
+                mismatches.append("replay_icp_set_date")
         _validate_replay_source_archive(
             service,
             str(row.get("round_id") or ""),
@@ -1429,6 +1534,7 @@ def main(argv: list[str] | None = None) -> int:
         service, app = _build_pinned_service(
             args.round_id, replay_published_round=args.replay_published_round,
             replay_assignments=args.replay_assignment,
+            replay_historical=args.replay_historical,
         )
         checks = service.startup_checks()
         print(

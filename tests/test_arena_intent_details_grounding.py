@@ -495,7 +495,9 @@ def test_required_attribute_source_context_exposes_multiverse_growth_fact():
     ) == 12_000
 
 
-@pytest.mark.parametrize("defect", ["wrong_url", "unbound_quote", "extra_field"])
+@pytest.mark.parametrize(
+    "defect", ["wrong_url", "unhashable_url", "unbound_quote", "extra_field"],
+)
 def test_required_attribute_source_context_requires_final_grounded_source(defect):
     company, icp, results, fit = inputs()
     company_url = "https://acme.example/required-attribute"
@@ -511,6 +513,8 @@ def test_required_attribute_source_context_requires_final_grounded_source(defect
     }
     if defect == "wrong_url":
         context["url"] = "https://untrusted.example/claim"
+    elif defect == "unhashable_url":
+        context["url"] = [company_url]
     elif defect == "unbound_quote":
         context["text"] = "A submitted claim is not fetched evidence."
     else:
@@ -607,8 +611,10 @@ def test_common_wealth_selects_linkedin_daily3_and_keeps_flow_program_fact():
         if source["evidence_kind"] == "verified_company_source_context"
     ]
 
-    assert len(company_sources) == 1
-    assert company_sources[0]["company_dimension"] == "employee_size"
+    assert [
+        source["company_dimension"] for source in company_sources
+    ] == ["required_attribute", "employee_size"]
+    assert any(company_quote in value for value in values)
     assert any(program_fact in value for value in values)
     assert any("three new employers every business day" in value for value in values)
     assert any("80% of plans placed" in value for value in values)
@@ -625,6 +631,11 @@ def test_common_wealth_selects_linkedin_daily3_and_keeps_flow_program_fact():
         }
         for value in source.get("admitted_text", [])
     ) <= 12_000
+    assert sum(
+        len(value.encode("utf-8"))
+        for source in company_sources
+        for value in source.get("admitted_text", [])
+    ) <= intent_details._COMPANY_SOURCE_CONTEXT_RESERVATION_BYTES
 
 
 def test_company_source_context_candidates_are_ordered_and_bounded():
@@ -667,6 +678,104 @@ def test_company_source_context_candidates_are_ordered_and_bounded():
                 fit,
                 company_source_contexts=contexts,
             )
+
+
+@pytest.mark.parametrize(
+    ("stage_quote", "body_stage_quote"),
+    [
+        pytest.param(
+            "Today we're excited to announce a $550M Series E.",
+            "Today we're excited to announce a $550M Series E.",
+            id="literal",
+        ),
+        pytest.param(
+            "Today we&#39;re excited to announce a $550M Series E.",
+            "Today we're excited to announce a $550M Series E.",
+            id="normalized-html",
+        ),
+    ],
+)
+def test_same_page_context_anchors_paragraph_relevant_stage_quote(
+    stage_quote, body_stage_quote,
+):
+    company, icp, results, fit = inputs()
+    company.intent_details = (
+        "Temporal is actively recruiting a Senior Software Engineer for Cloud "
+        "Platform Foundations in Seattle. The role owns core infrastructure "
+        "behind Temporal Cloud, including control-plane automation, disaster "
+        "recovery, multi-tenant systems, CI/CD, Kubernetes, APIs, and developer "
+        "tooling. Its LinkedIn profile lists 501–1,000 employees and Bellevue, "
+        "Washington headquarters, while Temporal’s September 14, 2026 "
+        "announcement identifies a Series E raise. This hiring may support "
+        "continued scaling of the cloud platform technical teams use to run "
+        "durable applications and automate workflows."
+    )
+    results = [results[0]]
+    company.intent_signals = [company.intent_signals[0]]
+    signal_quote = results[0]["judge_verdict"]["verification_trace"][
+        "intent_verdict"
+    ]["signal_evaluations"][0]["supporting_quotes"][0]
+    results[0]["judge_verdict"]["verification_trace"][
+        "verified_source_context"
+    ] = [{
+        "url": results[0]["evidence_urls"][0],
+        "text": signal_quote + "j" * (8_000 - len(signal_quote)),
+    }]
+    source_url = "https://temporal.example/news/series-e"
+    date_text = "Sep 14, 2026"
+    employee_quote = (
+        "This funding is going toward growing a team that has doubled to "
+        "570 people over the past year."
+    )
+    body = "x" * 357 + date_text
+    body += "x" * (921 - len(body)) + body_stage_quote
+    body += "x" * (5_319 - len(body)) + employee_quote
+    body += "x" * (7_886 - len(body))
+    fit["dimension_evidence"].update({
+        "required_attribute": {
+            "decision": "match",
+            "web_evidence": {
+                "url": "https://temporal.example/",
+                "quote": "Temporal provides workflow orchestration software.",
+            },
+        },
+        "employee_size": {
+            "decision": "match",
+            "web_evidence": {"url": source_url, "quote": employee_quote},
+        },
+        "stage": {
+            "decision": "match",
+            "web_evidence": {"url": source_url, "quote": stage_quote},
+        },
+    })
+
+    document = intent_details.review_evidence(
+        company,
+        icp,
+        results,
+        fit,
+        company_source_contexts=[{
+            "dimension": "required_attribute",
+            "url": "https://temporal.example/",
+            "text": (
+                "Temporal provides workflow orchestration software. "
+                + "h" * 4_000
+            ),
+        }, {
+            "dimension": "employee_size",
+            "url": source_url,
+            "text": body,
+        }],
+    )
+    source = next(
+        item for item in reversed(document["admitted_evidence"])
+        if item["evidence_kind"] == "verified_company_source_context"
+    )
+    admitted = source["admitted_text"][0]
+
+    assert date_text in admitted
+    assert body_stage_quote in admitted
+    assert len(admitted.encode("utf-8")) <= 2_000
 
 
 def test_company_source_context_stays_private_to_review_input(monkeypatch):

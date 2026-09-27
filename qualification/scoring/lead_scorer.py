@@ -2115,6 +2115,89 @@ def _hydrate_required_attribute_source_cache(
         )
 
 
+_PARAGRAPH_COMPANY_CONTEXT_DIMENSIONS = (
+    "required_attribute",
+    "employee_size",
+    "geography",
+    "stage",
+)
+_MAX_PARAGRAPH_COMPANY_CONTEXTS = 2
+
+
+def _complete_company_identity(
+    result: CompanyFitDecisionResult,
+) -> bool:
+    """Require the final independent name, domain, and LinkedIn identity."""
+
+    receipt = verified_identity_receipt([result.receipt("company_fit")])
+    return bool(
+        receipt
+        and all(
+            isinstance(receipt.get(field), str)
+            and str(receipt[field]).strip()
+            for field in (
+                "observed_name",
+                "observed_domain",
+                "observed_linkedin_slug",
+            )
+        )
+    )
+
+
+def _retain_matched_investigator_source_contexts(
+    source_sink: Optional[dict[str, dict[str, str]]],
+    result: CompanyFitDecisionResult,
+    investigation: Mapping[str, Any],
+) -> None:
+    """Retain fetched pages cited by final matched company dimensions."""
+
+    if source_sink is None or not _complete_company_identity(result):
+        return
+    details = result.details if isinstance(result.details, Mapping) else {}
+    dimensions = details.get("dimension_evidence")
+    if not isinstance(dimensions, Mapping):
+        return
+    evidence_by_url: dict[str, str] = {}
+    for dimension in ("employee_size", "geography", "stage"):
+        evidence = dimensions.get(dimension)
+        if (
+            not isinstance(evidence, Mapping)
+            or evidence.get("decision") != COMPANY_FIT_MATCH
+        ):
+            continue
+        web_evidence = evidence.get("web_evidence")
+        if not isinstance(web_evidence, Mapping):
+            continue
+        source_url = _valid_web_evidence_url(web_evidence.get("url"))
+        quote = web_evidence.get("quote")
+        if source_url and isinstance(quote, str) and quote:
+            evidence_by_url[source_url] = quote
+    for stale_url in set(source_sink) - set(evidence_by_url):
+        source_sink.pop(stale_url, None)
+    if not evidence_by_url:
+        return
+    pages, final_urls = _validated_prefetched_pages(
+        investigation.get(PRIVATE_FETCHED_PAGES_KEY),
+        submitted_source_urls=tuple(evidence_by_url),
+    )
+    for source_url, quote in evidence_by_url.items():
+        text = pages.get(source_url)
+        final_url = final_urls.get(source_url)
+        if (
+            not isinstance(text, str)
+            or not text
+            or not isinstance(final_url, str)
+            or _registrable_domain(source_url)
+            != _registrable_domain(final_url)
+            or not _quote_occurs(quote, text)
+        ):
+            continue
+        source_sink[source_url] = {
+            "final_url": final_url,
+            "text": text,
+        }
+
+
 def _hydrate_verified_required_attribute_recovery_source(
     source_cache: dict[str, dict[str, Any]],
     investigation: Mapping[str, Any],
@@ -5798,6 +5881,9 @@ async def _run_targeted_company_evidence_investigation(
     verified_homepage_pages: Optional[
         Mapping[str, Mapping[str, Any]]
     ] = None,
+    matched_company_source_sink: Optional[
+        dict[str, dict[str, str]]
+    ] = None,
 ) -> Tuple[
     dict[str, Any],
     CompanyFitDecisionResult,
@@ -6336,6 +6422,11 @@ async def _run_targeted_company_evidence_investigation(
         positive_semantic_resolved
     )
     projected_result.details["investigation_receipt"] = investigation_receipt
+    _retain_matched_investigator_source_contexts(
+        matched_company_source_sink,
+        projected_result,
+        investigation,
+    )
     return (
         projected,
         projected_result,
@@ -6361,6 +6452,9 @@ async def _llm_reverify_company(
         dict[str, dict[str, Any]]
     ] = None,
     linkedin_profile_source_sink: Optional[dict[str, str]] = None,
+    matched_company_source_sink: Optional[
+        dict[str, dict[str, str]]
+    ] = None,
 ) -> CompanyFitDecisionResult:
     """Web-grounded re-verification of the model-REPORTED attribute claim and
     stage label — the two dimensions where the scorer otherwise trusts model
@@ -6901,6 +6995,7 @@ async def _llm_reverify_company(
                 verified_homepage_navigation_locators
             ),
             verified_homepage_pages=verified_homepage_pages,
+            matched_company_source_sink=matched_company_source_sink,
         )
         if not claims:
             return result
@@ -7313,6 +7408,7 @@ async def _llm_reverify_company(
                     verified_homepage_navigation_locators
                 ),
                 verified_homepage_pages=verified_homepage_pages,
+                matched_company_source_sink=matched_company_source_sink,
             )
             if not post_repair_claims:
                 return repaired_result
@@ -7620,6 +7716,9 @@ async def _verify_company_fit(
         dict[str, dict[str, Any]]
     ] = None,
     linkedin_profile_source_sink: Optional[dict[str, str]] = None,
+    matched_company_source_sink: Optional[
+        dict[str, dict[str, str]]
+    ] = None,
 ) -> CompanyFitDecisionResult:
     """One official public/Research Lab company-fit verifier.
 
@@ -7795,6 +7894,7 @@ async def _verify_company_fit(
             required_attribute_retry_source_cache
         ),
         linkedin_profile_source_sink=linkedin_profile_source_sink,
+        matched_company_source_sink=matched_company_source_sink,
     )
     web_details = web.details if isinstance(web.details, Mapping) else {}
     if isinstance(web_details.get("investigation_receipt"), Mapping):
@@ -8094,11 +8194,11 @@ def _matched_required_attribute_source_context(
     return {"url": source_url, "text": text}
 
 
-def _matched_linkedin_profile_source_context(
+def _matched_linkedin_profile_source_binding(
     company_fit: CompanyFitDecisionResult,
     source_candidate: Optional[Mapping[str, Any]],
-) -> Optional[dict[str, str]]:
-    """Return one identity-bound final employee-size profile body."""
+) -> Optional[tuple[str, dict[str, str]]]:
+    """Return one identity-bound final profile body and matched dimension."""
 
     if (
         company_fit.decision != COMPANY_FIT_MATCH
@@ -8144,24 +8244,6 @@ def _matched_linkedin_profile_source_context(
     dimensions = details.get("dimension_evidence")
     if not isinstance(dimensions, Mapping):
         return None
-    employee_size = dimensions.get("employee_size")
-    if (
-        not isinstance(employee_size, Mapping)
-        or employee_size.get("decision") != COMPANY_FIT_MATCH
-        or employee_size.get("observed_decision") != COMPANY_FIT_MATCH
-    ):
-        return None
-    web_evidence = employee_size.get("web_evidence")
-    if not isinstance(web_evidence, Mapping):
-        return None
-    evidence_url = _valid_web_evidence_url(web_evidence.get("url"))
-    quote = str(web_evidence.get("quote") or "")
-    if (
-        evidence_url != source_url
-        or not quote
-        or not _quote_occurs(quote, text)
-    ):
-        return None
     identity = dimensions.get("identity")
     identity_receipt = (
         identity.get("web_identity_receipt")
@@ -8176,15 +8258,105 @@ def _matched_linkedin_profile_source_context(
         != source_slug
     ):
         return None
-    return {"url": source_url, "text": text}
+    for dimension in ("employee_size", "geography"):
+        evidence = dimensions.get(dimension)
+        if (
+            not isinstance(evidence, Mapping)
+            or evidence.get("decision") != COMPANY_FIT_MATCH
+            or evidence.get("observed_decision") != COMPANY_FIT_MATCH
+        ):
+            continue
+        web_evidence = evidence.get("web_evidence")
+        if not isinstance(web_evidence, Mapping):
+            continue
+        evidence_url = _valid_web_evidence_url(web_evidence.get("url"))
+        quote = str(web_evidence.get("quote") or "")
+        if (
+            evidence_url == source_url
+            and quote
+            and _quote_occurs(quote, text)
+        ):
+            return dimension, {"url": source_url, "text": text}
+    return None
+
+
+def _matched_linkedin_profile_source_context(
+    company_fit: CompanyFitDecisionResult,
+    source_candidate: Optional[Mapping[str, Any]],
+) -> Optional[dict[str, str]]:
+    """Return one identity-bound final employee or geography profile body."""
+
+    binding = _matched_linkedin_profile_source_binding(
+        company_fit,
+        source_candidate,
+    )
+    return binding[1] if binding is not None else None
+
+
+def _matched_investigator_source_contexts(
+    company_fit: CompanyFitDecisionResult,
+    source_cache: Optional[Mapping[str, Any]],
+) -> list[dict[str, str]]:
+    """Bind retained fetched pages back to exact final dimension evidence."""
+
+    if (
+        company_fit.decision != COMPANY_FIT_MATCH
+        or not _complete_company_identity(company_fit)
+        or not isinstance(source_cache, Mapping)
+        or len(source_cache) > MAX_FETCH_CALLS
+    ):
+        return []
+    details = company_fit.details if isinstance(company_fit.details, Mapping) else {}
+    dimensions = details.get("dimension_evidence")
+    if not isinstance(dimensions, Mapping):
+        return []
+    contexts: list[dict[str, str]] = []
+    for dimension in ("employee_size", "geography", "stage"):
+        evidence = dimensions.get(dimension)
+        if (
+            not isinstance(evidence, Mapping)
+            or evidence.get("decision") != COMPANY_FIT_MATCH
+        ):
+            continue
+        web_evidence = evidence.get("web_evidence")
+        if not isinstance(web_evidence, Mapping):
+            continue
+        source_url = _valid_web_evidence_url(web_evidence.get("url"))
+        quote = str(web_evidence.get("quote") or "")
+        entry = source_cache.get(source_url) if source_url else None
+        if not isinstance(entry, Mapping) or set(entry) != {"final_url", "text"}:
+            continue
+        final_url = entry.get("final_url")
+        text = entry.get("text")
+        if (
+            not isinstance(final_url, str)
+            or not isinstance(text, str)
+            or not text
+            or len(text) > MAX_PAGE_CHARACTERS
+            or _registrable_domain(source_url) != _registrable_domain(final_url)
+            or not quote
+            or not _quote_occurs(quote, text)
+        ):
+            continue
+        contexts.append({
+            "dimension": dimension,
+            "url": source_url,
+            "text": text,
+        })
+    return contexts
 
 
 def _matched_company_source_contexts(
     company_fit: CompanyFitDecisionResult,
     required_attribute_source_cache: Optional[Mapping[str, Any]],
     linkedin_profile_source_candidate: Optional[Mapping[str, Any]],
+    matched_company_source_cache: Optional[Mapping[str, Any]] = None,
+    *,
+    paragraph: str = "",
 ) -> Optional[list[dict[str, str]]]:
-    """Project at most one source for each final matched company dimension."""
+    """Project at most two deduplicated final matched company sources."""
+
+    from qualification.scoring.intent_details import _source_overlap_score
 
     contexts: list[dict[str, str]] = []
     required_attribute = _matched_required_attribute_source_context(
@@ -8196,13 +8368,41 @@ def _matched_company_source_contexts(
             "dimension": "required_attribute",
             **required_attribute,
         })
-    employee_size = _matched_linkedin_profile_source_context(
+    linkedin_binding = _matched_linkedin_profile_source_binding(
         company_fit,
         linkedin_profile_source_candidate,
     )
-    if employee_size is not None:
-        contexts.append({"dimension": "employee_size", **employee_size})
-    return contexts or None
+    if linkedin_binding is not None:
+        dimension, profile = linkedin_binding
+        contexts.append({"dimension": dimension, **profile})
+    contexts.extend(_matched_investigator_source_contexts(
+        company_fit,
+        matched_company_source_cache,
+    ))
+    deduplicated: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for context in contexts:
+        if context["url"] in seen_urls:
+            continue
+        seen_urls.add(context["url"])
+        deduplicated.append(context)
+    ranked = sorted(
+        enumerate(deduplicated),
+        key=lambda item: (
+            -_source_overlap_score(
+                paragraph,
+                item[1]["text"],
+            ),
+            item[0],
+        ),
+    )[:_MAX_PARAGRAPH_COMPANY_CONTEXTS]
+    selected = [context for _index, context in ranked]
+    selected.sort(
+        key=lambda item: _PARAGRAPH_COMPANY_CONTEXT_DIMENSIONS.index(
+            item["dimension"]
+        )
+    )
+    return selected or None
 
 
 def _matched_provider_observation(
@@ -8304,6 +8504,7 @@ async def score_company_competition_intent(
         return _zero_company_breakdown(force_fail_reason)
 
     linkedin_profile_source_candidate: dict[str, str] = {}
+    matched_company_source_cache: dict[str, dict[str, str]] = {}
     company_fit = await _verify_company_fit(
         company,
         icp,
@@ -8317,6 +8518,7 @@ async def score_company_competition_intent(
             required_attribute_retry_source_cache
         ),
         linkedin_profile_source_sink=linkedin_profile_source_candidate,
+        matched_company_source_sink=matched_company_source_cache,
     )
     gate_receipts = [company_fit.receipt("company_fit")]
     if company_fit.decision != COMPANY_FIT_MATCH:
@@ -8386,6 +8588,8 @@ async def score_company_competition_intent(
                 company_fit,
                 required_attribute_retry_source_cache,
                 linkedin_profile_source_candidate,
+                matched_company_source_cache,
+                paragraph=str(company.intent_details or ""),
             ),
             **(
                 {

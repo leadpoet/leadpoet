@@ -431,7 +431,7 @@ def _continuous_source_window(
         if match is not None:
             anchor_start = len(value[:match.start()].encode("utf-8"))
             break
-    start = max(0, anchor_start - maximum_bytes // 4)
+    start = max(0, anchor_start - maximum_bytes // 3)
     while start > 0 and encoded[start] & 0xC0 == 0x80:
         start -= 1
     return encoded[start:start + maximum_bytes].decode(
@@ -1085,6 +1085,10 @@ def review_evidence(
             and isinstance(value, str) and value
         }
     paragraph = validate_intent_details_text(company.intent_details)
+    paragraph_terms = {
+        word[:6] for word in re.findall(r"[\w%$]+", paragraph.casefold())
+        if len(word) >= 5
+    }
     company_context_candidates: list[dict[str, Any]] = []
     if company_source_contexts is not None:
         from qualification.scoring.company_evidence_investigator import (
@@ -1098,8 +1102,14 @@ def review_evidence(
             or len(company_source_contexts) > 2
         ):
             raise ValueError("invalid company source contexts")
-        dimension_order = {"required_attribute": 0, "employee_size": 1}
+        dimension_order = {
+            "required_attribute": 0,
+            "employee_size": 1,
+            "geography": 2,
+            "stage": 3,
+        }
         prior_order = -1
+        observed_context_urls: set[str] = set()
         for raw_context in company_source_contexts:
             if (
                 not isinstance(raw_context, Mapping)
@@ -1117,13 +1127,14 @@ def review_evidence(
                 order is None
                 or order <= prior_order
                 or not isinstance(source_url, str)
+                or source_url in observed_context_urls
                 or _safe_https_url(source_url) != source_url
                 or not isinstance(source_text, str)
                 or not source_text
                 or not isinstance(company_fact, Mapping)
             ):
                 raise ValueError("invalid company source context")
-            paired_quotes = [
+            dimension_quotes = [
                 company_fact[quote_key]
                 for quote_key, url_key in (
                     ("quote", "url"), ("evidence_quote", "evidence_url"),
@@ -1132,10 +1143,38 @@ def review_evidence(
                 and isinstance(company_fact.get(quote_key), str)
                 and company_fact.get(quote_key)
             ]
-            if not paired_quotes or not any(
-                _quote_occurs(quote, source_text) for quote in paired_quotes
+            if not dimension_quotes or not any(
+                _quote_occurs(quote, source_text) for quote in dimension_quotes
             ):
                 raise ValueError("unbound company source context")
+            paired_quotes = list(dict.fromkeys(
+                quote
+                for fact in company_facts.values()
+                if isinstance(fact, Mapping)
+                for quote_key, url_key in (
+                    ("quote", "url"), ("evidence_quote", "evidence_url"),
+                )
+                if fact.get(url_key) == source_url
+                and isinstance((quote := fact.get(quote_key)), str)
+                and quote
+                and _quote_occurs(quote, source_text)
+            ))
+            paired_quotes.sort(
+                key=lambda quote: (
+                    -_source_overlap_score(paragraph, quote),
+                    -len(
+                        paragraph_terms
+                        & {
+                            word[:6]
+                            for word in re.findall(
+                                r"[\w%$]+", quote.casefold()
+                            )
+                            if len(word) >= 5
+                        }
+                    ),
+                    quote not in dimension_quotes,
+                )
+            )
             company_context_candidates.append({
                 "dimension": dimension,
                 "url": source_url,
@@ -1145,35 +1184,18 @@ def review_evidence(
                     paragraph, source_text,
                 ),
             })
+            observed_context_urls.add(source_url)
             prior_order = order
-
-    selected_company_context = max(
-        company_context_candidates,
-        key=lambda item: item["overlap_score"],
-        default=None,
-    )
-    if (
-        selected_company_context is not None
-        and selected_company_context["overlap_score"] == 0
-    ):
-        selected_company_context = next(
-            (
-                item for item in company_context_candidates
-                if item["dimension"] == "required_attribute"
-            ),
-            None,
-        )
-    source_text = (
-        selected_company_context["text"]
-        if selected_company_context is not None else ""
-    )
 
     # Reserve a bounded share for the final grounded company page, while
     # retaining the existing fair split across verified intent activities.
     # Unused intent allowance returns to the company page; the combined text
     # still cannot exceed the original source-context budget.
     company_reservation = min(
-        len(source_text.encode("utf-8")),
+        sum(
+            len(context["text"].encode("utf-8"))
+            for context in company_context_candidates
+        ),
         _COMPANY_SOURCE_CONTEXT_RESERVATION_BYTES,
     )
     intent_context_budget = _MAX_SOURCE_CONTEXT_BYTES - company_reservation
@@ -1189,24 +1211,37 @@ def review_evidence(
         item["source_context"] = [
             context for context in item["source_context"] if context["text"]
         ]
-    selected_company_fact = (
-        company_facts.get(selected_company_context["dimension"])
-        if selected_company_context is not None else None
+    remaining_context_bytes = max(
+        0, _MAX_SOURCE_CONTEXT_BYTES - context_bytes_used,
     )
-    if source_text and isinstance(selected_company_fact, dict):
-        remaining_context_bytes = max(
-            0, _MAX_SOURCE_CONTEXT_BYTES - context_bytes_used,
+    remaining_company_contexts = len(company_context_candidates)
+    selected_company_facts: list[dict[str, Any]] = []
+    for selected_company_context in company_context_candidates:
+        selected_company_fact = company_facts.get(
+            selected_company_context["dimension"]
+        )
+        if not isinstance(selected_company_fact, dict):
+            remaining_company_contexts -= 1
+            continue
+        context_allowance = (
+            remaining_context_bytes // remaining_company_contexts
+            if remaining_company_contexts else 0
         )
         bounded_company_text = _continuous_source_window(
-            source_text,
-            remaining_context_bytes,
-            selected_company_context["paired_quotes"],
+            selected_company_context["text"],
+            context_allowance,
+            selected_company_context["paired_quotes"][:1],
         )
         if bounded_company_text:
             selected_company_fact["source_context"] = {
                 "url": selected_company_context["url"],
                 "text": bounded_company_text,
             }
+            selected_company_facts.append(selected_company_fact)
+            remaining_context_bytes -= len(
+                bounded_company_text.encode("utf-8")
+            )
+        remaining_company_contexts -= 1
     document = {
         "intent_details_units": _statement_units(paragraph),
         "company": {"name": company.company_name, "website": company.company_website},
@@ -1239,7 +1274,7 @@ def review_evidence(
         for item in verified
         for context in item.get("source_context", [])
     ]
-    if isinstance(selected_company_fact, Mapping):
+    for selected_company_fact in selected_company_facts:
         company_context = selected_company_fact.get("source_context")
         if isinstance(company_context, dict):
             trim_contexts.append(company_context)
@@ -1255,7 +1290,7 @@ def review_evidence(
             item["source_context"] = [context for context in item["source_context"] if context["text"]]
             if not item["source_context"]:
                 del item["source_context"]
-    if isinstance(selected_company_fact, dict):
+    for selected_company_fact in selected_company_facts:
         company_context = selected_company_fact.get("source_context")
         if isinstance(company_context, Mapping) and not company_context.get("text"):
             del selected_company_fact["source_context"]

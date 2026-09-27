@@ -248,20 +248,22 @@ HIRING_FUNCTIONAL_ROLE_BLOCK = """  HIRING — FUNCTIONAL ROLE MATCH:
     scope of that same role; the title and submitted claim quote need not repeat
     the category word or contain the complete evidentiary window.
 
-    For a broad target such as "platform roles", direct responsibility to build,
-    operate, own, maintain, or improve the employer's platform products or
-    components qualifies; the role need not have an infrastructure or platform-
-    team title. Read same-role sentences together: one sentence may establish
-    the platform or component scope and another may assign the direct duties.
-    The duty sentence need not repeat the platform name. If the target instead
-    asks for infrastructure, an internal developer platform, or another narrower
-    scope, preserve that qualifier.
+    For a broad target such as "platform roles", direct responsibility for
+    platform architecture, production readiness, reliability, scaling,
+    operations, or improvement qualifies whether the work is internal or
+    customer-facing; the role need not have an infrastructure or platform-team
+    title. Read same-role sentences together: one sentence may establish the
+    platform scope and another may assign the direct duties. The duty sentence
+    need not repeat the platform name. If the target instead asks for the
+    employer's own platform, infrastructure, an internal developer platform, or
+    another narrower scope, preserve that qualifier.
 
     Keep the boundary strict. A generic software role at a company that sells a
-    platform is not automatically a platform role. Merely using a platform,
-    gaining incidental exposure to it, serving its users, or mentioning it only
-    in company boilerplate is insufficient when the same role has no direct
-    functional duties. Never borrow duties from another role or hiring event.
+    platform is not automatically a platform role. Generic presales, customer
+    support, merely using a platform, gaining incidental exposure to it, or
+    mentioning it only in company boilerplate is insufficient when the same
+    role has no direct platform duties. Never borrow duties from another role or
+    hiring event.
     Preserve every explicit inclusion, exclusion, and organizational constraint
     in the target."""
 

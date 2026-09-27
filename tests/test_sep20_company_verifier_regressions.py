@@ -7,6 +7,7 @@ import pytest
 from gateway.qualification.models import CompanyOutput
 from lab_arena import scoring as arena_scoring
 from qualification.scoring import company_verification, lead_scorer
+from qualification.scoring import company_evidence_investigator as investigator
 from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
     COMPANY_FIT_MISMATCH,
@@ -498,9 +499,59 @@ def test_lab_scorer_retry_reuses_grounded_body_for_final_paragraph(
     async def homepage(*_args, **_kwargs):
         return company_fit_match("homepage identity verified")
 
-    async def company_provider(**kwargs):
-        provider_calls.append(kwargs["telemetry_purpose"])
-        return dict(verdict), ""
+    async def web_reverify(*_args, **kwargs):
+        provider_calls.append("lead_scorer_reverify")
+        retry_cache = kwargs["required_attribute_retry_source_cache"]
+        grounded, _source = await lead_scorer._ground_required_attribute_evidence(
+            verdict,
+            active_attribute=True,
+            source_cache=retry_cache,
+            successful_source_sink=retry_cache,
+        )
+        assert grounded[lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING][
+            "status"
+        ] == "grounded"
+        identity_receipt = {
+            "decision": COMPANY_FIT_MATCH,
+            "evidence_source": "company_web_reverification",
+            "submitted_name": "TypeSafe AI",
+            "submitted_domain": "typesafe.example",
+            "submitted_linkedin_slug": "typesafe-ai",
+            "observed_name": "TypeSafe AI",
+            "observed_domain": "typesafe.example",
+            "observed_linkedin_slug": "typesafe-ai",
+        }
+        dimensions = {
+            name: COMPANY_FIT_MATCH
+            for name in ("employee_size", "industry", "geography", "stage")
+        }
+        return company_fit_match(details={
+            "identity_decision": COMPANY_FIT_MATCH,
+            "identity_receipt": identity_receipt,
+            "dimension_decisions": dimensions,
+            "dimension_evidence": {
+                "employee_size": {
+                    "url": source_url,
+                    "quote": verdict["employee_size_evidence_quote"],
+                },
+                "industry": {
+                    "url": source_url,
+                    "quote": verdict["industry_evidence_quote"],
+                },
+                "geography": {
+                    "url": source_url,
+                    "quote": verdict["geography_evidence_quote"],
+                },
+                "required_attribute": {
+                    "url": source_url,
+                    "quote": quote,
+                },
+            },
+            "required_attribute_decision": COMPANY_FIT_MATCH,
+            "required_attribute_grounding": grounded[
+                lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING
+            ],
+        })
 
     async def source_fetch(_session, url, **_kwargs):
         fetch_calls.append(url)
@@ -542,9 +593,7 @@ def test_lab_scorer_retry_reuses_grounded_body_for_final_paragraph(
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
     monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
-    monkeypatch.setattr(
-        lead_scorer, "_request_company_reverify_json", company_provider
-    )
+    monkeypatch.setattr(lead_scorer, "_llm_reverify_company", web_reverify)
     monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", source_fetch)
     monkeypatch.setattr(
         lead_scorer, "score_company_competition_intent_signal", intent_score
@@ -868,11 +917,21 @@ def test_company_source_contexts_are_bounded_and_dimension_ordered():
                     "quote": profile_quote,
                 },
             },
+            "stage": {
+                "decision": COMPANY_FIT_MATCH,
+                "web_evidence": {
+                    "url": attribute_url,
+                    "quote": attribute_quote,
+                },
+            },
             "identity": {
                 "decision": COMPANY_FIT_MATCH,
                 "web_identity_receipt": {
                     "decision": COMPANY_FIT_MATCH,
+                    "observed_name": "Example Company",
+                    "observed_domain": "example.com",
                     "observed_linkedin_slug": "example-company",
+                    "evidence_source": "company_web_reverification",
                 },
             },
         },
@@ -896,6 +955,12 @@ def test_company_source_contexts_are_bounded_and_dimension_ordered():
         company_fit,
         attribute_cache,
         profile_candidate,
+        {
+            attribute_url: {
+                "final_url": attribute_url,
+                "text": f"News {attribute_quote}",
+            },
+        },
     ) == [
         {
             "dimension": "required_attribute",
@@ -908,6 +973,229 @@ def test_company_source_contexts_are_bounded_and_dimension_ordered():
             "text": f"## About\n{profile_quote}",
         },
     ]
+
+
+def _matched_company_fit_with_sources(*, source_url, quote, dimension="stage"):
+    return company_fit_match(details={
+        "dimension_evidence": {
+            dimension: {
+                "decision": COMPANY_FIT_MATCH,
+                "observed_decision": COMPANY_FIT_MATCH,
+                "web_evidence": {"url": source_url, "quote": quote},
+            },
+            "identity": {
+                "decision": COMPANY_FIT_MATCH,
+                "web_identity_receipt": {
+                    "decision": COMPANY_FIT_MATCH,
+                    "observed_name": "Example Company",
+                    "observed_domain": "example.com",
+                    "observed_linkedin_slug": "example-company",
+                    "evidence_source": "company_web_reverification",
+                },
+            },
+        },
+    })
+
+
+def test_final_matched_investigator_source_is_retained_for_intent_context():
+    source_url = "https://example.com/news/series-e"
+    quote = "Example Company announced a $175 million Series E on November 19, 2024."
+    body = f"Newsroom\n{quote}\nCompany profile."
+    fit = _matched_company_fit_with_sources(
+        source_url=source_url,
+        quote=quote,
+    )
+    retained = {}
+
+    lead_scorer._retain_matched_investigator_source_contexts(
+        retained,
+        fit,
+        {
+            investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                source_url: {"final_url": source_url, "text": body},
+            },
+        },
+    )
+
+    assert retained == {
+        source_url: {"final_url": source_url, "text": body},
+    }
+    assert lead_scorer._matched_company_source_contexts(
+        fit,
+        None,
+        None,
+        retained,
+        paragraph="Example Company announced a $175 million Series E.",
+    ) == [{"dimension": "stage", "url": source_url, "text": body}]
+
+
+def test_intermediate_unavailable_source_survives_final_fit_repair():
+    source_url = "https://example.com/news/series-e"
+    quote = "Example Company announced a $550 million Series E."
+    final_fit = _matched_company_fit_with_sources(
+        source_url=source_url,
+        quote=quote,
+    )
+    intermediate = company_fit_unavailable(
+        "geography remained unresolved",
+        details=final_fit.details,
+    )
+    retained = {}
+
+    lead_scorer._retain_matched_investigator_source_contexts(
+        retained,
+        intermediate,
+        {
+            investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                source_url: {
+                    "final_url": source_url,
+                    "text": f"Newsroom\n{quote}",
+                },
+            },
+        },
+    )
+
+    assert lead_scorer._matched_company_source_contexts(
+        final_fit,
+        None,
+        None,
+        retained,
+        paragraph=quote,
+    ) == [{
+        "dimension": "stage",
+        "url": source_url,
+        "text": f"Newsroom\n{quote}",
+    }]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "mutated_value"),
+    [
+        ("identity", ""),
+        ("final_url", "https://other.example/news/series-e"),
+        ("text", "The exact final quote is absent."),
+        ("text", "%PDF-1.7 binary"),
+        ("text", "x" * (investigator.MAX_PAGE_CHARACTERS + 1)),
+    ],
+)
+def test_investigator_source_retention_fails_closed(mutation, mutated_value):
+    source_url = "https://example.com/news/series-e"
+    quote = "Example Company announced a $175 million Series E."
+    fit = _matched_company_fit_with_sources(
+        source_url=source_url,
+        quote=quote,
+    )
+    if mutation == "identity":
+        fit.details["dimension_evidence"]["identity"][
+            "web_identity_receipt"
+        ]["observed_linkedin_slug"] = mutated_value
+    page = {
+        "final_url": source_url,
+        "text": f"Newsroom\n{quote}",
+    }
+    if mutation != "identity":
+        page[mutation] = mutated_value
+    retained = {}
+
+    lead_scorer._retain_matched_investigator_source_contexts(
+        retained,
+        fit,
+        {investigator.PRIVATE_FETCHED_PAGES_KEY: {source_url: page}},
+    )
+
+    assert retained == {}
+
+
+def test_company_context_selection_keeps_two_relevant_bound_sources():
+    stage_url = "https://example.com/news/series-e"
+    stage_quote = "Example Company raised $175 million in a Series E."
+    geography_url = "https://www.linkedin.com/company/example-company"
+    geography_quote = "Headquarters Bellevue, Washington"
+    fit = _matched_company_fit_with_sources(
+        source_url=stage_url,
+        quote=stage_quote,
+    )
+    fit.details["dimension_evidence"]["geography"] = {
+        "decision": COMPANY_FIT_MATCH,
+        "observed_decision": COMPANY_FIT_MATCH,
+        "web_evidence": {"url": geography_url, "quote": geography_quote},
+    }
+    retained = {
+        stage_url: {
+            "final_url": stage_url,
+            "text": f"News\n{stage_quote}\nPublished November 19, 2024.",
+        },
+    }
+    linkedin = {
+        "url": geography_url,
+        "text": f"Example Company | LinkedIn\n{geography_quote}",
+    }
+
+    contexts = lead_scorer._matched_company_source_contexts(
+        fit,
+        None,
+        linkedin,
+        retained,
+        paragraph=(
+            "Example Company raised $175 million in a Series E and is "
+            "headquartered in Bellevue, Washington."
+        ),
+    )
+
+    assert [context["dimension"] for context in contexts] == [
+        "geography", "stage",
+    ]
+    assert len(contexts) == 2
+
+
+def test_unfetched_new_round_is_not_projected_to_intent_context():
+    source_url = "https://example.com/news/series-b2"
+    quote = "Example Company raised a $24 million Series B2."
+    fit = _matched_company_fit_with_sources(
+        source_url=source_url,
+        quote=quote,
+    )
+
+    assert lead_scorer._matched_company_source_contexts(
+        fit,
+        None,
+        None,
+        {},
+        paragraph=quote,
+    ) is None
+
+
+def test_later_investigation_prunes_superseded_matched_source():
+    old_url = "https://example.com/news/old-round"
+    new_url = "https://example.com/news/current-round"
+    old_quote = "Example Company announced an old financing round."
+    new_quote = "Example Company announced its current financing round."
+    retained = {}
+    for source_url, quote in (
+        (old_url, old_quote),
+        (new_url, new_quote),
+    ):
+        lead_scorer._retain_matched_investigator_source_contexts(
+            retained,
+            _matched_company_fit_with_sources(
+                source_url=source_url,
+                quote=quote,
+            ),
+            {
+                investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                    source_url: {
+                        "final_url": source_url,
+                        "text": f"Newsroom\n{quote}",
+                    },
+                },
+            },
+        )
+
+    assert set(retained) == {new_url}
+
+
+
+
 
 
 def test_required_attribute_source_outage_is_unavailable_and_cached(monkeypatch):

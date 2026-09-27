@@ -86,17 +86,19 @@ def test_unibuddy_source_and_functional_role_rule_reach_stage_three() -> None:
     )
 
     prompt = _stage_three_prompt(row, UNIBUDDY_TEXT, url=UNIBUDDY_URL)
+    normalized_prompt = " ".join(prompt.split())
 
     assert TARGET in prompt
     assert UNIBUDDY_URL in prompt
     assert UNIBUDDY_TEXT in prompt
     assert "title and submitted claim quote need not repeat" in prompt
-    assert "direct responsibility to build,\n    operate, own, maintain" in prompt
+    assert "direct responsibility for platform architecture" in normalized_prompt
+    assert "whether the work is internal or customer-facing" in normalized_prompt
     assert (
-        "one sentence may establish\n    the platform or component scope and "
-        "another may assign the direct duties"
-    ) in prompt
-    assert "The duty sentence need not repeat the platform name" in prompt
+        "one sentence may establish the platform scope and another may assign "
+        "the direct duties"
+    ) in normalized_prompt
+    assert "The duty sentence need not repeat the platform name" in normalized_prompt
     assert "an internal developer platform" in prompt
 
 
@@ -109,7 +111,7 @@ def test_unibuddy_source_and_functional_role_rule_reach_stage_three() -> None:
                 "the shared identity and data services that power every layer "
                 "of the Acme platform."
             ),
-            "employer's platform products or\n    components",
+            "direct responsibility for\n    platform architecture",
             id="direct-platform-duties",
         ),
         pytest.param(
@@ -133,7 +135,7 @@ def test_unibuddy_source_and_functional_role_rule_reach_stage_three() -> None:
                 "Sales Solutions Engineer. This role belongs to the sales "
                 "organization and demonstrates the platform to prospects."
             ),
-            "Preserve every explicit inclusion, exclusion",
+            "Generic presales, customer\n    support",
             id="explicitly-excluded-function",
         ),
     ],
@@ -169,13 +171,12 @@ def test_functional_role_precedence_does_not_import_unrelated_evidence() -> None
     )
 
     prompt = _stage_three_prompt(_row(), source_text)
+    normalized_prompt = " ".join(prompt.split())
 
     assert source_text in prompt
-    assert (
-        "Never borrow duties from another role or hiring event"
-    ) in prompt
-    assert "Merely using a platform" in prompt
-    assert "generic software role" in prompt
+    assert "Never borrow duties from another role or hiring event" in normalized_prompt
+    assert "merely using a platform" in normalized_prompt
+    assert "generic software role" in normalized_prompt
 
 
 def test_broad_platform_role_does_not_erase_narrow_target_qualifiers() -> None:
@@ -184,8 +185,31 @@ def test_broad_platform_role_does_not_erase_narrow_target_qualifiers() -> None:
         _row(target=target),
         "Product Engineer. Own and maintain customer-facing product features.",
     )
+    normalized_prompt = " ".join(prompt.split())
 
     assert target in prompt
-    assert "If the target instead\n    asks for infrastructure" in prompt
+    assert "If the target instead asks for" in normalized_prompt
     assert "an internal developer platform" in prompt
     assert "preserve that qualifier" in prompt
+
+
+def test_customer_facing_platform_operations_reach_broad_platform_prompt() -> None:
+    target = (
+        "Is actively hiring for platform, infrastructure, or revenue "
+        "operations roles, with evidence in current job postings or a careers page."
+    )
+    source_text = (
+        "Senior Platform Architect - West. Work with customers to define "
+        "production readiness criteria and operational standards. Guide "
+        "reliability, failure handling, scaling, upgrades, alerting, migrations, "
+        "observability, and readiness certification."
+    )
+
+    prompt = _stage_three_prompt(_row(target=target), source_text)
+    normalized_prompt = " ".join(prompt.split())
+
+    assert target in prompt
+    assert source_text in prompt
+    assert "whether the work is internal or customer-facing" in normalized_prompt
+    assert "production readiness, reliability, scaling" in normalized_prompt
+    assert "same role has no direct platform duties" in normalized_prompt

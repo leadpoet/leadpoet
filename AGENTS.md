@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: remaining verifier consistency fixes
+
+On 2026-09-27 the user renewed authority to fix the remaining reproducible
+Tenable evidence-retrieval, Zen Educate semantic-qualification, and bounded
+judgment-recovery issues. Authority includes protected inspection, narrow
+general code changes, exact-case and positive/negative tests, real provider-backed
+saved-output Arena validation, push/merge, scorer-image publication, and
+canonical paired gateway/normal-validator deployment through the overnight
+skill. Preserve qualification standards, deterministic scoring, budgets, miner
+credential ownership, separate verifier costs, frozen results, and concurrent
+work. Do not add company-specific exceptions, dependencies, or a new verifier
+architecture. Do not interrupt another task's active validation. This authority
+ends when these fixes are deployed and verified end to end.
+
 ## Scoped production authorization: September 27 cycle audit
 
 On 2026-09-27 the user authorized a full audit of the published September 27

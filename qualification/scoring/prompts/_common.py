@@ -172,6 +172,15 @@ PART_A_BLOCK = """  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
     The miner asserts their evidence proves the buyer's target_icp_signal.
     Check whether the miner_claim, even if true, would actually mean
     the target_icp_signal is satisfied.
+    For a HIRING target that asks for a named function or role category,
+    apply the HIRING functional-role rule below. When miner_claim is an exact
+    quote grounded in the supplied source, bind it using the surrounding exact
+    body for that same documented hiring event and role. The quote may omit
+    function, event, or role words; that omission does not fail PART A when the
+    complete same-role body proves the requested function. A contradictory
+    quote or evidence about a different company, event, or role still fails.
+    This does not relax date, source, target inclusion, exclusion, or scope
+    requirements.
     Read explicit logical requirements in target_icp_signal as written:
       * `OR` / `either` separates alternatives. One complete alternative is
         sufficient; do not require conditions from alternatives not chosen.
@@ -406,10 +415,15 @@ so structural callers can distinguish entity-mismatch from claim-mismatch."""
 # Final-judge-only blocks (consumed by build_final_judge_prompt)
 # ──────────────────────────────────────────────────────────────────────
 FINAL_JUDGE_RULES_BLOCK = """Final judge rules:
-- Re-apply the PART A check from above BEFORE judging content support: if
-  miner_claim does not semantically map to target_icp_signal, return
-  contradicted regardless of what the extracted content shows. Do not let a
-  factually-true but orthogonal claim pass just because the URL supports it.
+- Re-apply the PART A check from above BEFORE judging content support. For a
+  HIRING functional-role target, follow the HIRING rule: surrounding exact
+  source text for the same documented hiring event and role may complete an
+  exact submitted quote that omits function, event, or role words. It may not
+  replace a contradictory claim or evidence about a different company, event,
+  or role. In all other cases, if miner_claim does not semantically map to
+  target_icp_signal, return contradicted regardless of what the extracted
+  content shows. Do not let a factually-true but orthogonal claim pass just
+  because the URL supports it.
 - Use only the exact source extraction above as supporting evidence.
 - Require semantic fidelity, not verbatim wording. A concise claim can use a
   faithful umbrella description of a named release or capability when the

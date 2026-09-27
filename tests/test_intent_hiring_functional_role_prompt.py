@@ -15,6 +15,11 @@ UNIBUDDY_URL = (
     "https://unibuddy-1668416154.teamtailor.com/jobs/"
     "7606923-software-engineer-ii-chat-systems-fully-remote-europe"
 )
+UNIBUDDY_NATIVE_DESCRIPTION = (
+    "“You will gain exposure to the full stack of the Unibuddy platform across "
+    "web, native, and backend to deliver engaging solutions to our users and "
+    "customers.”"
+)
 UNIBUDDY_TEXT = (
     "We’re looking for an exceptional mid-level software engineer with a "
     "passion for building great products to join our team. You will gain "
@@ -55,6 +60,7 @@ def _stage_three_prompt(
     source_text: str,
     *,
     url: str | None = None,
+    verified_identity_context: dict | None = None,
 ) -> str:
     source_url = url or row["claimed_source_urls"][0]
     return intent._build_final_judge_prompt(
@@ -68,27 +74,37 @@ def _stage_three_prompt(
             }],
             "statuses": [],
         },
+        verified_identity_context=verified_identity_context,
     )
 
 
 def test_unibuddy_source_and_functional_role_rule_reach_stage_three() -> None:
     row = _row(
-        claim=(
-            "Unibuddy is recruiting a Software Engineer II to work across its "
-            "web, native, and backend platform."
-        )
+        claim=UNIBUDDY_NATIVE_DESCRIPTION,
     )
     row.update(
         company="Unibuddy",
         website="https://unibuddy.com/",
-        company_linkedin="https://linkedin.com/company/unibuddy",
+        company_linkedin="",
         claimed_source_urls=[UNIBUDDY_URL],
+        _integrity_policy=True,
+        _buyer_max_age_days=365,
     )
 
-    prompt = _stage_three_prompt(row, UNIBUDDY_TEXT, url=UNIBUDDY_URL)
+    prompt = _stage_three_prompt(
+        row,
+        UNIBUDDY_TEXT,
+        url=UNIBUDDY_URL,
+        verified_identity_context={
+            "observed_name": "unibuddy",
+            "observed_domain": "unibuddy.com",
+            "observed_linkedin_slug": "unibuddy",
+        },
+    )
     normalized_prompt = " ".join(prompt.split())
 
     assert TARGET in prompt
+    assert UNIBUDDY_NATIVE_DESCRIPTION[1:-1] in prompt
     assert UNIBUDDY_URL in prompt
     assert UNIBUDDY_TEXT in prompt
     assert "title and submitted claim quote need not repeat" in prompt
@@ -104,6 +120,22 @@ def test_unibuddy_source_and_functional_role_rule_reach_stage_three() -> None:
     ) in normalized_prompt
     assert "The duty sentence need not repeat the platform name" in normalized_prompt
     assert "an internal developer platform" in prompt
+    assert (
+        "When miner_claim is an exact quote grounded in the supplied source, bind "
+        "it using the surrounding exact body for that same documented hiring event "
+        "and role"
+    ) in normalized_prompt
+    assert (
+        "The quote may omit function, event, or role words; that omission does not "
+        "fail PART A"
+    ) in normalized_prompt
+    assert (
+        "surrounding exact source text for the same documented hiring event and role "
+        "may complete an exact submitted quote that omits function, event, or role words"
+    ) in normalized_prompt
+    assert "It may not replace a contradictory claim" in normalized_prompt
+    assert "ARENA INTEGRITY DATE POLICY" in prompt
+    assert '"linkedin_company_slug":"unibuddy"' in prompt
 
 
 @pytest.mark.parametrize(

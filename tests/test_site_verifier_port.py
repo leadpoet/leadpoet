@@ -1,8 +1,8 @@
 """Tests for the site-verifier improvements ported into the lab verifier.
 
 Covers the four ported surfaces and the precision-first company-fit contract.
-The official default enforces deterministic industry fit. Explicit shadow and
-disabled modes remain available for controlled observation.
+Taxonomy checks flag industry disputes for evidence-based company review.
+Explicit shadow and disabled modes remain available for controlled observation.
 """
 
 from __future__ import annotations
@@ -360,7 +360,9 @@ async def test_gate_receipts_persist_into_breakdown_end_to_end(monkeypatch) -> N
         score_company_competition_intent,
     )
 
-    # Canonical conflict zeroes deterministically before provider calls.
+    # A disputed label requires evidence review. Without a provider key the
+    # fact stays unproven, and the failed qualification receipt must persist.
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     breakdown = await score_company_competition_intent(
         _company("Manufacturing"),
         _icp("Software"),
@@ -369,14 +371,14 @@ async def test_gate_receipts_persist_into_breakdown_end_to_end(monkeypatch) -> N
         seen_companies=set(),
     )
     assert breakdown.final_score == 0
-    assert "submitted company fit conflicts" in (breakdown.failure_reason or "")
+    assert "Company fit unavailable" in (breakdown.failure_reason or "")
     receipts = breakdown.verifier_gate_receipts
     assert receipts and receipts[0]["gate"] == "company_fit"
-    assert receipts[0]["decision"] == "mismatch"
-    assert receipts[0]["company_fit_dimensions"]["industry"] == "mismatch"
+    assert receipts[0]["decision"] == "unavailable"
+    assert receipts[0]["company_fit_dimensions"]["industry"] == "unavailable"
     # Round-trips through the model layer (what the evaluator serializes).
-    dumped = breakdown.model_dump()
-    assert dumped["verifier_gate_receipts"][0]["decision"] == "mismatch"
+    restored = type(breakdown).model_validate_json(breakdown.model_dump_json())
+    assert restored.verifier_gate_receipts == receipts
 
 
 @pytest.mark.asyncio

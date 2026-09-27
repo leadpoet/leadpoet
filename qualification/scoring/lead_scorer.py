@@ -2389,7 +2389,7 @@ def _retain_matched_company_retry_sources(
             retained[url] = page
             continue
         if len(retained) >= MAX_FETCH_CALLS:
-            break
+            continue
         retained[url] = page
     retry_cache.clear()
     retry_cache.update({

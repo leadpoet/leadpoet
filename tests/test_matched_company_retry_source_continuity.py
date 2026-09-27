@@ -230,6 +230,32 @@ def test_fresh_same_url_bytes_replace_old_bytes_even_when_cache_is_full():
     assert cache["pages"][PLATFORM_URL]["text"] == updated_text
 
 
+def test_full_cache_skips_new_page_but_refreshes_later_existing_page():
+    cache = _retry_cache()
+    for index in range(1, MAX_FETCH_CALLS):
+        url = f"https://unibuddy.com/retained-{index}/"
+        cache["pages"][url] = {"final_url": url, "text": f"retained {index}"}
+    new_url = "https://unibuddy.com/new-platform/"
+    updated_text = f"Updated platform page\n{PLATFORM_QUOTE}\nNew exact body."
+    result = _fit_result(decision=COMPANY_FIT_UNAVAILABLE)
+    dimensions = result.details["dimension_evidence"]
+    dimensions["geography"] = deepcopy(dimensions["industry"])
+    dimensions["industry"]["web_evidence"]["url"] = new_url
+
+    lead_scorer._retain_matched_company_retry_sources(
+        cache,
+        {
+            new_url: {"final_url": new_url, "text": PLATFORM_TEXT},
+            PLATFORM_URL: {"final_url": PLATFORM_URL, "text": updated_text},
+        },
+        result,
+    )
+
+    assert len(cache["pages"]) == MAX_FETCH_CALLS
+    assert new_url not in cache["pages"]
+    assert cache["pages"][PLATFORM_URL]["text"] == updated_text
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

@@ -4509,6 +4509,43 @@ def _structured_profile_identity_anchor(
     }
 
 
+def _investigator_identity_context(
+    submitted_linkedin: Any,
+    homepage_identity: Mapping[str, Any],
+    web_identity: Mapping[str, Any],
+    transport_domain: str,
+) -> tuple[Mapping[str, Any], str]:
+    """Carry one proven numeric LinkedIn alias into the investigator."""
+
+    resolved_identity = _structured_profile_identity_anchor(
+        homepage_identity,
+        web_identity,
+        transport_domain,
+    )
+    submitted_slug = linkedin_company_page_slug(submitted_linkedin)
+    homepage_slug = str(
+        homepage_identity.get("linkedin_company_slug") or ""
+    ).strip().casefold()
+    resolved_slug = str(
+        resolved_identity.get("linkedin_company_slug") or ""
+    ).strip().casefold()
+    if (
+        submitted_slug
+        and submitted_slug == homepage_slug
+        and homepage_slug.isdigit()
+        and resolved_slug
+        and not resolved_slug.isdigit()
+        and web_identity.get("decision") == COMPANY_FIT_MATCH
+        and web_identity.get("reason_code")
+        == "structured_numeric_linkedin_alias_verified"
+    ):
+        return (
+            resolved_identity,
+            f"https://www.linkedin.com/company/{resolved_slug}",
+        )
+    return homepage_identity, str(submitted_linkedin or "")
+
+
 def _alias_unresolved_structured_profile_lookup(
     web_identity: Mapping[str, Any],
     transport_domain: str,
@@ -6185,6 +6222,22 @@ async def _run_targeted_company_evidence_investigation(
         submitted_source_urls.append(safe_url)
         if len(submitted_source_urls) >= MAX_SUBMITTED_SOURCE_URLS:
             break
+    investigation_web_identity = _web_identity_receipt(
+        company,
+        verdict,
+        verified_homepage_identity=verified_identity,
+        verified_homepage_transport_domain=verified_transport_domain,
+        verified_structured_identity=structured_profile_identity_evidence,
+        company_quality=company_quality,
+    )
+    investigation_verified_identity, investigation_linkedin = (
+        _investigator_identity_context(
+            company.company_linkedin,
+            verified_identity,
+            investigation_web_identity,
+            verified_transport_domain,
+        )
+    )
     structured_private_stage_evidence = (
         dict(structured_public_company_evidence)
         if "stage" in investigation_targets
@@ -6192,16 +6245,7 @@ async def _run_targeted_company_evidence_investigation(
             structured_public_company_evidence,
             _structured_profile_identity_anchor(
                 verified_identity,
-                _web_identity_receipt(
-                    company,
-                    verdict,
-                    verified_homepage_identity=verified_identity,
-                    verified_homepage_transport_domain=verified_transport_domain,
-                    verified_structured_identity=(
-                        structured_profile_identity_evidence
-                    ),
-                    company_quality=company_quality,
-                ),
+                investigation_web_identity,
                 verified_transport_domain,
             ),
         )
@@ -6211,7 +6255,7 @@ async def _run_targeted_company_evidence_investigation(
         company_locator={
             "name": company.company_name,
             "website": company.company_website,
-            "linkedin": company.company_linkedin,
+            "linkedin": investigation_linkedin,
         },
         targets=investigation_targets,
         requested_stage=icp_stage,
@@ -6289,7 +6333,7 @@ async def _run_targeted_company_evidence_investigation(
                 else {}
             ),
         },
-        verified_homepage_identity=verified_identity,
+        verified_homepage_identity=investigation_verified_identity,
         homepage_navigation_locators=(
             homepage_navigation_locators if review_positive_semantics else ()
         ),
@@ -6302,7 +6346,7 @@ async def _run_targeted_company_evidence_investigation(
             structured_profile_description_evidence=(
                 structured_profile_description_evidence
             ),
-            verified_identity=verified_identity,
+            verified_identity=investigation_verified_identity,
             include_structured_description="stage" in investigation_targets,
         ),
         diagnostic=investigation_diagnostic,

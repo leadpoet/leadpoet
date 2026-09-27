@@ -337,19 +337,11 @@ def test_historical_replay_service_keeps_source_dates_and_current_deadlines(monk
     from lab_arena import api, service, wiring
 
     built, _runs, _documents = _replay_source_fixture(monkeypatch)
-
-    @dataclass
-    class Defaults:
-        benchmark_icp_count: int = 10
-        promotion_margin: float = 0.5
-        runner_slot_ceiling: int = 10
-        rewards_enabled: bool = True
-        daily_cutoff_hour_utc: int = 0
-        baseline_source_url: str = "example"
+    production_service = service.ArenaService
 
     @dataclass
     class Config:
-        defaults: Defaults
+        defaults: object
         mode: str = "live"
         network_name: str = "finney"
         netuid: int = 71
@@ -360,23 +352,18 @@ def test_historical_replay_service_keeps_source_dates_and_current_deadlines(monk
         baseline_source_fetcher: object = None
         daily_icp_source: object = None
 
-    class FakeArenaService:
+    class InMemoryArenaService(production_service):
         def __init__(self, config):
-            self.config = config
+            self._config = config
 
-        def build_schedule(self, cutoff):
-            cutoff = cutoff.astimezone(timezone.utc)
-            return {
-                "submission_open": (cutoff.replace(day=26)).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ"
-                ),
-                "submission_cutoff": cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "benchmark_deadline": cutoff.replace(hour=cutoff.hour + 1).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ"
-                ),
-            }
-
-    built.config = Config(Defaults())
+    built.config = Config(service.RoundDefaults(
+        benchmark_icp_count=10,
+        promotion_margin=0.5,
+        runner_slot_ceiling=10,
+        rewards_enabled=True,
+        daily_cutoff_hour_utc=0,
+        baseline_source_url="example",
+    ))
     monkeypatch.setenv("LAB_ARENA_MODE", "live")
     monkeypatch.setattr(
         verification, "_utc_now",
@@ -385,7 +372,7 @@ def test_historical_replay_service_keeps_source_dates_and_current_deadlines(monk
     monkeypatch.setattr(
         wiring, "build_service_from_environment", lambda _mode: (built, None)
     )
-    monkeypatch.setattr(service, "ArenaService", FakeArenaService)
+    monkeypatch.setattr(service, "ArenaService", InMemoryArenaService)
     monkeypatch.setattr(api, "create_app", lambda _service: "test-app")
     monkeypatch.setattr(
         verification, "_validate_replay_source_archive",
@@ -397,16 +384,28 @@ def test_historical_replay_service_keeps_source_dates_and_current_deadlines(monk
         replay_published_round=REPLAY_SOURCE_ROUND_ID,
         replay_historical=True,
     )
-    schedule = replay_service.build_schedule(
-        datetime(2026, 9, 27, 1, tzinfo=timezone.utc)
-    )
-
-    assert app == "test-app"
-    assert schedule == {
+    cutoff = datetime(2026, 9, 27, 1, tzinfo=timezone.utc)
+    schedule = replay_service.build_schedule(cutoff)
+    production_schedule = production_service.build_schedule(replay_service, cutoff)
+    expected_schedule = dict(production_schedule)
+    expected_schedule.update({
         "submission_open": "2026-09-23T00:00:00Z",
         "submission_cutoff": "2026-09-24T00:00:00Z",
-        "benchmark_deadline": "2026-09-27T02:00:00Z",
-    }
+    })
+
+    assert app == "test-app"
+    assert schedule == expected_schedule
+    assert contracts.validate_document(
+        schedule, contracts.STAGE_SCHEDULE_FIELDS
+    ) == schedule
+    ordered = [
+        schedule[field.name]
+        for field in contracts.STAGE_SCHEDULE_FIELDS
+        if field.name in schedule
+    ]
+    assert ordered == sorted(ordered)
+    assert len(set(ordered)) == len(ordered)
+    assert schedule["benchmark_deadline"] > cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
     assert replay_service._saved_output_replay["evaluation_date"] == "2026-09-24"
     assert replay_service._saved_output_replay["icp_set_date"] == "2026-09-23"
     native_evaluation_date = datetime.strptime(
@@ -430,6 +429,8 @@ def test_historical_replay_service_keeps_source_dates_and_current_deadlines(monk
 
 
 def test_historical_replay_requires_source_and_resume_keeps_frozen_schedule():
+    from lab_arena.service import ArenaService, RoundDefaults
+
     with pytest.raises(verification.VerificationError, match="requires a published source"):
         verification._build_pinned_service(ROUND_ID, replay_historical=True)
 
@@ -447,34 +448,28 @@ def test_historical_replay_requires_source_and_resume_keeps_frozen_schedule():
     service.store.row["round_id"] = target_round_id
     service.store.row["configuration_doc"]["round_id"] = target_round_id
     service.config.pinned_round_id = target_round_id
-    service.config.defaults.stage_minutes = {
-        "benchmark": 60,
-        "stage_1": 60,
-        "stage_1_scoring": 60,
-        "stage_2": 60,
-        "final_scoring": 60,
-    }
-    runtime_schedule = {
+    service.config.defaults.stage_minutes = RoundDefaults().stage_minutes
+    source_schedule = {
         "submission_open": "2026-09-14T00:00:00Z",
         "submission_cutoff": "2026-09-15T00:00:00Z",
-        "benchmark_deadline": "2026-09-16T01:00:00Z",
-        "stage_1_start": "2026-09-16T01:00:01Z",
-        "stage_1_close": "2026-09-16T02:00:01Z",
-        "stage_1_scoring_close": "2026-09-16T03:00:01Z",
-        "stage_2_start": "2026-09-16T03:00:02Z",
-        "stage_2_close": "2026-09-16T04:00:02Z",
-        "final_scoring_close": "2026-09-16T05:00:02Z",
-        "publication_deadline": "2026-09-16T05:00:03Z",
     }
+    schedule_builder = object.__new__(ArenaService)
+    schedule_builder._config = SimpleNamespace(defaults=service.config.defaults)
+
+    def build_historical_schedule(cutoff):
+        schedule = ArenaService.build_schedule(schedule_builder, cutoff)
+        schedule.update(source_schedule)
+        return schedule
+
+    runtime_schedule = build_historical_schedule(
+        datetime(2026, 9, 16, tzinfo=timezone.utc)
+    )
     service.store.row["configuration_doc"]["schedule"] = dict(runtime_schedule)
-    service.build_schedule = lambda _cutoff: dict(runtime_schedule)
+    service.build_schedule = build_historical_schedule
     service._saved_output_replay.update({
         "historical_source": True,
         "icp_set_date": "2026-09-14",
-        "source_schedule": {
-            "submission_open": "2026-09-14T00:00:00Z",
-            "submission_cutoff": "2026-09-15T00:00:00Z",
-        },
+        "source_schedule": source_schedule,
     })
     verification._validate_frozen_round(service, service.store.row)
 

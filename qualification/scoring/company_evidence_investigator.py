@@ -1211,7 +1211,7 @@ def _quote_supports_sec_equity_listing(
     return bool(re.search(
         r"securities\s+registered\s+pursuant\s+to\s+section\s+12\s*\(b\)"
         r".{0,100}title\s+of\s+each\s+class"
-        r".{0,40}trading\s+symbol\(s\)"
+        r".{0,40}trading\s+symbol(?:s|\(s\))?(?![a-z]|\s*\(s\))"
         r".{0,40}name\s+of\s+each\s+exchange\s+on\s+which\s+registered"
         r"\s+(?:(?:class\s+[a-z]|voting|non-voting)\s+)?"
         r"(?:common\s+(?:stock|shares)|ordinary\s+shares)"

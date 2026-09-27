@@ -52,6 +52,17 @@ def test_exact_ciso_sec_table_projects_through_normal_stage_decision():
     ) == lead_scorer.COMPANY_FIT_UNAVAILABLE
 
 
+def test_jll_singular_symbol_table_validates_through_findings():
+    quote = QUOTE.replace(
+        "CISO GLOBAL, INC.", "Jones Lang LaSalle Incorporated",
+    )
+    quote = quote.replace("Trading Symbol(s)", "Trading Symbol")
+    quote = quote.replace(
+        "CISO The Nasdaq Stock Market LLC", "JLL The New York Stock Exchange",
+    )
+    assert validate(quote, names={"joneslanglasalle"})["status"] == "VERIFIED"
+
+
 @pytest.mark.parametrize("quote", [
     QUOTE.replace("CISO The Nasdaq Stock Market LLC", "CISO New York Stock Exchange"),
     QUOTE.replace("Common Stock", "Class A common stock"),
@@ -62,11 +73,20 @@ def test_registered_equity_table_variants(quote):
     assert validate(quote)["status"] == "VERIFIED"
 
 
+@pytest.mark.parametrize("header", [
+    "Trading Symbol", "Trading Symbols", "Trading Symbol(s)",
+])
+def test_registered_equity_table_accepts_sec_symbol_header_variants(header):
+    quote = QUOTE.replace("Trading Symbol(s)", header)
+    assert validate(quote)["status"] == "VERIFIED"
+
+
 @pytest.mark.parametrize("quote", [
     QUOTE.replace("Common Stock", "Convertible Notes"),
     QUOTE.replace("Common Stock", "Preferred Stock"),
     QUOTE.replace("CISO The Nasdaq Stock Market LLC", "None None"),
     QUOTE.replace("Trading Symbol(s)", "Market reference"),
+    QUOTE.replace("Trading Symbol(s)", "Trading Symbols(s)"),
     QUOTE.replace("Section 12(b)", "Section 12(g)"),
     QUOTE.replace("Securities registered", "Securities proposed to be registered"),
     QUOTE + ". CISO Global common stock has ceased trading.",

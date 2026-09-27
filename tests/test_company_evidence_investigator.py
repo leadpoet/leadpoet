@@ -8764,6 +8764,36 @@ def test_current_jll_investor_trading_row_is_admitted_as_public_stage():
     assert finding["evidence_quote"] == quote
 
 
+def test_retained_jll_ir_page_navigation_quote_is_admitted_as_public_stage():
+    url = "https://ir.jll.com/overview/default.aspx"
+    quote = (
+        "JLL - Investor relations Skip to main content Investor relations "
+        "Search Investor relations NYSE: JLL 321.91 -2.49 ( -0.77% ) "
+        "Volume: 367,005 September 25, 2026 4:00 PM 20 Minute Delay "
+        "A member of the Fortune 500®, JLL (Jones Lang LaSalle Incorporated) "
+        "is a leading global commercial real estate services and investment "
+        "management company"
+    )
+    page = f"{quote} that helps clients buy, build, occupy, and manage property."
+
+    assert investigator._quote_occurs(quote, page)
+    finding = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            observed_value="Public",
+            evidence_url=url,
+            evidence_quote=quote,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: page},
+        first_party_domains={"jll.com"},
+        identity_names={"jll", "joneslanglasalleincorporated"},
+    )["stage"]
+
+    assert finding["status"] == "VERIFIED"
+    assert finding["evidence_quote"] == quote
+
+
 def test_acculon_retrospective_series_a_statement_requires_recipient_binding():
     quote = (
         "The facility’s opening follows a period of rapid growth for Acculon, "

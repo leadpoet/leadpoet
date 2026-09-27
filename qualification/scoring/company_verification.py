@@ -147,14 +147,20 @@ _COPYRIGHT_LEGAL_NAME_RE = re.compile(
     r"(?=\s+(?:abn|acn|all rights reserved)\b|[\s.]*$)",
     re.IGNORECASE,
 )
-_CURRENT_EXCHANGE_PROFILE_RE = re.compile(
-    r"(?:(?:nyse|nasdaq)\s*/\s*(?P<slash_ticker>[A-Z][A-Z0-9.-]{0,9})\s+"
-    r"(?P<slash_issuer>[A-Z][A-Z0-9&.'’+ -]{2,100})|"
-    r"(?P<label_issuer>[A-Z][A-Za-z0-9&.'’+ -]{2,100}?)\s+"
-    r"(?P<label_exchange>New\s+York\s+Stock\s+Exchange|NYSE|NASDAQ)\s*:\s*"
-    r"(?P<label_ticker>[A-Z][A-Z0-9.-]{0,9})|"
-    r"(?P<prefix_exchange>NYSE|NASDAQ)\s*:\s*"
-    r"(?P<prefix_ticker>[A-Z][A-Z0-9.-]{1,9}))",
+_CURRENT_EXCHANGE_SLASH_PROFILE_RE = re.compile(
+    r"(?:nyse|nasdaq)\s*/\s*(?P<ticker>[A-Z][A-Z0-9.-]{0,9})\s+"
+    r"(?P<issuer>[A-Z][A-Z0-9&.'’+ -]{2,100})",
+    re.I,
+)
+_CURRENT_EXCHANGE_LABEL_PROFILE_RE = re.compile(
+    r"(?P<issuer>[A-Z][A-Za-z0-9&.'’+ -]{2,100}?)\s+"
+    r"(?P<exchange>New\s+York\s+Stock\s+Exchange|NYSE|NASDAQ)\s*:\s*"
+    r"(?P<ticker>[A-Z][A-Z0-9.-]{0,9})",
+    re.I,
+)
+_CURRENT_EXCHANGE_PREFIX_PROFILE_RE = re.compile(
+    r"(?P<exchange>NYSE|NASDAQ)\s*:\s*"
+    r"(?P<ticker>[A-Z][A-Z0-9.-]{1,9})",
     re.I,
 )
 # ----------------------------------------------------------------------------
@@ -220,15 +226,8 @@ def current_exchange_profile_names_issuer(
         str(value).strip() for value in identity_names
         if str(value or "").strip()
     }
-    for match in _CURRENT_EXCHANGE_PROFILE_RE.finditer(quote):
-        prefix_ticker = str(match.group("prefix_ticker") or "")
-        if prefix_ticker:
-            ticker_key = _company_name(prefix_ticker)
-            if any(_company_name(name) == ticker_key for name in names):
-                return True
-            continue
-        issuer = str(match.group("slash_issuer") or match.group("label_issuer") or "")
-        if match.group("slash_issuer"):
+    def issuer_matches(issuer: str, *, slash_form: bool) -> bool:
+        if slash_form:
             issuer = re.split(r"\s+\d", issuer, maxsplit=1)[0]
         else:
             issuer = re.sub(
@@ -248,7 +247,7 @@ def current_exchange_profile_names_issuer(
                 "inc", "incorporated", "corp", "corporation",
             }
         ).casefold()
-        if any(
+        return any(
             (
                 normalized_name == normalized_issuer
                 and issuer_structural_terms == set(re.findall(
@@ -263,7 +262,47 @@ def current_exchange_profile_names_issuer(
             )
             for name in names
             if (normalized_name := _company_name(name))
-        ):
+        )
+
+    def navigation_label_for_direct_ticker(issuer: str) -> bool:
+        """Identify an issuer-owned IR title accidentally joined to nav text."""
+
+        return any(
+            re.fullmatch(
+                rf"\s*{re.escape(name)}\s*-\s*investor relations"
+                r"(?:\s+(?:skip to main content|investor relations|search))*\s*",
+                issuer,
+                re.I,
+            )
+            for name in names
+        )
+
+    labeled_matches = list(_CURRENT_EXCHANGE_LABEL_PROFILE_RE.finditer(quote))
+    for match in _CURRENT_EXCHANGE_SLASH_PROFILE_RE.finditer(quote):
+        if issuer_matches(str(match.group("issuer") or ""), slash_form=True):
+            return True
+    for match in labeled_matches:
+        if issuer_matches(str(match.group("issuer") or ""), slash_form=False):
+            return True
+    for match in _CURRENT_EXCHANGE_PREFIX_PROFILE_RE.finditer(quote):
+        ticker_key = _company_name(match.group("ticker"))
+        if not any(_company_name(name) == ticker_key for name in names):
+            continue
+        # A direct ticker card may follow navigation text, as on issuer IR
+        # pages. Do not let that text consume the direct match. An explicit
+        # nearby issuer label still owns the attribution and blocks a ticker
+        # collision when it names a different company.
+        conflicting_label = any(
+            labeled.end() == match.end()
+            and not issuer_matches(
+                str(labeled.group("issuer") or ""), slash_form=False,
+            )
+            and not navigation_label_for_direct_ticker(
+                str(labeled.group("issuer") or ""),
+            )
+            for labeled in labeled_matches
+        )
+        if not conflicting_label:
             return True
     return False
 

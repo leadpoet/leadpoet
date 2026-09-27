@@ -220,13 +220,12 @@ Keep temporal claims about a report or source separate from current company
 attributes and event timing. A current source statement that a company "is
 Series B" can support current or latest-known funding-stage wording when no
 admitted evidence contradicts it. It does not prove that the source, coverage,
-or financing event is recent. Any claim that a source, report, or coverage is
-recently published, or that financing or another event happened recently,
-requires the relevant admitted publication or event date. Retrieval during this
-review and a separately date-checked current-stage decision are not publication
-or event dates. A current job body can still support present-status wording
-such as "is hiring"; claiming the posting was recently published requires
-admitted publication evidence.
+or financing event is recent. A claim of recent coverage, a recently published
+source or report, or a recently occurring event requires the relevant admitted
+publication or event date. Retrieval during this review and a separately date-
+checked current-stage decision are not publication or event dates. A current job
+body can still support present-status wording such as "is hiring"; claiming the
+posting was recently published requires admitted publication evidence.
 Return facts_supported=false only when at least one concrete factual clause in
 the paragraph is absent from, broader than, or contradicted by the supplied
 evidence. A verbatim
@@ -284,9 +283,20 @@ evidence conflicts with a clause and UNPROVEN when admitted evidence does not
 establish a clause. Missing evidence, a different metric, or a failed ICP event
 match is not a factual contradiction. CONTRADICTED requires evidence for an
 incompatible fact; otherwise use UNPROVEN. Check the actor, action, object,
-numbers, dates, and source attribution separately. A related product benefit or
-funding event cannot establish an unstated mechanism or API behavior. Do not omit a unit
-or a clause because another clause in the same unit is supported.
+numbers, dates, every relative-time qualifier, and source attribution
+separately. For unit_grounding, treat a qualifier about when a source, report,
+or coverage was published or when an event happened as a separate factual
+clause, even when it gives no calendar date. Mark the unit VERIFIED only when
+its returned evidence includes a binding to the relevant admitted publication
+or event date; an undated attribute statement cannot ground the full qualified
+unit. For example, an undated provider description can support "Example is an
+analytics provider," but not "a recently published report describes Example as
+an analytics provider." The latter unit is UNPROVEN. This date-binding rule
+does not apply to conditional commercial inference or to a current,
+present-status, or latest-known-state claim directly supported by current
+evidence. A related product benefit or funding event cannot establish an
+unstated mechanism or API behavior. Do not omit a unit or a clause because
+another clause in the same unit is supported.
 
 For each VERIFIED factual unit, return one or two evidence bindings that support
 the asserted facts, not just related facts about the company. If an asserted

@@ -99,7 +99,11 @@ async def _review(
     async def judge(prompt, **kwargs):
         system = kwargs["system_prompt"]
         assert "latest-known funding-stage wording" in system
-        assert "source, report, or coverage" in system
+        assert "recent coverage, a recently published" in system
+        assert "For unit_grounding, treat a qualifier" in system
+        assert "returned evidence includes a binding" in system
+        assert "undated provider description" in system
+        assert "latest-known-state claim directly supported" in system
         assert "present-status wording" in system
         assert 'such as "is hiring"' in system
         document = json.loads(prompt)

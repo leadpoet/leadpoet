@@ -1452,11 +1452,12 @@ def test_real_citation_receipt_reaches_bundle_persistence_and_cost_count(
     }
     validation_calls = {"n": 0}
 
-    def validate_review(_response, _document):
+    def validate_review(_response, _document, *, initial_review=True):
         validation_calls["n"] += 1
+        assert initial_review is (validation_calls["n"] == 1)
         if validation_calls["n"] == 1:
-            raise intent_details._CitationRepairNeeded(
-                {0: {"missing_evidence"}}, held_response
+            raise intent_details._BoundedReviewRepairNeeded(
+                {0: {"missing_evidence"}}, held_response, set()
             )
         raise ValueError("citation remains unbound")
 

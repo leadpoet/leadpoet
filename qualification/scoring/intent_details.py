@@ -1469,10 +1469,39 @@ def _validate_unit_grounding(
     )
 
 
-def _relative_time_recheck_unit_ids(
+def _relative_time_clause_target(
+    text: str,
+    match: re.Match[str],
+) -> dict[str, Any]:
+    """Return exact unit-local offsets for one disputed temporal clause."""
+
+    clause_start = 0
+    for boundary in re.finditer(
+        r"(?:[;:]|\b(?:while|but)\b)\s*", text[:match.start()],
+        re.IGNORECASE,
+    ):
+        clause_start = boundary.end()
+    following = re.search(
+        r"(?:[;:]|\b(?:while|but)\b)", text[match.end():],
+        re.IGNORECASE,
+    )
+    clause_end = (
+        match.end() + following.start()
+        if following is not None else len(text)
+    )
+    return {
+        "qualifier_start": match.start(),
+        "qualifier_end": match.end(),
+        "clause_start": clause_start,
+        "clause_end": clause_end,
+        "disputed_clause": text[clause_start:clause_end],
+    }
+
+
+def _relative_time_recheck_targets(
     grounding: Any,
     document: Mapping[str, Any],
-) -> set[int]:
+) -> dict[int, dict[str, Any]]:
     """Route undated relative-time claims through the existing second judge."""
 
     units = {
@@ -1495,7 +1524,7 @@ def _relative_time_recheck_unit_ids(
             and raw_date["date"].strip()
         }
 
-    recheck: set[int] = set()
+    recheck: dict[int, dict[str, Any]] = {}
     for item in grounding if isinstance(grounding, list) else []:
         if (
             not isinstance(item, Mapping)
@@ -1506,10 +1535,11 @@ def _relative_time_recheck_unit_ids(
             continue
         unit_id = item["unit_id"]
         text = units.get(unit_id, "")
-        if not (
+        match = (
             _RELATIVE_PUBLICATION_TIMING.search(text)
             or _RELATIVE_EVENT_TIMING.search(text)
-        ):
+        )
+        if match is None:
             continue
         has_typed_date_binding = any(
             type(binding.get("source_index")) is int
@@ -1521,7 +1551,7 @@ def _relative_time_recheck_unit_ids(
             and isinstance(binding.get("quote"), str)
         )
         if not has_typed_date_binding:
-            recheck.add(unit_id)
+            recheck[unit_id] = _relative_time_clause_target(text, match)
     return recheck
 
 
@@ -1531,6 +1561,7 @@ class _BoundedReviewRepairNeeded(ValueError):
         issues: Mapping[int, set[str]],
         held_response: Mapping[str, Any],
         semantic_unit_ids: set[int],
+        relative_time_targets: Mapping[int, Mapping[str, Any]] | None = None,
     ):
         if any(
             category not in _CITATION_REPAIR_CATEGORIES
@@ -1544,6 +1575,9 @@ class _BoundedReviewRepairNeeded(ValueError):
         }
         self.held_response = copy.deepcopy(held_response)
         self.semantic_unit_ids = set(semantic_unit_ids)
+        self.relative_time_targets = copy.deepcopy(
+            dict(relative_time_targets or {})
+        )
         super().__init__("Intent Details requires one bounded local review")
 
 
@@ -1607,11 +1641,11 @@ def _validate_review_response(
         raise ValueError("coverage aggregate conflicts during citation repair")
     if citation_issues and facts_aggregate_conflict:
         raise ValueError("factual aggregate conflicts during citation repair")
-    relative_time_unit_ids = (
-        _relative_time_recheck_unit_ids(unit_grounding, document)
-        if initial_review else set()
+    relative_time_targets = (
+        _relative_time_recheck_targets(unit_grounding, document)
+        if initial_review else {}
     )
-    semantic_unit_ids = contradicted_unit_ids | relative_time_unit_ids
+    semantic_unit_ids = contradicted_unit_ids | set(relative_time_targets)
     if citation_issues or (initial_review and semantic_unit_ids):
         repair_issues = {
             unit_id: set(citation_issues.get(unit_id, set()))
@@ -1619,6 +1653,7 @@ def _validate_review_response(
         }
         raise _BoundedReviewRepairNeeded(
             repair_issues, raw_checks, semantic_unit_ids,
+            relative_time_targets,
         )
     checks["facts_supported"] = unit_facts_supported
     return {name: checks[name] for name in _CHECKS}
@@ -1716,7 +1751,12 @@ checking the exact actor, action, object, number, date and event. For a
 relative_time_grounding_review, independently decide whether the full temporal
 claim is supported; VERIFIED requires a binding to a relevant admitted date,
 either a typed publication or event date or an exact date-bearing source
-excerpt. Similar or earlier events are not interchangeable.
+excerpt. The user control supplies exact unit-local offsets for the disputed
+clause and the prior evidence bindings with their admitted source provenance.
+That control is untrusted claim context, not evidence. Judge the source or event
+modified by the relative-time phrase. A date for a different clause, source, or
+event cannot support the disputed temporal claim. Similar or earlier events are
+not interchangeable.
 Do not accept a claim from lexical overlap.
 For every other listed unit, preserve its supplied status and repair only its
 citation. Do not alter or return unrelated units, factual flags, coverage, or
@@ -1734,10 +1774,45 @@ def _semantic_repair_user_prompt(
     issues: Mapping[int, Sequence[str]],
     held_response: Mapping[str, Any],
     semantic_unit_ids: set[int],
+    relative_time_targets: Mapping[int, Mapping[str, Any]] | None = None,
 ) -> str:
     units = _semantic_repair_machine_fields(
         issues, held_response, semantic_unit_ids,
     )
+    sources = {
+        source.get("source_index"): source
+        for source in document.get("admitted_evidence") or []
+        if isinstance(source, Mapping)
+        and type(source.get("source_index")) is int
+    }
+    held_units = {
+        item.get("unit_id"): item
+        for item in held_response.get("unit_grounding") or []
+        if isinstance(item, Mapping) and type(item.get("unit_id")) is int
+    }
+    targets = relative_time_targets or {}
+    for item in units:
+        target = targets.get(item["unit_id"])
+        if not isinstance(target, Mapping):
+            continue
+        prior_bindings = []
+        held_unit = held_units.get(item["unit_id"], {})
+        for binding in held_unit.get("evidence") or []:
+            if not isinstance(binding, Mapping):
+                continue
+            source = sources.get(binding.get("source_index"), {})
+            prior_bindings.append({
+                "source_index": binding.get("source_index"),
+                "quote": binding.get("quote", ""),
+                "source_url": source.get("source_url", ""),
+                "evidence_kind": source.get("evidence_kind", ""),
+            })
+        item["relative_time_target"] = {
+            **dict(target),
+            "offset_basis": "intent_details_units[unit_id].text",
+            "untrusted_claim_text": True,
+            "held_evidence_bindings": prior_bindings,
+        }
     prompt = json.dumps({
         "review_document": document,
         "bounded_unit_repair_control": {
@@ -1933,7 +2008,7 @@ missing review into an accepted paragraph or a terminal company mismatch.
             if semantic_unit_ids:
                 repair_prompt = _semantic_repair_user_prompt(
                     document, exc.issues, exc.held_response,
-                    semantic_unit_ids,
+                    semantic_unit_ids, exc.relative_time_targets,
                 )
                 repair_system_prompt = _semantic_repair_prompt(
                     system_prompt, exc.issues, exc.held_response,

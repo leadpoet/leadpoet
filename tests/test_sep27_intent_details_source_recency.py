@@ -244,6 +244,7 @@ async def test_current_or_latest_known_stage_remains_supported(
         paragraph=f"{job_quote} {second_sentence}",
         signal_quote=job_quote,
         source_text=job_quote,
+        source_publication_date="2026-04-21",
         company_dimension="stage",
         company_quote=stage_quote,
     )
@@ -313,11 +314,13 @@ async def test_undated_relative_coverage_uses_one_bounded_semantic_recheck(
     inputs = _inputs(
         company_name="HarborSoft",
         paragraph=(
-            f"{job_quote} Recent coverage identifies HarborSoft's latest "
-            "known institutional stage as Series B."
+            f"{job_quote} The canonical posting describes platform "
+            "responsibilities, while recent coverage identifies HarborSoft's "
+            "latest known institutional stage as Series B."
         ),
         signal_quote=job_quote,
         source_text=job_quote,
+        source_publication_date="2026-04-21",
         company_dimension="stage",
         company_quote=stage_quote,
     )
@@ -330,20 +333,70 @@ async def test_undated_relative_coverage_uses_one_bounded_semantic_recheck(
         if len(calls) == 1:
             return json.dumps(_response(document, [
                 (True, "VERIFIED", [job_quote]),
-                (True, "VERIFIED", [stage_quote]),
+                (True, "VERIFIED", [job_quote, stage_quote]),
             ]))
         control = payload["bounded_unit_repair_control"]
-        assert control["units"] == [{
+        assert len(control["units"]) == 1
+        repair_unit = control["units"][0]
+        target = repair_unit.pop("relative_time_target")
+        assert repair_unit == {
             "unit_id": 1,
             "contains_factual_claim": True,
             "status": "VERIFIED",
             "citation_errors": [],
             "semantic_recheck_allowed": True,
             "semantic_recheck_reason": "relative_time_grounding_review",
+        }
+        unit_text = document["intent_details_units"][1]["text"]
+        disputed_clause = (
+            "recent coverage identifies HarborSoft's latest known "
+            "institutional stage as Series B."
+        )
+        clause_start = unit_text.index(disputed_clause)
+        qualifier_start = unit_text.index("recent coverage")
+        assert target == {
+            "qualifier_start": qualifier_start,
+            "qualifier_end": qualifier_start + len("recent coverage"),
+            "clause_start": clause_start,
+            "clause_end": len(unit_text),
+            "disputed_clause": disputed_clause,
+            "offset_basis": "intent_details_units[unit_id].text",
+            "untrusted_claim_text": True,
+            "held_evidence_bindings": [
+                {
+                    "source_index": _binding(document, job_quote)[
+                        "source_index"
+                    ],
+                    "quote": job_quote,
+                    "source_url": "https://harborsoft.example/evidence",
+                    "evidence_kind": "verified_source_context",
+                },
+                {
+                    "source_index": _binding(document, stage_quote)[
+                        "source_index"
+                    ],
+                    "quote": stage_quote,
+                    "source_url": "https://harborsoft.example/stage",
+                    "evidence_kind": "verified_company_fact",
+                },
+            ],
+        }
+        job_source = document["admitted_evidence"][
+            target["held_evidence_bindings"][0]["source_index"]
+        ]
+        stage_source = document["admitted_evidence"][
+            target["held_evidence_bindings"][1]["source_index"]
+        ]
+        assert job_source["observed_dates"] == [{
+            "date": "2026-04-21", "basis": "source_publication_date",
         }]
+        assert "observed_dates" not in stage_source
         assert "routing control, not evidence or a conclusion" in kwargs[
             "system_prompt"
         ]
+        assert "different clause, source, or" in kwargs["system_prompt"]
+        assert disputed_clause not in kwargs["system_prompt"]
+        assert disputed_clause in prompt
         return json.dumps({"repairs": [{
             "unit_id": 1, "status": "UNPROVEN", "evidence": [],
         }]})
@@ -382,6 +435,13 @@ async def test_body_date_can_keep_relative_publication_claim_verified_on_recheck
             return json.dumps(_response(
                 document, [(True, "VERIFIED", [dated_excerpt])],
             ))
+        target = payload["bounded_unit_repair_control"]["units"][0][
+            "relative_time_target"
+        ]
+        assert target["disputed_clause"] == document[
+            "intent_details_units"
+        ][0]["text"]
+        assert target["held_evidence_bindings"][0]["quote"] == dated_excerpt
         assert "exact date-bearing source" in kwargs["system_prompt"]
         assert "excerpt" in kwargs["system_prompt"]
         return json.dumps({"repairs": [{
@@ -508,7 +568,9 @@ async def test_citation_and_temporal_findings_share_one_repair(monkeypatch):
                 "UNBOUND JOB QUOTE"
             )
             return json.dumps(response)
-        assert payload["bounded_unit_repair_control"]["units"] == [
+        units = payload["bounded_unit_repair_control"]["units"]
+        relative_target = units[1].pop("relative_time_target")
+        assert units == [
             {
                 "unit_id": 0,
                 "contains_factual_claim": True,
@@ -525,6 +587,13 @@ async def test_citation_and_temporal_findings_share_one_repair(monkeypatch):
                 "semantic_recheck_reason": "relative_time_grounding_review",
             },
         ]
+        assert relative_target["disputed_clause"] == (
+            "Recent coverage identifies HarborSoft as a Series B company."
+        )
+        assert [
+            binding["quote"]
+            for binding in relative_target["held_evidence_bindings"]
+        ] == [stage_quote]
         return json.dumps({"repairs": [
             {
                 "unit_id": 0,

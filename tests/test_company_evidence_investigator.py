@@ -5268,7 +5268,41 @@ def test_investigator_still_rejects_nonstage_late_series_wording():
     )["stage"]
 
     assert finding["status"] == "UNPROVEN"
-    assert finding["reason"] == "observed company stage was not canonical"
+    assert finding["reason"].startswith("observed company stage was not canonical;")
+    assert "Do not infer a value from the requested stage" in finding["reason"]
+
+
+@pytest.mark.parametrize(
+    ("observed", "expected"),
+    [(None, "UNPROVEN"), ("Series C+", "VERIFIED"), ("Series B", "UNPROVEN")],
+)
+def test_render_completed_extension_needs_supported_canonical_stage(observed, expected):
+    url = "https://render.com/blog/series-c-extension"
+    quote = (
+        "Render has raised $100M in an extension of our Series C, "
+        "valuing the company at $1.5B"
+    )
+    finding = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            observed_value=observed,
+            evidence_url=url,
+            evidence_quote=quote,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: quote},
+        first_party_domains={"render.com"},
+        identity_names={"render"},
+    )["stage"]
+
+    assert finding["status"] == expected
+    if observed is None:
+        assert "non-null evidence-supported value" in finding["reason"]
+        assert "extensions, use series c+" in finding["reason"]
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+    assert 'Return observed_value="Series C+" for such evidence' in prompt
+    assert "not the requested value by default" in prompt
+    assert "Debt, grants, planned rounds" in prompt
 
 
 @pytest.mark.parametrize(

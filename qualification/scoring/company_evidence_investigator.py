@@ -202,6 +202,14 @@ investing in other companies does not establish this ownership stage. Fetch
 and quote explicit current ownership/control evidence; the existing ownership
 proof gate still applies. Otherwise return UNPROVEN or a proven different stage.
 
+For a proven stage, observed_value must be a non-null canonical value: Seed,
+Series A, Series B, Series C+, Private Equity, Public, or Acquired. Use the value
+the evidence proves, not the requested value by default. Series C+ represents
+completed Series C and later priced-equity rounds, including a completed
+extension of that round. Return observed_value="Series C+" for such evidence;
+an extension does not require a new stage label. Debt, grants, planned rounds,
+and unresolved ownership or chronology do not establish that value.
+
 Public stage needs current company-attributed exchange/ticker or current
 listed/traded-share proof. A 'Public Company' label, planned IPO, old listing,
 product launch, or funding total is insufficient. A current SEC filing's
@@ -1457,7 +1465,14 @@ def _validated_findings(
                         status="UNPROVEN",
                         evidence_url="",
                         evidence_quote="",
-                        reason="observed company stage was not canonical",
+                        reason=(
+                            "observed company stage was not canonical; provide "
+                            "a non-null evidence-supported value from: "
+                            + ", ".join(sorted(_CANONICAL_COMPANY_STAGES))
+                            + ". Series C and later completed priced-equity "
+                            "rounds, including their extensions, use series c+. "
+                            "Do not infer a value from the requested stage."
+                        ),
                     )
                 elif normalized_stage == "private equity" and not (
                     _stage_evidence_supports_observation(

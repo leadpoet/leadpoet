@@ -3218,6 +3218,11 @@ def test_complete_identity_binds_exact_unnamed_first_party_industry_quote():
                 "cloud accounts and permissions. " + finding["evidence_quote"]
             ),
         },
+        fetched_final_urls={
+            finding["evidence_url"]: (
+                "https://www.rapid7.com/insightcloudsec/identity-analysis/"
+            ),
+        },
         first_party_domains={"rapid7.com"},
         identity_names={"rapid7"},
         identity_anchor=_complete_rapid7_identity_anchor(),
@@ -3345,6 +3350,7 @@ def test_unnamed_industry_quote_rejects_incomplete_or_mismatched_identity(
         {"findings": [finding]},
         targets=("industry",),
         fetched_pages={finding["evidence_url"]: finding["evidence_quote"]},
+        fetched_final_urls={finding["evidence_url"]: finding["evidence_url"]},
         first_party_domains={"rapid7.com"},
         identity_names={"rapid7"},
         identity_anchor=_complete_rapid7_identity_anchor(**identity_updates),
@@ -3387,11 +3393,60 @@ def test_unnamed_industry_quote_rejects_unbound_or_rebrand_domain(
         {"findings": [finding]},
         targets=("industry",),
         fetched_pages={url: finding["evidence_quote"]},
+        fetched_final_urls={url: url},
         first_party_domains=domains,
         identity_names={"rapid7"},
         identity_anchor=_complete_rapid7_identity_anchor(**identity_updates),
     )
 
+    assert result["industry"]["status"] == "UNPROVEN"
+
+
+def test_unnamed_industry_quote_rejects_foreign_final_redirect():
+    finding = _unnamed_rapid7_industry_finding()
+    result = _validated_findings(
+        {"findings": [finding]},
+        targets=("industry",),
+        fetched_pages={finding["evidence_url"]: finding["evidence_quote"]},
+        fetched_final_urls={
+            finding["evidence_url"]: (
+                "https://marketplace.example/vendors/cloud-security"
+            ),
+        },
+        first_party_domains={"rapid7.com"},
+        identity_names={"rapid7"},
+        identity_anchor=_complete_rapid7_identity_anchor(),
+    )
+
+    assert result["industry"]["status"] == "UNPROVEN"
+    assert result["industry"]["evidence_url"] == ""
+
+
+def test_prefetched_foreign_final_url_reaches_industry_validation():
+    finding = _unnamed_rapid7_industry_finding()
+    pages, final_urls = investigator._validated_prefetched_pages(
+        {
+            finding["evidence_url"]: {
+                "final_url": "https://example.com/vendors/cloud-security",
+                "text": finding["evidence_quote"],
+            },
+        },
+        submitted_source_urls=[finding["evidence_url"]],
+    )
+
+    result = _validated_findings(
+        {"findings": [finding]},
+        targets=("industry",),
+        fetched_pages=pages,
+        fetched_final_urls=final_urls,
+        first_party_domains={"rapid7.com"},
+        identity_names={"rapid7"},
+        identity_anchor=_complete_rapid7_identity_anchor(),
+    )
+
+    assert final_urls[finding["evidence_url"]] == (
+        "https://example.com/vendors/cloud-security"
+    )
     assert result["industry"]["status"] == "UNPROVEN"
 
 
@@ -3405,6 +3460,7 @@ def test_complete_identity_does_not_override_wrong_industry_role(role):
         {"findings": [finding]},
         targets=("industry",),
         fetched_pages={finding["evidence_url"]: finding["evidence_quote"]},
+        fetched_final_urls={finding["evidence_url"]: finding["evidence_url"]},
         first_party_domains={"rapid7.com"},
         identity_names={"rapid7"},
         identity_anchor=_complete_rapid7_identity_anchor(),
@@ -3426,6 +3482,7 @@ def test_complete_identity_does_not_admit_fabricated_industry_quote():
                 "indicators like overly permissive access."
             ),
         },
+        fetched_final_urls={finding["evidence_url"]: finding["evidence_url"]},
         first_party_domains={"rapid7.com"},
         identity_names={"rapid7"},
         identity_anchor=_complete_rapid7_identity_anchor(),

@@ -1304,6 +1304,7 @@ def _validated_findings(
     *,
     targets: tuple[str, ...],
     fetched_pages: Mapping[str, str],
+    fetched_final_urls: Optional[Mapping[str, str]] = None,
     first_party_domains: set[str],
     identity_names: Optional[set[str]] = None,
     identity_anchor: Optional[Mapping[str, Any]] = None,
@@ -1419,6 +1420,13 @@ def _validated_findings(
                     and finding["activity_role"] == "supplier_operator"
                     and _complete_verified_first_party_identity(
                         evidence_url,
+                        first_party_domains,
+                        identity_anchor or {},
+                    )
+                    and _complete_verified_first_party_identity(
+                        str(
+                            (fetched_final_urls or {}).get(evidence_url) or ""
+                        ),
                         first_party_domains,
                         identity_anchor or {},
                     )
@@ -2238,6 +2246,7 @@ async def investigate_company_evidence(
                         arguments,
                         targets=requested_targets,
                         fetched_pages=fetched_pages,
+                        fetched_final_urls=fetched_final_urls,
                         first_party_domains=first_party_domains,
                         identity_names=identity_names,
                         identity_anchor=identity_anchor,

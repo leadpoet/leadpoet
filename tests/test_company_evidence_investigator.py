@@ -5285,6 +5285,38 @@ def test_rebel_headquarters_conflict_requires_dates_or_move_evidence():
     assert "A factory opening cannot prove an HQ move" in prompt
 
 
+def test_prologis_one_activity_or_branch_is_sufficient():
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+
+    assert (
+        '"buys, sells, brokers, develops, or manages property assets" is '
+        "satisfied by company-bound evidence for any one of those activities"
+    ) in prompt
+    assert (
+        "never require brokerage after development or management is proved"
+        in prompt
+    )
+
+
+def test_industry_activity_disjunction_keeps_explicit_and_requirements():
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+
+    assert "This OR applies only inside that activity clause" in prompt
+    assert (
+        "Still prove every separate industry, sub-industry, product/service, "
+        "required-attribute, or other clause joined by AND"
+    ) in prompt
+
+
+def test_industry_activity_disjunction_rejects_wrong_industry_control():
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+
+    assert (
+        "An allowed verb in the wrong industry does not satisfy the criterion"
+        in prompt
+    )
+
+
 @pytest.mark.parametrize(
     ("name", "domain", "quote", "country", "state", "expected"),
     [

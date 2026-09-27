@@ -47,6 +47,13 @@ from qualification.scoring.lead_scorer import (
 )
 
 
+def _core_usage(usage: dict) -> dict:
+    return {
+        key: usage[key]
+        for key in ("reasoning_turns", "search_calls", "fetch_calls")
+    }
+
+
 def _company(
     *,
     name: str = "Acme",
@@ -177,6 +184,11 @@ def test_investigator_prompt_preserves_equity_stage_across_later_debt():
     assert "if any disputed source remains" in prompt
     assert "return stage UNPROVEN" in prompt
     assert "validated different completed stage may still be" in prompt
+    assert (
+        "inspect known relevant first-party product, pricing, subscription, "
+        "or platform links"
+    ) in prompt
+    assert "Do not infer a commercial model" in prompt
 
 
 def test_public_source_selection_prefers_supplied_issuer_evidence_within_limits():
@@ -3356,7 +3368,7 @@ def test_retained_rapid7_shape_reaches_unnamed_industry_attribution(
     assert result["claims"]["industry"]["evidence_quote"] == (
         finding["evidence_quote"]
     )
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 1,
         "search_calls": 0,
         "fetch_calls": 0,
@@ -4770,7 +4782,7 @@ def test_corestack_buyer_quote_is_rejected_before_submitted_series_b_fetch(
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["claims"]["stage"]["observed_value"] == "Series B"
     assert result["claims"]["stage"]["evidence_quote"] == series_b_quote
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 3,
         "search_calls": 1,
         "fetch_calls": 1,
@@ -4874,7 +4886,7 @@ def test_acculon_retrospective_receipt_requires_live_current_stage_discovery(
     ))
 
     assert result["claims"]["stage"]["status"] == "VERIFIED"
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 1,
         "search_calls": 1,
         "fetch_calls": 0,
@@ -8750,7 +8762,7 @@ def test_positive_semantic_review_routes_one_bounded_loop_to_existing_luna(
         "fetch_calls": 3,
         "admission_deadline_seconds": 110.0,
         "prefetched_pages": 1,
-        "remaining_fetch_calls": 2,
+        "remaining_fetch_calls": 3,
     }
     if positive_semantic_review:
         assert input_document["untrusted_homepage_navigation_locators"] == [{
@@ -8760,7 +8772,7 @@ def test_positive_semantic_review_routes_one_bounded_loop_to_existing_luna(
     else:
         assert "untrusted_homepage_navigation_locators" not in input_document
     assert result["claims"]["industry"]["status"] == "VERIFIED"
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 1,
         "search_calls": 0,
         "fetch_calls": 0,
@@ -8865,7 +8877,7 @@ def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatc
 
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["claims"]["stage"]["evidence_quote"] == quote
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 2,
         "search_calls": 1,
         "fetch_calls": 1,
@@ -8959,7 +8971,7 @@ def test_fetch_tool_result_is_bounded_without_truncating_stored_evidence(monkeyp
     assert result["claims"]["industry"]["status"] == "VERIFIED"
     assert result["claims"]["industry"]["evidence_quote"] == quote
     assert result[investigator.PRIVATE_FETCHED_PAGES_KEY][url]["text"] == full_text
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 2,
         "search_calls": 0,
         "fetch_calls": 1,
@@ -9145,7 +9157,7 @@ def test_saved_doctronic_case_script_discovers_and_fetches_current_series_b(
 
     assert result["claims"]["stage"]["status"] == "CONTRADICTED"
     assert result["claims"]["stage"]["observed_value"] == "Series B"
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 3,
         "search_calls": 1,
         "fetch_calls": 2,
@@ -9245,7 +9257,7 @@ def test_current_stage_search_preserves_valid_series_a_without_superseding_event
 
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["claims"]["stage"]["observed_value"] == "Series A"
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 3,
         "search_calls": 1 if later_url else 2,
         "fetch_calls": 2 if later_url else 1,
@@ -9383,7 +9395,7 @@ def test_current_stage_search_deadline_returns_unproven(monkeypatch, deadline_mo
     ))
 
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 0,
         "search_calls": 0 if deadline_mode == "before_admission" else 1,
         "fetch_calls": 0,
@@ -9561,7 +9573,7 @@ def test_curated_armada_relationship_rejection_forces_targeted_research(
 
     assert result["claims"]["industry"]["status"] == "VERIFIED"
     assert result["claims"]["industry"]["evidence_url"] == software_url
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 5,
         "search_calls": 1,
         "fetch_calls": 2,
@@ -9784,7 +9796,7 @@ def test_no_search_customer_role_gets_one_bounded_industry_followup(
 
     assert result["claims"]["industry"]["status"] == final_status
     assert result["claims"]["industry"]["activity_role"] == final_role
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 5,
         "search_calls": 1,
         "fetch_calls": 2,
@@ -9801,6 +9813,85 @@ def test_no_search_customer_role_gets_one_bounded_industry_followup(
         "type": "function",
         "function": {"name": "fetch_page"},
     }
+
+
+def test_industry_followup_cache_hit_counts_as_inspected_after_search(monkeypatch):
+    homepage_url = "https://acme.example/about"
+    followup_url = "https://acme.example/platform"
+    initial_quote = "Acme uses workflow software supplied by Example Systems."
+    followup_quote = "Acme sells workflow software subscriptions to businesses."
+    actions = [
+        ("fetch_page", {"url": homepage_url}),
+        ("submit_findings", {"findings": [_finding(
+            "industry",
+            status="CONTRADICTED",
+            observed_industry="Software",
+            observed_subindustry="Customer use",
+            activity_role="customer_user",
+            evidence_url=homepage_url,
+            evidence_quote=initial_quote,
+        )]}),
+        ("search_web", {"query": "Acme software company activity"}),
+        ("fetch_page", {"url": followup_url}),
+        ("submit_findings", {"findings": [_finding(
+            "industry",
+            status="VERIFIED",
+            observed_industry="Software",
+            observed_subindustry="Workflow software",
+            activity_role="supplier_operator",
+            evidence_url=followup_url,
+            evidence_quote=followup_quote,
+        )]}),
+    ]
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers, payload
+        name, arguments = actions[fake_post.turn]
+        fake_post.turn += 1
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(fake_post.turn),
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    fake_post.turn = 0
+    network_fetch = AsyncMock(return_value={
+        "ok": True,
+        "url": homepage_url,
+        "final_url": homepage_url,
+        "text": initial_quote,
+    })
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_fetch_page", network_fetch)
+    monkeypatch.setattr(
+        investigator,
+        "_search_web",
+        AsyncMock(return_value={"results": [{"url": followup_url}]}),
+    )
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("industry",),
+        requested_industry="Software",
+        positive_semantic_review=True,
+        prior_observations={"submitted_source_urls": [followup_url]},
+        verified_homepage_identity={
+            "normalized_name": "acme",
+            "registrable_dns_domain": "acme.example",
+        },
+        prefetched_pages={followup_url: {
+            "final_url": followup_url,
+            "text": followup_quote,
+        }},
+    ))
+
+    assert result["claims"]["industry"]["status"] == "VERIFIED"
+    assert result["claims"]["industry"]["evidence_url"] == followup_url
+    assert network_fetch.await_count == 1
+    assert result["usage"]["fetch_calls"] == 1
+    assert result["usage"]["total_loaded_pages"] == 2
 
 
 def test_successful_targeted_search_does_not_add_industry_followup_calls(
@@ -9873,7 +9964,7 @@ def test_successful_targeted_search_does_not_add_industry_followup_calls(
 
     assert result["claims"]["industry"]["status"] == "CONTRADICTED"
     assert result["claims"]["industry"]["activity_role"] == "customer_user"
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 3,
         "search_calls": 1,
         "fetch_calls": 1,
@@ -9930,7 +10021,7 @@ def test_non_pe_customer_contradiction_stays_unproven_when_search_is_exhausted(
     ))
 
     assert result["claims"]["industry"]["status"] == "UNPROVEN"
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 2, "search_calls": 0, "fetch_calls": 0,
     }
     search.assert_not_awaited()
@@ -10235,7 +10326,7 @@ def test_prefetched_grab_source_requires_independent_exact_stage_submission(
     }
     assert result["_validated_stage_finding"] == result["claims"]["stage"]
     assert _stage_quote_supports_observation("public", quote)
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 1,
         "search_calls": 1,
         "fetch_calls": 0,
@@ -10248,7 +10339,7 @@ def test_prefetched_grab_source_requires_independent_exact_stage_submission(
         requests[0]["messages"][1]["content"].split("\n", 1)[1]
     )
     assert input_document["prefetched_sources"] == [{"url": url, "text": text}]
-    assert input_document["investigation_limits"]["remaining_fetch_calls"] == 2
+    assert input_document["investigation_limits"]["remaining_fetch_calls"] == 3
     assert "strategic partnership" in input_document["requested_attribute"]
     assert "required_attribute" not in result["claims"]
 
@@ -10409,7 +10500,7 @@ def test_prefetched_attribute_hint_remains_subject_to_industry_guards(
     ))
 
     assert result["claims"]["industry"]["status"] == expected_status
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": expected_reasoning_turns,
         "search_calls": 0,
         "fetch_calls": 0,
@@ -10426,7 +10517,7 @@ def test_prefetched_attribute_hint_remains_subject_to_industry_guards(
     ] == quote
 
 
-def test_prefetched_pages_reduce_remaining_network_fetch_budget(monkeypatch):
+def test_prefetched_pages_do_not_reduce_fresh_network_fetch_budget(monkeypatch):
     first_url = "https://acme.example/investors"
     second_url = "https://acme.example/about"
     third_url = "https://exchange.example/acme"
@@ -10453,12 +10544,13 @@ def test_prefetched_pages_reduce_remaining_network_fetch_budget(monkeypatch):
             "function": {"name": name, "arguments": json.dumps(arguments)},
         }]}}]}
 
-    network_fetch = AsyncMock(return_value={
-        "ok": True,
-        "url": third_url,
-        "final_url": third_url,
-        "text": "Exchange page with no additional company proof.",
-    })
+    async def network_fetch(_session, url):
+        return {
+            "ok": True,
+            "url": url,
+            "final_url": url,
+            "text": "Fresh page with no additional company proof.",
+        }
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
     monkeypatch.setattr(investigator, "_post_json", fake_post_json)
@@ -10485,10 +10577,209 @@ def test_prefetched_pages_reduce_remaining_network_fetch_budget(monkeypatch):
         },
     ))
 
-    assert network_fetch.await_count == 1
-    assert result["usage"]["fetch_calls"] == 1
-    assert len(result[investigator.PRIVATE_FETCHED_PAGES_KEY]) == 3
-    exhausted = json.loads(requests[2]["messages"][-1]["content"])
+    assert result["usage"] == {
+        "reasoning_turns": 3,
+        "search_calls": 1,
+        "fetch_calls": 2,
+        "prefetched_pages": 2,
+        "total_loaded_pages": 4,
+    }
+    assert len(result[investigator.PRIVATE_FETCHED_PAGES_KEY]) == 4
+
+
+def test_two_prefetches_leave_fresh_fetches_for_stage_and_industry(monkeypatch):
+    homepage_url = "https://render.example/"
+    job_url = "https://jobs.example/render"
+    stage_url = "https://render.example/news/series-c"
+    pricing_url = "https://render.example/pricing"
+    stage_quote = "Render completed a $100 million extension of its Series C."
+    industry_quote = (
+        "Render sells subscription cloud infrastructure plans that technical "
+        "teams use to deploy and manage production applications."
+    )
+    actions = [
+        ("fetch_page", {"url": stage_url}),
+        ("fetch_page", {"url": pricing_url}),
+        ("submit_findings", {"findings": [
+            _finding(
+                "stage",
+                observed_value="Series C+",
+                evidence_url=stage_url,
+                evidence_quote=stage_quote,
+            ),
+            _finding(
+                "industry",
+                observed_value="Subscription cloud infrastructure",
+                observed_industry="Information Technology",
+                observed_subindustry="Cloud infrastructure",
+                activity_role="supplier_operator",
+                evidence_url=pricing_url,
+                evidence_quote=industry_quote,
+            ),
+        ]}),
+    ]
+    requests = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        name, args = actions[len(requests) - 1]
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(len(requests)), "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)},
+        }]}}]}
+
+    async def fake_fetch(_session, url):
+        text = stage_quote if url == stage_url else industry_quote
+        return {"ok": True, "url": url, "final_url": url, "text": text}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    monkeypatch.setattr(
+        investigator,
+        "_search_web",
+        AsyncMock(return_value={"results": [{"url": stage_url}]}),
+    )
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "Render",
+            "website": "https://render.example",
+        },
+        targets=("stage", "industry"),
+        requested_stage="Series C+",
+        requested_industry="Information Technology",
+        requested_subindustry="Cloud infrastructure",
+        requested_attribute=(
+            "Sells a subscription software platform used by technical teams "
+            "to manage cloud or infrastructure workflows"
+        ),
+        positive_semantic_review=True,
+        prior_observations={
+            "submitted_source_urls": [homepage_url, job_url],
+        },
+        verified_homepage_identity={
+            "normalized_name": "render",
+            "registrable_dns_domain": "render.example",
+        },
+        prefetched_pages={
+            homepage_url: {
+                "final_url": homepage_url,
+                "text": "Render provides a cloud platform for developers.",
+            },
+            job_url: {
+                "final_url": job_url,
+                "text": "Render is hiring a compute infrastructure engineer.",
+            },
+        },
+    ))
+
+    assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["claims"]["industry"]["status"] == "VERIFIED"
+    assert result["usage"] == {
+        "reasoning_turns": 3,
+        "search_calls": 1,
+        "fetch_calls": 2,
+        "prefetched_pages": 2,
+        "total_loaded_pages": 4,
+    }
+
+
+def test_prefetched_cache_hit_does_not_refetch_or_consume_fresh_budget(monkeypatch):
+    url = "https://acme.example/platform"
+    quote = "Acme sells subscription workflow software to technical teams."
+    requests = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        if len(requests) == 1:
+            name, args = "fetch_page", {"url": url}
+        else:
+            name, args = "submit_findings", {"findings": [_finding(
+                "industry",
+                observed_industry="Software",
+                observed_subindustry="Workflow software",
+                activity_role="supplier_operator",
+                evidence_url=url,
+                evidence_quote=quote,
+            )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(len(requests)), "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)},
+        }]}}]}
+
+    network_fetch = AsyncMock()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_fetch_page", network_fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("industry",),
+        requested_industry="Software",
+        prior_observations={"submitted_source_urls": [url]},
+        prefetched_pages={url: {"final_url": url, "text": quote}},
+        verified_homepage_identity={
+            "normalized_name": "acme",
+            "registrable_dns_domain": "acme.example",
+        },
+    ))
+
+    assert result["claims"]["industry"]["status"] == "VERIFIED"
+    assert network_fetch.await_count == 0
+    assert result["usage"]["fetch_calls"] == 0
+    assert result["usage"]["total_loaded_pages"] == 1
+
+
+def test_three_fresh_fetch_cap_remains_with_three_prefetched_pages(monkeypatch):
+    prefetched = [f"https://acme.example/saved-{index}" for index in range(3)]
+    fresh = [f"https://acme.example/fresh-{index}" for index in range(4)]
+    requests = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        if len(requests) <= len(fresh):
+            name, args = "fetch_page", {"url": fresh[len(requests) - 1]}
+        else:
+            name, args = "submit_findings", {"findings": [_finding(
+                "industry", status="UNPROVEN", evidence_url="", evidence_quote=""
+            )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(len(requests)), "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)},
+        }]}}]}
+
+    async def fake_fetch(_session, url):
+        return {"ok": True, "url": url, "final_url": url, "text": "No proof."}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    monkeypatch.setattr(
+        investigator, "_search_web", AsyncMock(return_value={"results": []})
+    )
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("industry",),
+        requested_industry="Software",
+        prior_observations={"submitted_source_urls": prefetched},
+        prefetched_pages={
+            url: {"final_url": url, "text": "Saved untrusted page."}
+            for url in prefetched
+        },
+    ))
+
+    assert result["usage"]["fetch_calls"] == 3
+    assert result["usage"]["prefetched_pages"] == 3
+    assert result["usage"]["total_loaded_pages"] == 6
+    exhausted = json.loads(requests[4]["messages"][-1]["content"])
     assert exhausted == {"ok": False, "error": "fetch_budget_exhausted"}
 
 
@@ -10552,7 +10843,7 @@ def test_harness_accepts_semantic_stage_finding_after_source_checks(monkeypatch)
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["claims"]["stage"]["evidence_quote"] == quote
     assert result["_validated_stage_finding"] == result["claims"]["stage"]
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 2,
         "search_calls": 1,
         "fetch_calls": 1,
@@ -10679,7 +10970,7 @@ def test_final_unproven_with_evidence_gets_one_submit_only_correction(monkeypatc
 
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["claims"]["stage"]["evidence_quote"] == quote
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": investigator.MAX_REASONING_TURNS + 1,
         "search_calls": investigator.MAX_SEARCH_CALLS,
         "fetch_calls": 1,
@@ -10760,7 +11051,7 @@ def test_final_noncontiguous_quote_correction_stays_unproven(monkeypatch):
     )
     assert result["claims"]["stage"]["evidence_url"] == ""
     assert result["_validated_stage_finding"] == {}
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 3,
         "search_calls": 1,
         "fetch_calls": 1,
@@ -11328,7 +11619,7 @@ def test_final_rejected_stage_quote_gets_one_bounded_search_and_source_fetch(
 
     assert "stage" in result["claims"], result
     assert result["claims"]["stage"]["status"] == "VERIFIED"
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 4,
         "search_calls": 2,
         "fetch_calls": 1,
@@ -11430,7 +11721,7 @@ def test_missing_saved_stage_quote_uses_only_bounded_stage_search(
     if outcome == "search_exhausted":
         monkeypatch.setattr(investigator, "MAX_SEARCH_CALLS", 1)
     if outcome == "fetch_exhausted":
-        monkeypatch.setattr(investigator, "MAX_FETCH_CALLS", 1)
+        monkeypatch.setattr(investigator, "MAX_FETCH_CALLS", 0)
 
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={
@@ -11571,7 +11862,7 @@ def test_stage_repair_owns_overlapping_industry_followup_search(monkeypatch):
 
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["claims"]["industry"]["status"] == "UNPROVEN"
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 4,
         "search_calls": 2,
         "fetch_calls": 1,

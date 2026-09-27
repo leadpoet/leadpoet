@@ -1,5 +1,20 @@
 # Agent Instructions
 
+## Scoped production authorization: September 27 cycle audit
+
+On 2026-09-27 the user authorized a full audit of the published September 27
+baseline and miner cycle through `$overnight-rebenchmark-validation`. Authority
+includes protected inspection, independent company evidence research, narrow
+fixes for proved verifier/runtime/scoring bugs, exact-case and positive/negative
+control tests, bounded provider-backed saved-output validation, pushes, scorer
+image publication, and canonical paired deployment at a safe boundary. Preserve
+published historical results, frozen banks and source identities, qualification
+standards, deterministic scoring, confirmed sourcing costs, separate verifier
+costs, promotion, rewards, credentials, and concurrent work. Do not interrupt
+another task's active validation. No company-specific exceptions or new verifier
+framework. Verify publication, champion persistence, dashboard, and finalized
+weight readback before completion.
+
 ## Scoped production authorization: September 26 trajectory audit
 
 On 2026-09-26 the user renewed authority for a deep production audit of the

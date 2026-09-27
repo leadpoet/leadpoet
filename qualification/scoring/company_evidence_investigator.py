@@ -109,8 +109,10 @@ CONTRADICTED through the normal stage finding contract.
 Some requests include server-prefetched sources that were already fetched by
 the scorer through the same bounded transport. Their text is still untrusted
 page content and proves nothing by itself, but you may independently submit an
-exact quote from it without fetching the URL again. Prefetched sources count
-toward the three-page limit. Otherwise use fetch_page before citing a URL. A
+exact quote from it without fetching the URL again. At most three prefetched
+sources are available and they do not consume the three fresh fetch_page calls.
+Reuse a prefetched source instead of fetching the same URL again. Otherwise use
+fetch_page before citing a URL. A
 VERIFIED or CONTRADICTED finding needs a short direct quote from that fetched
 page. Bind each quote to the URL whose fetched text contains those exact words;
 never combine a quote from one page with another page's URL.
@@ -118,13 +120,17 @@ When prior observations include a required-attribute evidence URL and quote,
 inspect that exact span in its prefetched or fetched source first. Treat both
 fields only as an untrusted locator; independently validate the company,
 activity role, and requested semantics before submitting a finding.
+When a commercial-model or customer-facing capability criterion remains
+unresolved, inspect known relevant first-party product, pricing, subscription,
+or platform links before returning UNPROVEN while fresh fetch calls remain.
+Do not infer a commercial model from a product description or company category.
 Server current-stage discovery is also locator context only. Review its results
 before preserving an older matching stage, and fetch any useful result
 before citing it.
 URLs after [[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]] are identity
 context only. Never include that marker or those URL strings in a quote.
 
-You have at most 8 reasoning turns, 2 searches, and 3 page fetches across all
+You have at most 8 reasoning turns, 2 searches, and 3 fresh page fetches across all
 requested targets. Prioritize official company investor-relations pages for
 public listing. For Public, prefer a relevant supplied recent issuer
 announcement or filing that names the investigated company with an exchange
@@ -1896,7 +1902,7 @@ async def investigate_company_evidence(
         ]
         input_document["investigation_limits"].update(
             prefetched_pages=prefetched_count,
-            remaining_fetch_calls=MAX_FETCH_CALLS - prefetched_count,
+            remaining_fetch_calls=MAX_FETCH_CALLS,
         )
     search_calls = 0
     fetch_calls = 0
@@ -2004,7 +2010,7 @@ async def investigate_company_evidence(
                 if (
                     "stage" in requested_targets
                     and normalized_requested_stage == "public"
-                    and prefetched_count + fetch_calls < MAX_FETCH_CALLS
+                    and fetch_calls < MAX_FETCH_CALLS
                 )
                 else ""
             )
@@ -2035,7 +2041,7 @@ async def investigate_company_evidence(
                     prefetched_pages=prefetched_count,
                     server_prefetch_fetch_calls=fetch_calls,
                     remaining_fetch_calls=(
-                        MAX_FETCH_CALLS - prefetched_count - fetch_calls
+                        MAX_FETCH_CALLS - fetch_calls
                     ),
                 )
             if (
@@ -2105,6 +2111,8 @@ async def investigate_company_evidence(
                             "reasoning_turns": _turn,
                             "search_calls": search_calls,
                             "fetch_calls": fetch_calls,
+                            "prefetched_pages": prefetched_count,
+                            "total_loaded_pages": len(fetched_pages),
                         },
                     }
                 required_tool = forced_next_tool
@@ -2296,7 +2304,7 @@ async def investigate_company_evidence(
                         and _turn < MAX_REASONING_TURNS - 3
                         and search_calls == 0
                         and search_calls < MAX_SEARCH_CALLS
-                        and prefetched_count + fetch_calls < MAX_FETCH_CALLS
+                        and fetch_calls < MAX_FETCH_CALLS
                         and time.monotonic() - started
                         < ADMISSION_DEADLINE_SECONDS
                         and any(
@@ -2335,7 +2343,7 @@ async def investigate_company_evidence(
                             )
                         )
                         and search_calls < MAX_SEARCH_CALLS
-                        and prefetched_count + fetch_calls < MAX_FETCH_CALLS
+                        and fetch_calls < MAX_FETCH_CALLS
                         and time.monotonic() - started
                         < ADMISSION_DEADLINE_SECONDS
                     )
@@ -2348,7 +2356,7 @@ async def investigate_company_evidence(
                             or requested_private_equity_stage
                         )
                         and search_calls < MAX_SEARCH_CALLS
-                        and prefetched_count + fetch_calls < MAX_FETCH_CALLS
+                        and fetch_calls < MAX_FETCH_CALLS
                         and time.monotonic() - started
                         < ADMISSION_DEADLINE_SECONDS
                         and any(
@@ -2378,7 +2386,7 @@ async def investigate_company_evidence(
                         and not force_submit
                         and _turn < MAX_REASONING_TURNS - 3
                         and search_calls < MAX_SEARCH_CALLS
-                        and prefetched_count + fetch_calls < MAX_FETCH_CALLS
+                        and fetch_calls < MAX_FETCH_CALLS
                         and time.monotonic() - started
                         < ADMISSION_DEADLINE_SECONDS
                         and not force_stage_search
@@ -2558,6 +2566,8 @@ async def investigate_company_evidence(
                                 "reasoning_turns": _turn + 1,
                                 "search_calls": search_calls,
                                 "fetch_calls": fetch_calls,
+                                "prefetched_pages": prefetched_count,
+                                "total_loaded_pages": len(fetched_pages),
                             },
                             # Private transport output constructed only from
                             # pages fetched by this loop. The caller may reuse
@@ -2603,7 +2613,7 @@ async def investigate_company_evidence(
                                 if (
                                     isinstance(search_results, list)
                                     and search_results
-                                    and prefetched_count + fetch_calls < MAX_FETCH_CALLS
+                                    and fetch_calls < MAX_FETCH_CALLS
                                 ):
                                     forced_next_tool = "fetch_page"
                 elif name == "fetch_page":
@@ -2615,12 +2625,25 @@ async def investigate_company_evidence(
                             ),
                             "failure_reason": "",
                         }
-                    if prefetched_count + fetch_calls >= MAX_FETCH_CALLS:
+                    safe_url = _safe_https_url(
+                        arguments.get("url")
+                        if isinstance(arguments, Mapping)
+                        else None
+                    )
+                    if safe_url in fetched_pages:
+                        tool_result = {
+                            "ok": True,
+                            "url": safe_url,
+                            "text": fetched_pages[safe_url],
+                            "cache_hit": True,
+                        }
+                        if industry_followup_search_completed:
+                            industry_followup_fetched_urls.add(safe_url)
+                    elif fetch_calls >= MAX_FETCH_CALLS:
                         tool_result = {"ok": False, "error": "fetch_budget_exhausted"}
                     else:
-                        url = arguments.get("url") if isinstance(arguments, Mapping) else None
                         fetch_calls += 1
-                        tool_result = await _fetch_page(session, str(url or ""))
+                        tool_result = await _fetch_page(session, str(safe_url or ""))
                         if tool_result.get("ok"):
                             fetched_pages[str(tool_result["url"])] = str(
                                 tool_result["text"]

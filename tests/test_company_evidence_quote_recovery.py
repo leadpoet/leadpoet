@@ -11,6 +11,10 @@ import pytest
 from qualification.scoring import company_evidence_investigator as investigator
 
 
+def _core_usage(usage):
+    return {key: usage[key] for key in ("reasoning_turns", "search_calls", "fetch_calls")}
+
+
 def _finding(target: str, **overrides):
     finding = {
         "target": target,
@@ -199,7 +203,7 @@ def test_ciso_quote_repair_failure_forces_one_remaining_search_and_fetch(monkeyp
     assert result["claims"]["industry"]["status"] == "VERIFIED", (
         result["claims"]["industry"], result["usage"]
     )
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 5, "search_calls": 2, "fetch_calls": 1,
     }
     assert searches == [
@@ -216,7 +220,7 @@ def test_ciso_quote_repair_failure_forces_one_remaining_search_and_fetch(monkeyp
     }
     document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
     assert document["investigation_limits"]["prefetched_pages"] == 1
-    assert document["investigation_limits"]["remaining_fetch_calls"] == 2
+    assert document["investigation_limits"]["remaining_fetch_calls"] == 3
 
 
 def test_unibuddy_industry_only_quote_failure_uses_remaining_search(monkeypatch):
@@ -313,7 +317,7 @@ def test_unibuddy_industry_only_quote_failure_uses_remaining_search(monkeypatch)
             evidence_quote=exact_industry_quote,
         )
     }
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 4,
         "search_calls": 1,
         "fetch_calls": 0,
@@ -364,14 +368,14 @@ def test_exact_quote_repair_from_existing_page_does_not_search(monkeypatch):
     assert result["claims"]["industry"]["status"] == "VERIFIED", (
         result["claims"]["industry"], result["usage"]
     )
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 2, "search_calls": 0, "fetch_calls": 0,
     }
     search.assert_not_awaited()
     assert requests[1]["tool_choice"] == "required"
 
 
-def test_repeated_quote_failure_does_not_search_when_prefetch_budget_is_full(
+def test_repeated_quote_failure_can_search_with_full_prefetch_set(
     monkeypatch,
 ):
     urls = [f"https://acme.example/source-{index}" for index in range(3)]
@@ -386,11 +390,18 @@ def test_repeated_quote_failure_does_not_search_when_prefetch_budget_is_full(
                 evidence_url=urls[0],
                 evidence_quote="Acme is a cybersecurity supplier.",
             )
+            return _response(
+                len(requests), "submit_findings", {"findings": [finding]}
+            )
+        if len(requests) == 3:
+            return _response(
+                len(requests), "search_web", {"query": "Acme cybersecurity"}
+            )
         else:
             finding = _finding("industry", status="UNPROVEN")
         return _response(len(requests), "submit_findings", {"findings": [finding]})
 
-    search = AsyncMock()
+    search = AsyncMock(return_value={"results": []})
     fetch = AsyncMock()
     _set_keys(monkeypatch)
     monkeypatch.setattr(investigator, "_post_json", fake_post)
@@ -409,12 +420,14 @@ def test_repeated_quote_failure_does_not_search_when_prefetch_budget_is_full(
     ))
 
     assert result["claims"]["industry"]["status"] == "UNPROVEN"
-    assert result["usage"] == {
-        "reasoning_turns": 3, "search_calls": 0, "fetch_calls": 0,
+    assert _core_usage(result["usage"]) == {
+        "reasoning_turns": 4, "search_calls": 1, "fetch_calls": 0,
     }
-    search.assert_not_awaited()
+    search.assert_awaited_once()
     fetch.assert_not_awaited()
-    assert requests[2]["tool_choice"] == "required"
+    assert requests[2]["tool_choice"] == {
+        "type": "function", "function": {"name": "search_web"},
+    }
 
 
 def test_unproven_with_capacity_mechanically_forces_instructed_search(monkeypatch):
@@ -460,7 +473,7 @@ def test_unproven_with_capacity_mechanically_forces_instructed_search(monkeypatc
     assert result["claims"]["industry"]["status"] == "VERIFIED", (
         result["claims"]["industry"], result["usage"]
     )
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 4, "search_calls": 1, "fetch_calls": 1,
     }
     assert requests[1]["tool_choice"] == {

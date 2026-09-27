@@ -11,6 +11,10 @@ import pytest
 
 from gateway.qualification.models import CompanyOutput
 from qualification.scoring import company_evidence_investigator as investigator
+
+
+def _core_usage(usage):
+    return {key: usage[key] for key in ("reasoning_turns", "search_calls", "fetch_calls")}
 from qualification.scoring import lead_scorer
 
 
@@ -481,7 +485,7 @@ def test_completed_solarwinds_take_private_is_a_deterministic_contradiction(
     fetch.assert_awaited_once()
     assert result["claims"]["stage"]["status"] == "CONTRADICTED"
     assert result["claims"]["stage"]["observed_value"] == "Acquired"
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 2,
         "search_calls": 1,
         "fetch_calls": 1,
@@ -561,7 +565,7 @@ def test_tenable_nasdaq_hint_fetches_within_budget_and_exact_quote_admits(monkey
     ))
 
     assert result["claims"]["stage"]["status"] == "VERIFIED"
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 1,
         "search_calls": 1,
         "fetch_calls": 1,
@@ -571,7 +575,7 @@ def test_tenable_nasdaq_hint_fetches_within_budget_and_exact_quote_admits(monkey
     document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
     assert document["investigation_limits"]["prefetched_pages"] == 1
     assert document["investigation_limits"]["server_prefetch_fetch_calls"] == 1
-    assert document["investigation_limits"]["remaining_fetch_calls"] == 1
+    assert document["investigation_limits"]["remaining_fetch_calls"] == 2
     assert document["investigation_limits"]["remaining_search_calls"] == 1
 
 
@@ -829,7 +833,7 @@ def test_pe_rejected_prefetch_uses_remaining_search_and_fetch(monkeypatch):
     ))
 
     assert result["claims"]["stage"]["status"] == "VERIFIED"
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 4, "search_calls": 2, "fetch_calls": 1,
     }
     assert len(searches) == investigator.MAX_SEARCH_CALLS
@@ -839,7 +843,7 @@ def test_pe_rejected_prefetch_uses_remaining_search_and_fetch(monkeypatch):
     }
 
 
-def test_pe_rejected_prefetch_does_not_exceed_full_fetch_budget(monkeypatch):
+def test_three_pe_prefetches_keep_fresh_fetch_budget(monkeypatch):
     weak_url = "https://bigtime.example/about"
     other_urls = (
         "https://bigtime.example/platform",
@@ -851,22 +855,17 @@ def test_pe_rejected_prefetch_does_not_exceed_full_fetch_budget(monkeypatch):
     async def fake_post(_session, _url, *, headers, payload):
         del headers
         requests.append(payload)
-        if len(requests) == 1:
-            finding = {
-                "target": "stage", "status": "VERIFIED",
-                "observed_value": "Private Equity",
-                "evidence_url": weak_url, "evidence_quote": weak_quote,
-            }
-        else:
-            finding = {
-                "target": "stage", "status": "UNPROVEN",
-                "observed_value": None, "reason": "no controlling owner proof",
-            }
+        finding = {
+            "target": "stage", "status": "UNPROVEN",
+            "observed_value": None, "reason": "no controlling owner proof",
+        }
+        name = "submit_findings"
+        arguments = {"findings": [finding]}
         return 200, {"choices": [{"message": {"tool_calls": [{
             "id": f"call-{len(requests)}", "type": "function",
             "function": {
-                "name": "submit_findings",
-                "arguments": json.dumps({"findings": [finding]}),
+                "name": name,
+                "arguments": json.dumps(arguments),
             },
         }]}}]}
 
@@ -898,11 +897,11 @@ def test_pe_rejected_prefetch_does_not_exceed_full_fetch_budget(monkeypatch):
     ))
 
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
-    assert result["usage"] == {
-        "reasoning_turns": 2, "search_calls": 1, "fetch_calls": 0,
+    assert _core_usage(result["usage"]) == {
+        "reasoning_turns": 1, "search_calls": 1, "fetch_calls": 0,
     }
     search.assert_awaited_once()
     fetch.assert_not_awaited()
-    assert requests[1]["tool_choice"] == "required"
+    assert requests[0]["tool_choice"] == "required"
     document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
-    assert document["investigation_limits"]["remaining_fetch_calls"] == 0
+    assert document["investigation_limits"]["remaining_fetch_calls"] == 3

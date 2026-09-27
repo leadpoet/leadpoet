@@ -219,7 +219,7 @@ def test_exact_multiverse_description_reaches_real_investigator(monkeypatch):
         "text": DESCRIPTION,
     }]
     assert user_document["investigation_limits"]["prefetched_pages"] == 1
-    assert user_document["investigation_limits"]["remaining_fetch_calls"] == 2
+    assert user_document["investigation_limits"]["remaining_fetch_calls"] == 3
     assert claims["stage"]["status"] == "VERIFIED"
     assert validated_stage["evidence_quote"] == STAGE_EVIDENCE_QUOTE
     assert projected["observed_company_stage"] == "series c+"
@@ -229,6 +229,8 @@ def test_exact_multiverse_description_reaches_real_investigator(monkeypatch):
         "search_calls": 1,
         "fetch_calls": 0,
         "reasoning_turns": 1,
+        "prefetched_pages": 1,
+        "total_loaded_pages": 1,
     }
     assert DESCRIPTION not in json.dumps(receipt, sort_keys=True)
     assert "structured_profile_description_evidence" not in json.dumps(

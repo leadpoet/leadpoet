@@ -9,6 +9,10 @@ import aiohttp
 from qualification.scoring import company_evidence_investigator as investigator
 
 
+def _core_usage(usage):
+    return {key: usage[key] for key in ("reasoning_turns", "search_calls", "fetch_calls")}
+
+
 def _finding(*, status="VERIFIED", observed_value="Public", url="", quote=""):
     return {
         "target": "stage",
@@ -87,7 +91,7 @@ def test_public_stage_prefetches_exact_tenable_submitted_release(monkeypatch):
 
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["claims"]["stage"]["evidence_url"] == url
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 1, "search_calls": 1, "fetch_calls": 1,
     }
     fetch.assert_awaited_once()
@@ -264,7 +268,7 @@ def test_unrelated_submitted_domain_is_not_server_prefetched(monkeypatch):
     fetch.assert_not_awaited()
 
 
-def test_existing_first_party_prefetch_preserves_two_fetch_slots(monkeypatch):
+def test_existing_first_party_prefetch_preserves_three_fresh_fetch_slots(monkeypatch):
     first_url = "https://acme.example/investors/current-listing"
     second_url = "https://exchange.example/acme"
     third_url = "https://filings.example/acme"
@@ -306,10 +310,11 @@ def test_existing_first_party_prefetch_preserves_two_fetch_slots(monkeypatch):
     ))
 
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
-    assert result["usage"]["fetch_calls"] == 2
-    assert fetch.await_count == 2
-    exhausted = json.loads(requests[3]["messages"][-1]["content"])
-    assert exhausted == {"ok": False, "error": "fetch_budget_exhausted"}
+    assert result["usage"]["fetch_calls"] == 3
+    assert fetch.await_count == 3
+    third_fresh_result = json.loads(requests[3]["messages"][-1]["content"])
+    assert third_fresh_result["ok"] is True
+    assert third_fresh_result["url"] == fourth_url
 
 
 def test_public_stage_auto_prefetch_plus_two_model_fetches_stops_fourth(monkeypatch):
@@ -454,7 +459,7 @@ def test_historical_ipo_only_remains_unproven(monkeypatch):
     ))
 
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
-    assert result["usage"] == {
+    assert _core_usage(result["usage"]) == {
         "reasoning_turns": 3, "search_calls": 2, "fetch_calls": 1,
     }
     assert search.await_count == 2

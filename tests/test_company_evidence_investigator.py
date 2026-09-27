@@ -8705,6 +8705,10 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
     )
     assert "one supported alternative for each OR clause" in system_prompt
     assert "Equivalent source language is sufficient" in system_prompt
+    assert "paid management console, policy control plane" in system_prompt
+    assert "do not require cloud resource management" in system_prompt
+    assert "generic license by itself does not prove" in system_prompt
+    assert "Customer use of another vendor's platform" in system_prompt
     assert (
         "footer, navigation, logo, URL path, or page title does not by itself"
         in system_prompt
@@ -8713,6 +8717,122 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
     assert "recruiting pages, and internal tool use" in system_prompt
     assert "Never add the name to source text or splice separate passages" in (
         system_prompt
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "company_name",
+        "url",
+        "quote",
+        "finding_status",
+        "activity_role",
+        "expected_status",
+    ),
+    [
+        pytest.param(
+            "Chainguard",
+            "https://www.chainguard.dev/pricing",
+            (
+                "Chainguard provides full access to language dependencies for "
+                "subscribed ecosystems and a Console to manage entitlements, "
+                "pull tokens, and more."
+            ),
+            "VERIFIED",
+            "supplier_operator",
+            "VERIFIED",
+            id="paid-technical-management-console-qualifies",
+        ),
+        pytest.param(
+            "ArtifactCo",
+            "https://artifact.example/catalog",
+            "ArtifactCo licenses a catalog of downloadable container images.",
+            "UNPROVEN",
+            "unresolved",
+            "UNPROVEN",
+            id="component-only-catalog-does-not-qualify",
+        ),
+        pytest.param(
+            "BuyerCo",
+            "https://buyer.example/engineering",
+            (
+                "BuyerCo's engineering team uses VendorCloud's subscription "
+                "console to manage deployment workflows."
+            ),
+            "CONTRADICTED",
+            "customer_user",
+            "UNPROVEN",
+            id="customer-only-platform-use-does-not-qualify",
+        ),
+    ],
+)
+def test_paid_technical_management_platform_semantic_boundaries(
+    monkeypatch,
+    company_name,
+    url,
+    quote,
+    finding_status,
+    activity_role,
+    expected_status,
+):
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers, payload
+        finding = _finding(
+            "industry",
+            status=finding_status,
+            observed_value=(
+                "Subscription technical operations platform"
+                if finding_status == "VERIFIED"
+                else None
+            ),
+            observed_industry="Information Technology",
+            observed_subindustry="Cloud infrastructure and enterprise software",
+            activity_role=activity_role,
+            evidence_url=url if finding_status != "UNPROVEN" else "",
+            evidence_quote=quote if finding_status != "UNPROVEN" else "",
+        )
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {
+                "name": "submit_findings",
+                "arguments": json.dumps({"findings": [finding]}),
+            },
+        }]}}]}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 1)
+    monkeypatch.setattr(investigator, "MAX_SEARCH_CALLS", 0)
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": company_name,
+            "website": url.split("/", 3)[0] + "//" + url.split("/", 3)[2],
+        },
+        targets=("industry",),
+        requested_industry="Information Technology",
+        requested_subindustry="Cloud infrastructure and enterprise software",
+        requested_product_service=(
+            "A cloud or enterprise software platform used by technical teams "
+            "to run systems, automate workflows, or manage infrastructure"
+        ),
+        requested_attribute=(
+            "Sells a subscription software platform used by technical teams "
+            "to manage cloud, infrastructure, or internal operations workflows"
+        ),
+        positive_semantic_review=True,
+        prior_observations={"submitted_source_urls": [url]},
+        prefetched_pages={url: {"final_url": url, "text": quote}},
+        verified_homepage_identity={
+            "normalized_name": company_name,
+            "registrable_dns_domain": url.split("/", 3)[2].removeprefix("www."),
+        },
+    ))
+
+    assert result["claims"]["industry"]["status"] == expected_status, (
+        result["claims"]["industry"]["reason"]
     )
 
 

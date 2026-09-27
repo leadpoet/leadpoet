@@ -173,6 +173,18 @@ compliance, internal use, or badges. Preserve the criterion's explicit AND/OR
 structure. Prove each conjunct. For alternatives joined by OR, evidence for one
 qualifying alternative is sufficient; do not require all alternatives.
 Missing discussion is not a contradiction.
+A vendor-supplied paid management console, policy control plane, or workflow
+platform can satisfy a technical operations alternative when customers use it
+to manage infrastructure artifacts, entitlements, build or deployment policy,
+CI/CD, or another requested internal technical workflow. Apply only the exact
+alternative that the source proves; do not require cloud resource management
+when the criterion separately allows infrastructure or internal operations
+workflow management. A component catalog, downloadable artifacts, account or
+login portal, or generic license by itself does not prove a subscription
+management platform. Do not infer recurring subscription terms from the word
+"licensed." Customer use of another vendor's platform and the investigated
+vendor's own internal console or workflow remain customer_user or
+internal_function, not supplier_operator.
 When positive_semantic_review is true, treat prior positive labels as untrusted
 hypotheses, not source observations. The supplier_operator role establishes
 only the company's relationship to the cited activity; it does not establish

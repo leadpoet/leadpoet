@@ -8709,6 +8709,10 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
     assert "do not require cloud resource management" in system_prompt
     assert "generic license by itself does not prove" in system_prompt
     assert "Customer use of another vendor's platform" in system_prompt
+    assert "monthly or annual fees supports a paid subscription" in system_prompt
+    assert "current commercial customers or deployments" in system_prompt
+    assert "free plan, research study" in system_prompt
+    assert "investor's general commercialization claim" in system_prompt
     assert (
         "footer, navigation, logo, URL path, or page title does not by itself"
         in system_prompt
@@ -8763,6 +8767,42 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
             "customer_user",
             "UNPROVEN",
             id="customer-only-platform-use-does-not-qualify",
+        ),
+        pytest.param(
+            "Render",
+            "https://render.com/pricing",
+            "Render Pro costs $25 per user per month for workspace teams.",
+            "VERIFIED",
+            "supplier_operator",
+            "VERIFIED",
+            id="monthly-paid-workspace-plan-proves-subscription-model",
+        ),
+        pytest.param(
+            "FreeCloud",
+            "https://freecloud.example/pricing",
+            "FreeCloud offers a free workspace plan for developer projects.",
+            "UNPROVEN",
+            "unresolved",
+            "UNPROVEN",
+            id="free-plan-alone-does-not-prove-commercial-sale",
+        ),
+        pytest.param(
+            "ResearchCloud",
+            "https://researchcloud.example/study",
+            "ResearchCloud is evaluating its workflow prototype in a research study.",
+            "UNPROVEN",
+            "unresolved",
+            "UNPROVEN",
+            id="research-study-alone-does-not-prove-commercial-sale",
+        ),
+        pytest.param(
+            "PortfolioCloud",
+            "https://investor.example/portfolio-cloud",
+            "Our investment will help PortfolioCloud commercialize its platform.",
+            "UNPROVEN",
+            "unresolved",
+            "UNPROVEN",
+            id="investor-commercialization-claim-does-not-prove-product-sale",
         ),
     ],
 )
@@ -8834,6 +8874,73 @@ def test_paid_technical_management_platform_semantic_boundaries(
     assert result["claims"]["industry"]["status"] == expected_status, (
         result["claims"]["industry"]["reason"]
     )
+
+
+def test_current_vendor_deployments_plus_product_support_ultrasight_sale(monkeypatch):
+    product_url = "https://ultrasight.com/echosystem/"
+    commercial_url = "https://ultrasight.com/company-update/"
+    product_quote = (
+        "UltraSight EchoSystem brings together real-time AI guidance, "
+        "interpretation, and analytics for clinical providers."
+    )
+    commercial_quote = (
+        "UltraSight has commercially deployed EchoSystem across 10 clinical sites."
+    )
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers, payload
+        finding = _finding(
+            "industry",
+            observed_value="AI-guided cardiac imaging workflow platform",
+            observed_industry="Health Care",
+            observed_subindustry="Clinical workflow software",
+            activity_role="supplier_operator",
+            evidence_url=product_url,
+            evidence_quote=product_quote,
+        )
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {
+                "name": "submit_findings",
+                "arguments": json.dumps({"findings": [finding]}),
+            },
+        }]}}]}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 1)
+    monkeypatch.setattr(investigator, "MAX_SEARCH_CALLS", 0)
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "UltraSight", "website": "https://ultrasight.com"},
+        targets=("industry",),
+        requested_industry="Health Care",
+        requested_subindustry="Clinical workflow software",
+        requested_product_service="AI-guided cardiac imaging workflow platform",
+        requested_attribute=(
+            "Sells a clinical workflow platform used by health systems"
+        ),
+        positive_semantic_review=True,
+        prior_observations={
+            "submitted_source_urls": [product_url, commercial_url],
+        },
+        prefetched_pages={
+            product_url: {"final_url": product_url, "text": product_quote},
+            commercial_url: {
+                "final_url": commercial_url,
+                "text": commercial_quote,
+            },
+        },
+        verified_homepage_identity={
+            "normalized_name": "UltraSight",
+            "registrable_dns_domain": "ultrasight.com",
+        },
+    ))
+
+    assert result["claims"]["industry"]["status"] == "VERIFIED"
+    assert result["claims"]["industry"]["evidence_url"] == product_url
 
 
 @pytest.mark.parametrize(

@@ -185,6 +185,14 @@ management platform. Do not infer recurring subscription terms from the word
 "licensed." Customer use of another vendor's platform and the investigated
 vendor's own internal console or workflow remain customer_user or
 internal_function, not supplier_operator.
+An explicit monetary platform or workspace plan with monthly or annual fees
+supports a paid subscription model without requiring the literal word
+"subscription." A vendor-owned product offering plus current commercial
+customers or deployments of that same product supports that the vendor sells
+it; do not require a public price or invoice. Bind the commercial fact to the
+exact investigated company and product. A free plan, research study,
+prototype, pilot, demonstration, funding announcement, or investor's general
+commercialization claim does not by itself prove a current commercial sale.
 When positive_semantic_review is true, treat prior positive labels as untrusted
 hypotheses, not source observations. The supplier_operator role establishes
 only the company's relationship to the cited activity; it does not establish

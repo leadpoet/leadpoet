@@ -15,6 +15,7 @@ import copy
 import hashlib
 import html
 import json
+import math
 import os
 import re
 import time
@@ -1918,6 +1919,72 @@ def _submitted_finding_rejection(
     return None
 
 
+def _untrusted_non_rejected_source_context(
+    *,
+    targets: Sequence[str],
+    findings: Mapping[str, Mapping[str, Any]],
+    rejected_findings: Sequence[Mapping[str, Any]],
+    fetched_pages: Mapping[str, str],
+    excluded_targets: Sequence[str] = (),
+) -> list[dict[str, Any]]:
+    """Carry bounded source evidence across a different target's correction."""
+
+    rejected_targets = {
+        str(item.get("target") or "") for item in rejected_findings
+    }
+    rejected_targets.update(str(target) for target in excluded_targets)
+    context: list[dict[str, Any]] = []
+    for target in tuple(dict.fromkeys(str(value) for value in targets))[
+        :len(TARGETS)
+    ]:
+        finding = findings.get(target) or {}
+        if (
+            target in rejected_targets
+            or finding.get("status") not in {"VERIFIED", "CONTRADICTED"}
+        ):
+            continue
+        evidence_url = _safe_https_url(finding.get("evidence_url"))
+        evidence_quote = str(finding.get("evidence_quote") or "")[:2000]
+        fetched_text = fetched_pages.get(evidence_url, "")
+        if not evidence_url or not _quote_occurs(evidence_quote, fetched_text):
+            continue
+        observed_value = finding.get("observed_value")
+        if isinstance(observed_value, str):
+            observed_value = observed_value[:300]
+        elif isinstance(observed_value, float) and not math.isfinite(
+            observed_value
+        ):
+            observed_value = None
+        elif not isinstance(observed_value, (int, float, bool, type(None))):
+            observed_value = None
+        item = {
+            "target": target,
+            "prior_status": finding.get("status"),
+            "observed_value": observed_value,
+            "observed_country": str(finding.get("observed_country") or "")[:100],
+            "observed_state": str(finding.get("observed_state") or "")[:100],
+            "observed_industry": str(finding.get("observed_industry") or "")[:200],
+            "observed_subindustry": str(
+                finding.get("observed_subindustry") or ""
+            )[:300],
+            "activity_role": str(finding.get("activity_role") or "")[:40],
+            "evidence_url": evidence_url,
+            "evidence_quote": evidence_quote,
+            "old_name": str(finding.get("old_name") or "")[:200],
+            "new_name": str(finding.get("new_name") or "")[:200],
+            "old_domain": str(finding.get("old_domain") or "")[:253],
+            "new_domain": str(finding.get("new_domain") or "")[:253],
+            "shared_linkedin_slug": str(
+                finding.get("shared_linkedin_slug") or ""
+            )[:200],
+        }
+        source_context = _source_context_for_quote(evidence_quote, fetched_text)
+        if source_context:
+            item["source_context"] = source_context
+        context.append(item)
+    return context
+
+
 async def investigate_company_evidence(
     *,
     company_locator: Mapping[str, Any],
@@ -2752,6 +2819,19 @@ async def investigate_company_evidence(
                     if (
                         rejected or force_industry_followup
                     ) and not correction_turn:
+                        non_rejected_source_context = (
+                            _untrusted_non_rejected_source_context(
+                                targets=requested_targets,
+                                findings=claims,
+                                rejected_findings=rejected,
+                                fetched_pages=fetched_pages,
+                                excluded_targets=(
+                                    ("industry",)
+                                    if force_industry_followup
+                                    else ()
+                                ),
+                            )
+                        )
                         final_correction_pending = bool(
                             force_submit and not force_stage_search
                         )
@@ -2766,6 +2846,15 @@ async def investigate_company_evidence(
                             "ok": False,
                             "error": "deterministic_evidence_validation_failed",
                             "rejected_findings": rejected,
+                            **(
+                                {
+                                    "untrusted_non_rejected_source_context": (
+                                        non_rejected_source_context
+                                    ),
+                                }
+                                if non_rejected_source_context
+                                else {}
+                            ),
                             "instruction": (
                                 (
                                     "The submitted industry contradiction proved another "
@@ -2798,6 +2887,22 @@ async def investigate_company_evidence(
                                 "join passages, or insert ellipses. VERIFIED and "
                                 "CONTRADICTED require that exact quote and its fetched URL. "
                                 "UNPROVEN requires empty evidence_url and evidence_quote. "
+                                + (
+                                    "The feedback includes untrusted source-bound context "
+                                    "for non-rejected targets. Re-review it; prior statuses "
+                                    "and observations are not authoritative. If you revise "
+                                    "one of those targets, address its cited exact evidence "
+                                    "in the new reason. You may keep it, return a supported "
+                                    "CONTRADICTED finding, or return UNPROVEN; the context "
+                                    "does not force acceptance. For a broad industry, "
+                                    "product/service, or attribute criterion, assess whether "
+                                    "the cited concrete customer-facing functions directly "
+                                    "perform every requested capability instead of requiring "
+                                    "the source to repeat the criterion's label. Preserve "
+                                    "every AND/OR condition, qualifier, and exclusion. "
+                                    if non_rejected_source_context
+                                    else ""
+                                )
                                 + (
                                     "This is the single final submit-only correction; "
                                     "do not search or fetch. "

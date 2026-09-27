@@ -27,6 +27,7 @@ import aiohttp
 from lab_arena.operations import OPENROUTER_MAX_CONTENT_CHARS
 from leadpoet_verifier.identity.normalization import NormalizationError, normalize_host
 from qualification.competition_models import public_http_url
+from qualification.scoring.company_fit_decision import _company_name
 from qualification.scoring.company_verification import (
     MAX_HOMEPAGE_NAVIGATION_LABEL_LENGTH,
     MAX_HOMEPAGE_NAVIGATION_LOCATORS,
@@ -889,7 +890,7 @@ def _complete_verified_first_party_identity(
         identity.get("verified_domain"),
     )
     identity_names = tuple(
-        re.sub(r"[^a-z0-9]+", "", _normalized_span(identity.get(key)))
+        _company_name(identity.get(key))
         for key in ("submitted_name", "observed_name", "verified_name")
     )
     submitted_slug = str(

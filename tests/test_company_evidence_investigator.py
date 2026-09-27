@@ -3366,6 +3366,66 @@ def _complete_rapid7_identity_anchor(**updates):
     return anchor
 
 
+@pytest.mark.parametrize(
+    ("submitted_name", "observed_name", "verified_name"),
+    [
+        pytest.param("Prologis", "Prologis", "Prologis Inc", id="prologis-inc"),
+        pytest.param("Acme", "Acme Inc.", "Acme Incorporated", id="acme-inc"),
+    ],
+)
+def test_complete_first_party_identity_allows_terminal_legal_suffixes(
+    submitted_name,
+    observed_name,
+    verified_name,
+):
+    assert investigator._complete_verified_first_party_identity(
+        "https://www.prologis.com/real-estate/development",
+        {"prologis.com"},
+        {
+            "submitted_name": submitted_name,
+            "observed_name": observed_name,
+            "verified_name": verified_name,
+            "submitted_domain": "prologis.com",
+            "observed_domain": "prologis.com",
+            "verified_domain": "prologis.com",
+            "submitted_linkedin_slug": "prologis",
+            "observed_linkedin_slug": "prologis",
+            "verified_linkedin_slug": "prologis",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        pytest.param({"verified_name": "Other Company Inc"}, id="different-company"),
+        pytest.param({"verified_name": "Prologis Essentials Inc"}, id="subsidiary"),
+        pytest.param({"verified_domain": "other.example"}, id="wrong-domain"),
+        pytest.param({"verified_linkedin_slug": "other-company"}, id="wrong-linkedin-slug"),
+        pytest.param({"observed_name": ""}, id="incomplete-identity"),
+    ],
+)
+def test_legal_suffix_identity_alignment_requires_all_other_exact_anchors(updates):
+    identity = {
+        "submitted_name": "Prologis",
+        "observed_name": "Prologis",
+        "verified_name": "Prologis Inc",
+        "submitted_domain": "prologis.com",
+        "observed_domain": "prologis.com",
+        "verified_domain": "prologis.com",
+        "submitted_linkedin_slug": "prologis",
+        "observed_linkedin_slug": "prologis",
+        "verified_linkedin_slug": "prologis",
+    }
+    identity.update(updates)
+
+    assert not investigator._complete_verified_first_party_identity(
+        "https://www.prologis.com/real-estate/development",
+        {"prologis.com"},
+        identity,
+    )
+
+
 def _unnamed_rapid7_industry_finding(*, role="supplier_operator", quote=None):
     return _finding(
         "industry",

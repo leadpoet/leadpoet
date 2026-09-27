@@ -248,15 +248,15 @@ HIRING_FUNCTIONAL_ROLE_BLOCK = """  HIRING — FUNCTIONAL ROLE MATCH:
     scope of that same role; the title and submitted claim quote need not repeat
     the category word or contain the complete evidentiary window.
 
-    For a broad target such as "platform roles", direct responsibility for
-    platform architecture, production readiness, reliability, scaling,
-    operations, or improvement qualifies whether the work is internal or
-    customer-facing; the role need not have an infrastructure or platform-team
-    title. Read same-role sentences together: one sentence may establish the
-    platform scope and another may assign the direct duties. The duty sentence
-    need not repeat the platform name. If the target instead asks for the
-    employer's own platform, infrastructure, an internal developer platform, or
-    another narrower scope, preserve that qualifier.
+    For a broad target such as "platform roles", direct responsibility to build,
+    operate, own, maintain, or improve platform products or components qualifies,
+    including platform architecture, production readiness, reliability, scaling,
+    or operations, whether the work is internal or customer-facing; the role need
+    not have an infrastructure or platform-team title. Read same-role sentences
+    together: one sentence may establish the platform scope and another may assign
+    the direct duties. The duty sentence need not repeat the platform name. If the
+    target instead asks for the employer's own platform, infrastructure,
+    an internal developer platform, or another narrower scope, preserve that qualifier.
 
     Keep the boundary strict. A generic software role at a company that sells a
     platform is not automatically a platform role. Generic presales, customer

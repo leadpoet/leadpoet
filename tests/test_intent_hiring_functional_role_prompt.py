@@ -92,7 +92,11 @@ def test_unibuddy_source_and_functional_role_rule_reach_stage_three() -> None:
     assert UNIBUDDY_URL in prompt
     assert UNIBUDDY_TEXT in prompt
     assert "title and submitted claim quote need not repeat" in prompt
-    assert "direct responsibility for platform architecture" in normalized_prompt
+    assert (
+        "direct responsibility to build, operate, own, maintain, or improve "
+        "platform products or components qualifies"
+    ) in normalized_prompt
+    assert "including platform architecture, production readiness" in normalized_prompt
     assert "whether the work is internal or customer-facing" in normalized_prompt
     assert (
         "one sentence may establish the platform scope and another may assign "
@@ -111,7 +115,7 @@ def test_unibuddy_source_and_functional_role_rule_reach_stage_three() -> None:
                 "the shared identity and data services that power every layer "
                 "of the Acme platform."
             ),
-            "direct responsibility for\n    platform architecture",
+            "direct responsibility to build,\n    operate, own, maintain, or improve platform products or components",
             id="direct-platform-duties",
         ),
         pytest.param(

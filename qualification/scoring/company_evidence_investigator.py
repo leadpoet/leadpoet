@@ -276,6 +276,13 @@ found. A failed optional fetch of a newer page does not erase that valid
 listing evidence by itself. It does require UNPROVEN when its available
 locator exposes a concrete material conflict that cannot be resolved. A
 historical IPO-completion announcement alone remains insufficient.
+On a current first-party company or investor-relations profile, a separate
+current trading-information row that names the exact company and a literal
+exchange plus ticker is current company-attributed exchange/ticker evidence.
+Do not treat that trading row as historical merely because the same profile
+also lists the company's historical IPO date. This does not make an archived
+IPO profile current, and a later completed delisting, take-private, or
+controlling acquisition still overrides the ticker row.
 When prior observations contain exact structured `Privately Held` company-type
 evidence, first seek current first-party take-private, delisting, or listing
 evidence. An archived SEC filing cover page is a historical snapshot and cannot

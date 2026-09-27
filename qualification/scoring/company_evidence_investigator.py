@@ -852,6 +852,25 @@ def _public_stage_submitted_source_to_prefetch(
     return first_party_candidates[0] if first_party_candidates else ""
 
 
+def _fetched_bound_public_market_sources(
+    fetched_pages: Mapping[str, str],
+    identity_names: set[str],
+) -> tuple[str, ...]:
+    """Return fetched sources with strong market proof bound to this issuer."""
+
+    from qualification.scoring.lead_scorer import (
+        _public_quote_has_bound_market_locator,
+    )
+
+    return tuple(
+        url
+        for url, text in fetched_pages.items()
+        if _public_quote_has_bound_market_locator(
+            _visible_quote_surface(text), tuple(identity_names)
+        )
+    )
+
+
 def _independently_bound_first_party_url(
     url: str,
     domains: set[str],
@@ -2221,6 +2240,7 @@ async def investigate_company_evidence(
             industry_followup_search_completed = False
             industry_followup_fetched_urls: set[str] = set()
             quote_repair_targets: set[str] = set()
+            public_stage_unproven_rereviewed = False
             for _turn in range(MAX_REASONING_TURNS + 1):
                 correction_turn = _turn == MAX_REASONING_TURNS
                 if correction_turn and not final_correction_pending:
@@ -2587,6 +2607,27 @@ async def investigate_company_evidence(
                             "current public stage was not established after a "
                             "successful company-bound current-status discovery",
                         )["stage"]
+                    submitted_stage = submitted_findings.get("stage", {})
+                    bound_public_sources = (
+                        _fetched_bound_public_market_sources(
+                            fetched_pages,
+                            identity_names,
+                        )
+                        if requested_public_stage
+                        else ()
+                    )
+                    force_public_stage_rereview = bool(
+                        requested_public_stage
+                        and submitted_stage.get("status") == "UNPROVEN"
+                        and stage_finding.get("status") == "UNPROVEN"
+                        and not rejected
+                        and current_stage_search_succeeded
+                        and bound_public_sources
+                        and not public_stage_unproven_rereviewed
+                        and not correction_turn
+                        and not force_submit
+                        and _turn < MAX_REASONING_TURNS - 1
+                    )
                     if (
                         rejected or force_industry_followup
                     ) and not correction_turn:
@@ -2659,6 +2700,29 @@ async def investigate_company_evidence(
                                     )
                                 )
                                 + "Submit one complete finding for every requested target."
+                            ),
+                        }
+                    elif force_public_stage_rereview:
+                        public_stage_unproven_rereviewed = True
+                        forced_next_tool = "submit_findings"
+                        tool_result = {
+                            "ok": False,
+                            "error": "fetched_public_stage_evidence_not_adjudicated",
+                            "issuer_bound_market_source_urls": list(
+                                bound_public_sources
+                            ),
+                            "instruction": (
+                                "Re-review Public stage once using the already fetched "
+                                "issuer-bound market sources and the completed current-status "
+                                "discovery. A failed optional fetch does not by itself erase "
+                                "valid company-bound exchange or ticker evidence. A concrete "
+                                "later completed acquisition, take-private, or delisting is a "
+                                "material conflict and must remain UNPROVEN or support the "
+                                "different stage. Do not infer Public from this correction. "
+                                "Do not search or fetch. VERIFIED or CONTRADICTED still needs "
+                                "one exact continuous quote from its fetched URL and must pass "
+                                "the unchanged deterministic validator. Submit one complete "
+                                "finding for every requested target."
                             ),
                         }
                     elif unproven_without_search:

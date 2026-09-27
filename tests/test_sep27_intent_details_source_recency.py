@@ -391,10 +391,17 @@ async def test_undated_relative_coverage_uses_one_bounded_semantic_recheck(
             "date": "2026-04-21", "basis": "source_publication_date",
         }]
         assert "observed_dates" not in stage_source
-        assert "routing control, not evidence or a conclusion" in kwargs[
+        assert "Trusted routing controls (not factual evidence)" in kwargs[
             "system_prompt"
         ]
-        assert "different clause, source, or" in kwargs["system_prompt"]
+        assert kwargs["system_prompt"].startswith(
+            "Recheck the factual support of only the flagged paragraph units."
+        )
+        assert "Review a client-facing Intent Details" not in kwargs[
+            "system_prompt"
+        ]
+        assert "facts_supported must equal" not in kwargs["system_prompt"]
+        assert "events, sources, or clauses" in kwargs["system_prompt"]
         assert disputed_clause not in kwargs["system_prompt"]
         assert disputed_clause in prompt
         return json.dumps({"repairs": [{
@@ -442,8 +449,8 @@ async def test_body_date_can_keep_relative_publication_claim_verified_on_recheck
             "intent_details_units"
         ][0]["text"]
         assert target["held_evidence_bindings"][0]["quote"] == dated_excerpt
-        assert "exact date-bearing source" in kwargs["system_prompt"]
-        assert "excerpt" in kwargs["system_prompt"]
+        assert "date-bearing" in kwargs["system_prompt"]
+        assert "admitted source excerpt" in kwargs["system_prompt"]
         return json.dumps({"repairs": [{
             "unit_id": 0,
             "status": "VERIFIED",

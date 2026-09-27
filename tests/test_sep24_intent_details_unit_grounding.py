@@ -1250,7 +1250,7 @@ def test_unproven_bad_optional_quote_repairs_to_empty_and_terminal_mismatch(
         calls += 1
         document = _prompt_document(prompt)
         if calls == 2:
-            assert "Do not alter or return unrelated units" in kwargs[
+            assert "Return no\nunlisted unit" in kwargs[
                 "system_prompt"
             ]
             assert json.loads(prompt)["bounded_unit_repair_control"]["units"] == [

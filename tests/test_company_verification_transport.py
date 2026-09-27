@@ -1580,6 +1580,72 @@ def test_current_exchange_row_binds_exact_jll_ticker():
     )
 
 
+def test_current_exchange_row_navigation_does_not_consume_direct_ticker():
+    quote = (
+        "JLL - Investor relations Skip to main content Investor relations "
+        "Search Investor relations NYSE: JLL 321.91 -2.49 ( -0.77% ) "
+        "Volume: 367,005 September 25, 2026 4:00 PM 20 Minute Delay "
+        "A member of the Fortune 500®, JLL (Jones Lang LaSalle Incorporated) "
+        "is a leading global commercial real estate services and investment "
+        "management company"
+    )
+
+    assert current_exchange_profile_names_issuer(
+        quote, {"JLL", "Jones Lang LaSalle Incorporated"},
+    )
+
+
+def test_current_exchange_row_binds_other_exact_issuer_without_ticker_alias():
+    assert current_exchange_profile_names_issuer(
+        "| Acme Holdings Inc. NYSE: ACM 42.10 Volume: 9,400 "
+        "September 25, 2026 4:00 PM",
+        {"Acme Holdings Inc."},
+    )
+
+
+def test_current_exchange_navigation_does_not_hide_another_issuer():
+    assert not current_exchange_profile_names_issuer(
+        "JLL - Investor relations Acme Holdings Inc. NYSE: JLL "
+        "321.91 Volume: 367,005 September 25, 2026 4:00 PM",
+        {"JLL", "Jones Lang LaSalle Incorporated"},
+    )
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        (
+            "Acme Holdings Inc. NYSE: JLL 321.91 Volume: 367,005 "
+            "September 25, 2026 4:00 PM"
+        ),
+        (
+            "The Global Acme Commercial Property Investment Holdings "
+            "Incorporated NYSE: JLL 321.91 Volume: 367,005 "
+            "September 25, 2026 4:00 PM"
+        ),
+        (
+            "Stock quote Acme Holdings Inc. NYSE: JLL 321.91 "
+            "Volume: 367,005 September 25, 2026 4:00 PM"
+        ),
+        (
+            "NASDAQ / JLL Acme Holdings Inc. 321.91 Volume: 367,005 "
+            "September 25, 2026 4:00 PM"
+        ),
+        (
+            "JLL completed its IPO in 1997 and began trading on NYSE: JLL."
+        ),
+        (
+            "JLL NYSE: JLL 321.91 Volume: 367,005 September 25, 2026; "
+            "JLL was delisted and became private."
+        ),
+    ],
+)
+def test_current_exchange_row_keeps_wrong_historical_and_private_controls(quote):
+    assert not current_exchange_profile_names_issuer(
+        quote, {"JLL", "Jones Lang LaSalle Incorporated"},
+    )
+
+
 def test_iag_parenthetical_alias_rejects_wrong_submitted_linkedin():
     receipt = evaluate_company_identity(
         submitted_name="Insurance Australia Group Limited (IAG)",

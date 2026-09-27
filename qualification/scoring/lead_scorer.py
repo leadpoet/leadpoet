@@ -2371,8 +2371,19 @@ def _complete_verified_attribute_recovery_identity(
         or not isinstance(receipt, Mapping)
     ):
         return False
+    recovery_identity, recovery_linkedin = _investigator_identity_context(
+        company.company_linkedin,
+        verified_identity,
+        receipt,
+        str(verified_identity.get("registrable_dns_domain") or "").strip(),
+    )
+    submitted_slug = receipt.get("submitted_linkedin_slug")
+    company_slug = linkedin_company_page_slug(company.company_linkedin)
+    recovery_slug = linkedin_company_page_slug(recovery_linkedin)
+    if company_slug and recovery_slug and recovery_slug != company_slug:
+        submitted_slug = recovery_slug
     verified_domain = str(
-        verified_identity.get("registrable_dns_domain") or ""
+        recovery_identity.get("registrable_dns_domain") or ""
     ).strip()
     return _complete_verified_first_party_identity(
         evidence_url,
@@ -2380,13 +2391,13 @@ def _complete_verified_attribute_recovery_identity(
         {
             "submitted_name": receipt.get("submitted_name") or company.company_name,
             "submitted_domain": receipt.get("submitted_domain"),
-            "submitted_linkedin_slug": receipt.get("submitted_linkedin_slug"),
+            "submitted_linkedin_slug": submitted_slug,
             "observed_name": receipt.get("observed_name"),
             "observed_domain": receipt.get("observed_domain"),
             "observed_linkedin_slug": receipt.get("observed_linkedin_slug"),
-            "verified_name": verified_identity.get("normalized_name"),
+            "verified_name": recovery_identity.get("normalized_name"),
             "verified_domain": verified_domain,
-            "verified_linkedin_slug": verified_identity.get(
+            "verified_linkedin_slug": recovery_identity.get(
                 "linkedin_company_slug"
             ),
         },

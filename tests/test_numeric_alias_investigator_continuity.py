@@ -245,7 +245,12 @@ def _run_real_investigation(
     finding,
     source_url: str = PRODUCT_URL,
     source_text: str = PRODUCT_PAGE,
+    icp: ICPPrompt | None = None,
+    prior_result=None,
+    attribute_source_cache=None,
+    repair_required_attribute: bool = False,
 ):
+    active_icp = icp or _icp()
     requests = []
     responses = [_tool_response(finding)]
     if finding["status"] == "VERIFIED":
@@ -273,10 +278,10 @@ def _run_real_investigation(
     result = asyncio.run(
         lead_scorer._run_targeted_company_evidence_investigation(
             company=_company(),
-            icp=_icp(),
+            icp=active_icp,
             verdict=verdict,
             investigation_targets=("industry",),
-            icp_attribute="",
+            icp_attribute=str(active_icp.required_attribute or ""),
             icp_stage="Public",
             verified_identity=_verified_homepage_identity(),
             verified_transport_domain="rapid7.com",
@@ -285,6 +290,11 @@ def _run_real_investigation(
             employee_size_conflict=False,
             company_quality=True,
             structured_profile_identity_evidence=structured_identity,
+            prior_result=prior_result,
+            required_attribute_source_cache=attribute_source_cache,
+            repair_required_attribute_from_industry=(
+                repair_required_attribute
+            ),
             review_positive_semantics=True,
             verified_homepage_pages={
                 source_url: {"final_url": source_url, "text": source_text}
@@ -297,6 +307,48 @@ def _run_real_investigation(
         search.assert_awaited_once()
     fetch.assert_not_awaited()
     return result, requests
+
+
+def _attribute_result(structured_identity):
+    required_attribute = (
+        "Provides cloud infrastructure entitlement management."
+    )
+    icp = _icp().model_copy(update={
+        "required_attribute": required_attribute,
+    })
+    verdict = _verdict()
+    verdict.update(
+        attribute_satisfied=None,
+        required_attribute_evidence_url="",
+        required_attribute_evidence_quote="",
+    )
+    result = lead_scorer._reverify_decision(
+        verdict,
+        required_attribute,
+        "Public",
+        icp=icp,
+        company=_company(),
+        verified_homepage_identity=_verified_homepage_identity(),
+        verified_homepage_transport_domain="rapid7.com",
+        structured_profile_identity_evidence=structured_identity,
+        company_quality=True,
+    )
+    return icp, result
+
+
+def _unproven_attribute_result():
+    icp, result = _attribute_result(_structured_identity())
+    assert result.details["identity_decision"] == COMPANY_FIT_MATCH
+    assert result.details["identity_receipt"][
+        "submitted_linkedin_slug"
+    ] == "39624"
+    assert result.details["identity_receipt"][
+        "observed_linkedin_slug"
+    ] == "rapid7"
+    assert result.details["required_attribute_decision"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+    return icp, result
 
 
 def test_exact_rapid7_quote_passes_real_entry_only_after_full_alias_proof(
@@ -321,6 +373,131 @@ def test_exact_rapid7_quote_passes_real_entry_only_after_full_alias_proof(
         "registrable_dns_domain": "rapid7.com",
         "linkedin_company_slug": "rapid7",
     }
+
+
+def test_proven_alias_carries_verified_industry_into_attribute_repair(
+    monkeypatch,
+):
+    icp, prior_result = _unproven_attribute_result()
+    source_cache = {}
+
+    result, requests = _run_real_investigation(
+        monkeypatch,
+        structured_identity=_structured_identity(),
+        finding=_industry_finding(),
+        icp=icp,
+        prior_result=prior_result,
+        attribute_source_cache=source_cache,
+        repair_required_attribute=True,
+    )
+
+    projected, repaired, claims = result[:3]
+    assert claims["industry"]["status"] == "VERIFIED"
+    assert projected["attribute_satisfied"] is True
+    assert projected["required_attribute_evidence_url"] == PRODUCT_URL
+    assert repaired.details["required_attribute_decision"] == COMPANY_FIT_MATCH
+    assert source_cache[PRODUCT_URL]["final_url"] == PRODUCT_URL
+    assert source_cache[PRODUCT_URL]["text"] == PRODUCT_PAGE
+    assert prior_result.details["identity_receipt"][
+        "submitted_linkedin_slug"
+    ] == "39624"
+    assert _company().company_linkedin == NUMERIC_LINKEDIN
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    "structured_identity",
+    [
+        pytest.param(None, id="absent-proof"),
+        pytest.param(_structured_identity(company_id="99999"), id="wrong-id"),
+        pytest.param(_structured_identity(name="Other Company"), id="wrong-company"),
+        pytest.param(
+            _structured_identity(website="https://other.example/"),
+            id="wrong-domain",
+        ),
+    ],
+)
+def test_attribute_repair_rejects_absent_or_tampered_alias_proof(
+    structured_identity,
+):
+    _icp_value, prior_result = _attribute_result(structured_identity)
+
+    assert prior_result.details["identity_decision"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+    assert not lead_scorer._complete_verified_attribute_recovery_identity(
+        _company(),
+        prior_result,
+        _verified_homepage_identity(),
+        PRODUCT_URL,
+    )
+
+
+@pytest.mark.parametrize(
+    "structured_identity",
+    [
+        pytest.param(None, id="removed-proof"),
+        pytest.param(_structured_identity(company_id="99999"), id="wrong-id"),
+        pytest.param(_structured_identity(name="Other Company"), id="wrong-company"),
+        pytest.param(
+            _structured_identity(website="https://other.example/"),
+            id="wrong-domain",
+        ),
+    ],
+)
+def test_attribute_repair_revalidates_embedded_alias_proof(
+    structured_identity,
+):
+    _icp_value, prior_result = _unproven_attribute_result()
+    receipt = dict(prior_result.details["identity_receipt"])
+    if structured_identity is None:
+        receipt.pop("structured_profile_identity")
+    else:
+        receipt["structured_profile_identity"] = structured_identity
+    tampered_prior = lead_scorer.company_fit_unavailable(
+        prior_result.reason,
+        details={
+            **prior_result.details,
+            "identity_receipt": receipt,
+        },
+    )
+
+    assert tampered_prior.details["identity_decision"] == COMPANY_FIT_MATCH
+    assert not lead_scorer._complete_verified_attribute_recovery_identity(
+        _company(),
+        tampered_prior,
+        _verified_homepage_identity(),
+        PRODUCT_URL,
+    )
+
+
+def test_attribute_repair_preserves_receipt_slug_without_proven_resolution():
+    _icp_value, prior_result = _unproven_attribute_result()
+    receipt = {
+        **prior_result.details["identity_receipt"],
+        "submitted_linkedin_slug": "other-company",
+    }
+    mismatched_prior = lead_scorer.company_fit_unavailable(
+        prior_result.reason,
+        details={
+            **prior_result.details,
+            "identity_receipt": receipt,
+        },
+    )
+    vanity_company = _company().model_copy(update={
+        "company_linkedin": VANITY_LINKEDIN,
+    })
+    vanity_identity = {
+        **_verified_homepage_identity(),
+        "linkedin_company_slug": "rapid7",
+    }
+
+    assert not lead_scorer._complete_verified_attribute_recovery_identity(
+        vanity_company,
+        mismatched_prior,
+        vanity_identity,
+        PRODUCT_URL,
+    )
 
 
 @pytest.mark.parametrize(

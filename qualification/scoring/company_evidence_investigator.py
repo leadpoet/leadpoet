@@ -673,6 +673,22 @@ def _bounded_message_json(value: Any, *, prefix: str = "") -> str:
             navigation_locators.pop()
         if not navigation_locators:
             document.pop("untrusted_homepage_navigation_locators", None)
+    optional_context_keys = (
+        "untrusted_non_rejected_source_context",
+        "untrusted_alternative_public_stage_context",
+    )
+    while len(encode()) > message_limit:
+        removed = False
+        for key in optional_context_keys:
+            entries = document.get(key)
+            if isinstance(entries, list) and entries:
+                entries.pop()
+                removed = True
+                if not entries:
+                    document.pop(key, None)
+                break
+        if not removed:
+            break
     if len(encode()) > message_limit:
         raise ValueError("investigation_message_metadata_too_large")
     if not evidence_texts:

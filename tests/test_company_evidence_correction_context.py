@@ -248,6 +248,195 @@ def test_alternative_public_stage_context_rejects_hidden_or_missing_source():
     ) == []
 
 
+def test_bounded_message_json_drops_whole_optional_context_entries_only():
+    alternatives = [
+        {
+            "source_url": f"https://market.example/{index}",
+            "source_context": str(index) * 1_500,
+        }
+        for index in range(2)
+    ]
+    retained = [
+        {
+            "target": target,
+            "evidence_url": f"https://example.com/{target}",
+            "evidence_quote": target * 400,
+            "source_context": target * 700,
+            "observed_value": "V" * 300,
+            "observed_subindustry": "S" * 300,
+        }
+        for target in ("rebrand", "headcount", "industry", "geography")
+    ]
+
+    document = {
+        "rejected_findings": [{
+            "target": "stage",
+            "reason": "R" * 300,
+            "source_context": "X" * 8_000,
+        }],
+        "untrusted_alternative_public_stage_context": alternatives,
+        "untrusted_non_rejected_source_context": retained,
+        "instruction": "Review the evidence again.",
+    }
+    encoded = investigator._bounded_message_json(document)
+    bounded = json.loads(encoded)
+
+    assert len(encoded) < arena_operations.OPENROUTER_MAX_CONTENT_CHARS
+    assert bounded["rejected_findings"] == document["rejected_findings"]
+    assert bounded["untrusted_alternative_public_stage_context"] == alternatives
+    assert len(bounded.get("untrusted_non_rejected_source_context", [])) < 4
+    assert all(
+        item in retained
+        for item in bounded.get("untrusted_non_rejected_source_context", [])
+    )
+
+    small = {
+        "untrusted_alternative_public_stage_context": alternatives[:1],
+        "untrusted_non_rejected_source_context": retained[:1],
+    }
+    assert investigator._bounded_message_json(small) == json.dumps(
+        small,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def test_adversarial_all_target_feedback_survives_operations_bound(monkeypatch):
+    requests = []
+    targets = ("stage", "rebrand", "headcount", "industry", "geography")
+    oversized_alternatives = [
+        {
+            "source_url": f"https://market.example/{index}",
+            "source_context": str(index) * 1_500,
+        }
+        for index in range(2)
+    ]
+    oversized_retained = [
+        {
+            "target": target,
+            "prior_status": "VERIFIED",
+            "observed_value": "V" * 300,
+            "observed_country": "C" * 100,
+            "observed_state": "S" * 100,
+            "observed_industry": "I" * 200,
+            "observed_subindustry": "U" * 300,
+            "activity_role": "supplier_operator",
+            "evidence_url": f"https://example.com/{target}",
+            "evidence_quote": target * 285,
+            "source_context": target * 500,
+            "old_name": "O" * 200,
+            "new_name": "N" * 200,
+            "old_domain": "old.example",
+            "new_domain": "new.example",
+            "shared_linkedin_slug": "L" * 200,
+        }
+        for target in targets
+        if target != "stage"
+    ]
+
+    def fake_validated_findings(arguments, **_kwargs):
+        findings = {
+            item["target"]: dict(item) for item in arguments["findings"]
+        }
+        if findings["stage"]["status"] == "VERIFIED":
+            findings["stage"].update(
+                status="UNPROVEN",
+                evidence_url="",
+                evidence_quote="",
+                reason="submitted quote was not present in fetched source",
+            )
+        return findings
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        arena_operations.validate_operation_request("openrouter.chat", payload)
+        requests.append(payload)
+        if len(requests) == 1:
+            findings = [_finding(target) for target in targets]
+            findings[0].update(
+                evidence_url=SEC_URL,
+                evidence_quote=LONG_SEC_RECOMPOSED_QUOTE,
+            )
+        else:
+            findings = [
+                _finding(
+                    target,
+                    status="UNPROVEN",
+                    observed_value="",
+                    evidence_url="",
+                    evidence_quote="",
+                )
+                for target in targets
+            ]
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{len(requests)}",
+            "type": "function",
+            "function": {
+                "name": "submit_findings",
+                "arguments": json.dumps({"findings": findings}),
+            },
+        }]}}]}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 1)
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_validated_findings", fake_validated_findings)
+    monkeypatch.setattr(
+        investigator,
+        "_untrusted_alternative_public_stage_context",
+        lambda **_kwargs: oversized_alternatives,
+    )
+    monkeypatch.setattr(
+        investigator,
+        "_untrusted_non_rejected_source_context",
+        lambda **_kwargs: oversized_retained,
+    )
+    monkeypatch.setattr(
+        investigator,
+        "_search_web",
+        AsyncMock(return_value={"results": []}),
+    )
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Rapid7", "website": "https://rapid7.com"},
+        targets=targets,
+        requested_stage="Public",
+        requested_employee_buckets=("51-200",),
+        requested_industry="Security software",
+        requested_subindustry="Cloud security",
+        requested_geography="Massachusetts, United States",
+        prior_observations={
+            "observed_company_name": "Rapid7",
+            "observed_company_website": "https://rapid7.com",
+            "submitted_source_urls": [NASDAQ_URL, SEC_URL],
+        },
+        verified_homepage_identity={
+            "normalized_name": "Rapid7",
+            "registrable_dns_domain": "rapid7.com",
+        },
+        prefetched_pages={
+            NASDAQ_URL: {"final_url": NASDAQ_URL, "text": NASDAQ_QUOTE},
+            SEC_URL: {"final_url": SEC_URL, "text": SEC_TEXT},
+        },
+    ))
+
+    assert len(requests) == 2
+    feedback_content = requests[1]["messages"][-1]["content"]
+    feedback = json.loads(feedback_content)
+    assert len(feedback_content) < arena_operations.OPENROUTER_MAX_CONTENT_CHARS
+    assert feedback["untrusted_alternative_public_stage_context"] == (
+        oversized_alternatives
+    )
+    assert len(feedback["untrusted_non_rejected_source_context"]) < 4
+    assert all(
+        result["claims"][target]["status"] == "UNPROVEN"
+        for target in targets
+    )
+
+
 def test_industry_semantic_followup_excludes_its_prior_contradiction(monkeypatch):
     geography_url = "https://rapid7.com/company"
     geography_quote = (

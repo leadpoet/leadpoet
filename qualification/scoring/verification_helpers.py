@@ -42,10 +42,12 @@ class _VisibleHTMLTextParser(HTMLParser):
         *,
         hidden_classes: frozenset[str] = frozenset(),
         hidden_ids: frozenset[str] = frozenset(),
+        include_scroll_reveal: bool = False,
     ) -> None:
         super().__init__(convert_charrefs=True)
         self._hidden_classes = hidden_classes
         self._hidden_ids = hidden_ids
+        self._include_scroll_reveal = include_scroll_reveal
         self._stack: list[tuple[str, bool, int]] = []
         self._hidden_depth = 0
         self._heading_depth: Optional[int] = None
@@ -67,13 +69,29 @@ class _VisibleHTMLTextParser(HTMLParser):
         classes = frozenset(values.get("class", "").casefold().split())
         element_id = values.get("id", "").casefold()
         style = re.sub(r"\s+", "", values.get("style", "").casefold())
+        # WOW.js hides ordinary paragraphs until they enter the viewport.
+        # A rendered scrape can retain that initial state below the fold.
+        # Recognize only its narrow entrance-animation state; explicit hidden
+        # attributes, hidden ancestors, CSS selectors and display:none still win.
+        scroll_reveal = bool(
+            self._include_scroll_reveal
+            and tag == "p"
+            and "wow" in classes
+            and any(
+                re.fullmatch(r"(?:fade|slide)in(?:up|down|left|right)?(?:big)?", name)
+                for name in classes
+            )
+            and set(filter(None, style.split(";"))) == {
+                "visibility:hidden", "animation-name:none",
+            }
+        )
         semantic_values = classes | ({element_id} if element_id else set())
         return bool(
             tag in self._HIDDEN_ELEMENTS
             or "hidden" in values
             or values.get("aria-hidden", "").strip().casefold() in {"true", "1"}
             or "display:none" in style
-            or "visibility:hidden" in style
+            or ("visibility:hidden" in style and not scroll_reveal)
             or classes & self._hidden_classes
             or element_id in self._hidden_ids
             or any(
@@ -201,13 +219,16 @@ def _css_hidden_selectors(content: str) -> tuple[frozenset[str], frozenset[str]]
     return frozenset(classes), frozenset(ids)
 
 
-def _visible_html_document(content: str) -> tuple[str, str, str]:
+def _visible_html_document(
+    content: str, *, include_scroll_reveal: bool = False,
+) -> tuple[str, str, str]:
     """Return visible page text, its first H1, and local pre-H1 context."""
 
     hidden_classes, hidden_ids = _css_hidden_selectors(content)
     parser = _VisibleHTMLTextParser(
         hidden_classes=hidden_classes,
         hidden_ids=hidden_ids,
+        include_scroll_reveal=include_scroll_reveal,
     )
     try:
         parser.feed(content)
@@ -224,10 +245,12 @@ def _visible_html_document(content: str) -> tuple[str, str, str]:
     return text, heading, heading_prefix
 
 
-def visible_html_text(content: str) -> str:
-    """Return sanitized visible page text without article relevance pruning."""
+def visible_html_text(content: str, *, include_scroll_reveal: bool = False) -> str:
+    """Return page text; company review can include known scroll-reveal copy."""
 
-    return _visible_html_document(content)[0]
+    return _visible_html_document(
+        content, include_scroll_reveal=include_scroll_reveal,
+    )[0]
 
 
 def visible_html_links(content: str) -> tuple[str, ...]:

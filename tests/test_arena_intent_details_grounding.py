@@ -498,16 +498,17 @@ def test_required_attribute_source_context_exposes_multiverse_growth_fact():
 @pytest.mark.parametrize(
     "defect", ["wrong_url", "unhashable_url", "unbound_quote", "extra_field"],
 )
-def test_required_attribute_source_context_requires_final_grounded_source(defect):
+@pytest.mark.parametrize("dimension", ["required_attribute", "industry"])
+def test_required_attribute_source_context_requires_final_grounded_source(defect, dimension):
     company, icp, results, fit = inputs()
     company_url = "https://acme.example/required-attribute"
     attribute_quote = "Acme provides a reporting software platform."
-    fit["dimension_evidence"]["required_attribute"] = {
+    fit["dimension_evidence"][dimension] = {
         "decision": "match",
         "web_evidence": {"url": company_url, "quote": attribute_quote},
     }
     context = {
-        "dimension": "required_attribute",
+        "dimension": dimension,
         "url": company_url,
         "text": attribute_quote,
     }
@@ -636,6 +637,63 @@ def test_common_wealth_selects_linkedin_daily3_and_keeps_flow_program_fact():
         for source in company_sources
         for value in source.get("admitted_text", [])
     ) <= intent_details._COMPANY_SOURCE_CONTEXT_RESERVATION_BYTES
+
+
+def test_matched_investigator_industry_page_reaches_paragraph_review(monkeypatch):
+    from qualification.scoring.company_evidence_investigator import PRIVATE_FETCHED_PAGES_KEY
+
+    company, icp, results, fit = inputs()
+    url = "https://acme.example/products/reporting"
+    quote = "Acme supplies reporting software to customers."
+    body = quote + " Customers can automate their reporting workflows."
+    fit["dimension_evidence"]["industry"]["web_evidence"] = {
+        "url": url, "quote": quote,
+    }
+    fit["dimension_evidence"]["identity"] = {
+        "decision": "match",
+        "web_identity_receipt": {
+            "decision": "match",
+            "observed_name": "Acme",
+            "observed_domain": "acme.example",
+            "observed_linkedin_slug": "acme",
+            "evidence_source": "company_web_reverification",
+        },
+    }
+    matched = company_fit_match(details={"dimension_evidence": fit["dimension_evidence"]})
+    retained = {}
+    lead_scorer._retain_matched_investigator_source_contexts(
+        retained, matched,
+        {PRIVATE_FETCHED_PAGES_KEY: {url: {"final_url": url, "text": body}}},
+    )
+    contexts = lead_scorer._matched_company_source_contexts(
+        matched, None, None, retained, paragraph=company.intent_details,
+    )
+    assert contexts == [{"dimension": "industry", "url": url, "text": body}]
+    calls = []
+
+    async def judge(prompt, **kwargs):
+        document = json.loads(prompt)
+        calls.append(document)
+        assert any(
+            item["evidence_kind"] == "verified_company_source_context"
+            and item["company_dimension"] == "industry"
+            and item["source_url"] == url
+            and body in item["admitted_text"]
+            for item in document["admitted_evidence"]
+        )
+        return json.dumps(_review_response(
+            {name: True for name in intent_details._CHECKS},
+            [{"matched_icp_signal": index, "covered": True} for index in (0, 1)],
+            document,
+        ))
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(
+        company, icp, results, fit, company_source_contexts=contexts,
+    ))
+    assert len(calls) == 1
+    assert receipt["decision"] == "match"
+    assert body not in json.dumps(receipt)
 
 
 def test_company_source_context_candidates_are_ordered_and_bounded():
@@ -778,13 +836,14 @@ def test_same_page_context_anchors_paragraph_relevant_stage_quote(
     assert len(admitted.encode("utf-8")) <= 2_000
 
 
-def test_company_source_context_stays_private_to_review_input(monkeypatch):
+@pytest.mark.parametrize("dimension", ["required_attribute", "industry"])
+def test_company_source_context_stays_private_to_review_input(monkeypatch, dimension):
     company, icp, results, fit = inputs()
     company_url = "https://acme.example/required-attribute"
     attribute_quote = "Acme provides a reporting software platform."
     growth_fact = "Acme revenue grew 50% year over year."
     company_body = attribute_quote + " " + growth_fact
-    fit["dimension_evidence"]["required_attribute"] = {
+    fit["dimension_evidence"][dimension] = {
         "decision": "match",
         "web_evidence": {"url": company_url, "quote": attribute_quote},
     }
@@ -810,7 +869,7 @@ def test_company_source_context_stays_private_to_review_input(monkeypatch):
         results,
         fit,
         company_source_contexts=[{
-            "dimension": "required_attribute",
+            "dimension": dimension,
             "url": company_url,
             "text": company_body,
         }],

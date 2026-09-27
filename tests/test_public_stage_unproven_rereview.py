@@ -175,9 +175,13 @@ def test_tenable_optional_filing_failure_gets_one_bounded_rereview(monkeypatch):
     }
 
 
-def test_other_issuer_gets_the_same_general_rereview(monkeypatch):
+def test_newer_generic_filing_locator_does_not_erase_valid_listing(monkeypatch):
     url = "https://www.crowdstrike.com/news/current-results"
     quote = "CrowdStrike Holdings, Inc. (NASDAQ: CRWD) announced current results."
+    generic_filing_url = (
+        "https://www.sec.gov/Archives/edgar/data/1535527/"
+        "crwd-20260731.htm"
+    )
     result, requests = _prefetched_request(
         monkeypatch,
         company_name="CrowdStrike",
@@ -188,10 +192,22 @@ def test_other_issuer_gets_the_same_general_rereview(monkeypatch):
             _finding(reason="optional filing unavailable"),
             _finding(status="VERIFIED", value="Public", url=url, quote=quote),
         ],
+        search=AsyncMock(return_value={"results": [{
+            "url": generic_filing_url,
+            "title": "CrowdStrike files quarterly report on Form 10-Q",
+        }]}),
     )
 
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert len(requests) == 2
+    correction = json.loads(requests[1]["messages"][-1]["content"])
+    assert (
+        "generic SEC filing reference, or unfetched filing locator is not by "
+        "itself a material listing conflict"
+    ) in correction["instruction"]
+    assert "does not require valid listing evidence to postdate it" in (
+        correction["instruction"]
+    )
 
 
 def test_solarwinds_material_delisting_conflict_stays_unproven(monkeypatch):
@@ -214,7 +230,10 @@ def test_solarwinds_material_delisting_conflict_stays_unproven(monkeypatch):
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
     assert len(requests) == 2
     correction = json.loads(requests[1]["messages"][-1]["content"])
-    assert "material conflict" in correction["instruction"]
+    assert "completed delisting, take-private" in correction["instruction"]
+    assert "current private status creates that conflict" in (
+        correction["instruction"]
+    )
 
 
 @pytest.mark.parametrize("quote", [

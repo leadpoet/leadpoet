@@ -213,6 +213,16 @@ def test_public_source_selection_prefers_supplied_issuer_evidence_within_limits(
     assert "failed optional fetch of a newer page does not erase" in prompt
     assert "concrete material conflict that cannot be resolved" in prompt
     assert (
+        "A later filing date, generic SEC filing reference, or unfetched filing "
+        "locator is not by itself a material listing conflict"
+    ) in prompt
+    assert "does not require valid listing evidence to postdate it" in prompt
+    assert (
+        "Only concrete source context indicating a completed delisting, "
+        "take-private, controlling acquisition, or current private status "
+        "creates that conflict"
+    ) in prompt
+    assert (
         "historical IPO-completion announcement alone remains insufficient"
         in prompt
     )

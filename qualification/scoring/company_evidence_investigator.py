@@ -296,8 +296,13 @@ company's shares are listed or traded can still establish current Public when
 no later completed delisting, take-private, or controlling acquisition is
 found. A failed optional fetch of a newer page does not erase that valid
 listing evidence by itself. It does require UNPROVEN when its available
-locator exposes a concrete material conflict that cannot be resolved. A
-historical IPO-completion announcement alone remains insufficient.
+locator exposes a concrete material conflict that cannot be resolved. A later
+filing date, generic SEC filing reference, or unfetched filing locator is not
+by itself a material listing conflict and does not require valid listing
+evidence to postdate it. Only concrete source context indicating a completed
+delisting, take-private, controlling acquisition, or current private status
+creates that conflict. A historical IPO-completion announcement alone remains
+insufficient.
 On a current first-party company or investor-relations profile, a separate
 current trading-information row that names the exact company and a literal
 exchange plus ticker is current company-attributed exchange/ticker evidence.
@@ -2831,10 +2836,14 @@ async def investigate_company_evidence(
                                 "Re-review Public stage once using the already fetched "
                                 "issuer-bound market sources and the completed current-status "
                                 "discovery. A failed optional fetch does not by itself erase "
-                                "valid company-bound exchange or ticker evidence. A concrete "
-                                "later completed acquisition, take-private, or delisting is a "
-                                "material conflict and must remain UNPROVEN or support the "
-                                "different stage. Do not infer Public from this correction. "
+                                "valid company-bound exchange or ticker evidence. A later "
+                                "filing date, generic SEC filing reference, or unfetched filing "
+                                "locator is not by itself a material listing conflict and does "
+                                "not require valid listing evidence to postdate it. Only concrete "
+                                "source context indicating a completed delisting, take-private, "
+                                "controlling acquisition, or current private status creates that "
+                                "conflict and must remain UNPROVEN or support the different stage. "
+                                "Do not infer Public from this correction. "
                                 "Do not search or fetch. VERIFIED or CONTRADICTED still needs "
                                 "one exact continuous quote from its fetched URL and must pass "
                                 "the unchanged deterministic validator. Submit one complete "

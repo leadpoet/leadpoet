@@ -216,6 +216,17 @@ that the catalog or assortment broadened, but does not by itself prove increased
 checkout activity, transactions, visits, or performance.
 Use authoritative_date_basis: publication dates must not become event dates.
 An unknown date must stay unknown; do not invent recency or urgency.
+Keep temporal claims about a report or source separate from current company
+attributes and event timing. A current source statement that a company "is
+Series B" can support current or latest-known funding-stage wording when no
+admitted evidence contradicts it. It does not prove that the source, coverage,
+or financing event is recent. Any claim that a source, report, or coverage is
+recently published, or that financing or another event happened recently,
+requires the relevant admitted publication or event date. Retrieval during this
+review and a separately date-checked current-stage decision are not publication
+or event dates. A current job body can still support present-status wording
+such as "is hiring"; calling the posting recent requires admitted publication
+evidence.
 Return facts_supported=false only when at least one concrete factual clause in
 the paragraph is absent from, broader than, or contradicted by the supplied
 evidence. A verbatim

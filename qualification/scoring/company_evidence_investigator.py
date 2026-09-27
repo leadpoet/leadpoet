@@ -164,10 +164,18 @@ quote directly describes the investigated company's own product, service, or
 operation. Return customer_user, internal_function, or third_party when that
 relationship is what the quote proves. Never infer absence from a page that
 does not discuss the requested activity. Apply the complete requested industry,
-sub-industry, product/service, and required-attribute context. A company that
-sells software to a requested industry is not itself in that industry unless
-the exact criterion says that vendors to that industry qualify. For industry,
-VERIFIED means direct supplier/operator evidence for the requested activity.
+sub-industry, product/service, and required-attribute context. Derive the
+requested supplier/operator role from that complete context, not from the
+industry or sub-industry label alone. When the requested product/service or
+required attribute explicitly asks for a sector platform or service used by
+providers, direct evidence that the investigated company supplies or operates
+that platform or service can qualify it as supplier_operator. Do not require
+the supplier to operate the customer institution or require the criterion to
+literally say that vendors qualify. A customer sector named only as a target
+market remains insufficient, and a supplier does not satisfy a criterion that
+explicitly requires the investigated company itself to be the institution or
+downstream operator. For industry, VERIFIED means direct supplier/operator
+evidence for the requested activity.
 A first-party URL, site ownership, footer, navigation, logo, URL path, or page
 title does not by itself establish that a quoted capability is supplied by the
 investigated company. Decide the activity role from the fetched page body.

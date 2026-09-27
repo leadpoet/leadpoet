@@ -1502,28 +1502,13 @@ def _relative_time_recheck_targets(
     grounding: Any,
     document: Mapping[str, Any],
 ) -> dict[int, dict[str, Any]]:
-    """Route undated relative-time claims through the existing second judge."""
+    """Route relative-time claims through the existing second judge."""
 
     units = {
         unit.get("unit_id"): unit.get("text", "")
         for unit in document.get("intent_details_units") or []
         if isinstance(unit, Mapping) and type(unit.get("unit_id")) is int
     }
-    dates_by_source: dict[int, set[str]] = {}
-    for source in document.get("admitted_evidence") or []:
-        if not isinstance(source, Mapping):
-            continue
-        source_index = source.get("source_index")
-        if type(source_index) is not int:
-            continue
-        dates_by_source[source_index] = {
-            _typography_normalized_span(raw_date["date"]).strip().casefold()
-            for raw_date in source.get("observed_dates") or []
-            if isinstance(raw_date, Mapping)
-            and isinstance(raw_date.get("date"), str)
-            and raw_date["date"].strip()
-        }
-
     recheck: dict[int, dict[str, Any]] = {}
     for item in grounding if isinstance(grounding, list) else []:
         if (
@@ -1541,17 +1526,7 @@ def _relative_time_recheck_targets(
         )
         if match is None:
             continue
-        has_typed_date_binding = any(
-            type(binding.get("source_index")) is int
-            and _typography_normalized_span(binding.get("quote", ""))
-            .strip().casefold()
-            in dates_by_source.get(binding["source_index"], set())
-            for binding in item.get("evidence") or []
-            if isinstance(binding, Mapping)
-            and isinstance(binding.get("quote"), str)
-        )
-        if not has_typed_date_binding:
-            recheck[unit_id] = _relative_time_clause_target(text, match)
+        recheck[unit_id] = _relative_time_clause_target(text, match)
     return recheck
 
 

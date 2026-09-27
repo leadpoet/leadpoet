@@ -297,12 +297,31 @@ async def test_recent_report_is_supported_when_publication_date_is_admitted(
         source_publication_date="2026-09-01",
     )
 
-    await _review(
-        monkeypatch,
-        inputs,
-        unit_specs=[(True, "VERIFIED", [source_text, "2026-09-01"])],
-        expected_decision="match",
-    )
+    calls = 0
+
+    async def judge(prompt, **_kwargs):
+        nonlocal calls
+        calls += 1
+        payload = json.loads(prompt)
+        document = payload.get("review_document", payload)
+        evidence = [
+            _binding(document, source_text),
+            _binding(document, "2026-09-01"),
+        ]
+        if calls == 2:
+            return json.dumps({"repairs": [{
+                "unit_id": 0, "status": "VERIFIED", "evidence": evidence,
+            }]})
+        return json.dumps(_response(
+            document,
+            [(True, "VERIFIED", [source_text, "2026-09-01"])],
+        ))
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = await intent_details.review_intent_details(*inputs)
+
+    assert calls == 2
+    assert receipt["decision"] == "match"
 
 
 @pytest.mark.asyncio
@@ -333,7 +352,7 @@ async def test_undated_relative_coverage_uses_one_bounded_semantic_recheck(
         if len(calls) == 1:
             return json.dumps(_response(document, [
                 (True, "VERIFIED", [job_quote]),
-                (True, "VERIFIED", [job_quote, stage_quote]),
+                (True, "VERIFIED", ["2026-04-21", stage_quote]),
             ]))
         control = payload["bounded_unit_repair_control"]
         assert len(control["units"]) == 1
@@ -364,10 +383,10 @@ async def test_undated_relative_coverage_uses_one_bounded_semantic_recheck(
             "untrusted_claim_text": True,
             "held_evidence_bindings": [
                 {
-                    "source_index": _binding(document, job_quote)[
+                    "source_index": _binding(document, "2026-04-21")[
                         "source_index"
                     ],
-                    "quote": job_quote,
+                    "quote": "2026-04-21",
                     "source_url": "https://harborsoft.example/evidence",
                     "evidence_kind": "verified_source_context",
                 },
@@ -465,7 +484,9 @@ async def test_body_date_can_keep_relative_publication_claim_verified_on_recheck
 
 
 @pytest.mark.asyncio
-async def test_typed_date_binding_avoids_relative_time_recheck(monkeypatch):
+async def test_typed_date_binding_is_rechecked_and_can_remain_verified(
+    monkeypatch,
+):
     dated_excerpt = "HarborSoft announced a funding round on 2026-09-01."
     inputs = _inputs(
         company_name="HarborSoft",
@@ -479,7 +500,16 @@ async def test_typed_date_binding_avoids_relative_time_recheck(monkeypatch):
     async def judge(prompt, **_kwargs):
         nonlocal calls
         calls += 1
-        document = json.loads(prompt)
+        payload = json.loads(prompt)
+        document = payload.get("review_document", payload)
+        evidence = [
+            _binding(document, dated_excerpt),
+            _binding(document, "2026-09-01"),
+        ]
+        if calls == 2:
+            return json.dumps({"repairs": [{
+                "unit_id": 0, "status": "VERIFIED", "evidence": evidence,
+            }]})
         return json.dumps(_response(
             document,
             [(True, "VERIFIED", [dated_excerpt, "2026-09-01"])],
@@ -488,7 +518,7 @@ async def test_typed_date_binding_avoids_relative_time_recheck(monkeypatch):
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     receipt = await intent_details.review_intent_details(*inputs)
 
-    assert calls == 1
+    assert calls == 2
     assert receipt["decision"] == "match"
 
 

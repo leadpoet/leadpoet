@@ -11063,7 +11063,7 @@ def test_failed_fetch_then_success_records_bounded_outcomes(monkeypatch):
 
     async def fake_fetch(_session, url):
         if url == failed_url:
-            return {"ok": False, "error": "http_403"}
+            return {"ok": False, "error": "http_400"}
         return {"ok": True, "url": url, "final_url": url, "text": quote}
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
@@ -11099,6 +11099,118 @@ def test_failed_fetch_then_success_records_bounded_outcomes(monkeypatch):
             "loaded_text_length": len(quote),
         },
     ]
+
+
+@pytest.mark.parametrize("stealth_succeeds", [True, False])
+def test_exact_provider_hint_allows_one_counted_same_url_stealth_call(
+    monkeypatch, stealth_succeeds,
+):
+    first_url = "https://acme.example/about"
+    url = "https://acme.example/funding"
+    quote = "Acme announced a current commercial software platform deployment."
+    calls = []
+    requests = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers, payload
+        requests.append(True)
+        if len(requests) == 1:
+            name, arguments = "fetch_page", {"url": first_url}
+        elif len(requests) == 2:
+            name, arguments = "fetch_page", {"url": url}
+        else:
+            name, arguments = "submit_findings", {"findings": [_finding(
+                "industry",
+                status="VERIFIED" if stealth_succeeds else "UNPROVEN",
+                observed_industry="Software",
+                activity_role=("supplier_operator" if stealth_succeeds else "unresolved"),
+                evidence_url=url if stealth_succeeds else "",
+                evidence_quote=quote if stealth_succeeds else "",
+            )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(len(requests)), "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_fetch(_session, requested_url, *, stealth_mode=False):
+        calls.append((requested_url, stealth_mode))
+        if requested_url == first_url:
+            return {
+                "ok": True,
+                "url": first_url,
+                "final_url": first_url,
+                "text": "Acme company information.",
+            }
+        if not stealth_mode:
+            return {
+                "ok": False,
+                "error": "http_400",
+                "_retry_with_stealth": True,
+            }
+        if stealth_succeeds:
+            return {
+                "ok": True, "url": url, "final_url": url, "text": quote,
+            }
+        return {"ok": False, "error": "http_400"}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    monkeypatch.setattr(investigator, "_search_web", AsyncMock(return_value={
+        "results": [{"url": url}],
+    }))
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("industry",),
+        requested_industry="Software",
+        verified_homepage_identity={
+            "normalized_name": "acme",
+            "registrable_dns_domain": "acme.example",
+        },
+    ))
+
+    assert calls == [(first_url, False), (url, False), (url, True)]
+    assert result["usage"]["fetch_calls"] == 3
+    assert len(result["usage"]["fetch_outcomes"]) == 3
+    assert result["claims"]["industry"]["status"] == (
+        "VERIFIED" if stealth_succeeds else "UNPROVEN"
+    )
+
+
+def test_stealth_fetch_requires_existing_provider_key(monkeypatch):
+    monkeypatch.delenv("SCRAPINGDOG_API_KEY", raising=False)
+    monkeypatch.delenv("QUALIFICATION_SCRAPINGDOG_API_KEY", raising=False)
+
+    result = asyncio.run(investigator._fetch_page(
+        None, "https://acme.example/funding", stealth_mode=True,
+    ))
+
+    assert result == {"ok": False, "error": "provider_key_unavailable"}
+
+
+@pytest.mark.parametrize(
+    ("body", "expects_retry"),
+    [
+        ("Request rejected. Retry with stealth_mode=true.", True),
+        ("Request rejected with invalid parameters.", False),
+    ],
+)
+def test_only_exact_http_400_provider_hint_requests_stealth_retry(
+    monkeypatch, body, expects_retry,
+):
+    async def fake_bounded(_session, url):
+        return 400, url, body
+
+    monkeypatch.setattr(investigator, "_fetch_bounded_html", fake_bounded)
+    result = asyncio.run(investigator._fetch_page(
+        object(), "https://acme.example/funding",
+    ))
+
+    assert result["ok"] is False
+    assert result["error"] == "http_400"
+    assert result.get("_retry_with_stealth", False) is expects_retry
 
 
 def test_three_fresh_fetch_cap_remains_with_three_prefetched_pages(monkeypatch):

@@ -55,6 +55,7 @@ MAX_SEARCH_CALLS = 2
 MAX_FETCH_CALLS = 3
 MAX_SEARCH_RESULTS = 5
 MAX_PAGE_CHARACTERS = 24_000
+MAX_PROVIDER_PAGE_BYTES = 2_097_152
 MAX_SUBMITTED_SOURCE_URLS = 8
 PRIVATE_FETCHED_PAGES_KEY = "_server_fetched_pages"
 REJECTED_QUOTE_CONTEXT_BEFORE_CHARACTERS = 1_000
@@ -1318,13 +1319,36 @@ async def _search_web(
 async def _fetch_page(
     session: aiohttp.ClientSession,
     url: str,
+    *,
+    stealth_mode: bool = False,
 ) -> dict[str, Any]:
     safe_url = _safe_https_url(url)
     if not safe_url:
         return {"ok": False, "error": "invalid_url"}
     try:
         canonical_url = public_http_url(safe_url)
-        status, final_url, raw = await _fetch_bounded_html(session, canonical_url)
+        if stealth_mode:
+            api_key = os.environ.get("SCRAPINGDOG_API_KEY") or os.environ.get(
+                "QUALIFICATION_SCRAPINGDOG_API_KEY"
+            )
+            if not api_key:
+                return {"ok": False, "error": "provider_key_unavailable"}
+            async with session.get(
+                "https://api.scrapingdog.com/scrape",
+                params={
+                    "api_key": api_key,
+                    "url": canonical_url,
+                    "stealth_mode": "true",
+                },
+            ) as response:
+                raw_bytes = await response.content.read(MAX_PROVIDER_PAGE_BYTES)
+                status = response.status
+                raw = raw_bytes.decode("utf-8", errors="replace")
+                # The provider endpoint is transport only. Evidence identity
+                # remains the exact same validated target URL.
+                final_url = canonical_url
+        else:
+            status, final_url, raw = await _fetch_bounded_html(session, canonical_url)
         safe_final_url = _safe_https_url(final_url)
         if not safe_final_url:
             raise ValueError("invalid final URL")
@@ -1332,7 +1356,19 @@ async def _fetch_page(
     except (TypeError, ValueError):
         return {"ok": False, "error": "invalid_url"}
     if status != 200:
-        return {"ok": False, "error": f"http_{status}"}
+        return {
+            "ok": False,
+            "error": f"http_{status}",
+            **(
+                {"_retry_with_stealth": True}
+                if (
+                    not stealth_mode
+                    and status == 400
+                    and "stealth_mode=true" in raw.casefold()
+                )
+                else {}
+            ),
+        }
     if _is_known_binary_document(raw):
         return {"ok": False, "error": "unsupported_binary_content"}
     text = _plain_text(raw)
@@ -2055,6 +2091,22 @@ async def investigate_company_evidence(
     timeout = aiohttp.ClientTimeout(total=BROKER_SETTLEMENT_TIMEOUT_SECONDS)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
+            async def fetch_fresh_page(url: str) -> dict[str, Any]:
+                nonlocal fetch_calls
+                fetch_calls += 1
+                result = await _fetch_page(session, url)
+                fetch_outcomes.append(_fetch_outcome(url, result))
+                retry_with_stealth = bool(result.pop("_retry_with_stealth", False))
+                if (
+                    retry_with_stealth
+                    and fetch_calls < MAX_FETCH_CALLS
+                    and time.monotonic() - started < ADMISSION_DEADLINE_SECONDS
+                ):
+                    fetch_calls += 1
+                    result = await _fetch_page(session, url, stealth_mode=True)
+                    fetch_outcomes.append(_fetch_outcome(url, result))
+                return result
+
             public_stage_source_url = (
                 _public_stage_submitted_source_to_prefetch(
                     submitted_source_urls=submitted_source_urls,
@@ -2072,11 +2124,7 @@ async def investigate_company_evidence(
                 else ""
             )
             if public_stage_source_url:
-                fetch_calls += 1
-                source_result = await _fetch_page(session, public_stage_source_url)
-                fetch_outcomes.append(
-                    _fetch_outcome(public_stage_source_url, source_result)
-                )
+                source_result = await fetch_fresh_page(public_stage_source_url)
                 input_document["server_public_stage_source_fetch"] = {
                     "url": public_stage_source_url,
                     "ok": bool(source_result.get("ok")),
@@ -2704,11 +2752,7 @@ async def investigate_company_evidence(
                     elif fetch_calls >= MAX_FETCH_CALLS:
                         tool_result = {"ok": False, "error": "fetch_budget_exhausted"}
                     else:
-                        fetch_calls += 1
-                        tool_result = await _fetch_page(session, str(safe_url or ""))
-                        fetch_outcomes.append(
-                            _fetch_outcome(str(safe_url or ""), tool_result)
-                        )
+                        tool_result = await fetch_fresh_page(str(safe_url or ""))
                         if tool_result.get("ok"):
                             fetched_pages[str(tool_result["url"])] = str(
                                 tool_result["text"]

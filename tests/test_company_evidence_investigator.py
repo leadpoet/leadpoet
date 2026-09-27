@@ -8771,7 +8771,7 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
         pytest.param(
             "Render",
             "https://render.com/pricing",
-            "Render Pro costs $25 per user per month for workspace teams.",
+            "Pro | $25/month + compute | For teams deploying production-grade apps and agents.",
             "VERIFIED",
             "supplier_operator",
             "VERIFIED",
@@ -8863,10 +8863,16 @@ def test_paid_technical_management_platform_semantic_boundaries(
             "to manage cloud, infrastructure, or internal operations workflows"
         ),
         positive_semantic_review=True,
-        prior_observations={"submitted_source_urls": [url]},
+        prior_observations={
+            "submitted_source_urls": [url],
+            "observed_company_name": company_name,
+            "observed_company_website": url,
+            "observed_company_linkedin": f"https://www.linkedin.com/company/{company_name.lower()}/",
+        },
         prefetched_pages={url: {"final_url": url, "text": quote}},
         verified_homepage_identity={
             "normalized_name": company_name,
+            "linkedin_company_slug": company_name.lower(),
             "registrable_dns_domain": url.split("/", 3)[2].removeprefix("www."),
         },
     ))
@@ -8877,14 +8883,18 @@ def test_paid_technical_management_platform_semantic_boundaries(
 
 
 def test_current_vendor_deployments_plus_product_support_ultrasight_sale(monkeypatch):
-    product_url = "https://ultrasight.com/echosystem/"
-    commercial_url = "https://ultrasight.com/company-update/"
+    product_url = "https://ultrasight.com/solution/"
+    commercial_url = (
+        "https://ultrasight.com/ultrasight-raises-24-million-to-scale-its-ai-guided-"
+        "cardiac-workflow-platform-across-u-s-health-systems/"
+    )
     product_quote = (
-        "UltraSight EchoSystem brings together real-time AI guidance, "
-        "interpretation, and analytics for clinical providers."
+        "The EchoSystem connects training, real-time AI guidance, interpretation, "
+        "workflow integration, and ongoing echo lab stewardship"
     )
     commercial_quote = (
-        "UltraSight has commercially deployed EchoSystem across 10 clinical sites."
+        "Today, the UltraSight Echosystem is deployed across more than 10 "
+        "commercial sites spanning intensive care settings"
     )
 
     async def fake_post(_session, _url, *, headers, payload):
@@ -8925,6 +8935,9 @@ def test_current_vendor_deployments_plus_product_support_ultrasight_sale(monkeyp
         positive_semantic_review=True,
         prior_observations={
             "submitted_source_urls": [product_url, commercial_url],
+            "observed_company_name": "UltraSight",
+            "observed_company_website": "https://ultrasight.com",
+            "observed_company_linkedin": "https://www.linkedin.com/company/ultrasight/",
         },
         prefetched_pages={
             product_url: {"final_url": product_url, "text": product_quote},
@@ -8935,6 +8948,7 @@ def test_current_vendor_deployments_plus_product_support_ultrasight_sale(monkeyp
         },
         verified_homepage_identity={
             "normalized_name": "UltraSight",
+            "linkedin_company_slug": "ultrasight",
             "registrable_dns_domain": "ultrasight.com",
         },
     ))

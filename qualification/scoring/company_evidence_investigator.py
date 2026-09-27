@@ -55,7 +55,6 @@ MAX_SEARCH_CALLS = 2
 MAX_FETCH_CALLS = 3
 MAX_SEARCH_RESULTS = 5
 MAX_PAGE_CHARACTERS = 24_000
-MAX_PROVIDER_PAGE_BYTES = 2_097_152
 MAX_SUBMITTED_SOURCE_URLS = 8
 PRIVATE_FETCHED_PAGES_KEY = "_server_fetched_pages"
 REJECTED_QUOTE_CONTEXT_BEFORE_CHARACTERS = 1_000
@@ -1333,19 +1332,24 @@ async def _fetch_page(
             )
             if not api_key:
                 return {"ok": False, "error": "provider_key_unavailable"}
-            async with session.get(
+            status, final_url, raw = await _fetch_bounded_html(
+                session,
                 "https://api.scrapingdog.com/scrape",
                 params={
                     "api_key": api_key,
                     "url": canonical_url,
                     "stealth_mode": "true",
                 },
-            ) as response:
-                raw_bytes = await response.content.read(MAX_PROVIDER_PAGE_BYTES)
-                status = response.status
-                raw = raw_bytes.decode("utf-8", errors="replace")
-                # The provider endpoint is transport only. Evidence identity
-                # remains the exact same validated target URL.
+            )
+            provider_parts = urlsplit(str(final_url or ""))
+            if (
+                (provider_parts.hostname or "").casefold()
+                == "api.scrapingdog.com"
+                and provider_parts.path == "/scrape"
+            ):
+                # The provider endpoint is transport only. When the broker
+                # returns that fixed URL rather than a target redirect,
+                # evidence identity remains the validated target URL.
                 final_url = canonical_url
         else:
             status, final_url, raw = await _fetch_bounded_html(session, canonical_url)

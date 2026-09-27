@@ -874,8 +874,13 @@ def _identity_result(
 async def _fetch_bounded_html(
     session: aiohttp.ClientSession,
     url: str,
+    *,
+    params: Optional[Mapping[str, str]] = None,
 ) -> tuple[int, str, str]:
-    async with session.get(url, allow_redirects=True) as resp:
+    request_kwargs = {"params": dict(params)} if params is not None else {}
+    async with session.get(
+        url, allow_redirects=True, **request_kwargs,
+    ) as resp:
         raw = bytearray()
         while len(raw) < _MAX_BYTES:
             chunk = await resp.content.read(_MAX_BYTES - len(raw))

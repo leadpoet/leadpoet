@@ -18,6 +18,7 @@ from qualification.scoring.competition import (
     _normalized_company,
 )
 from qualification.scoring import company_evidence_investigator as investigator
+from qualification.scoring import company_verification
 from qualification.scoring import lead_scorer
 from qualification.scoring.company_evidence_investigator import (
     _validated_findings,
@@ -11211,6 +11212,138 @@ def test_only_exact_http_400_provider_hint_requests_stealth_retry(
     assert result["ok"] is False
     assert result["error"] == "http_400"
     assert result.get("_retry_with_stealth", False) is expects_retry
+
+
+def test_bounded_reader_joins_fragmented_provider_body_and_forwards_params():
+    chunks = [b"Acme ", b"platform ", b"evidence", b""]
+
+    class Content:
+        async def read(self, _remaining):
+            return chunks.pop(0)
+
+    class Response:
+        status = 200
+        url = "https://acme.example/final"
+        headers = {"content-type": "text/html; charset=utf-8"}
+        content = Content()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Session:
+        def get(self, url, **kwargs):
+            self.call = (url, kwargs)
+            return Response()
+
+    session = Session()
+    status, final_url, body = asyncio.run(company_verification._fetch_bounded_html(
+        session,
+        "https://api.scrapingdog.com/scrape",
+        params={"url": "https://acme.example", "stealth_mode": "true"},
+    ))
+
+    assert session.call[1]["params"] == {
+        "url": "https://acme.example", "stealth_mode": "true",
+    }
+    assert status == 200
+    assert final_url == "https://acme.example/final"
+    assert "Acme platform evidence" in body
+
+
+def test_stealth_transport_preserves_unrelated_target_redirect(monkeypatch):
+    source_url = "https://acme.example/platform"
+    redirected_url = "https://unrelated.example/platform"
+    quote = "Acme supplies workflow software."
+
+    async def fake_bounded(_session, provider_url, *, params=None):
+        assert provider_url == "https://api.scrapingdog.com/scrape"
+        assert params["url"] == source_url
+        return 200, redirected_url, quote
+
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", "test-runtime-handle")
+    monkeypatch.setattr(investigator, "_fetch_bounded_html", fake_bounded)
+    page = asyncio.run(investigator._fetch_page(
+        object(), source_url, stealth_mode=True,
+    ))
+
+    assert page["url"] == source_url
+    assert page["final_url"] == redirected_url
+    claims = investigator._validated_findings(
+        {"findings": [_finding(
+            "industry",
+            observed_industry="Software",
+            activity_role="supplier_operator",
+            evidence_url=source_url,
+            evidence_quote=quote,
+        )]},
+        targets=("industry",),
+        fetched_pages={source_url: quote},
+        fetched_final_urls={source_url: redirected_url},
+        first_party_domains={"acme.example"},
+        identity_names={"acme"},
+    )
+    assert claims["industry"]["status"] == "UNPROVEN"
+
+
+@pytest.mark.parametrize("blocked_by", ["budget", "deadline"])
+def test_hint_does_not_retry_at_fetch_cap_or_deadline(monkeypatch, blocked_by):
+    url = "https://acme.example/funding"
+    calls = []
+    model_turns = []
+    real_monotonic = investigator.time.monotonic
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers, payload
+        model_turns.append(True)
+        if len(model_turns) > 1:
+            tool_name = "submit_findings"
+            arguments = {"findings": [_finding(
+                "industry", status="UNPROVEN",
+            )]}
+        else:
+            tool_name = "fetch_page"
+            arguments = {"url": url}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "call-1", "type": "function",
+            "function": {
+                "name": tool_name,
+                "arguments": json.dumps(arguments),
+            },
+        }]}}]}
+
+    async def fake_fetch(_session, requested_url, *, stealth_mode=False):
+        calls.append((requested_url, stealth_mode))
+        if blocked_by == "deadline":
+            expired = real_monotonic() + investigator.ADMISSION_DEADLINE_SECONDS + 1
+            monkeypatch.setattr(
+                investigator.time, "monotonic",
+                lambda: expired,
+            )
+        return {
+            "ok": False,
+            "error": "http_400",
+            "_retry_with_stealth": True,
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    if blocked_by == "budget":
+        monkeypatch.setattr(investigator, "MAX_FETCH_CALLS", 1)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("industry",),
+        requested_industry="Software",
+    ))
+
+    assert calls == [(url, False)]
+    assert result["usage"]["fetch_calls"] == 1
+    assert len(result["usage"]["fetch_outcomes"]) == 1
 
 
 def test_three_fresh_fetch_cap_remains_with_three_prefetched_pages(monkeypatch):

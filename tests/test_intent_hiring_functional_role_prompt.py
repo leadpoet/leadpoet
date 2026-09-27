@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from qualification.scoring import intent_verification_three_stage as intent
@@ -249,3 +251,94 @@ def test_customer_facing_platform_operations_reach_broad_platform_prompt() -> No
     assert "whether the work is internal or customer-facing" in normalized_prompt
     assert "production readiness, reliability, scaling" in normalized_prompt
     assert "same role has no direct platform duties" in normalized_prompt
+
+
+@pytest.mark.asyncio
+async def test_clarification_rechecks_full_same_role_beyond_prior_quotes(
+    monkeypatch,
+) -> None:
+    source_url = "https://acme.example/jobs/platform-engineer"
+    partial_quote = (
+        "You will gain exposure to the full stack of the Acme platform."
+    )
+    later_duties = (
+        "Demonstrate ownership of the product through ongoing upkeep, "
+        "maintenance, performance, and bug resolution."
+    )
+    source_text = (
+        "About the role. We’re looking for a software engineer. "
+        f"{partial_quote} This role focuses on customer messaging products. "
+        "Responsibilities and qualifications. "
+        f"{later_duties}"
+    )
+
+    def verdict(confidence: str) -> dict:
+        return {
+            "answer": {
+                "overall_verdict": "qualified",
+                "overall_confidence": confidence,
+                "signal_evaluations": [{
+                    "signal_status": "supported",
+                    "verification_mode": "source_grounded",
+                    "same_entity_check": "pass",
+                    "confidence": confidence,
+                    "evidence_urls_used": [source_url],
+                    "claim_matches_miner_date": "consistent",
+                    "claim": "Acme is hiring for a platform role.",
+                    "supporting_quotes": [partial_quote],
+                    "contradicting_quotes": [],
+                    "unsupported_parts": [],
+                    "risk_notes": ["source_publication_date:2026-04-21"],
+                }],
+            },
+            "model": "test-stage3",
+            "usage": {},
+        }
+
+    judge = AsyncMock(side_effect=[verdict("medium"), verdict("high")])
+    monkeypatch.setattr(intent, "_call_openrouter", judge)
+    monkeypatch.setattr(
+        intent,
+        "_fetch_sd_then_exa",
+        AsyncMock(return_value={
+            "results": [{
+                "url": source_url,
+                "title": "Platform Engineer",
+                "text": source_text,
+                "source_publication_date": "2026-04-21",
+            }],
+            "statuses": [{"source": "scrapingdog", "stage": "ok"}],
+        }),
+    )
+
+    result = await intent.verify_three_stage(
+        object(),
+        company_name="Acme",
+        company_linkedin="https://www.linkedin.com/company/acme",
+        company_website="https://acme.example",
+        source_url=source_url,
+        miner_claim="Acme is hiring for a platform role.",
+        target_signal_text=TARGET,
+        miner_signal_date="2026-04-21",
+        evidence_type="HIRING",
+        declared_source="job_board",
+        stage1_soft_reject=True,
+    )
+
+    assert judge.await_count == 2
+    assert judge.await_args_list[1].kwargs["max_attempts"] == 1
+    clarification_prompt = judge.await_args_list[1].args[2]
+    assert source_text in clarification_prompt
+    assert later_duties in clarification_prompt
+    assert partial_quote in clarification_prompt
+    assert "non-exhaustive locators, not the complete evidence record" in (
+        clarification_prompt
+    )
+    assert "reconcile all same-role responsibilities, qualifications" in (
+        clarification_prompt
+    )
+    assert "Preserve every target qualifier and still reject" in (
+        clarification_prompt
+    )
+    assert TARGET in clarification_prompt
+    assert result["decision"] == "approve"

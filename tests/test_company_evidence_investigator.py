@@ -233,6 +233,38 @@ def test_public_source_selection_prefers_supplied_issuer_evidence_within_limits(
     ) == (8, 2, 3)
 
 
+def test_multitarget_budget_moves_from_proven_stage_to_unresolved_product():
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+
+    assert (
+        "when fetched evidence already directly proves the requested stage "
+        "and discovery exposes no concrete material stage conflict"
+    ) in prompt
+    assert (
+        "do not spend another search or fetch merely to corroborate stage "
+        "while another requested target remains unresolved"
+    ) in prompt
+    assert (
+        "First fetch a known relevant first-party product, platform, or other "
+        "locator for that unresolved target."
+    ) in prompt
+    assert "Rapid7" not in prompt
+    assert "InsightCloudSec" not in prompt
+
+
+def test_multitarget_budget_preserves_stage_conflict_and_locator_guards():
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+
+    assert (
+        "A concrete stage conflict or any stage_dispute_urls still takes "
+        "priority and must be resolved first."
+    ) in prompt
+    assert (
+        "A navigation URL or label remains discovery only: fetch its page and "
+        "apply the unchanged quote, identity, relationship, and semantic checks."
+    ) in prompt
+
+
 @pytest.mark.parametrize(
     ("quote", "expected"),
     [
@@ -11279,6 +11311,129 @@ def test_two_prefetches_leave_fresh_fetches_for_stage_and_industry(monkeypatch):
     }
     assert result["usage"]["prefetched_pages"] == 2
     assert result["usage"]["total_loaded_pages"] == 4
+
+
+@pytest.mark.parametrize("stage_conflict", [False, True])
+def test_multitarget_retrieval_allocates_after_current_stage_review(
+    monkeypatch,
+    stage_conflict,
+):
+    product_url = "https://acme.example/products/cloud-guard"
+    product_quote = (
+        "Acme Cloud Guard protects cloud infrastructure and manages customer "
+        "identity entitlements."
+    )
+    if stage_conflict:
+        stage_url = "https://acme.example/news/completed-acquisition"
+        stage_quote = "BuyerCo completed its acquisition of Acme, Inc."
+        stage_status = "CONTRADICTED"
+        stage_value = "Acquired"
+        prefetched_pages = None
+        expected_fetches = [stage_url, product_url]
+    else:
+        stage_url = "https://acme.example/investors/current-results"
+        stage_quote = (
+            "Acme, Inc. (NASDAQ: ACME) announced its current quarterly results."
+        )
+        stage_status = "VERIFIED"
+        stage_value = "Public"
+        prefetched_pages = {
+            stage_url: {"final_url": stage_url, "text": stage_quote},
+        }
+        expected_fetches = [product_url]
+    prior_observations = {"submitted_source_urls": [stage_url]}
+    if stage_conflict:
+        prior_observations["stage_dispute_urls"] = [stage_url]
+
+    actions = [
+        ("fetch_page", {"url": product_url}),
+        ("submit_findings", {"findings": [
+            _finding(
+                "stage",
+                status=stage_status,
+                observed_value=stage_value,
+                activity_role="supplier_operator",
+                evidence_url=stage_url,
+                evidence_quote=stage_quote,
+            ),
+            _finding(
+                "industry",
+                observed_value="Cloud security software",
+                observed_industry="Security software",
+                observed_subindustry="Cloud security and identity protection",
+                activity_role="supplier_operator",
+                evidence_url=product_url,
+                evidence_quote=product_quote,
+            ),
+        ]}),
+    ]
+    requests = []
+    fetched_urls = []
+    search_results = [{"url": stage_url}] if stage_conflict else []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        name, args = actions[len(requests) - 1]
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(len(requests)), "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)},
+        }]}}]}
+
+    async def fake_fetch(_session, url):
+        fetched_urls.append(url)
+        text = stage_quote if url == stage_url else product_quote
+        return {"ok": True, "url": url, "final_url": url, "text": text}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    monkeypatch.setattr(
+        investigator,
+        "_search_web",
+        AsyncMock(return_value={"results": search_results}),
+    )
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("stage", "industry"),
+        requested_stage="Public",
+        requested_industry="Security software",
+        requested_subindustry="Cloud security and identity protection",
+        requested_product_service=(
+            "Software that protects cloud infrastructure or accounts"
+        ),
+        positive_semantic_review=True,
+        prior_observations=prior_observations,
+        verified_homepage_identity={
+            "normalized_name": "acme",
+            "registrable_dns_domain": "acme.example",
+            "linkedin_company_slug": "acme",
+        },
+        homepage_navigation_locators=[{
+            "url": product_url,
+            "label": "Cloud security and identity protection",
+        }],
+        prefetched_pages=prefetched_pages,
+    ))
+
+    assert fetched_urls == expected_fetches
+    assert result["claims"]["stage"]["status"] == stage_status
+    assert result["claims"]["stage"]["observed_value"] == stage_value
+    assert result["claims"]["industry"]["status"] == "VERIFIED"
+    assert _core_usage(result["usage"]) == {
+        "reasoning_turns": 2,
+        "search_calls": 1,
+        "fetch_calls": len(expected_fetches),
+    }
+    input_document = json.loads(
+        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+    )
+    assert input_document["untrusted_homepage_navigation_locators"] == [{
+        "url": product_url,
+        "label": "Cloud security and identity protection",
+    }]
 
 
 def test_prefetched_cache_hit_does_not_refetch_or_consume_fresh_budget(monkeypatch):

@@ -149,6 +149,15 @@ announcement or filing that names the investigated company with an exchange
 ticker, and fetch it before a stock-quote or chart page. This source order does
 not establish current stage: still require a fetched company-bound quote and
 compare later completed take-private, acquisition, or delisting evidence.
+Allocate this shared tool budget across unresolved requested targets. After
+current-stage discovery, when fetched evidence already directly proves the
+requested stage and discovery exposes no concrete material stage conflict, do
+not spend another search or fetch merely to corroborate stage while another
+requested target remains unresolved. First fetch a known relevant first-party
+product, platform, or other locator for that unresolved target. A concrete
+stage conflict or any stage_dispute_urls still takes priority and must be
+resolved first. A navigation URL or label remains discovery only: fetch its
+page and apply the unchanged quote, identity, relationship, and semantic checks.
 Prioritize official company rebrand or FAQ pages for rebrand continuity and
 first-party sources for completed stage events. If a saved source does not
 prove the fact, use at least one targeted search before returning UNPROVEN when

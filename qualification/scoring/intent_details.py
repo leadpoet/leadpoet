@@ -225,8 +225,8 @@ recently published, or that financing or another event happened recently,
 requires the relevant admitted publication or event date. Retrieval during this
 review and a separately date-checked current-stage decision are not publication
 or event dates. A current job body can still support present-status wording
-such as "is hiring"; calling the posting recent requires admitted publication
-evidence.
+such as "is hiring"; claiming the posting was recently published requires
+admitted publication evidence.
 Return facts_supported=false only when at least one concrete factual clause in
 the paragraph is absent from, broader than, or contradicted by the supplied
 evidence. A verbatim

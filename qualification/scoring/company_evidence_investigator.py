@@ -584,7 +584,7 @@ def _plain_text(value: str) -> str:
     # tables and feature grids that an article extractor considers boilerplate.
     # Keep their full visible surface. The shared parser still excludes hidden,
     # executable, fallback, navigation, and related-page markup.
-    decoded = html.unescape(visible_html_text(value))
+    decoded = html.unescape(visible_html_text(value, include_scroll_reveal=True))
     # Script and style bodies are not visible page evidence. Remove them before
     # applying the fixed page-text bound so they cannot displace visible text.
     for tag in ("script", "style"):

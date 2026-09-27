@@ -1117,9 +1117,10 @@ def review_evidence(
             raise ValueError("invalid company source contexts")
         dimension_order = {
             "required_attribute": 0,
-            "employee_size": 1,
-            "geography": 2,
-            "stage": 3,
+            "industry": 1,
+            "employee_size": 2,
+            "geography": 3,
+            "stage": 4,
         }
         prior_order = -1
         observed_context_urls: set[str] = set()

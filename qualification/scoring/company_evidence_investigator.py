@@ -63,6 +63,10 @@ PRIVATE_FETCHED_PAGES_KEY = "_server_fetched_pages"
 REJECTED_QUOTE_CONTEXT_BEFORE_CHARACTERS = 1_000
 REJECTED_QUOTE_CONTEXT_AFTER_CHARACTERS = 500
 ADMISSION_DEADLINE_SECONDS = 110.0
+# Reserve the final 30 seconds of the unchanged admission window for judgment
+# over loaded evidence. Provider calls already admitted may settle under the
+# existing broker timeout.
+JUDGMENT_ADMISSION_RESERVE_SECONDS = 30.0
 # OpenRouter chat is broker-bounded at 120 seconds. Add only local framing
 # tolerance. A request admitted before the deadline is allowed to settle.
 BROKER_SETTLEMENT_TIMEOUT_SECONDS = 125.0
@@ -2272,7 +2276,8 @@ async def investigate_company_evidence(
                 # Do not cancel a paid request after admission. Stop admitting
                 # the next request when the shared per-company deadline passed;
                 # an admitted request settles under the broker's own bound.
-                if time.monotonic() - started >= ADMISSION_DEADLINE_SECONDS:
+                elapsed = time.monotonic() - started
+                if elapsed >= ADMISSION_DEADLINE_SECONDS:
                     return {
                         "claims": _unproven_findings(
                             requested_targets, "investigation admission budget exhausted"
@@ -2288,13 +2293,23 @@ async def investigate_company_evidence(
                         },
                     }
                 required_tool = forced_next_tool
+                judgment_reserve_active = bool(
+                    elapsed >= ADMISSION_DEADLINE_SECONDS
+                    - JUDGMENT_ADMISSION_RESERVE_SECONDS
+                )
+                if judgment_reserve_active:
+                    # Use the already loaded evidence for one final judgment.
+                    # Any required proof that is still missing remains
+                    # UNPROVEN under the unchanged deterministic validators.
+                    required_tool = "submit_findings"
                 stage_search_reserve = bool(
                     "stage" in requested_targets
                     and normalized_requested_stage
                     and search_calls == 0
                 )
                 force_submit = bool(
-                    correction_turn
+                    judgment_reserve_active
+                    or correction_turn
                     or (
                         not required_tool
                         and _turn >= (
@@ -2858,15 +2873,38 @@ async def investigate_company_evidence(
                             },
                         }
                 elif name == "search_web":
-                    if time.monotonic() - started >= ADMISSION_DEADLINE_SECONDS:
+                    elapsed = time.monotonic() - started
+                    if elapsed >= ADMISSION_DEADLINE_SECONDS:
                         return {
                             "claims": _unproven_findings(
                                 requested_targets,
                                 "investigation admission budget exhausted",
                             ),
                             "failure_reason": "",
+                            "usage": {
+                                "reasoning_turns": _turn + 1,
+                                "search_calls": search_calls,
+                                "fetch_calls": fetch_calls,
+                                "prefetched_pages": prefetched_count,
+                                "total_loaded_pages": len(fetched_pages),
+                                "fetch_outcomes": list(fetch_outcomes),
+                            },
                         }
-                    if search_calls >= MAX_SEARCH_CALLS:
+                    if (
+                        elapsed >= ADMISSION_DEADLINE_SECONDS
+                        - JUDGMENT_ADMISSION_RESERVE_SECONDS
+                    ):
+                        forced_next_tool = "submit_findings"
+                        tool_result = {
+                            "ok": False,
+                            "error": "judgment_time_reserved",
+                            "instruction": (
+                                "Do not search or fetch. Submit complete findings now "
+                                "using only already loaded evidence. Return UNPROVEN "
+                                "for any claim whose required proof is still missing."
+                            ),
+                        }
+                    elif search_calls >= MAX_SEARCH_CALLS:
                         tool_result = {"ok": False, "error": "search_budget_exhausted"}
                     else:
                         query = arguments.get("query") if isinstance(arguments, Mapping) else None
@@ -2893,13 +2931,22 @@ async def investigate_company_evidence(
                                 ):
                                     forced_next_tool = "fetch_page"
                 elif name == "fetch_page":
-                    if time.monotonic() - started >= ADMISSION_DEADLINE_SECONDS:
+                    elapsed = time.monotonic() - started
+                    if elapsed >= ADMISSION_DEADLINE_SECONDS:
                         return {
                             "claims": _unproven_findings(
                                 requested_targets,
                                 "investigation admission budget exhausted",
                             ),
                             "failure_reason": "",
+                            "usage": {
+                                "reasoning_turns": _turn + 1,
+                                "search_calls": search_calls,
+                                "fetch_calls": fetch_calls,
+                                "prefetched_pages": prefetched_count,
+                                "total_loaded_pages": len(fetched_pages),
+                                "fetch_outcomes": list(fetch_outcomes),
+                            },
                         }
                     safe_url = _safe_https_url(
                         arguments.get("url")
@@ -2915,6 +2962,20 @@ async def investigate_company_evidence(
                         }
                         if industry_followup_search_completed:
                             industry_followup_fetched_urls.add(safe_url)
+                    elif (
+                        elapsed >= ADMISSION_DEADLINE_SECONDS
+                        - JUDGMENT_ADMISSION_RESERVE_SECONDS
+                    ):
+                        forced_next_tool = "submit_findings"
+                        tool_result = {
+                            "ok": False,
+                            "error": "judgment_time_reserved",
+                            "instruction": (
+                                "Do not search or fetch. Submit complete findings now "
+                                "using only already loaded evidence. Return UNPROVEN "
+                                "for any claim whose required proof is still missing."
+                            ),
+                        }
                     elif fetch_calls >= MAX_FETCH_CALLS:
                         tool_result = {"ok": False, "error": "fetch_budget_exhausted"}
                     else:

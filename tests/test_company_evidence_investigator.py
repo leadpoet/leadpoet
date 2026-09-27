@@ -13020,10 +13020,19 @@ def test_final_invalid_target_does_not_erase_independent_valid_stage(monkeypatch
         calls.append(payload)
         if len(calls) == 1:
             name, args = "fetch_page", {"url": "https://acme.example/investors"}
-        else:
+        elif len(calls) == 2:
             name, args = "submit_findings", {"findings": [
                 _finding("stage"),
                 _finding("industry", evidence_quote="Acme invented a claim absent from the page."),
+            ]}
+        else:
+            name, args = "submit_findings", {"findings": [
+                _finding(
+                    "industry",
+                    status="UNPROVEN",
+                    evidence_url="",
+                    evidence_quote="",
+                ),
             ]}
         return 200, {"choices": [{"message": {"tool_calls": [{
             "id": str(len(calls)), "type": "function",
@@ -13048,6 +13057,10 @@ def test_final_invalid_target_does_not_erase_independent_valid_stage(monkeypatch
         targets=("stage", "industry"), requested_stage="Public",
     ))
     assert len(calls) == 3
+    correction_schema = calls[2]["tools"][0]["function"]["parameters"]
+    assert correction_schema["properties"]["findings"]["items"][
+        "properties"
+    ]["target"]["enum"] == ["industry"]
     assert result["claims"]["industry"]["status"] == "UNPROVEN"
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["_validated_stage_finding"] == result["claims"]["stage"]

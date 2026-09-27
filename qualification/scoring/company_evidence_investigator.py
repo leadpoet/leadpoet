@@ -2443,19 +2443,41 @@ async def investigate_company_evidence(
             industry_followup_fetched_urls: set[str] = set()
             quote_repair_targets: set[str] = set()
             public_stage_unproven_rereviewed = False
+            scoped_correction_targets: tuple[str, ...] = ()
+            scoped_correction_preserved: dict[str, dict[str, Any]] = {}
+            scoped_correction_candidate_targets: tuple[str, ...] = ()
+            scoped_correction_candidate_preserved: dict[
+                str, dict[str, Any]
+            ] = {}
             for _turn in range(MAX_REASONING_TURNS + 1):
                 correction_turn = _turn == MAX_REASONING_TURNS
                 if correction_turn and not final_correction_pending:
                     break
+                scoped_correction_active = bool(scoped_correction_targets)
+                active_submit_targets = (
+                    scoped_correction_targets
+                    if scoped_correction_active
+                    else requested_targets
+                )
                 # Do not cancel a paid request after admission. Stop admitting
                 # the next request when the shared per-company deadline passed;
                 # an admitted request settles under the broker's own bound.
                 elapsed = time.monotonic() - started
                 if elapsed >= ADMISSION_DEADLINE_SECONDS:
+                    timeout_claims = _unproven_findings(
+                        active_submit_targets,
+                        "investigation admission budget exhausted",
+                    )
+                    if scoped_correction_active:
+                        timeout_claims = {
+                            target: dict(
+                                timeout_claims.get(target)
+                                or scoped_correction_preserved[target]
+                            )
+                            for target in requested_targets
+                        }
                     return {
-                        "claims": _unproven_findings(
-                            requested_targets, "investigation admission budget exhausted"
-                        ),
+                        "claims": timeout_claims,
                         "failure_reason": "",
                         "usage": {
                             "reasoning_turns": _turn,
@@ -2467,6 +2489,8 @@ async def investigate_company_evidence(
                         },
                     }
                 required_tool = forced_next_tool
+                if scoped_correction_active:
+                    required_tool = "submit_findings"
                 judgment_reserve_active = bool(
                     elapsed >= ADMISSION_DEADLINE_SECONDS
                     - JUDGMENT_ADMISSION_RESERVE_SECONDS
@@ -2493,6 +2517,38 @@ async def investigate_company_evidence(
                         )
                     )
                 )
+                if (
+                    scoped_correction_candidate_targets
+                    and not scoped_correction_active
+                ):
+                    if force_submit and required_tool in {
+                        "", "submit_findings",
+                    }:
+                        scoped_correction_targets = (
+                            scoped_correction_candidate_targets
+                        )
+                        scoped_correction_preserved = (
+                            scoped_correction_candidate_preserved
+                        )
+                        scoped_correction_active = True
+                        active_submit_targets = scoped_correction_targets
+                        required_tool = "submit_findings"
+                        messages.append({
+                            "role": "user",
+                            "content": _bounded_message_json({
+                                "correction_targets": list(
+                                    scoped_correction_targets
+                                ),
+                                "instruction": (
+                                    "This is now a submit-only correction. The "
+                                    "server retained unrelated findings that already "
+                                    "passed validation. Submit one complete finding "
+                                    "for each correction target and no other target."
+                                ),
+                            }),
+                        })
+                    scoped_correction_candidate_targets = ()
+                    scoped_correction_candidate_preserved = {}
                 forced_stage_search_call = bool(
                     required_tool == "search_web"
                     and forced_stage_search_pending
@@ -2533,8 +2589,11 @@ async def investigate_company_evidence(
                                     if key != "type"
                                 },
                             }
-                            for tool in _tools(requested_targets)
-                            if not correction_turn or tool["name"] == "submit_findings"
+                            for tool in _tools(active_submit_targets)
+                            if (
+                                not correction_turn
+                                and not scoped_correction_active
+                            ) or tool["name"] == "submit_findings"
                         ],
                         "tool_choice": (
                             {
@@ -2687,7 +2746,7 @@ async def investigate_company_evidence(
                 if name == "submit_findings":
                     claims = _validated_findings(
                         arguments,
-                        targets=requested_targets,
+                        targets=active_submit_targets,
                         fetched_pages=fetched_pages,
                         fetched_final_urls=fetched_final_urls,
                         first_party_domains=first_party_domains,
@@ -2720,7 +2779,8 @@ async def investigate_company_evidence(
                             )
                         rejected.append(rejected_finding)
                     unproven_without_search = bool(
-                        not force_submit
+                        not scoped_correction_active
+                        and not force_submit
                         and _turn < MAX_REASONING_TURNS - 3
                         and search_calls == 0
                         and search_calls < MAX_SEARCH_CALLS
@@ -2749,7 +2809,8 @@ async def investigate_company_evidence(
                         for item in rejected
                     )
                     force_industry_search = bool(
-                        (
+                        not scoped_correction_active
+                        and (
                             non_supplier_industry_contradiction
                             or rejected_other_activity_contradiction
                         )
@@ -2768,7 +2829,8 @@ async def investigate_company_evidence(
                         < ADMISSION_DEADLINE_SECONDS
                     )
                     force_stage_search = bool(
-                        rejected
+                        not scoped_correction_active
+                        and rejected
                         and normalized_requested_stage
                         and not correction_turn
                         and (
@@ -2802,7 +2864,8 @@ async def investigate_company_evidence(
                         == "submitted quote was not present in fetched source"
                     }
                     force_quote_recovery_search = bool(
-                        quote_presence_rejected_targets & quote_repair_targets
+                        not scoped_correction_active
+                        and quote_presence_rejected_targets & quote_repair_targets
                         and not force_submit
                         and _turn < MAX_REASONING_TURNS - 3
                         and search_calls < MAX_SEARCH_CALLS
@@ -2910,7 +2973,8 @@ async def investigate_company_evidence(
                         else []
                     )
                     force_public_stage_rereview = bool(
-                        requested_public_stage
+                        not scoped_correction_active
+                        and requested_public_stage
                         and submitted_stage.get("status") == "UNPROVEN"
                         and stage_finding.get("status") == "UNPROVEN"
                         and not rejected
@@ -2924,8 +2988,50 @@ async def investigate_company_evidence(
                     if (
                         rejected or force_industry_followup
                     ) and not correction_turn:
+                        final_correction_pending = bool(
+                            scoped_correction_active
+                            or (force_submit and not force_stage_search)
+                        )
+                        capture_scoped_correction = bool(
+                            rejected
+                            and not scoped_correction_active
+                            and not force_industry_followup
+                            and not force_stage_search
+                            and not force_quote_recovery_search
+                        )
+                        if capture_scoped_correction:
+                            rejected_targets = {
+                                str(item.get("target") or "")
+                                for item in rejected
+                            }
+                            preserved = {
+                                target: dict(finding)
+                                for target, finding in claims.items()
+                                if (
+                                    target not in rejected_targets
+                                    and finding.get("status")
+                                    in {"VERIFIED", "CONTRADICTED"}
+                                )
+                            }
+                            pending_targets = tuple(
+                                target
+                                for target in requested_targets
+                                if target not in preserved
+                            )
+                            if preserved and pending_targets:
+                                if force_submit:
+                                    scoped_correction_preserved = preserved
+                                    scoped_correction_targets = pending_targets
+                                    scoped_correction_active = True
+                                else:
+                                    scoped_correction_candidate_preserved = preserved
+                                    scoped_correction_candidate_targets = (
+                                        pending_targets
+                                    )
                         non_rejected_source_context = (
-                            _untrusted_non_rejected_source_context(
+                            []
+                            if scoped_correction_active
+                            else _untrusted_non_rejected_source_context(
                                 targets=requested_targets,
                                 findings=claims,
                                 rejected_findings=rejected,
@@ -2936,9 +3042,6 @@ async def investigate_company_evidence(
                                     else ()
                                 ),
                             )
-                        )
-                        final_correction_pending = bool(
-                            force_submit and not force_stage_search
                         )
                         if force_stage_search:
                             forced_next_tool = "search_web"
@@ -3053,7 +3156,19 @@ async def investigate_company_evidence(
                                         )
                                     )
                                 )
-                                + "Submit one complete finding for every requested target."
+                                + (
+                                    "The server retained the unrelated findings that "
+                                    "already passed validation. Submit one complete "
+                                    "finding for each correction target and no other "
+                                    "target. Correction targets: "
+                                    + ", ".join(scoped_correction_targets)
+                                    + "."
+                                    if scoped_correction_active
+                                    else (
+                                        "Submit one complete finding for every requested "
+                                        "target."
+                                    )
+                                )
                             ),
                         }
                     elif force_public_stage_rereview:
@@ -3099,6 +3214,14 @@ async def investigate_company_evidence(
                     else:
                         for item in rejected:
                             claims[item["target"]]["reason"] = item["reason"]
+                        if scoped_correction_active:
+                            claims = {
+                                target: dict(
+                                    claims.get(target)
+                                    or scoped_correction_preserved[target]
+                                )
+                                for target in requested_targets
+                            }
                         stage_finding = claims.get("stage") or {}
                         return {
                             "claims": claims,

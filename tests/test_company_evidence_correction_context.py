@@ -381,7 +381,7 @@ def test_adversarial_all_target_feedback_survives_operations_bound(monkeypatch):
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
-    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 1)
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 3)
     monkeypatch.setattr(investigator, "_post_json", fake_post_json)
     monkeypatch.setattr(investigator, "_validated_findings", fake_validated_findings)
     monkeypatch.setattr(
@@ -423,7 +423,7 @@ def test_adversarial_all_target_feedback_survives_operations_bound(monkeypatch):
         },
     ))
 
-    assert len(requests) == 2
+    assert len(requests) == 3
     feedback_content = requests[1]["messages"][-1]["content"]
     feedback = json.loads(feedback_content)
     assert len(feedback_content) < arena_operations.OPENROUTER_MAX_CONTENT_CHARS

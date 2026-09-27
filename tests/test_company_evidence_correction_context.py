@@ -372,6 +372,13 @@ def test_stage_quote_correction_keeps_untrusted_industry_source_context(
         correction["instruction"]
     )
     assert "does not force acceptance" in correction["instruction"]
+    assert (
+        "reuse its supplied exact evidence_url and evidence_quote instead of "
+        "composing a replacement span"
+    ) in correction["instruction"]
+    assert "Otherwise revise the finding or return UNPROVEN" in (
+        correction["instruction"]
+    )
     assert "perform every requested capability" in correction["instruction"]
     assert "Preserve every AND/OR condition, qualifier, and exclusion" in (
         correction["instruction"]

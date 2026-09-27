@@ -1726,15 +1726,21 @@ EVERY factual clause is supported. CONTRADICTED requires an incompatible fact;
 missing evidence is UNPROVEN. Check the actor, action, object, number, date and event.
 Different rounds, events, sources, or clauses are not interchangeable.
 
-For relative_time_grounding_review, inspect the exact disputed clause and its
-held source bindings. The timing qualifier is a factual claim in its own right.
-A current attribute does not prove that coverage of it was published recently.
-A date from a separate job, funding, or product event does not date this claim.
-If the relevant publication/event date is absent, return UNPROVEN even when the
-underlying company attribute is correct. Do not fill a missing date with a date
-from another clause. A source publication date is not automatically an event date.
-An authenticated first-observed date proves observation only. A date-bearing
-admitted source excerpt or the relevant typed date can prove timing.
+For relative_time_grounding_review, first classify the exact disputed clause,
+then classify every other factual clause in the unit. Bind a date to the same
+coverage, report, source, or event whose timing the disputed clause asserts.
+A date tied only to a different job, funding, product event, claim, or unrelated
+source neither supports nor contradicts that timing claim. If the relevant
+publication/event date is absent, the disputed clause is UNPROVEN even when the
+underlying company attribute is correct. CONTRADICTED applies only when evidence
+about that same timed subject proves incompatible timing or an incompatible event
+fact. Then set the
+entire unit to CONTRADICTED if any clause is contradicted; otherwise UNPROVEN if
+any clause is unproven; otherwise VERIFIED. Do not preserve unsupported other
+clauses merely because the relative-time clause is supported. A source publication
+date is not automatically an event date. An authenticated first-observed date
+proves observation only. A date-bearing admitted source excerpt or the relevant
+typed date can prove timing.
 
 For other listed units, keep their status and repair citations only. Return no
 unlisted unit, coverage, factual flags, or aggregate checks. VERIFIED and

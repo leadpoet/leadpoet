@@ -421,6 +421,27 @@ async def test_undated_relative_coverage_uses_one_bounded_semantic_recheck(
         ]
         assert "facts_supported must equal" not in kwargs["system_prompt"]
         assert "events, sources, or clauses" in kwargs["system_prompt"]
+        assert (
+            "first classify the exact disputed clause" in
+            kwargs["system_prompt"]
+        )
+        assert (
+            "source neither supports nor contradicts that timing claim" in
+            kwargs["system_prompt"]
+        )
+        assert (
+            "CONTRADICTED applies only when evidence\n"
+            "about that same timed subject proves incompatible timing"
+            in kwargs["system_prompt"]
+        )
+        assert (
+            "otherwise UNPROVEN if\nany clause is unproven; otherwise VERIFIED"
+            in kwargs["system_prompt"]
+        )
+        assert (
+            "Do not preserve unsupported other\nclauses" in
+            kwargs["system_prompt"]
+        )
         assert disputed_clause not in kwargs["system_prompt"]
         assert disputed_clause in prompt
         return json.dumps({"repairs": [{

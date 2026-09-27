@@ -73,6 +73,7 @@ from qualification.scoring.company_evidence_investigator import (
     MAX_PAGE_CHARACTERS,
     MAX_SUBMITTED_SOURCE_URLS,
     PRIVATE_FETCHED_PAGES_KEY,
+    _VENTURE_SERIES_STAGE_LABELS,
     _complete_verified_first_party_identity,
     _plain_text,
     _quote_occurs,
@@ -336,18 +337,16 @@ _VENTURE_STAGE_PROOF_PATTERNS = {
         ),
         _present_tense_raise_proof_pattern(r"seed"),
     ),
-    "series a": _series_stage_proof_patterns(r"series\s+a"),
-    "series b": _series_stage_proof_patterns(r"series\s+b"),
-    "series c+": _series_stage_proof_patterns(r"series\s+[c-z]"),
+    **{stage: _series_stage_proof_patterns(label)
+       for stage, label in _VENTURE_SERIES_STAGE_LABELS.items()},
 }
 _PRE_SEED_STAGE_TOKEN_RE = re.compile(
     r"\bpre(?:\s*[-\u2010\u2011\u2013\u2014]\s*|\s+)seed\b",
     re.I,
 )
 _VENTURE_STAGE_STATEMENT_PATTERNS = {
-    "series a": _series_stage_statement_patterns(r"series\s+a"),
-    "series b": _series_stage_statement_patterns(r"series\s+b"),
-    "series c+": _series_stage_statement_patterns(r"series\s+[c-z]"),
+    stage: _series_stage_statement_patterns(label)
+    for stage, label in _VENTURE_SERIES_STAGE_LABELS.items()
 }
 _PUBLIC_COMPANY_ALIAS_RE = re.compile(
     r"\((?:"

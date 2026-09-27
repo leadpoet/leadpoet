@@ -1032,6 +1032,14 @@ def _quote_names_domain_styled_stage_company(
     )
 
 
+_VENTURE_SERIES_STAGE_LABELS = {
+    # A numbered subround retains its series family; B2B is not a subround.
+    "series a": r"series\s+a(?:[1-9][0-9]*)?",
+    "series b": r"series\s+b(?:[1-9][0-9]*)?",
+    "series c+": r"series\s+[c-z](?:[1-9][0-9]*)?",
+}
+
+
 def _quote_names_compatible_venture_stage(
     normalized_stage: str,
     quote: str,
@@ -1047,12 +1055,9 @@ def _quote_names_compatible_venture_stage(
             normalized_quote,
         )
         return bool(re.search(r"\bseed\b", without_pre_seed))
-    if normalized_stage == "series a":
-        return bool(re.search(r"\bseries\s+a\b", normalized_quote))
-    if normalized_stage == "series b":
-        return bool(re.search(r"\bseries\s+b\b", normalized_quote))
-    if normalized_stage == "series c+":
-        return bool(re.search(r"\bseries\s+[c-z]\b", normalized_quote))
+    if normalized_stage in _VENTURE_SERIES_STAGE_LABELS:
+        label = _VENTURE_SERIES_STAGE_LABELS[normalized_stage]
+        return bool(re.search(rf"\b{label}\b", normalized_quote))
     return True
 
 

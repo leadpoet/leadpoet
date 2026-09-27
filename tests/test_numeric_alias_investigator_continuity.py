@@ -471,6 +471,35 @@ def test_attribute_repair_revalidates_embedded_alias_proof(
     )
 
 
+def test_attribute_repair_preserves_receipt_slug_without_proven_resolution():
+    _icp_value, prior_result = _unproven_attribute_result()
+    receipt = {
+        **prior_result.details["identity_receipt"],
+        "submitted_linkedin_slug": "other-company",
+    }
+    mismatched_prior = lead_scorer.company_fit_unavailable(
+        prior_result.reason,
+        details={
+            **prior_result.details,
+            "identity_receipt": receipt,
+        },
+    )
+    vanity_company = _company().model_copy(update={
+        "company_linkedin": VANITY_LINKEDIN,
+    })
+    vanity_identity = {
+        **_verified_homepage_identity(),
+        "linkedin_company_slug": "rapid7",
+    }
+
+    assert not lead_scorer._complete_verified_attribute_recovery_identity(
+        vanity_company,
+        mismatched_prior,
+        vanity_identity,
+        PRODUCT_URL,
+    )
+
+
 @pytest.mark.parametrize(
     "structured_identity",
     [

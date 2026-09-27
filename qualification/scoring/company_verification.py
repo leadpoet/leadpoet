@@ -51,6 +51,7 @@ from qualification.scoring.company_fit_decision import (
     company_fit_mismatch,
     company_fit_unavailable,
     evaluate_company_identity,
+    _company_name,
 )
 
 
@@ -146,9 +147,125 @@ _COPYRIGHT_LEGAL_NAME_RE = re.compile(
     r"(?=\s+(?:abn|acn|all rights reserved)\b|[\s.]*$)",
     re.IGNORECASE,
 )
+_CURRENT_EXCHANGE_PROFILE_RE = re.compile(
+    r"(?:(?:nyse|nasdaq)\s*/\s*(?P<slash_ticker>[A-Z][A-Z0-9.-]{0,9})\s+"
+    r"(?P<slash_issuer>[A-Z][A-Z0-9&.'’+ -]{2,100})|"
+    r"(?P<label_issuer>[A-Z][A-Za-z0-9&.'’+ -]{2,100}?)\s+"
+    r"(?P<label_exchange>New\s+York\s+Stock\s+Exchange|NYSE|NASDAQ)\s*:\s*"
+    r"(?P<label_ticker>[A-Z][A-Z0-9.-]{0,9})|"
+    r"(?P<prefix_exchange>NYSE|NASDAQ)\s*:\s*"
+    r"(?P<prefix_ticker>[A-Z][A-Z0-9.-]{1,9}))",
+    re.I,
+)
 # ----------------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------------
+
+def verified_brand_legal_name_initialism(
+    brand: object,
+    legal_name: object,
+    verified_legal_name_aliases: object,
+) -> bool:
+    """Bind a brand initialism to a homepage-corroborated full legal name."""
+
+    brand_key = _company_name(brand)
+    legal_key = _company_name(legal_name)
+    words = re.findall(r"[a-z0-9]+", str(legal_name or "").casefold())
+    while len(words) > 1 and _company_name(" ".join(words[:-1])) == legal_key:
+        words.pop()
+    aliases = (
+        verified_legal_name_aliases
+        if isinstance(verified_legal_name_aliases, list)
+        else []
+    )
+    alias_words: list[list[str]] = []
+    for alias in aliases[:_MAX_ORGANIZATION_LEGAL_NAME_ALIASES]:
+        if not isinstance(alias, str) or not alias.strip():
+            continue
+        alias_key = _company_name(alias)
+        tokens = re.findall(r"[a-z0-9]+", alias.casefold())
+        while len(tokens) > 1 and _company_name(" ".join(tokens[:-1])) == alias_key:
+            tokens.pop()
+        alias_words.append(tokens)
+    return bool(
+        2 <= len(brand_key) <= 10
+        and len(words) >= 2
+        and "".join(word[0] for word in words) == brand_key
+        and any(tokens[:len(words)] == words for tokens in alias_words)
+    )
+
+
+def current_exchange_profile_names_issuer(
+    quote: str,
+    identity_names: list[str] | tuple[str, ...] | set[str],
+) -> bool:
+    """Bind a current exchange quote-card layout to its exact issuer identity."""
+
+    if re.search(
+        r"\b(?:delisted|no\s+longer\s+listed)\b|"
+        r"\b(?:ceased|stopped)\s+trading\b|"
+        r"\b(?:taken|went|became)\s+private\b",
+        quote,
+        re.I,
+    ) or not re.search(
+        r"\b(?:last|open|prev\.?\s*close|volume|market\s+cap)\s*[:$]?\s*"
+        r"\$?\d+(?:[,.]\d+)*(?:\.\d+)?[kmb]?\b|"
+        r"\bstock\s+price\s+(?:increased|decreased)\s+by\s+"
+        r"[+-]?\$?\d+(?:\.\d+)?\b",
+        quote,
+        re.I,
+    ):
+        return False
+    names = {
+        str(value).strip() for value in identity_names
+        if str(value or "").strip()
+    }
+    for match in _CURRENT_EXCHANGE_PROFILE_RE.finditer(quote):
+        prefix_ticker = str(match.group("prefix_ticker") or "")
+        if prefix_ticker:
+            ticker_key = _company_name(prefix_ticker)
+            if any(_company_name(name) == ticker_key for name in names):
+                return True
+            continue
+        issuer = str(match.group("slash_issuer") or match.group("label_issuer") or "")
+        if match.group("slash_issuer"):
+            issuer = re.split(r"\s+\d", issuer, maxsplit=1)[0]
+        else:
+            issuer = re.sub(
+                r"^(?:quote\s*&\s*chart\s+)?(?:chart\s+)?",
+                "",
+                issuer,
+                flags=re.I,
+            )
+        normalized_issuer = _company_name(issuer)
+        issuer_structural_terms = set(re.findall(
+            r"\b(?:holdings?|subsidiar(?:y|ies)|group)\b",
+            issuer.casefold(),
+        ))
+        issuer_initials = "".join(
+            token[0] for token in re.findall(r"[A-Za-z0-9]+", issuer)
+            if token.casefold() not in {
+                "inc", "incorporated", "corp", "corporation",
+            }
+        ).casefold()
+        if any(
+            (
+                normalized_name == normalized_issuer
+                and issuer_structural_terms == set(re.findall(
+                    r"\b(?:holdings?|subsidiar(?:y|ies)|group)\b",
+                    str(name).casefold(),
+                ))
+            )
+            or (
+                not issuer_structural_terms
+                and len(normalized_name) >= 3
+                and normalized_name == issuer_initials
+            )
+            for name in names
+            if (normalized_name := _company_name(name))
+        ):
+            return True
+    return False
 
 def _upgrade_plain_http_company_url(company_website: str) -> str:
     """Upgrade a conventional HTTP company URL to the V2 HTTPS transport.

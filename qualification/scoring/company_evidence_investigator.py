@@ -33,6 +33,7 @@ from qualification.scoring.company_verification import (
     MAX_HOMEPAGE_NAVIGATION_LOCATORS,
     MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS,
     _fetch_bounded_html,
+    current_exchange_profile_names_issuer,
 )
 from qualification.scoring.evaluation_clock import evaluation_date
 from qualification.scoring.linkedin_company_size import (
@@ -1680,6 +1681,10 @@ def _validated_findings(
                         semantic_public_listing=(
                             _quote_supports_semantic_public_listing(
                                 finding["evidence_quote"]
+                            )
+                            or current_exchange_profile_names_issuer(
+                                finding["evidence_quote"],
+                                stage_attribution_names,
                             )
                         ),
                         authoritative_public_listing=(

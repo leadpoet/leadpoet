@@ -16,8 +16,10 @@ from qualification.scoring.company_fit_decision import (
 from qualification.scoring.company_evidence_investigator import MAX_PAGE_CHARACTERS
 from qualification.scoring.company_verification import (
     MAX_HOMEPAGE_NAVIGATION_LOCATORS,
+    current_exchange_profile_names_issuer,
     _homepage_navigation_locators,
     _upgrade_plain_http_company_url,
+    verified_brand_legal_name_initialism,
     verify_company_exists,
 )
 from qualification.scoring.lead_scorer import (
@@ -1449,6 +1451,133 @@ def test_iag_web_reverification_uses_verified_homepage_anchor():
         },
     )
     assert incomplete_anchor["decision"] == COMPANY_FIT_UNAVAILABLE
+
+
+def test_jll_legal_name_initialism_uses_complete_homepage_identity():
+    company = CompanyOutput(
+        company_name="JLL",
+        company_website="https://www.jll.com/",
+        company_linkedin="https://www.linkedin.com/company/jll",
+        industry="Real Estate",
+        employee_count="10,001+",
+        company_stage="Public",
+        country="United States",
+        intent_signals=[{
+            "description": "JLL opened an office.",
+            "source": "news",
+            "url": "https://www.jll.com/newsroom",
+            "date": "2026-04-07",
+            "snippet": "JLL opened an office.",
+        }],
+    )
+    receipt = _web_identity_receipt(
+        company,
+        {
+            "observed_company_name": "Jones Lang LaSalle Incorporated",
+            "observed_company_website": "https://www.jll.com/about",
+            "observed_company_linkedin": "https://www.linkedin.com/company/jll",
+        },
+        verified_homepage_identity={
+            "normalized_name": "jll",
+            "registrable_dns_domain": "jll.com",
+            "linkedin_company_slug": "jll",
+            "verified_legal_name_aliases": ["Jones Lang LaSalle IP, Inc."],
+        },
+        verified_rebrand_identity={"status": "UNPROVEN"},
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_MATCH
+    assert receipt["reason_code"] == "verified_legal_name_initialism"
+
+
+@pytest.mark.parametrize(
+    ("observed_name", "observed_website", "observed_linkedin"),
+    [
+        ("Jones Lang LaSalle IP, Inc.", "https://www.jll.com", "https://linkedin.com/company/jll"),
+        ("Jones Lang LaSalle Technologies", "https://www.jll.com", "https://linkedin.com/company/jll"),
+        ("Jones Lang LaSalle Incorporated", "https://different.example", "https://linkedin.com/company/jll"),
+        ("Jones Lang LaSalle Incorporated", "https://www.jll.com", "https://linkedin.com/company/jll-technologies"),
+    ],
+)
+def test_jll_initialism_does_not_bind_subsidiary_or_wrong_anchor(
+    observed_name, observed_website, observed_linkedin,
+):
+    company = CompanyOutput(
+        company_name="JLL",
+        company_website="https://www.jll.com/",
+        company_linkedin="https://www.linkedin.com/company/jll",
+        industry="Real Estate",
+        employee_count="10,001+",
+        company_stage="Public",
+        country="United States",
+        intent_signals=[{
+            "description": "JLL opened an office.",
+            "source": "news",
+            "url": "https://www.jll.com/newsroom",
+            "date": "2026-04-07",
+            "snippet": "JLL opened an office.",
+        }],
+    )
+    receipt = _web_identity_receipt(
+        company,
+        {
+            "observed_company_name": observed_name,
+            "observed_company_website": observed_website,
+            "observed_company_linkedin": observed_linkedin,
+        },
+        verified_homepage_identity={
+            "normalized_name": "jll",
+            "registrable_dns_domain": "jll.com",
+            "linkedin_company_slug": "jll",
+            "verified_legal_name_aliases": ["Jones Lang LaSalle IP, Inc."],
+        },
+        verified_rebrand_identity={"status": "UNPROVEN"},
+    )
+
+    assert receipt["decision"] != COMPANY_FIT_MATCH
+
+
+def test_legal_name_initialism_is_exact_not_fuzzy():
+    assert verified_brand_legal_name_initialism(
+        "JLL", "Jones Lang LaSalle Incorporated",
+        ["Jones Lang LaSalle IP, Inc."],
+    )
+    assert not verified_brand_legal_name_initialism(
+        "JLL", "Jones Lang LaSalle IP, Inc.",
+        ["Jones Lang LaSalle IP, Inc."],
+    )
+    assert not verified_brand_legal_name_initialism(
+        "JLL", "Johnson Logistics Limited",
+        ["Jones Lang LaSalle IP, Inc."],
+    )
+    assert not verified_brand_legal_name_initialism(
+        "JLL", "Jones Lang LaSalle Incorporated", [],
+    )
+    assert not verified_brand_legal_name_initialism(
+        "JLL", "Jupiter Logistics Laboratories Incorporated",
+        ["Jones Lang LaSalle IP, Inc."],
+    )
+
+
+@pytest.mark.parametrize(
+    "quote",
+    [
+        "NYSE: OTHER 321.91 Volume: 367,005 September 25, 2026 4:00 PM",
+        "NYSE: JLL 321.91 Volume: 367,005; JLL was delisted in 2025",
+        "NYSE: JLL 321.91 Volume: 367,005; JLL became private in 2025",
+        "NYSE: JLL",
+    ],
+)
+def test_current_exchange_row_rejects_wrong_historical_or_incomplete_quote(quote):
+    assert not current_exchange_profile_names_issuer(quote, {"JLL"})
+
+
+def test_current_exchange_row_binds_exact_jll_ticker():
+    assert current_exchange_profile_names_issuer(
+        "NYSE: JLL 321.91 -2.49 (-0.77%) Volume: 367,005 "
+        "September 25, 2026 4:00 PM 20 Minute Delay",
+        {"JLL", "Jones Lang LaSalle Incorporated"},
+    )
 
 
 def test_iag_parenthetical_alias_rejects_wrong_submitted_linkedin():

@@ -52,6 +52,8 @@ from qualification.scoring.intent_signal_gate import (
 from qualification.scoring.company_verification import (
     _fetch_bounded_html,
     _registrable_domain,
+    current_exchange_profile_names_issuer,
+    verified_brand_legal_name_initialism,
     verify_company_exists,
 )
 from qualification.scoring.company_fit_decision import (
@@ -741,76 +743,13 @@ _PUBLIC_STRONG_CURRENT_PATTERNS = (
     *_PUBLIC_TICKER_STAGE_PROOF_PATTERNS,
     _PUBLIC_SEMANTIC_LISTING_RE,
 )
-_PUBLIC_CURRENT_EXCHANGE_PROFILE_RE = re.compile(
-    r"(?:(?:nyse|nasdaq)\s*/\s*(?P<slash_ticker>[A-Z][A-Z0-9.-]{0,9})\s+"
-    r"(?P<slash_issuer>[A-Z][A-Z0-9&.'’+ -]{2,100})|"
-    r"(?P<label_issuer>[A-Z][A-Za-z0-9&.'’+ -]{2,100}?)\s+"
-    r"(?P<exchange>New\s+York\s+Stock\s+Exchange|NYSE|NASDAQ)\s*:\s*"
-    r"(?P<label_ticker>[A-Z][A-Z0-9.-]{0,9}))",
-    re.I,
-)
-
-
 def _current_exchange_profile_names_issuer(
     quote: str,
     identity_names: Sequence[str],
 ) -> bool:
     """Bind a current exchange quote-card layout to its named issuer."""
 
-    if re.search(
-        r"\b(?:delisted|no\s+longer\s+listed)\b|"
-        r"\b(?:ceased|stopped)\s+trading\b|"
-        r"\b(?:taken|went|became)\s+private\b",
-        quote,
-        re.I,
-    ) or not re.search(
-        r"\b(?:last|open|prev\.?\s*close|volume|market\s+cap)\s*[:$]?\s*"
-        r"\$?\d+(?:\.\d+)?[kmb]?\b|"
-        r"\bstock\s+price\s+(?:increased|decreased)\s+by\s+"
-        r"[+-]?\$?\d+(?:\.\d+)?\b",
-        quote,
-        re.I,
-    ):
-        return False
-    names = {str(value).strip() for value in identity_names if str(value or "").strip()}
-    for match in _PUBLIC_CURRENT_EXCHANGE_PROFILE_RE.finditer(quote):
-        issuer = str(match.group("slash_issuer") or match.group("label_issuer") or "")
-        if match.group("slash_issuer"):
-            issuer = re.split(r"\s+\d", issuer, maxsplit=1)[0]
-        else:
-            issuer = re.sub(
-                r"^(?:quote\s*&\s*chart\s+)?(?:chart\s+)?",
-                "",
-                issuer,
-                flags=re.I,
-            )
-        normalized_issuer = _company_name(issuer)
-        issuer_structural_terms = set(re.findall(
-            r"\b(?:holdings?|subsidiar(?:y|ies)|group)\b",
-            issuer.casefold(),
-        ))
-        issuer_initials = "".join(
-            token[0] for token in re.findall(r"[A-Za-z0-9]+", issuer)
-            if token.casefold() not in {"inc", "incorporated", "corp", "corporation"}
-        ).casefold()
-        if any(
-            (
-                normalized_name == normalized_issuer
-                and issuer_structural_terms == set(re.findall(
-                    r"\b(?:holdings?|subsidiar(?:y|ies)|group)\b",
-                    str(name).casefold(),
-                ))
-            )
-            or (
-                not issuer_structural_terms
-                and len(normalized_name) >= 3
-                and normalized_name == issuer_initials
-            )
-            for name in names
-            if (normalized_name := _company_name(name))
-        ):
-            return True
-    return False
+    return current_exchange_profile_names_issuer(quote, identity_names)
 
 
 def _public_claims_share_clause(
@@ -3130,6 +3069,42 @@ def _web_identity_receipt(
         receipt.get("evidence_source") == "company_web_reverification"
         and _same_domain_name_alias(alias_anchor)
     )
+    verified_brand_receipt: Mapping[str, str] = {}
+    if verified_alias_name and verified_alias_domain and verified_alias_slug:
+        verified_brand_receipt = evaluate_company_identity(
+            submitted_name=company.company_name,
+            submitted_website=company.company_website,
+            submitted_linkedin=company.company_linkedin,
+            observed_name=verified_alias_name,
+            observed_website=f"https://{verified_alias_domain}",
+            observed_linkedin=(
+                "https://www.linkedin.com/company/"
+                f"{verified_alias_slug}"
+            ),
+            evidence_source="company_homepage",
+            company_quality=company_quality,
+        )
+    if (
+        receipt.get("decision") != COMPANY_FIT_MATCH
+        and verified_brand_receipt.get("decision") == COMPANY_FIT_MATCH
+        and receipt.get("evidence_source") == "company_web_reverification"
+        and receipt_submitted_domain
+        == receipt_observed_domain
+        == verified_alias_domain
+        and receipt_submitted_slug
+        == receipt_observed_slug
+        == verified_alias_slug
+        and verified_brand_legal_name_initialism(
+            verified_alias_name,
+            observed_values["name"],
+            verified_alias_anchor.get("verified_legal_name_aliases"),
+        )
+    ):
+        receipt.update(
+            decision=COMPANY_FIT_MATCH,
+            reason_code="verified_legal_name_initialism",
+        )
+        return receipt
     if (
         receipt.get("decision") != COMPANY_FIT_MATCH
         and rebrand.get("status") == "VERIFIED"

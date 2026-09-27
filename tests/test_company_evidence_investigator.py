@@ -8714,6 +8714,29 @@ def test_public_stage_needs_listing_proof_not_labels_or_plans():
     assert finding["reason"] == "source quote did not prove current public listing"
 
 
+def test_current_jll_investor_trading_row_is_admitted_as_public_stage():
+    url = "https://ir.jll.com/overview/default.aspx"
+    quote = (
+        "NYSE: JLL 321.91 -2.49 (-0.77%) Volume: 367,005 "
+        "September 25, 2026 4:00 PM 20 Minute Delay"
+    )
+    finding = _validated_findings(
+        {"findings": [_finding(
+            "stage",
+            observed_value="Public",
+            evidence_url=url,
+            evidence_quote=quote,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: quote},
+        first_party_domains={"jll.com"},
+        identity_names={"jll", "joneslanglasalleincorporated"},
+    )["stage"]
+
+    assert finding["status"] == "VERIFIED"
+    assert finding["evidence_quote"] == quote
+
+
 def test_acculon_retrospective_series_a_statement_requires_recipient_binding():
     quote = (
         "The facility’s opening follows a period of rapid growth for Acculon, "

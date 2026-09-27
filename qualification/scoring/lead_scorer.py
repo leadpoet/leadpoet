@@ -7069,6 +7069,20 @@ async def _llm_reverify_company(
         investigation_targets = tuple(
             dict.fromkeys((*investigation_targets, "industry"))
         )
+        # The positive review also investigates the full required activity.
+        # Derive its evidence handoff after adding that target, so a verified
+        # alternate can replace an unavailable attribute quote under the same
+        # identity, fetched-source, and exact-quote guards.
+        industry_attribute_semantic_repair = (
+            industry_attribute_semantic_repair
+            or (
+                result.details.get("required_attribute_decision")
+                == COMPANY_FIT_UNAVAILABLE
+                and _industry_attribute_semantic_repair_needed(
+                    result, icp, investigation_targets
+                )
+            )
+        )
     required_attribute_source_recovery = bool(
         require_company_fit_dimensions
         and evidence_investigator

@@ -2249,8 +2249,9 @@ def test_crowdstrike_stage_industry_source_can_repair_required_attribute(
     async def keep_employee_observation(candidate, *_args, **_kwargs):
         return candidate
 
-    async def bounded_investigation(*, targets, **_kwargs):
+    async def bounded_investigation(*, targets, positive_semantic_review, **_kwargs):
         assert targets == ("stage", "industry")
+        assert positive_semantic_review is True
         stage = _finding(
             "stage",
             observed_value="Public",
@@ -2262,14 +2263,17 @@ def test_crowdstrike_stage_industry_source_can_repair_required_attribute(
                 "stage": stage,
                 "industry": _finding(
                     "industry",
+                    status=(
+                        "VERIFIED" if repair_proves_required_function else "UNPROVEN"
+                    ),
                     observed_value="Cloud security software",
                     observed_industry="Privacy and Security",
                     observed_subindustry=(
                         "Cloud security and identity protection"
                     ),
                     activity_role="supplier_operator",
-                    evidence_url=source_url,
-                    evidence_quote=attribute_quote,
+                    evidence_url=(source_url if repair_proves_required_function else ""),
+                    evidence_quote=(attribute_quote if repair_proves_required_function else ""),
                 ),
             },
             "_validated_stage_finding": stage,
@@ -2326,15 +2330,16 @@ def test_crowdstrike_stage_industry_source_can_repair_required_attribute(
 
     assert result.decision == expected_decision
     assert source_fetch.await_count == 1
-    assert len(prompts) == 2
-    assert "<untrusted_required_attribute_source>" in prompts[1]
-    assert attribute_quote in prompts[1]
+    # The positive investigator verifies the full attribute criterion. Reuse
+    # its grounded source directly; a second broad schema judgment is not
+    # required, and an UNPROVEN investigator cannot be repaired into a match.
+    assert len(prompts) == 1
     grounding = result.details["required_attribute_grounding"]
     assert grounding["cache_hit"] is repair_proves_required_function
     assert grounding["status"] == (
         "grounded"
         if expected_decision == COMPANY_FIT_MATCH
-        else "invalid_evidence"
+        else "source_unavailable"
     )
 
 
@@ -2776,9 +2781,7 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
     ))
 
     assert calls == {
-        "provider": 2 if investigator_mode in {
-            "supported", "alternate_supported"
-        } else 1,
+        "provider": 2 if investigator_mode == "supported" else 1,
         "investigator": 1,
         "direct_fetch": 1,
     }

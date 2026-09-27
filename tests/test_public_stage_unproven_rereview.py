@@ -6,7 +6,10 @@ import asyncio
 import json
 from unittest.mock import AsyncMock
 
+import pytest
+
 from qualification.scoring import company_evidence_investigator as investigator
+from qualification.scoring import lead_scorer
 
 
 TENB_URL = (
@@ -206,19 +209,130 @@ def test_solarwinds_material_delisting_conflict_stays_unproven(monkeypatch):
     assert "material conflict" in correction["instruction"]
 
 
-def test_stale_ipo_does_not_trigger_public_rereview(monkeypatch):
+@pytest.mark.parametrize("quote", [
+    (
+        "In July 2018, Tenable Holdings, Inc. (NASDAQ: TENB) completed its "
+        "initial public offering."
+    ),
+    (
+        "Tenable Holdings, Inc. (NASDAQ: TENB) completed its initial public "
+        "offering in July 2018."
+    ),
+])
+def test_stale_ipo_ticker_does_not_trigger_public_rereview(monkeypatch, quote):
     url = "https://tenable.com/news/2018-initial-public-offering"
     result, requests = _prefetched_request(
         monkeypatch,
         company_name="Tenable",
         company_url="https://tenable.com",
         evidence_url=url,
-        evidence_text="In July 2018, Tenable completed its initial public offering.",
+        evidence_text=quote,
         findings=[_finding(reason="historical IPO only")],
     )
 
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
     assert len(requests) == 1
+
+
+def _validated_public_finding(quote):
+    url = "https://www.tenable.com/news/issuer-update"
+    return investigator._validated_findings(
+        {"findings": [_finding(
+            status="VERIFIED",
+            value="Public",
+            url=url,
+            quote=quote,
+        )]},
+        targets=("stage",),
+        fetched_pages={url: quote},
+        fetched_final_urls={url: url},
+        first_party_domains={"tenable.com"},
+        identity_names={"tenable", "tenableholdings"},
+        identity_anchor={
+            "submitted_name": "Tenable",
+            "submitted_domain": "tenable.com",
+        },
+    )["stage"]
+
+
+@pytest.mark.parametrize("quote", [
+    (
+        "In July 2018, Tenable Holdings, Inc. (NASDAQ: TENB) completed its "
+        "initial public offering."
+    ),
+    (
+        "Tenable Holdings, Inc. (NASDAQ: TENB) completed its initial public "
+        "offering in July 2018."
+    ),
+])
+def test_ipo_completion_only_ticker_is_not_current_public_proof(quote):
+    assert not lead_scorer._public_quote_has_bound_market_locator(
+        quote, ("tenable", "tenableholdings"),
+    )
+    assert _validated_public_finding(quote)["status"] == "UNPROVEN"
+
+
+@pytest.mark.parametrize("quote", [
+    (
+        "Tenable Holdings, Inc. (NASDAQ: TENB), today announced quarterly "
+        "results. In July 2018, Tenable completed its initial public offering."
+    ),
+    (
+        "In July 2018, Tenable completed its initial public offering. "
+        "Tenable Holdings, Inc. (NASDAQ: TENB), today announced quarterly "
+        "results."
+    ),
+])
+def test_independent_current_issuer_row_survives_historical_ipo_elsewhere(quote):
+    assert lead_scorer._public_quote_has_bound_market_locator(
+        quote, ("tenable", "tenableholdings"),
+    )
+    assert _validated_public_finding(quote)["status"] == "VERIFIED"
+
+
+@pytest.mark.parametrize("current_statement", [
+    "Tenable common stock is currently listed on Nasdaq under ticker TENB",
+    "Tenable common stock currently trades on Nasdaq under ticker TENB",
+])
+def test_same_clause_explicit_current_listing_survives_historical_ipo(
+    current_statement,
+):
+    quote = (
+        "Tenable Holdings, Inc. (NASDAQ: TENB) completed its initial public "
+        f"offering in July 2018 and {current_statement}."
+    )
+
+    assert lead_scorer._public_quote_has_bound_market_locator(
+        quote, ("tenable", "tenableholdings"),
+    )
+    assert _validated_public_finding(quote)["status"] == "VERIFIED"
+
+
+def test_wrong_issuer_current_ticker_does_not_rescue_tenable_ipo():
+    quote = (
+        "Tenable Holdings, Inc. (NASDAQ: TENB) completed its initial public "
+        "offering in July 2018. Other Holdings, Inc. (NASDAQ: OTHR), today "
+        "announced quarterly results."
+    )
+
+    assert not lead_scorer._public_quote_has_bound_market_locator(
+        quote, ("tenable", "tenableholdings"),
+    )
+    assert _validated_public_finding(quote)["status"] == "UNPROVEN"
+
+
+@pytest.mark.parametrize("quote", [
+    (
+        "Tenable Holdings, Inc. (NASDAQ: TENB) announced quarterly results "
+        "on September 27, 2026."
+    ),
+    "Tenable common stock is currently listed on Nasdaq under ticker TENB.",
+])
+def test_current_issuer_market_statements_remain_public_proof(quote):
+    assert lead_scorer._public_quote_has_bound_market_locator(
+        quote, ("tenable", "tenableholdings"),
+    )
+    assert _validated_public_finding(quote)["status"] == "VERIFIED"
 
 
 def test_wrong_issuer_market_locator_does_not_trigger_rereview(monkeypatch):

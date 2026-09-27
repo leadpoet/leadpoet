@@ -725,6 +725,13 @@ _PUBLIC_SEMANTIC_LISTING_RE = re.compile(
     r"[^.!?;\n]{0,100}\b(?:exchange|stock\s+code|ticker)\b",
     re.I,
 )
+_PUBLIC_IPO_COMPLETION_EVENT_RE = re.compile(
+    r"\b(?:completed|closed)\s+(?:(?:its|an?|the)\s+)?"
+    r"(?:ipo|initial\s+public\s+offering)\b|"
+    r"\b(?:ipo|initial\s+public\s+offering)\s+"
+    r"(?:was\s+|has\s+been\s+)?(?:completed|closed)\b",
+    re.I,
+)
 _PUBLIC_STRONG_CURRENT_PATTERNS = (
     _PUBLIC_STAGE_PROOF_PATTERNS[2],
     *_PUBLIC_STAGE_PROOF_PATTERNS[4:6],
@@ -732,6 +739,23 @@ _PUBLIC_STRONG_CURRENT_PATTERNS = (
     *_PUBLIC_TICKER_STAGE_PROOF_PATTERNS,
     _PUBLIC_SEMANTIC_LISTING_RE,
 )
+
+
+def _public_claims_share_clause(
+    text: str,
+    first: re.Match,
+    second: re.Match,
+) -> bool:
+    """Return whether two proof spans have no sentence/clause boundary."""
+
+    earlier, later = sorted((first, second), key=lambda item: item.start())
+    if re.match(r"[;!?\n]|\.(?=\s+(?:[A-Z0-9]|$))", later.group(0)):
+        return False
+    between = text[earlier.end():later.start()]
+    return not bool(re.search(
+        r"[;!?\n]|\.(?=\s+(?:[A-Z0-9]|$))",
+        between,
+    ))
 
 
 def _public_quote_has_bound_market_locator(
@@ -768,7 +792,17 @@ def _public_quote_has_bound_market_locator(
                 ):
                     continue
             compact_candidate = _compact_company_name(candidate)
-            if any(name in compact_candidate for name in names):
+            if (
+                any(name in compact_candidate for name in names)
+                and not (
+                    pattern is _PUBLIC_STAGE_PROOF_PATTERNS[2]
+                    and any(
+                        _public_claims_share_clause(quote, match, ipo_match)
+                        for ipo_match
+                        in _PUBLIC_IPO_COMPLETION_EVENT_RE.finditer(quote)
+                    )
+                )
+            ):
                 return True
     return False
 
@@ -809,6 +843,14 @@ def _stage_evidence_supports_observation(
         return lexical_support
     if authoritative_public_listing:
         return True
+    if (
+        _PUBLIC_IPO_COMPLETION_EVENT_RE.search(quote)
+        and not _public_quote_has_bound_market_locator(quote, identity_names)
+    ):
+        # An IPO-completion announcement proves a historical event. Its old
+        # exchange/ticker parenthetical is not current-stage proof unless this
+        # exact quote also contains a separate issuer-bound market statement.
+        return False
     if not lexical_support and not semantic_public_listing:
         return False
     try:

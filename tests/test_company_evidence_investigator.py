@@ -2803,11 +2803,11 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
 
 
 @pytest.mark.parametrize(
-    ("attribute_satisfied", "expected_decision"),
-    [(True, COMPANY_FIT_MATCH), (False, COMPANY_FIT_MISMATCH)],
+    "attribute_satisfied",
+    [True, False],
 )
-def test_grounded_positive_attribute_gets_semantic_investigator_review(
-    monkeypatch, attribute_satisfied, expected_decision
+def test_grounded_attribute_gets_one_semantic_investigator_review(
+    monkeypatch, attribute_satisfied
 ):
     source_url = "https://acme.example/platform"
     quote = "Acme builds and sells software for production AI workflows."
@@ -2846,7 +2846,6 @@ def test_grounded_positive_attribute_gets_semantic_investigator_review(
 
     async def investigate(*, targets, **_kwargs):
         calls["investigator"] += 1
-        assert attribute_satisfied is True
         assert targets == ("industry",)
         return {
             "claims": {
@@ -2859,6 +2858,9 @@ def test_grounded_positive_attribute_gets_semantic_investigator_review(
                     evidence_url=source_url,
                     evidence_quote=quote,
                 )
+            },
+            investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                source_url: {"final_url": source_url, "text": quote},
             },
             "failure_reason": "",
         }
@@ -2889,12 +2891,12 @@ def test_grounded_positive_attribute_gets_semantic_investigator_review(
         evidence_investigator=True,
     ))
 
-    assert result.decision == expected_decision
-    assert result.details["required_attribute_decision"] == expected_decision
+    assert result.decision == COMPANY_FIT_MATCH
+    assert result.details["required_attribute_decision"] == COMPANY_FIT_MATCH
     assert calls == {
         "provider": 1,
         "fetch": 1,
-        "investigator": 1 if attribute_satisfied else 0,
+        "investigator": 1,
     }
 
 
@@ -2936,7 +2938,7 @@ def test_attribute_recovery_trigger_is_only_blocked_or_provider_unavailable(
     ) is expect_investigation
 
 
-def test_selector_reopens_only_unsupported_industry_semantics():
+def test_selector_reopens_only_reviewable_industry_semantics():
     cloudforce = _complete_verdict(
         observed_industry="Cloud consulting",
         observed_subindustry="University AI platform",
@@ -2964,29 +2966,135 @@ def test_selector_reopens_only_unsupported_industry_semantics():
         employee_size_conflict=False,
     ) == ("industry",)
 
-    proven_customer = dict(
-        cloudforce,
+    for role in ("customer_user", "internal_function", "third_party"):
+        for industry_matches in (True, False):
+            non_supplier = dict(
+                cloudforce,
+                industry_matches=industry_matches,
+                industry_activity_role=role,
+                industry_evidence_quote=(
+                    "Acme uses education software supplied by another company."
+                ),
+            )
+            result = _reverify_decision(
+                non_supplier,
+                "",
+                "",
+                icp=_icp(industry="Education Technology"),
+                company=_company(),
+                company_quality=True,
+            )
+            assert result.details["dimension_decisions"]["industry"] == (
+                COMPANY_FIT_MISMATCH
+            )
+            assert _targeted_company_investigation_dimensions(
+                result,
+                icp_stage="",
+                employee_size_conflict=False,
+            ) == ("industry",)
+
+@pytest.mark.parametrize(
+    ("investigator_status", "expected_decision"),
+    [
+        ("VERIFIED", COMPANY_FIT_MATCH),
+        ("UNPROVEN", COMPANY_FIT_MISMATCH),
+    ],
+)
+def test_non_supplier_industry_role_gets_one_bounded_followup(
+    monkeypatch,
+    investigator_status,
+    expected_decision,
+):
+    customer_url = "https://acme.example/customer-story"
+    customer_quote = "Acme uses classroom software supplied by OtherCo."
+    product_url = "https://acme.example/university-platform"
+    product_quote = "Acme supplies its enrollment platform to universities."
+    initial = _complete_verdict(
+        observed_industry="Education Technology",
+        observed_subindustry="Customer use",
+        industry_matches=True,
         industry_activity_role="customer_user",
-        industry_evidence_quote=(
-            "Acme uses education software supplied by another company."
+        industry_evidence_url=customer_url,
+        industry_evidence_quote=customer_quote,
+    )
+    calls = {"provider": 0, "investigator": 0}
+
+    async def provider(**_kwargs):
+        calls["provider"] += 1
+        return initial, ""
+
+    async def investigate(*, targets, **_kwargs):
+        calls["investigator"] += 1
+        assert targets == ("industry",)
+        if investigator_status == "UNPROVEN":
+            return {
+                "claims": {"industry": _finding(
+                    "industry",
+                    status="UNPROVEN",
+                    observed_value=None,
+                    evidence_url="",
+                    evidence_quote="",
+                )},
+                "failure_reason": "",
+            }
+        return {
+            "claims": {"industry": _finding(
+                "industry",
+                observed_value="University enrollment software",
+                observed_industry="Education Technology",
+                observed_subindustry="University enrollment platforms",
+                activity_role="supplier_operator",
+                evidence_url=product_url,
+                evidence_quote=product_quote,
+            )},
+            investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                product_url: {"final_url": product_url, "text": product_quote},
+            },
+            "failure_reason": "",
+        }
+
+    async def keep_observation(verdict, *_args, **_kwargs):
+        return verdict
+
+    verified_homepage = lead_scorer.company_fit_match(
+        "homepage identity verified",
+        details={
+            "identity": {
+                "decision": COMPANY_FIT_MATCH,
+                "evidence_source": "company_homepage",
+                "observed_name": "acme",
+                "observed_domain": "acme.example",
+                "observed_linkedin_slug": "acme",
+            },
+            "verified_homepage_transport_domain": "acme.example",
+        },
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(
+        lead_scorer,
+        "_refresh_linkedin_employee_size_observation",
+        keep_observation,
+    )
+    monkeypatch.setattr(
+        lead_scorer, "investigate_company_evidence", investigate
+    )
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _company(),
+        _icp(
+            industry="Education Technology",
+            sub_industry="University enrollment platforms",
+            product_service="Enrollment software supplied to universities.",
         ),
-    )
-    terminal = _reverify_decision(
-        proven_customer,
-        "",
-        "",
-        icp=_icp(industry="Education Technology"),
-        company=_company(),
+        require_company_fit_dimensions=True,
+        verified_homepage_identity=verified_homepage,
         company_quality=True,
-    )
-    assert terminal.details["dimension_decisions"]["industry"] == (
-        COMPANY_FIT_MISMATCH
-    )
-    assert _targeted_company_investigation_dimensions(
-        terminal,
-        icp_stage="",
-        employee_size_conflict=False,
-    ) == ()
+        evidence_investigator=True,
+    ))
+
+    assert result.decision == expected_decision
+    assert calls == {"provider": 1, "investigator": 1}
 
 
 def test_selector_researches_missing_headcount_and_hq_but_not_proven_region_mismatch():
@@ -6867,55 +6975,81 @@ def test_flam_industry_review_can_repair_attribute_from_verified_flicks_page(
     }
 
 
-def test_attribute_mismatch_without_industry_gap_stays_terminal(monkeypatch):
+def test_grounded_attribute_mismatch_unproven_review_stays_unqualified(
+    monkeypatch,
+):
+    source_url = "https://acme.example/platform"
+    quote = "Acme supplies software without the requested capability."
     initial = _complete_verdict(
         attribute_satisfied=False,
-        required_attribute_evidence_url="https://acme.example/platform",
-        required_attribute_evidence_quote=(
-            "Acme supplies software without the requested capability."
-        ),
+        required_attribute_evidence_url=source_url,
+        required_attribute_evidence_quote=quote,
     )
-    calls = {"provider": 0, "investigator": 0}
+    calls = {"provider": 0, "fetch": 0, "investigator": 0}
 
     async def provider(**_kwargs):
         calls["provider"] += 1
         return initial, ""
 
-    async def must_not_investigate(**_kwargs):
+    async def source_fetch(_session, url):
+        calls["fetch"] += 1
+        assert url == source_url
+        return 200, url, quote
+
+    async def investigate(*, targets, **_kwargs):
         calls["investigator"] += 1
-        raise AssertionError("an attribute-only mismatch cannot admit research")
+        assert targets == ("industry",)
+        return {
+            "claims": {"industry": _finding(
+                "industry",
+                status="UNPROVEN",
+                observed_value=None,
+                evidence_url="",
+                evidence_quote="",
+            )},
+            "failure_reason": "",
+        }
 
     async def keep_observation(verdict, *_args, **_kwargs):
         return verdict
 
-    async def keep_attribute(verdict, **_kwargs):
-        return verdict, {}
+    verified_homepage = lead_scorer.company_fit_match(
+        "homepage identity verified",
+        details={
+            "identity": {
+                "decision": COMPANY_FIT_MATCH,
+                "evidence_source": "company_homepage",
+                "observed_name": "acme",
+                "observed_domain": "acme.example",
+                "observed_linkedin_slug": "acme",
+            },
+            "verified_homepage_transport_domain": "acme.example",
+        },
+    )
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", source_fetch)
     monkeypatch.setattr(
-        lead_scorer, "investigate_company_evidence", must_not_investigate
+        lead_scorer, "investigate_company_evidence", investigate
     )
     monkeypatch.setattr(
         lead_scorer,
         "_refresh_linkedin_employee_size_observation",
         keep_observation,
     )
-    monkeypatch.setattr(
-        lead_scorer, "_ground_required_attribute_evidence", keep_attribute
-    )
-
     result = asyncio.run(lead_scorer._llm_reverify_company(
         _company(),
         _icp(required_attribute="Offers configurable firewall rules."),
         require_company_fit_dimensions=True,
+        verified_homepage_identity=verified_homepage,
         company_quality=True,
         evidence_investigator=True,
     ))
 
-    assert calls == {"provider": 1, "investigator": 0}
-    assert result.decision == COMPANY_FIT_MISMATCH
-    assert result.details["required_attribute_decision"] == COMPANY_FIT_MISMATCH
+    assert calls == {"provider": 1, "fetch": 1, "investigator": 1}
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["required_attribute_decision"] == COMPANY_FIT_UNAVAILABLE
 
 
 @pytest.mark.parametrize(

@@ -544,6 +544,72 @@ async def test_typed_date_binding_is_rechecked_and_can_remain_verified(
 
 
 @pytest.mark.asyncio
+async def test_relative_posting_repairs_three_quotes_to_two_complete_bindings(
+    monkeypatch,
+):
+    context_quote = (
+        "Platform Engineer role for HarborSoft's workflow product."
+    )
+    inputs = _inputs(
+        company_name="HarborSoft",
+        paragraph=(
+            "HarborSoft's Platform Engineer role was recently posted for "
+            "its workflow product."
+        ),
+        signal_quote=context_quote,
+        source_text=context_quote,
+        source_publication_date="2026-09-25",
+    )
+    calls = []
+
+    async def judge(prompt, **kwargs):
+        calls.append((prompt, kwargs))
+        payload = json.loads(prompt)
+        document = payload.get("review_document", payload)
+        if len(calls) == 1:
+            return json.dumps(_response(document, [(
+                True,
+                "VERIFIED",
+                [
+                    "2026-09-25",
+                    "Platform Engineer role",
+                    "HarborSoft's workflow product",
+                ],
+            )]))
+        repair_unit = payload["bounded_unit_repair_control"]["units"][0]
+        assert repair_unit["citation_errors"] == ["too_many_quotes"]
+        assert repair_unit["semantic_recheck_allowed"] is True
+        assert repair_unit["semantic_recheck_reason"] == (
+            "relative_time_grounding_review"
+        )
+        assert "Treat each citation_errors value as a required output" in (
+            kwargs["system_prompt"]
+        )
+        assert "For too_many_quotes, return at most two" in kwargs[
+            "system_prompt"
+        ]
+        assert "never the original oversized list" in kwargs["system_prompt"]
+        assert "Do not omit support for any factual clause" in kwargs[
+            "system_prompt"
+        ]
+        return json.dumps({"repairs": [{
+            "unit_id": 0,
+            "status": "VERIFIED",
+            "evidence": [
+                _binding(document, "2026-09-25"),
+                _binding(document, context_quote),
+            ],
+        }]})
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = await intent_details.review_intent_details(*inputs)
+
+    assert len(calls) == 2
+    assert receipt["decision"] == "match"
+    assert receipt["checks"]["facts_supported"] is True
+
+
+@pytest.mark.asyncio
 async def test_authenticated_first_observed_date_is_not_publication_recency(
     monkeypatch,
 ):

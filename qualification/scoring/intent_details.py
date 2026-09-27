@@ -1718,7 +1718,12 @@ exactly once and no other unit. Do not return statuses, factual flags, coverage 
 aggregate checks. For a flagged UNPROVEN or non-factual unit, return evidence:[];
 do not repeat an optional citation. A factual VERIFIED or CONTRADICTED unit still
 requires continuous exact bound evidence. If it cannot be bound, return evidence:[]
-and the server will reject it. Only review_document.admitted_evidence is bindable.
+and the server will reject it. Treat each citation_errors value as a required
+output correction. For too_many_quotes, return at most two bindings, never the
+original oversized list. Choose the strongest complementary exact excerpts;
+prefer one continuous context quote for related facts plus one needed date. Do
+not omit support for a factual clause merely to meet the limit. Only
+review_document.admitted_evidence is bindable.
 Trusted repair machine fields:
 """ + json.dumps(feedback, separators=(",", ":"))
 
@@ -1781,7 +1786,13 @@ unlisted unit, coverage, factual flags, or aggregate checks. VERIFIED and
 CONTRADICTED require exact bound evidence for the facts they assert. Use one or
 two source_index/quote bindings, each a continuous exact admitted excerpt or
 observed date, at most 500 characters. No ellipses or stitched spans. UNPROVEN may
-return evidence:[]. A pure date is not evidence for a separate company attribute.
+return evidence:[]. Treat each citation_errors value as a required output
+correction even during a semantic recheck. For too_many_quotes, return at most two
+bindings, never the original oversized list. Choose the strongest complementary
+exact excerpts; prefer one continuous context quote for related facts plus one
+needed date. Do not omit support for any factual clause merely to meet the limit;
+if two bindings cannot support all clauses, do not return VERIFIED. A pure date is
+not evidence for a separate company attribute.
 Return only {"repairs":[{"unit_id":...,"status":"VERIFIED|CONTRADICTED|UNPROVEN","evidence":[...]}]}.
 Trusted routing controls (not factual evidence):
 """ + json.dumps(feedback, separators=(",", ":"))

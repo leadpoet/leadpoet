@@ -73,6 +73,7 @@ _MAX_ORGANIZATION_NAME_LENGTH = 200
 MAX_HOMEPAGE_NAVIGATION_LOCATORS = 40
 MAX_HOMEPAGE_NAVIGATION_LABEL_LENGTH = 200
 MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS = 6_000
+VERIFIED_REBRAND_REDIRECT_KEY = "verified_rebrand_redirect"
 _HTML_ENCODING_SNIFF_BYTES = 1024
 _MIN_NON_HTML_HOMEPAGE_CHARS = 50
 _IDENTITY_SOURCE_HOST_LABELS = frozenset({"media", "news", "newsroom", "press"})
@@ -1001,6 +1002,7 @@ def _identity_result(
     source_fetch_failed: bool = False,
     failure_reason_code: str = "",
     verified_homepage_transport_domain: str = "",
+    verified_rebrand_redirect: Optional[Mapping[str, str]] = None,
 ) -> CompanyFitDecisionResult:
     details = {
         "identity": dict(receipt),
@@ -1017,6 +1019,11 @@ def _identity_result(
         **(
             {"failure_reason_code": failure_reason_code or "source_blocked"}
             if source_fetch_failed or failure_reason_code
+            else {}
+        ),
+        **(
+            {VERIFIED_REBRAND_REDIRECT_KEY: dict(verified_rebrand_redirect)}
+            if verified_rebrand_redirect
             else {}
         ),
     }
@@ -1189,11 +1196,68 @@ async def verify_company_exists(
             reason_code="identity_mismatch",
             observed_domain=observed_domain,
         )
+        verified_rebrand_redirect: dict[str, str] = {}
+        if (
+            not _PARKED_DOMAIN_RE.search(text)
+            and not _homepage_body_is_unusable(text)
+        ):
+            submitted_linkedin = _canonical_linkedin_company_url(
+                company_linkedin
+            )
+            observed_linkedins = _homepage_company_linkedin_urls(text)
+            try:
+                canonical_request_url = public_http_url(request_url)
+                canonical_final_url = public_http_url(observed_url)
+                request_parts = urlsplit(canonical_request_url)
+                final_parts = urlsplit(canonical_final_url)
+            except (NormalizationError, TypeError, ValueError):
+                canonical_request_url = ""
+                canonical_final_url = ""
+                request_parts = None
+                final_parts = None
+            if (
+                submitted_linkedin
+                and observed_linkedins == [submitted_linkedin]
+                and request_parts is not None
+                and final_parts is not None
+                and request_parts.scheme.casefold() == "https"
+                and final_parts.scheme.casefold() == "https"
+                and request_parts.username is None
+                and request_parts.password is None
+                and final_parts.username is None
+                and final_parts.password is None
+                and request_parts.fragment == ""
+                and final_parts.fragment == ""
+                and request_parts.port in {None, 443}
+                and final_parts.port in {None, 443}
+            ):
+                verified_rebrand_redirect = {
+                    "source": "server_homepage_redirect_v1",
+                    "submitted_name": company_name.strip(),
+                    "submitted_domain": domain,
+                    "observed_domain": observed_domain,
+                    "submitted_linkedin_slug": submitted_linkedin.rsplit("/", 1)[-1],
+                    "observed_linkedin_slug": submitted_linkedin.rsplit("/", 1)[-1],
+                    "request_url": canonical_request_url,
+                    "final_url": canonical_final_url,
+                }
+                if homepage_evidence_sink is not None:
+                    from qualification.scoring.company_evidence_investigator import (
+                        _plain_text,
+                    )
+
+                    evidence_text = _plain_text(text)
+                    if evidence_text:
+                        homepage_evidence_sink[canonical_request_url] = {
+                            "final_url": canonical_final_url,
+                            "text": evidence_text,
+                        }
         return _identity_result(
             redirect_receipt,
             f"company identity conflict: redirect changed registrable domain "
             f"from {domain!r} to {observed_domain!r}",
             actual_final_url=observed_url,
+            verified_rebrand_redirect=verified_rebrand_redirect,
         )
 
     # ----- Parked-domain detection ------------------------------------------

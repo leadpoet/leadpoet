@@ -50,6 +50,7 @@ from qualification.scoring.intent_signal_gate import (
     judge_intent_signal,
 )
 from qualification.scoring.company_verification import (
+    VERIFIED_REBRAND_REDIRECT_KEY,
     _fetch_bounded_html,
     _registrable_domain,
     current_exchange_profile_names_issuer,
@@ -1788,6 +1789,80 @@ def _verified_homepage_identity_anchor(
     return anchor
 
 
+def _verified_homepage_rebrand_redirect(
+    identity: Optional[CompanyFitDecisionResult],
+    company: CompanyOutput,
+    homepage_pages: Optional[Mapping[str, Mapping[str, Any]]],
+) -> dict[str, str]:
+    """Project one server-observed cross-domain rebrand locator, not proof."""
+
+    if identity is None or identity.decision != COMPANY_FIT_MISMATCH:
+        return {}
+    details = identity.details if isinstance(identity.details, Mapping) else {}
+    receipt = details.get("identity")
+    candidate = details.get(VERIFIED_REBRAND_REDIRECT_KEY)
+    expected_keys = {
+        "source", "submitted_name", "submitted_domain", "observed_domain",
+        "submitted_linkedin_slug", "observed_linkedin_slug", "request_url",
+        "final_url",
+    }
+    if (
+        not isinstance(receipt, Mapping)
+        or not isinstance(candidate, Mapping)
+        or set(candidate) != expected_keys
+        or candidate.get("source") != "server_homepage_redirect_v1"
+        or receipt.get("decision") != COMPANY_FIT_MISMATCH
+        or receipt.get("reason_code") != "identity_mismatch"
+        or receipt.get("evidence_source") != "company_homepage"
+    ):
+        return {}
+    try:
+        submitted_domain = _registrable_domain(company.company_website)
+    except (NormalizationError, TypeError, ValueError):
+        return {}
+    submitted_slug = linkedin_company_page_slug(company.company_linkedin)
+    observed_domain = str(candidate.get("observed_domain") or "").casefold()
+    request_url = str(candidate.get("request_url") or "")
+    final_url = str(candidate.get("final_url") or "")
+    try:
+        canonical_request = public_http_url(request_url)
+        canonical_final = public_http_url(final_url)
+        request_parts = urlsplit(canonical_request)
+        final_parts = urlsplit(canonical_final)
+    except (TypeError, ValueError):
+        return {}
+    pages, final_urls = _validated_prefetched_pages(
+        homepage_pages,
+        submitted_source_urls=(canonical_request,),
+    )
+    if (
+        not submitted_domain
+        or not submitted_slug
+        or observed_domain == submitted_domain
+        or candidate.get("submitted_domain") != submitted_domain
+        or candidate.get("submitted_name") != company.company_name.strip()
+        or candidate.get("submitted_linkedin_slug") != submitted_slug
+        or candidate.get("observed_linkedin_slug") != submitted_slug
+        or receipt.get("submitted_domain") != submitted_domain
+        or receipt.get("observed_domain") != observed_domain
+        or details.get("actual_final_url") != final_url
+        or request_parts.scheme.casefold() != "https"
+        or final_parts.scheme.casefold() != "https"
+        or request_parts.username is not None
+        or request_parts.password is not None
+        or final_parts.username is not None
+        or final_parts.password is not None
+        or request_parts.port not in {None, 443}
+        or final_parts.port not in {None, 443}
+        or _registrable_domain(canonical_request) != submitted_domain
+        or _registrable_domain(canonical_final) != observed_domain
+        or not pages.get(canonical_request)
+        or final_urls.get(canonical_request) != canonical_final
+    ):
+        return {}
+    return {key: str(candidate[key]) for key in expected_keys}
+
+
 def _dimension_web_evidence(verdict: Mapping[str, Any], dimension: str) -> dict[str, str]:
     """Extract the URL and quote required to make one web claim auditable."""
 
@@ -3137,6 +3212,7 @@ def _web_identity_receipt(
     verified_homepage_identity: Optional[Mapping[str, Any]] = None,
     verified_homepage_transport_domain: str = "",
     verified_rebrand_identity: Optional[Mapping[str, Any]] = None,
+    verified_rebrand_redirect: Optional[Mapping[str, str]] = None,
     verified_structured_identity: Optional[Mapping[str, Any]] = None,
     company_quality: bool = False,
 ) -> dict[str, Any]:
@@ -3201,6 +3277,21 @@ def _web_identity_receipt(
         if isinstance(verified_rebrand_identity, Mapping)
         else {}
     )
+    rebrand_redirect = (
+        verified_rebrand_redirect
+        if isinstance(verified_rebrand_redirect, Mapping)
+        else {}
+    )
+    try:
+        rebrand_redirect_request_domain = _registrable_domain(
+            str(rebrand_redirect.get("request_url") or "")
+        )
+        rebrand_redirect_final_domain = _registrable_domain(
+            str(rebrand_redirect.get("final_url") or "")
+        )
+    except (NormalizationError, TypeError, ValueError):
+        rebrand_redirect_request_domain = ""
+        rebrand_redirect_final_domain = ""
     receipt_submitted_domain = str(receipt.get("submitted_domain") or "").casefold()
     receipt_observed_domain = str(receipt.get("observed_domain") or "").casefold()
     receipt_submitted_slug = str(receipt.get("submitted_linkedin_slug") or "").casefold()
@@ -3321,13 +3412,49 @@ def _web_identity_receipt(
             and submitted_slug == observed_slug
             and (not shared_slug or shared_slug == submitted_slug)
         )
-        if names_bind and (cross_domain_binds or same_domain_binds) and linkedin_binds:
+        changed_slug_redirect_binds = bool(
+            set(rebrand_redirect) == {
+                "source", "submitted_name", "submitted_domain",
+                "observed_domain", "submitted_linkedin_slug",
+                "observed_linkedin_slug", "request_url", "final_url",
+            }
+            and rebrand_redirect.get("source")
+            == "server_homepage_redirect_v1"
+            and rebrand_redirect.get("submitted_name")
+            == str(company.company_name or "").strip()
+            and old_domain == receipt_submitted_domain == receipt_observed_domain
+            and new_domain
+            == str(rebrand_redirect.get("observed_domain") or "").casefold()
+            and old_domain
+            == str(rebrand_redirect.get("submitted_domain") or "").casefold()
+            and receipt_submitted_slug
+            == str(
+                rebrand_redirect.get("submitted_linkedin_slug") or ""
+            ).casefold()
+            == str(
+                rebrand_redirect.get("observed_linkedin_slug") or ""
+            ).casefold()
+            and receipt_observed_slug
+            and receipt_observed_slug != receipt_submitted_slug
+            and rebrand_redirect_request_domain == old_domain
+            and rebrand_redirect_final_domain == new_domain
+            and _name_binds_rebrand(submitted_raw_name)
+            and _name_binds_rebrand(observed_raw_name)
+        )
+        if names_bind and (
+            ((cross_domain_binds or same_domain_binds) and linkedin_binds)
+            or changed_slug_redirect_binds
+        ):
             receipt.update(
                 decision=COMPANY_FIT_MATCH,
                 reason_code=(
                     "verified_same_domain_alias"
                     if same_domain_binds
-                    else "verified_rebrand_continuity"
+                    else (
+                        "verified_rebrand_redirect_continuity"
+                        if changed_slug_redirect_binds
+                        else "verified_rebrand_continuity"
+                    )
                 ),
                 rebrand_evidence_url=str(rebrand.get("evidence_url") or ""),
                 rebrand_evidence_quote=str(rebrand.get("evidence_quote") or "")[:2000],
@@ -4932,6 +5059,7 @@ def _reverify_decision(
     verified_homepage_identity: Optional[Mapping[str, str]] = None,
     verified_homepage_transport_domain: str = "",
     verified_rebrand_identity: Optional[Mapping[str, Any]] = None,
+    verified_rebrand_redirect: Optional[Mapping[str, str]] = None,
     validated_stage_finding: Optional[Mapping[str, Any]] = None,
     structured_employee_size_evidence: Optional[Mapping[str, Any]] = None,
     structured_public_company_evidence: Optional[Mapping[str, Any]] = None,
@@ -4960,6 +5088,7 @@ def _reverify_decision(
                 verified_homepage_transport_domain
             ),
             verified_rebrand_identity=verified_rebrand_identity,
+            verified_rebrand_redirect=verified_rebrand_redirect,
             verified_structured_identity=structured_profile_identity_evidence,
             company_quality=company_quality,
         )
@@ -5687,6 +5816,7 @@ def _targeted_company_investigation_dimensions(
     icp_stage: str,
     employee_size_conflict: bool,
     company: Optional[CompanyOutput] = None,
+    verified_rebrand_redirect: Optional[Mapping[str, str]] = None,
 ) -> tuple[str, ...]:
     """Select only fact gaps and unsupported semantic company disputes."""
 
@@ -5720,19 +5850,22 @@ def _targeted_company_investigation_dimensions(
     ):
         targets.append("stage")
     identity = details.get("identity_receipt")
-    if (
-        isinstance(identity, Mapping)
-        and details.get("identity_decision") != COMPANY_FIT_MATCH
-        and (
-            (
-                identity.get("submitted_domain")
-                and identity.get("observed_domain")
-                and identity.get("submitted_domain")
-                != identity.get("observed_domain")
-            )
-            or (
-                identity.get("evidence_source") == "company_web_reverification"
-                and _same_domain_name_alias(identity)
+    if details.get("identity_decision") != COMPANY_FIT_MATCH and (
+        bool(verified_rebrand_redirect)
+        or (
+            isinstance(identity, Mapping)
+            and (
+                (
+                    identity.get("submitted_domain")
+                    and identity.get("observed_domain")
+                    and identity.get("submitted_domain")
+                    != identity.get("observed_domain")
+                )
+                or (
+                    identity.get("evidence_source")
+                    == "company_web_reverification"
+                    and _same_domain_name_alias(identity)
+                )
             )
         )
     ):
@@ -6237,6 +6370,7 @@ async def _run_targeted_company_evidence_investigation(
         dict[str, dict[str, str]]
     ] = None,
     matched_company_retry_source_cache: Optional[Mapping[str, Any]] = None,
+    verified_rebrand_redirect: Optional[Mapping[str, str]] = None,
 ) -> Tuple[
     dict[str, Any],
     CompanyFitDecisionResult,
@@ -6378,6 +6512,11 @@ async def _run_targeted_company_evidence_investigation(
         investigation_verified_identity,
     )
     source_candidates = [
+        *(
+            [verified_rebrand_redirect.get("request_url")]
+            if verified_rebrand_redirect
+            else []
+        ),
         *matched_company_retry_pages.keys(),
         *(
             (verified_homepage_pages or {}).keys()
@@ -6520,6 +6659,7 @@ async def _run_targeted_company_evidence_investigation(
             ),
         },
         verified_homepage_identity=investigation_verified_identity,
+        verified_homepage_rebrand_redirect=verified_rebrand_redirect,
         homepage_navigation_locators=(
             homepage_navigation_locators if review_positive_semantics else ()
         ),
@@ -6527,7 +6667,9 @@ async def _run_targeted_company_evidence_investigation(
             required_attribute_source_cache or {},
             submitted_source_urls,
             verified_homepage_pages=(
-                verified_homepage_pages if review_positive_semantics else None
+                verified_homepage_pages
+                if review_positive_semantics or verified_rebrand_redirect
+                else None
             ),
             matched_company_retry_pages=matched_company_retry_pages,
             structured_profile_description_evidence=(
@@ -6772,6 +6914,7 @@ async def _run_targeted_company_evidence_investigation(
         verified_homepage_identity=verified_identity,
         verified_homepage_transport_domain=verified_transport_domain,
         verified_rebrand_identity=verified_rebrand_identity,
+        verified_rebrand_redirect=verified_rebrand_redirect,
         validated_stage_finding=validated_stage_finding,
         structured_employee_size_evidence=structured_employee_size_evidence,
         structured_public_company_evidence=(
@@ -7000,6 +7143,11 @@ async def _llm_reverify_company(
     )
     verified_identity = _verified_homepage_identity_anchor(
         verified_homepage_identity
+    )
+    verified_rebrand_redirect = _verified_homepage_rebrand_redirect(
+        verified_homepage_identity,
+        company,
+        verified_homepage_pages,
     )
     unresolved_homepage_identity: Mapping[str, Any] = {}
     verified_transport_domain = str(
@@ -7272,6 +7420,7 @@ async def _llm_reverify_company(
             icp_stage=icp_stage,
             employee_size_conflict=employee_size_conflict,
             company=company,
+            verified_rebrand_redirect=verified_rebrand_redirect,
         )
         if require_company_fit_dimensions and evidence_investigator
         else ()
@@ -7380,6 +7529,7 @@ async def _llm_reverify_company(
             matched_company_retry_source_cache=(
                 matched_company_retry_source_cache
             ),
+            verified_rebrand_redirect=verified_rebrand_redirect,
         )
         if not claims:
             return result
@@ -7590,6 +7740,7 @@ async def _llm_reverify_company(
         verified_homepage_identity=verified_identity,
         verified_homepage_transport_domain=verified_transport_domain,
         verified_rebrand_identity=verified_rebrand_identity,
+        verified_rebrand_redirect=verified_rebrand_redirect,
         verified_structured_identity=structured_profile_identity_evidence,
         company_quality=company_quality,
     )
@@ -7731,6 +7882,7 @@ async def _llm_reverify_company(
                 icp_stage=icp_stage,
                 employee_size_conflict=employee_size_conflict,
                 company=company,
+                verified_rebrand_redirect=verified_rebrand_redirect,
             )
         )
         post_repair_positive_semantic_review = (
@@ -7796,6 +7948,7 @@ async def _llm_reverify_company(
                 matched_company_retry_source_cache=(
                     matched_company_retry_source_cache
                 ),
+                verified_rebrand_redirect=verified_rebrand_redirect,
             )
             if not post_repair_claims:
                 return repaired_result

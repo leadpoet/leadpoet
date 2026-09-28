@@ -22,6 +22,8 @@ from qualification.scoring import company_verification
 from qualification.scoring import lead_scorer
 from qualification.scoring import verification_helpers
 from qualification.scoring.company_evidence_investigator import (
+    _quote_proves_rebrand_continuity,
+    _validated_homepage_rebrand_redirect,
     _validated_findings,
 )
 from qualification.scoring.company_fit_decision import (
@@ -29,6 +31,7 @@ from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MISMATCH,
     COMPANY_FIT_UNAVAILABLE,
     company_fit_match,
+    company_fit_mismatch,
 )
 from qualification.scoring.evaluation_clock import use_evaluation_date
 from qualification.scoring.linkedin_company_size import (
@@ -46,6 +49,7 @@ from qualification.scoring.lead_scorer import (
     _reverify_decision,
     _stage_quote_supports_observation,
     _targeted_company_investigation_dimensions,
+    _web_identity_receipt,
 )
 
 
@@ -5830,6 +5834,338 @@ def test_rebrand_needs_first_party_explicit_old_and_new_name_continuity():
         first_party_domains={"quizizz.com", "wayground.com"},
     )
     assert prospective_result["rebrand"]["status"] == "UNPROVEN"
+
+
+def test_server_redirect_binds_changed_domain_without_replacing_quote_proof():
+    request_url = "https://safetyculture.com/"
+    final_url = "https://mitti.com/"
+    body = (
+        "SafetyCulture has a new name. Say hello to Mitti. "
+        "Same product, same team. New name."
+    )
+    locator = {
+        "source": "server_homepage_redirect_v1",
+        "submitted_name": "SafetyCulture",
+        "submitted_domain": "safetyculture.com",
+        "observed_domain": "mitti.com",
+        "submitted_linkedin_slug": "mittihq",
+        "observed_linkedin_slug": "mittihq",
+        "request_url": request_url,
+        "final_url": final_url,
+    }
+    company_locator = {
+        "name": "SafetyCulture",
+        "website": request_url,
+        "linkedin": "https://www.linkedin.com/company/mittihq",
+    }
+    validated = _validated_homepage_rebrand_redirect(
+        locator,
+        company_locator=company_locator,
+        fetched_pages={request_url: body},
+        fetched_final_urls={request_url: final_url},
+    )
+    assert validated == locator
+
+    finding = _finding(
+        "rebrand",
+        observed_value="Mitti",
+        evidence_url=request_url,
+        evidence_quote="SafetyCulture has a new name. Say hello to Mitti.",
+        old_name="SafetyCulture",
+        new_name="Mitti",
+        old_domain="safetyculture.com",
+        new_domain="mitti.com",
+    )
+    result = _validated_findings(
+        {"findings": [finding]},
+        targets=("rebrand",),
+        fetched_pages={request_url: body},
+        fetched_final_urls={request_url: final_url},
+        first_party_domains={"safetyculture.com", "mitti.com"},
+        identity_anchor={
+            "verified_rebrand_old_domain": "safetyculture.com",
+            "verified_rebrand_new_domain": "mitti.com",
+            "verified_rebrand_linkedin_slug": "mittihq",
+        },
+    )
+    assert result["rebrand"]["status"] == "VERIFIED"
+
+    weak = dict(finding, evidence_quote="Visit our new website at Mitti.")
+    rejected = _validated_findings(
+        {"findings": [weak]},
+        targets=("rebrand",),
+        fetched_pages={request_url: weak["evidence_quote"]},
+        fetched_final_urls={request_url: final_url},
+        first_party_domains={"safetyculture.com", "mitti.com"},
+        identity_anchor={
+            "verified_rebrand_old_domain": "safetyculture.com",
+            "verified_rebrand_new_domain": "mitti.com",
+            "verified_rebrand_linkedin_slug": "mittihq",
+        },
+    )
+    assert rejected["rebrand"]["status"] == "UNPROVEN"
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"submitted_domain": "attacker.example"},
+        {"observed_domain": "unrelated.example"},
+        {"submitted_linkedin_slug": "forged"},
+        {"observed_linkedin_slug": "forged"},
+        {"request_url": "https://attacker.example/"},
+        {"final_url": "https://unrelated.example/"},
+        {"source": "miner_supplied"},
+    ],
+)
+def test_server_redirect_rejects_forged_or_reused_candidate(updates):
+    request_url = "https://safetyculture.com/"
+    final_url = "https://mitti.com/"
+    locator = {
+        "source": "server_homepage_redirect_v1",
+        "submitted_name": "SafetyCulture",
+        "submitted_domain": "safetyculture.com",
+        "observed_domain": "mitti.com",
+        "submitted_linkedin_slug": "mittihq",
+        "observed_linkedin_slug": "mittihq",
+        "request_url": request_url,
+        "final_url": final_url,
+        **updates,
+    }
+    assert _validated_homepage_rebrand_redirect(
+        locator,
+        company_locator={
+            "name": "SafetyCulture",
+            "website": request_url,
+            "linkedin": "https://www.linkedin.com/company/mittihq",
+        },
+        fetched_pages={request_url: "SafetyCulture rebrands as Mitti."},
+        fetched_final_urls={request_url: final_url},
+    ) == {}
+
+
+def test_changed_linkedin_slug_rebrand_requires_redirect_and_explicit_continuity():
+    company = _company(
+        name="SafetyCulture",
+        website="https://safetyculture.com/",
+        linkedin="https://www.linkedin.com/company/mittihq",
+    )
+    verdict = _complete_verdict(
+        observed_company_name="SafetyCulture",
+        observed_company_website="https://safetyculture.com/",
+        observed_company_linkedin=(
+            "https://www.linkedin.com/company/safetyculturehq"
+        ),
+    )
+    proof = _finding(
+        "rebrand",
+        evidence_url="https://mitti.com/media-releases/rebrand",
+        evidence_quote="SafetyCulture rebrands as Mitti.",
+        old_name="SafetyCulture",
+        new_name="Mitti",
+        old_domain="safetyculture.com",
+        new_domain="mitti.com",
+    )
+    redirect = {
+        "source": "server_homepage_redirect_v1",
+        "submitted_name": "SafetyCulture",
+        "submitted_domain": "safetyculture.com",
+        "observed_domain": "mitti.com",
+        "submitted_linkedin_slug": "mittihq",
+        "observed_linkedin_slug": "mittihq",
+        "request_url": "https://safetyculture.com/",
+        "final_url": "https://mitti.com/",
+    }
+
+    assert _web_identity_receipt(
+        company,
+        {**verdict, "verified_rebrand_redirect": redirect},
+        verified_rebrand_identity=proof,
+    )["decision"] == COMPANY_FIT_MISMATCH
+    accepted = _web_identity_receipt(
+        company,
+        verdict,
+        verified_rebrand_identity=proof,
+        verified_rebrand_redirect=redirect,
+    )
+    assert accepted["decision"] == COMPANY_FIT_MATCH
+    assert accepted["reason_code"] == "verified_rebrand_redirect_continuity"
+
+    for updates in (
+        {"observed_domain": "unrelated.example"},
+        {"observed_linkedin_slug": "wrong"},
+        {"submitted_name": "Other Company"},
+    ):
+        assert _web_identity_receipt(
+            company,
+            verdict,
+            verified_rebrand_identity=proof,
+            verified_rebrand_redirect={**redirect, **updates},
+        )["decision"] != COMPANY_FIT_MATCH
+
+    initial = _reverify_decision(
+        verdict,
+        "",
+        "",
+        icp=_icp(),
+        company=company,
+        company_quality=True,
+    )
+    assert "rebrand" not in _targeted_company_investigation_dimensions(
+        initial,
+        icp_stage="",
+        employee_size_conflict=False,
+        company=company,
+    )
+    assert "rebrand" in _targeted_company_investigation_dimensions(
+        initial,
+        icp_stage="",
+        employee_size_conflict=False,
+        company=company,
+        verified_rebrand_redirect=redirect,
+    )
+
+
+def test_acquisition_alone_is_not_rebrand_but_explicit_rebrand_can_coexist():
+    assert not _quote_proves_rebrand_continuity(
+        "Acme acquired Beta, which becomes part of Acme.",
+        old_name="Beta",
+        new_name="Acme",
+    )
+    assert _quote_proves_rebrand_continuity(
+        "After the acquisition, Beta rebranded as Acme and remains the same company.",
+        old_name="Beta",
+        new_name="Acme",
+    )
+    assert _quote_proves_rebrand_continuity(
+        "OldCo is now NewCo; NewCo also acquired an unrelated business.",
+        old_name="OldCo",
+        new_name="NewCo",
+    )
+    assert _quote_proves_rebrand_continuity(
+        "OldCo rebranded as NewCo as part of a broader product launch.",
+        old_name="OldCo",
+        new_name="NewCo",
+    )
+    assert not _quote_proves_rebrand_continuity(
+        "OldCo is now part of NewCo after the acquisition.",
+        old_name="OldCo",
+        new_name="NewCo",
+    )
+
+
+def test_cross_domain_rebrand_locator_flows_through_bounded_investigator(
+    monkeypatch,
+):
+    request_url = "https://safetyculture.com/"
+    final_url = "https://mitti.com/"
+    page_text = (
+        "SafetyCulture has a new name. Say hello to Mitti. "
+        "Same product, same team. New name."
+    )
+    redirect = {
+        "source": "server_homepage_redirect_v1",
+        "submitted_name": "SafetyCulture",
+        "submitted_domain": "safetyculture.com",
+        "observed_domain": "mitti.com",
+        "submitted_linkedin_slug": "mittihq",
+        "observed_linkedin_slug": "mittihq",
+        "request_url": request_url,
+        "final_url": final_url,
+    }
+    homepage = company_fit_mismatch(
+        "company identity conflict: redirect changed registrable domain",
+        details={
+            "identity": {
+                "decision": COMPANY_FIT_MISMATCH,
+                "reason_code": "identity_mismatch",
+                "evidence_source": "company_homepage",
+                "submitted_name": "safetyculture",
+                "submitted_domain": "safetyculture.com",
+                "submitted_linkedin_slug": "mittihq",
+                "observed_name": "",
+                "observed_domain": "mitti.com",
+                "observed_linkedin_slug": "",
+            },
+            "actual_final_url": final_url,
+            company_verification.VERIFIED_REBRAND_REDIRECT_KEY: redirect,
+        },
+    )
+    company = _company(
+        name="SafetyCulture",
+        website=request_url,
+        linkedin="https://www.linkedin.com/company/mittihq",
+    )
+    verdict = _complete_verdict(
+        observed_company_name="SafetyCulture",
+        observed_company_website=request_url,
+        observed_company_linkedin=(
+            "https://www.linkedin.com/company/safetyculturehq"
+        ),
+        employee_size_evidence_url="https://safetyculture.com/about",
+        employee_size_evidence_quote="SafetyCulture has 11-50 employees.",
+        industry_evidence_url="https://safetyculture.com/about",
+        industry_evidence_quote="SafetyCulture supplies SaaS software.",
+        geography_evidence_url="https://safetyculture.com/about",
+        geography_evidence_quote=(
+            "SafetyCulture is headquartered in California, United States."
+        ),
+    )
+    proof = _finding(
+        "rebrand",
+        observed_value="Mitti",
+        evidence_url=request_url,
+        evidence_quote="SafetyCulture has a new name. Say hello to Mitti.",
+        old_name="SafetyCulture",
+        new_name="Mitti",
+        old_domain="safetyculture.com",
+        new_domain="mitti.com",
+    )
+
+    async def fake_reverify(**_kwargs):
+        return verdict, ""
+
+    async def fake_refresh(observed, *_args, **_kwargs):
+        return observed
+
+    async def fake_investigate(**kwargs):
+        assert kwargs["verified_homepage_rebrand_redirect"] == redirect
+        assert kwargs["prefetched_pages"][request_url] == {
+            "final_url": final_url,
+            "text": page_text,
+        }
+        assert kwargs["targets"] == ("rebrand",)
+        return {
+            "claims": {"rebrand": proof},
+            "usage": {"reasoning_turns": 1, "search_calls": 0, "fetch_calls": 0},
+            "failure_reason": "",
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", fake_reverify)
+    monkeypatch.setattr(
+        lead_scorer,
+        "_refresh_linkedin_employee_size_observation",
+        fake_refresh,
+    )
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", fake_investigate)
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        company,
+        _icp(),
+        require_company_fit_dimensions=True,
+        verified_homepage_identity=homepage,
+        verified_homepage_pages={
+            request_url: {"final_url": final_url, "text": page_text}
+        },
+        company_quality=True,
+        evidence_investigator=True,
+    ))
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert result.details["identity_receipt"]["reason_code"] == (
+        "verified_rebrand_redirect_continuity"
+    )
 
 
 def test_verified_rebrand_binds_completed_stage_under_old_name_only():

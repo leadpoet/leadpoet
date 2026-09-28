@@ -16,6 +16,7 @@ from qualification.scoring.company_fit_decision import (
 from qualification.scoring.company_evidence_investigator import MAX_PAGE_CHARACTERS
 from qualification.scoring.company_verification import (
     MAX_HOMEPAGE_NAVIGATION_LOCATORS,
+    VERIFIED_REBRAND_REDIRECT_KEY,
     current_exchange_profile_names_issuer,
     _homepage_navigation_locators,
     _upgrade_plain_http_company_url,
@@ -24,6 +25,7 @@ from qualification.scoring.company_verification import (
 )
 from qualification.scoring.lead_scorer import (
     _verified_homepage_identity_anchor,
+    _verified_homepage_rebrand_redirect,
     _web_identity_receipt,
 )
 
@@ -91,6 +93,109 @@ class _RoutingSession:
         if isinstance(response, Exception):
             raise response
         return response
+
+
+def test_cross_domain_redirect_retains_only_server_bound_rebrand_locator(
+    monkeypatch,
+):
+    body = (
+        b"<title>Mitti</title>"
+        b"<p>SafetyCulture has a new name. Say hello to Mitti.</p>"
+        b'<a href="https://www.linkedin.com/company/mittihq">LinkedIn</a>'
+    )
+    response = _Response(200, body, "https://mitti.com/")
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification.aiohttp.ClientSession",
+        lambda **_kwargs: _Session(response),
+    )
+    pages = {}
+    result = asyncio.run(verify_company_exists(
+        "SafetyCulture",
+        "https://safetyculture.com/",
+        company_linkedin="https://www.linkedin.com/company/mittihq",
+        require_https_transport=True,
+        homepage_evidence_sink=pages,
+    ))
+
+    assert result.decision == COMPANY_FIT_MISMATCH
+    candidate = result.details[VERIFIED_REBRAND_REDIRECT_KEY]
+    assert candidate == {
+        "source": "server_homepage_redirect_v1",
+        "submitted_name": "SafetyCulture",
+        "submitted_domain": "safetyculture.com",
+        "observed_domain": "mitti.com",
+        "submitted_linkedin_slug": "mittihq",
+        "observed_linkedin_slug": "mittihq",
+        "request_url": "https://safetyculture.com/",
+        "final_url": "https://mitti.com/",
+    }
+    assert pages["https://safetyculture.com/"]["final_url"] == (
+        "https://mitti.com/"
+    )
+    assert "SafetyCulture has a new name" in pages[
+        "https://safetyculture.com/"
+    ]["text"]
+
+    company = CompanyOutput(
+        company_name="SafetyCulture",
+        company_website="https://safetyculture.com/",
+        company_linkedin="https://www.linkedin.com/company/mittihq",
+        industry="Software",
+        employee_count="501-1000",
+        company_stage="Series C+",
+        country="Australia",
+        intent_signals=[{
+            "description": "SafetyCulture announced its new Mitti name.",
+            "source": "company_website",
+            "url": "https://mitti.com/media-releases/rebrand",
+            "date": "2026-09-01",
+            "snippet": "SafetyCulture has a new name. Say hello to Mitti.",
+        }],
+    )
+    assert _verified_homepage_rebrand_redirect(result, company, pages) == candidate
+
+
+@pytest.mark.parametrize(
+    ("body", "final_url"),
+    [
+        (
+            b'<a href="https://www.linkedin.com/company/unrelated">LinkedIn</a>',
+            "https://mitti.com/",
+        ),
+        (
+            b"This domain is for sale "
+            b'<a href="https://www.linkedin.com/company/mittihq">LinkedIn</a>',
+            "https://mitti.com/",
+        ),
+        (
+            b'<a href="https://www.linkedin.com/company/mittihq">LinkedIn</a>',
+            "http://mitti.com/",
+        ),
+        (
+            b'<a href="https://www.linkedin.com/company/mittihq">LinkedIn</a>',
+            "https://127.0.0.1/",
+        ),
+    ],
+)
+def test_cross_domain_redirect_never_creates_unsafe_or_unbound_candidate(
+    monkeypatch, body, final_url
+):
+    response = _Response(200, body, final_url)
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification.aiohttp.ClientSession",
+        lambda **_kwargs: _Session(response),
+    )
+    pages = {}
+    result = asyncio.run(verify_company_exists(
+        "SafetyCulture",
+        "https://safetyculture.com/",
+        company_linkedin="https://www.linkedin.com/company/mittihq",
+        require_https_transport=True,
+        homepage_evidence_sink=pages,
+    ))
+
+    assert VERIFIED_REBRAND_REDIRECT_KEY not in result.details
+    assert pages == {}
 
 
 def _stream_reader():
@@ -1975,10 +2080,10 @@ def test_cross_registrable_domain_redirect_is_identity_conflict(monkeypatch):
         "qualification.scoring.company_verification.aiohttp.ClientSession",
         lambda **_kwargs: _Session(
             _Response(
-                200,
-                b'<title>Example Company</title>'
-                b'<a href="https://linkedin.com/company/example-company">LinkedIn</a>',
-                "https://attacker.example/final",
+                    200,
+                    b'<title>Example Company</title>'
+                    b'<a href="https://linkedin.com/company/attacker-company">LinkedIn</a>',
+                    "https://attacker.example/final",
             )
         ),
     )

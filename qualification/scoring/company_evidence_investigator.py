@@ -342,10 +342,17 @@ evaluate completed stage events under either verified name. Do not discard an
 earlier completed round solely because it uses the old name; still check for a
 later completed stage event. Rebrand VERIFIED needs an explicit first-party
 statement that the old and new names are the same entity, and must identify
-both names. A domain-changing rebrand must identify both domains. A same-domain
-legal or trading-name alias may instead use an independently verified homepage
-name plus the same company domain and exact LinkedIn company slug, together
-with a fetched first-party quote that names the observed legal or trading name.
+both names. A domain-changing rebrand must identify both domains. A
+server-observed redirect can bind those domains only when its already fetched
+body explicitly proves the old and new names are the same operating company.
+A same-domain legal or trading-name alias may instead use an independently
+verified homepage name plus the same company domain and exact LinkedIn company
+slug, together with a fetched first-party quote that names the observed legal
+or trading name.
+A merger, acquisition, ownership change, parent, subsidiary, or replacement
+business alone does not prove that the old and new brands are the same
+operating company. A true rebrand can coexist with separate ownership history,
+but the quoted text must explicitly prove the old-to-new company continuity.
 A common domain, redirect, or shared LinkedIn slug alone is insufficient. Never
 inherit Public or another stage from a parent, holding company, or subsidiary.
 Headcount must be current company-wide headcount; department,
@@ -517,6 +524,47 @@ def _safe_https_url(value: Any) -> str:
     ):
         return ""
     return value
+
+
+def _validated_homepage_rebrand_redirect(
+    value: Any,
+    *,
+    company_locator: Mapping[str, Any],
+    fetched_pages: Mapping[str, str],
+    fetched_final_urls: Mapping[str, str],
+) -> dict[str, str]:
+    """Validate the server-only redirect locator against this invocation."""
+
+    expected_keys = {
+        "source", "submitted_name", "submitted_domain", "observed_domain",
+        "submitted_linkedin_slug", "observed_linkedin_slug", "request_url",
+        "final_url",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected_keys:
+        return {}
+    submitted_domain = _registrable_domain(company_locator.get("website"))
+    submitted_slug = linkedin_company_page_slug(company_locator.get("linkedin"))
+    request_url = _safe_https_url(value.get("request_url"))
+    final_url = _safe_https_url(value.get("final_url"))
+    observed_domain = str(value.get("observed_domain") or "").casefold()
+    if (
+        value.get("source") != "server_homepage_redirect_v1"
+        or value.get("submitted_name")
+        != str(company_locator.get("name") or "").strip()
+        or not submitted_domain
+        or value.get("submitted_domain") != submitted_domain
+        or not observed_domain
+        or observed_domain == submitted_domain
+        or not submitted_slug
+        or value.get("submitted_linkedin_slug") != submitted_slug
+        or value.get("observed_linkedin_slug") != submitted_slug
+        or _registrable_domain(request_url) != submitted_domain
+        or _registrable_domain(final_url) != observed_domain
+        or request_url not in fetched_pages
+        or fetched_final_urls.get(request_url) != final_url
+    ):
+        return {}
+    return {key: str(value[key]) for key in expected_keys}
 
 
 def _validated_homepage_navigation_locators(
@@ -1156,9 +1204,13 @@ def _quote_proves_rebrand_continuity(
         normalized_quote,
     ):
         return False
+    if re.search(r"\b(?:is now|becomes?)\s+(?:a\s+)?part of\b", normalized_quote):
+        return False
     continuity = re.search(
-        r"\b(?:formerly known as|is now|renamed(?: itself)?(?: from)?|"
-        r"changed (?:its )?name|same (?:legal )?(?:entity|company)|becomes?|"
+        r"\b(?:rebrand(?:s|ed|ing)?(?: as| to)?|formerly known as|is now|"
+        r"renamed(?: itself)?(?: from)?|"
+        r"changed (?:its )?name|has a new name|"
+        r"same (?:legal )?(?:entity|company)|becomes?|"
         r"trad(?:es|ing) as|doing business as|legal name)\b",
         normalized_quote,
     )
@@ -1866,6 +1918,14 @@ def _validated_findings(
                 )
             elif target == "rebrand":
                 anchor = identity_anchor or {}
+                redirect_domains_bind = bool(
+                    finding["old_domain"]
+                    == anchor.get("verified_rebrand_old_domain")
+                    and finding["new_domain"]
+                    == anchor.get("verified_rebrand_new_domain")
+                    and finding["old_domain"] != finding["new_domain"]
+                    and anchor.get("verified_rebrand_linkedin_slug")
+                )
                 same_domain_alias = bool(
                     _same_domain_name_alias(anchor)
                     and {
@@ -1912,10 +1972,15 @@ def _validated_findings(
                             or finding["old_domain"] == finding["new_domain"]
                             or finding["old_domain"] not in first_party_domains
                             or finding["new_domain"] not in first_party_domains
-                            or finding["old_domain"].casefold()
-                            not in fetched_text.casefold()
-                            or finding["new_domain"].casefold()
-                            not in fetched_text.casefold()
+                            or (
+                                not redirect_domains_bind
+                                and (
+                                    finding["old_domain"].casefold()
+                                    not in fetched_text.casefold()
+                                    or finding["new_domain"].casefold()
+                                    not in fetched_text.casefold()
+                                )
+                            )
                         )
                     )
                     or not (
@@ -2092,6 +2157,7 @@ async def investigate_company_evidence(
     positive_semantic_review: bool = False,
     prior_observations: Optional[Mapping[str, Any]] = None,
     verified_homepage_identity: Optional[Mapping[str, Any]] = None,
+    verified_homepage_rebrand_redirect: Optional[Mapping[str, Any]] = None,
     homepage_navigation_locators: Optional[Sequence[Mapping[str, Any]]] = None,
     prefetched_pages: Optional[Mapping[str, Any]] = None,
     diagnostic: Optional[dict[str, str]] = None,
@@ -2203,6 +2269,12 @@ async def investigate_company_evidence(
         prefetched_pages,
         submitted_source_urls=submitted_source_urls,
     )
+    verified_rebrand_redirect = _validated_homepage_rebrand_redirect(
+        verified_homepage_rebrand_redirect,
+        company_locator=company_locator,
+        fetched_pages=fetched_pages,
+        fetched_final_urls=fetched_final_urls,
+    )
     prefetched_count = len(fetched_pages)
 
     input_document = {
@@ -2239,6 +2311,14 @@ async def investigate_company_evidence(
             prefetched_pages=prefetched_count,
             remaining_fetch_calls=MAX_FETCH_CALLS,
         )
+    if verified_rebrand_redirect:
+        input_document["server_verified_rebrand_redirect_locator"] = {
+            **verified_rebrand_redirect,
+            "notice": (
+                "server_observed_redirect_and_linkedin_locator_only; "
+                "the fetched body must still explicitly prove rebrand continuity"
+            ),
+        }
     search_calls = 0
     fetch_calls = 0
     fetch_outcomes: list[dict[str, Any]] = []
@@ -2287,6 +2367,8 @@ async def investigate_company_evidence(
         )
         if domain
     }
+    if "rebrand" in requested_targets and verified_rebrand_redirect:
+        first_party_domains.add(verified_rebrand_redirect["observed_domain"])
     identity_names = {
         normalized
         for normalized in (
@@ -2327,6 +2409,21 @@ async def investigate_company_evidence(
         ).casefold(),
         "observed_linkedin_slug": linkedin_company_page_slug(
             (prior_observations or {}).get("observed_company_linkedin")
+        ),
+        **(
+            {
+                "verified_rebrand_old_domain": verified_rebrand_redirect[
+                    "submitted_domain"
+                ],
+                "verified_rebrand_new_domain": verified_rebrand_redirect[
+                    "observed_domain"
+                ],
+                "verified_rebrand_linkedin_slug": verified_rebrand_redirect[
+                    "observed_linkedin_slug"
+                ],
+            }
+            if verified_rebrand_redirect
+            else {}
         ),
     }
 

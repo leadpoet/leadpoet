@@ -516,19 +516,36 @@ def test_verified_relative_repair_rejects_missing_or_unbound_date_proof():
         [_relative_source(4, "Publication date: 2026-09-01")],
         {"source_index": 4, "quote": "Publication date: 2026-09-01"},
     )
+    for hidden_date in (
+        "[HarborSoft report](https://example.com/2026-09-01)",
+        "![HarborSoft report dated 2026-09-01](https://example.com/image.png)",
+        "[HarborSoft report](not-a-valid-url/2026-09-01)",
+        "Monday, Sep. 1, 2026 10:00 GMT",
+    ):
+        assert not _relative_repair_has_date(
+            [_relative_source(6, hidden_date)],
+            {"source_index": 6, "quote": hidden_date},
+        )
 
 
 def test_verified_relative_repair_accepts_same_source_date_proof():
-    dated_report = (
-        "September 1, 2026. HarborSoft published its market report."
-    )
     report = "HarborSoft published its market report."
     posting = "Platform Engineer role for HarborSoft's workflow product."
 
-    assert _relative_repair_has_date(
-        [_relative_source(0, dated_report)],
-        {"source_index": 0, "quote": dated_report},
-    )
+    for date_text in (
+        "September 1, 2026",
+        "Sep 1, 2026",
+        "Sep. 1, 2026",
+        "Sept. 1, 2026",
+        "1 September 2026",
+        "1 Sep 2026",
+        "1 Sept. 2026",
+    ):
+        dated_report = f"{date_text}. {report}"
+        assert _relative_repair_has_date(
+            [_relative_source(0, dated_report)],
+            {"source_index": 0, "quote": dated_report},
+        )
     for text, observed_date in (
         (report, "2026-09-01"),
         (posting, "2026-09-25"),

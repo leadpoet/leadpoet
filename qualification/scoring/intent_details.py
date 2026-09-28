@@ -936,13 +936,31 @@ _BODY_DATELINE_RE = re.compile(
 _INLINE_ISO_DATE_RE = re.compile(
     r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)"
 )
-_INLINE_ENGLISH_DATE_RE = re.compile(
-    r"\b(" + "|".join(_MONTHS) + r")\s+(\d{1,2}),\s+(\d{4})\b",
+_DATE_MONTH_NUMBERS = {
+    **_MONTHS,
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11,
+    "dec": 12,
+}
+_DATE_MONTH_PATTERN = (
+    r"(?:January|Jan\.?|February|Feb\.?|March|Mar\.?|April|Apr\.?|May|"
+    r"June|Jun\.?|July|Jul\.?|August|Aug\.?|September|Sept?\.?|October|"
+    r"Oct\.?|November|Nov\.?|December|Dec\.?)"
+)
+_INLINE_MONTH_FIRST_DATE_RE = re.compile(
+    rf"\b({_DATE_MONTH_PATTERN})\s+(\d{{1,2}}),\s+(\d{{4}})\b",
+    re.IGNORECASE,
+)
+_INLINE_DAY_FIRST_DATE_RE = re.compile(
+    rf"\b(\d{{1,2}})\s+({_DATE_MONTH_PATTERN})\s+(\d{{4}})\b",
     re.IGNORECASE,
 )
 _TEMPORAL_LABEL_WORDS = frozenset({
-    "as", "at", "date", "dated", "first", "last", "modified", "of", "on",
-    "posted", "publication", "published", "time", "timestamp", "updated",
+    "am", "as", "at", "date", "dated", "first", "fri", "friday", "gmt",
+    "last", "mod", "modified", "mon", "monday", "of", "on", "pm", "posted",
+    "publication", "published", "sat", "saturday", "sun", "sunday", "thu",
+    "thur", "thurs", "thursday", "time", "timestamp", "tue", "tues",
+    "tuesday", "updated", "utc", "wed", "wednesday",
 })
 
 
@@ -975,12 +993,22 @@ def _calendar_date_spans(text: str) -> list[tuple[int, int]]:
         except ValueError:
             continue
         spans.append(match.span())
-    for match in _INLINE_ENGLISH_DATE_RE.finditer(str(text or "")):
+    for match in _INLINE_MONTH_FIRST_DATE_RE.finditer(str(text or "")):
         try:
             date(
                 int(match.group(3)),
-                _MONTHS[match.group(1).casefold()],
+                _DATE_MONTH_NUMBERS[match.group(1).casefold().rstrip(".")],
                 int(match.group(2)),
+            )
+        except (KeyError, ValueError):
+            continue
+        spans.append(match.span())
+    for match in _INLINE_DAY_FIRST_DATE_RE.finditer(str(text or "")):
+        try:
+            date(
+                int(match.group(3)),
+                _DATE_MONTH_NUMBERS[match.group(2).casefold().rstrip(".")],
+                int(match.group(1)),
             )
         except (KeyError, ValueError):
             continue
@@ -1029,17 +1057,11 @@ def _relative_time_repair_has_source_bound_date(
             == "authenticated_provider_observation"
         ):
             continue
-        date_spans = _calendar_date_spans(quote)
-        typed_dates = {
-            raw_date.get("date")
-            for raw_date in source.get("observed_dates") or []
-            if isinstance(raw_date, Mapping)
-            and isinstance(raw_date.get("date"), str)
-            and _calendar_date_spans(raw_date["date"])
-        }
-        if quote.strip() in typed_dates or date_spans:
+        quote_surface = _visible_admitted_evidence_surface(quote)
+        date_spans = _calendar_date_spans(quote_surface)
+        if date_spans:
             date_sources.add(source_index)
-        if _quote_has_substantive_text(quote, date_spans):
+        if _quote_has_substantive_text(quote_surface, date_spans):
             substantive_sources.add(source_index)
     return bool(date_sources & substantive_sources)
 

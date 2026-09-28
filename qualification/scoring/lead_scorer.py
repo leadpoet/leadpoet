@@ -4677,24 +4677,44 @@ def _investigator_identity_context(
 ) -> tuple[Mapping[str, Any], str]:
     """Carry one proven numeric LinkedIn alias into the investigator."""
 
-    resolved_identity = _structured_profile_identity_anchor(
-        homepage_identity,
-        web_identity,
-        transport_domain,
-    )
     submitted_slug = linkedin_company_page_slug(submitted_linkedin)
     homepage_slug = str(
         homepage_identity.get("linkedin_company_slug") or ""
+    ).strip().casefold()
+    # The caller can already hold the resolved vanity anchor after a structured
+    # website redirect check. Reconstruct its original numeric anchor only to
+    # revalidate the same strict embedded alias proof before changing the
+    # investigator locator. An unverified submitted numeric slug cannot pass
+    # _structured_profile_identity_anchor on its own.
+    alias_anchor = homepage_identity
+    if (
+        submitted_slug
+        and submitted_slug.isdigit()
+        and homepage_slug
+        and not homepage_slug.isdigit()
+    ):
+        alias_anchor = {
+            **homepage_identity,
+            "linkedin_company_slug": submitted_slug,
+        }
+    resolved_identity = _structured_profile_identity_anchor(
+        alias_anchor,
+        web_identity,
+        transport_domain,
+    )
+    anchor_slug = str(
+        alias_anchor.get("linkedin_company_slug") or ""
     ).strip().casefold()
     resolved_slug = str(
         resolved_identity.get("linkedin_company_slug") or ""
     ).strip().casefold()
     if (
         submitted_slug
-        and submitted_slug == homepage_slug
-        and homepage_slug.isdigit()
+        and submitted_slug == anchor_slug
+        and anchor_slug.isdigit()
         and resolved_slug
         and not resolved_slug.isdigit()
+        and homepage_slug in {anchor_slug, resolved_slug}
         and web_identity.get("decision") == COMPANY_FIT_MATCH
         and web_identity.get("reason_code")
         == "structured_numeric_linkedin_alias_verified"

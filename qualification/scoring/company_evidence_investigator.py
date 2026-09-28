@@ -2497,8 +2497,19 @@ async def investigate_company_evidence(
                             )
                             for target in requested_targets
                         }
+                    preserved_stage = timeout_preserved.get("stage") or {}
                     return {
                         "claims": timeout_claims,
+                        # Preserve the server-only validation receipt together
+                        # with the exact stage finding it already validated.
+                        # Generated timeout findings and unresolved correction
+                        # targets never receive this metadata.
+                        "_validated_stage_finding": (
+                            dict(preserved_stage)
+                            if preserved_stage.get("status")
+                            in {"VERIFIED", "CONTRADICTED"}
+                            else {}
+                        ),
                         "failure_reason": "",
                         "usage": {
                             "reasoning_turns": _turn,

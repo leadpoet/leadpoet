@@ -249,6 +249,7 @@ def _run_real_investigation(
     prior_result=None,
     attribute_source_cache=None,
     repair_required_attribute: bool = False,
+    verified_identity=None,
 ):
     active_icp = icp or _icp()
     requests = []
@@ -283,7 +284,9 @@ def _run_real_investigation(
             investigation_targets=("industry",),
             icp_attribute=str(active_icp.required_attribute or ""),
             icp_stage="Public",
-            verified_identity=_verified_homepage_identity(),
+            verified_identity=(
+                verified_identity or _verified_homepage_identity()
+            ),
             verified_transport_domain="rapid7.com",
             structured_employee_size_evidence=None,
             structured_public_company_evidence=None,
@@ -373,6 +376,30 @@ def test_exact_rapid7_quote_passes_real_entry_only_after_full_alias_proof(
         "registrable_dns_domain": "rapid7.com",
         "linkedin_company_slug": "rapid7",
     }
+
+
+def test_exact_unnamed_product_quote_uses_pre_resolved_numeric_alias(
+    monkeypatch,
+):
+    resolved_identity = {
+        **_verified_homepage_identity(),
+        "linkedin_company_slug": "rapid7",
+    }
+    result, requests = _run_real_investigation(
+        monkeypatch,
+        structured_identity=_structured_identity(),
+        finding=_industry_finding(),
+        verified_identity=resolved_identity,
+    )
+
+    assert result[2]["industry"]["status"] == "VERIFIED"
+    assert result[2]["industry"]["evidence_quote"] == PRODUCT_QUOTE
+    assert len(requests) == 1
+    input_document = json.loads(
+        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+    )
+    assert input_document["company_locator"]["linkedin"] == VANITY_LINKEDIN
+    assert input_document["verified_homepage_identity"] == resolved_identity
 
 
 def test_proven_alias_carries_verified_industry_into_attribute_repair(
@@ -590,6 +617,56 @@ def test_numeric_alias_continuity_is_one_way_and_exact():
     )
     assert reverse_identity["linkedin_company_slug"] == "rapid7"
     assert reverse_locator == VANITY_LINKEDIN
+
+
+def test_pre_resolved_numeric_alias_continuity_revalidates_embedded_proof():
+    verified_web = _web_identity(_structured_identity())
+    resolved_homepage = {
+        **_verified_homepage_identity(),
+        "linkedin_company_slug": "rapid7",
+    }
+
+    identity, locator = lead_scorer._investigator_identity_context(
+        NUMERIC_LINKEDIN,
+        resolved_homepage,
+        verified_web,
+        "rapid7.com",
+    )
+
+    assert identity == resolved_homepage
+    assert locator == VANITY_LINKEDIN
+
+
+@pytest.mark.parametrize(
+    "web_update",
+    [
+        pytest.param({"reason_code": "verifier_accepted"}, id="wrong-reason"),
+        pytest.param({"decision": COMPANY_FIT_UNAVAILABLE}, id="unverified"),
+        pytest.param({"submitted_domain": "other.example"}, id="wrong-domain"),
+        pytest.param({"submitted_name": "Other Company"}, id="wrong-name"),
+        pytest.param({"submitted_linkedin_slug": "99999"}, id="wrong-numeric-id"),
+        pytest.param({"observed_linkedin_slug": "other-company"}, id="wrong-vanity"),
+    ],
+)
+def test_pre_resolved_numeric_alias_rejects_conflicted_receipt(web_update):
+    verified_web = {
+        **_web_identity(_structured_identity()),
+        **web_update,
+    }
+    resolved_homepage = {
+        **_verified_homepage_identity(),
+        "linkedin_company_slug": "rapid7",
+    }
+
+    identity, locator = lead_scorer._investigator_identity_context(
+        NUMERIC_LINKEDIN,
+        resolved_homepage,
+        verified_web,
+        "rapid7.com",
+    )
+
+    assert identity == resolved_homepage
+    assert locator == NUMERIC_LINKEDIN
 
 
 def test_exact_observed_malformed_stage_quote_remains_rejected():

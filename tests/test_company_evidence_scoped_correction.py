@@ -37,6 +37,9 @@ MALFORMED_SEC_QUOTE = SEC_PAGE.replace(" of the registrant", "", 1)
 ACQUIRED_QUOTE = (
     "Rapid7 has been acquired by Parent Corp and is now part of its platform."
 )
+HISTORICAL_IPO_QUOTE = (
+    "Rapid7 completed its initial public offering in 2015."
+)
 
 
 def _finding(target: str, **overrides):
@@ -368,8 +371,25 @@ def test_scoped_incomplete_submit_retry_uses_pending_schema_once(
         }
 
 
+@pytest.mark.parametrize(
+    "invalid_stage",
+    [
+        pytest.param(
+            _finding(
+                "stage",
+                evidence_url=SEC_URL,
+                evidence_quote=MALFORMED_SEC_QUOTE,
+            ),
+            id="nonexistent-quote",
+        ),
+        pytest.param(
+            _finding("stage", evidence_quote=HISTORICAL_IPO_QUOTE),
+            id="stale-ipo",
+        ),
+    ],
+)
 def test_scoped_candidate_preserves_valid_finding_on_admission_timeout(
-    monkeypatch,
+    monkeypatch, invalid_stage,
 ):
     requests = []
     clock = {"now": 0.0}
@@ -384,7 +404,9 @@ def test_scoped_candidate_preserves_valid_finding_on_admission_timeout(
             "type": "function",
             "function": {
                 "name": "submit_findings",
-                "arguments": json.dumps({"findings": _initial_findings()}),
+                "arguments": json.dumps({
+                    "findings": [invalid_stage, _industry_finding()]
+                }),
             },
         }]}}]}
 
@@ -425,7 +447,10 @@ def test_scoped_candidate_preserves_valid_finding_on_admission_timeout(
             "linkedin_company_slug": "rapid7",
         },
         prefetched_pages={
-            NASDAQ_URL: {"final_url": NASDAQ_URL, "text": NASDAQ_QUOTE},
+            NASDAQ_URL: {
+                "final_url": NASDAQ_URL,
+                "text": f"{NASDAQ_QUOTE} {HISTORICAL_IPO_QUOTE}",
+            },
             SEC_URL: {"final_url": SEC_URL, "text": SEC_PAGE},
             PRODUCT_URL: {"final_url": PRODUCT_URL, "text": PRODUCT_QUOTE},
         },
@@ -439,6 +464,84 @@ def test_scoped_candidate_preserves_valid_finding_on_admission_timeout(
     )
     assert result["claims"]["industry"]["status"] == "VERIFIED"
     assert result["claims"]["industry"]["evidence_quote"] == PRODUCT_QUOTE
+    assert result["_validated_stage_finding"] == {}
+
+
+def test_timeout_preserves_only_server_validated_stage_metadata(monkeypatch):
+    requests = []
+    clock = {"now": 0.0}
+    invalid_industry = _industry_finding(
+        evidence_quote="Cloud security wording absent from the fetched page."
+    )
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        arena_operations.validate_operation_request("openrouter.chat", payload)
+        requests.append(payload)
+        clock["now"] = investigator.ADMISSION_DEADLINE_SECONDS
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "call-1",
+            "type": "function",
+            "function": {
+                "name": "submit_findings",
+                "arguments": json.dumps({
+                    "findings": [_finding("stage"), invalid_industry]
+                }),
+            },
+        }]}}]}
+
+    async def fake_search(_session, _query, *, key):
+        del key
+        return {"results": []}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 3)
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(
+        investigator,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock["now"]),
+    )
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "Rapid7",
+            "website": "https://rapid7.com",
+            "linkedin": "https://www.linkedin.com/company/rapid7",
+        },
+        targets=("stage", "industry"),
+        requested_stage="Public",
+        prior_observations={
+            "observed_company_name": "Rapid7",
+            "observed_company_website": "https://rapid7.com",
+            "observed_company_linkedin": (
+                "https://www.linkedin.com/company/rapid7"
+            ),
+            "submitted_source_urls": [NASDAQ_URL, PRODUCT_URL],
+        },
+        verified_homepage_identity={
+            "normalized_name": "Rapid7",
+            "registrable_dns_domain": "rapid7.com",
+            "linkedin_company_slug": "rapid7",
+        },
+        prefetched_pages={
+            NASDAQ_URL: {"final_url": NASDAQ_URL, "text": NASDAQ_QUOTE},
+            PRODUCT_URL: {
+                "final_url": PRODUCT_URL,
+                "text": PRODUCT_QUOTE,
+            },
+        },
+    ))
+
+    assert len(requests) == 1
+    assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["claims"]["industry"]["status"] == "UNPROVEN"
+    assert result["claims"]["industry"]["reason"] == (
+        "investigation admission budget exhausted"
+    )
+    assert result["_validated_stage_finding"] == result["claims"]["stage"]
 
 
 def test_scoped_correction_rejects_unrelated_extra_target(monkeypatch):

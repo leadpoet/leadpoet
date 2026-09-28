@@ -456,6 +456,255 @@ async def test_undated_relative_coverage_uses_one_bounded_semantic_recheck(
     assert receipt["checks"]["facts_supported"] is False
 
 
+def _relative_source(
+    source_index: int,
+    text: str,
+    *,
+    observed_date: str = "",
+    evidence_kind: str = "verified_source_context",
+) -> dict:
+    return {
+        "source_index": source_index,
+        "evidence_kind": evidence_kind,
+        "admitted_text": [text],
+        **({
+            "observed_dates": [{
+                "date": observed_date,
+                "basis": "source_publication_date",
+            }],
+        } if observed_date else {}),
+    }
+
+
+def _relative_repair_has_date(sources: list[dict], *bindings) -> bool:
+    return intent_details._relative_time_repair_has_source_bound_date(
+        {"unit_id": 0, "status": "VERIFIED", "evidence": list(bindings)},
+        {"admitted_evidence": sources},
+    )
+
+
+def test_verified_relative_repair_rejects_missing_or_unbound_date_proof():
+    stage = "HarborSoft is a Series B company."
+    observed = "The provider first observed this listing on 2026-09-20."
+    invalid = "On 2026-02-30 HarborSoft published a funding report."
+    stage_source = _relative_source(
+        5, stage, evidence_kind="verified_company_fact",
+    )
+    job_source = _relative_source(
+        0, "HarborSoft is hiring an engineer.", observed_date="2026-04-21",
+    )
+    observation_source = _relative_source(
+        2, observed, evidence_kind="authenticated_provider_observation",
+    )
+
+    assert not _relative_repair_has_date(
+        [stage_source], {"source_index": 5, "quote": stage},
+    )
+    assert not _relative_repair_has_date(
+        [job_source, stage_source],
+        {"source_index": 0, "quote": "2026-04-21"},
+        {"source_index": 5, "quote": stage},
+    )
+    assert not _relative_repair_has_date(
+        [observation_source], {"source_index": 2, "quote": observed},
+    )
+    assert not _relative_repair_has_date(
+        [_relative_source(3, invalid)],
+        {"source_index": 3, "quote": invalid},
+    )
+    assert not _relative_repair_has_date(
+        [_relative_source(4, "Publication date: 2026-09-01")],
+        {"source_index": 4, "quote": "Publication date: 2026-09-01"},
+    )
+
+
+def test_verified_relative_repair_accepts_same_source_date_proof():
+    dated_report = (
+        "September 1, 2026. HarborSoft published its market report."
+    )
+    report = "HarborSoft published its market report."
+    posting = "Platform Engineer role for HarborSoft's workflow product."
+
+    assert _relative_repair_has_date(
+        [_relative_source(0, dated_report)],
+        {"source_index": 0, "quote": dated_report},
+    )
+    for text, observed_date in (
+        (report, "2026-09-01"),
+        (posting, "2026-09-25"),
+    ):
+        assert _relative_repair_has_date(
+            [_relative_source(0, text, observed_date=observed_date)],
+            {"source_index": 0, "quote": observed_date},
+            {"source_index": 0, "quote": text},
+        )
+
+
+def test_exact_retained_unibuddy_repair_fails_closed_without_date_proof():
+    stage_quote = (
+        "You may have heard the news, we're proud to have raised a whopping "
+        "$20 million USD in Series B funding and we're excited!"
+    )
+    document = {"admitted_evidence": [
+        _relative_source(
+            0,
+            "Software Engineer II - Chat Systems. Unibuddy is hiring.",
+            observed_date="2026-04-21",
+        ),
+        _relative_source(
+            5, stage_quote, evidence_kind="verified_company_fact",
+        ),
+    ]}
+    exact_action_21 = json.dumps({"repairs": [{
+        "evidence": [{"quote": stage_quote, "source_index": 5}],
+        "status": "VERIFIED",
+        "unit_id": 1,
+    }]})
+
+    with pytest.raises(
+        ValueError,
+        match="verified relative-time repair lacks source-bound date proof",
+    ):
+        intent_details._validate_relative_time_repair_date_proof(
+            exact_action_21,
+            document,
+            {1: {"disputed_clause": "recent coverage identifies Series B"}},
+        )
+
+
+@pytest.mark.asyncio
+async def test_forged_date_bearing_relative_repair_remains_unavailable(
+    monkeypatch,
+):
+    stage_quote = "HarborSoft is a Series B company."
+    inputs = _inputs(
+        company_name="HarborSoft",
+        paragraph="Recent coverage identifies HarborSoft as Series B.",
+        signal_quote="HarborSoft is actively hiring a Platform Engineer.",
+        source_text="HarborSoft is actively hiring a Platform Engineer.",
+        company_dimension="stage",
+        company_quote=stage_quote,
+    )
+    calls = 0
+
+    async def judge(prompt, **_kwargs):
+        nonlocal calls
+        calls += 1
+        payload = json.loads(prompt)
+        document = payload.get("review_document", payload)
+        if calls == 1:
+            return json.dumps(_response(
+                document, [(True, "VERIFIED", [stage_quote])],
+            ))
+        stage_binding = _binding(document, stage_quote)
+        stage_binding["quote"] = (
+            "On 2026-09-01 HarborSoft was covered as a Series B company."
+        )
+        return json.dumps({"repairs": [{
+            "unit_id": 0,
+            "status": "VERIFIED",
+            "evidence": [stage_binding],
+        }]})
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = await intent_details.review_intent_details(*inputs)
+
+    assert calls == 2
+    assert receipt["decision"] == "unavailable"
+    assert receipt["failure_reason_code"] == "malformed_response"
+
+
+@pytest.mark.asyncio
+async def test_date_bearing_job_does_not_semantically_date_funding_coverage(
+    monkeypatch,
+):
+    job_quote = (
+        "On 2026-04-21 HarborSoft posted a Platform Engineer opening."
+    )
+    stage_quote = "HarborSoft is a Series B company."
+    inputs = _inputs(
+        company_name="HarborSoft",
+        paragraph=(
+            f"{job_quote} Recent coverage identifies HarborSoft's latest "
+            "institutional stage as Series B."
+        ),
+        signal_quote=job_quote,
+        source_text=job_quote,
+        source_publication_date="2026-04-21",
+        company_dimension="stage",
+        company_quote=stage_quote,
+    )
+    calls = []
+
+    async def judge(prompt, **kwargs):
+        calls.append((prompt, kwargs))
+        payload = json.loads(prompt)
+        document = payload.get("review_document", payload)
+        if len(calls) == 1:
+            return json.dumps(_response(document, [
+                (True, "VERIFIED", [job_quote]),
+                (True, "VERIFIED", [stage_quote]),
+            ]))
+        assert "substantive\nsupport from the same source_index" in kwargs[
+            "system_prompt"
+        ]
+        return json.dumps({"repairs": [{
+            "unit_id": 1,
+            "status": "UNPROVEN",
+            "evidence": [],
+        }]})
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = await intent_details.review_intent_details(*inputs)
+
+    assert len(calls) == 2
+    assert receipt["decision"] == "mismatch"
+    assert receipt["checks"]["facts_supported"] is False
+
+
+@pytest.mark.asyncio
+async def test_dated_relative_claim_keeps_unsupported_other_clause_unproven(
+    monkeypatch,
+):
+    report_quote = (
+        "On 2026-09-01 HarborSoft published its Workflow Market Outlook."
+    )
+    inputs = _inputs(
+        company_name="HarborSoft",
+        paragraph=(
+            "Recent coverage dated 2026-09-01 reports HarborSoft's Workflow "
+            "Market Outlook and says it won a national university award."
+        ),
+        signal_quote=report_quote,
+        source_text=report_quote,
+        source_publication_date="2026-09-01",
+    )
+    calls = 0
+
+    async def judge(prompt, **_kwargs):
+        nonlocal calls
+        calls += 1
+        payload = json.loads(prompt)
+        document = payload.get("review_document", payload)
+        if calls == 1:
+            return json.dumps(_response(
+                document,
+                [(True, "VERIFIED", [report_quote, "2026-09-01"])],
+            ))
+        return json.dumps({"repairs": [{
+            "unit_id": 0,
+            "status": "UNPROVEN",
+            "evidence": [],
+        }]})
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = await intent_details.review_intent_details(*inputs)
+
+    assert calls == 2
+    assert receipt["decision"] == "mismatch"
+    assert receipt["checks"]["facts_supported"] is False
+
+
 @pytest.mark.asyncio
 async def test_body_date_can_keep_relative_publication_claim_verified_on_recheck(
     monkeypatch,

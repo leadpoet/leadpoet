@@ -933,6 +933,17 @@ _BODY_DATELINE_RE = re.compile(
     + r")\s+(\d{1,2}),\s+(\d{4})\s*(?:[-\u2013\u2014]|$)",
     re.IGNORECASE,
 )
+_INLINE_ISO_DATE_RE = re.compile(
+    r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)"
+)
+_INLINE_ENGLISH_DATE_RE = re.compile(
+    r"\b(" + "|".join(_MONTHS) + r")\s+(\d{1,2}),\s+(\d{4})\b",
+    re.IGNORECASE,
+)
+_TEMPORAL_LABEL_WORDS = frozenset({
+    "as", "at", "date", "dated", "first", "last", "modified", "of", "on",
+    "posted", "publication", "published", "time", "timestamp", "updated",
+})
 
 
 def _body_dateline_dates(text: str) -> list[str]:
@@ -950,6 +961,87 @@ def _body_dateline_dates(text: str) -> list[str]:
             continue
         dates.append(parsed.isoformat())
     return list(dict.fromkeys(dates))
+
+
+def _calendar_date_spans(text: str) -> list[tuple[int, int]]:
+    """Return spans for valid explicit calendar dates in one evidence quote."""
+
+    spans: list[tuple[int, int]] = []
+    for match in _INLINE_ISO_DATE_RE.finditer(str(text or "")):
+        try:
+            date(
+                int(match.group(1)), int(match.group(2)), int(match.group(3)),
+            )
+        except ValueError:
+            continue
+        spans.append(match.span())
+    for match in _INLINE_ENGLISH_DATE_RE.finditer(str(text or "")):
+        try:
+            date(
+                int(match.group(3)),
+                _MONTHS[match.group(1).casefold()],
+                int(match.group(2)),
+            )
+        except (KeyError, ValueError):
+            continue
+        spans.append(match.span())
+    return sorted(set(spans))
+
+
+def _quote_has_substantive_text(
+    quote: str,
+    date_spans: Sequence[tuple[int, int]],
+) -> bool:
+    """Distinguish a factual excerpt from a bare cited calendar date."""
+
+    characters = list(str(quote or ""))
+    for start, end in date_spans:
+        characters[start:end] = " " * (end - start)
+    words = re.findall(r"[A-Za-z]{2,}", "".join(characters).casefold())
+    return any(word not in _TEMPORAL_LABEL_WORDS for word in words)
+
+
+def _relative_time_repair_has_source_bound_date(
+    repair: Mapping[str, Any],
+    document: Mapping[str, Any],
+) -> bool:
+    """Require date proof and substantive support from one admitted source."""
+
+    sources = {
+        source.get("source_index"): source
+        for source in document.get("admitted_evidence") or []
+        if isinstance(source, Mapping)
+        and type(source.get("source_index")) is int
+    }
+    date_sources: set[int] = set()
+    substantive_sources: set[int] = set()
+    for binding in repair.get("evidence") or []:
+        if not isinstance(binding, Mapping):
+            continue
+        source_index = binding.get("source_index")
+        source = sources.get(source_index)
+        quote = binding.get("quote")
+        if (
+            not isinstance(source, Mapping)
+            or not isinstance(quote, str)
+            or not quote.strip()
+            or source.get("evidence_kind")
+            == "authenticated_provider_observation"
+        ):
+            continue
+        date_spans = _calendar_date_spans(quote)
+        typed_dates = {
+            raw_date.get("date")
+            for raw_date in source.get("observed_dates") or []
+            if isinstance(raw_date, Mapping)
+            and isinstance(raw_date.get("date"), str)
+            and _calendar_date_spans(raw_date["date"])
+        }
+        if quote.strip() in typed_dates or date_spans:
+            date_sources.add(source_index)
+        if _quote_has_substantive_text(quote, date_spans):
+            substantive_sources.add(source_index)
+    return bool(date_sources & substantive_sources)
 
 
 def review_evidence(
@@ -1779,7 +1871,8 @@ any clause is unproven; otherwise VERIFIED. Do not preserve unsupported other
 clauses merely because the relative-time clause is supported. A source publication
 date is not automatically an event date. An authenticated first-observed date
 proves observation only. A date-bearing admitted source excerpt or the relevant
-typed date can prove timing.
+typed date can prove timing. VERIFIED must cite that date proof and substantive
+support from the same source_index; otherwise return UNPROVEN.
 
 For other listed units, keep their status and repair citations only. Return no
 unlisted unit, coverage, factual flags, or aggregate checks. VERIFIED and
@@ -1891,6 +1984,36 @@ def _merge_citation_repairs(
         if unit["unit_id"] in expected_unit_ids:
             unit["evidence"] = copy.deepcopy(evidence_by_id[unit["unit_id"]])
     return merged
+
+
+def _validate_relative_time_repair_date_proof(
+    response: str,
+    document: Mapping[str, Any],
+    relative_time_targets: Mapping[int, Mapping[str, Any]],
+) -> None:
+    """Reject a VERIFIED temporal repair with no same-source date proof."""
+
+    raw_repair = json.loads(response)
+    items = raw_repair.get("repairs") if isinstance(raw_repair, Mapping) else None
+    if not isinstance(items, list):
+        return
+    repairs = {
+        item.get("unit_id"): item
+        for item in items
+        if isinstance(item, Mapping) and type(item.get("unit_id")) is int
+    }
+    for unit_id in relative_time_targets:
+        repair_item = repairs.get(unit_id)
+        if (
+            isinstance(repair_item, Mapping)
+            and repair_item.get("status") == "VERIFIED"
+            and not _relative_time_repair_has_source_bound_date(
+                repair_item, document,
+            )
+        ):
+            raise ValueError(
+                "verified relative-time repair lacks source-bound date proof"
+            )
 
 
 def _merge_semantic_repairs(
@@ -2070,6 +2193,9 @@ missing review into an accepted paragraph or a terminal company mismatch.
                 }
             try:
                 if semantic_unit_ids:
+                    _validate_relative_time_repair_date_proof(
+                        repair_response, document, exc.relative_time_targets,
+                    )
                     merged = _merge_semantic_repairs(
                         repair_response, exc.held_response,
                         set(exc.issues), semantic_unit_ids,

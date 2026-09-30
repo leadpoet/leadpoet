@@ -67,13 +67,7 @@ class PerIcpHarness(QualityHarness):
 
 @pytest.fixture
 def database():
-    yield from database_with_lab_arena_migration(
-        CURRENT_SERVICE_MIGRATIONS
-        + (
-            "289-lab-arena-per-icp-cost-policy.sql",
-            "292-lab-arena-null-final-score-publication.sql",
-        )
-    )
+    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
 
 
 def test_per_icp_overshoot_preserves_output_other_icps_restart_and_rewards(database, tmp_path):
@@ -176,6 +170,11 @@ def test_per_icp_overshoot_preserves_output_other_icps_restart_and_rewards(datab
     forged_documents.append(forged)
     forged = deepcopy(genuine)
     forged["cost_summary"]["per_icp"].pop()
+    forged_documents.append(forged)
+    forged = deepcopy(genuine)
+    forged["cost_summary"]["per_icp"][-1] = deepcopy(
+        forged["cost_summary"]["per_icp"][0]
+    )
     forged_documents.append(forged)
     forged = deepcopy(genuine)
     forged["final_score"] += 1
@@ -575,17 +574,24 @@ def test_all_budget_exhausted_challenger_publishes_null_score(database, tmp_path
     fixtures.assert_canary_absent(harness, connect)
 
 
-def test_null_score_publication_migration_replays_and_rolls_back(database):
+def test_publication_eligibility_reuse_migration_replays_and_rolls_back(database):
     psycopg2, dsn = database
     migration = (
         Path(__file__).resolve().parents[2]
         / "scripts"
-        / "292-lab-arena-null-final-score-publication.sql"
+        / "367-lab-arena-publication-eligibility-reuse.sql"
     ).read_text(encoding="utf-8")
     connection = psycopg2.connect(**dsn)
     connection.autocommit = True
     try:
         with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_catalog.pg_get_userbyid(proowner),prosecdef,"
+                "provolatile,proconfig,proacl FROM pg_catalog.pg_proc WHERE "
+                "oid='public.lab_arena__per_icp_publication_valid(text,jsonb)'"
+                "::pg_catalog.regprocedure"
+            )
+            identity = cursor.fetchone()
             cursor.execute(
                 "SELECT pg_catalog.pg_get_functiondef("
                 "'public.lab_arena__per_icp_publication_valid(text,jsonb)'"
@@ -600,13 +606,17 @@ def test_null_score_publication_migration_replays_and_rolls_back(database):
                 "::pg_catalog.regprocedure)"
             )
             assert cursor.fetchone()[0] == original
+            cursor.execute(
+                "SELECT pg_catalog.pg_get_userbyid(proowner),prosecdef,"
+                "provolatile,proconfig,proacl FROM pg_catalog.pg_proc WHERE "
+                "oid='public.lab_arena__per_icp_publication_valid(text,jsonb)'"
+                "::pg_catalog.regprocedure"
+            )
+            assert cursor.fetchone() == identity
 
             failing = migration.replace(
-                "RETURN TRUE;", "RETURN FALSE;", 1
-            ).replace(
-                "pg_catalog.strpos(v_definition, 'v_is_baseline') = 0 THEN",
-                "pg_catalog.strpos(v_definition, 'deliberate_missing_marker') = 0 THEN",
-                1,
+                "lab_arena_verified_publication_eligibility_v1",
+                "deliberately_unknown_publication_shape",
             )
             with pytest.raises(psycopg2.Error):
                 cursor.execute(failing)
@@ -617,5 +627,12 @@ def test_null_score_publication_migration_replays_and_rolls_back(database):
                 "::pg_catalog.regprocedure)"
             )
             assert cursor.fetchone()[0] == original
+            cursor.execute(
+                "SELECT pg_catalog.pg_get_userbyid(proowner),prosecdef,"
+                "provolatile,proconfig,proacl FROM pg_catalog.pg_proc WHERE "
+                "oid='public.lab_arena__per_icp_publication_valid(text,jsonb)'"
+                "::pg_catalog.regprocedure"
+            )
+            assert cursor.fetchone() == identity
     finally:
         connection.close()

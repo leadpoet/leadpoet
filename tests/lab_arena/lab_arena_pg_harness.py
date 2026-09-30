@@ -119,6 +119,7 @@ CURRENT_SERVICE_MIGRATIONS = POSTGREST_MIGRATIONS + (
     "356-lab-arena-deadline-provider-retry-isolation.sql",
     "362-lab-arena-publication-aggregate-double.sql",
     "363-lab-arena-judgment-group-terminal-handoff.sql",
+    "367-lab-arena-publication-eligibility-reuse.sql",
 )
 
 

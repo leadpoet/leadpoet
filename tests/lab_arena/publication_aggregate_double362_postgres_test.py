@@ -55,7 +55,12 @@ MICRO_SCORE_PATTERN = tuple(
 @pytest.fixture(scope="module")
 def database():
     migrations = tuple(
-        name for name in CURRENT_SERVICE_MIGRATIONS if name != MIGRATION.name
+        name
+        for name in CURRENT_SERVICE_MIGRATIONS
+        if name not in (
+            MIGRATION.name,
+            "367-lab-arena-publication-eligibility-reuse.sql",
+        )
     )
     yield from database_with_lab_arena_migration(migrations)
 

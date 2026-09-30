@@ -272,7 +272,8 @@ configuration, logs, or Git.
 Run `--check-scoring-only` with the same interpreter, runtime path, work path,
 and account as the validator. It uses the same existing non-interactive sudo
 permission as normal startup. It checks Linux x86_64, the selected executable,
-rootful service identity, a five-second `runsc --version` invocation, and runner
+rootful service identity, bounded five-second `runsc --version` and isolated
+Python `pip --version` invocations, and runner
 directory access, including `sandboxes`, `runs`, `images`, `sources`, and the
 fixed `/tmp` socket root. It creates missing named runner directories with private
 permissions and removes only its own temporary write probes. Existing runner
@@ -312,6 +313,9 @@ but no paid provider requests. Missing or invalid proxies fail this check.
 | `runsc_unusable` | Check executable architecture and the complete matching installation. |
 | `runsc_probe_timeout` | Investigate why the installed runtime's version check hangs. |
 | `runsc_probe_cleanup_failed` | Inspect the host for a stuck version-check process; forced cleanup could not be confirmed. |
+| `dependency_installer_unavailable` | Install pip for the Python interpreter used by the validator. |
+| `dependency_installer_probe_timeout` | Investigate why that interpreter's pip version check hangs. |
+| `dependency_installer_probe_cleanup_failed` | Inspect the host for a stuck pip check; cleanup could not be confirmed. |
 | `unsupported_host` | Use Linux x86_64 for this Arena integration. |
 | `root_required` | The process is not root and existing non-interactive sudo permission was unavailable. Scoring cannot start; weights continue. |
 | `unsafe_work_directory` | Inspect the reported path; preserve its contents and correct the configuration. |

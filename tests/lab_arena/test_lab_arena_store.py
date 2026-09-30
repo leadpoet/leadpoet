@@ -145,6 +145,48 @@ def test_rpc_other_http_error_stays_base_store_error_without_replay():
     assert len(requests) == 1
 
 
+def test_publication_allows_database_validation_without_changing_other_deadlines():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json=[] if request.method == "GET" else {"status": "ok"})
+
+    timeout = httpx.Timeout(connect=2, read=8, write=3, pool=4)
+    with httpx.Client(transport=httpx.MockTransport(handler), timeout=timeout) as client:
+        transport = PostgrestTransport(
+            "https://project.example", service_key="sb_secret_test", http_client=client
+        )
+        store = ArenaStore(transport)
+        store.transition_round("arena-2026-09-30", "scored", "published", {})
+        store.transition_round("arena-2026-09-30", "stage2_judged", "scored", {})
+        transport.rpc("lab_arena_cancel_round", {"p_round_id": "arena-2026-09-30"})
+        assert transport.select("lab_arena_rounds") == []
+        assert client.timeout == timeout
+    assert requests[0].extensions["timeout"] == {
+        "connect": 2, "read": 35.0, "write": 3, "pool": 4
+    }
+    assert all(request.extensions["timeout"] == timeout.as_dict() for request in requests[1:])
+
+
+@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError])
+def test_publication_response_loss_is_not_blindly_replayed(error_type):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        raise error_type("private response diagnostic", request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        store = ArenaStore(PostgrestTransport(
+            "https://project.example", service_key="sb_secret_test", http_client=client
+        ))
+        with pytest.raises(ArenaStoreUnavailable, match="lab_arena_transition_round"):
+            store.transition_round("arena-2026-09-30", "scored", "published", {})
+    assert len(requests) == 1
+    assert requests[0].extensions["timeout"]["read"] == 35.0
+
+
 @pytest.mark.parametrize("response", [
     httpx.Response(403, json={"code": "42501", "message": "permission denied"}),
     httpx.Response(200, content=b"invalid JSON"),

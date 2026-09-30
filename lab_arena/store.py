@@ -243,6 +243,10 @@ ROUND_NETUID_COLUMN = "arena_netuid"
 
 DEADLOCK_SQLSTATE = "40P01"
 DEADLOCK_RETRIES = 3
+# Publication validates the complete round in one atomic database transaction.
+# Let its existing 30-second server deadline return a result before giving up
+# on the response. Other RPCs keep the normal short transport deadline.
+PUBLICATION_RPC_READ_TIMEOUT_SECONDS = 35.0
 
 
 class ArenaStoreError(RuntimeError):
@@ -368,9 +372,22 @@ class PostgrestTransport(StoreTransport):
         if function not in FUNCTION_SIGNATURES:
             raise ArenaStoreError("unknown Arena function")
         content = canonical_json(dict(params)).encode("utf-8")
+        request_options = {}
+        if (
+            function == "lab_arena_transition_round"
+            and params.get("p_expected_status") == "scored"
+            and params.get("p_next_status") == "published"
+        ):
+            timeout = self._client.timeout
+            request_options["timeout"] = httpx.Timeout(
+                connect=timeout.connect,
+                read=PUBLICATION_RPC_READ_TIMEOUT_SECONDS,
+                write=timeout.write,
+                pool=timeout.pool,
+            )
         for attempt in range(DEADLOCK_RETRIES + 1):
             try:
-                response = self._client.post("%s/rest/v1/rpc/%s" % (self._base_url, function), headers=self._headers, content=content)
+                response = self._client.post("%s/rest/v1/rpc/%s" % (self._base_url, function), headers=self._headers, content=content, **request_options)
             except httpx.TransportError as exc:
                 # A mutating RPC may have committed before its response failed.
                 # Surface availability to the API, but never replay the POST.

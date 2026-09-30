@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: September 30 publication recovery
+
+On 2026-09-30 the user authorized fixing the completed September 30 Arena round
+that is scored but unpublished, and the related recurring validator startup
+failures. Authority includes protected inspection, narrow source changes,
+regression tests, exact committed migrations, push, and canonical paired
+gateway/normal-validator deployment through the overnight recovery workflow.
+Preserve the frozen bank, configuration, accepted outputs, judgments, recorded
+scores, cost eligibility, promotion rules, rewards, and concurrent work. Recover
+publication through the existing guarded service/database path; do not invent
+results or rerun completed scoring. Confirm dashboard publication and downstream
+reward/weight health. This scope ends after deployment and live verification.
+
 ## Scoped production authorization: September 28 decision capture
 
 On 2026-09-27 the user authorized the smallest useful Arena model decision

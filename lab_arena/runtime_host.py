@@ -11,10 +11,13 @@ import secrets
 import signal
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 RUNSC_CHECK_TIMEOUT_SECONDS = 5
 RUNSC_CHECK_CLEANUP_SECONDS = 2
+DEPENDENCY_INSTALLER_CHECK_TIMEOUT_SECONDS = 5
+DEPENDENCY_INSTALLER_CHECK_CLEANUP_SECONDS = 2
 DEFAULT_RUNNER_SOCKET_ROOT = Path("/tmp")
 HOST_MEMORY_RESERVE_BYTES = 2 * 1024 ** 3
 PER_SLOT_MEMORY_RESERVE_BYTES = 128 * 1024 ** 2
@@ -27,6 +30,9 @@ _REASONS = {
     "runsc_unusable": "the installed runsc could not execute; check its architecture and complete installation",
     "runsc_probe_timeout": "the installed runsc did not respond to its bounded version check",
     "runsc_probe_cleanup_failed": "the version check could not be stopped and reaped; inspect the host before retrying",
+    "dependency_installer_unavailable": "install pip for the configured Arena Python interpreter",
+    "dependency_installer_probe_timeout": "the pip readiness check did not finish; inspect the host before retrying",
+    "dependency_installer_probe_cleanup_failed": "the pip readiness check could not be stopped and reaped; inspect the host before retrying",
     "unsupported_host": "Arena scoring requires Linux x86_64",
     "root_required": "Arena scoring requires the configured rootful service",
     "unsafe_work_directory": "runner directories must be real directories at a dedicated path",
@@ -241,6 +247,42 @@ def check_runsc_launch(binary: Path) -> None:
         raise RuntimeHostError(reason="runsc_unusable", runsc_path=binary)
 
 
+def check_dependency_installer() -> None:
+    """Prove this interpreter can launch pip before the runner claims work."""
+
+    try:
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-m", "pip", "--version"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
+            start_new_session=True,
+        )
+    except OSError:
+        raise RuntimeHostError(reason="dependency_installer_unavailable") from None
+    try:
+        returncode = process.wait(timeout=DEPENDENCY_INSTALLER_CHECK_TIMEOUT_SECONDS)
+    except BaseException as exc:
+        try:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=DEPENDENCY_INSTALLER_CHECK_CLEANUP_SECONDS)
+        except (OSError, subprocess.TimeoutExpired):
+            raise RuntimeHostError(
+                reason="dependency_installer_probe_cleanup_failed"
+            ) from None
+        if isinstance(exc, subprocess.TimeoutExpired):
+            raise RuntimeHostError(
+                reason="dependency_installer_probe_timeout"
+            ) from None
+        raise
+    if returncode != 0:
+        raise RuntimeHostError(reason="dependency_installer_unavailable")
+
+
 def _open_directory_tree(path: Path, *, create: bool) -> int:
     """Walk from / using no-follow opens, including every parent component."""
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -362,5 +404,6 @@ def prepare_scoring_host(runsc_path: Path, work_dir: Path) -> None:
     binary = require_runsc_executable(runsc_path)
     require_rootful_runtime()
     check_runsc_launch(binary)
+    check_dependency_installer()
     prepare_runner_directories(work_dir)
     check_runner_socket_directory()

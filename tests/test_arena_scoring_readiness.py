@@ -201,6 +201,58 @@ def test_runtime_version_check_has_no_provider_environment(scoring_host, monkeyp
     host.prepare_scoring_host(binary, work)
 
 
+def test_missing_pip_fails_before_runner_directories_with_fixed_diagnostic(
+    scoring_host, monkeypatch, capsys
+):
+    binary, work = scoring_host
+
+    class MissingPip:
+        pid = 123
+
+        @staticmethod
+        def wait(*, timeout):
+            assert timeout == host.DEPENDENCY_INSTALLER_CHECK_TIMEOUT_SECONDS
+            return 1
+
+    monkeypatch.setattr(host, "check_runsc_launch", lambda _binary: None)
+    monkeypatch.setattr(host.subprocess, "Popen", lambda *_a, **_kw: MissingPip())
+
+    assert validator.main([
+        "--check-scoring-only",
+        "--arena-runsc-path", str(binary),
+        "--arena-work-dir", str(work),
+    ]) == 1
+    output = capsys.readouterr()
+    assert "reason=dependency_installer_unavailable" in output.err
+    assert "install pip for the configured Arena Python interpreter" in output.err
+    assert "Traceback" not in output.err
+    assert not work.exists()
+
+
+def test_dependency_installer_check_uses_isolated_fixed_command(monkeypatch):
+    calls = []
+
+    class ReadyPip:
+        @staticmethod
+        def wait(*, timeout):
+            assert timeout == host.DEPENDENCY_INSTALLER_CHECK_TIMEOUT_SECONDS
+            return 0
+
+    def popen(command, **kwargs):
+        calls.append((command, kwargs))
+        return ReadyPip()
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "must-not-be-forwarded")
+    monkeypatch.setattr(host.subprocess, "Popen", popen)
+    host.check_dependency_installer()
+
+    assert calls[0][0] == [sys.executable, "-I", "-m", "pip", "--version"]
+    assert calls[0][1]["env"] == {"PATH": "/usr/local/bin:/usr/bin:/bin"}
+    assert calls[0][1]["stdin"] is subprocess.DEVNULL
+    assert calls[0][1]["stdout"] is subprocess.DEVNULL
+    assert calls[0][1]["stderr"] is subprocess.DEVNULL
+
+
 def test_runtime_version_check_times_out(scoring_host, monkeypatch):
     binary, work = scoring_host
     binary.write_text("#!/bin/sh\nexec /bin/sleep 60\n")

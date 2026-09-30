@@ -116,6 +116,9 @@ _DEPENDENCY_INSTALL_NETWORK_MARKERS = (
     b"ProxyError(",
     b"ReadTimeoutError(",
 )
+_DEPENDENCY_INSTALL_HOST_MARKERS = (
+    b"No module named pip",
+)
 MAX_WORKER_CONNECTIONS = 8
 WORKER_SOCKET_READ_TIMEOUT_SECONDS = 10.0
 TEMPORARY_HOLD_RETRY_SECONDS = 1.0
@@ -264,6 +267,11 @@ def _pip_stderr_tail(path: Path) -> bytes:
 def _pip_stderr_has_network_marker(path: Path) -> bool:
     tail = _pip_stderr_tail(path)
     return any(marker in tail for marker in _DEPENDENCY_INSTALL_NETWORK_MARKERS)
+
+
+def _pip_stderr_has_host_marker(path: Path) -> bool:
+    tail = _pip_stderr_tail(path)
+    return any(marker in tail for marker in _DEPENDENCY_INSTALL_HOST_MARKERS)
 
 
 def _pip_failure_detail(path: Path) -> str:
@@ -1277,6 +1285,10 @@ def install_binary_requirements(requirements_path: Path, target_dir: Path) -> No
                     detail=_pip_failure_detail(stderr_path),
                 ) from exc
             if result.returncode != 0:
+                if _pip_stderr_has_host_marker(stderr_path):
+                    raise DependencyInstallInfrastructureError(
+                        "installer_error", detail=_pip_failure_detail(stderr_path)
+                    )
                 if not _pip_stderr_has_network_marker(stderr_path):
                     # pip maps its installation and network exceptions to the
                     # same exit code. Unclassified failures remain source-owned.

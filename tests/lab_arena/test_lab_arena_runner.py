@@ -1362,6 +1362,36 @@ def test_binary_requirement_install_does_not_retry_unknown_pip_failure(
     assert raised.value.diagnostic_detail == "No matching distribution found"
 
 
+def test_binary_requirement_install_classifies_missing_host_pip_as_infrastructure(
+    tmp_path, monkeypatch
+):
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("pydantic-ai==1.0.0\n", encoding="utf-8")
+    target = tmp_path / "deps"
+    target.mkdir()
+    pip_calls = 0
+
+    def run(command, **kwargs):
+        nonlocal pip_calls
+        if "pip" in command:
+            pip_calls += 1
+            kwargs["stderr"].write(
+                b"/usr/bin/python3: No module named pip\n"
+            )
+            return type("Result", (), {"returncode": 1})()
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(rn.subprocess, "run", run)
+
+    with pytest.raises(rn.DependencyInstallInfrastructureError) as raised:
+        rn.install_binary_requirements(requirements, target)
+
+    assert pip_calls == 1
+    assert raised.value.failure_kind == "installer_error"
+    assert raised.value.diagnostic_detail.endswith("No module named pip")
+    assert not any(target.iterdir())
+
+
 @pytest.mark.parametrize("stderr_error", (None, OSError, ValueError, RuntimeError))
 def test_submitted_dependency_failure_is_a_model_error_not_an_abandoned_lease(
     tmp_path, capsys, monkeypatch, stderr_error,

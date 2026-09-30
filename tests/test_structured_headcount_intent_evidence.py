@@ -115,7 +115,7 @@ def test_crowdstrike_structured_range_is_a_bound_typed_fact():
         "evidence": [{"source_index": source["source_index"], "quote": quote}],
     }]
     assert intent_details._validate_unit_grounding(grounding, document) == (
-        True, True, {}, set(),
+        True, True, {}, set(), set(),
     )
     assert "not a verbatim webpage quotation" in (
         intent_details._STRUCTURED_EMPLOYEE_RANGE_SYSTEM_APPENDIX

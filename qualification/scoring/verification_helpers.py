@@ -52,6 +52,7 @@ class _VisibleHTMLTextParser(HTMLParser):
         self._hidden_depth = 0
         self._heading_depth: Optional[int] = None
         self._saw_heading = False
+        self.heading_start: Optional[int] = None
         self.parts: list[str] = []
         self.heading_parts: list[str] = []
         self.heading_prefix_parts: list[str] = []
@@ -139,6 +140,7 @@ class _VisibleHTMLTextParser(HTMLParser):
                         break
             self._heading_depth = len(self._stack)
             self._saw_heading = True
+            self.heading_start = len(self.parts)
 
     def handle_endtag(self, tag: str) -> None:
         lowered = tag.casefold()
@@ -221,6 +223,7 @@ def _css_hidden_selectors(content: str) -> tuple[frozenset[str], frozenset[str]]
 
 def _visible_html_document(
     content: str, *, include_scroll_reveal: bool = False,
+    heading_context_sink: Optional[list[str]] = None,
 ) -> tuple[str, str, str]:
     """Return visible page text, its first H1, and local pre-H1 context."""
 
@@ -238,6 +241,14 @@ def _visible_html_document(
     text = " ".join(" ".join(parser.parts).split())
     heading = " ".join(" ".join(parser.heading_parts).split())
     heading_prefix = " ".join(" ".join(parser.heading_prefix_parts).split())
+    if heading_context_sink is not None and parser.heading_start is not None:
+        # Use the actual visible H1, not a repeated document title or an
+        # unrelated archive heading. Keep a small adjacent source window;
+        # these words remain evidence, never inferred publication metadata.
+        context = " ".join(" ".join(parser.parts[parser.heading_start:]).split())
+        if len(context) > 800:
+            context = context[:800].rsplit(" ", 1)[0]
+        heading_context_sink.append(context)
     if len(heading_prefix) > 500:
         heading_prefix = heading_prefix[-500:]
         if " " in heading_prefix:
@@ -344,8 +355,9 @@ def extract_article_body(content: str, *, min_body_chars: int = 200) -> str:
     # markdown/text inputs.
     if "<html" not in content[:2000].lower() and "<body" not in content[:2000].lower() and "<div" not in content[:5000].lower():
         return content
+    heading_context: list[str] = []
     visible_document, primary_heading, heading_prefix = _visible_html_document(
-        content
+        content, heading_context_sink=heading_context,
     )
     if _TRAFILATURA_AVAILABLE:
         try:
@@ -364,6 +376,28 @@ def extract_article_body(content: str, *, min_body_chars: int = 200) -> str:
                 _extraction_matches_primary_heading(primary_heading, body)
                 and _extraction_is_visible(visible_document, body)
             ):
+                context = heading_context[0] if heading_context else ""
+                # Extractors often retain the article but drop the date placed
+                # after its H1. Preserve the surrounding visible words so the
+                # judge can distinguish an event date, a report date and an
+                # update. Never synthesize a date or take one from a URL.
+                context_dates = re.findall(
+                    r"\b(?:\d{4}-\d{2}-\d{2}|"
+                    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|"
+                    r"Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|"
+                    r"Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+"
+                    r"\d{1,2},?\s+\d{4})\b",
+                    context, re.IGNORECASE,
+                )
+                if context and any(
+                    _normalized_visible_evidence(value)
+                    not in _normalized_visible_evidence(body)
+                    for value in context_dates
+                ):
+                    # Both spans independently bind to visible source text.
+                    # A short overlap is intentional; do not discard the
+                    # complete article to join disjoint extractor segments.
+                    body = f"{context}\n\n{body}"
                 normalized_prefix = _normalized_visible_evidence(heading_prefix)
                 if (
                     normalized_prefix

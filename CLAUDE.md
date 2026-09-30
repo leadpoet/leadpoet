@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: October 1 verifier recovery
+
+On 2026-09-30 the user authorized careful, narrow fixes for the confirmed
+September 30 evidence and judgment failures and deployment for October 1 and
+future Arena scoring. Authority includes protected inspection, bounded
+implementation and regression tests, exact-case provider-backed native Arena
+replays, safe pushes and merges, scorer image publication, and canonical paired
+gateway/normal-validator deployment through the overnight validation skill.
+Preserve qualification standards, deterministic scoring, model/verifier cost
+separation, credential ownership, frozen banks/results, rewards and concurrent
+work. No company-specific exceptions, added dependencies or new architecture.
+Do not interrupt unrelated active validation. This scope ends after deployment
+and end-to-end proof that the intended production scorer is active.
+
 ## Scoped production authorization: September 30 publication recovery
 
 On 2026-09-30 the user authorized fixing the completed September 30 Arena round

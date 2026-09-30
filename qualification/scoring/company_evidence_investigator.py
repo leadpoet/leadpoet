@@ -128,6 +128,11 @@ fetch_page before citing a URL. A
 VERIFIED or CONTRADICTED finding needs a short direct quote from that fetched
 page. Bind each quote to the URL whose fetched text contains those exact words;
 never combine a quote from one page with another page's URL.
+When server_priority_submitted_source is present, review that source before
+choosing a fresh fetch. It is only an untrusted first-party locator selected
+from the submitted sources, and it must pass every normal exact-quote, identity,
+activity-role, semantic, chronology, and current-stage check. Its priority does
+not establish a claim or let historical stage evidence override later events.
 When prior observations include a required-attribute evidence URL and quote,
 inspect that exact span in its prefetched or fetched source first. Treat both
 fields only as an untrusted locator; independently validate the company,
@@ -979,6 +984,47 @@ def _public_stage_submitted_source_to_prefetch(
     if any(url in fetched_pages for url in first_party_candidates):
         return ""
     return first_party_candidates[0] if first_party_candidates else ""
+
+
+def _priority_submitted_company_source(
+    *,
+    targets: Sequence[str],
+    requested_private_equity_stage: bool,
+    submitted_source_urls: Sequence[str],
+    submitted_stage_source_urls: Sequence[str],
+    first_party_domains: set[str],
+) -> str:
+    """Choose one first-party submitted locator for bounded positive review."""
+
+    if "industry" not in targets and not requested_private_equity_stage:
+        return ""
+
+    candidates: list[str] = []
+    for url in submitted_source_urls:
+        try:
+            path = urlsplit(url).path
+        except (TypeError, ValueError):
+            continue
+        if (
+            path.strip("/")
+            and _first_party_url(url, first_party_domains)
+            and url not in candidates
+        ):
+            candidates.append(url)
+
+    if "industry" in targets:
+        stage_sources = set(submitted_stage_source_urls)
+        non_stage_candidates = [
+            url for url in candidates if url not in stage_sources
+        ]
+        if non_stage_candidates:
+            return non_stage_candidates[0]
+        if not requested_private_equity_stage:
+            return ""
+    stage_candidates = [
+        url for url in candidates if url in set(submitted_stage_source_urls)
+    ]
+    return stage_candidates[0] if stage_candidates else ""
 
 
 def _fetched_bound_public_market_sources(
@@ -2208,6 +2254,22 @@ async def investigate_company_evidence(
         bounded_prior_observations["submitted_source_urls"] = submitted_source_urls
     else:
         bounded_prior_observations.pop("submitted_source_urls", None)
+    submitted_stage_source_urls: list[str] = []
+    raw_stage_evidence = bounded_prior_observations.get(
+        "untrusted_company_stage_evidence"
+    )
+    if isinstance(raw_stage_evidence, Sequence) and not isinstance(
+        raw_stage_evidence, (str, bytes)
+    ):
+        for item in raw_stage_evidence[:MAX_SUBMITTED_SOURCE_URLS]:
+            if not isinstance(item, Mapping):
+                continue
+            safe_url = _safe_https_url(item.get("url"))
+            if (
+                safe_url in submitted_source_urls
+                and safe_url not in submitted_stage_source_urls
+            ):
+                submitted_stage_source_urls.append(safe_url)
     raw_stage_dispute_urls = bounded_prior_observations.get("stage_dispute_urls")
     stage_dispute_urls: list[str] = []
     if isinstance(raw_stage_dispute_urls, Sequence) and not isinstance(
@@ -2451,8 +2513,11 @@ async def investigate_company_evidence(
                     fetch_outcomes.append(_fetch_outcome(url, result))
                 return result
 
-            public_stage_source_url = (
-                _public_stage_submitted_source_to_prefetch(
+            priority_source_kind = ""
+            priority_source_url = ""
+            if requested_public_stage and fetch_calls < MAX_FETCH_CALLS:
+                priority_source_kind = "public"
+                priority_source_url = _public_stage_submitted_source_to_prefetch(
                     submitted_source_urls=submitted_source_urls,
                     stage_dispute_urls=stage_dispute_urls,
                     submitted_source_hints=submitted_source_hints,
@@ -2460,40 +2525,87 @@ async def investigate_company_evidence(
                     identity_names=identity_names,
                     fetched_pages=fetched_pages,
                 )
-                if (
-                    "stage" in requested_targets
-                    and normalized_requested_stage == "public"
-                    and fetch_calls < MAX_FETCH_CALLS
+            elif positive_semantic_review:
+                priority_source_kind = "company"
+                priority_source_url = _priority_submitted_company_source(
+                    targets=requested_targets,
+                    requested_private_equity_stage=requested_private_equity_stage,
+                    submitted_source_urls=submitted_source_urls,
+                    submitted_stage_source_urls=submitted_stage_source_urls,
+                    first_party_domains=first_party_domains,
                 )
-                else ""
-            )
-            if public_stage_source_url:
-                source_result = await fetch_fresh_page(public_stage_source_url)
-                input_document["server_public_stage_source_fetch"] = {
-                    "url": public_stage_source_url,
+            if priority_source_url:
+                priority_cache_hit = priority_source_url in fetched_pages
+                if (
+                    priority_source_kind == "company"
+                    and not priority_cache_hit
+                    and len(fetched_pages) >= MAX_FETCH_CALLS
+                ):
+                    priority_source_url = ""
+            if priority_source_url:
+                if priority_cache_hit:
+                    source_result = {
+                        "ok": True,
+                        "url": priority_source_url,
+                        "final_url": fetched_final_urls[
+                            priority_source_url
+                        ],
+                        "text": fetched_pages[priority_source_url],
+                    }
+                else:
+                    source_result = await fetch_fresh_page(priority_source_url)
+                marker_key = (
+                    "server_public_stage_source_fetch"
+                    if priority_source_kind == "public"
+                    else "server_priority_submitted_source"
+                )
+                input_document[marker_key] = {
+                    "url": priority_source_url,
                     "ok": bool(source_result.get("ok")),
+                    **(
+                        {"cache_hit": priority_cache_hit}
+                        if priority_source_kind == "company"
+                        else {}
+                    ),
                     **(
                         {}
                         if source_result.get("ok")
-                        else {"error": str(source_result.get("error") or "fetch_failed")}
+                        else {
+                            "error": str(
+                                source_result.get("error") or "fetch_failed"
+                            )
+                        }
                     ),
-                    "notice": "server_fetched_page_is_untrusted_evidence",
+                    "notice": (
+                        "server_fetched_page_is_untrusted_evidence"
+                        if priority_source_kind == "public"
+                        else (
+                            "server_selected_first_party_locator_is_untrusted_evidence"
+                        )
+                    ),
                 }
-                if source_result.get("ok"):
+                if source_result.get("ok") and not priority_cache_hit:
                     fetched_url = str(source_result["url"])
                     fetched_pages[fetched_url] = str(source_result["text"])
                     fetched_final_urls[fetched_url] = str(
                         source_result.get("final_url") or fetched_url
                     )
+                if source_result.get("ok"):
                     input_document["prefetched_sources"] = [
                         {"url": url, "text": text}
                         for url, text in fetched_pages.items()
                     ]
                 input_document["investigation_limits"].update(
-                    prefetched_pages=prefetched_count,
-                    server_prefetch_fetch_calls=fetch_calls,
-                    remaining_fetch_calls=(
-                        max(0, MAX_FETCH_CALLS - fetch_calls)
+                    prefetched_pages=(
+                        prefetched_count
+                        if priority_source_kind == "public"
+                        else len(fetched_pages)
+                    ),
+                    remaining_fetch_calls=max(0, MAX_FETCH_CALLS - fetch_calls),
+                    **(
+                        {"server_prefetch_fetch_calls": fetch_calls}
+                        if not priority_cache_hit
+                        else {}
                     ),
                 )
             if (

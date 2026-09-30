@@ -503,18 +503,68 @@ def test_unproven_compound_unit_can_bind_its_supported_part(monkeypatch):
     quote = "Example raised a Series A."
     inputs = _inputs(paragraph, quote, supporting_quote=quote)
 
-    def response(document):
+    calls = 0
+
+    async def judge(prompt, **_kwargs):
+        nonlocal calls
+        calls += 1
+        document = _prompt_document(prompt)
         unit = _unproven_unit(0)
         unit["evidence"] = [_binding(document, quote)]
-        return _response(
-            document,
-            [unit],
-            facts_supported=False,
-        )
+        if calls == 2:
+            return json.dumps(_semantic_repair_response(
+                0, "UNPROVEN", unit["evidence"],
+            ))
+        return json.dumps(_response(
+            document, [unit], facts_supported=False,
+        ))
 
-    receipt = _review(monkeypatch, inputs, response)
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(*inputs))
+    assert calls == 2
     assert receipt["decision"] == "mismatch"
     assert receipt["checks"]["facts_supported"] is False
+
+
+def test_evidence_bound_unproven_unit_gets_one_bounded_semantic_recheck(
+    monkeypatch,
+):
+    quote = "Example raised a Series A."
+    inputs = _inputs(quote, quote, supporting_quote=quote)
+    calls = 0
+
+    async def judge(prompt, **_kwargs):
+        nonlocal calls
+        calls += 1
+        document = _prompt_document(prompt)
+        evidence = [_binding(document, quote)]
+        if calls == 2:
+            control = json.loads(prompt)["bounded_unit_repair_control"]
+            assert control["units"] == [{
+                "unit_id": 0,
+                "contains_factual_claim": True,
+                "status": "UNPROVEN",
+                "citation_errors": [],
+                "semantic_recheck_allowed": True,
+                "semantic_recheck_reason": (
+                    "evidence_bound_unproven_verdict"
+                ),
+            }]
+            return json.dumps(_semantic_repair_response(
+                0, "VERIFIED", evidence,
+            ))
+        unit = _unproven_unit(0)
+        unit["evidence"] = evidence
+        return json.dumps(_response(
+            document, [unit], facts_supported=False,
+        ))
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(*inputs))
+
+    assert calls == 2
+    assert receipt["decision"] == "match"
+    assert receipt["checks"]["facts_supported"] is True
 
 
 def test_all_nonfactual_units_conflict_with_complete_signal_coverage(monkeypatch):
@@ -840,7 +890,7 @@ def test_source_index_recovery_does_not_change_a_negative_verdict(monkeypatch, s
 
     monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
     receipt = asyncio.run(intent_details.review_intent_details(*inputs))
-    assert calls == (2 if status == "CONTRADICTED" else 1)
+    assert calls == 2
     assert receipt["decision"] == "mismatch"
     assert receipt["checks"]["facts_supported"] is False
 

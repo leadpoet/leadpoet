@@ -61,6 +61,9 @@ _RELATIVE_EVENT_TIMING = re.compile(
     r"partnership|contract|award)\b",
     re.IGNORECASE,
 )
+_RELATIVE_TIMING_QUALIFIER = re.compile(
+    r"\b(?:recent|recently|newly)\b", re.IGNORECASE,
+)
 _MARKDOWN_IMAGE_RE = re.compile(
     r"!\[[^\[\]\r\n]*\](?:\([^\r\n)]*\)|\[[^\]\r\n]*\])",
 )
@@ -1503,7 +1506,7 @@ def review_evidence(
 def _validate_unit_grounding(
     grounding: Any,
     document: Mapping[str, Any],
-) -> tuple[bool, bool, dict[int, set[str]], set[int]]:
+) -> tuple[bool, bool, dict[int, set[str]], set[int], set[int]]:
     units = document.get("intent_details_units")
     if not isinstance(units, list):
         raise ValueError("missing Intent Details statement units")
@@ -1525,6 +1528,7 @@ def _validate_unit_grounding(
     any_factual_claim = False
     citation_issues: dict[int, set[str]] = {}
     contradicted_unit_ids: set[int] = set()
+    evidence_bound_unproven_unit_ids: set[int] = set()
     for item in grounding:
         if (
             not isinstance(item, dict)
@@ -1606,6 +1610,16 @@ def _validate_unit_grounding(
             all_factual_units_verified = False
         if status == "CONTRADICTED":
             contradicted_unit_ids.add(unit_id)
+        elif (
+            status == "UNPROVEN"
+            and bindings
+            and unit_id not in citation_issues
+        ):
+            # Valid evidence on an UNPROVEN compound unit may prove the whole
+            # unit or only its supported clauses.  One bounded semantic pass
+            # distinguishes those cases; an unsupported unit with no evidence
+            # remains a terminal mismatch.
+            evidence_bound_unproven_unit_ids.add(unit_id)
 
     if observed_ids != set(expected_units):
         raise ValueError("incomplete Intent Details unit grounding")
@@ -1614,6 +1628,7 @@ def _validate_unit_grounding(
         any_factual_claim,
         citation_issues,
         contradicted_unit_ids,
+        evidence_bound_unproven_unit_ids,
     )
 
 
@@ -1726,6 +1741,7 @@ def _validate_review_response(
         any_factual_claim,
         citation_issues,
         contradicted_unit_ids,
+        evidence_bound_unproven_unit_ids,
     ) = _validate_unit_grounding(unit_grounding, document)
     facts_aggregate_conflict = (
         checks["facts_supported"] is not unit_facts_supported
@@ -1768,7 +1784,33 @@ def _validate_review_response(
         _relative_time_recheck_targets(unit_grounding, document)
         if initial_review else {}
     )
-    semantic_unit_ids = contradicted_unit_ids | set(relative_time_targets)
+    unit_texts = {
+        unit.get("unit_id"): unit.get("text", "")
+        for unit in document.get("intent_details_units") or []
+        if isinstance(unit, Mapping) and type(unit.get("unit_id")) is int
+    }
+    evidence_bound_unproven_unit_ids = {
+        unit_id for unit_id in evidence_bound_unproven_unit_ids
+        if not (
+            _RELATIVE_PUBLICATION_TIMING.search(unit_texts.get(unit_id, ""))
+            or _RELATIVE_EVENT_TIMING.search(unit_texts.get(unit_id, ""))
+            or _RELATIVE_TIMING_QUALIFIER.search(unit_texts.get(unit_id, ""))
+        )
+    }
+    # Recheck an evidence-bound UNPROVEN unit only when factual support is the
+    # sole failed paragraph check.  A second factual opinion cannot make a
+    # paragraph pass an independent coverage, relevance, ICP, or prose failure.
+    factual_support_only_failure = all(
+        checks[name] for name in _CHECKS if name != "facts_supported"
+    )
+    semantic_unit_ids = (
+        contradicted_unit_ids
+        | (
+            evidence_bound_unproven_unit_ids
+            if factual_support_only_failure else set()
+        )
+        | set(relative_time_targets)
+    )
     if citation_issues or (initial_review and semantic_unit_ids):
         repair_issues = {
             unit_id: set(citation_issues.get(unit_id, set()))
@@ -1807,11 +1849,13 @@ def _semantic_repair_machine_fields(
         semantic_recheck = item["unit_id"] in semantic_unit_ids
         item["semantic_recheck_allowed"] = semantic_recheck
         if semantic_recheck:
-            item["semantic_recheck_reason"] = (
-                "contradicted_verdict"
-                if item["status"] == "CONTRADICTED"
-                else "relative_time_grounding_review"
-            )
+            if item["status"] == "CONTRADICTED":
+                reason = "contradicted_verdict"
+            elif item["status"] == "UNPROVEN":
+                reason = "evidence_bound_unproven_verdict"
+            else:
+                reason = "relative_time_grounding_review"
+            item["semantic_recheck_reason"] = reason
     return fields
 
 

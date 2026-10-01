@@ -303,11 +303,17 @@ def leased_image_exporter(
             )
         except LeasedImageError as exc:
             failure = str(exc)
-        except Exception:
+        except Exception as exc:
             # API and HTTP errors can carry the signed capability URL in a
             # chained exception. Re-raise outside the handler so no original
             # exception or traceback is retained by the runner.
-            failure = "leased image access failed"
+            status = getattr(exc, "http_status", None)
+            failure = (
+                "leased image access HTTP %d" % status
+                if isinstance(status, int) and not isinstance(status, bool)
+                and 400 <= status <= 599
+                else "leased image access failed"
+            )
         finally:
             document = None
             if client is not None:

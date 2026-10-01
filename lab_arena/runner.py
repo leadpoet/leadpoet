@@ -880,7 +880,8 @@ class HttpArenaApiClient:
                 if response.status_code != 200:
                     raise RunnerError(
                         "run image access is unavailable: HTTP %d"
-                        % response.status_code
+                        % response.status_code,
+                        http_status=response.status_code,
                     )
                 declared = response.headers.get("content-length")
                 if declared is not None:
@@ -3659,7 +3660,13 @@ class Runner:
             self.completed.append({"run_id": lease["run_id"], "result": result})
         except Exception as exc:  # the attempt fails closed; the service expires the lease
             self.abandoned += 1
-            detail = runtime_host_diagnostic(exc) if isinstance(exc, RuntimeHostError) else type(exc).__name__
+            if isinstance(exc, RuntimeHostError):
+                detail = runtime_host_diagnostic(exc)
+            elif isinstance(exc, leased_images.LeasedImageError):
+                # The exporter retains only fixed, URL-free failure reasons.
+                detail = "%s: %s" % (type(exc).__name__, str(exc))
+            else:
+                detail = type(exc).__name__
             print(
                 "Lab Arena run abandoned: %s" % detail,
                 file=sys.stderr,

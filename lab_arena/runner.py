@@ -1068,6 +1068,32 @@ class ImageCache:
             self._in_use.pop(victim, None)
             _remove_cache_path(rootfs.parent)
 
+    def _reserve_export_space_locked(self) -> None:
+        # A cold export holds the compressed layer on disk while extracting it.
+        # Make room before downloading, since ordinary cache eviction happens
+        # only after a successful export.
+        required = min(self._max_bytes, images.DEFAULT_MAX_ROOTFS_BYTES) + images.DEFAULT_MAX_IMAGE_BYTES
+        try:
+            free = shutil.disk_usage(self._root).free
+        except OSError as exc:
+            raise RunnerError("image cache disk space could not be checked") from exc
+        while free < required:
+            victim = next((digest for digest in self._ready if self._in_use.get(digest, 0) == 0), None)
+            if victim is None:
+                raise RunnerError("insufficient disk space for image export")
+            rootfs = self._ready[victim]
+            target = rootfs.parent
+            _remove_cache_path(target)
+            if target.exists() or target.is_symlink():
+                raise RunnerError("image cache eviction failed")
+            self._ready.pop(victim)
+            self._sizes.pop(victim, None)
+            self._in_use.pop(victim, None)
+            try:
+                free = shutil.disk_usage(self._root).free
+            except OSError as exc:
+                raise RunnerError("image cache disk space could not be checked") from exc
+
     def _rootfs_for_locked(
         self,
         image_digest: str,
@@ -1086,6 +1112,7 @@ class ImageCache:
         target = self._root / ("sha256-" + image_digest.rsplit("sha256:", 1)[1])
         if target.exists() or target.is_symlink():
             _remove_cache_path(target)
+        self._reserve_export_space_locked()
         target.mkdir(parents=True)
         try:
             (exporter or self._exporter)(image_reference, image_digest, target)

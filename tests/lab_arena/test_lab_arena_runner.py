@@ -18,6 +18,7 @@ import tempfile
 import tarfile
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import Mock
 from pathlib import Path
 from typing import Any, Dict, List
@@ -1104,6 +1105,74 @@ def test_image_cache_evicts_only_idle_images_and_cleans_rejected_exports(tmp_pat
     with pytest.raises(rn.RunnerError, match="exceeds runner cache capacity"):
         oversized.rootfs_for(first)
     assert list((tmp_path / "small").iterdir()) == []
+
+
+def test_image_cache_reclaims_idle_lru_before_disk_pressured_export(tmp_path, monkeypatch):
+    digests = ["sha256:" + character * 64 for character in "123"]
+    exports = []
+
+    def exporter(_reference, digest, target):
+        exports.append(digest)
+        (target / "rootfs").mkdir()
+
+    cache = rn.ImageCache(tmp_path / "images", exporter)
+    cache.rootfs_for(digests[0])
+    cache.rootfs_for(digests[1])
+    cache.rootfs_for(digests[0])  # The second image is now least recently used.
+    second_target = tmp_path / "images" / digests[1].replace(":", "-")
+    required = min(cache._max_bytes, rn.images.DEFAULT_MAX_ROOTFS_BYTES) + rn.images.DEFAULT_MAX_IMAGE_BYTES
+    monkeypatch.setattr(
+        rn.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=required - 1 if second_target.exists() else required),
+    )
+
+    cache.rootfs_for(digests[2])
+
+    assert exports == digests
+    assert not second_target.exists()
+    assert cache.rootfs_for(digests[0]).is_dir()
+    assert exports == digests
+
+
+def test_image_cache_disk_pressure_preserves_active_images_and_fails_before_export(tmp_path, monkeypatch):
+    first = "sha256:" + "1" * 64
+    second = "sha256:" + "2" * 64
+    third = "sha256:" + "3" * 64
+    exports = []
+
+    def exporter(_reference, digest, target):
+        exports.append(digest)
+        (target / "rootfs").mkdir()
+
+    cache = rn.ImageCache(tmp_path / "images", exporter)
+    with cache.acquire(first) as active_rootfs:
+        cache.rootfs_for(second)
+        monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
+        assert cache.rootfs_for(first) == active_rootfs
+        with pytest.raises(rn.RunnerError, match="insufficient disk space"):
+            cache.rootfs_for(third)
+        assert active_rootfs.is_dir()
+        assert second not in cache._ready
+        assert third not in cache._ready
+        assert exports == [first, second]
+
+
+def test_image_cache_export_error_is_not_retried_and_partial_target_is_removed(tmp_path, monkeypatch):
+    digest = "sha256:" + "4" * 64
+    exports = []
+
+    def exporter(_reference, _digest, target):
+        exports.append(_digest)
+        (target / "rootfs").mkdir()
+        raise ValueError("bad image layer")
+
+    cache = rn.ImageCache(tmp_path / "images", exporter)
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=10**15))
+    with pytest.raises(ValueError, match="bad image layer"):
+        cache.rootfs_for(digest)
+    assert exports == [digest]
+    assert list((tmp_path / "images").iterdir()) == []
 
 
 def test_source_cache_extracts_once_and_installs_optional_binary_dependencies(tmp_path):

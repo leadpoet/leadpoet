@@ -21,7 +21,9 @@ def _seed_active(cursor):
     cursor.execute("SET session_replication_role=replica")
     cursor.execute(
         "UPDATE public.lab_arena_rounds SET status='stage1_scoring',"
-        "status_generation=6,stage_generation=5 WHERE round_id=%s",
+        "status_generation=6,stage_generation=5,"
+        "configuration_doc=jsonb_set(configuration_doc,'{integrity_policy}',"
+        "'\"arena_integrity_v1\"'::jsonb) WHERE round_id=%s",
         (recovery.ROUND,),
     )
     cursor.execute(
@@ -51,6 +53,21 @@ def _seed_active(cursor):
         "ELSE NULL END "
         "FROM public.lab_arena_runs e WHERE e.round_id=%s AND e.kind='execute'",
         (recovery.ROUND,),
+    )
+    cursor.execute(
+        "INSERT INTO public.lab_arena_trajectory_events "
+        "(run_id,event_id,round_id,submission_id,miner_hotkey,"
+        "runner_hotkey,assignment_id,icp_identifier,stage,icp_position,"
+        "attempt,run_kind,model_role,event_kind,occurred_at,content) "
+        "SELECT run_id,'00000000-0000-0000-0000-000000000369',round_id,"
+        "submission_id,miner_hotkey,miner_hotkey,assignment_id,'oct01-0',"
+        "stage,icp_position,attempt,'score','baseline','provider.response',"
+        "'2026-10-01T06:00:26Z',"
+        "'{\"operation_id\":\"scrapingdog.scrape\",\"action_sequence\":56,"
+        "\"call\":{\"error_code\":\"miner_credentials_unavailable\","
+        "\"call_identity\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+        "\"provider_status\":403}}'::jsonb "
+        "FROM public.lab_arena_runs WHERE run_id='score369:0:1'"
     )
     cursor.execute("SET session_replication_role=origin")
 

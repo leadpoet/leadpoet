@@ -1272,9 +1272,10 @@ def review_evidence(
     )
     for dimension, raw in dimensions.items():
         evidence = _mapping(raw)
-        # Only the fit gate's own independently observed source fields are
-        # context; submitted company summaries and required-attribute claims
-        # never enter the review.
+        # The fit gate's independently observed fields provide company facts.
+        # A submitted attribute quote can also identify an exact fetched
+        # first-party page after identity and source binding; the submitted
+        # claim itself is not evidence.
         if evidence.get("decision") != "match":
             continue
         observed = _mapping(evidence.get("web_evidence"))
@@ -1295,6 +1296,7 @@ def review_evidence(
             _registrable_domain,
             _safe_https_url,
         )
+        from qualification.scoring.lead_scorer import _compact_company_name
 
         if (
             not isinstance(company_source_contexts, Sequence)
@@ -1341,12 +1343,8 @@ def review_evidence(
                 submitted_quote = getattr(
                     submitted_attribute, "evidence_quote", None
                 )
-                normalized_name = re.sub(
-                    r"[^a-z0-9]+", "", str(company.company_name).casefold()
-                )
-                normalized_source = re.sub(
-                    r"[^a-z0-9]+", "", str(source_text or "").casefold()
-                )
+                normalized_name = _compact_company_name(company.company_name)
+                normalized_source = _compact_company_name(source_text)
                 if (
                     company_fit_receipt.get("decision") == "match"
                     and identity.get("decision") == "match"
@@ -1359,7 +1357,7 @@ def review_evidence(
                     == str(identity["observed_domain"]).casefold()
                     and isinstance(submitted_quote, str)
                     and _quote_occurs(submitted_quote, str(source_text or ""))
-                    and len(normalized_name) >= 5
+                    and normalized_name
                     and normalized_name in normalized_source
                 ):
                     company_fact = {

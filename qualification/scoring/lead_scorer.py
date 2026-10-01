@@ -2418,10 +2418,15 @@ def _retain_matched_investigator_source_contexts(
         getattr(submitted_attribute, "evidence_url", None)
     )
     submitted_quote = getattr(submitted_attribute, "evidence_quote", None)
+    submitted_name = (
+        _compact_company_name(company.company_name)
+        if company is not None else ""
+    )
     first_party_url = (
         submitted_url
         if company is not None
         and company.intent_details
+        and submitted_name
         and isinstance(identity, Mapping)
         and submitted_url.startswith("https://")
         and _registrable_domain(submitted_url)
@@ -2456,8 +2461,7 @@ def _retain_matched_investigator_source_contexts(
             or not _quote_occurs(quote, text)
             or (
                 source_url == first_party_url
-                and _compact_company_name(company.company_name)
-                not in _compact_company_name(text)
+                and submitted_name not in _compact_company_name(text)
             )
         ):
             continue
@@ -8974,6 +8978,10 @@ def _matched_company_source_contexts(
         getattr(submitted_attribute, "evidence_url", None)
     )
     submitted_quote = getattr(submitted_attribute, "evidence_quote", None)
+    submitted_name = (
+        _compact_company_name(company.company_name)
+        if company is not None else ""
+    )
     identity = verified_identity_receipt([company_fit.receipt("company_fit")])
     source_entry = (
         matched_company_source_cache.get(submitted_url)
@@ -8985,6 +8993,7 @@ def _matched_company_source_contexts(
     if (
         company is not None
         and company_fit.decision == COMPANY_FIT_MATCH
+        and submitted_name
         and isinstance(identity, Mapping)
         and submitted_url.startswith("https://")
         and _registrable_domain(submitted_url)
@@ -9001,8 +9010,7 @@ def _matched_company_source_contexts(
         and isinstance(source_entry.get("text"), str)
         and 0 < len(source_entry["text"]) <= MAX_PAGE_CHARACTERS
         and _quote_occurs(submitted_quote, source_entry["text"])
-        and _compact_company_name(company.company_name)
-        in _compact_company_name(source_entry["text"])
+        and submitted_name in _compact_company_name(source_entry["text"])
     ):
         contexts.append({
             "dimension": "first_party_company",

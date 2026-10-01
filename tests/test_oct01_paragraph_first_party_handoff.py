@@ -30,7 +30,7 @@ def _case(*, about_url=ABOUT, about_quote=ABOUT_QUOTE, name="Chemify"):
         company_name=name,
         company_website="https://www.chemify.example/",
         intent_details=(
-            "Chemify's own site says it is headquartered in Scotland, has "
+            f"{name}'s own site says it is headquartered in Scotland, has "
             "more than 200 employees, and turns code into molecules."
         ),
         required_attribute=SimpleNamespace(
@@ -45,7 +45,7 @@ def _case(*, about_url=ABOUT, about_quote=ABOUT_QUOTE, name="Chemify"):
         "identity": {
             "decision": "match",
             "web_identity_receipt": {
-                "decision": "match", "observed_name": "Chemify",
+                "decision": "match", "observed_name": name,
                 "observed_domain": "chemify.example",
                 "observed_linkedin_slug": "chemify",
                 "evidence_source": "company_web_reverification",
@@ -103,6 +103,40 @@ def test_fetched_first_party_page_reaches_bounded_paragraph_evidence():
         }
         for text in item.get("admitted_text", [])
     ) <= intent_details._MAX_SOURCE_CONTEXT_BYTES
+
+
+@pytest.mark.parametrize("name", ["Io", "Café Labs Ltd."])
+def test_produced_short_or_unicode_legal_name_context_is_admitted(name):
+    quote = f"{name} turns digital code into real molecules."
+    page = (
+        f"About {name}. Headquartered in Scotland, {name} has more than "
+        f"200 employees. {quote}"
+    )
+    company, fit = _case(name=name, about_quote=quote)
+    retained = {}
+    lead_scorer._retain_matched_investigator_source_contexts(
+        retained, fit, _investigation(page), company=company,
+    )
+    contexts = lead_scorer._matched_company_source_contexts(
+        fit, None, None, retained,
+        paragraph=company.intent_details, company=company,
+    )
+    assert contexts and any(item["url"] == ABOUT for item in contexts)
+
+    paragraph_company, icp, signals, _fit_receipt = inputs()
+    paragraph_company.company_name = name
+    paragraph_company.company_website = company.company_website
+    paragraph_company.intent_details = company.intent_details
+    paragraph_company.required_attribute = company.required_attribute
+    document = intent_details.review_evidence(
+        paragraph_company, icp, signals, fit.receipt("company_fit"),
+        company_source_contexts=contexts,
+    )
+    assert any(
+        item.get("source_url") == ABOUT
+        and item["evidence_kind"] == "verified_company_source_context"
+        for item in document["admitted_evidence"]
+    )
 
 
 @pytest.mark.parametrize("change", [

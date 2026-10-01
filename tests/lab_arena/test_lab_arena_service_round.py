@@ -847,7 +847,7 @@ def test_operator_hold_freezes_open_round_without_starting_work(connect, tmp_pat
         assert {p["submission_id"] for p in row["participants"]} == {
             challenger_id, "baseline-2026-10-10"
         }
-        assert len(harness.service.benchmark_icps(harness.round_id)) == 20
+        assert harness.service.benchmark_icps(harness.round_id) == daily_icps()
         assert harness.service.store.list_runs(harness.round_id) == []
         assert harness.service.advance_round(harness.round_id) == {
             "status": "paused", "round_status": "committed"

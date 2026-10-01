@@ -2,7 +2,8 @@
 -- not be materialized. All twenty attempts failed before model execution.
 -- The immutable benchmark and all fourteen frozen source archives stay bound
 -- to the same live round. Failed attempts and their sixty trajectory events
--- remain in a cancelled audit round; no provider ledger entry is moved.
+-- remain in a cancelled audit round. Forty-two source code-review ledger
+-- entries stay on their original live submission identities; none is moved.
 --
 -- Evidence: production-initial.json and trajectories-initial.json captured
 -- after cancellation; benchmark.json SHA-256:
@@ -83,6 +84,18 @@ BEGIN
            WHERE round_id = v_archive_id) <> 60
        OR (SELECT pg_catalog.count(*) FROM public.lab_arena_ledger
            WHERE round_id = v_archive_id) <> 0
+       OR (SELECT pg_catalog.count(*) FROM public.lab_arena_ledger l
+           WHERE l.round_id = v_round_id AND l.run_id IS NULL
+             AND pg_catalog.split_part(l.operation_id, ':', 1) =
+                 'openrouter.code_review') <> 42
+       OR (SELECT pg_catalog.encode(extensions.digest(
+             pg_catalog.jsonb_agg(pg_catalog.to_jsonb(l)
+               ORDER BY l.entry_id)::TEXT, 'sha256'), 'hex')
+           FROM public.lab_arena_ledger l
+           WHERE l.round_id = v_round_id AND l.run_id IS NULL
+             AND pg_catalog.split_part(l.operation_id, ':', 1) =
+                 'openrouter.code_review') IS DISTINCT FROM
+          '268c9b105f1a513ddc34668807c6cd7435f29c1f84ac27afd7b1a80c7daf54ce'
        OR (SELECT pg_catalog.encode(extensions.digest(
              pg_catalog.jsonb_agg(pg_catalog.to_jsonb(s)
                ORDER BY s.submission_id)::TEXT, 'sha256'), 'hex')
@@ -115,8 +128,9 @@ BEGIN
   END IF;
 
   -- These digests cover every column, including frozen scorer image/policy,
-  -- all fourteen source identities, failed terminal documents, and private
-  -- trajectory contents. Any extra row changes the ordered digest or count.
+  -- all fourteen source identities, failed terminal documents, private
+  -- trajectory contents, and pre-existing source code-review costs. Any extra
+  -- row changes an ordered digest or count.
   IF v_round.status IS DISTINCT FROM 'cancelled'
      OR v_round.status_generation IS DISTINCT FROM 3
      OR v_round.stage_generation IS DISTINCT FROM 2
@@ -161,14 +175,34 @@ BEGIN
          FROM public.lab_arena_trajectory_events e
          WHERE e.round_id = v_round_id) IS DISTINCT FROM
         'de57bf99060cfe8cf5170436a5a25ac9fa3bbf71d66dfb3e8a167116f6cc1d0b'
-     OR EXISTS (SELECT 1 FROM public.lab_arena_ledger
-         WHERE round_id = v_round_id OR submission_id IN (
-           SELECT submission_id FROM public.lab_arena_submissions
-           WHERE round_id = v_round_id
-         ) OR run_id IN (
-           SELECT run_id FROM public.lab_arena_runs
-           WHERE round_id = v_round_id
-         ))
+     OR (SELECT pg_catalog.count(*) FROM public.lab_arena_ledger
+         WHERE round_id = v_round_id) <> 42
+     OR EXISTS (SELECT 1 FROM public.lab_arena_ledger l
+         WHERE l.round_id = v_round_id AND
+           (l.run_id IS NOT NULL OR
+            pg_catalog.split_part(l.operation_id, ':', 1) IS DISTINCT FROM
+              'openrouter.code_review'))
+     OR (SELECT pg_catalog.encode(extensions.digest(
+           pg_catalog.jsonb_agg(pg_catalog.to_jsonb(l)
+             ORDER BY l.entry_id)::TEXT, 'sha256'), 'hex')
+         FROM public.lab_arena_ledger l
+         WHERE l.round_id = v_round_id) IS DISTINCT FROM
+        '268c9b105f1a513ddc34668807c6cd7435f29c1f84ac27afd7b1a80c7daf54ce'
+     OR EXISTS (SELECT 1 FROM public.lab_arena_ledger l
+         WHERE l.round_id = v_round_id AND
+           (l.submission_id = v_baseline_id OR l.run_id IS NOT NULL OR
+            NOT EXISTS (SELECT 1 FROM public.lab_arena_submissions s
+              WHERE s.round_id = v_round_id AND
+                s.submission_id = l.submission_id)))
+     OR EXISTS (SELECT 1 FROM public.lab_arena_ledger l
+         WHERE l.round_id <> v_round_id AND
+           (l.submission_id IN (
+             SELECT submission_id FROM public.lab_arena_submissions
+             WHERE round_id = v_round_id
+           ) OR l.run_id IN (
+             SELECT run_id FROM public.lab_arena_runs
+             WHERE round_id = v_round_id
+           )))
      OR EXISTS (SELECT 1 FROM public.lab_arena_runs
          WHERE submission_id = v_baseline_id AND round_id <> v_round_id)
      OR EXISTS (SELECT 1 FROM public.lab_arena_trajectory_events
@@ -377,6 +411,16 @@ BEGIN
          WHERE round_id = v_round_id) <> 10
      OR (SELECT pg_catalog.count(*) FROM public.lab_arena_trajectory_events
          WHERE round_id = v_round_id) <> 0
+     OR (SELECT pg_catalog.count(*) FROM public.lab_arena_ledger
+         WHERE round_id = v_round_id) <> 42
+     OR (SELECT pg_catalog.count(*) FROM public.lab_arena_ledger
+         WHERE round_id = v_archive_id) <> 0
+     OR (SELECT pg_catalog.encode(extensions.digest(
+           pg_catalog.jsonb_agg(pg_catalog.to_jsonb(l)
+             ORDER BY l.entry_id)::TEXT, 'sha256'), 'hex')
+         FROM public.lab_arena_ledger l
+         WHERE l.round_id = v_round_id) IS DISTINCT FROM
+        '268c9b105f1a513ddc34668807c6cd7435f29c1f84ac27afd7b1a80c7daf54ce'
      OR EXISTS (SELECT 1 FROM pg_catalog.pg_trigger t
          WHERE t.tgrelid IN (
            'public.lab_arena_rounds'::REGCLASS,

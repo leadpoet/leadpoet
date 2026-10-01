@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import uuid
 from pathlib import Path
 
@@ -49,6 +50,7 @@ PRODUCTION_HASHES = {
     "submissions": "1c9caa3e983e80458a9c0910255f14387f37098d288c29b596090765d04112b3",
     "runs": "a28d65a9d8e350b081473855e5d239f5d27bc92c8fe9afc083288a3a7f7ac2d8",
     "events": "de57bf99060cfe8cf5170436a5a25ac9fa3bbf71d66dfb3e8a167116f6cc1d0b",
+    "ledger": "268c9b105f1a513ddc34668807c6cd7435f29c1f84ac27afd7b1a80c7daf54ce",
     "bank": "8fe8de7ccf091baaa2fedde44b4d1c01e84fe1999f8b7f086d82a0f3332c1e61",
     "new_config": "e7cd2d1d2fea2a1f2ae41b313889545d36ca3e9b09e5d3d4021fec36a99b0a7b",
     "participants": "872f81d1d045dbd2f2d2b7d52b7f5185b9841add7a4ed14eb21a2aea67b17d19",
@@ -148,6 +150,26 @@ def _seed(cursor, *, foreign: bool = False) -> None:
                          "source_size_bytes": participant["source_size_bytes"]}),
              participant["source_ref"], participant["source_size_bytes"]),
         )
+    # Source-code review happened during submission, before any baseline run.
+    # These paid entries must remain attached to their live miner identities.
+    for ordinal in range(14):
+        participant = participants[ordinal % 13]
+        call_identity = "sha256:" + hashlib.sha256(
+            f"fixture-oct01-code-review-{ordinal}".encode()
+        ).hexdigest()
+        for kind in ("reservation", "dispatch", "uncertain" if ordinal == 13 else "settlement"):
+            cursor.execute(
+                "INSERT INTO public.lab_arena_ledger "
+                "(entry_kind,miner_hotkey,round_id,submission_id,run_id,"
+                "call_identity,provider,operation_id,funding_source,"
+                "amount_microusd,entry_doc,created_at) VALUES "
+                "(%s,%s,%s,%s,NULL,%s,'openrouter','openrouter.code_review',"
+                "'miner_key',%s,%s::jsonb,'2026-09-30T23:30:00Z')",
+                (kind, participant["miner_hotkey"], ROUND,
+                 participant["submission_id"], call_identity,
+                 1_000_000 if kind != "settlement" else 500_000,
+                 json.dumps({"fixture": True, "ordinal": ordinal})),
+            )
     for position in range(10):
         assignment = f"{ROUND}:{BASELINE}:1:{position}"
         for attempt in (1, 2):
@@ -247,6 +269,7 @@ def _render_sql(cursor) -> str:
     subs = _rows(cursor, "lab_arena_submissions", f"round_id='{ROUND}'", "submission_id")
     runs = _rows(cursor, "lab_arena_runs", f"round_id='{ROUND}'", "run_id")
     events = _rows(cursor, "lab_arena_trajectory_events", f"round_id='{ROUND}'", "trajectory_id")
+    ledger = _rows(cursor, "lab_arena_ledger", f"round_id='{ROUND}'", "entry_id")
     cursor.execute("SELECT icps FROM public.qualification_private_icp_sets WHERE set_id=20260930")
     bank = cursor.fetchone()[0]
     hashes = {
@@ -254,6 +277,7 @@ def _render_sql(cursor) -> str:
         "submissions": _many_hash(cursor, "lab_arena_submissions", subs, "submission_id"),
         "runs": _many_hash(cursor, "lab_arena_runs", runs, "run_id"),
         "events": _many_hash(cursor, "lab_arena_trajectory_events", events, "trajectory_id"),
+        "ledger": _many_hash(cursor, "lab_arena_ledger", ledger, "entry_id"),
         "participants": _json_hash(cursor, round_row["participants"]),
         "bank": _json_hash(cursor, bank),
     }
@@ -336,7 +360,9 @@ def test_recovery_preserves_frozen_sources_failures_events_and_foreign_rows(data
                 r for r in before[2] if r["run_id"] == "foreign368:1")
             assert next(e for e in after[3] if e["run_id"] == "foreign368:1") == next(
                 e for e in before[3] if e["run_id"] == "foreign368:1")
-            assert after[4] == before[4] == []  # No provider spend.
+            assert after[4] == before[4] and len(after[4]) == 42
+            assert all(row["round_id"] == ROUND and row["run_id"] is None
+                       and row["submission_id"] != BASELINE for row in after[4])
             active = next(r for r in after[0] if r["round_id"] == ROUND)
             assert (active["status"], active["status_generation"],
                     active["stage_generation"], active["cancel_reason"]) == (
@@ -388,8 +414,48 @@ def test_replay_rejects_mutated_archive_event(database):
             assert _state(cursor) == before
 
 
+def test_replay_allows_new_execution_cost_but_rejects_changed_review_cost(database):
+    psycopg, dsn = database
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cursor:
+            _seed(cursor)
+            sql = _render_sql(cursor)
+            cursor.execute(sql)
+            cursor.execute("SET session_replication_role=replica")
+            cursor.execute(
+                "INSERT INTO public.lab_arena_ledger "
+                "(entry_kind,miner_hotkey,round_id,submission_id,run_id,"
+                "call_identity,provider,operation_id,funding_source,"
+                "amount_microusd,entry_doc,created_at) VALUES "
+                "('reservation',%s,%s,%s,%s,%s,'openrouter',"
+                "'openrouter.sourcing','miner_key',123,'{}'::jsonb,"
+                "'2026-10-01T06:00:00Z')",
+                (_configuration()["baseline_hotkey"], ROUND, BASELINE,
+                 f"{ROUND}:{BASELINE}:1:0:r368:1",
+                 "sha256:" + hashlib.sha256(b"new-execution-cost").hexdigest()),
+            )
+            cursor.execute("SET session_replication_role=origin")
+            before = _state(cursor)
+            cursor.execute(sql)
+            assert _state(cursor) == before
+            cursor.execute("SET session_replication_role=replica")
+            cursor.execute("UPDATE public.lab_arena_ledger "
+                           "SET amount_microusd=amount_microusd+1 "
+                           "WHERE entry_id=(SELECT min(entry_id) "
+                           "FROM public.lab_arena_ledger WHERE round_id=%s)",
+                           (ROUND,))
+            cursor.execute("SET session_replication_role=origin")
+            changed = _state(cursor)
+            with pytest.raises(psycopg.Error, match="replay differs"):
+                cursor.execute(sql)
+            cursor.execute("ROLLBACK")
+            assert _state(cursor) == changed
+
+
 @pytest.mark.parametrize("tamper", [
     "round", "submission", "run", "event", "bank", "extra_run", "ledger",
+    "ledger_value",
 ])
 def test_preimage_tamper_aborts_without_writes(database, tamper):
     psycopg, dsn = database
@@ -421,6 +487,12 @@ def test_preimage_tamper_aborts_without_writes(database, tamper):
                                "stage,icp_position,attempt,status) VALUES "
                                "('extra368:1','extra368',%s,%s,%s,1,0,1,'pending')",
                                (ROUND, BASELINE, _configuration()["baseline_hotkey"]))
+            elif tamper == "ledger_value":
+                cursor.execute("UPDATE public.lab_arena_ledger "
+                               "SET amount_microusd=amount_microusd+1 "
+                               "WHERE entry_id=(SELECT min(entry_id) "
+                               "FROM public.lab_arena_ledger WHERE round_id=%s)",
+                               (ROUND,))
             else:
                 cursor.execute("INSERT INTO public.lab_arena_ledger "
                                "(entry_kind,miner_hotkey,round_id,submission_id,run_id,"

@@ -127,6 +127,74 @@ def test_hold_blocks_new_claims_preserves_active_completion_and_replays(database
             assert cursor.fetchone()[0] == "pending"
 
 
+def test_hold_blocks_deadline_scoring_and_derived_scores_without_mutation(database):
+    psycopg, dsn = database
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cursor:
+            _seed_active(cursor)
+            # The synthetic run-score write below exercises the hold guard
+            # without needing an unrelated qualification receipt fixture.
+            cursor.execute("SET session_replication_role=replica")
+            cursor.execute("UPDATE public.lab_arena_rounds SET "
+                           "configuration_doc=configuration_doc - 'integrity_policy' "
+                           "WHERE round_id=%s", (recovery.ROUND,))
+            cursor.execute("SET session_replication_role=origin")
+            cursor.execute(_render_hold(cursor))
+            cursor.execute("SELECT public.lab_arena_operator_hold_active_v1()")
+            assert cursor.fetchone()[0] is True
+            cursor.execute("SELECT status,status_generation,stage_generation "
+                           "FROM public.lab_arena_rounds WHERE round_id=%s", (recovery.ROUND,))
+            before_round = cursor.fetchone()
+            cursor.execute("SELECT run_id,status,terminal_cause,per_icp_score "
+                           "FROM public.lab_arena_runs WHERE round_id=%s "
+                           "ORDER BY run_id", (recovery.ROUND,))
+            before_runs = cursor.fetchall()
+            with pytest.raises(psycopg.Error, match="lab_arena_round_progression_paused"):
+                cursor.execute("SELECT public.lab_arena_close_scoring(%s,1::smallint)", (recovery.ROUND,))
+            cursor.execute("ROLLBACK")
+            cursor.execute("SELECT status,status_generation,stage_generation "
+                           "FROM public.lab_arena_rounds WHERE round_id=%s", (recovery.ROUND,))
+            assert cursor.fetchone() == before_round
+            cursor.execute("SELECT run_id,status,terminal_cause,per_icp_score "
+                           "FROM public.lab_arena_runs WHERE round_id=%s "
+                           "ORDER BY run_id", (recovery.ROUND,))
+            assert cursor.fetchall() == before_runs
+            with pytest.raises(psycopg.Error, match="lab_arena_round_progression_paused"):
+                cursor.execute("UPDATE public.lab_arena_runs SET per_icp_score=0 "
+                               "WHERE round_id=%s AND kind='execute'", (recovery.ROUND,))
+            cursor.execute("ROLLBACK")
+            cursor.execute("SELECT count(*) FROM public.lab_arena_runs "
+                           "WHERE round_id=%s AND per_icp_score IS NOT NULL", (recovery.ROUND,))
+            assert cursor.fetchone()[0] == 0
+            # Exact recovery can move backward and clear derived fields.
+            cursor.execute("UPDATE public.lab_arena_rounds SET status='stage1_closed' "
+                           "WHERE round_id=%s", (recovery.ROUND,))
+            cursor.execute("SELECT status FROM public.lab_arena_rounds "
+                           "WHERE round_id=%s", (recovery.ROUND,))
+            assert cursor.fetchone()[0] == "stage1_closed"
+
+
+def test_released_hold_allows_normal_scoring_close(database):
+    psycopg, dsn = database
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cursor:
+            _seed_active(cursor)
+            cursor.execute(_render_hold(cursor))
+            cursor.execute("UPDATE public.lab_arena_restart_claim_control "
+                           "SET operator_paused=false,pause_reason='',actor_ref='' "
+                           "WHERE singleton")
+            cursor.execute("SELECT public.lab_arena_operator_hold_active_v1()")
+            assert cursor.fetchone()[0] is False
+            cursor.execute("SELECT public.lab_arena_close_scoring(%s,1::smallint)", (recovery.ROUND,))
+            assert cursor.fetchone()[0]["round_status"] == "stage1_judged"
+            cursor.execute("SELECT count(*) FROM public.lab_arena_runs "
+                           "WHERE round_id=%s AND kind='score' "
+                           "AND status='failed' AND terminal_cause='stage_closed'", (recovery.ROUND,))
+            assert cursor.fetchone()[0] == 8
+
+
 @pytest.mark.parametrize("conflict", ["operator", "guard", "foreign_live", "foreign_lease", "source"])
 def test_hold_fails_closed_for_foreign_owner_guard_or_frozen_tamper(database, conflict):
     psycopg, dsn = database

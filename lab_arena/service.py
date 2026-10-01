@@ -4454,6 +4454,12 @@ class ArenaService:
                         "round_status": "open",
                         "remaining_admissions": int(admission["remaining"]),
                     }
+            # The operator hold pauses round progression as well as new
+            # claims. Keep intake and independent billing available above.
+            # Migration 371 also guards the database transition against a
+            # concurrent hold or an older driver process.
+            if row["status"] not in TERMINAL_STATUSES and self._store.operator_hold_active():
+                return {"status": "paused", "round_status": row["status"]}
             return self._advance_round_locked(round_id)
         finally:
             self._invalidate_hot_round()

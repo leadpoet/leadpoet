@@ -52,6 +52,7 @@ SERVICE_ROLE_NAME = "lab_arena_service"
 SCORE_BATCH_SIZE = 500
 
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
+    "lab_arena_operator_hold_active_v1": (),
     "lab_arena_append_trajectory_events_v1": (
         ("p_run_id", "text"),
         ("p_lease_token_hash", "text"),
@@ -1736,6 +1737,12 @@ class ArenaStore:
 
     def expire_leases(self, round_id: str) -> Dict[str, Any]:
         return _require_mapping(self._transport.rpc("lab_arena_expire_leases", {"p_round_id": round_id}), "expire_leases")
+
+    def operator_hold_active(self) -> bool:
+        result = self._transport.rpc("lab_arena_operator_hold_active_v1", {})
+        if not isinstance(result, bool):
+            raise ArenaStoreError("operator hold state is malformed")
+        return result
 
     def close_stage(self, round_id: str, stage: int) -> Dict[str, Any]:
         return _require_mapping(self._transport.rpc("lab_arena_close_stage", {"p_round_id": round_id, "p_stage": int(stage)}), "close_stage")

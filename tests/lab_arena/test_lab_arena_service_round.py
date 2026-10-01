@@ -822,6 +822,52 @@ def test_benchmark_commit_rejects_missing_live_cost_policy_without_mutation(
     assert harness.service.store.list_runs(round_id) == []
 
 
+def test_operator_hold_survives_scoring_deadline_then_normal_round_publishes(
+    connect, tmp_path
+):
+    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    configuration = harness.service.create_round(
+        datetime.now(timezone.utc) + timedelta(minutes=30),
+        round_id="arena-2026-10-09",
+    )
+    harness.round_id = configuration["round_id"]
+    schedule = harness.service.store.get_round(harness.round_id)["configuration_doc"]["schedule"]
+    harness.clock.advance_to(schedule["submission_cutoff"])
+    assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+    assert harness.service.advance_round(harness.round_id)["assignments"] == 10
+    harness.run_stage_with_runners(1)
+    assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+    assert harness.service.advance_round(harness.round_id)["assignments"] == 10
+    assert harness.status() == "stage1_scoring"
+
+    with connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("UPDATE public.lab_arena_restart_claim_control "
+                           "SET operator_paused=true,pause_reason='test',actor_ref='test' "
+                           "WHERE singleton")
+    before_runs = harness.service.store.list_runs(harness.round_id)
+    harness.clock.advance_to(schedule["stage_1_scoring_close"])
+    for _ in range(3):
+        assert harness.service.advance_round(harness.round_id) == {
+            "status": "paused", "round_status": "stage1_scoring"
+        }
+    assert harness.status() == "stage1_scoring"
+    assert harness.service.store.list_runs(harness.round_id) == before_runs
+    assert all(row["per_icp_score"] is None for row in before_runs)
+    assert harness.service.store.get_round(harness.round_id)["published_at"] is None
+
+    with connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("UPDATE public.lab_arena_restart_claim_control "
+                           "SET operator_paused=false,pause_reason='',actor_ref='' "
+                           "WHERE singleton")
+    harness.clock.now = datetime.fromisoformat(
+        schedule["stage_1_scoring_close"].replace("Z", "+00:00")
+    ) - timedelta(minutes=1)
+    harness.advance_until("published", runners=1)
+    assert harness.status() == "published"
+
+
 def test_round_advances_from_cutoff_on_readiness_without_nominal_idle_gaps(
     connect, tmp_path
 ):

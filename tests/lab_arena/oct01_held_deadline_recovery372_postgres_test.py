@@ -20,6 +20,9 @@ MIGRATION = ROOT / "scripts/372-arena-2026-10-01-held-deadline-recovery.sql"
 ROUND = hold.recovery.ROUND
 ARCHIVE = ROUND + "-r372archive"
 BASELINE = hold.recovery.BASELINE
+CANONICAL_ACTOR = (
+    "canonical-active-release:07016ffd02e174b6deaaa136e0e8e216d498a8d2"
+)
 database = hold.database
 
 
@@ -43,6 +46,11 @@ def _prepare(cursor):
     hold._seed_active(cursor)
     cursor.execute(hold._render_hold(cursor))
     cursor.execute("SET session_replication_role=replica")
+    cursor.execute(
+        "UPDATE public.lab_arena_restart_claim_control "
+        "SET actor_ref=%s,guard_generation=301 WHERE singleton",
+        (CANONICAL_ACTOR,),
+    )
     cursor.execute(
         "UPDATE public.lab_arena_runs SET per_icp_score=0 "
         "WHERE round_id=%s AND kind='execute' AND stage=1", (ROUND,)
@@ -180,7 +188,7 @@ def test_recovery_archives_invalid_derivation_and_keeps_hold(database):
             assert schedule["stage_1_scoring_close"] == "2026-10-01T20:00:01Z"
             cursor.execute("SELECT operator_paused,actor_ref FROM "
                            "public.lab_arena_restart_claim_control WHERE singleton")
-            assert cursor.fetchone() == (True, "oct01-provider-recovery369")
+            assert cursor.fetchone() == (True, CANONICAL_ACTOR)
             assert _rows(cursor, "lab_arena_ledger", ROUND) == before_ledger
             assert _rows(cursor, "lab_arena_trajectory_events", ROUND) == before_events
             assert _rows(cursor, "lab_arena_rounds", "arena-2026-10-02") == foreign_before
@@ -231,7 +239,9 @@ def test_replay_rejects_changed_archive_snapshot(database):
             assert _rows(cursor, "lab_arena_runs", ARCHIVE) == before
 
 
-@pytest.mark.parametrize("tamper", ["score", "pending_job", "foreign_stage"])
+@pytest.mark.parametrize("tamper", [
+    "score", "pending_job", "foreign_stage", "foreign_owner", "active_guard",
+])
 def test_preimage_drift_fails_without_mutation(database, tamper):
     psycopg, dsn = database
     with psycopg.connect(**dsn) as conn:
@@ -246,6 +256,17 @@ def test_preimage_drift_fails_without_mutation(database, tamper):
                 cursor.execute("UPDATE public.lab_arena_runs SET status='leased' "
                                "WHERE run_id=(SELECT min(run_id) FROM public.lab_arena_runs "
                                "WHERE round_id=%s AND stage=2)", (ROUND,))
+            elif tamper == "foreign_owner":
+                cursor.execute("UPDATE public.lab_arena_restart_claim_control "
+                               "SET actor_ref='foreign-operator' WHERE singleton")
+            elif tamper == "active_guard":
+                cursor.execute("UPDATE public.lab_arena_restart_claim_control "
+                               "SET guard_commitment='sha256:'||repeat('a',64),"
+                               "owner_commitment='sha256:'||repeat('b',64),"
+                               "guard_expires_at=now()+interval '1 hour',"
+                               "candidate_commit=repeat('c',40),"
+                               "restart_scope='all',restart_phase='draining' "
+                               "WHERE singleton")
             else:
                 cursor.execute("UPDATE public.lab_arena_rounds SET status='stage1' "
                                "WHERE round_id='arena-2026-10-02'")

@@ -85,7 +85,9 @@ BEGIN
   WHERE singleton FOR UPDATE;
   IF NOT FOUND OR NOT v_control.operator_paused
      OR v_control.pause_reason <> 'oct01_deepline_outage'
-     OR v_control.actor_ref <> 'oct01-provider-recovery369'
+     OR v_control.actor_ref <>
+          'canonical-active-release:07016ffd02e174b6deaaa136e0e8e216d498a8d2'
+     OR v_control.guard_generation <> 301
      OR v_control.guard_commitment <> ''
      OR v_control.owner_commitment <> ''
      OR v_control.guard_expires_at IS NOT NULL

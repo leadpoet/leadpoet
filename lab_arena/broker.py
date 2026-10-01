@@ -2114,6 +2114,43 @@ def _deepline_generic_http_request_refusal(
     )
 
 
+def _deepline_firecrawl_enrichment_refusal(
+    parameters: Mapping[str, Any], response: ProviderResponse
+) -> bool:
+    """Identify the observed managed-provider denial for LinkedIn enrichment."""
+
+    if response.status != 403 or parameters.get("tool") != "firecrawl_scrape":
+        return False
+    try:
+        document = json.loads(response.body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(document, Mapping):
+        return False
+    tool_error = document.get("tool_error")
+    return (
+        document.get("code") == "PROVIDER_AUTHORIZATION_FAILED"
+        and document.get("credential_owner") == "deepline_managed"
+        and document.get("credential_source") == "env"
+        and document.get("error_category") == "provider_auth"
+        and document.get("failure_origin") == "provider"
+        and document.get("provider") == "firecrawl"
+        and document.get("operation") == "firecrawl_scrape"
+        and type(document.get("upstream_status")) is int
+        and document["upstream_status"] == 403
+        and document.get("upstream_error_code")
+        == "THIRD_PARTY_DATA_ENRICHMENT_NOT_ENABLED"
+        and isinstance(tool_error, Mapping)
+        and tool_error.get("code") == "PROVIDER_AUTHORIZATION_FAILED"
+        and tool_error.get("category") == "authentication"
+        and tool_error.get("origin") == "provider"
+        and type(tool_error.get("statusCode")) is int
+        and tool_error["statusCode"] == 403
+        and tool_error.get("provider") == "firecrawl"
+        and tool_error.get("operation") == "firecrawl_scrape"
+    )
+
+
 def _provider_request_refused(
     provider: str,
     parameters: Mapping[str, Any],
@@ -2122,7 +2159,10 @@ def _provider_request_refused(
     if provider == "openrouter":
         return _openrouter_request_policy_refusal(response)
     if provider == "deepline":
-        return _deepline_generic_http_request_refusal(parameters, response)
+        return (
+            _deepline_generic_http_request_refusal(parameters, response)
+            or _deepline_firecrawl_enrichment_refusal(parameters, response)
+        )
     return False
 
 

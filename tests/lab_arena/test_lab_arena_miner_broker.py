@@ -9,7 +9,219 @@ import pytest
 
 from lab_arena import broker as br
 from lab_arena import operations
-from test_lab_arena_broker import CHAT, CONTEXT, FakeLedgerStore, FakeTransport, make_broker
+from test_lab_arena_broker import (
+    CHAT, CONTEXT, FakeLedgerStore, FakeTransport, deepline_history,
+    deepline_history_entry, make_broker,
+)
+
+
+def firecrawl_enrichment_denial(request_id="iad1::firecrawl-enrichment-denied"):
+    return {
+        "code": "PROVIDER_AUTHORIZATION_FAILED",
+        "credential_owner": "deepline_managed",
+        "credential_source": "env",
+        "error": "private upstream denial",
+        "error_category": "provider_auth",
+        "failure_origin": "provider",
+        "operation": "firecrawl_scrape",
+        "provider": "firecrawl",
+        "requestId": request_id,
+        "request_id": request_id,
+        "tool_error": {
+            "code": "PROVIDER_AUTHORIZATION_FAILED",
+            "category": "authentication",
+            "origin": "provider",
+            "statusCode": 403,
+            "provider": "firecrawl",
+            "operation": "firecrawl_scrape",
+        },
+        "upstream_error_code": "THIRD_PARTY_DATA_ENRICHMENT_NOT_ENABLED",
+        "upstream_status": 403,
+    }
+
+
+def _firecrawl_failed_zero_history(request_id):
+    entry = deepline_history_entry(
+        request_id, "firecrawl_scrape", 0,
+        charge_state="failed", provider="firecrawl",
+    )
+    entry.update({"status": "error", "delta": 0})
+    return deepline_history(entry)
+
+
+def test_miner_score_managed_firecrawl_enrichment_denial_is_request_refusal():
+    request_id = "iad1::firecrawl-enrichment-denied"
+    denial = firecrawl_enrichment_denial(request_id)
+    marked = []
+    broker, ledger, transport = make_broker(
+        transport=FakeTransport([
+            (403, denial), (200, _firecrawl_failed_zero_history(request_id)),
+        ]),
+        credential_for=lambda _context, _provider: "miner-deepline-key",
+        funding_source_for=lambda _context: "miner_key",
+        retry_miner_credential_for=lambda _context: True,
+        mark_provider_fallback=lambda context, provider, evidence: (
+            marked.append((context, provider, evidence)) or {"status": "marked"}
+        ),
+    )
+    context = replace(CONTEXT, kind="score", round_id="arena-2026-10-01")
+    arguments = dict(
+        operation_id="scrapingdog.scrape",
+        parameters={"url": "https://www.linkedin.com/company/edvistasinc"},
+        action_sequence=56,
+        timeout_ms=60_000,
+    )
+
+    result = broker.execute(context, **arguments)
+    replay = broker.execute(context, **arguments)
+
+    assert result.status == 403
+    assert json.loads(result.body) == {
+        "error": {"code": "provider_request_refused"}
+    }
+    assert result.call["error_code"] == "provider_request_refused"
+    assert result.call["provider_status"] == 403
+    assert result.call["actual_microusd"] == 0
+    assert result.call["cost_basis"] == "deepline_billing_history_failed_zero"
+    assert result.call["operation_id"] == "scrapingdog.scrape"
+    assert result.call["effective_operation_id"] == "deepline.execute"
+    assert marked == []
+    assert replay.call["idempotent"] is True
+    assert replay.call["error_code"] == "provider_request_refused"
+    assert replay.body == result.body
+    assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
+    terminal = ledger.calls[result.call["call_identity"]]["terminal"]
+    assert "account_failure_evidence" not in terminal
+    assert denial["error"] not in repr(result.to_document())
+    assert denial["error"] not in repr(ledger.calls)
+
+
+def test_miner_score_firecrawl_denial_without_verified_cost_stays_uncertain():
+    denial = firecrawl_enrichment_denial()
+    broker, ledger, _transport = make_broker(
+        transport=FakeTransport([(403, denial), (200, deepline_history())]),
+        credential_for=lambda _context, _provider: "miner-deepline-key",
+        funding_source_for=lambda _context: "miner_key",
+    )
+    result = broker.execute(
+        replace(CONTEXT, kind="score", round_id="arena-2026-10-01"),
+        operation_id="scrapingdog.scrape",
+        parameters={"url": "https://www.linkedin.com/company/edvistasinc"},
+        action_sequence=0,
+        timeout_ms=60_000,
+    )
+    assert result.status == 502
+    assert result.call["error_code"] == "provider_unavailable"
+    assert result.call["outcome"] == "uncertain"
+    assert "actual_microusd" not in result.call
+    assert ledger.log == ["reserve", "dispatch", "uncertain"]
+
+
+def test_miner_score_firecrawl_public_page_still_succeeds():
+    envelope = {
+        "job_id": "test-public-page",
+        "status": "completed",
+        "result": {"data": {
+            "rawHtml": "<html>Example Domain</html>",
+            "metadata": {
+                "sourceURL": "https://example.com/",
+                "url": "https://example.com/",
+                "statusCode": 200,
+            },
+        }},
+        "billing": {"credits_charged": 0},
+    }
+    broker, _ledger, transport = make_broker(
+        transport=FakeTransport([(200, envelope)]),
+        credential_for=lambda _context, _provider: "miner-deepline-key",
+        funding_source_for=lambda _context: "miner_key",
+    )
+    result = broker.execute(
+        replace(CONTEXT, kind="score", round_id="arena-2026-10-01"),
+        operation_id="scrapingdog.scrape",
+        parameters={"url": "https://example.com/"},
+        action_sequence=0,
+        timeout_ms=60_000,
+    )
+    assert result.status == 200
+    assert b"Example Domain" in result.body
+    assert result.call.get("error_code") is None
+    assert result.call["actual_microusd"] == 0
+    assert len(transport.sent) == 1
+
+
+@pytest.mark.parametrize("status,owner,upstream_code", [
+    (401, "deepline_managed", "THIRD_PARTY_DATA_ENRICHMENT_NOT_ENABLED"),
+    (402, "deepline_managed", "THIRD_PARTY_DATA_ENRICHMENT_NOT_ENABLED"),
+    (403, "workspace", "THIRD_PARTY_DATA_ENRICHMENT_NOT_ENABLED"),
+    (403, "deepline_managed", "OTHER"),
+])
+def test_miner_score_firecrawl_account_denials_keep_credential_error(
+    status, owner, upstream_code
+):
+    request_id = "iad1::firecrawl-account-denied"
+    denial = firecrawl_enrichment_denial(request_id)
+    denial["credential_owner"] = owner
+    denial["upstream_error_code"] = upstream_code
+    broker, _ledger, _transport = make_broker(
+        transport=FakeTransport([
+            (status, denial), (200, _firecrawl_failed_zero_history(request_id)),
+        ]),
+        credential_for=lambda _context, _provider: "miner-deepline-key",
+        funding_source_for=lambda _context: "miner_key",
+    )
+    result = broker.execute(
+        replace(CONTEXT, kind="score", round_id="arena-2026-10-01"),
+        operation_id="scrapingdog.scrape",
+        parameters={"url": "https://www.linkedin.com/company/edvistasinc"},
+        action_sequence=0,
+        timeout_ms=60_000,
+    )
+    assert result.status == 402
+    assert result.call["error_code"] == "miner_credentials_unavailable"
+    assert result.call["provider_status"] == status
+
+
+@pytest.mark.parametrize("change", [
+    {"code": "OTHER"},
+    {"credential_owner": "workspace"},
+    {"credential_source": "workspace"},
+    {"error_category": "authorization"},
+    {"failure_origin": "workspace"},
+    {"provider": "generic_http"},
+    {"operation": "other"},
+    {"upstream_status": 401},
+    {"upstream_error_code": "OTHER"},
+    {"tool_error": {"code": "OTHER"}},
+    {"tool_error": {"category": "authorization"}},
+    {"tool_error": {"origin": "workspace"}},
+    {"tool_error": {"statusCode": 401}},
+    {"tool_error": {"provider": "generic_http"}},
+    {"tool_error": {"operation": "other"}},
+])
+def test_firecrawl_enrichment_refusal_rejects_inconsistent_metadata(change):
+    denial = firecrawl_enrichment_denial()
+    if "tool_error" in change:
+        denial["tool_error"].update(change["tool_error"])
+    else:
+        denial.update(change)
+    response = br.ProviderResponse(
+        403, {"content-type": "application/json"},
+        json.dumps(denial).encode("utf-8"),
+    )
+    assert not br._provider_request_refused(
+        "deepline", {"tool": "firecrawl_scrape"}, response,
+    )
+
+
+@pytest.mark.parametrize("body,tool", [
+    (b"{not json", "firecrawl_scrape"),
+    (b"[]", "firecrawl_scrape"),
+    (b"{}", "generic_http_request"),
+])
+def test_firecrawl_enrichment_refusal_rejects_malformed_or_other_tool(body, tool):
+    response = br.ProviderResponse(403, {"content-type": "application/json"}, body)
+    assert not br._provider_request_refused("deepline", {"tool": tool}, response)
 
 
 def test_miner_score_scrape_preserves_only_the_validated_final_url_on_replay():

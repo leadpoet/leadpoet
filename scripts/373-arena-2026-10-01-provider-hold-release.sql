@@ -87,7 +87,7 @@ BEGIN
      OR v_archive.status <> 'cancelled'
      OR v_archive.configuration_doc->>'mode' <> 'shadow'
      OR v_archive.configuration_doc->>'recovery_source_round_id' <> v_round.round_id
-     OR v_archive.configuration_doc->>'recovery_preimage_score_rows_sha256' <> 
+     OR v_archive.configuration_doc->>'recovery_preimage_score_rows_sha256' <>
           'dad688e5ab73c5f5e6671299f10d914d5462a5b8333d24b9ddb53b467bf58a63'
      OR v_archive.configuration_doc->>'recovery_preimage_stage2_rows_sha256' <>
           '2b0443f2ba2cf021628d34bebd575886be427c4749536b2c8879d3b9bc10239a'

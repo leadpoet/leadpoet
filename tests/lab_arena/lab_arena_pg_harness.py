@@ -121,6 +121,7 @@ CURRENT_SERVICE_MIGRATIONS = POSTGREST_MIGRATIONS + (
     "363-lab-arena-judgment-group-terminal-handoff.sql",
     "367-lab-arena-publication-eligibility-reuse.sql",
     "371-lab-arena-operator-hold-transition-guard.sql",
+    "374-lab-arena-preserve-operator-pause-reason.sql",
 )
 
 

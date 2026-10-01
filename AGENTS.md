@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: October 1 production audit and recovery
+
+On 2026-10-01 the user authorized end-to-end production audit and recovery of
+the October 1 Arena baseline and miner round, including actual source/evidence
+audits, protected logs and state, narrow confirmed bug fixes, regression tests,
+exact committed recovery migrations, pushes and canonical paired deployment.
+Use the overnight rebenchmark validation workflow. Preserve the frozen ICP bank,
+model sources, scoring and qualification rules, provider credential ownership,
+sourcing/judge cost separation, failure history and other rounds. Restore the
+cancelled infrastructure-failed round only through a guarded, auditable recovery
+that retains its original frozen inputs. Do not fabricate results or overwrite
+accepted scores. Verify publication, dashboard, promotion, rewards and weights.
+This authority ends after the October 1 audit and production recovery complete.
+
 ## Scoped production authorization: October 1 verifier recovery
 
 On 2026-09-30 the user authorized careful, narrow fixes for the confirmed

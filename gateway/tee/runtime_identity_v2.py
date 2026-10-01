@@ -260,6 +260,7 @@ class RuntimeIdentityV2:
         self._boot_identity = None  # type: Optional[Dict[str, Any]]
         self._fresh_attestation = None  # type: Optional[bytes]
         self._fresh_attestation_expires_at = 0.0
+        self._fresh_certificate_expires_at = None  # type: Optional[datetime]
 
     def configure(
         self,
@@ -380,7 +381,12 @@ class RuntimeIdentityV2:
             if boot is None:
                 raise RuntimeIdentityV2Error("V2 runtime identity is not configured")
             now = self._attestation_cache_clock()
-            if self._fresh_attestation is not None and now < self._fresh_attestation_expires_at:
+            if (
+                self._fresh_attestation is not None
+                and now < self._fresh_attestation_expires_at
+                and self._fresh_certificate_expires_at is not None
+                and (self._fresh_certificate_expires_at - self._clock()).total_seconds() > 5
+            ):
                 return self._fresh_attestation
             user_data = canonical_json(build_boot_attestation_user_data(boot)).encode("utf-8")
             document = self._attestation_supplier(
@@ -396,6 +402,7 @@ class RuntimeIdentityV2:
                 raise RuntimeIdentityV2Error("fresh Nitro attestation certificate is expired")
             self._fresh_attestation = document
             self._fresh_attestation_expires_at = now + min(FRESH_ATTESTATION_CACHE_SECONDS, remaining)
+            self._fresh_certificate_expires_at = expires_at
             return document
 
     def transport_certificate_pem(self) -> bytes:

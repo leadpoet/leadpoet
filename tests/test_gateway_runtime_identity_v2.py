@@ -214,7 +214,7 @@ def test_fresh_attestation_refresh_failure_never_returns_cached_document(tmp_pat
         manager.fresh_attestation_document()
 
 
-def test_fresh_attestation_cache_ends_before_leaf_expiry(tmp_path: Path, monkeypatch):
+def test_fresh_attestation_cache_stops_before_leaf_expiry_even_if_ttl_remains(tmp_path: Path, monkeypatch):
     manager, _, _ = _manager(tmp_path)
     configuration = _configuration()
     manager.configure(configuration=configuration, expected_config_hash=_configuration_hash(configuration))
@@ -238,7 +238,6 @@ def test_fresh_attestation_cache_ends_before_leaf_expiry(tmp_path: Path, monkeyp
     tick[0] = 6
     now[0] += timedelta(seconds=6)
     assert manager.fresh_attestation_document() == b"fresh-1"
-    tick[0] = 8
     now[0] += timedelta(seconds=2)
     with pytest.raises(RuntimeIdentityV2Error, match="expired"):
         manager.fresh_attestation_document()

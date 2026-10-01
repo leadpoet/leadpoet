@@ -349,7 +349,11 @@ def handle_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
                 % enclave_role
             }
         if method == "get_event_signing_identity":
-            if params not in ({}, {"fresh_attestation": True}):
+            if params != {} and (
+                not isinstance(params, dict)
+                or set(params) != {"fresh_attestation"}
+                or params["fresh_attestation"] is not True
+            ):
                 raise ValueError("event signing identity parameters are invalid")
             return {"result": _event_signing_identity(fresh_attestation=bool(params))}
         if method == "role_health":

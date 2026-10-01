@@ -39,7 +39,13 @@ def test_existing_identity_rpc_refreshes_only_on_exact_opt_in(monkeypatch):
     assert fresh["enclave_pubkey"] == default["enclave_pubkey"]
     assert fresh["signer_state"] == default["signer_state"]
     assert calls == ["refresh"]
-    assert tee_service.handle_rpc("get_event_signing_identity", {"fresh_attestation": False})["error_type"] == "ValueError"
+    for invalid in (False, 1, "true", None):
+        assert tee_service.handle_rpc(
+            "get_event_signing_identity", {"fresh_attestation": invalid}
+        )["error_type"] == "ValueError"
+    assert tee_service.handle_rpc(
+        "get_event_signing_identity", {"fresh_attestation": True, "extra": True}
+    )["error_type"] == "ValueError"
 
 
 @pytest.mark.asyncio

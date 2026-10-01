@@ -387,7 +387,7 @@
       "symbol": "rpc_method_allowed"
     },
     {
-      "ast_sha256": "sha256:df9b955c4328d0b2b0922545e6299ce940742a9f06df9a885f4e2c705b9194ea",
+      "ast_sha256": "sha256:59253d033695c0fbb175fec7b43b5dcc024eeecb309710f752f8d8cd4e13d31a",
       "path": "gateway/tee/runtime_identity_v2.py",
       "symbol": "RuntimeIdentityV2"
     },
@@ -807,7 +807,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:216535836ba9158546bf6a741eee4aeef65fd689f0eb686b83d9ac5a1e508645",
-  "protected_source_commit": "02683b72730df04972a1831e169f761e0f676c57",
+  "manifest_hash": "sha256:f4a726ccba2bb8eeeba6629bdf86b4d9f2088a678b92532cbf921a98a90e24e1",
+  "protected_source_commit": "8776ab1b0c0c36bbf51335e7bc6bd928b94a015f",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -323,6 +323,66 @@ def test_verified_homepage_navigation_sink_reaches_reverification(monkeypatch):
     assert captured["verified_homepage_pages"] == homepage_page
 
 
+@pytest.mark.parametrize("bound_web_identity", [True, False])
+def test_unbound_homepage_reaches_positive_review_only_after_web_identity(
+    monkeypatch, bound_web_identity,
+):
+    homepage_url = "https://peer.example/"
+    homepage_page = {
+        homepage_url: {
+            "final_url": homepage_url,
+            "text": "PeerConnect sells an AI enrollment platform to universities.",
+        }
+    }
+    prior = (
+        lead_scorer._reverify_decision(
+            _verdict(),
+            _icp().required_attribute,
+            "series a",
+            icp=_icp(),
+            company=_company(),
+            verified_homepage_identity={},
+            verified_homepage_transport_domain="peer.example",
+            company_quality=True,
+        )
+        if bound_web_identity
+        else company_fit_unavailable("web identity unresolved")
+    )
+    calls = []
+
+    async def investigate(**kwargs):
+        calls.append(kwargs)
+        return {"claims": {
+            "industry": _finding(
+                "industry", status="UNPROVEN", activity_role="unresolved",
+                evidence_url="", evidence_quote="",
+            ),
+        }, "usage": {"reasoning_turns": 1}}
+
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
+    asyncio.run(lead_scorer._run_targeted_company_evidence_investigation(
+        company=_company(),
+        icp=_icp(),
+        verdict=_verdict(),
+        investigation_targets=("industry",),
+        icp_attribute=_icp().required_attribute,
+        icp_stage="series a",
+        verified_identity={},
+        verified_transport_domain="peer.example",
+        structured_employee_size_evidence=None,
+        structured_public_company_evidence=None,
+        employee_size_conflict=False,
+        company_quality=True,
+        prior_result=prior,
+        review_positive_semantics=True,
+        verified_homepage_pages=homepage_page,
+    ))
+
+    assert calls[0]["prefetched_pages"] == (
+        homepage_page if bound_web_identity else {}
+    )
+
+
 @pytest.mark.parametrize(
     ("industry_finding", "expected_decision", "semantic_resolved"),
     [

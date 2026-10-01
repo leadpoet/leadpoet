@@ -1331,6 +1331,47 @@ async def verify_company_exists(
             verified_homepage_transport_domain=domain,
         )
     if not observed_linkedins:
+        # The missing LinkedIn binding makes identity unavailable, but the
+        # already fetched same-domain homepage can still be useful as
+        # untrusted evidence after independent web identity verification.
+        if (
+            homepage_evidence_sink is not None
+            and any(_company_name(name) == _company_name(company_name)
+                    for name in observed_names)
+        ):
+            from qualification.scoring.company_evidence_investigator import (
+                _plain_text,
+            )
+
+            try:
+                canonical_request_url = public_http_url(request_url)
+                canonical_final_url = public_http_url(observed_url)
+                request_parts = urlsplit(canonical_request_url)
+                final_parts = urlsplit(canonical_final_url)
+            except (TypeError, ValueError):
+                canonical_request_url = ""
+                canonical_final_url = ""
+                request_parts = None
+                final_parts = None
+            if (
+                request_parts is not None
+                and final_parts is not None
+                and request_parts.scheme == final_parts.scheme == "https"
+                and request_parts.username is None
+                and request_parts.password is None
+                and final_parts.username is None
+                and final_parts.password is None
+                and request_parts.fragment == final_parts.fragment == ""
+                and request_parts.port in {None, 443}
+                and final_parts.port in {None, 443}
+                and _registrable_domain(canonical_request_url) == domain
+                and _registrable_domain(canonical_final_url) == domain
+                and (evidence_text := _plain_text(text))
+            ):
+                homepage_evidence_sink[canonical_request_url] = {
+                    "final_url": canonical_final_url,
+                    "text": evidence_text,
+                }
         return _identity_result(
             submitted_identity,
             "homepage identity evidence unavailable: LinkedIn company binding not found",

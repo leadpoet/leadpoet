@@ -2264,6 +2264,45 @@ def test_verified_homepage_binary_body_never_enters_evidence_sink(monkeypatch):
     assert homepage_pages == {}
 
 
+@pytest.mark.parametrize(
+    ("submitted_name", "final_url", "retained"),
+    [
+        ("Woodway Assurance", "https://woodway-assurance.com/", True),
+        ("Other Company", "https://woodway-assurance.com/", False),
+        ("Woodway Assurance", "https://other.example/", False),
+    ],
+)
+def test_unbound_homepage_body_is_retained_only_for_same_company_domain(
+    monkeypatch, submitted_name, final_url, retained,
+):
+    from qualification.scoring import company_verification
+
+    async def fetch(_session, _url):
+        return (
+            200,
+            final_url,
+            "<title>Woodway Assurance</title><main>Woodway Assurance "
+            "offers EviData AI software by subscription.</main>",
+        )
+
+    monkeypatch.setattr(company_verification, "_fetch_bounded_html", fetch)
+    pages = {}
+    result = asyncio.run(verify_company_exists(
+        submitted_name,
+        "https://woodway-assurance.com/",
+        require_https_transport=True,
+        homepage_evidence_sink=pages,
+    ))
+
+    assert result.decision != COMPANY_FIT_MATCH
+    assert bool(pages) is retained
+    if retained:
+        assert pages["https://woodway-assurance.com/"]["final_url"] == final_url
+        assert "EviData AI software" in pages[
+            "https://woodway-assurance.com/"
+        ]["text"]
+
+
 def test_verified_homepage_evidence_text_uses_existing_page_cap(monkeypatch):
     from qualification.scoring import company_verification
 

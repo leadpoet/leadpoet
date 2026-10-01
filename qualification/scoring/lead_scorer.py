@@ -6546,6 +6546,33 @@ async def _run_targeted_company_evidence_investigation(
         )
     )
     submitted_source_urls: list[str] = []
+    homepage_pages = verified_homepage_pages or {}
+    if homepage_pages and not verified_identity:
+        # An unavailable homepage identity may retain its fetched body as
+        # untrusted evidence. Admit it only after the separate web verifier
+        # has bound the submitted name, domain, and LinkedIn identity.
+        identity_receipt = (
+            prior_result.details.get("identity_receipt")
+            if prior_result is not None
+            and isinstance(prior_result.details, Mapping)
+            else None
+        )
+        submitted_domain = _registrable_domain(company.company_website)
+        if not (
+            prior_result is not None
+            and prior_result.details.get("identity_decision") == COMPANY_FIT_MATCH
+            and isinstance(identity_receipt, Mapping)
+            and identity_receipt.get("decision") == COMPANY_FIT_MATCH
+            and identity_receipt.get("evidence_source")
+            == "company_web_reverification"
+            and _company_name(identity_receipt.get("observed_name"))
+            == _company_name(company.company_name)
+            and bool(identity_receipt.get("observed_linkedin_slug"))
+            and identity_receipt.get("submitted_domain") == submitted_domain
+            and identity_receipt.get("observed_domain") == submitted_domain
+            and verified_transport_domain == submitted_domain
+        ):
+            homepage_pages = {}
     matched_company_retry_pages = _matched_company_retry_prefetched_pages(
         matched_company_retry_source_cache,
         investigation_verified_identity,
@@ -6558,7 +6585,7 @@ async def _run_targeted_company_evidence_investigation(
         ),
         *matched_company_retry_pages.keys(),
         *(
-            (verified_homepage_pages or {}).keys()
+            homepage_pages.keys()
             if review_positive_semantics
             else []
         ),
@@ -6706,7 +6733,7 @@ async def _run_targeted_company_evidence_investigation(
             required_attribute_source_cache or {},
             submitted_source_urls,
             verified_homepage_pages=(
-                verified_homepage_pages
+                homepage_pages
                 if review_positive_semantics or verified_rebrand_redirect
                 else None
             ),

@@ -357,9 +357,12 @@ class TEEClient:
             request_bytes=request_bytes,
         )
     
-    async def get_event_signing_identity(self) -> Dict:
+    async def get_event_signing_identity(self, *, fresh_attestation: bool = False) -> Dict:
         """Return the Nitro-bound coordinator runtime identity."""
-        return await self._send_rpc("get_event_signing_identity", {})
+        return await self._send_rpc(
+            "get_event_signing_identity",
+            {"fresh_attestation": True} if fresh_attestation else {},
+        )
 
     async def role_health(self) -> Dict:
         """Return the measured physical role and build identity for this CID."""

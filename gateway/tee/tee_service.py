@@ -26,6 +26,7 @@ print("=" * 80, flush=True)
 
 print("🐛 DEBUG: Importing standard library modules...", flush=True)
 import socket
+import base64
 import json
 import sys
 import os
@@ -312,15 +313,20 @@ def handle_v2_runtime_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]
     raise ValueError("Unknown V2 runtime method")
 
 
-def _event_signing_identity() -> Dict[str, Any]:
+def _event_signing_identity(*, fresh_attestation: bool = False) -> Dict[str, Any]:
     """Return the coordinator's measured boot identity for public attestation."""
 
-    boot = get_v2_runtime_identity().boot_identity()
+    manager = get_v2_runtime_identity()
+    boot = manager.boot_identity()
+    attestation_document_b64 = (
+        base64.b64encode(manager.fresh_attestation_document()).decode("ascii")
+        if fresh_attestation else boot["attestation_document_b64"]
+    )
     return {
         "purpose": "gateway_event_signing",
         "enclave_pubkey": boot["signing_pubkey"],
         "code_hash": compute_code_hash(),
-        "attestation_document_b64": boot["attestation_document_b64"],
+        "attestation_document_b64": attestation_document_b64,
         "signer_state": {
             "status": "ready",
             "boot_identity_hash": boot["boot_identity_hash"],
@@ -343,7 +349,9 @@ def handle_rpc(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
                 % enclave_role
             }
         if method == "get_event_signing_identity":
-            return {"result": _event_signing_identity()}
+            if params not in ({}, {"fresh_attestation": True}):
+                raise ValueError("event signing identity parameters are invalid")
+            return {"result": _event_signing_identity(fresh_attestation=bool(params))}
         if method == "role_health":
             from gateway.tee.build_identity import load_identity
             from gateway.tee.topology import role_spec

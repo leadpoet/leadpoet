@@ -68,10 +68,13 @@ class PubkeyResponse(BaseModel):
     enclave_pubkey: str  # Hex-encoded Ed25519 public key
 
 
-async def _runtime_identity() -> dict:
+async def _runtime_identity(*, fresh_attestation: bool = False) -> dict:
     """Read the measured identity through the retained client RPC alias."""
 
-    identity = await coordinator_tee_client.get_event_signing_identity()
+    if fresh_attestation:
+        identity = await coordinator_tee_client.get_event_signing_identity(fresh_attestation=True)
+    else:
+        identity = await coordinator_tee_client.get_event_signing_identity()
     if identity.get("purpose") != "gateway_event_signing":
         raise RuntimeError("coordinator enclave returned the wrong signing purpose")
     if not identity.get("enclave_pubkey") or not identity.get("code_hash"):
@@ -112,7 +115,7 @@ async def get_attestation_document_endpoint():
     - Auditors should report this limitation in their output
     """
     try:
-        identity = await _runtime_identity()
+        identity = await _runtime_identity(fresh_attestation=True)
         attestation_b64 = str(identity.get("attestation_document_b64") or "")
         if not attestation_b64:
             raise HTTPException(

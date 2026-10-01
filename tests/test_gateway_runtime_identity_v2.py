@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import copy
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import cbor2
 import pytest
-from cryptography.hazmat.primitives import serialization
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.x509.oid import NameOID
 
 from gateway.tee.build_identity import build_identity, write_identity
 from gateway.tee.runtime_identity_v2 import (
@@ -14,6 +19,7 @@ from gateway.tee.runtime_identity_v2 import (
     RuntimeIdentityV2,
     RuntimeIdentityV2Error,
 )
+from gateway.tee import runtime_identity_v2
 from leadpoet_canonical.attested_v2 import (
     build_boot_attestation_user_data,
     canonical_json,
@@ -150,6 +156,115 @@ def test_runtime_configuration_is_immutable_for_boot(tmp_path: Path):
             configuration=changed,
             expected_config_hash=_configuration_hash(changed),
         )
+
+
+def test_fresh_attestation_reuses_boot_claim_and_key_without_mutating_boot(tmp_path: Path, monkeypatch):
+    manager, observed, signing_pubkey = _manager(tmp_path)
+    configuration = _configuration()
+    manager.configure(configuration=configuration, expected_config_hash=_configuration_hash(configuration))
+    boot = manager.boot_identity()
+    attestation_calls = []
+    tick = [0.0]
+    manager._attestation_cache_clock = lambda: tick[0]
+    manager._clock = lambda: datetime(2026, 10, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        runtime_identity_v2,
+        "_attestation_certificate_expires_at",
+        lambda _document: datetime(2026, 10, 1, tzinfo=timezone.utc) + timedelta(minutes=5),
+    )
+
+    def attest(*, user_data, signing_pubkey):
+        attestation_calls.append((bytes(user_data), bytes(signing_pubkey)))
+        return ("fresh-%d" % len(attestation_calls)).encode()
+
+    manager._attestation_supplier = attest
+    assert manager.fresh_attestation_document() == b"fresh-1"
+    tick[0] = 29
+    assert manager.fresh_attestation_document() == b"fresh-1"
+    tick[0] = 31
+    assert manager.fresh_attestation_document() == b"fresh-2"
+    assert len(attestation_calls) == 2
+    assert all(json.loads(data) == build_boot_attestation_user_data(boot) for data, _ in attestation_calls)
+    assert all(key == bytes.fromhex(signing_pubkey) for _, key in attestation_calls)
+    assert manager.boot_identity() == boot
+    assert observed["signing_pubkey"] == bytes.fromhex(signing_pubkey)
+
+
+def test_fresh_attestation_refresh_failure_never_returns_cached_document(tmp_path: Path, monkeypatch):
+    manager, _, _ = _manager(tmp_path)
+    configuration = _configuration()
+    manager.configure(configuration=configuration, expected_config_hash=_configuration_hash(configuration))
+    tick = [0.0]
+    manager._attestation_cache_clock = lambda: tick[0]
+    manager._clock = lambda: datetime(2026, 10, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        runtime_identity_v2,
+        "_attestation_certificate_expires_at",
+        lambda _document: datetime(2026, 10, 1, tzinfo=timezone.utc) + timedelta(minutes=5),
+    )
+    manager._attestation_supplier = lambda **_kwargs: b"fresh"
+    assert manager.fresh_attestation_document() == b"fresh"
+    tick[0] = 31
+
+    def unavailable(**_kwargs):
+        raise RuntimeIdentityV2Error("hardware Nitro attestation is unavailable")
+
+    manager._attestation_supplier = unavailable
+    with pytest.raises(RuntimeIdentityV2Error, match="unavailable"):
+        manager.fresh_attestation_document()
+
+
+def test_fresh_attestation_cache_ends_before_leaf_expiry(tmp_path: Path, monkeypatch):
+    manager, _, _ = _manager(tmp_path)
+    configuration = _configuration()
+    manager.configure(configuration=configuration, expected_config_hash=_configuration_hash(configuration))
+    tick = [0.0]
+    now = [datetime(2026, 10, 1, tzinfo=timezone.utc)]
+    manager._attestation_cache_clock = lambda: tick[0]
+    manager._clock = lambda: now[0]
+    monkeypatch.setattr(
+        runtime_identity_v2,
+        "_attestation_certificate_expires_at",
+        lambda _document: datetime(2026, 10, 1, tzinfo=timezone.utc) + timedelta(seconds=12),
+    )
+    calls = []
+
+    def attest(**_kwargs):
+        calls.append(1)
+        return ("fresh-%d" % len(calls)).encode()
+
+    manager._attestation_supplier = attest
+    assert manager.fresh_attestation_document() == b"fresh-1"
+    tick[0] = 6
+    now[0] += timedelta(seconds=6)
+    assert manager.fresh_attestation_document() == b"fresh-1"
+    tick[0] = 8
+    now[0] += timedelta(seconds=2)
+    with pytest.raises(RuntimeIdentityV2Error, match="expired"):
+        manager.fresh_attestation_document()
+    assert calls == [1, 1]
+
+
+def test_fresh_attestation_reads_leaf_expiry_from_cose_document():
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test")])
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    expiry = now + timedelta(minutes=5)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(expiry)
+        .sign(key, hashes.SHA256())
+    )
+    payload = cbor2.dumps({"certificate": certificate.public_bytes(serialization.Encoding.DER)})
+    document = cbor2.dumps([b"", {}, payload, b""])
+    assert runtime_identity_v2._attestation_certificate_expires_at(document) == expiry
+    with pytest.raises(RuntimeIdentityV2Error, match="certificate is invalid"):
+        runtime_identity_v2._attestation_certificate_expires_at(b"bad COSE")
 
 
 def test_runtime_identity_rejects_zero_pcr_and_secret_material(tmp_path: Path):

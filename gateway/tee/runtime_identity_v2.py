@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import secrets
 import threading
+import time
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from gateway.tee.build_identity import load_identity
@@ -28,6 +29,7 @@ BOOTSTRAP_SCHEMA_VERSION = "leadpoet.gateway_v2_bootstrap.v2"
 MAX_RUNTIME_CONFIGURATION_BYTES = 1024 * 1024
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PCR0_RE = re.compile(r"^[0-9a-f]{96}$")
+FRESH_ATTESTATION_CACHE_SECONDS = 30
 _SECRET_MARKERS = (
     "api_key",
     "credential",
@@ -200,6 +202,27 @@ def nsm_attestation_document(*, user_data: bytes, signing_pubkey: bytes) -> byte
     return bytes(document)
 
 
+def _attestation_certificate_expires_at(document: bytes) -> datetime:
+    """Read the NSM leaf expiry so a cached proof never outlives its certificate."""
+
+    try:
+        import cbor2
+        from cryptography import x509
+
+        cose = cbor2.loads(document)
+        fields = cose.value if hasattr(cose, "value") else cose
+        if not isinstance(fields, list) or len(fields) != 4:
+            raise ValueError("COSE structure is invalid")
+        payload = cbor2.loads(fields[2])
+        certificate = x509.load_der_x509_certificate(payload["certificate"])
+        expiry = getattr(certificate, "not_valid_after_utc", None)
+        if expiry is None:
+            expiry = certificate.not_valid_after.replace(tzinfo=timezone.utc)
+        return expiry
+    except Exception as exc:
+        raise RuntimeIdentityV2Error("fresh Nitro attestation certificate is invalid") from exc
+
+
 class RuntimeIdentityV2:
     """One immutable signing/TLS/config identity for an enclave boot."""
 
@@ -213,6 +236,7 @@ class RuntimeIdentityV2:
         attestation_supplier: Callable[..., bytes] = nsm_attestation_document,
         tls_identity_supplier: Callable[..., Mapping[str, Any]] = generate_ephemeral_tls_identity,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        attestation_cache_clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._gateway_root = Path(gateway_root)
         self._physical_role = str(physical_role or "")
@@ -229,10 +253,13 @@ class RuntimeIdentityV2:
         self._attestation_supplier = attestation_supplier
         self._tls_identity_supplier = tls_identity_supplier
         self._clock = clock
+        self._attestation_cache_clock = attestation_cache_clock
         self._lock = threading.Lock()
         self._runtime_configuration = None  # type: Optional[Dict[str, Any]]
         self._tls_identity = None  # type: Optional[Dict[str, Any]]
         self._boot_identity = None  # type: Optional[Dict[str, Any]]
+        self._fresh_attestation = None  # type: Optional[bytes]
+        self._fresh_attestation_expires_at = 0.0
 
     def configure(
         self,
@@ -344,6 +371,32 @@ class RuntimeIdentityV2:
             if self._boot_identity is None:
                 raise RuntimeIdentityV2Error("V2 runtime identity is not configured")
             return dict(self._boot_identity)
+
+    def fresh_attestation_document(self) -> bytes:
+        """Return a current NSM proof of the same immutable boot claim and key."""
+
+        with self._lock:
+            boot = self._boot_identity
+            if boot is None:
+                raise RuntimeIdentityV2Error("V2 runtime identity is not configured")
+            now = self._attestation_cache_clock()
+            if self._fresh_attestation is not None and now < self._fresh_attestation_expires_at:
+                return self._fresh_attestation
+            user_data = canonical_json(build_boot_attestation_user_data(boot)).encode("utf-8")
+            document = self._attestation_supplier(
+                user_data=user_data,
+                signing_pubkey=bytes.fromhex(boot["signing_pubkey"]),
+            )
+            if not isinstance(document, (bytes, bytearray)) or not document:
+                raise RuntimeIdentityV2Error("fresh Nitro attestation document is empty")
+            document = bytes(document)
+            expires_at = _attestation_certificate_expires_at(document)
+            remaining = (expires_at - self._clock()).total_seconds() - 5
+            if remaining <= 0:
+                raise RuntimeIdentityV2Error("fresh Nitro attestation certificate is expired")
+            self._fresh_attestation = document
+            self._fresh_attestation_expires_at = now + min(FRESH_ATTESTATION_CACHE_SECONDS, remaining)
+            return document
 
     def transport_certificate_pem(self) -> bytes:
         with self._lock:

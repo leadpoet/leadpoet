@@ -4454,11 +4454,10 @@ class ArenaService:
                         "round_status": "open",
                         "remaining_admissions": int(admission["remaining"]),
                     }
-            # The operator hold pauses round progression as well as new
-            # claims. Keep intake and independent billing available above.
-            # Migration 371 also guards the database transition against a
-            # concurrent hold or an older driver process.
-            if row["status"] not in TERMINAL_STATUSES and self._store.operator_hold_active():
+            # Freeze the open round's bank, scorer, and participants at cutoff
+            # even during a claim hold. Subsequent execution/scoring progress
+            # waits; migration 371 also guards old or racing driver processes.
+            if row["status"] not in ("open",) + TERMINAL_STATUSES and self._store.operator_hold_active():
                 return {"status": "paused", "round_status": row["status"]}
             return self._advance_round_locked(round_id)
         finally:

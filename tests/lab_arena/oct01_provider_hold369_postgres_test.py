@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from lab_arena.store import ArenaStore, ArenaStoreError
 from tests.lab_arena import oct01_cancelled_baseline_recovery368_postgres_test as recovery
 
 
@@ -193,6 +194,40 @@ def test_released_hold_allows_normal_scoring_close(database):
                            "WHERE round_id=%s AND kind='score' "
                            "AND status='failed' AND terminal_cause='stage_closed'", (recovery.ROUND,))
             assert cursor.fetchone()[0] == 8
+
+
+def test_restart_guard_alone_pauses_progression(database):
+    psycopg, dsn = database
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cursor:
+            _seed_active(cursor)
+            cursor.execute("UPDATE public.lab_arena_restart_claim_control "
+                           "SET guard_commitment='sha256:'||repeat('a',64),"
+                           "owner_commitment='sha256:'||repeat('b',64),"
+                           "guard_generation=1,guard_expires_at=now()+interval '1 hour',"
+                           "candidate_commit=repeat('c',40),restart_scope='all',"
+                           "restart_phase='draining' WHERE singleton")
+            cursor.execute("SELECT public.lab_arena_operator_hold_active_v1()")
+            assert cursor.fetchone()[0] is True
+            with pytest.raises(psycopg.Error, match="lab_arena_round_progression_paused"):
+                cursor.execute("SELECT public.lab_arena_close_scoring(%s,1::smallint)",
+                               (recovery.ROUND,))
+            cursor.execute("ROLLBACK")
+            cursor.execute("SELECT status FROM public.lab_arena_rounds "
+                           "WHERE round_id=%s", (recovery.ROUND,))
+            assert cursor.fetchone()[0] == "stage1_scoring"
+
+
+@pytest.mark.parametrize("malformed", [None, "false", {}, 0])
+def test_operator_hold_rpc_rejects_malformed_state(malformed):
+    class Transport:
+        def rpc(self, function, params):
+            assert (function, params) == ("lab_arena_operator_hold_active_v1", {})
+            return malformed
+
+    with pytest.raises(ArenaStoreError, match="operator hold state is malformed"):
+        ArenaStore(Transport()).operator_hold_active()
 
 
 @pytest.mark.parametrize("conflict", ["operator", "guard", "foreign_live", "foreign_lease", "source"])

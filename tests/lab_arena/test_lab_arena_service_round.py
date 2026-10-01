@@ -822,6 +822,45 @@ def test_benchmark_commit_rejects_missing_live_cost_policy_without_mutation(
     assert harness.service.store.list_runs(round_id) == []
 
 
+def test_operator_hold_freezes_open_round_without_starting_work(connect, tmp_path):
+    harness = Harness(connect, tmp_path, challengers=["Frozen"], runners=["alpha"])
+    configuration = harness.service.create_round(
+        datetime.now(timezone.utc) + timedelta(minutes=30),
+        round_id="arena-2026-10-10",
+    )
+    harness.round_id = configuration["round_id"]
+    challenger_id = harness.submit("Frozen", harness.round_id)
+    frozen_scorer = harness.service.config.defaults.scorer_image_digest
+    schedule = configuration["schedule"]
+    with connect() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("UPDATE public.lab_arena_restart_claim_control "
+                           "SET operator_paused=true,pause_reason='test',actor_ref='test' "
+                           "WHERE singleton")
+    try:
+        harness.clock.advance_to(schedule["submission_cutoff"])
+        assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+        row = harness.service.store.get_round(harness.round_id)
+        assert row["status"] == "committed"
+        assert row["icp_set_date"] == schedule["submission_open"][:10]
+        assert row["configuration_doc"]["scorer_image_digest"] == frozen_scorer
+        assert {p["submission_id"] for p in row["participants"]} == {
+            challenger_id, "baseline-2026-10-10"
+        }
+        assert len(harness.service.benchmark_icps(harness.round_id)) == 20
+        assert harness.service.store.list_runs(harness.round_id) == []
+        assert harness.service.advance_round(harness.round_id) == {
+            "status": "paused", "round_status": "committed"
+        }
+        assert harness.service.store.list_runs(harness.round_id) == []
+    finally:
+        with connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("UPDATE public.lab_arena_restart_claim_control "
+                               "SET operator_paused=false,pause_reason='',actor_ref='' "
+                               "WHERE singleton")
+
+
 def test_operator_hold_survives_scoring_deadline_then_normal_round_publishes(
     connect, tmp_path
 ):

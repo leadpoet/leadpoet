@@ -58,6 +58,11 @@ BEGIN
   IF OLD.status IS NOT DISTINCT FROM NEW.status THEN
     RETURN NEW;
   END IF;
+  -- Cutoff must still freeze the prior-day bank, scorer, and participants.
+  -- This transition creates no execution or scoring assignment.
+  IF OLD.status = 'open' AND NEW.status = 'committed' THEN
+    RETURN NEW;
+  END IF;
   v_old_rank := CASE OLD.status
     WHEN 'open' THEN 0 WHEN 'committed' THEN 1
     WHEN 'stage1' THEN 2 WHEN 'stage1_closed' THEN 3

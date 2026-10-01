@@ -250,6 +250,29 @@ def test_transport_exception_does_not_retain_signed_url(tmp_path):
     assert caught.value.__context__ is None
 
 
+def test_image_access_http_failure_keeps_status_without_response_body(tmp_path):
+    image = simple_image()
+    reference, _document, _payloads = _access_document(image)
+    api = runner.HttpArenaApiClient(
+        "https://arena.example",
+        client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(
+                    503, text="private response must not enter the log"
+                )
+            )
+        ),
+    )
+    exporter = leased_images.leased_image_exporter(
+        api, "run-1", "lease-secret"
+    )
+    with pytest.raises(leased_images.LeasedImageError) as caught:
+        exporter(reference, image["digest"], tmp_path / "target")
+    assert str(caught.value) == "leased image access HTTP 503"
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
 def test_failed_transfer_is_not_cached_and_retry_refetches_access(tmp_path):
     image = simple_image()
     reference, first, payloads = _access_document(image)
@@ -348,6 +371,41 @@ def test_normal_assignment_executor_automatically_uses_lease_exporter(
         (api, "r1", "tok-r1"),
         (leased["image_reference"], IMAGE),
     ]
+
+
+def test_runner_logs_bounded_lease_image_failure_reason(tmp_path, monkeypatch, capsys):
+    api = FakeApi([lease()])
+    (tmp_path / "work").mkdir()
+    config = make_config(
+        tmp_path,
+        api,
+        BridgingRuntime(output={"companies": [valid_company(1)]}, calls=0),
+    )
+    original_claim = api.claim
+
+    def claim(envelope):
+        result = original_claim(envelope)
+        result["image_reference"] = (
+            "%s/%s@%s" % (ECR_REGISTRY, ECR_REPOSITORY, IMAGE)
+        )
+        return result
+
+    api.claim = claim
+
+    def factory(_api, _run_id, _lease_token):
+        def export(_reference, _digest, _target):
+            raise leased_images.LeasedImageError("leased image access HTTP 503")
+
+        return export
+
+    monkeypatch.setattr(leased_images, "leased_image_exporter", factory)
+    instance = runner.Runner(config)
+    assert instance.run_once() == 1
+    assert instance.abandoned == 1
+    assert capsys.readouterr().err == (
+        "Lab Arena run abandoned: LeasedImageError: "
+        "leased image access HTTP 503\n"
+    )
 
 
 def test_http_api_image_access_sends_lease_header_and_enforces_bounds():

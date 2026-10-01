@@ -1272,9 +1272,10 @@ def review_evidence(
     )
     for dimension, raw in dimensions.items():
         evidence = _mapping(raw)
-        # Only the fit gate's own independently observed source fields are
-        # context; submitted company summaries and required-attribute claims
-        # never enter the review.
+        # The fit gate's independently observed fields provide company facts.
+        # A submitted attribute quote can also identify an exact fetched
+        # first-party page after identity and source binding; the submitted
+        # claim itself is not evidence.
         if evidence.get("decision") != "match":
             continue
         observed = _mapping(evidence.get("web_evidence"))
@@ -1292,8 +1293,10 @@ def review_evidence(
     if company_source_contexts is not None:
         from qualification.scoring.company_evidence_investigator import (
             _quote_occurs,
+            _registrable_domain,
             _safe_https_url,
         )
+        from qualification.scoring.lead_scorer import _compact_company_name
 
         if (
             not isinstance(company_source_contexts, Sequence)
@@ -1307,6 +1310,7 @@ def review_evidence(
             "employee_size": 2,
             "geography": 3,
             "stage": 4,
+            "first_party_company": 5,
         }
         prior_order = -1
         observed_context_urls: set[str] = set()
@@ -1323,6 +1327,44 @@ def review_evidence(
                 dimension, str
             ) else None
             company_fact = company_facts.get(str(dimension))
+            if dimension == "first_party_company":
+                identity = _mapping(
+                    _mapping(
+                        _mapping(company_fit_receipt.get("dimension_evidence"))
+                        .get("identity")
+                    ).get("web_identity_receipt")
+                )
+                submitted_attribute = getattr(
+                    company, "required_attribute", None
+                )
+                submitted_url = getattr(
+                    submitted_attribute, "evidence_url", None
+                )
+                submitted_quote = getattr(
+                    submitted_attribute, "evidence_quote", None
+                )
+                normalized_name = _compact_company_name(company.company_name)
+                normalized_source = _compact_company_name(source_text)
+                if (
+                    company_fit_receipt.get("decision") == "match"
+                    and identity.get("decision") == "match"
+                    and all(identity.get(field) for field in (
+                        "observed_name", "observed_domain",
+                        "observed_linkedin_slug",
+                    ))
+                    and source_url == submitted_url
+                    and _registrable_domain(source_url)
+                    == str(identity["observed_domain"]).casefold()
+                    and isinstance(submitted_quote, str)
+                    and _quote_occurs(submitted_quote, str(source_text or ""))
+                    and normalized_name
+                    and normalized_name in normalized_source
+                ):
+                    company_fact = {
+                        "url": source_url,
+                        "quote": submitted_quote,
+                    }
+                    company_facts["first_party_company"] = company_fact
             if (
                 order is None
                 or order <= prior_order

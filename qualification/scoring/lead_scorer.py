@@ -2259,6 +2259,7 @@ _PARAGRAPH_COMPANY_CONTEXT_DIMENSIONS = (
     "employee_size",
     "geography",
     "stage",
+    "first_party_company",
 )
 _MAX_PARAGRAPH_COMPANY_CONTEXTS = 2
 _MAX_RETAINED_INVESTIGATOR_CONTEXTS = 4
@@ -2382,8 +2383,10 @@ def _retain_matched_investigator_source_contexts(
     source_sink: Optional[dict[str, dict[str, str]]],
     result: CompanyFitDecisionResult,
     investigation: Mapping[str, Any],
+    *,
+    company: Optional["CompanyOutput"] = None,
 ) -> None:
-    """Retain fetched pages cited by final matched company dimensions."""
+    """Retain matched pages and one fetched, identity-bound first-party page."""
 
     if source_sink is None or not _complete_company_identity(result):
         return
@@ -2406,6 +2409,38 @@ def _retain_matched_investigator_source_contexts(
         quote = web_evidence.get("quote")
         if source_url and isinstance(quote, str) and quote:
             evidence_by_url[source_url] = quote
+    identity = verified_identity_receipt([result.receipt("company_fit")])
+    submitted_attribute = (
+        getattr(company, "required_attribute", None)
+        if company is not None else None
+    )
+    submitted_url = _valid_web_evidence_url(
+        getattr(submitted_attribute, "evidence_url", None)
+    )
+    submitted_quote = getattr(submitted_attribute, "evidence_quote", None)
+    submitted_name = (
+        _compact_company_name(company.company_name)
+        if company is not None else ""
+    )
+    first_party_url = (
+        submitted_url
+        if company is not None
+        and company.intent_details
+        and submitted_name
+        and isinstance(identity, Mapping)
+        and submitted_url.startswith("https://")
+        and _registrable_domain(submitted_url)
+        == str(identity.get("observed_domain") or "").casefold()
+        and isinstance(submitted_quote, str)
+        and submitted_quote
+        else ""
+    )
+    if (
+        first_party_url
+        and first_party_url not in evidence_by_url
+        and len(evidence_by_url) < _MAX_RETAINED_INVESTIGATOR_CONTEXTS
+    ):
+        evidence_by_url[first_party_url] = submitted_quote
     for stale_url in set(source_sink) - set(evidence_by_url):
         source_sink.pop(stale_url, None)
     if not evidence_by_url:
@@ -2424,6 +2459,10 @@ def _retain_matched_investigator_source_contexts(
             or _registrable_domain(source_url)
             != _registrable_domain(final_url)
             or not _quote_occurs(quote, text)
+            or (
+                source_url == first_party_url
+                and submitted_name not in _compact_company_name(text)
+            )
         ):
             continue
         source_sink[source_url] = {
@@ -6935,6 +6974,7 @@ async def _run_targeted_company_evidence_investigation(
         matched_company_source_sink,
         projected_result,
         investigation,
+        company=company,
     )
     return (
         projected,
@@ -8903,6 +8943,7 @@ def _matched_company_source_contexts(
     matched_company_source_cache: Optional[Mapping[str, Any]] = None,
     *,
     paragraph: str = "",
+    company: Optional["CompanyOutput"] = None,
 ) -> Optional[list[dict[str, str]]]:
     """Project at most two deduplicated final matched company sources."""
 
@@ -8929,6 +8970,53 @@ def _matched_company_source_contexts(
         company_fit,
         matched_company_source_cache,
     ))
+    submitted_attribute = (
+        getattr(company, "required_attribute", None)
+        if company is not None else None
+    )
+    submitted_url = _valid_web_evidence_url(
+        getattr(submitted_attribute, "evidence_url", None)
+    )
+    submitted_quote = getattr(submitted_attribute, "evidence_quote", None)
+    submitted_name = (
+        _compact_company_name(company.company_name)
+        if company is not None else ""
+    )
+    identity = verified_identity_receipt([company_fit.receipt("company_fit")])
+    source_entry = (
+        matched_company_source_cache.get(submitted_url)
+        if isinstance(matched_company_source_cache, Mapping)
+        and len(matched_company_source_cache)
+        <= _MAX_RETAINED_INVESTIGATOR_CONTEXTS
+        else None
+    )
+    if (
+        company is not None
+        and company_fit.decision == COMPANY_FIT_MATCH
+        and submitted_name
+        and isinstance(identity, Mapping)
+        and submitted_url.startswith("https://")
+        and _registrable_domain(submitted_url)
+        == str(identity.get("observed_domain") or "").casefold()
+        and isinstance(submitted_quote, str)
+        and isinstance(source_entry, Mapping)
+        and set(source_entry) == {"final_url", "text"}
+        and isinstance(source_entry["final_url"], str)
+        and source_entry["final_url"].startswith("https://")
+        and _valid_web_evidence_url(source_entry["final_url"])
+        == source_entry["final_url"]
+        and _registrable_domain(source_entry.get("final_url"))
+        == _registrable_domain(submitted_url)
+        and isinstance(source_entry.get("text"), str)
+        and 0 < len(source_entry["text"]) <= MAX_PAGE_CHARACTERS
+        and _quote_occurs(submitted_quote, source_entry["text"])
+        and submitted_name in _compact_company_name(source_entry["text"])
+    ):
+        contexts.append({
+            "dimension": "first_party_company",
+            "url": submitted_url,
+            "text": source_entry["text"],
+        })
     deduplicated: list[dict[str, str]] = []
     seen_urls: set[str] = set()
     for context in contexts:
@@ -9151,6 +9239,7 @@ async def score_company_competition_intent(
                 linkedin_profile_source_candidate,
                 matched_company_source_cache,
                 paragraph=str(company.intent_details or ""),
+                company=company,
             ),
             **(
                 {

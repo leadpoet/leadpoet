@@ -74,6 +74,8 @@ JUDGMENT_ADMISSION_RESERVE_SECONDS = 30.0
 # OpenRouter chat is broker-bounded at 120 seconds. Add only local framing
 # tolerance. A request admitted before the deadline is allowed to settle.
 BROKER_SETTLEMENT_TIMEOUT_SECONDS = 125.0
+OPENROUTER_TRANSIENT_RETRY_DELAY_SECONDS = 1.5
+OPENROUTER_TRANSIENT_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
 TARGETS = frozenset({"stage", "rebrand", "headcount", "industry", "geography"})
 STATUSES = frozenset({"VERIFIED", "CONTRADICTED", "UNPROVEN"})
 _NON_SUPPLIER_ACTIVITY_ROLES = frozenset({
@@ -1538,6 +1540,40 @@ async def _post_json(
     return status, body
 
 
+async def _post_openrouter_json(
+    session: aiohttp.ClientSession,
+    url: str,
+    *,
+    headers: Mapping[str, str],
+    payload: Mapping[str, Any],
+    started: float,
+) -> tuple[int, Any]:
+    """Retry one explicit transient response inside the admission window."""
+
+    status, body = await _post_json(
+        session,
+        url,
+        headers=headers,
+        payload=payload,
+    )
+    if status not in OPENROUTER_TRANSIENT_HTTP_STATUSES:
+        return status, body
+
+    retry_delay = OPENROUTER_TRANSIENT_RETRY_DELAY_SECONDS
+    admission_deadline = started + ADMISSION_DEADLINE_SECONDS
+    if time.monotonic() + retry_delay >= admission_deadline:
+        return status, body
+    await asyncio.sleep(retry_delay)
+    if time.monotonic() >= admission_deadline:
+        return status, body
+    return await _post_json(
+        session,
+        url,
+        headers=headers,
+        payload=payload,
+    )
+
+
 async def _search_web(
     session: aiohttp.ClientSession,
     query: str,
@@ -2804,7 +2840,7 @@ async def investigate_company_evidence(
                     and required_tool == "submit_findings"
                 )
                 incomplete_submit_retry_pending = False
-                status, body = await _post_json(
+                status, body = await _post_openrouter_json(
                     session,
                     "https://openrouter.ai/api/v1/chat/completions",
                     headers={
@@ -2862,6 +2898,7 @@ async def investigate_company_evidence(
                             else {}
                         ),
                     },
+                    started=started,
                 )
                 if status != 200:
                     raise RuntimeError("reasoning_provider_unavailable")

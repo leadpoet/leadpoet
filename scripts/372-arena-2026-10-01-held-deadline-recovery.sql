@@ -84,7 +84,7 @@ BEGIN
   SELECT * INTO v_control FROM public.lab_arena_restart_claim_control
   WHERE singleton FOR UPDATE;
   IF NOT FOUND OR NOT v_control.operator_paused
-     OR v_control.pause_reason <> 'oct01_deepline_outage'
+     OR v_control.pause_reason <> 'canonical_restart_guard'
      OR v_control.actor_ref <>
           'canonical-active-release:07016ffd02e174b6deaaa136e0e8e216d498a8d2'
      OR v_control.guard_generation <> 301
@@ -422,6 +422,20 @@ BEGIN
          WHERE singleton) IS DISTINCT FROM TRUE
   THEN
     RAISE EXCEPTION 'Oct01 deadline recovery postcondition differs'
+      USING ERRCODE='55000';
+  END IF;
+
+  -- The completed canonical restart kept the operator pause but replaced its
+  -- reason. Restore the original owned reason only after recovery succeeds;
+  -- actor and generation continue to identify that completed restart.
+  UPDATE public.lab_arena_restart_claim_control
+  SET pause_reason='oct01_deepline_outage',updated_at=pg_catalog.clock_timestamp()
+  WHERE singleton AND operator_paused
+    AND pause_reason='canonical_restart_guard'
+    AND actor_ref=v_control.actor_ref
+    AND guard_generation=301;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Oct01 deadline recovery hold reason changed'
       USING ERRCODE='55000';
   END IF;
 END;

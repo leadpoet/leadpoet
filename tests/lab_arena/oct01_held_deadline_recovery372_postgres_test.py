@@ -48,7 +48,8 @@ def _prepare(cursor):
     cursor.execute("SET session_replication_role=replica")
     cursor.execute(
         "UPDATE public.lab_arena_restart_claim_control "
-        "SET actor_ref=%s,guard_generation=301 WHERE singleton",
+        "SET actor_ref=%s,guard_generation=301,"
+        "pause_reason='canonical_restart_guard' WHERE singleton",
         (CANONICAL_ACTOR,),
     )
     cursor.execute(
@@ -192,9 +193,11 @@ def test_recovery_archives_invalid_derivation_and_keeps_hold(database):
                 "stage1_scoring", 10, 8, None
             )
             assert schedule["stage_1_scoring_close"] == "2026-10-01T20:00:01Z"
-            cursor.execute("SELECT operator_paused,actor_ref FROM "
+            cursor.execute("SELECT operator_paused,pause_reason,actor_ref,guard_generation FROM "
                            "public.lab_arena_restart_claim_control WHERE singleton")
-            assert cursor.fetchone() == (True, CANONICAL_ACTOR)
+            assert cursor.fetchone() == (
+                True, "oct01_deepline_outage", CANONICAL_ACTOR, 301
+            )
             assert _rows(cursor, "lab_arena_ledger", ROUND) == before_ledger
             assert _rows(cursor, "lab_arena_trajectory_events", ROUND) == before_events
             assert _rows(cursor, "lab_arena_rounds", "arena-2026-10-02") == foreign_before
@@ -246,7 +249,8 @@ def test_replay_rejects_changed_archive_snapshot(database):
 
 
 @pytest.mark.parametrize("tamper", [
-    "score", "pending_job", "foreign_stage", "foreign_owner", "active_guard",
+    "score", "pending_job", "foreign_stage", "foreign_owner", "foreign_reason",
+    "active_guard",
 ])
 def test_preimage_drift_fails_without_mutation(database, tamper):
     psycopg, dsn = database
@@ -265,6 +269,9 @@ def test_preimage_drift_fails_without_mutation(database, tamper):
             elif tamper == "foreign_owner":
                 cursor.execute("UPDATE public.lab_arena_restart_claim_control "
                                "SET actor_ref='foreign-operator' WHERE singleton")
+            elif tamper == "foreign_reason":
+                cursor.execute("UPDATE public.lab_arena_restart_claim_control "
+                               "SET pause_reason='foreign' WHERE singleton")
             elif tamper == "active_guard":
                 cursor.execute("UPDATE public.lab_arena_restart_claim_control "
                                "SET guard_commitment='sha256:'||repeat('a',64),"

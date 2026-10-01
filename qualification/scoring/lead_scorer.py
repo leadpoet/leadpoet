@@ -6547,7 +6547,7 @@ async def _run_targeted_company_evidence_investigation(
     )
     submitted_source_urls: list[str] = []
     homepage_pages = verified_homepage_pages or {}
-    if homepage_pages and not verified_identity:
+    if homepage_pages and not verified_identity and not verified_rebrand_redirect:
         # An unavailable homepage identity may retain its fetched body as
         # untrusted evidence. Admit it only after the separate web verifier
         # has bound the submitted name, domain, and LinkedIn identity.

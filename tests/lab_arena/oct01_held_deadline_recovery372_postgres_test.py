@@ -158,6 +158,12 @@ def _prepare(cursor):
                       "ORDER BY run_id) FROM public.lab_arena_runs WHERE "
                       "round_id='arena-2026-10-01' AND kind='execute' AND stage=2)"),
     )
+    decision_clock = "IF pg_catalog.clock_timestamp() >=\n      (v_new_schedule"
+    assert decision_clock in sql
+    sql = sql.replace(
+        decision_clock,
+        "IF '2026-10-01T15:00:00Z'::TIMESTAMPTZ >=\n      (v_new_schedule",
+    )
     return sql, plan, work_items
 
 

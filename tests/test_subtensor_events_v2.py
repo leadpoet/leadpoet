@@ -31,6 +31,8 @@ CURRENT_RUNTIME_FIXTURES = {
     464: ROOT / "tests" / "fixtures" / "subtensor_events_spec464_block9088963.json",
     466: ROOT / "tests" / "fixtures" / "subtensor_events_spec466_block9091482.json",
     467: ROOT / "tests" / "fixtures" / "subtensor_events_spec467_block9095804.json",
+    468: ROOT / "tests" / "fixtures" / "subtensor_events_spec468_block9117768.json",
+    469: ROOT / "tests" / "fixtures" / "subtensor_events_spec469_block9128207.json",
     470: ROOT / "tests" / "fixtures" / "subtensor_events_spec470_block9141889.json",
 }
 
@@ -192,6 +194,18 @@ def test_real_spec455_archive_events_prove_exact_adjacent_reveal():
             266,
         ),
         (
+            468,
+            "80acd157c696ca91b770062ca94572ce32bc9b9a2277b8476b2eb93e10643daa",
+            "0x899a87a4e4610587d81d9237adeb3e420ea524cd39b397c7a9b4c811b0e7af1d",
+            241,
+        ),
+        (
+            469,
+            "39fb56e546ed5a7e7fdd0eebfc4886c95c2bb313117b48f4f9c928437a185b0c",
+            "0x8858cf3545c90255e5f865dec13713fa1d76cac2be6b8f1070256ee572280abe",
+            223,
+        ),
+        (
             470,
             "ccad189c41970e1d33fe665b697b4bc763bece0212e81e15a3035d4091c79b1d",
             "0x5675b684d69a07f6f224c2ba9cabef719804911fba40fbe1a2295198c9cb7c47",
@@ -286,7 +300,7 @@ def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
     assert proof["account_id_hex"] == expected["account_id_hex"]
 
 
-@pytest.mark.parametrize("spec_version", [464, 466, 467, 470])
+@pytest.mark.parametrize("spec_version", [464, 466, 467, 468, 469, 470])
 def test_exact_runtime_and_reveal_tampering_fail_closed(spec_version):
     fixture = json.loads(
         CURRENT_RUNTIME_FIXTURES[spec_version].read_text(encoding="utf-8")

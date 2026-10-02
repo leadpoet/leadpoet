@@ -26,6 +26,8 @@ DEFAULT_PROFILE_PATHS = {
     464: Path(__file__).with_name("subtensor_events_profile_spec464_v2.json"),
     466: Path(__file__).with_name("subtensor_events_profile_spec466_v2.json"),
     467: Path(__file__).with_name("subtensor_events_profile_spec467_v2.json"),
+    468: Path(__file__).with_name("subtensor_events_profile_spec468_v2.json"),
+    469: Path(__file__).with_name("subtensor_events_profile_spec469_v2.json"),
     470: Path(__file__).with_name("subtensor_events_profile_spec470_v2.json"),
 }
 SYSTEM_EVENTS_STORAGE_KEY = (

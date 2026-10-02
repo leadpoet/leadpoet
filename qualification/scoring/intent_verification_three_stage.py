@@ -4179,6 +4179,7 @@ async def verify_three_stage(
     source_url: str,
     miner_claim: str,
     target_signal_text: str,
+    buyer_request_context: str = "",
     contact_linkedin: str = "",
     stage1_model: Optional[str] = None,
     stage3_model: Optional[str] = None,
@@ -4235,6 +4236,11 @@ async def verify_three_stage(
             "intent_signal.description",
             allow_layout_whitespace=True,
         )
+        # This is the trusted buyer's original ICP, not miner-provided evidence.
+        # Keep it complete within a fixed transport allowance; never silently
+        # truncate a qualifier that could change the requested event state.
+        if not isinstance(buyer_request_context, str) or len(buyer_request_context) > 12_000:
+            raise ValueError("buyer request context exceeds verifier allowance")
         bundle = []
         if evidence_bundle is not None:
             from qualification.scoring.arena_integrity import MAX_EVIDENCE_PER_CRITERION
@@ -4316,6 +4322,8 @@ async def verify_three_stage(
         ),
         **({"_evidence_bundle": bundle} if bundle else {}),
         "_target_signal_text": target_signal_text,
+        **({"_buyer_request_context": buyer_request_context}
+           if buyer_request_context else {}),
         "_declared_source": (declared_source or "").strip().lower() or None,
         "_integrity_policy": bool(integrity_policy),
         "_buyer_max_age_days": max(1, int(buyer_max_age_days or 365)),

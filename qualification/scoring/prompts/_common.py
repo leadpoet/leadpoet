@@ -57,6 +57,8 @@ def visible_signal(row: Dict[str, Any]) -> Dict[str, Any]:
         "miner_claim": row.get("claim") or "",
         "miner_signal_date": row.get("signal_date") or None,
         "target_icp_signal": row.get("_target_signal_text") or "",
+        **({"buyer_original_request": row["_buyer_request_context"]}
+           if row.get("_buyer_request_context") else {}),
         "claimed_source_urls": row.get("claimed_source_urls") or [],
         **({"criterion_evidence": row["_evidence_bundle"]}
            if row.get("_evidence_bundle") else {}),
@@ -249,6 +251,28 @@ PART_A_BLOCK = """  PART A — CLAIM ↔ ICP SEMANTIC ALIGNMENT:
     `contradicted` (the URL is about a different topic than the ICP
     signal asks for).  Do NOT return `wrong_entity` — `wrong_entity` is
     reserved STRICTLY for entity-identity mismatch in PART 0."""
+
+
+BUYER_REQUEST_EVENT_BLOCK = """  BUYER ORIGINAL REQUEST — MATCHED EVENT ONLY:
+    buyer_original_request is the trusted buyer's natural-language ICP.
+    Apply its event and state requirements to the chosen target_icp_signal,
+    including words such as shipped, available, launched, introduced,
+    announced, previewed, or planned. Do not turn independent company-fit,
+    product-fit, role, or attribute requirements in that broader request into
+    extra intent gates; those are checked elsewhere.
+    A request for a shipped, released, launched, or currently available
+    capability needs source-body proof that customers could use the exact
+    submitted capability by the claimed event date. Introducing, announcing,
+    previewing, inviting early access, or planning a future release alone does
+    not prove that completed state. A future availability statement for that
+    same capability controls over an introduction headline or isolated launch
+    quote, even when the announcement is in a first-party press release.
+    A separately available older product or later general-availability event
+    cannot rescue the submitted event. Future roadmap text about a different
+    capability does not negate an already available submitted capability.
+    When the matched target and buyer request actually ask for an announcement,
+    introduction, preview, or plan, judge that requested state as written; do
+    not impose a shipped or generally available requirement."""
 
 
 HIRING_FUNCTIONAL_ROLE_BLOCK = """  HIRING — FUNCTIONAL ROLE MATCH:
@@ -552,6 +576,8 @@ def build_verification_prompt(
     """
     signal = visible_signal(row)
     parts: List[str] = [PART_0_BLOCK, PART_A_BLOCK]
+    if row.get("_buyer_request_context"):
+        parts.append(BUYER_REQUEST_EVENT_BLOCK)
     # Keep unrelated guidance out of the fixed prompt budget so it does not
     # displace source evidence. These are interpretation hints, not gates.
     criterion = str(row.get("_target_signal_text") or "").lower()

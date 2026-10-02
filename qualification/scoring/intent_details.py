@@ -279,6 +279,11 @@ Generic relevance, product expansion or growth language does not cover a
 distinct office opening, hire, funding or other event. Never treat source
 evidence as if it appeared in the paragraph. Check coverage independently for
 each signal before deciding verified_signals_covered.
+For a verified product launch, a statement that the company builds AI agents
+or offers a platform does not alone describe the launch. The paragraph must
+state the released capability or launch activity, in supported equivalent
+language. Do not infer launch coverage merely because the source contains
+release notes or another sentence covers a separate funding event.
 For relevance_grounded, allow plausible commercial implications only as clearly
 conditional inference (may, could, suggests); reject invented purchases, budget,
 pain, deadlines, tools or buying intent stated as facts. product_service can be

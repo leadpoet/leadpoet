@@ -1361,6 +1361,33 @@ def test_conditional_funding_connection_preserves_independent_gates(
         assert receipt["checks"][failed_check] is False
 
 
+def test_current_product_description_does_not_override_missing_launch_coverage(
+    monkeypatch,
+):
+    company, icp, results, fit = inputs()
+    company.intent_details = (
+        "Acme provides reporting software. It opened a Berlin office on "
+        "September 3, 2026, which may support regional delivery of its software."
+    )
+
+    async def judge(prompt, **kwargs):
+        assert "does not alone describe the launch" in kwargs["system_prompt"]
+        checks = {name: True for name in intent_details._CHECKS}
+        checks["verified_signals_covered"] = False
+        return json.dumps(_review_response(checks, [
+            {"matched_icp_signal": 0, "covered": False},
+            {"matched_icp_signal": 1, "covered": True},
+        ], json.loads(prompt)))
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(
+        company, icp, results, fit,
+    ))
+    assert receipt["decision"] == "mismatch"
+    assert receipt["checks"]["facts_supported"] is True
+    assert receipt["checks"]["verified_signals_covered"] is False
+
+
 @pytest.mark.parametrize(
     ("paragraph", "failed_check", "expected_true"),
     [

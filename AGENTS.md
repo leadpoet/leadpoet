@@ -13,6 +13,20 @@ qualification, scoring, promotion, credentials, rewards and concurrent work.
 Do not cache miner sourcing or reuse changed evidence or verifier inputs.
 This authority ends after live deployment and end-to-end cache validation.
 
+## Scoped production authorization: historical weight recovery and stale caches
+
+On 2026-10-02 the user requested fixes for missing historical Subtensor runtime
+468 reveal decoding and retained caches in old Arena test workspaces. The
+standing implementation authority includes focused source changes and tests,
+safe pushes and merges, and canonical gateway/normal-validator deployment.
+Use protected read-only inspection and the current Arena deployment checks.
+Reclaim only verified reproducible stale image/source caches under the explicit
+Arena workspace root and add bounded retention. Preserve active workspaces,
+wallets, weight journals, saved results and audit evidence, current weights,
+scoring, qualification, credentials and concurrent work. Do not resize storage,
+change historical outcomes, submit manual weights or restore retired services.
+This authority ends when both fixes and unaffected live flows are verified.
+
 ## Scoped production authorization: PR 202 historical weight recovery
 
 On 2026-10-02 the user authorized review, necessary narrow safety fixes, merge,

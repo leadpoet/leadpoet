@@ -577,7 +577,7 @@ def build_runner_from_environment(args, *, keypair=None):
             wallet_arguments["path"] = wallet_path
         wallet = Wallet(**wallet_arguments)
         keypair = wallet.hotkey
-    runner_root = Path(args.work_dir)
+    runner_root = Path(args.work_dir).absolute()
     sandbox_work = runner_root / "sandboxes"
     runs_work = runner_root / "runs"
     config = runtime.RuntimeConfig(runsc_path=Path(args.runsc_path), work_dir=sandbox_work)
@@ -585,17 +585,26 @@ def build_runner_from_environment(args, *, keypair=None):
     identity = runner_module.RunnerIdentity(hotkey=keypair.ss58_address, sign=lambda message: keypair.sign(message.encode("utf-8")).hex())
     # Only the common trusted Python/scorer image is materialized. Miner code
     # arrives as a bounded source archive under its active execution lease.
-    cache = runner_module.ImageCache(Path(args.work_dir) / "images", runner_module.registry_image_exporter(registry_client_from_environment()))
-    api = runner_module.HttpArenaApiClient(args.api_base_url)
-    source_cache = runner_module.SourceCache(
-        Path(args.work_dir) / "sources", api.source
-    )
-    runner_config = runner_module.RunnerConfig(
-        round_id=round_id, identity=identity, api=api, sandbox_runtime=sandbox_runtime, image_cache=cache, source_cache=source_cache,
-        work_dir=runs_work, max_parallel_runs=startup.parallelism, proxy_worker_pool=proxy_pool,
-        claim_poll_seconds=max(5, int(getattr(args, "poll_seconds", 30))),
-    )
-    if round_id is not None:
-        api.round(round_id)
-        runner_config.evaluation_date = round_id.replace("arena-", "")[:10]
-    return runner_module.Runner(runner_config)
+    from lab_arena.cache_retention import workspace_cache_lock
+
+    # Keep this shared lease until the runner closes. Maintenance needs the
+    # exclusive lease before it can remove reproducible cache entries.
+    cache_lock = workspace_cache_lock(runner_root, exclusive=False)
+    try:
+        cache = runner_module.ImageCache(runner_root / "images", runner_module.registry_image_exporter(registry_client_from_environment()))
+        api = runner_module.HttpArenaApiClient(args.api_base_url)
+        source_cache = runner_module.SourceCache(
+            runner_root / "sources", api.source
+        )
+        runner_config = runner_module.RunnerConfig(
+            round_id=round_id, identity=identity, api=api, sandbox_runtime=sandbox_runtime, image_cache=cache, source_cache=source_cache,
+            work_dir=runs_work, workspace_cache_lock=cache_lock, max_parallel_runs=startup.parallelism, proxy_worker_pool=proxy_pool,
+            claim_poll_seconds=max(5, int(getattr(args, "poll_seconds", 30))),
+        )
+        if round_id is not None:
+            api.round(round_id)
+            runner_config.evaluation_date = round_id.replace("arena-", "")[:10]
+        return runner_module.Runner(runner_config)
+    except BaseException:
+        cache_lock.close()
+        raise

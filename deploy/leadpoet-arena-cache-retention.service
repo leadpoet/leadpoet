@@ -1,0 +1,11 @@
+[Unit]
+Description=Prune retired Arena workspace caches
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/ec2-user/leadpoet/validator-current
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/home/ec2-user/arena-validator-venv311/bin/python3 scripts/prune_arena_workspace_caches.py --workspace-root /var/lib/lab-arena --active-work-dir /var/lib/lab-arena/runner --active-work-dir /var/lib/lab-arena/minerproof2-vn1zwn --active-work-dir /var/lib/lab-arena/cleanup-e2e-20260907 --older-than-days 7 --apply
+TimeoutStartSec=1800
+UMask=0077

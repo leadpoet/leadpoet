@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily retired Arena cache retention
+
+[Timer]
+OnCalendar=*-*-* 03:40:00 UTC
+Persistent=true
+RandomizedDelaySec=900
+Unit=leadpoet-arena-cache-retention.service
+
+[Install]
+WantedBy=timers.target

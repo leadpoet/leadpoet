@@ -250,7 +250,20 @@ the fetched source directly supports every active requested sub-industry
 constraint and the active product/service and required-attribute constraints.
 Preserve each criterion's explicit AND/OR structure: prove every required
 conjunct and one supported alternative for each OR clause. Equivalent source
-language is sufficient; do not require literal taxonomy labels. An adjacent
+language is sufficient; do not require literal taxonomy labels. A broad
+sub-industry taxonomy label joined by "and" may name a category, not require
+two distinct product lines. For example, B2B software infrastructure and
+workflow platforms can include a directly sold B2B workflow platform without
+a separate infrastructure product when the requested product/service and
+required attribute support that reading. A paid professional-services
+automation platform with customer-facing workflow automations and integrations
+can qualify when its subscription model and business customer scope are proven.
+A generic professional-services automation label without the requested
+capability is insufficient; customer or internal use of another vendor's tool
+is not supplier/operator evidence. If the criterion explicitly requires the
+company to supply both infrastructure AND workflow platforms, prove both.
+Keep every separate product/service and required-attribute conjunct mandatory.
+An adjacent
 activity for the same customer group is UNPROVEN. Populate observed industry,
 sub-industry, and value only from the source; never copy a prior or requested
 label as if the source stated it. In reason, concisely explain which concrete

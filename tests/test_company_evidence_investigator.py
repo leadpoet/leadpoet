@@ -269,6 +269,21 @@ def test_multitarget_budget_preserves_stage_conflict_and_locator_guards():
     ) in prompt
 
 
+def test_broad_subindustry_label_keeps_explicit_product_conjuncts():
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+
+    assert "may name a category, not require two distinct product lines" in prompt
+    assert "directly sold B2B workflow platform" in prompt
+    assert "subscription model and business customer scope are proven" in prompt
+    assert "without the requested capability is insufficient" in prompt
+    assert "customer or internal use of another vendor's tool" in prompt
+    assert "explicitly requires the company to supply both" in prompt
+    assert (
+        "Keep every separate product/service and required-attribute conjunct "
+        "mandatory"
+    ) in prompt
+
+
 @pytest.mark.parametrize(
     ("quote", "expected"),
     [

@@ -79,10 +79,11 @@ def test_hold_preserves_all_work_blocks_new_claims_and_allows_drain(database):
     "UPDATE public.lab_arena_restart_claim_control SET guard_commitment='sha256:'||repeat('a',64),owner_commitment='sha256:'||repeat('b',64),guard_generation=1,guard_expires_at=now()+interval '1 hour',candidate_commit=repeat('c',40),restart_scope='all',restart_phase='draining' WHERE singleton",
     "UPDATE public.lab_arena_rounds SET configuration_doc=jsonb_set(configuration_doc,'{scorer_image_digest}','\"wrong\"'::jsonb) WHERE round_id='arena-2026-10-01'",
     "UPDATE public.lab_arena_rounds SET status='stage2' WHERE round_id='arena-2026-10-02'",
-    "UPDATE public.lab_arena_runs SET assignment_id='wrong' WHERE round_id='arena-2026-10-01' AND kind='score' AND stage=2 AND icp_position=0",
+    "UPDATE public.lab_arena_runs SET assignment_id='wrong:'||run_id WHERE round_id='arena-2026-10-01' AND kind='score' AND stage=2 AND icp_position=0",
     "UPDATE public.lab_arena_runs SET output_ref=NULL WHERE round_id='arena-2026-10-01' AND kind='execute' AND stage=2 AND icp_position=0",
     "UPDATE public.lab_arena_rounds SET published_at=now() WHERE round_id='arena-2026-10-01'",
-])
+], ids=['foreign_owner', 'restart_guard', 'wrong_image', 'other_live_round',
+        'bad_assignment', 'missing_source', 'published'])
 def test_hold_fails_closed_without_mutation(database, mutation):
     psycopg, dsn = database
     with psycopg.connect(**dsn) as conn:

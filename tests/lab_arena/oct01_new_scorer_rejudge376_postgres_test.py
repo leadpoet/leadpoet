@@ -20,7 +20,7 @@ database = prior.database
 def _prepare(cursor):
     recovery_sql, plan, _ = prior._prepare(cursor)
     cursor.execute(
-        "UPDATE public.lab_arena_runs SET qualification_doc='{" 
+        "UPDATE public.lab_arena_runs SET qualification_doc='{"
         "\"companies\":[]}'::jsonb WHERE round_id=%s "
         "AND stage=1 AND kind='execute'", (prior.ROUND,)
     )

@@ -1284,15 +1284,42 @@ def test_submitted_intent_without_bound_conflicting_round_does_not_reopen(signal
         icp_stage="series a",
         employee_size_conflict=False,
         company=company,
-    ) == ()
+    ) == ("stage",)
 
 
-def test_matching_stage_without_later_round_hint_keeps_current_path(monkeypatch):
+@pytest.mark.parametrize(
+    ("name", "requested_stage", "current_stage", "current_quote", "expected"),
+    [
+        (
+            "Branch", "Series B", "Series C+",
+            "Branch announced a completed $60 million Series C round in 2017.",
+            COMPANY_FIT_MISMATCH,
+        ),
+        (
+            "Dialogue", "Series A", "Acquired",
+            "Sun Life completed its acquisition of Dialogue in 2023.",
+            COMPANY_FIT_MISMATCH,
+        ),
+        (
+            "Acme", "Series A", "Series A",
+            "Acme announced a completed $20 million Series A round.",
+            COMPANY_FIT_MATCH,
+        ),
+    ],
+)
+def test_matching_venture_stage_checks_current_chronology(
+    monkeypatch, name, requested_stage, current_stage, current_quote, expected
+):
+    company = _company(name=name)
+    current_url = f"https://news.example/{name.casefold()}-current-stage"
     initial = _complete_verdict(
-        observed_company_stage="Series A",
+        observed_company_name=name,
+        observed_company_stage=requested_stage,
         stage_matches=True,
-        stage_evidence_url="https://news.example/acme-series-a",
-        stage_evidence_quote="Acme today announced a $20 million Series A round.",
+        stage_evidence_url=f"https://news.example/{name.casefold()}-old-round",
+        stage_evidence_quote=(
+            f"{name} announced a completed $20 million {requested_stage} round."
+        ),
     )
 
     async def provider(**_kwargs):
@@ -1301,8 +1328,23 @@ def test_matching_stage_without_later_round_hint_keeps_current_path(monkeypatch)
     async def keep_employee_observation(candidate, *_args, **_kwargs):
         return candidate
 
-    async def must_not_investigate(**_kwargs):
-        raise AssertionError("matching stage without a later-round hint was reopened")
+    async def investigate(**kwargs):
+        assert kwargs["targets"] == ("stage",)
+        finding = _finding(
+            "stage",
+            status=("VERIFIED" if expected == COMPANY_FIT_MATCH else "CONTRADICTED"),
+            observed_value=current_stage,
+            evidence_url=current_url,
+            evidence_quote=current_quote,
+        )
+        return {
+            "claims": {"stage": finding},
+            "_validated_stage_finding": finding,
+            investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                current_url: {"final_url": current_url, "text": current_quote},
+            },
+            "failure_reason": "",
+        }
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
@@ -1312,18 +1354,19 @@ def test_matching_stage_without_later_round_hint_keeps_current_path(monkeypatch)
         keep_employee_observation,
     )
     monkeypatch.setattr(
-        lead_scorer, "investigate_company_evidence", must_not_investigate
+        lead_scorer, "investigate_company_evidence", investigate
     )
 
     result = asyncio.run(lead_scorer._llm_reverify_company(
-        _company().model_copy(update={"company_stage": "Series A"}),
-        _icp(company_stage="Series A"),
+        company.model_copy(update={"company_stage": requested_stage}),
+        _icp(company_stage=requested_stage),
         require_company_fit_dimensions=True,
         evidence_investigator=True,
     ))
 
-    assert result.decision == COMPANY_FIT_MATCH
-    assert "investigation_receipt" not in result.details
+    assert result.decision == expected
+    assert result.details["dimension_decisions"]["stage"] == expected
+    assert result.details["investigation_receipt"]["targets"] == ["stage"]
 
 
 def test_investigator_hydrates_only_matching_failed_attribute_source():
@@ -2623,7 +2666,7 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
         industry="Artificial Intelligence",
         sub_industry="Generative AI platforms",
         employee_count="201-500",
-        company_stage="Series C+",
+        company_stage="",
         product_service="Commercial AI platform for model-driven workflows.",
         required_attribute=(
             "Builds and sells AI software used to develop, deploy, or operate "

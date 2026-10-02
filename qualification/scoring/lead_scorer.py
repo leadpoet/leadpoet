@@ -5878,6 +5878,11 @@ def _targeted_company_investigation_dimensions(
         _normalize_company_stage(icp_stage) == "public"
         and dimensions.get("stage") == COMPANY_FIT_MATCH
     )
+    current_venture_stage_check = bool(
+        _normalize_company_stage(icp_stage)
+        in {"seed", "series a", "series b", "series c+"}
+        and dimensions.get("stage") == COMPANY_FIT_MATCH
+    )
     if (
         icp_stage
         and (
@@ -5885,6 +5890,7 @@ def _targeted_company_investigation_dimensions(
             in {COMPANY_FIT_MISMATCH, COMPANY_FIT_UNAVAILABLE}
             or submitted_stage_conflict
             or current_public_stage_check
+            or current_venture_stage_check
         )
     ):
         targets.append("stage")

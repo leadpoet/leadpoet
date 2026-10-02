@@ -27,10 +27,27 @@ def _prepare(cursor):
                    "output_ref='arena/test/score387-old.json',lease_expires_at=NULL "
                    "WHERE round_id=%s AND kind='score' AND status='leased'", (ROUND,))
     assert cursor.rowcount == 13
+    cursor.execute("UPDATE public.lab_arena_runs SET status='accepted',terminal_cause='accepted',"
+                   "output_ref='arena/test/score387-old.json' WHERE run_id IN ("
+                   "SELECT run_id FROM public.lab_arena_runs WHERE round_id=%s "
+                   "AND kind='score' AND status='pending' ORDER BY run_id LIMIT 17)", (ROUND,))
+    assert cursor.rowcount == 17
     cursor.execute("UPDATE public.lab_arena_runs SET qualification_doc='{"
                    "\"companies\":[]}'::jsonb,per_icp_score=54 "
-                   "WHERE round_id=%s AND kind='execute' AND status='accepted'", (ROUND,))
-    assert cursor.rowcount == 140
+                   "WHERE round_id=%s AND kind='execute' AND stage=1 "
+                   "AND status='accepted'", (ROUND,))
+    assert cursor.rowcount == 10
+    cursor.execute("SELECT count(*) FILTER (WHERE stage=1 AND qualification_doc IS NOT NULL "
+                   "AND per_icp_score IS NOT NULL),count(*) FILTER (WHERE stage=2 "
+                   "AND qualification_doc IS NULL AND per_icp_score IS NULL) "
+                   "FROM public.lab_arena_runs WHERE round_id=%s AND kind='execute' "
+                   "AND status='accepted'", (ROUND,))
+    assert cursor.fetchone() == (10, 130)
+    cursor.execute("SELECT count(*) FILTER (WHERE stage=1 AND status='accepted'),"
+                   "count(*) FILTER (WHERE stage=2 AND status='accepted'),"
+                   "count(*) FILTER (WHERE stage=2 AND status='pending') "
+                   "FROM public.lab_arena_runs WHERE round_id=%s AND kind='score'", (ROUND,))
+    assert cursor.fetchone() == (10, 121, 9)
     cursor.execute("UPDATE public.lab_arena_rounds SET "
                    "stage1_scoring_plan_doc='{}'::jsonb,stage2_scoring_plan_doc='{}'::jsonb,"
                    "finalists='[]'::jsonb WHERE round_id=%s", (ROUND,))
@@ -153,7 +170,7 @@ def test_full_archive_preserves_executions_costs_and_original_credential_ids(dat
             assert cursor.fetchone()[0] == 0
             cursor.execute("SELECT count(*),count(*) FILTER(WHERE status='pending') "
                            "FROM public.lab_arena_runs WHERE round_id=%s AND kind='score'", (ARCHIVE,))
-            assert cursor.fetchone() == (140, 26)
+            assert cursor.fetchone() == (140, 9)
             cursor.execute("SELECT count(*) FROM public.lab_arena_ledger WHERE round_id=%s", (ARCHIVE,))
             assert cursor.fetchone()[0] == 140
             cursor.execute("SELECT count(*) FROM public.lab_arena_trajectory_events WHERE round_id=%s", (ARCHIVE,))

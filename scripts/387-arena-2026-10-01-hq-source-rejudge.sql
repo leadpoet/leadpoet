@@ -345,9 +345,6 @@ BEGIN
      OR (SELECT COUNT(*) FROM public.lab_arena_runs
          WHERE round_id=v_round_id AND kind='execute' AND status='failed') <> 1
      OR (SELECT COUNT(*) FROM public.lab_arena_runs
-         WHERE round_id=v_round_id AND kind='execute' AND status='accepted'
-           AND per_icp_score IS NOT NULL AND qualification_doc IS NOT NULL) <> 140
-     OR (SELECT COUNT(*) FROM public.lab_arena_runs
          WHERE round_id=v_round_id AND kind='score') <> 140
      OR EXISTS (SELECT 1 FROM public.lab_arena_runs
          WHERE round_id=v_round_id AND kind='score'

@@ -279,6 +279,8 @@ def test_broken_prior_epoch_does_not_block_current_epoch(tmp_path):
         (459, 464, "subtensor_events_spec464_block9088963.json"),
         (464, 466, "subtensor_events_spec466_block9091482.json"),
         (466, 467, "subtensor_events_spec467_block9095804.json"),
+        (467, 468, "subtensor_events_spec468_block9117768.json"),
+        (468, 469, "subtensor_events_spec469_block9128207.json"),
         (467, 470, "subtensor_events_spec470_block9141889.json"),
     ],
 )
@@ -380,6 +382,14 @@ def test_prior_poll_recovers_signed_journal_after_runtime_upgrade_reveal(
     assert outcome["reported"] is True
     assert len(reported) == 1
     assert signer.prepares == 0
+    assert signer.recoveries == 1
+    assert signer.confirms == 1
+    assert broadcasts == []
+    assert journal_path.read_bytes() == retained_journal
+
+    # A recovered and reported outcome is not replayed on the next poll.
+    orchestrator.poll_prior_outcomes(11)
+    assert len(reported) == 1
     assert signer.recoveries == 1
     assert signer.confirms == 1
     assert broadcasts == []

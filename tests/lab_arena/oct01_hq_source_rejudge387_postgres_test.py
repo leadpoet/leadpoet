@@ -318,6 +318,17 @@ def test_replay_rejects_archived_and_retained_payload_drift(database):
         with conn.cursor() as cursor:
             sql = _prepare(cursor)
             cursor.execute(sql)
+            cursor.execute("WITH row_hashes AS (SELECT entry_id,"
+                           "encode(extensions.digest(to_jsonb(l)::text,'sha256'),'hex') AS hash "
+                           "FROM public.lab_arena_ledger l WHERE round_id=%s "
+                           "ORDER BY entry_id LIMIT 2) SELECT "
+                           "encode(extensions.digest(string_agg(hash,'' ORDER BY entry_id),"
+                           "'sha256'),'hex'),"
+                           "encode(extensions.digest(string_agg(hash,'' ORDER BY entry_id DESC),"
+                           "'sha256'),'hex'),length(string_agg(hash,'' ORDER BY entry_id)) "
+                           "FROM row_hashes", (ARCHIVE,))
+            ordered, reversed_order, bounded_length = cursor.fetchone()
+            assert ordered != reversed_order and bounded_length == 128
             mutations = (
                 "UPDATE public.lab_arena_runs SET result_doc='{}'::jsonb "
                 "WHERE run_id=(SELECT run_id FROM public.lab_arena_runs WHERE round_id=%s AND kind='score' ORDER BY run_id LIMIT 1)",

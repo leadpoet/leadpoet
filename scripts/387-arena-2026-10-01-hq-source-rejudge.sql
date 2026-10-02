@@ -200,23 +200,23 @@ BEGIN
        OR v_archive.configuration_doc->>'recovery_source_round_id'
          IS DISTINCT FROM v_round_id
        OR v_archive.configuration_doc->>'recovery_score_runs_sha256'
-         IS DISTINCT FROM (SELECT pg_catalog.encode(extensions.digest(
-           pg_catalog.jsonb_agg(pg_catalog.to_jsonb(s) ||
+         IS DISTINCT FROM (SELECT pg_catalog.encode(extensions.digest(COALESCE(
+           pg_catalog.string_agg(pg_catalog.encode(extensions.digest((pg_catalog.to_jsonb(s) ||
              pg_catalog.jsonb_build_object('round_id',v_round_id,
                'submission_id',CASE
                  WHEN s.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-01'
-                 ELSE s.submission_id END)
-               ORDER BY run_id)::TEXT,
+                 ELSE s.submission_id END))::TEXT,'sha256'),'hex'),''
+               ORDER BY run_id),''),
            'sha256'),'hex') FROM public.lab_arena_runs s
            WHERE round_id=v_archive_id AND kind='score')
        OR v_archive.configuration_doc->>'recovery_score_ledger_sha256'
          IS DISTINCT FROM (SELECT pg_catalog.encode(extensions.digest(COALESCE(
-           pg_catalog.jsonb_agg(pg_catalog.to_jsonb(l) ||
+           pg_catalog.string_agg(pg_catalog.encode(extensions.digest((pg_catalog.to_jsonb(l) ||
              pg_catalog.jsonb_build_object('round_id',v_round_id,
                'submission_id',CASE
                  WHEN l.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-01'
-                 ELSE l.submission_id END)
-               ORDER BY entry_id)::TEXT,''),
+                 ELSE l.submission_id END))::TEXT,'sha256'),'hex'),''
+               ORDER BY entry_id),''),
            'sha256'),'hex') FROM public.lab_arena_ledger l
            WHERE round_id=v_archive_id AND EXISTS
              (SELECT 1 FROM public.lab_arena_runs s
@@ -226,12 +226,12 @@ BEGIN
                (v_archive.configuration_doc->>'recovery_score_ledger_max_entry_id')::BIGINT)
        OR v_archive.configuration_doc->>'recovery_score_events_sha256'
          IS DISTINCT FROM (SELECT pg_catalog.encode(extensions.digest(COALESCE(
-           pg_catalog.jsonb_agg(pg_catalog.to_jsonb(e) ||
+           pg_catalog.string_agg(pg_catalog.encode(extensions.digest((pg_catalog.to_jsonb(e) ||
              pg_catalog.jsonb_build_object('round_id',v_round_id,
                'submission_id',CASE
                  WHEN e.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-01'
-                 ELSE e.submission_id END)
-               ORDER BY trajectory_id)::TEXT,''),
+                 ELSE e.submission_id END))::TEXT,'sha256'),'hex'),''
+               ORDER BY trajectory_id),''),
            'sha256'),'hex') FROM public.lab_arena_trajectory_events e
            WHERE round_id=v_archive_id AND run_kind='score')
        OR v_archive.configuration_doc->>'recovery_source_receipts_sha256'
@@ -241,19 +241,23 @@ BEGIN
        OR pg_catalog.jsonb_array_length(
            v_archive.configuration_doc->'recovery_source_receipts') <> 140
        OR v_archive.configuration_doc->>'recovery_execute_runs_sha256'
-         IS DISTINCT FROM (SELECT pg_catalog.encode(extensions.digest(
-           pg_catalog.jsonb_agg((pg_catalog.to_jsonb(r) - 'qualification_doc' -
-             'per_icp_score') ORDER BY run_id)::TEXT,'sha256'),'hex')
+         IS DISTINCT FROM (SELECT pg_catalog.encode(extensions.digest(COALESCE(
+           pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+             (pg_catalog.to_jsonb(r) - 'qualification_doc' -
+               'per_icp_score')::TEXT,'sha256'),'hex'),'' ORDER BY run_id),''),
+           'sha256'),'hex')
            FROM public.lab_arena_runs r WHERE round_id=v_round_id AND kind='execute')
        OR v_archive.configuration_doc->>'recovery_execute_ledger_sha256'
          IS DISTINCT FROM (SELECT pg_catalog.encode(extensions.digest(COALESCE(
-           pg_catalog.jsonb_agg(pg_catalog.to_jsonb(l) ORDER BY entry_id)::TEXT,''),
+           pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+             pg_catalog.to_jsonb(l)::TEXT,'sha256'),'hex'),'' ORDER BY entry_id),''),
            'sha256'),'hex') FROM public.lab_arena_ledger l
            WHERE round_id=v_round_id AND EXISTS (SELECT 1 FROM public.lab_arena_runs r
              WHERE r.run_id=l.run_id AND r.kind='execute' AND r.round_id=v_round_id))
        OR v_archive.configuration_doc->>'recovery_execute_events_sha256'
          IS DISTINCT FROM (SELECT pg_catalog.encode(extensions.digest(COALESCE(
-           pg_catalog.jsonb_agg(pg_catalog.to_jsonb(e) ORDER BY trajectory_id)::TEXT,''),
+           pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+             pg_catalog.to_jsonb(e)::TEXT,'sha256'),'hex'),'' ORDER BY trajectory_id),''),
            'sha256'),'hex') FROM public.lab_arena_trajectory_events e
            WHERE round_id=v_round_id AND run_kind='execute')
        OR v_round.configuration_doc->>'scorer_image_digest'
@@ -417,29 +421,34 @@ BEGIN
     RAISE EXCEPTION 'Oct01 headquarters source rejudge precondition differs' USING ERRCODE='55000';
   END IF;
 
-  SELECT pg_catalog.encode(extensions.digest(
-    pg_catalog.jsonb_agg((pg_catalog.to_jsonb(r) - 'qualification_doc' -
-      'per_icp_score') ORDER BY run_id)::TEXT,
+  SELECT pg_catalog.encode(extensions.digest(COALESCE(
+    pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+      (pg_catalog.to_jsonb(r) - 'qualification_doc' -
+        'per_icp_score')::TEXT,'sha256'),'hex'),'' ORDER BY run_id),''),
     'sha256'),'hex') INTO v_execution_hash
   FROM public.lab_arena_runs r WHERE round_id=v_round_id AND kind='execute';
   SELECT pg_catalog.encode(extensions.digest(COALESCE(
-    pg_catalog.jsonb_agg(pg_catalog.to_jsonb(l) ORDER BY entry_id)::TEXT,''),
+    pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+      pg_catalog.to_jsonb(l)::TEXT,'sha256'),'hex'),'' ORDER BY entry_id),''),
     'sha256'),'hex') INTO v_execution_ledger_hash
   FROM public.lab_arena_ledger l WHERE round_id=v_round_id AND EXISTS (
     SELECT 1 FROM public.lab_arena_runs r WHERE r.run_id=l.run_id
       AND r.round_id=v_round_id AND r.kind='execute');
   SELECT pg_catalog.encode(extensions.digest(COALESCE(
-    pg_catalog.jsonb_agg(pg_catalog.to_jsonb(e) ORDER BY trajectory_id)::TEXT,''),
+    pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+      pg_catalog.to_jsonb(e)::TEXT,'sha256'),'hex'),'' ORDER BY trajectory_id),''),
     'sha256'),'hex') INTO v_execution_events_hash
   FROM public.lab_arena_trajectory_events e WHERE round_id=v_round_id
     AND run_kind='execute';
 
-  SELECT pg_catalog.encode(extensions.digest(
-    pg_catalog.jsonb_agg(pg_catalog.to_jsonb(s) ORDER BY run_id)::TEXT,
+  SELECT pg_catalog.encode(extensions.digest(COALESCE(
+    pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+      pg_catalog.to_jsonb(s)::TEXT,'sha256'),'hex'),'' ORDER BY run_id),''),
     'sha256'),'hex') INTO v_score_hash
   FROM public.lab_arena_runs s WHERE round_id=v_round_id AND kind='score';
   SELECT pg_catalog.encode(extensions.digest(COALESCE(
-    pg_catalog.jsonb_agg(pg_catalog.to_jsonb(l) ORDER BY entry_id)::TEXT,''),
+    pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+      pg_catalog.to_jsonb(l)::TEXT,'sha256'),'hex'),'' ORDER BY entry_id),''),
     'sha256'),'hex') INTO v_ledger_hash
   FROM public.lab_arena_ledger l WHERE round_id=v_round_id
     AND EXISTS (SELECT 1 FROM public.lab_arena_runs s
@@ -449,7 +458,8 @@ BEGIN
     AND EXISTS (SELECT 1 FROM public.lab_arena_runs s
       WHERE s.round_id=v_round_id AND s.kind='score' AND s.run_id=l.run_id);
   SELECT pg_catalog.encode(extensions.digest(COALESCE(
-    pg_catalog.jsonb_agg(pg_catalog.to_jsonb(e) ORDER BY trajectory_id)::TEXT,''),
+    pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+      pg_catalog.to_jsonb(e)::TEXT,'sha256'),'hex'),'' ORDER BY trajectory_id),''),
     'sha256'),'hex') INTO v_events_hash
   FROM public.lab_arena_trajectory_events e WHERE round_id=v_round_id
     AND e.run_kind='score';
@@ -560,26 +570,26 @@ BEGIN
       THEN v_archive_baseline_id ELSE e.submission_id END
   WHERE e.round_id=v_round_id AND e.run_kind='score';
 
-  IF v_score_hash IS DISTINCT FROM (SELECT pg_catalog.encode(extensions.digest(
-      pg_catalog.jsonb_agg(pg_catalog.to_jsonb(s) || pg_catalog.jsonb_build_object(
+  IF v_score_hash IS DISTINCT FROM (SELECT pg_catalog.encode(extensions.digest(COALESCE(
+      pg_catalog.string_agg(pg_catalog.encode(extensions.digest((pg_catalog.to_jsonb(s) || pg_catalog.jsonb_build_object(
         'round_id',v_round_id,'submission_id',CASE
           WHEN s.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-01'
-          ELSE s.submission_id END) ORDER BY run_id)::TEXT,
+          ELSE s.submission_id END))::TEXT,'sha256'),'hex'),'' ORDER BY run_id),''),
       'sha256'),'hex') FROM public.lab_arena_runs s
       WHERE round_id=v_archive_id AND kind='score')
      OR v_ledger_hash IS DISTINCT FROM (SELECT pg_catalog.encode(extensions.digest(COALESCE(
-      pg_catalog.jsonb_agg(pg_catalog.to_jsonb(l) || pg_catalog.jsonb_build_object(
+      pg_catalog.string_agg(pg_catalog.encode(extensions.digest((pg_catalog.to_jsonb(l) || pg_catalog.jsonb_build_object(
         'round_id',v_round_id,'submission_id',CASE
           WHEN l.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-01'
-          ELSE l.submission_id END) ORDER BY entry_id)::TEXT,''),
+          ELSE l.submission_id END))::TEXT,'sha256'),'hex'),'' ORDER BY entry_id),''),
       'sha256'),'hex') FROM public.lab_arena_ledger l
       WHERE round_id=v_archive_id AND EXISTS (SELECT 1 FROM public.lab_arena_runs s
         WHERE s.round_id=v_archive_id AND s.kind='score' AND s.run_id=l.run_id))
      OR v_events_hash IS DISTINCT FROM (SELECT pg_catalog.encode(extensions.digest(COALESCE(
-      pg_catalog.jsonb_agg(pg_catalog.to_jsonb(e) || pg_catalog.jsonb_build_object(
+      pg_catalog.string_agg(pg_catalog.encode(extensions.digest((pg_catalog.to_jsonb(e) || pg_catalog.jsonb_build_object(
         'round_id',v_round_id,'submission_id',CASE
           WHEN e.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-01'
-          ELSE e.submission_id END) ORDER BY trajectory_id)::TEXT,''),
+          ELSE e.submission_id END))::TEXT,'sha256'),'hex'),'' ORDER BY trajectory_id),''),
       'sha256'),'hex') FROM public.lab_arena_trajectory_events e
       WHERE round_id=v_archive_id AND run_kind='score')
   THEN
@@ -618,19 +628,22 @@ BEGIN
          WHERE round_id=v_archive_id AND kind='score') <> 140
      OR (SELECT COUNT(DISTINCT assignment_id) FROM public.lab_arena_runs
          WHERE round_id=v_round_id AND stage=2 AND kind='execute') <> 130
-     OR v_execution_hash IS DISTINCT FROM (SELECT pg_catalog.encode(extensions.digest(
-         pg_catalog.jsonb_agg((pg_catalog.to_jsonb(r) - 'qualification_doc' -
-           'per_icp_score') ORDER BY run_id)::TEXT,
+     OR v_execution_hash IS DISTINCT FROM (SELECT pg_catalog.encode(extensions.digest(COALESCE(
+         pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+           (pg_catalog.to_jsonb(r) - 'qualification_doc' -
+             'per_icp_score')::TEXT,'sha256'),'hex'),'' ORDER BY run_id),''),
          'sha256'),'hex') FROM public.lab_arena_runs r
          WHERE round_id=v_round_id AND kind='execute')
      OR v_execution_ledger_hash IS DISTINCT FROM (SELECT pg_catalog.encode(extensions.digest(COALESCE(
-         pg_catalog.jsonb_agg(pg_catalog.to_jsonb(l) ORDER BY entry_id)::TEXT,''),
+         pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+           pg_catalog.to_jsonb(l)::TEXT,'sha256'),'hex'),'' ORDER BY entry_id),''),
          'sha256'),'hex') FROM public.lab_arena_ledger l
          WHERE round_id=v_round_id AND EXISTS (
            SELECT 1 FROM public.lab_arena_runs r WHERE r.run_id=l.run_id
              AND r.round_id=v_round_id AND r.kind='execute'))
      OR v_execution_events_hash IS DISTINCT FROM (SELECT pg_catalog.encode(extensions.digest(COALESCE(
-         pg_catalog.jsonb_agg(pg_catalog.to_jsonb(e) ORDER BY trajectory_id)::TEXT,''),
+         pg_catalog.string_agg(pg_catalog.encode(extensions.digest(
+           pg_catalog.to_jsonb(e)::TEXT,'sha256'),'hex'),'' ORDER BY trajectory_id),''),
          'sha256'),'hex') FROM public.lab_arena_trajectory_events e
          WHERE round_id=v_round_id AND run_kind='execute')
      OR EXISTS (SELECT 1 FROM public.lab_arena_runs

@@ -92,6 +92,11 @@ def test_rejudge_archives_history_and_reopens_only_baseline_scoring(database):
             cursor.execute("SELECT benchmark_ref,evaluation_date,icp_set_date,participants "
                            "FROM public.lab_arena_rounds WHERE round_id=%s", (prior.ROUND,))
             frozen_before = cursor.fetchone()
+            cursor.execute("SELECT champion_funding_frozen,champion_submission_id,"
+                           "champion_hotkey,champion_fallback_providers FROM "
+                           "public.lab_arena_rounds WHERE round_id=%s", (prior.ROUND,))
+            funding_before = cursor.fetchone()
+            assert funding_before[0] is True and funding_before[1] and funding_before[2]
             cursor.execute("SELECT jsonb_agg(to_jsonb(s) ORDER BY submission_id) "
                            "FROM public.lab_arena_submissions s WHERE round_id=%s",
                            (prior.ROUND,))
@@ -153,8 +158,11 @@ def test_rejudge_archives_history_and_reopens_only_baseline_scoring(database):
     assert archive['configuration_doc']['mode'] == 'live'
     assert archive['rewards_enabled'] is False
     assert archive['king_hotkey'] is None
-    assert archive['champion_hotkey'] is None
+    assert (archive['champion_funding_frozen'], archive['champion_submission_id'],
+            archive['champion_hotkey'], archive['champion_fallback_providers']) == funding_before
     assert archive['promotion_required'] is False
+    assert archive['reward_activated_at'] is None
+    assert archive['effective_reward_epoch'] is None
     archive_baseline = 'baseline-2026-10-01-r376archive'
     assert next(p['submission_id'] for p in archive['participants'] if p['is_king']) == archive_baseline
     archived_score = next(r for r in store.list_runs(archive['round_id'], kind='score')
@@ -167,11 +175,32 @@ def test_rejudge_archives_history_and_reopens_only_baseline_scoring(database):
         stage=1, kind='score', attempt=archived_score['attempt'],
         round_id=archive['round_id'],
     )
-    keys = SubmissionProviderKeys(store=store, credentials=None,
+    class CredentialStore:
+        def get_submission(self, submission_id):
+            return store.get_submission(submission_id)
+
+        def provider_funding(self, run_id, provider):
+            return store.provider_funding(run_id, provider)
+
+        def get_submission_credential(self, submission_id, miner_hotkey, provider):
+            return {'submission_id': submission_id, 'miner_hotkey': miner_hotkey,
+                    'provider': provider}
+
+    class Decryptor:
+        def runtime_key(self, encrypted, provider):
+            assert encrypted['submission_id'] == funding_before[1]
+            assert encrypted['miner_hotkey'] == funding_before[2]
+            assert provider == 'deepline'
+            return 'test-miner-key'
+
+    keys = SubmissionProviderKeys(store=CredentialStore(), credentials=Decryptor(),
                                   organizer_keys={'deepline': 'test-host-key'})
-    assert store.provider_funding(archived_score['run_id'], 'deepline')['funding_source'] == 'host'
-    assert keys.provider_funding_source_for(context, 'deepline') == 'host'
-    assert keys.credential_for(context, 'deepline') == 'test-host-key'
+    funding = store.provider_funding(archived_score['run_id'], 'deepline')
+    assert funding['funding_source'] == 'miner_key'
+    assert funding['credential_submission_id'] == funding_before[1]
+    assert funding['credential_miner_hotkey'] == funding_before[2]
+    assert keys.provider_funding_source_for(context, 'deepline') == 'miner_key'
+    assert keys.credential_for(context, 'deepline') == 'test-miner-key'
     assert public_dashboard._is_administrative_archive(archive)
     service = object.__new__(ArenaService)
     service._store = store

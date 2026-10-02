@@ -79,8 +79,13 @@ BEGIN
        OR v_archive.king_hotkey IS NOT NULL
        OR v_archive.effective_reward_epoch IS NOT NULL
        OR v_archive.promotion_required IS DISTINCT FROM FALSE
-       OR v_archive.champion_funding_frozen IS DISTINCT FROM FALSE
-       OR v_archive.champion_hotkey IS NOT NULL
+       OR v_archive.champion_funding_frozen IS DISTINCT FROM TRUE
+       OR v_archive.champion_submission_id IS DISTINCT FROM
+         v_archive.configuration_doc->>'recovery_original_champion_submission_id'
+       OR v_archive.champion_hotkey IS DISTINCT FROM
+         v_archive.configuration_doc->>'recovery_original_champion_hotkey'
+       OR pg_catalog.to_jsonb(v_archive.champion_fallback_providers) IS DISTINCT FROM
+         v_archive.configuration_doc->'recovery_original_champion_fallback_providers'
        OR v_archive.cancel_reason IS DISTINCT FROM
          'authorized_oct01_new_scorer_rejudge_archive'
        OR v_archive.configuration_doc->>'recovery_source_round_id'
@@ -133,6 +138,8 @@ BEGIN
        '2026-10-01T20:00:01Z'
      OR v_round.benchmark_ref IS NULL OR v_round.evaluation_date IS NULL
      OR v_round.published_at IS NOT NULL OR v_round.reward_activated_at IS NOT NULL
+     OR v_round.champion_funding_frozen IS DISTINCT FROM TRUE
+     OR v_round.champion_submission_id IS NULL OR v_round.champion_hotkey IS NULL
      OR (SELECT COUNT(*) FROM public.lab_arena_runs
          WHERE round_id=v_round_id AND stage=1 AND kind='execute'
            AND submission_id='baseline-2026-10-01' AND status='accepted'
@@ -197,6 +204,7 @@ BEGIN
     'recovery_source_round_id',v_round_id,
     'recovery_original_champion_submission_id',v_round.champion_submission_id,
     'recovery_original_champion_hotkey',v_round.champion_hotkey,
+    'recovery_original_champion_fallback_providers',v_round.champion_fallback_providers,
     'recovery_score_runs_sha256',v_score_hash,
     'recovery_score_ledger_sha256',v_ledger_hash,
     'recovery_score_ledger_max_entry_id',v_ledger_max,
@@ -246,9 +254,7 @@ BEGIN
       'signing_key_doc',NULL,'effective_reward_epoch',NULL,
       'reward_activated_at',NULL,'king_outcome',NULL,'king_hotkey',NULL,
       'king_start_epoch',NULL,'promotion_required',FALSE,'promotion_doc',NULL,
-      'baseline_promoted_at',NULL,'champion_funding_frozen',FALSE,
-      'champion_submission_id',NULL,'champion_hotkey',NULL,
-      'champion_fallback_providers','[]'::JSONB,
+      'baseline_promoted_at',NULL,
       'cancel_reason','authorized_oct01_new_scorer_rejudge_archive'));
   INSERT INTO public.lab_arena_submissions
   SELECT (pg_catalog.jsonb_populate_record(NULL::public.lab_arena_submissions,

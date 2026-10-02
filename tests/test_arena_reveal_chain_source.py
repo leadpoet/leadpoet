@@ -64,6 +64,11 @@ SPEC470_FIXTURE = (
     / "fixtures"
     / "subtensor_events_spec470_block9141889.json"
 )
+SPEC472_FIXTURE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "subtensor_events_spec472_block9198408.json"
+)
 
 
 def _compact(value: int) -> bytes:
@@ -388,6 +393,7 @@ def test_historical_reveal_succeeds_after_latest_head_passed_deadline(monkeypatc
         (SPEC468_FIXTURE, 468),
         (SPEC469_FIXTURE, 469),
         (SPEC470_FIXTURE, 470),
+        (SPEC472_FIXTURE, 472),
     ],
 )
 def test_exact_parent_runtime_and_transition_events_prove_reveal(
@@ -430,7 +436,7 @@ def test_exact_parent_runtime_and_transition_events_prove_reveal(
     ) in fixture.calls
 
 
-@pytest.mark.parametrize("spec_version", [456, 457, 458, 459, 464, 466, 467, 468, 469, 470])
+@pytest.mark.parametrize("spec_version", [456, 457, 458, 459, 464, 466, 467, 468, 469, 470, 472])
 def test_historical_reveal_selects_observed_runtime_profile(
     monkeypatch, spec_version
 ):

@@ -79,9 +79,11 @@ from qualification.scoring.company_evidence_investigator import (
     _VENTURE_SERIES_STAGE_LABELS,
     _complete_verified_first_party_identity,
     _plain_text,
+    _priority_headquarters_navigation_source,
     _quote_occurs,
     _quote_identifies_headquarters,
     _same_domain_name_alias,
+    _validated_homepage_navigation_locators,
     _validated_prefetched_pages,
     investigate_company_evidence,
 )
@@ -5901,6 +5903,8 @@ def _targeted_company_investigation_dimensions(
     employee_size_conflict: bool,
     company: Optional[CompanyOutput] = None,
     verified_rebrand_redirect: Optional[Mapping[str, str]] = None,
+    verified_homepage_identity: Optional[Mapping[str, Any]] = None,
+    homepage_navigation_locators: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[str, ...]:
     """Select only fact gaps and unsupported semantic company disputes."""
 
@@ -6004,6 +6008,49 @@ def _targeted_company_investigation_dimensions(
     # only when the broad verifier did not establish a usable headquarters.
     if dimensions.get("geography") == COMPANY_FIT_UNAVAILABLE:
         targets.append("geography")
+    elif dimensions.get("geography") == COMPANY_FIT_MATCH:
+        # A third-party HQ match cannot bypass a known first-party contact or
+        # about page. The locator is only a fetch target, never an HQ claim.
+        raw_evidence = (
+            details.get("dimension_evidence", {}).get("geography", {})
+            if isinstance(details.get("dimension_evidence"), Mapping)
+            else {}
+        )
+        web_evidence = (
+            raw_evidence.get("web_evidence") or raw_evidence
+            if isinstance(raw_evidence, Mapping)
+            else {}
+        )
+        evidence_url = (
+            _valid_web_evidence_url(web_evidence.get("url"))
+            if isinstance(web_evidence, Mapping)
+            else ""
+        )
+        anchor = (
+            verified_homepage_identity
+            if isinstance(verified_homepage_identity, Mapping)
+            else {}
+        )
+        first_party_domain = str(
+            anchor.get("registrable_dns_domain") or ""
+        ).strip().casefold()
+        evidence_domain = _registrable_domain(evidence_url) if evidence_url else ""
+        if (
+            details.get("identity_decision") == COMPANY_FIT_MATCH
+            and first_party_domain
+            and evidence_domain
+            and evidence_domain != first_party_domain
+            and _priority_headquarters_navigation_source(
+                ("geography",),
+                _validated_homepage_navigation_locators(
+                    homepage_navigation_locators,
+                    positive_semantic_review=False,
+                    headquarters_review=True,
+                    verified_homepage_identity=anchor,
+                ),
+            )
+        ):
+            targets.append("geography")
     return tuple(targets)
 
 
@@ -7581,6 +7628,8 @@ async def _llm_reverify_company(
             employee_size_conflict=employee_size_conflict,
             company=company,
             verified_rebrand_redirect=verified_rebrand_redirect,
+            verified_homepage_identity=verified_identity,
+            homepage_navigation_locators=verified_homepage_navigation_locators,
         )
         if require_company_fit_dimensions and evidence_investigator
         else ()
@@ -8077,6 +8126,8 @@ async def _llm_reverify_company(
                 employee_size_conflict=employee_size_conflict,
                 company=company,
                 verified_rebrand_redirect=verified_rebrand_redirect,
+                verified_homepage_identity=verified_identity,
+                homepage_navigation_locators=verified_homepage_navigation_locators,
             )
         )
         post_repair_positive_semantic_review = (

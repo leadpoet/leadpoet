@@ -318,6 +318,12 @@ For geography, find the current headquarters of the investigated company.
 Prefer a known current first-party contact or about navigation locator and
 fetch it before relying on a generic profile location. A navigation label is
 only a locator: its page must contain an explicit company-bound HQ statement.
+When a fetched current company contact or about page explicitly names that
+company's headquarters, prefer that direct fact over an undated profile HQ.
+A dated headquarters move or a newer company-bound source can resolve a real
+conflict; otherwise return UNPROVEN rather than choosing the matching place.
+Do not transfer a customer's, parent company's, or regional office location
+to the investigated company.
 Incorporation, an office, factory, job, customer, event, service area, or parent
 company location is not headquarters. Return a country and, for a United
 States headquarters, a state. Use a quote that explicitly identifies the
@@ -1832,6 +1838,7 @@ def _validated_findings(
     first_party_domains: set[str],
     identity_names: Optional[set[str]] = None,
     identity_anchor: Optional[Mapping[str, Any]] = None,
+    priority_headquarters_url: str = "",
 ) -> Optional[dict[str, dict[str, Any]]]:
     if not isinstance(arguments, Mapping) or set(arguments) != {"findings"}:
         return None
@@ -1960,6 +1967,22 @@ def _validated_findings(
                         ),
                         first_party_domains,
                         identity_anchor or {},
+                    )
+                )
+                and not (
+                    target == "geography"
+                    and evidence_url == priority_headquarters_url
+                    and re.match(
+                        r"^\s*(?:#{1,6}\s*)?(?:corporate\s+|global\s+)?"
+                        r"headquarters\s*(?:[:\n]\s*)?\d{1,6}\b",
+                        finding["evidence_quote"], flags=re.I,
+                    )
+                    and _complete_verified_first_party_identity(
+                        evidence_url, first_party_domains, identity_anchor or {},
+                    )
+                    and _complete_verified_first_party_identity(
+                        str((fetched_final_urls or {}).get(evidence_url) or ""),
+                        first_party_domains, identity_anchor or {},
                     )
                 )
             ):
@@ -2745,7 +2768,9 @@ async def investigate_company_evidence(
                     identity_names=identity_names,
                     fetched_pages=fetched_pages,
                 )
-            elif positive_semantic_review or "geography" in requested_targets:
+            if not priority_source_url and (
+                positive_semantic_review or "geography" in requested_targets
+            ):
                 priority_source_kind = "company"
                 priority_source_url = _priority_headquarters_navigation_source(
                     requested_targets, bounded_homepage_navigation_locators,
@@ -3239,6 +3264,12 @@ async def investigate_company_evidence(
                         first_party_domains=first_party_domains,
                         identity_names=identity_names,
                         identity_anchor=identity_anchor,
+                        priority_headquarters_url=(
+                            _priority_headquarters_navigation_source(
+                                requested_targets,
+                                bounded_homepage_navigation_locators,
+                            )
+                        ),
                     )
                     if claims is None:
                         raise ValueError("reasoning_findings_malformed")

@@ -283,6 +283,38 @@ Configured work-directory symlinks, including parent components, are rejected
 without following or replacing them. The fixed OS `/tmp` alias is resolved and
 probed without changing shared-directory permissions.
 
+## Retired test workspace cache retention
+
+Each Arena work directory has its own bounded image and source cache. An old
+test work directory can retain its cache after the test process exits. Use the
+cache retention command to inspect direct children of `/var/lib/lab-arena`.
+It selects completed `images`, `sources`, and `judge-images-*` cache entries
+whose markers are at least seven days old in workspaces with no recent root,
+run, or sandbox activity. It preserves the active `runner`
+directory, wallet directories, `runs`, `sandboxes`, results, source trees,
+journals, unknown files, recent entries, and symlinks. A running Arena process
+or a held workspace lock prevents removal. The command fails closed if it
+cannot inspect relevant process metadata.
+
+From the release checkout, review the exact candidates first:
+
+```bash
+sudo /home/ec2-user/arena-validator-venv311/bin/python3 scripts/prune_arena_workspace_caches.py \
+  --workspace-root /var/lib/lab-arena \
+  --active-work-dir /var/lib/lab-arena/runner \
+  --active-work-dir /var/lib/lab-arena/minerproof2-vn1zwn \
+  --active-work-dir /var/lib/lab-arena/cleanup-e2e-20260907 \
+  --older-than-days 7
+```
+
+After review, use the same command with `--apply` to remove only the listed
+cache entries. Output is one JSON record per entry and a total. New runners
+hold a shared workspace lock while their caches are in use. The maintenance
+command takes an exclusive lock and skips locked workspaces. The
+`deploy/leadpoet-arena-cache-retention.service` and `.timer` units run this
+bounded operation each day; install and enable the timer only after the
+dry-run candidate list has been reviewed on that host.
+
 For a service installation, from the release checkout:
 
 ```bash

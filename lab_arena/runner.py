@@ -2686,6 +2686,7 @@ class RunnerConfig:
     # Reuse the process's normal idle claim cadence while active leases leave
     # spare capacity. A retry may become eligible without a local future ending.
     claim_poll_seconds: float = 30.0
+    workspace_cache_lock: Any = None
 
     def __post_init__(self) -> None:
         if (
@@ -3582,6 +3583,11 @@ WORKING_STATUSES = ("stage1", "stage1_scoring", "stage2", "stage2_scoring")
 
 
 class Runner:
+    # Keep an unproved worker drain alive in this process.  The validator may
+    # drop its local Runner reference after a close error; its cache lease must
+    # still block maintenance until a successful drain or process exit.
+    _unproved_closes: set["Runner"] = set()
+
     def __init__(self, config: RunnerConfig) -> None:
         self._config = config
         self._executor = AssignmentExecutor(config)
@@ -3885,4 +3891,16 @@ class Runner:
         return taken
 
     def close(self) -> None:
-        self._pool.shutdown(wait=True)
+        # A failed drain leaves worker state unproved. Keep the shared cache
+        # lease until shutdown succeeds so maintenance cannot remove its files.
+        try:
+            self._pool.shutdown(wait=True)
+        except BaseException:
+            if self._config.workspace_cache_lock is not None:
+                self._unproved_closes.add(self)
+            raise
+        self._unproved_closes.discard(self)
+        lock = self._config.workspace_cache_lock
+        if lock is not None:
+            self._config.workspace_cache_lock = None
+            lock.close()

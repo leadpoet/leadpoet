@@ -709,6 +709,7 @@ def test_pending_promotions_pushes_durable_filters_and_oldest_order():
                 "order": "created_at",
                 "descending": False,
                 "limit": 3,
+                "offset": None,
                 "columns": "round_id,publication_doc,promotion_doc,published_at,created_at",
             },
         )

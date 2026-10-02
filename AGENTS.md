@@ -16,7 +16,8 @@ This authority ends after live deployment and end-to-end cache validation.
 ## Scoped production authorization: historical weight recovery and stale caches
 
 On 2026-10-02 the user requested fixes for missing historical Subtensor runtime
-468 reveal decoding and retained caches in old Arena test workspaces. The
+468 reveal decoding and retained caches in old Arena test workspaces. This
+scope includes further runtime gaps found during live chain verification. The
 standing implementation authority includes focused source changes and tests,
 safe pushes and merges, and canonical gateway/normal-validator deployment.
 Use protected read-only inspection and the current Arena deployment checks.

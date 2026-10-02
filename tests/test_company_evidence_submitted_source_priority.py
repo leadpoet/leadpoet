@@ -229,6 +229,139 @@ def test_positive_industry_review_reuses_prefetched_priority_source(monkeypatch)
     assert document["investigation_limits"]["remaining_fetch_calls"] == 3
 
 
+def test_subscription_review_prefers_late_admitted_pricing_navigation(monkeypatch):
+    submitted_url = "https://acme.example/news/company-update"
+    pricing_url = "https://acme.example/pricing"
+    quote = "Acme sells its subscription platform to business customers."
+    requests: list[dict[str, object]] = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        return _tool_response({
+            "findings": [{
+                **_finding(pricing_url, quote),
+                "observed_value": "Subscription platform",
+                "observed_industry": "Software",
+                "observed_subindustry": "Business subscription software",
+            }],
+        })
+
+    fetch = AsyncMock(return_value={
+        "ok": True,
+        "url": pricing_url,
+        "final_url": pricing_url,
+        "text": quote,
+    })
+    _set_keys(monkeypatch)
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_fetch_page", fetch)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": "Acme",
+            "website": "https://acme.example/",
+        },
+        targets=("industry",),
+        requested_industry="Software",
+        requested_product_service="Subscription software for business teams",
+        positive_semantic_review=True,
+        prior_observations={"submitted_source_urls": [submitted_url]},
+        verified_homepage_identity={
+            "normalized_name": "Acme",
+            "registrable_dns_domain": "acme.example",
+            "linkedin_company_slug": "acme",
+        },
+        homepage_navigation_locators=[
+            {
+                "url": f"https://acme.example/section-{index}",
+                "label": f"Section {index}",
+            }
+            for index in range(7)
+        ] + [{"url": pricing_url, "label": "Pricing"}],
+    ))
+
+    assert result["claims"]["industry"]["status"] == "VERIFIED"
+    assert result["usage"]["fetch_calls"] == 1
+    fetch.assert_awaited_once()
+    assert fetch.await_args.args[1] == pricing_url
+    document = json.loads(
+        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+    )
+    assert document["server_priority_submitted_source"]["url"] == pricing_url
+
+
+def test_subscription_navigation_prefetch_requires_explicit_intent_and_valid_locator(
+    monkeypatch,
+):
+    submitted_url = "https://acme.example/news/company-update"
+    pricing_url = "https://acme.example/pricing"
+    unrelated_url = "https://acme.example/integrations"
+    quote = "Acme sells software to business customers."
+    requests: list[dict[str, object]] = []
+    fetched_urls: list[str] = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        return _tool_response({"findings": [_finding(submitted_url, quote)]})
+
+    async def fake_fetch(_session, url, **_kwargs):
+        fetched_urls.append(url)
+        return {
+            "ok": True,
+            "url": url,
+            "final_url": url,
+            "text": quote,
+        }
+
+    _set_keys(monkeypatch)
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+
+    async def run_case(requested_attribute, navigation):
+        requests.clear()
+        fetched_urls.clear()
+        return await investigator.investigate_company_evidence(
+            company_locator={
+                "name": "Acme",
+                "website": "https://acme.example/",
+            },
+            targets=("industry",),
+            requested_industry="Software",
+            requested_attribute=requested_attribute,
+            positive_semantic_review=True,
+            prior_observations={"submitted_source_urls": [submitted_url]},
+            verified_homepage_identity={
+                "normalized_name": "Acme",
+                "registrable_dns_domain": "acme.example",
+                "linkedin_company_slug": "acme",
+            },
+            homepage_navigation_locators=navigation,
+        )
+
+    asyncio.run(run_case(
+        "Software for a business subscription model",
+        [
+            {"url": unrelated_url, "label": "Integrations"},
+            {"url": "https://outside.example/pricing", "label": "Pricing"},
+        ],
+    ))
+    assert fetched_urls == [submitted_url]
+    assert "server_priority_submitted_source" in json.loads(
+        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+    )
+
+    asyncio.run(run_case(
+        "Software for business teams",
+        [{"url": pricing_url, "label": "Pricing"}],
+    ))
+    assert fetched_urls == [submitted_url]
+    assert json.loads(
+        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+    )["server_priority_submitted_source"]["url"] == submitted_url
+
+
 def test_priority_source_does_not_expand_three_page_prefetch_bound(monkeypatch):
     priority_url = "https://acme.example/news/manufacturing-expansion"
     prefetched_urls = [

@@ -1042,6 +1042,29 @@ def _priority_submitted_company_source(
     return stage_candidates[0] if stage_candidates else ""
 
 
+def _priority_subscription_navigation_source(
+    *,
+    targets: Sequence[str],
+    requested_product_service: str,
+    requested_attribute: str,
+    homepage_navigation_locators: Sequence[Mapping[str, str]],
+) -> str:
+    """Prefer an admitted pricing locator for an explicit subscription fit."""
+
+    if "industry" not in targets or not re.search(
+        r"\bsubscription\b",
+        f"{requested_product_service} {requested_attribute}",
+        flags=re.I,
+    ):
+        return ""
+    for locator in homepage_navigation_locators:
+        url = locator.get("url", "")
+        label = locator.get("label", "")
+        if re.search(r"\b(?:pricing|subscription)\b", f"{url} {label}", re.I):
+            return url
+    return ""
+
+
 def _fetched_bound_public_market_sources(
     fetched_pages: Mapping[str, str],
     identity_names: set[str],
@@ -2576,12 +2599,26 @@ async def investigate_company_evidence(
                 )
             elif positive_semantic_review:
                 priority_source_kind = "company"
-                priority_source_url = _priority_submitted_company_source(
-                    targets=requested_targets,
-                    requested_private_equity_stage=requested_private_equity_stage,
-                    submitted_source_urls=submitted_source_urls,
-                    submitted_stage_source_urls=submitted_stage_source_urls,
-                    first_party_domains=first_party_domains,
+                priority_source_url = (
+                    _priority_subscription_navigation_source(
+                        targets=requested_targets,
+                        requested_product_service=requested_product_service,
+                        requested_attribute=requested_attribute,
+                        homepage_navigation_locators=(
+                            bounded_homepage_navigation_locators
+                        ),
+                    )
+                    or _priority_submitted_company_source(
+                        targets=requested_targets,
+                        requested_private_equity_stage=(
+                            requested_private_equity_stage
+                        ),
+                        submitted_source_urls=submitted_source_urls,
+                        submitted_stage_source_urls=(
+                            submitted_stage_source_urls
+                        ),
+                        first_party_domains=first_party_domains,
+                    )
                 )
             if priority_source_url:
                 priority_cache_hit = priority_source_url in fetched_pages

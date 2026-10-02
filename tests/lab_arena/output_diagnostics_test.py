@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -861,14 +862,20 @@ def test_safe_diagnostic_is_private_until_existing_public_results_release():
         },
     }
     service = object.__new__(ArenaService)
+    service._completed_scores_lock = threading.Lock()
+    service._completed_scores_cache = {}
     service._round = lambda _round_id: round_row
     service._public_icp_disclosure = lambda _row: {
         "public_positions": [0]
     }
     service._store = SimpleNamespace(
-        list_runs=lambda *_args, **_kwargs: [
+        list_runs=lambda *_args, **kwargs: [] if kwargs.get("kind") == "score" else [
             {
                 "run_id": "run-1",
+                "submission_id": "submission-1",
+                "kind": "execute",
+                "status": "accepted",
+                "attempt": 1,
                 "icp_position": 0,
                 "stage": 1,
                 "per_icp_score": None,

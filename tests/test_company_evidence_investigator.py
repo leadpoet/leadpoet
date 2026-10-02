@@ -7900,8 +7900,10 @@ def test_oct01_edvisorly_homepage_platform_quote_does_not_prove_recurring_sale(
     ))
     assert calls == ["lead_scorer_reverify"]
     assert result.details["dimension_decisions"]["industry"] == COMPANY_FIT_MATCH
+    assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_UNAVAILABLE
     assert result.details["required_attribute_decision"] == COMPANY_FIT_UNAVAILABLE
     assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["failure_class"] == "insufficient_fit_evidence"
 
 
 def test_grounded_attribute_mismatch_unproven_review_stays_unqualified(

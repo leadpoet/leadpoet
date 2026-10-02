@@ -62,6 +62,7 @@ DECLARE
   v_round_id CONSTANT TEXT := 'arena-2026-10-01';
   v_archive_id CONSTANT TEXT := 'arena-2026-10-01-r376archive';
   v_suffix CONSTANT TEXT := ':r376archive';
+  v_archive_baseline_id CONSTANT TEXT := 'baseline-2026-10-01-r376archive';
   v_new_digest CONSTANT TEXT :=
     'sha256:342645a42b52363cb907c7b48627ead707e09547a7197b4b0d803e7e6e57a7ba';
   v_schedule CONSTANT JSONB :=
@@ -78,8 +79,13 @@ BEGIN
        OR v_archive.king_hotkey IS NOT NULL
        OR v_archive.effective_reward_epoch IS NOT NULL
        OR v_archive.promotion_required IS DISTINCT FROM FALSE
-       OR v_archive.champion_funding_frozen IS DISTINCT FROM FALSE
-       OR v_archive.champion_hotkey IS NOT NULL
+       OR v_archive.champion_funding_frozen IS DISTINCT FROM TRUE
+       OR v_archive.champion_submission_id IS DISTINCT FROM
+         v_archive.configuration_doc->>'recovery_original_champion_submission_id'
+       OR v_archive.champion_hotkey IS DISTINCT FROM
+         v_archive.configuration_doc->>'recovery_original_champion_hotkey'
+       OR pg_catalog.to_jsonb(v_archive.champion_fallback_providers) IS DISTINCT FROM
+         v_archive.configuration_doc->'recovery_original_champion_fallback_providers'
        OR v_archive.cancel_reason IS DISTINCT FROM
          'authorized_oct01_new_scorer_rejudge_archive'
        OR v_archive.configuration_doc->>'recovery_source_round_id'
@@ -132,6 +138,8 @@ BEGIN
        '2026-10-01T20:00:01Z'
      OR v_round.benchmark_ref IS NULL OR v_round.evaluation_date IS NULL
      OR v_round.published_at IS NOT NULL OR v_round.reward_activated_at IS NOT NULL
+     OR v_round.champion_funding_frozen IS DISTINCT FROM TRUE
+     OR v_round.champion_submission_id IS NULL OR v_round.champion_hotkey IS NULL
      OR (SELECT COUNT(*) FROM public.lab_arena_runs
          WHERE round_id=v_round_id AND stage=1 AND kind='execute'
            AND submission_id='baseline-2026-10-01' AND status='accepted'
@@ -183,7 +191,9 @@ BEGIN
     AND e.run_kind='score';
 
   SELECT pg_catalog.jsonb_agg(item.value || pg_catalog.jsonb_build_object(
-    'submission_id',(item.value->>'submission_id')||v_suffix) ORDER BY item.ordinal)
+    'submission_id',CASE WHEN item.value->>'submission_id'='baseline-2026-10-01'
+      THEN v_archive_baseline_id ELSE (item.value->>'submission_id')||v_suffix END)
+    ORDER BY item.ordinal)
   INTO v_archive_participants
   FROM pg_catalog.jsonb_array_elements(v_round.participants)
     WITH ORDINALITY AS item(value,ordinal);
@@ -194,6 +204,7 @@ BEGIN
     'recovery_source_round_id',v_round_id,
     'recovery_original_champion_submission_id',v_round.champion_submission_id,
     'recovery_original_champion_hotkey',v_round.champion_hotkey,
+    'recovery_original_champion_fallback_providers',v_round.champion_fallback_providers,
     'recovery_score_runs_sha256',v_score_hash,
     'recovery_score_ledger_sha256',v_ledger_hash,
     'recovery_score_ledger_max_entry_id',v_ledger_max,
@@ -243,29 +254,35 @@ BEGIN
       'signing_key_doc',NULL,'effective_reward_epoch',NULL,
       'reward_activated_at',NULL,'king_outcome',NULL,'king_hotkey',NULL,
       'king_start_epoch',NULL,'promotion_required',FALSE,'promotion_doc',NULL,
-      'baseline_promoted_at',NULL,'champion_funding_frozen',FALSE,
-      'champion_submission_id',NULL,'champion_hotkey',NULL,
-      'champion_fallback_providers','[]'::JSONB,
+      'baseline_promoted_at',NULL,
       'cancel_reason','authorized_oct01_new_scorer_rejudge_archive'));
   INSERT INTO public.lab_arena_submissions
   SELECT (pg_catalog.jsonb_populate_record(NULL::public.lab_arena_submissions,
     pg_catalog.to_jsonb(s) || pg_catalog.jsonb_build_object(
-      'submission_id',s.submission_id||v_suffix,'round_id',v_archive_id))).*
+      'submission_id',CASE WHEN s.submission_id='baseline-2026-10-01'
+        THEN v_archive_baseline_id ELSE s.submission_id||v_suffix END,
+      'round_id',v_archive_id))).*
   FROM public.lab_arena_submissions s WHERE s.round_id=v_round_id;
   GET DIAGNOSTICS v_count=ROW_COUNT;
   IF v_count<>14 THEN RAISE EXCEPTION 'Oct01 rejudge submissions differ'; END IF;
 
   UPDATE public.lab_arena_runs s
-  SET round_id=v_archive_id,submission_id=s.submission_id||v_suffix
+  SET round_id=v_archive_id,
+    submission_id=CASE WHEN s.submission_id='baseline-2026-10-01'
+      THEN v_archive_baseline_id ELSE s.submission_id||v_suffix END
   WHERE s.round_id=v_round_id AND s.kind='score';
   GET DIAGNOSTICS v_count=ROW_COUNT;
   IF v_count<>21 THEN RAISE EXCEPTION 'Oct01 rejudge score archive differs'; END IF;
   UPDATE public.lab_arena_ledger l
-  SET round_id=v_archive_id,submission_id=l.submission_id||v_suffix
+  SET round_id=v_archive_id,
+    submission_id=CASE WHEN l.submission_id='baseline-2026-10-01'
+      THEN v_archive_baseline_id ELSE l.submission_id||v_suffix END
   WHERE l.round_id=v_round_id AND EXISTS (SELECT 1 FROM public.lab_arena_runs s
     WHERE s.round_id=v_archive_id AND s.kind='score' AND s.run_id=l.run_id);
   UPDATE public.lab_arena_trajectory_events e
-  SET round_id=v_archive_id,submission_id=e.submission_id||v_suffix
+  SET round_id=v_archive_id,
+    submission_id=CASE WHEN e.submission_id='baseline-2026-10-01'
+      THEN v_archive_baseline_id ELSE e.submission_id||v_suffix END
   WHERE e.round_id=v_round_id AND e.run_kind='score';
 
   IF v_score_hash IS DISTINCT FROM (SELECT pg_catalog.encode(extensions.digest(

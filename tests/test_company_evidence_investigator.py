@@ -1320,6 +1320,10 @@ def test_submitted_intent_without_bound_conflicting_round_does_not_reopen(signal
             "Acme announced a completed $20 million Series A round.",
             COMPANY_FIT_MATCH,
         ),
+        (
+            "Cellenkos", "Series A", None, "",
+            COMPANY_FIT_UNAVAILABLE,
+        ),
     ],
 )
 def test_matching_venture_stage_checks_current_chronology(
@@ -1345,16 +1349,23 @@ def test_matching_venture_stage_checks_current_chronology(
 
     async def investigate(**kwargs):
         assert kwargs["targets"] == ("stage",)
+        status = (
+            "UNPROVEN" if expected == COMPANY_FIT_UNAVAILABLE
+            else "VERIFIED" if expected == COMPANY_FIT_MATCH
+            else "CONTRADICTED"
+        )
         finding = _finding(
             "stage",
-            status=("VERIFIED" if expected == COMPANY_FIT_MATCH else "CONTRADICTED"),
+            status=status,
             observed_value=current_stage,
-            evidence_url=current_url,
+            evidence_url=current_url if status != "UNPROVEN" else "",
             evidence_quote=current_quote,
         )
         return {
             "claims": {"stage": finding},
-            "_validated_stage_finding": finding,
+            "_validated_stage_finding": (
+                finding if status != "UNPROVEN" else {}
+            ),
             investigator.PRIVATE_FETCHED_PAGES_KEY: {
                 current_url: {"final_url": current_url, "text": current_quote},
             },
@@ -7835,8 +7846,15 @@ def test_sentinelone_style_industry_repair_preserves_valid_public_stage(
     )
 
 
-def test_schema_repair_cannot_restore_public_after_current_stage_is_unproven(
-    monkeypatch,
+@pytest.mark.parametrize(
+    ("requested_stage", "old_stage_quote"),
+    [
+        ("Public", "Generic Security, Inc. (NASDAQ: GSEC) announced results."),
+        ("Series A", "Generic Security announced a completed Series A round."),
+    ],
+)
+def test_schema_repair_cannot_restore_unproven_current_stage(
+    monkeypatch, requested_stage, old_stage_quote
 ):
     company = _company(
         name="Generic Security",
@@ -7844,16 +7862,16 @@ def test_schema_repair_cannot_restore_public_after_current_stage_is_unproven(
         linkedin="https://www.linkedin.com/company/generic-security",
     ).model_copy(update={
         "industry": "Cybersecurity",
-        "company_stage": "Public",
+        "company_stage": requested_stage,
     })
     icp = _icp(
         industry="Cybersecurity",
         sub_industry="Endpoint security",
-        company_stage="Public",
+        company_stage=requested_stage,
         required_attribute="Provides an endpoint security platform.",
     )
     old_listing_url = "https://genericsecurity.example/news/old-listing"
-    old_listing_quote = "Generic Security, Inc. (NASDAQ: GSEC) announced results."
+    old_listing_quote = old_stage_quote
     initial = _complete_verdict(
         observed_company_name="Generic Security",
         observed_company_website="https://genericsecurity.example/",
@@ -7868,7 +7886,7 @@ def test_schema_repair_cannot_restore_public_after_current_stage_is_unproven(
         industry_evidence_quote=(
             "Generic Security provides an endpoint security platform."
         ),
-        observed_company_stage="Public",
+        observed_company_stage=requested_stage,
         stage_matches=True,
         stage_evidence_url=old_listing_url,
         stage_evidence_quote=old_listing_quote,
@@ -7901,7 +7919,7 @@ def test_schema_repair_cannot_restore_public_after_current_stage_is_unproven(
                     "stage",
                     status="UNPROVEN",
                     observed_value=None,
-                    reason="current Public status was not proven",
+                    reason="current stage was not proven",
                 ),
                 "industry": _finding(
                     "industry",

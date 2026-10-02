@@ -6828,9 +6828,10 @@ async def _run_targeted_company_evidence_investigation(
             and isinstance(prior_result.details, Mapping)
             else {}
         )
-    reopened_public_stage = bool(
+    reopened_current_stage = bool(
         "stage" in investigation_targets
-        and _normalize_company_stage(icp_stage) == "public"
+        and _normalize_company_stage(icp_stage)
+        in {"seed", "series a", "series b", "series c+", "public"}
         and isinstance(prior_dimensions, Mapping)
         and prior_dimensions.get("stage") == COMPANY_FIT_MATCH
     )
@@ -6846,7 +6847,7 @@ async def _run_targeted_company_evidence_investigation(
             investigation_diagnostic.get(VERIFIER_FAILURE_REASON_KEY),
         )
         unavailable_verdict = dict(verdict)
-        if reopened_public_stage:
+        if reopened_current_stage:
             unavailable_verdict.update(
                 observed_company_stage="",
                 stage_matches=None,
@@ -6897,14 +6898,14 @@ async def _run_targeted_company_evidence_investigation(
             investigation,
         )
     )
-    reopened_public_stage_resolved = bool(
-        reopened_public_stage and validated_stage_finding
+    reopened_current_stage_resolved = bool(
+        reopened_current_stage and validated_stage_finding
     )
     if (
         (reopened_matching_stage and not reopened_stage_resolved)
-        or (reopened_public_stage and not reopened_public_stage_resolved)
+        or (reopened_current_stage and not reopened_current_stage_resolved)
     ):
-        # Once a conflict or mandatory current-Public check reopens a positive
+        # Once a conflict or mandatory current-stage check reopens a positive
         # stage, failure to validate it must not retain the stale verdict.
         projected.update(
             observed_company_stage="",
@@ -7882,11 +7883,12 @@ async def _llm_reverify_company(
     )
     if (
         "stage" in investigation_targets
-        and _normalize_company_stage(icp_stage) == "public"
+        and _normalize_company_stage(icp_stage)
+        in {"seed", "series a", "series b", "series c+", "public"}
         and not validated_stage_finding
     ):
         # A broader schema repair may fill another incomplete dimension, but
-        # it cannot replace the mandatory current-Public investigation that
+        # it cannot replace the mandatory current-stage investigation that
         # already returned no validated stage finding.
         repaired_verdict.update(
             observed_company_stage="",

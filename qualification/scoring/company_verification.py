@@ -858,9 +858,8 @@ def _homepage_navigation_locators(
     except Exception:
         return []
 
-    locators: list[dict[str, str]] = []
+    candidates: list[tuple[int, dict[str, str]]] = []
     seen: set[str] = set()
-    total_characters = 0
     for href, raw_label in parser.links:
         label = " ".join(str(raw_label or "").split())
         if not label or len(label) > MAX_HOMEPAGE_NAVIGATION_LABEL_LENGTH:
@@ -893,15 +892,31 @@ def _homepage_navigation_locators(
             continue
         if canonical in seen:
             continue
-        candidate_characters = len(canonical) + len(label)
-        if (
-            total_characters + candidate_characters
-            > MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS
-        ):
-            continue
         seen.add(canonical)
+        # Large menus can put Pricing after the first 40 links. Keep the
+        # original count and character limits, but reserve discovery space for
+        # visible first-party commercial and product locators.
+        words = set(re.findall(
+            r"[a-z]+", f"{parsed.path} {label}".casefold()
+        ))
+        priority = (
+            0 if words & {
+                "pricing", "price", "prices", "plan", "plans",
+                "subscription", "subscriptions",
+            }
+            else 1 if words & {"product", "products", "platform", "platforms"}
+            else 2
+        )
+        candidates.append((priority, {"url": canonical, "label": label}))
+
+    locators: list[dict[str, str]] = []
+    total_characters = 0
+    for _priority, candidate in sorted(candidates, key=lambda item: item[0]):
+        candidate_characters = len(candidate["url"]) + len(candidate["label"])
+        if total_characters + candidate_characters > MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS:
+            continue
+        locators.append(candidate)
         total_characters += candidate_characters
-        locators.append({"url": canonical, "label": label})
         if len(locators) >= MAX_HOMEPAGE_NAVIGATION_LOCATORS:
             break
     return locators

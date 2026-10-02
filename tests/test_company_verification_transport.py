@@ -2350,3 +2350,33 @@ def test_homepage_navigation_locator_count_is_bounded():
         "url": "https://flamapp.ai/product/39",
         "label": "Product 39",
     }
+
+
+def test_late_pricing_link_survives_bounded_homepage_navigation():
+    ordinary_links = "".join(
+        f'<a href="/guide/{index}">Guide {index}</a>'
+        for index in range(MAX_HOMEPAGE_NAVIGATION_LOCATORS + 20)
+    )
+    html = (
+        '<nav><a href="https://foreign.example/pricing">Pricing</a>'
+        '<a href="/private-pricing" hidden>Private Pricing</a>'
+        '<div hidden><a href="/hidden-pricing">Pricing</a></div>'
+        f'{ordinary_links}'
+        '<a href="/pricing">Pricing</a>'
+        '<a href="/platform">Platform</a></nav>'
+    )
+
+    locators = _homepage_navigation_locators(
+        html,
+        final_url="https://flamapp.ai/",
+        verified_domain="flamapp.ai",
+    )
+
+    assert len(locators) == MAX_HOMEPAGE_NAVIGATION_LOCATORS
+    assert locators[:2] == [
+        {"url": "https://flamapp.ai/pricing", "label": "Pricing"},
+        {"url": "https://flamapp.ai/platform", "label": "Platform"},
+    ]
+    assert all("private" not in item["url"] for item in locators)
+    assert all("hidden" not in item["url"] for item in locators)
+    assert all("foreign.example" not in item["url"] for item in locators)

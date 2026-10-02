@@ -122,6 +122,7 @@ CURRENT_SERVICE_MIGRATIONS = POSTGREST_MIGRATIONS + (
     "367-lab-arena-publication-eligibility-reuse.sql",
     "371-lab-arena-operator-hold-transition-guard.sql",
     "374-lab-arena-preserve-operator-pause-reason.sql",
+    "391-lab-arena-verifier-provider-request-cache.sql",
 )
 
 

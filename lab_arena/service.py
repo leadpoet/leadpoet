@@ -3849,7 +3849,30 @@ class ArenaService:
         if run is None:
             raise ServiceError("run_missing", 404)
         self._require_round_ownership(str(run.get("round_id") or ""))
-        return run, broker_module.RunContext(run_id=run_id, assignment_id=run["assignment_id"], attempt=int(run["attempt"]), icp_position=int(run["icp_position"]), lease_token_hash=hash_lease_token(lease_token), miner_hotkey=run["miner_hotkey"], submission_id=run["submission_id"], stage=int(run["stage"]), kind=str(run.get("kind") or "execute"), round_id=str(run.get("round_id") or ""))
+        judgment_cache_scope = None
+        if run.get("kind") == "score":
+            row = self._hot_round(str(run["round_id"]))
+            if row is None:
+                raise ServiceError("round_missing", 404)
+            configuration = row.get("configuration_doc") or {}
+            # Only gateway-owned frozen configuration can select a reusable
+            # provider judgment. Run/miner identity is deliberately excluded.
+            judgment_cache_scope = {
+                "round_id": str(row["round_id"]),
+                "evaluation_date": str(row.get("evaluation_date") or ""),
+                "scorer_image_digest": configuration.get("scorer_image_digest"),
+                "scorer_image_reference": configuration.get("scorer_image_reference"),
+                "scorer_policy": configuration.get("scorer_policy"),
+            }
+        return run, broker_module.RunContext(
+            run_id=run_id, assignment_id=run["assignment_id"],
+            attempt=int(run["attempt"]), icp_position=int(run["icp_position"]),
+            lease_token_hash=hash_lease_token(lease_token),
+            miner_hotkey=run["miner_hotkey"], submission_id=run["submission_id"],
+            stage=int(run["stage"]), kind=str(run.get("kind") or "execute"),
+            round_id=str(run.get("round_id") or ""),
+            judgment_cache_scope=judgment_cache_scope,
+        )
 
     def handle_quota_snapshot(
         self,

@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: exact verifier judgment reuse
+
+On 2026-10-02 the user authorized narrow deterministic reuse of identical
+Arena verifier/provider judgments at the gateway through the overnight
+validation skill. Reuse the existing provider ledger, bind exact requests to
+the frozen verifier image, policy and evaluation date, and preserve source
+evidence and confirmed billing. Authority includes protected inspection,
+focused and real saved-output scoring tests, exact committed migrations,
+push/merge and canonical paired deployment. Preserve completed results,
+qualification, scoring, promotion, credentials, rewards and concurrent work.
+Do not cache miner sourcing or reuse changed evidence or verifier inputs.
+This authority ends after live deployment and end-to-end cache validation.
+
 ## Scoped production authorization: PR 202 historical weight recovery
 
 On 2026-10-02 the user authorized review, necessary narrow safety fixes, merge,

@@ -516,10 +516,32 @@ def test_run_context_keeps_the_durable_round_identity():
     }
     service = object.__new__(ArenaService)
     service._store = SimpleNamespace(get_run=lambda _run_id: run)
+    service._hot_round = lambda round_id: {
+        "round_id": round_id, "evaluation_date": "2026-09-04",
+        "arena_network_name": "finney", "arena_netuid": 71,
+        "configuration_doc": {
+            "scorer_image_digest": "sha256:" + "a" * 64,
+            "scorer_image_reference": "registry/scorer@sha256:" + "a" * 64,
+            "scorer_policy": {"judge_models": {"intent": "judge-v1"}},
+        },
+    }
     returned, context = service._run_context("run-1", "lease-token")
     assert returned is run
     assert context.round_id == "arena-2026-09-04"
     assert context.lease_token_hash == hash_lease_token("lease-token")
+    assert context.judgment_cache_scope == {
+        "round_id": "arena-2026-09-04", "evaluation_date": "2026-09-04",
+        "scorer_image_digest": "sha256:" + "a" * 64,
+        "scorer_image_reference": "registry/scorer@sha256:" + "a" * 64,
+        "scorer_policy": {"judge_models": {"intent": "judge-v1"}},
+    }
+    # A different participant cannot alter the frozen verifier configuration.
+    run.update(submission_id="miner-2", stage=1, icp_position=8)
+    _, other = service._run_context("run-2", "other-lease")
+    assert other.judgment_cache_scope == context.judgment_cache_scope
+    run["kind"] = "execute"
+    _, execution = service._run_context("run-3", "execution-lease")
+    assert execution.judgment_cache_scope is None
 
 
 @pytest.mark.parametrize("moment", ["2026-09-01T23:59:59+00:00", "2026-09-02T01:00:00+00:00"])

@@ -25,7 +25,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_CEILING
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Deque, Dict, Mapping, Optional, Protocol, Sequence, Tuple
@@ -40,6 +40,8 @@ from lab_arena.contracts import ArenaContractError
 from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable
 
 PRICE_TABLE_SCHEMA_VERSION = "leadpoet.lab_arena.openrouter_price_table.v1"
+JUDGMENT_CACHE_SCHEMA_VERSION = "leadpoet.lab_arena.verifier_provider_request.v1"
+JUDGMENT_CACHE_BUSY_POLL_SECONDS = 1.0
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_GENERATION_URL = "https://openrouter.ai/api/v1/generation?id="
 OPENROUTER_LUNA_RESPONSES_MODEL = "openai/gpt-5.6-luna"
@@ -1549,6 +1551,8 @@ class RunContext:
     kind: str = "execute"  # "execute" runs a miner model; "score" runs the Arena judge on a miner's output
     attempt: int = 1
     round_id: str = ""
+    # Gateway-owned frozen scorer identity. An absent scope disables replay.
+    judgment_cache_scope: Optional[Mapping[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -1612,6 +1616,8 @@ def _provider_attempt_summary(
 
 class CallStore(Protocol):
     def reserve_call(self, **kwargs: Any) -> Dict[str, Any]: ...
+
+    def reserve_judgment_call(self, **kwargs: Any) -> Dict[str, Any]: ...
 
     def mark_dispatched(self, **kwargs: Any) -> Dict[str, Any]: ...
 
@@ -1680,8 +1686,24 @@ def _reservation_readback_matches(
         return False
     call_doc = reservation.get("entry_doc")
     expected_call_doc = reservation_arguments.get("call_doc")
-    if not isinstance(call_doc, Mapping) or dict(call_doc) != dict(expected_call_doc):
+    if not isinstance(call_doc, Mapping) or not isinstance(expected_call_doc, Mapping):
         return False
+    if dict(call_doc) != dict(expected_call_doc):
+        source_fields = {
+            "judgment_cache_source_call_identity",
+            "judgment_cache_source_run_id",
+        }
+        terminal = state.get("terminal_response")
+        if (
+            set(call_doc) - set(expected_call_doc) != source_fields
+            or {key: value for key, value in call_doc.items() if key not in source_fields}
+            != dict(expected_call_doc)
+            or not isinstance(terminal, Mapping)
+            or terminal.get("judgment_cache_key")
+            != expected_call_doc.get("judgment_cache_key")
+            or any(call_doc[field] != terminal.get(field) for field in source_fields)
+        ):
+            return False
     reserved_amount = reservation.get("amount_microusd")
     if isinstance(reserved_amount, bool) or not isinstance(reserved_amount, int) or reserved_amount < 0:
         return False
@@ -1731,6 +1753,7 @@ def _terminal_response_document(
     *, call_succeeded: bool,
     provider_cost: Optional[Mapping[str, Any]] = None,
     account_failure_evidence: Optional[Mapping[str, Any]] = None,
+    judgment_cache_eligible: bool = False,
 ) -> Dict[str, Any]:
     document = {
         "status": int(status),
@@ -1742,7 +1765,325 @@ def _terminal_response_document(
         document["provider_cost"] = dict(provider_cost)
     if account_failure_evidence is not None:
         document["account_failure_evidence"] = dict(account_failure_evidence)
+    if judgment_cache_eligible:
+        document["judgment_cache_eligible"] = True
     return document
+
+
+def _judgment_cache_material(
+    context: RunContext,
+    *,
+    requested_operation_id: str,
+    effective_operation_id: str,
+    normalized_request: Mapping[str, Any],
+    outbound_body: bytes,
+) -> Optional[Tuple[str, str]]:
+    """Hash one exact gateway-owned scorer request, never a model cache key."""
+
+    frozen = context.judgment_cache_scope
+    expected = {
+        "round_id", "evaluation_date", "scorer_image_digest",
+        "scorer_image_reference", "scorer_policy",
+    }
+    if (
+        context.kind != "score"
+        or requested_operation_id not in {"openrouter.chat", "openrouter.responses"}
+        or effective_operation_id != requested_operation_id
+        or not isinstance(frozen, Mapping)
+        or set(frozen) != expected
+        or frozen.get("round_id") != context.round_id
+        or not isinstance(frozen.get("evaluation_date"), str)
+        or not isinstance(frozen.get("scorer_image_reference"), str)
+        or not frozen["scorer_image_reference"]
+        or not isinstance(frozen.get("scorer_policy"), Mapping)
+    ):
+        return None
+    try:
+        date.fromisoformat(frozen["evaluation_date"])
+        contracts.require_sha256(frozen["scorer_image_digest"], "scorer image")
+        policy = contracts.validate_scorer_policy(frozen["scorer_policy"])
+        if (
+            policy != dict(frozen["scorer_policy"])
+            or normalized_request.get("model") not in policy["judge_models"].values()
+        ):
+            return None
+        scope = {
+            "schema_version": JUDGMENT_CACHE_SCHEMA_VERSION,
+            **dict(frozen),
+            "requested_operation_id": requested_operation_id,
+            "effective_operation_id": effective_operation_id,
+            "request_hash": contracts.document_hash(normalized_request),
+            "outbound_body_hash": contracts.hash_bytes(outbound_body),
+        }
+        canonical = contracts.canonical_json(scope)
+    except (ArenaContractError, TypeError, ValueError):
+        return None
+    if len(canonical.encode("utf-8")) > 60_000:
+        return None
+    return contracts.hash_bytes(canonical.encode("utf-8")), canonical
+
+
+def _matches_declared_verdict_shape(value: Any, schema: Any, *, depth: int = 0) -> bool:
+    """Check only the strict JSON-schema shape used for cached verdicts.
+
+    Unsupported schema features cause a miss. This does not decide scoring;
+    it only prevents an incomplete provider reply from becoming shared input.
+    """
+
+    if not isinstance(schema, Mapping) or depth > 8:
+        return False
+    allowed = {
+        "type", "enum", "required", "properties", "additionalProperties",
+        "items", "minItems", "maxItems", "minLength", "maxLength",
+        "minimum", "maximum", "title", "description",
+    }
+    if set(schema) - allowed:
+        return False
+    enum = schema.get("enum")
+    if enum is not None and (not isinstance(enum, list) or value not in enum):
+        return False
+    kind = schema.get("type")
+    if isinstance(kind, list):
+        return bool(kind) and all(isinstance(option, str) for option in kind) and any(
+            _matches_declared_verdict_shape(
+                value, {**schema, "type": option}, depth=depth + 1,
+            ) for option in kind
+        )
+    if kind == "object":
+        if not isinstance(value, Mapping):
+            return False
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        if (
+            not isinstance(properties, Mapping)
+            or not isinstance(required, list)
+            or any(not isinstance(key, str) for key in required)
+            or not set(required) <= set(value)
+            or schema.get("additionalProperties", False) is not False
+            or set(value) - set(properties)
+        ):
+            return False
+        return all(
+            _matches_declared_verdict_shape(item, properties[key], depth=depth + 1)
+            for key, item in value.items()
+        )
+    if kind == "array":
+        minimum = schema.get("minItems", 0)
+        maximum = schema.get("maxItems", 1_000_000)
+        return (
+            isinstance(value, list)
+            and type(minimum) is int and type(maximum) is int
+            and 0 <= minimum <= len(value) <= maximum
+            and "items" in schema
+            and all(
+                _matches_declared_verdict_shape(item, schema["items"], depth=depth + 1)
+                for item in value
+            )
+        )
+    valid_type = {
+        "string": lambda: isinstance(value, str),
+        "integer": lambda: type(value) is int,
+        "number": lambda: type(value) in (int, float),
+        "boolean": lambda: type(value) is bool,
+        "null": lambda: value is None,
+    }.get(kind)
+    if valid_type is None or not valid_type():
+        return False
+    if kind == "string":
+        minimum = schema.get("minLength", 0)
+        maximum = schema.get("maxLength", 1_000_000)
+        return (
+            type(minimum) is int and type(maximum) is int
+            and 0 <= minimum <= len(value) <= maximum
+        )
+    if kind in {"integer", "number"}:
+        minimum = schema.get("minimum", float("-inf"))
+        maximum = schema.get("maximum", float("inf"))
+        return (
+            type(minimum) in (int, float)
+            and type(maximum) in (int, float)
+            and minimum <= value <= maximum
+        )
+    return True
+
+
+def _complete_declared_tool_calls(message: Mapping[str, Any], request: Mapping[str, Any]) -> bool:
+    """Admit only finished function decisions whose arguments meet declared tools."""
+
+    calls = message.get("tool_calls")
+    tools = request.get("tools")
+    if not isinstance(calls, list) or not calls or not isinstance(tools, list):
+        return False
+    declared: Dict[str, Mapping[str, Any]] = {}
+    for tool in tools:
+        if not isinstance(tool, Mapping) or tool.get("type") != "function":
+            return False
+        function = tool.get("function")
+        if not isinstance(function, Mapping) or function.get("strict") is not True:
+            return False
+        name = function.get("name")
+        if not isinstance(name, str) or not name or name in declared:
+            return False
+        declared[name] = function
+    forced = request.get("tool_choice")
+    if isinstance(forced, Mapping):
+        forced_function = forced.get("function")
+        if (
+            forced.get("type") != "function"
+            or not isinstance(forced_function, Mapping)
+            or forced_function.get("name") not in declared
+        ):
+            return False
+        forced_name = forced_function["name"]
+    elif forced in (None, "auto", "required"):
+        forced_name = None
+    else:
+        return False
+    seen_ids = set()
+    for call in calls:
+        if not isinstance(call, Mapping) or call.get("type") != "function":
+            return False
+        call_id = call.get("id")
+        function = call.get("function")
+        if (
+            not isinstance(call_id, str) or not call_id or call_id in seen_ids
+            or not isinstance(function, Mapping)
+        ):
+            return False
+        seen_ids.add(call_id)
+        name = function.get("name")
+        arguments = function.get("arguments")
+        if name not in declared or (forced_name is not None and name != forced_name):
+            return False
+        if not isinstance(arguments, str):
+            return False
+        try:
+            parsed = json.loads(arguments)
+        except ValueError:
+            return False
+        if not _matches_declared_verdict_shape(parsed, declared[name].get("parameters")):
+            return False
+    return True
+
+
+def _complete_judgment_response(
+    operation_id: str,
+    request: Mapping[str, Any],
+    *,
+    status: int,
+    body: bytes,
+    call_succeeded: bool,
+) -> bool:
+    """Cache a complete model answer only; never freeze a retryable failure."""
+
+    if not call_succeeded or status != 200:
+        return False
+    try:
+        response = json.loads(body)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(response, Mapping) or response.get("error") is not None:
+        return False
+    if operation_id == "openrouter.chat":
+        choices = response.get("choices")
+        if not isinstance(choices, list) or len(choices) != 1:
+            return False
+        choice = choices[0]
+        if not isinstance(choice, Mapping) or choice.get("finish_reason") not in {"stop", "tool_calls"}:
+            return False
+        message = choice.get("message")
+        if not isinstance(message, Mapping) or message.get("refusal") is not None:
+            return False
+        if choice.get("finish_reason") == "tool_calls":
+            return _complete_declared_tool_calls(message, request)
+        content = message.get("content") if isinstance(message, Mapping) else None
+        if (
+            not isinstance(content, str)
+            or not content.strip()
+            or message.get("refusal") is not None
+        ):
+            return False
+        response_format = request.get("response_format")
+        if isinstance(response_format, Mapping) and response_format.get("type") in {
+            "json_object", "json_schema",
+        }:
+            try:
+                parsed = json.loads(content)
+                if not isinstance(parsed, Mapping) or not parsed:
+                    return False
+            except ValueError:
+                return False
+            if response_format.get("type") == "json_schema":
+                declared = response_format.get("json_schema")
+                if (
+                    not isinstance(declared, Mapping)
+                    or declared.get("strict") is not True
+                    or not _matches_declared_verdict_shape(
+                        parsed, declared.get("schema")
+                    )
+                ):
+                    return False
+                if declared.get("name") == "verification":
+                    evaluations = parsed.get("signal_evaluations")
+                    if (
+                        not isinstance(evaluations, list)
+                        or len(evaluations) != 1
+                        or not isinstance(evaluations[0], Mapping)
+                        or (
+                            evaluations[0].get("signal_status") == "wrong_entity"
+                            and evaluations[0].get("same_entity_check") != "fail"
+                        )
+                    ):
+                        return False
+        else:
+            # Free-form prose is not an accepted verifier verdict contract.
+            return False
+        return True
+    if operation_id == "openrouter.responses":
+        if (
+            response.get("status") != "completed"
+            or response.get("incomplete_details") is not None
+        ):
+            return False
+        output = response.get("output")
+        if not isinstance(output, list) or not output:
+            return False
+        texts = []
+        for item in output:
+            if not isinstance(item, Mapping) or item.get("status") not in (None, "completed"):
+                return False
+            if item.get("type") == "message":
+                if item.get("refusal") is not None:
+                    return False
+                content = item.get("content")
+                if not isinstance(content, list):
+                    return False
+                texts.extend(
+                    part.get("text") for part in content
+                    if isinstance(part, Mapping) and part.get("type") == "output_text"
+                )
+        if not texts or any(not isinstance(value, str) or not value.strip() for value in texts):
+            return False
+        text = request.get("text")
+        format_doc = text.get("format") if isinstance(text, Mapping) else None
+        if isinstance(format_doc, Mapping) and format_doc.get("type") == "json_schema":
+            try:
+                parsed = json.loads("".join(texts))
+                if not isinstance(parsed, Mapping) or not parsed:
+                    return False
+            except ValueError:
+                return False
+            if (
+                format_doc.get("strict") is not True
+                or not _matches_declared_verdict_shape(
+                    parsed, format_doc.get("schema")
+                )
+            ):
+                return False
+        else:
+            return False
+        return True
+    return False
 
 
 def _provider_cost_record(
@@ -1770,6 +2111,10 @@ def _decode_terminal(
         "call_succeeded",
         "provider_cost",
         "account_failure_evidence",
+        "judgment_cache_eligible",
+        "judgment_cache_key",
+        "judgment_cache_source_call_identity",
+        "judgment_cache_source_run_id",
     }
     if not isinstance(document, Mapping) or not required <= set(document) <= allowed:
         raise BrokerError("broker_unavailable")
@@ -1785,6 +2130,24 @@ def _decode_terminal(
     call_succeeded = document.get("call_succeeded")
     if call_succeeded is not None and not isinstance(call_succeeded, bool):
         raise BrokerError("broker_unavailable")
+    eligible = document.get("judgment_cache_eligible")
+    if eligible is not None and eligible is not True:
+        raise BrokerError("broker_unavailable")
+    cache_markers = {
+        "judgment_cache_key", "judgment_cache_source_call_identity",
+        "judgment_cache_source_run_id",
+    }
+    present_markers = cache_markers & set(document)
+    if present_markers:
+        if present_markers != cache_markers or eligible is not True:
+            raise BrokerError("broker_unavailable")
+        for name in ("judgment_cache_key", "judgment_cache_source_call_identity"):
+            try:
+                contracts.require_sha256(document[name], name)
+            except ArenaContractError as exc:
+                raise BrokerError("broker_unavailable") from exc
+        if not isinstance(document["judgment_cache_source_run_id"], str) or not document["judgment_cache_source_run_id"]:
+            raise BrokerError("broker_unavailable")
     _validated_account_failure_evidence(
         document.get("account_failure_evidence")
     )
@@ -2980,6 +3343,38 @@ class Broker:
             call_doc={"request_hash": request_hash, "base_call_identity": base_call_identity, "provider_attempt": provider_attempt, "action_sequence": action_sequence, "max_output_tokens": max_output_tokens, **request_accounting, **contact_finder_binding, **({"reserve_remaining_budget": True} if reserve_remaining_budget else {}), **(route.summary() if route else {})},
             lease_ttl_seconds=self._lease_ttl_seconds,
         )
+        judgment_cache_key = ""
+        cached_outbound: Optional[operations.OutboundRequest] = None
+        if (
+            getattr(context, "kind", "execute") == "score"
+            and effective_operation_id in {"openrouter.chat", "openrouter.responses"}
+            and provider_attempt == 1
+        ):
+            try:
+                cached_outbound = operations.build_outbound_request(
+                    effective_operation_id,
+                    effective_normalized,
+                    openrouter_provider_policy=(
+                        openrouter_host_route.provider_policy
+                        if openrouter_host_route is not None else None
+                    ),
+                )
+            except operations.OperationError:
+                return _error_result("invalid_request", summary)
+            material = _judgment_cache_material(
+                context,
+                requested_operation_id=operation_id,
+                effective_operation_id=effective_operation_id,
+                normalized_request=effective_normalized,
+                outbound_body=cached_outbound.body,
+            )
+            if material is not None:
+                judgment_cache_key, canonical_scope = material
+                reservation_arguments["call_doc"].update({
+                    "judgment_cache_key": judgment_cache_key,
+                    "judgment_cache_canonical": canonical_scope,
+                    "judgment_cache_scope": json.loads(canonical_scope),
+                })
         operation_timeout_seconds = min(
             max(1, int(timeout_ms)) / 1000.0,
             float(effective_operation.timeout_seconds),
@@ -3055,6 +3450,7 @@ class Broker:
         # Another call can hold money without having spent it. Wait briefly for
         # settlement, using the same identity; do not dispatch or charge twice.
         reserve_deadline = time.monotonic() + operations.BUDGET_ADMISSION_MAX_SECONDS
+        judgment_cache_deadline = api_started_at + operation_timeout_seconds - 2.0
         if gate_lease is not None:
             reserve_deadline = min(
                 reserve_deadline,
@@ -3065,8 +3461,15 @@ class Broker:
             )
         reserve_readback_used = False
         while True:
+            if judgment_cache_key and OpenRouterSharedGate._cancelled(cancel_requested):
+                summary.update({"outcome": "not_dispatched", "reason": "judgment_cache_cancelled"})
+                return _error_result("provider_unavailable", summary)
             try:
-                reserved = self._store.reserve_call(**reservation_arguments)
+                reserved = (
+                    self._store.reserve_judgment_call(**reservation_arguments)
+                    if judgment_cache_key else
+                    self._store.reserve_call(**reservation_arguments)
+                )
             except ArenaStoreUnavailable:
                 if reserve_readback_used:
                     raise
@@ -3076,6 +3479,21 @@ class Broker:
                 # creates the reservation if the first transaction rolled
                 # back). This never sends the paid provider request.
                 reserve_readback_used = True
+                continue
+            if reserved.get("status") == "cache_busy":
+                if not judgment_cache_key or reserved.get("judgment_cache_key") != judgment_cache_key:
+                    return _error_result("broker_unavailable", summary)
+                if time.monotonic() >= judgment_cache_deadline:
+                    summary.update({
+                        "outcome": "not_dispatched",
+                        "reason": "judgment_cache_busy",
+                        "idempotent": False,
+                    })
+                    return _error_result("provider_unavailable", summary)
+                time.sleep(min(
+                    JUDGMENT_CACHE_BUSY_POLL_SECONDS,
+                    max(0.0, judgment_cache_deadline - time.monotonic()),
+                ))
                 continue
             if reserved.get("status") != "budget_busy":
                 break
@@ -3185,6 +3603,43 @@ class Broker:
             if reserved.get("reason") == "provider_cost_uncertain":
                 return _error_result("provider_unavailable", summary)
             return _error_result("budget_refused", summary)
+        if status == "cache_hit":
+            terminal_document = reserved.get("terminal_response")
+            if (
+                not judgment_cache_key
+                or reserved.get("call_identity") != call_identity
+                or reserved.get("judgment_cache_key") != judgment_cache_key
+                or reserved.get("amount_microusd") != 0
+                or not isinstance(terminal_document, Mapping)
+                or terminal_document.get("judgment_cache_eligible") is not True
+                or terminal_document.get("judgment_cache_key") != judgment_cache_key
+                or terminal_document.get("judgment_cache_source_call_identity")
+                != reserved.get("source_call_identity")
+                or terminal_document.get("judgment_cache_source_run_id")
+                != reserved.get("source_run_id")
+                or reserved.get("source_call_identity") == call_identity
+            ):
+                return _error_result("broker_unavailable", summary)
+            try:
+                cached_status, cached_headers, cached_body = _decode_terminal(
+                    terminal_document, secret=secret,
+                )
+            except BrokerError:
+                return _error_result("broker_unavailable", summary)
+            if not _complete_judgment_response(
+                effective_operation_id, effective_normalized,
+                status=cached_status, body=cached_body,
+                call_succeeded=terminal_document.get("call_succeeded") is True,
+            ):
+                return _error_result("broker_unavailable", summary)
+            summary.update({
+                "outcome": "settled", "cached": True,
+                "actual_microusd": 0, "status": cached_status,
+                "source_call_identity": reserved["source_call_identity"],
+                "source_run_id": reserved["source_run_id"],
+                "response_hash": contracts.hash_bytes(cached_body),
+            })
+            return BrokerResult(cached_status, cached_headers, cached_body, summary)
         if status == "settled":
             # Repeated request for a settled identity: the stored response, no second dispatch.
             terminal_document = reserved.get("terminal_response")
@@ -3199,6 +3654,24 @@ class Broker:
                 route is None or route.adapter != "firecrawl_raw_html"
             ):
                 return _error_result("broker_unavailable", summary)
+            if isinstance(terminal_document, Mapping) and "judgment_cache_source_call_identity" in terminal_document:
+                if (
+                    not judgment_cache_key
+                    or terminal_document.get("judgment_cache_key") != judgment_cache_key
+                    or reserved.get("amount_microusd") != 0
+                    or not _complete_judgment_response(
+                        effective_operation_id, effective_normalized,
+                        status=terminal_status, body=terminal_body,
+                        call_succeeded=terminal_document.get("call_succeeded") is True,
+                    )
+                ):
+                    return _error_result("broker_unavailable", summary)
+                summary.update({
+                    "cached": True,
+                    "source_call_identity": terminal_document["judgment_cache_source_call_identity"],
+                    "source_run_id": terminal_document["judgment_cache_source_run_id"],
+                    "response_hash": contracts.hash_bytes(terminal_body),
+                })
             summary.update({"outcome": "settled", "idempotent": True, "actual_microusd": reserved.get("amount_microusd")})
             if terminal_status == 403:
                 try:
@@ -3235,6 +3708,36 @@ class Broker:
             return BrokerResult(terminal_status, terminal_headers, terminal_body, summary)
         if status in ("dispatched", "uncertain"):
             summary["outcome"] = "uncertain"
+            terminal_document = reserved.get("terminal_response")
+            if (
+                status == "uncertain"
+                and judgment_cache_key
+                and isinstance(terminal_document, Mapping)
+                and terminal_document.get("judgment_cache_eligible") is True
+                and terminal_document.get("judgment_cache_key", judgment_cache_key)
+                == judgment_cache_key
+                and "judgment_cache_source_call_identity" not in terminal_document
+            ):
+                try:
+                    terminal_status, terminal_headers, terminal_body = _decode_terminal(
+                        terminal_document, secret=secret,
+                    )
+                except BrokerError:
+                    return _error_result("broker_unavailable", summary)
+                if not _complete_judgment_response(
+                    effective_operation_id, effective_normalized,
+                    status=terminal_status, body=terminal_body,
+                    call_succeeded=terminal_document.get("call_succeeded") is True,
+                ):
+                    return _error_result("broker_unavailable", summary)
+                summary.update({
+                    "idempotent": True,
+                    "status": terminal_status,
+                    "response_hash": contracts.hash_bytes(terminal_body),
+                })
+                return BrokerResult(
+                    terminal_status, terminal_headers, terminal_body, summary,
+                )
             if (
                 status == "uncertain"
                 and champion_credential_retry
@@ -3706,6 +4209,7 @@ class Broker:
         failure_stage = "response_adaptation"
         adapted_response_url = ""
         call_succeeded = False
+        judgment_cache_eligible = False
         try:
             if effective_operation.provider == "openrouter":
                 response = (
@@ -3796,6 +4300,16 @@ class Broker:
                     sanitized_headers[operations.TRUSTED_RESPONSE_URL_HEADER] = (
                         _validated_response_url(adapted_response_url)
                     )
+            judgment_cache_eligible = bool(
+                judgment_cache_key
+                and not request_refused
+                and not miner_credential_failure
+                and _complete_judgment_response(
+                    effective_operation_id, effective_normalized,
+                    status=sanitized_status, body=sanitized_body,
+                    call_succeeded=call_succeeded,
+                )
+            )
             if missing_deepline_cost or missing_openrouter_cost:
                 account_failure_evidence = None
                 if retain_account_failure_evidence:
@@ -3821,6 +4335,14 @@ class Broker:
                 if account_failure_evidence is not None:
                     uncertain_doc["account_failure_evidence"] = (
                         account_failure_evidence
+                    )
+                if judgment_cache_eligible:
+                    uncertain_doc["judgment_cache_response"] = (
+                        _terminal_response_document(
+                            sanitized_status, sanitized_headers, sanitized_body,
+                            call_succeeded=True,
+                            judgment_cache_eligible=True,
+                        )
                     )
                 uncertain_state = self._store.mark_uncertain(
                     run_id=context.run_id,
@@ -3891,6 +4413,7 @@ class Broker:
                 sanitized_status, sanitized_headers, sanitized_body,
                 call_succeeded=call_succeeded,
                 provider_cost=cost_record,
+                judgment_cache_eligible=judgment_cache_eligible,
                 account_failure_evidence=(
                     {
                         "error_class": "account_credential_failure",
@@ -3994,6 +4517,14 @@ class Broker:
                     uncertain_doc["known_actual_microusd"] = raw_actual
                 if cost_record is not None:
                     uncertain_doc["provider_cost"] = cost_record
+                if judgment_cache_eligible:
+                    uncertain_doc["judgment_cache_response"] = (
+                        _terminal_response_document(
+                            sanitized_status, sanitized_headers, sanitized_body,
+                            call_succeeded=True,
+                            judgment_cache_eligible=True,
+                        )
+                    )
             if scrapingdog_observed_success_status is not None:
                 uncertain_doc.update({
                     "observed_provider_status": scrapingdog_observed_success_status,

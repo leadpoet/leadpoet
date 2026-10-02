@@ -286,7 +286,15 @@ the target company's own offering: connect activity to that offering and its
 operations, not an imagined seller or product. For connects_icp, require a
 grounded explanation of why the verified activity is relevant to the ICP, but
 allow that explanation anywhere in the paragraph and within another sentence;
-merely repeating filters or events is insufficient. Assess every Boolean
+merely repeating filters or events is insufficient.
+For example, when funding and the company's workflow platform are independently
+verified, "This funding may help the company expand its workflow platform"
+connects that activity to an ICP seeking funded workflow software companies.
+Do not require a specific use-of-proceeds plan or repeat every ICP constraint
+to make that conditional connection. The offering must still be supported and
+relevant to the actual ICP. "This matches the ICP" or "the company may grow"
+alone supplies no such specific connection.
+Assess every Boolean
 independently: a factual defect makes facts_supported false, but does not by
 itself make signal coverage, relevance, ICP connection or paragraph structure
 false. Require natural prose, not headings, bullet lists, field labels or

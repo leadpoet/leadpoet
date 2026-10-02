@@ -1315,6 +1315,52 @@ def test_grounded_icp_connection_does_not_require_a_separate_final_sentence(
     assert receipt["checks"]["connects_icp"] is True
 
 
+@pytest.mark.parametrize("failed_check", [None, "connects_icp", "facts_supported"])
+def test_conditional_funding_connection_preserves_independent_gates(
+    monkeypatch, failed_check,
+):
+    company, icp, results, fit = inputs()
+    company.intent_details = (
+        "Acme raised $60 million on September 1, 2026. "
+        + (
+            "The company may grow."
+            if failed_check == "connects_icp"
+            else "This funding may help Acme expand its workflow platform."
+        )
+    )
+    icp.prompt = "Find funded workflow software companies."
+    icp.product_service = "Workflow software"
+    icp.intent_signals = ["Funding"]
+    results = results[:1]
+    results[0]["judge_verdict"]["verification_trace"]["intent_verdict"][
+        "signal_evaluations"
+    ][0]["supporting_quotes"] = [
+        "Acme raised $60 million on September 1, 2026."
+    ]
+    fit["dimension_evidence"]["industry"]["web_evidence"]["quote"] = (
+        "Acme provides workflow software."
+    )
+
+    async def judge(prompt, **kwargs):
+        system = kwargs["system_prompt"]
+        assert "connects that activity to an ICP seeking funded workflow" in system
+        assert "The offering must still be supported" in system
+        assert "alone supplies no such specific connection" in system
+        return json.dumps(_review_response(
+            {name: name != failed_check for name in intent_details._CHECKS},
+            [{"matched_icp_signal": 0, "covered": True}],
+            json.loads(prompt),
+        ))
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(
+        company, icp, results, fit,
+    ))
+    assert receipt["decision"] == ("mismatch" if failed_check else "match")
+    if failed_check:
+        assert receipt["checks"][failed_check] is False
+
+
 @pytest.mark.parametrize(
     ("paragraph", "failed_check", "expected_true"),
     [

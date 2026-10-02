@@ -80,6 +80,7 @@ from qualification.scoring.company_evidence_investigator import (
     _complete_verified_first_party_identity,
     _plain_text,
     _quote_occurs,
+    _quote_identifies_headquarters,
     _same_domain_name_alias,
     _validated_prefetched_pages,
     investigate_company_evidence,
@@ -1527,6 +1528,12 @@ def _decision_from_observed_geography(
         if value
     ))
     if not observed or not requested_values:
+        return COMPANY_FIT_UNAVAILABLE
+    if company_quality and not _quote_identifies_headquarters(
+        _dimension_web_evidence(verdict, "geography")["quote"],
+    ):
+        # A profile location or regional office is not an HQ fact. Leave both
+        # positive and negative locations open for the bounded HQ investigator.
         return COMPANY_FIT_UNAVAILABLE
     if company_quality and company is not None:
         submitted_country = str(company.country or "").strip()
@@ -6803,7 +6810,9 @@ async def _run_targeted_company_evidence_investigation(
         verified_homepage_identity=investigation_verified_identity,
         verified_homepage_rebrand_redirect=verified_rebrand_redirect,
         homepage_navigation_locators=(
-            homepage_navigation_locators if review_positive_semantics else ()
+            homepage_navigation_locators
+            if review_positive_semantics or "geography" in investigation_targets
+            else ()
         ),
         prefetched_pages=_investigator_prefetched_pages(
             required_attribute_source_cache or {},
@@ -7212,7 +7221,13 @@ async def _llm_reverify_company(
                 f"and test it against {(icp.geography or icp.country)!r}."
                 " Always return the observed HQ state when the observed HQ "
                 "country is the United States. Bind current headquarters to the "
-                "same company entity. Incorporation, announcement datelines, "
+                "same company entity. Prefer a current first-party contact or "
+                "about page that explicitly labels headquarters. A company-bound "
+                "profile can prove HQ when it explicitly labels that location as "
+                "headquarters; a bare city/state or profile location cannot. A "
+                "silent or unavailable company page does not contradict an "
+                "otherwise supported profile HQ. Incorporation, announcement "
+                "datelines, "
                 "factories, warehouses, jobs, regional offices, branches, and "
                 "customer locations do not establish headquarters. If independent "
                 "sources disagree, distinguish source dates, an explicit HQ move, "

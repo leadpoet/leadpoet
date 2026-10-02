@@ -7,8 +7,10 @@ from types import SimpleNamespace
 import pytest
 
 from lab_arena import contact_policy, provider_observations, public_dashboard
+from lab_arena.broker import RunContext
 from lab_arena.service import ArenaService
 from lab_arena.store import ArenaStore, PsycopgTransport
+from lab_arena.submission_runtime import SubmissionProviderKeys
 from tests.lab_arena import oct01_held_deadline_recovery372_postgres_test as prior
 from tests.lab_arena.icp_fixtures import daily_icps
 
@@ -153,6 +155,23 @@ def test_rejudge_archives_history_and_reopens_only_baseline_scoring(database):
     assert archive['king_hotkey'] is None
     assert archive['champion_hotkey'] is None
     assert archive['promotion_required'] is False
+    archive_baseline = 'baseline-2026-10-01-r376archive'
+    assert next(p['submission_id'] for p in archive['participants'] if p['is_king']) == archive_baseline
+    archived_score = next(r for r in store.list_runs(archive['round_id'], kind='score')
+                          if r['status'] == 'accepted')
+    assert archived_score['submission_id'] == archive_baseline
+    context = RunContext(
+        run_id=archived_score['run_id'], assignment_id=archived_score['assignment_id'],
+        icp_position=archived_score['icp_position'], lease_token_hash='',
+        miner_hotkey=archived_score['miner_hotkey'], submission_id=archive_baseline,
+        stage=1, kind='score', attempt=archived_score['attempt'],
+        round_id=archive['round_id'],
+    )
+    keys = SubmissionProviderKeys(store=store, credentials=None,
+                                  organizer_keys={'deepline': 'test-host-key'})
+    assert store.provider_funding(archived_score['run_id'], 'deepline')['funding_source'] == 'host'
+    assert keys.provider_funding_source_for(context, 'deepline') == 'host'
+    assert keys.credential_for(context, 'deepline') == 'test-host-key'
     assert public_dashboard._is_administrative_archive(archive)
     service = object.__new__(ArenaService)
     service._store = store

@@ -62,6 +62,7 @@ DECLARE
   v_round_id CONSTANT TEXT := 'arena-2026-10-01';
   v_archive_id CONSTANT TEXT := 'arena-2026-10-01-r376archive';
   v_suffix CONSTANT TEXT := ':r376archive';
+  v_archive_baseline_id CONSTANT TEXT := 'baseline-2026-10-01-r376archive';
   v_new_digest CONSTANT TEXT :=
     'sha256:342645a42b52363cb907c7b48627ead707e09547a7197b4b0d803e7e6e57a7ba';
   v_schedule CONSTANT JSONB :=
@@ -183,7 +184,9 @@ BEGIN
     AND e.run_kind='score';
 
   SELECT pg_catalog.jsonb_agg(item.value || pg_catalog.jsonb_build_object(
-    'submission_id',(item.value->>'submission_id')||v_suffix) ORDER BY item.ordinal)
+    'submission_id',CASE WHEN item.value->>'submission_id'='baseline-2026-10-01'
+      THEN v_archive_baseline_id ELSE (item.value->>'submission_id')||v_suffix END)
+    ORDER BY item.ordinal)
   INTO v_archive_participants
   FROM pg_catalog.jsonb_array_elements(v_round.participants)
     WITH ORDINALITY AS item(value,ordinal);
@@ -250,22 +253,30 @@ BEGIN
   INSERT INTO public.lab_arena_submissions
   SELECT (pg_catalog.jsonb_populate_record(NULL::public.lab_arena_submissions,
     pg_catalog.to_jsonb(s) || pg_catalog.jsonb_build_object(
-      'submission_id',s.submission_id||v_suffix,'round_id',v_archive_id))).*
+      'submission_id',CASE WHEN s.submission_id='baseline-2026-10-01'
+        THEN v_archive_baseline_id ELSE s.submission_id||v_suffix END,
+      'round_id',v_archive_id))).*
   FROM public.lab_arena_submissions s WHERE s.round_id=v_round_id;
   GET DIAGNOSTICS v_count=ROW_COUNT;
   IF v_count<>14 THEN RAISE EXCEPTION 'Oct01 rejudge submissions differ'; END IF;
 
   UPDATE public.lab_arena_runs s
-  SET round_id=v_archive_id,submission_id=s.submission_id||v_suffix
+  SET round_id=v_archive_id,
+    submission_id=CASE WHEN s.submission_id='baseline-2026-10-01'
+      THEN v_archive_baseline_id ELSE s.submission_id||v_suffix END
   WHERE s.round_id=v_round_id AND s.kind='score';
   GET DIAGNOSTICS v_count=ROW_COUNT;
   IF v_count<>21 THEN RAISE EXCEPTION 'Oct01 rejudge score archive differs'; END IF;
   UPDATE public.lab_arena_ledger l
-  SET round_id=v_archive_id,submission_id=l.submission_id||v_suffix
+  SET round_id=v_archive_id,
+    submission_id=CASE WHEN l.submission_id='baseline-2026-10-01'
+      THEN v_archive_baseline_id ELSE l.submission_id||v_suffix END
   WHERE l.round_id=v_round_id AND EXISTS (SELECT 1 FROM public.lab_arena_runs s
     WHERE s.round_id=v_archive_id AND s.kind='score' AND s.run_id=l.run_id);
   UPDATE public.lab_arena_trajectory_events e
-  SET round_id=v_archive_id,submission_id=e.submission_id||v_suffix
+  SET round_id=v_archive_id,
+    submission_id=CASE WHEN e.submission_id='baseline-2026-10-01'
+      THEN v_archive_baseline_id ELSE e.submission_id||v_suffix END
   WHERE e.round_id=v_round_id AND e.run_kind='score';
 
   IF v_score_hash IS DISTINCT FROM (SELECT pg_catalog.encode(extensions.digest(

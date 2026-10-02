@@ -245,29 +245,26 @@ commercialization claim does not by itself prove a current commercial sale.
 When positive_semantic_review is true, treat prior positive labels as untrusted
 hypotheses, not source observations. The supplier_operator role establishes
 only the company's relationship to the cited activity; it does not establish
-that the activity satisfies the requested criterion. Return VERIFIED only when
-the fetched source directly supports every active requested sub-industry
-constraint and the active product/service and required-attribute constraints.
-Preserve each criterion's explicit AND/OR structure: prove every required
-conjunct and one supported alternative for each OR clause. Equivalent source
-language is sufficient; do not require literal taxonomy labels. A broad
-sub-industry taxonomy label joined by "and" may name a category, not require
-two distinct product lines. For example, B2B software infrastructure and
-workflow platforms can include a directly sold B2B workflow platform without
-a separate infrastructure product when the requested product/service and
-required attribute support that reading. A paid professional-services
-automation platform with customer-facing workflow automations and integrations
-can qualify when its subscription model and business customer scope are proven.
-A generic professional-services automation label without the requested
-capability is insufficient; customer or internal use of another vendor's tool
-is not supplier/operator evidence. If the criterion explicitly requires the
-company to supply both infrastructure AND workflow platforms, prove both.
-Keep every separate product/service and required-attribute conjunct mandatory.
-An adjacent
-activity for the same customer group is UNPROVEN. Populate observed industry,
-sub-industry, and value only from the source; never copy a prior or requested
-label as if the source stated it. In reason, concisely explain which concrete
-sold capability and customer scope the evidence proves or fails to prove.
+that the activity satisfies the requested industry criterion. For the industry
+finding, verify that the company itself supplies or operates the requested
+sector activity, using the complete industry, sub-industry, product/service,
+and required-attribute context to identify that activity. Do not make the
+industry finding depend on a commercial or other condition that is separately
+stated in the required attribute; that condition needs its own independent
+required-attribute judgment and source proof before company fit can match.
+Still prove every active industry, sub-industry, and supplied-product condition
+that is not separately checked by the required attribute. Preserve explicit
+AND/BOTH/ALL requirements and OR alternatives in each criterion: prove every
+required conjunct and one supported alternative for each OR clause. A label
+that names two customer sectors as a category does not alone require customers
+in both sectors; use the full ICP wording to decide whether either or both are
+required. Equivalent source language is sufficient; do not require literal
+taxonomy labels. An adjacent activity for the same customer group is UNPROVEN.
+Populate observed industry, sub-industry, and value only from the source; never
+copy a prior or requested label as if the source stated it. In reason, concisely
+explain which concrete supplied capability and customer scope the evidence
+proves or fails to prove. Do not infer subscriptions from software, customers,
+licenses, or a funding announcement. A broad sub-industry taxonomy label joined by "and" may name a category, not require two distinct product lines. A directly sold B2B workflow platform can satisfy a broad infrastructure/workflow category without a separate infrastructure product; company fit still requires that the subscription model and business customer scope are proven by their separate checks. A generic product label without the requested capability is insufficient; customer or internal use of another vendor's tool is not supplier/operator evidence. If the criterion explicitly requires the company to supply both product lines, prove both. Keep every separate product/service and required-attribute conjunct mandatory.
 CONTRADICTED requires direct customer, internal-function, or third-party
 evidence; a page that describes only a different business is UNPROVEN because
 it does not prove absence of another activity.

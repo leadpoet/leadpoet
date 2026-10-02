@@ -2435,10 +2435,9 @@ def test_crowdstrike_stage_industry_source_can_repair_required_attribute(
 
     assert result.decision == expected_decision
     assert source_fetch.await_count == 1
-    # The positive investigator verifies the full attribute criterion. Reuse
-    # its grounded source directly; a second broad schema judgment is not
-    # required, and an UNPROVEN investigator cannot be repaired into a match.
-    assert len(prompts) == 1
+    # The industry source can guide a separate attribute judgment, but cannot
+    # by itself turn an unproven attribute into a match.
+    assert len(prompts) == (2 if repair_proves_required_function else 1)
     grounding = result.details["required_attribute_grounding"]
     assert grounding["cache_hit"] is repair_proves_required_function
     assert grounding["status"] == (
@@ -2886,7 +2885,9 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
     ))
 
     assert calls == {
-        "provider": 2 if investigator_mode == "supported" else 1,
+        "provider": 2 if investigator_mode in {
+            "supported", "alternate_supported"
+        } else 1,
         "investigator": 1,
         "direct_fetch": 1,
     }
@@ -2921,14 +2922,35 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
 
 
 @pytest.mark.parametrize(
-    "attribute_satisfied",
-    [True, False],
+    ("attribute_satisfied", "attribute_quote", "repair_satisfied", "expected"),
+    [
+        (
+            True,
+            "Acme sells annual renewable subscriptions for production AI "
+            "workflow software.",
+            True,
+            COMPANY_FIT_MATCH,
+        ),
+        (
+            False,
+            "Acme uses identity verification tools for hiring.",
+            False,
+            COMPANY_FIT_MISMATCH,
+        ),
+        (
+            True,
+            "Acme uses identity verification tools for hiring.",
+            None,
+            COMPANY_FIT_UNAVAILABLE,
+        ),
+    ],
 )
 def test_grounded_attribute_gets_one_semantic_investigator_review(
-    monkeypatch, attribute_satisfied
+    monkeypatch, attribute_satisfied, attribute_quote, repair_satisfied, expected
 ):
     source_url = "https://acme.example/platform"
-    quote = "Acme builds and sells software for production AI workflows."
+    industry_quote = "Acme builds and sells software for production AI workflows."
+    source_text = industry_quote + " " + attribute_quote
     calls = {"provider": 0, "fetch": 0, "investigator": 0}
 
     async def prechecks(*_args, **_kwargs):
@@ -2952,15 +2974,18 @@ def test_grounded_attribute_gets_one_semantic_investigator_review(
     async def provider(**_kwargs):
         calls["provider"] += 1
         return _complete_verdict(
-            attribute_satisfied=attribute_satisfied,
+            attribute_satisfied=(
+                attribute_satisfied if calls["provider"] == 1
+                else repair_satisfied
+            ),
             required_attribute_evidence_url=source_url,
-            required_attribute_evidence_quote=quote,
+            required_attribute_evidence_quote=attribute_quote,
         ), ""
 
     async def source_fetch(_session, url):
         calls["fetch"] += 1
         assert url == source_url
-        return 200, url, quote
+        return 200, url, source_text
 
     async def investigate(*, targets, **_kwargs):
         calls["investigator"] += 1
@@ -2974,11 +2999,11 @@ def test_grounded_attribute_gets_one_semantic_investigator_review(
                     observed_subindustry="SaaS",
                     activity_role="supplier_operator",
                     evidence_url=source_url,
-                    evidence_quote=quote,
+                    evidence_quote=industry_quote,
                 )
             },
             investigator.PRIVATE_FETCHED_PAGES_KEY: {
-                source_url: {"final_url": source_url, "text": quote},
+                source_url: {"final_url": source_url, "text": source_text},
             },
             "failure_reason": "",
         }
@@ -3000,7 +3025,9 @@ def test_grounded_attribute_gets_one_semantic_investigator_review(
 
     result = asyncio.run(lead_scorer._verify_company_fit(
         _company(),
-        _icp(required_attribute="Sells software for production AI workflows."),
+        _icp(required_attribute=(
+            "Sells recurring software subscriptions for production AI workflows."
+        )),
         0.0,
         1.0,
         set(),
@@ -3009,10 +3036,10 @@ def test_grounded_attribute_gets_one_semantic_investigator_review(
         evidence_investigator=True,
     ))
 
-    assert result.decision == COMPANY_FIT_MATCH
-    assert result.details["required_attribute_decision"] == COMPANY_FIT_MATCH
+    assert result.decision == expected
+    assert result.details["required_attribute_decision"] == expected
     assert calls == {
-        "provider": 1,
+        "provider": 2,
         "fetch": 1,
         "investigator": 1,
     }
@@ -7370,7 +7397,7 @@ def test_schema_repair_reconciles_bounded_industry_decision(
         )
 
 
-def test_flam_industry_review_can_repair_attribute_from_verified_flicks_page(
+def test_flam_industry_review_requires_separate_attribute_judgment(
     monkeypatch,
 ):
     company = _company(
@@ -7400,8 +7427,8 @@ def test_flam_industry_review_can_repair_attribute_from_verified_flicks_page(
     flicks_url = "https://flamapp.ai/products/flicks"
     flicks_final_url = "https://flamapp.ai/en-US/products/flicks"
     flicks_quote = (
-        "Enable faster product discovery and learn user preference to "
-        "optimize next asset."
+        "Flam's Flicks platform helps brands plan and optimize digital "
+        "advertising campaigns."
     )
     initial = _complete_verdict(
         observed_company_name="Flam",
@@ -7419,6 +7446,12 @@ def test_flam_industry_review_can_repair_attribute_from_verified_flicks_page(
         required_attribute_evidence_url=generic_url,
         required_attribute_evidence_quote=generic_quote,
     )
+    repaired = dict(
+        initial,
+        attribute_satisfied=True,
+        required_attribute_evidence_url=flicks_url,
+        required_attribute_evidence_quote=flicks_quote,
+    )
     finding = _finding(
         "industry",
         observed_value="Digital advertising platform",
@@ -7432,7 +7465,7 @@ def test_flam_industry_review_can_repair_attribute_from_verified_flicks_page(
 
     async def provider(**_kwargs):
         calls["provider"] += 1
-        return initial, ""
+        return (initial if calls["provider"] == 1 else repaired), ""
 
     async def direct_fetch(_session, url):
         calls["direct_fetch"] += 1
@@ -7516,7 +7549,7 @@ def test_flam_industry_review_can_repair_attribute_from_verified_flicks_page(
         evidence_investigator=True,
     ))
 
-    assert calls == {"provider": 1, "investigator": 1, "direct_fetch": 1}
+    assert calls == {"provider": 2, "investigator": 1, "direct_fetch": 1}
     assert result.decision == COMPANY_FIT_MATCH
     assert result.details["dimension_decisions"]["industry"] == COMPANY_FIT_MATCH
     assert result.details["required_attribute_decision"] == COMPANY_FIT_MATCH
@@ -7532,6 +7565,156 @@ def test_flam_industry_review_can_repair_attribute_from_verified_flicks_page(
         "search_calls": 0,
         "fetch_calls": 1,
     }
+
+
+def test_oct01_abre_sector_proof_does_not_imply_recurring_subscription(
+    monkeypatch,
+):
+    """Production-shaped Abre activity does not prove recurring terms."""
+
+    growth_url = "https://abre.com/solutions/growth-and-support/"
+    growth_quote = (
+        "Abre's Growth & Support Solution helps teams capture a need, build a "
+        "plan, track progress, and evaluate what worked. For students and "
+        "staff alike."
+    )
+    stage_url = (
+        "https://abre.com/resources/press/abre-secures-24-million-series-a-"
+        "investment-to-fuel-growth-and-student-impact-in-k-12-education/"
+    )
+    stage_quote = (
+        "Abre, K-12’s #1 modern data solution, today announced a significant "
+        "milestone with the closing of a Series A investment round led by "
+        "PeakSpan Capital"
+    )
+    company = CompanyOutput.model_validate({
+        **_company(
+            name="Abre",
+            website="https://abre.com/",
+            linkedin="",
+        ).model_dump(mode="json"),
+        "industry": "education management",
+        "employee_count": "51-200",
+        "company_stage": "Series A",
+        "state": "Ohio",
+        "company_stage_evidence": [{"url": stage_url, "quote": stage_quote}],
+        "required_attribute": {
+            "text": (
+                "Sells a recurring software platform used by educational "
+                "institutions to streamline student-facing or administrative "
+                "workflows."
+            ),
+            "passed": True,
+            "evidence_url": growth_url,
+            "evidence_quote": growth_quote,
+        },
+    })
+    icp = _icp(
+        industry="Education",
+        sub_industry="K-12 and higher-ed software providers",
+        employee_count="51-200",
+        company_stage="Series A",
+        product_service=(
+            "A subscription platform that helps schools or universities "
+            "manage student workflows, communication, and operational reporting."
+        ),
+        required_attribute=company.required_attribute.text,
+    )
+    initial = _complete_verdict(
+        observed_company_name="Abre",
+        observed_company_website="https://abre.com",
+        observed_company_linkedin="https://www.linkedin.com/company/abre-io",
+        observed_employee_count="51-200",
+        employee_size_evidence_url="https://www.linkedin.com/company/abre-io",
+        employee_size_evidence_quote="Company size 51-200 employees",
+        observed_industry="Education Management",
+        observed_subindustry="K-12 data platform",
+        industry_matches=True,
+        industry_evidence_url="https://abre.com/company/",
+        industry_evidence_quote=(
+            "Abre is the K-12 Data Intelligence Platform that connects "
+            "district data, people, and priorities."
+        ),
+        observed_hq_state="Ohio",
+        geography_evidence_url="https://www.linkedin.com/company/abre-io",
+        geography_evidence_quote="Cincinnati, Ohio, United States",
+        observed_company_stage="Series A",
+        stage_matches=True,
+        stage_evidence_url=stage_url,
+        stage_evidence_quote=stage_quote,
+        attribute_satisfied=None,
+        required_attribute_evidence_url="",
+        required_attribute_evidence_quote="",
+    )
+    finding = _finding(
+        "industry",
+        observed_value="K-12 education software",
+        observed_industry="Education",
+        observed_subindustry="K-12 software provider",
+        activity_role="supplier_operator",
+        evidence_url=growth_url,
+        evidence_quote=growth_quote,
+    )
+    provider_calls = []
+
+    async def provider(**kwargs):
+        provider_calls.append(kwargs["telemetry_purpose"])
+        return initial, ""
+
+    async def investigate(**kwargs):
+        assert kwargs["targets"] == ("stage", "industry")
+        assert kwargs["positive_semantic_review"] is True
+        assert kwargs["requested_subindustry"] == icp.sub_industry
+        assert growth_url in kwargs["prior_observations"]["submitted_source_urls"]
+        return {
+            "claims": {"industry": finding, "stage": _finding(
+                "stage", observed_value="Series A", evidence_url=stage_url,
+                evidence_quote=stage_quote,
+            )},
+            investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                growth_url: {"final_url": growth_url, "text": growth_quote}
+            },
+            "failure_reason": "",
+        }
+
+    async def keep_observation(verdict, *_args, **_kwargs):
+        return verdict
+
+    homepage_identity = lead_scorer.company_fit_match(
+        "homepage identity verified",
+        details={
+            "identity": {
+                "decision": COMPANY_FIT_MATCH,
+                "evidence_source": "company_homepage",
+                "observed_name": "abre",
+                "observed_domain": "abre.com",
+                "observed_linkedin_slug": "abre-io",
+            },
+            "verified_homepage_transport_domain": "abre.com",
+        },
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
+    monkeypatch.setattr(
+        lead_scorer, "_refresh_linkedin_employee_size_observation", keep_observation
+    )
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        company,
+        icp,
+        require_company_fit_dimensions=True,
+        verified_homepage_identity=homepage_identity,
+        company_quality=True,
+        evidence_investigator=True,
+    ))
+
+    assert provider_calls == [
+        "lead_scorer_reverify", "lead_scorer_reverify_schema_repair"
+    ]
+    assert result.details["dimension_decisions"]["industry"] == COMPANY_FIT_MATCH
+    assert result.details["required_attribute_decision"] == COMPANY_FIT_UNAVAILABLE
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
 
 
 def test_grounded_attribute_mismatch_unproven_review_stays_unqualified(
@@ -9442,9 +9625,9 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
     system_prompt = " ".join(requests[0]["messages"][0]["content"].split())
     assert "prior positive labels as untrusted hypotheses" in system_prompt
     assert "supplier_operator role establishes" in system_prompt
-    assert (
-        "active product/service and required-attribute constraints" in system_prompt
-    )
+    assert "required-attribute judgment and source proof" in system_prompt
+    assert "Preserve explicit AND/BOTH/ALL requirements" in system_prompt
+    assert "does not alone require customers in both sectors" in system_prompt
     assert "one supported alternative for each OR clause" in system_prompt
     assert "Equivalent source language is sufficient" in system_prompt
     assert "paid management console, policy control plane" in system_prompt

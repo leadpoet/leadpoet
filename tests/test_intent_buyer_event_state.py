@@ -70,6 +70,14 @@ def _model_verdict(status: str, body: str) -> dict:
         "supported",
     ),
     (
+        "On July 28, 2026, Cyberhaven made Flow's detection capability available "
+        "to all existing customers, who can enable and use it today in public "
+        "preview.\nBroader general availability is planned for next quarter.",
+        "Find vendors with a new detection capability currently available to existing customers.",
+        TARGET,
+        "supported",
+    ),
+    (
         INTRODUCTION + "\nCyberhaven made its older Data Lineage product "
         "generally available in 2025.",
         SHIPPED_REQUEST, TARGET,

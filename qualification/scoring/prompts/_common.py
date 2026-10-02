@@ -258,7 +258,7 @@ BUYER_REQUEST_EVENT_BLOCK = """  BUYER ORIGINAL REQUEST — MATCHED EVENT ONLY:
     Apply its event and state requirements to the chosen target_icp_signal,
     including words such as shipped, available, launched, introduced,
     announced, previewed, or planned. Do not turn independent company-fit,
-    product-fit, role, or attribute requirements in that broader request into
+    product-fit, contact-role, or attribute requirements in that broader request into
     extra intent gates; those are checked elsewhere.
     A request for a shipped, released, launched, or currently available
     capability needs source-body proof that customers could use the exact
@@ -267,6 +267,11 @@ BUYER_REQUEST_EVENT_BLOCK = """  BUYER ORIGINAL REQUEST — MATCHED EVENT ONLY:
     not prove that completed state. A future availability statement for that
     same capability controls over an introduction headline or isolated launch
     quote, even when the announcement is in a first-party press release.
+    Preserve the availability level the buyer actually requests. Explicit
+    current access for the intended customers can prove availability at that
+    stated scope even if broader general availability is planned later; do not
+    invent a generally-available-to-everyone requirement. A waitlist or early
+    access invitation alone does not prove that customers can use it now.
     A separately available older product or later general-availability event
     cannot rescue the submitted event. Future roadmap text about a different
     capability does not negate an already available submitted capability.

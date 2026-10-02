@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: PR 202 historical weight recovery
+
+On 2026-10-02 the user authorized review, necessary narrow safety fixes, merge,
+and production deployment of PR 202 for historical runtime 468/469 weight
+recovery. Authority includes protected read-only chain and journal inspection,
+focused tests, exact committed integrity manifest updates, safe pushes/merge,
+and canonical paired gateway/normal-validator restarts. Preserve existing
+signed journals, wallet identity, accepted rewards, scoring, active work and
+operator pause state. Never broadcast manual weights or weaken chain proofs.
+Verify automatic historical recovery and current weight health after deployment.
+This authority ends when PR 202 is deployed and verified.
+
 ## Scoped production authorization: October 2 scoring audit
 
 On 2026-10-02 the user authorized a deep audit of the published October 2

@@ -2380,3 +2380,26 @@ def test_late_pricing_link_survives_bounded_homepage_navigation():
     assert all("private" not in item["url"] for item in locators)
     assert all("hidden" not in item["url"] for item in locators)
     assert all("foreign.example" not in item["url"] for item in locators)
+
+
+def test_late_company_links_survive_a_full_product_menu():
+    products = "".join(
+        f'<a href="/product/{index}">Product {index}</a>'
+        for index in range(MAX_HOMEPAGE_NAVIGATION_LOCATORS + 20)
+    )
+    locators = _homepage_navigation_locators(
+        products
+        + '<a href="/contact-us">Contact us</a>'
+        + '<a href="/about">Who we are</a>'
+        + '<a href="/pricing">Pricing</a>',
+        final_url="https://example.com/",
+        verified_domain="example.com",
+    )
+
+    assert len(locators) == MAX_HOMEPAGE_NAVIGATION_LOCATORS
+    assert locators[:3] == [
+        {"url": "https://example.com/pricing", "label": "Pricing"},
+        {"url": "https://example.com/contact-us", "label": "Contact us"},
+        {"url": "https://example.com/about", "label": "Who we are"},
+    ]
+    assert locators[3]["url"] == "https://example.com/product/0"

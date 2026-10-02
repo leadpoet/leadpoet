@@ -893,9 +893,8 @@ def _homepage_navigation_locators(
         if canonical in seen:
             continue
         seen.add(canonical)
-        # Large menus can put Pricing after the first 40 links. Keep the
-        # original count and character limits, but reserve discovery space for
-        # visible first-party commercial and product locators.
+        # Large menus can hide relevant commercial and company pages after the
+        # first 40 links. Preserve these locators within the existing limits.
         words = set(re.findall(
             r"[a-z]+", f"{parsed.path} {label}".casefold()
         ))
@@ -904,8 +903,9 @@ def _homepage_navigation_locators(
                 "pricing", "price", "prices", "plan", "plans",
                 "subscription", "subscriptions",
             }
-            else 1 if words & {"product", "products", "platform", "platforms"}
-            else 2
+            else 1 if words & {"contact", "about", "headquarters"}
+            else 2 if words & {"product", "products", "platform", "platforms"}
+            else 3
         )
         candidates.append((priority, {"url": canonical, "label": label}))
 

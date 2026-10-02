@@ -49,6 +49,16 @@ SPEC467_FIXTURE = (
     / "fixtures"
     / "subtensor_events_spec467_block9095804.json"
 )
+SPEC468_FIXTURE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "subtensor_events_spec468_block9117768.json"
+)
+SPEC469_FIXTURE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "subtensor_events_spec469_block9128207.json"
+)
 SPEC470_FIXTURE = (
     Path(__file__).resolve().parent
     / "fixtures"
@@ -375,6 +385,8 @@ def test_historical_reveal_succeeds_after_latest_head_passed_deadline(monkeypatc
         (SPEC464_FIXTURE, 464),
         (SPEC466_FIXTURE, 466),
         (SPEC467_FIXTURE, 467),
+        (SPEC468_FIXTURE, 468),
+        (SPEC469_FIXTURE, 469),
         (SPEC470_FIXTURE, 470),
     ],
 )
@@ -418,7 +430,7 @@ def test_exact_parent_runtime_and_transition_events_prove_reveal(
     ) in fixture.calls
 
 
-@pytest.mark.parametrize("spec_version", [456, 457, 458, 459, 464, 466, 467, 470])
+@pytest.mark.parametrize("spec_version", [456, 457, 458, 459, 464, 466, 467, 468, 469, 470])
 def test_historical_reveal_selects_observed_runtime_profile(
     monkeypatch, spec_version
 ):

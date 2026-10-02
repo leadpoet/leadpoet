@@ -41,6 +41,35 @@ DECLARE
       )
     )
 $insert$;
+  v_pick_anchor CONSTANT TEXT := $pick$    AND runs.stage_generation = v_round.stage_generation$pick$;
+  v_cooldown CONSTANT TEXT := $cooldown$
+    -- lab_arena_zero_call_score_runner_cooldown_v1: score candidates only.
+    -- Three distinct zero-call expiries in the frozen-TTL rolling window
+    -- exclude this runner from scoring until that evidence ages out.
+    AND (runs.kind <> 'score' OR v_round.status NOT IN ('stage1_scoring', 'stage2_scoring')
+      OR NOT EXISTS (
+       SELECT 1 FROM public.lab_arena_runs AS expired_score
+       WHERE expired_score.round_id=p_round_id
+         AND expired_score.stage=v_stage
+         AND expired_score.stage_generation=v_round.stage_generation
+         AND expired_score.runner_hotkey=p_runner_hotkey
+         AND expired_score.kind='score'
+         AND expired_score.status='failed'
+         AND expired_score.terminal_cause='lease_expired'
+         AND expired_score.result_doc IS NULL
+         AND expired_score.output_ref IS NULL
+         AND expired_score.lease_expires_at<=pg_catalog.clock_timestamp()
+         AND expired_score.lease_expires_at>
+           pg_catalog.clock_timestamp()-pg_catalog.make_interval(
+             secs => (v_round.configuration_doc->>'lease_ttl_seconds')::INTEGER)
+         AND NOT EXISTS (
+           SELECT 1 FROM public.lab_arena_ledger AS prior_cost
+           WHERE prior_cost.run_id=expired_score.run_id
+         )
+       GROUP BY expired_score.runner_hotkey
+       HAVING COUNT(DISTINCT expired_score.assignment_id)>=3
+      ))
+$cooldown$;
   v_owner NAME;
   v_acl ACLITEM[];
   v_security_definer BOOLEAN;
@@ -66,6 +95,8 @@ BEGIN
   IF pg_catalog.strpos(v_definition,'lab_arena_zero_call_score_expiry_handoff_v1')>0 THEN
     IF (pg_catalog.length(v_definition)-pg_catalog.length(pg_catalog.replace(v_definition,v_insert,'')))
          <> pg_catalog.length(v_insert)
+       OR (pg_catalog.length(v_definition)-pg_catalog.length(pg_catalog.replace(v_definition,v_cooldown,'')))
+         <> pg_catalog.length(v_cooldown)
        OR pg_catalog.strpos(v_definition,'lab_arena_zero_setup_runner_handoff_v1')=0 THEN
       RAISE EXCEPTION 'Arena score expiry claim replay differs' USING ERRCODE='55000';
     END IF;
@@ -75,10 +106,14 @@ BEGIN
        IS DISTINCT FROM '0252fa3efafe895a7cade9169a36493dc8be70a9148a5ca037d0d0dde870a7c0'
      OR pg_catalog.strpos(v_definition,'lab_arena_zero_setup_runner_handoff_v1')=0
      OR (pg_catalog.length(v_definition)-pg_catalog.length(pg_catalog.replace(v_definition,v_anchor,'')))
-       <> pg_catalog.length(v_anchor) THEN
+       <> pg_catalog.length(v_anchor)
+     OR (pg_catalog.length(v_definition)-pg_catalog.length(pg_catalog.replace(v_definition,v_pick_anchor,'')))
+       <> pg_catalog.length(v_pick_anchor) THEN
     RAISE EXCEPTION 'Arena score expiry claim function preimage differs' USING ERRCODE='55000';
   END IF;
-  EXECUTE pg_catalog.replace(v_definition,v_anchor,v_insert||v_anchor);
+  EXECUTE pg_catalog.replace(
+    pg_catalog.replace(v_definition,v_anchor,v_insert||v_anchor),
+    v_pick_anchor,v_pick_anchor||v_cooldown);
 END;
 $zero_call_score_handoff$;
 

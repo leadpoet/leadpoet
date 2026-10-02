@@ -772,7 +772,7 @@
       "symbol": "_has_explicitly_unproven_fit_dimensions"
     },
     {
-      "ast_sha256": "sha256:ef68ceccaf6bb90740818b56fc3fc83c8a72873c9afa3eb77267c9332296a9e3",
+      "ast_sha256": "sha256:32da2c2271fc33523d3e90e4dccd93bbef6eb8f671aea3be1afb6050c4c4fd21",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_llm_reverify_company"
     },
@@ -782,7 +782,7 @@
       "symbol": "_reverify_decision"
     },
     {
-      "ast_sha256": "sha256:5e450d23514ab659656e00376f02b13c24744e426ee594d39edf803b0f3c4aac",
+      "ast_sha256": "sha256:8302417ab9bbc3bbb4dc54538f216356cc4abe44bb3e4506945747ea56bae0ac",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_run_targeted_company_evidence_investigation"
     },
@@ -807,7 +807,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:ab447b47909cb6146927e4229362286c98dd9916b8562b7ac7a12c604b63b0d2",
-  "protected_source_commit": "8aa3ae44e375c542cdb478eca3fd7055a5a01151",
+  "manifest_hash": "sha256:120f04610c3d23564bf7feca0f5fa55524bc13f7f33c5a709a333d139cff356b",
+  "protected_source_commit": "53bf35e5d",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

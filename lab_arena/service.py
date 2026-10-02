@@ -13,6 +13,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
@@ -531,6 +532,8 @@ class ArenaService:
         self._openrouter_reconciliation_after: Dict[Tuple[str, str], int] = {}
         self._deepline_reconciliation_after: Dict[Tuple[str, str], int] = {}
         self._closed_deepline_reconciliation_after = 0
+        self._completed_scores_lock = threading.Lock()
+        self._completed_scores_cache: Dict[str, Tuple[float, int, Dict[str, Any]]] = {}
 
     # -- accessors -------------------------------------------------------------
 
@@ -4538,6 +4541,136 @@ class ArenaService:
     def public_competition(self) -> Dict[str, Any]:
         return public_dashboard.competition_snapshot(self)
 
+    def completed_submission_scores(self, row: Mapping[str, Any]) -> Dict[str, Any]:
+        """Read completed model results without publishing or advancing a round.
+
+        Use the same accepted judgments, arithmetic and cost eligibility as
+        final publication. Failed/retrying judges wait for the normal closed
+        stage to record their outcome. Never turn unfinished work into a zero.
+        The bounded cache coalesces dashboard polling; costs are rechecked on
+        refresh, and a round transition immediately invalidates its entry.
+        """
+        configuration = row.get("configuration_doc") or {}
+        if (row.get("status") not in {
+            "stage1_scoring", "stage1_judged", "stage1_scored", "stage2",
+            "stage2_closed", "stage2_scoring", "stage2_judged", "scored",
+        } or configuration.get("execution_sequence_policy") != contracts.BASELINE_SCORED_FIRST_POLICY
+            or configuration.get("sourcing_cost_eligibility_policy") != contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY):
+            return {}
+        round_id = str(row["round_id"])
+        generation = int(row.get("status_generation") or 0)
+        with self._completed_scores_lock:
+            cached = self._completed_scores_cache.get(round_id)
+            if cached and cached[1] == generation and time.monotonic() < cached[0]:
+                return cached[2]
+            result = self._read_completed_submission_scores(row)
+            # Public summaries enumerate a bounded recent history. Keep only
+            # recent active rounds, never an unbounded per-model cache.
+            if len(self._completed_scores_cache) >= 8:
+                self._completed_scores_cache.pop(next(iter(self._completed_scores_cache)))
+            self._completed_scores_cache[round_id] = (time.monotonic() + 15, generation, result)
+            return result
+
+    def _read_completed_submission_scores(self, row: Mapping[str, Any]) -> Dict[str, Any]:
+        round_id = str(row["round_id"])
+        configuration = row["configuration_doc"]
+        positions = set(range(contracts.benchmark_icp_count(configuration)))
+        execution_runs = self._store.list_runs(round_id, kind="execute")
+        judges = self._select_scoring_outputs(self._store.list_runs(round_id, kind="score"))
+        completed = {}
+        icps = None
+        for participant in row.get("participants") or []:
+            submission_id = str(participant["submission_id"])
+            stage = 1 if participant.get("is_king") else 2
+            plan = row.get("stage%d_scoring_plan_doc" % stage)
+            if not plan:
+                continue
+            selected = {}
+            for run in execution_runs:
+                if run["submission_id"] != submission_id or run["stage"] != stage:
+                    continue
+                position = int(run["icp_position"])
+                current = selected.get(position)
+                if current is None or (run["status"] == "accepted", run["attempt"]) > (current["status"] == "accepted", current["attempt"]):
+                    selected[position] = run
+            if set(selected) != positions or any(run["status"] not in {"accepted", "failed"} for run in selected.values()):
+                continue
+            items = [item for item in plan["work_items"] if item["submission_id"] == submission_id]
+            zeros = [item for item in plan["zero_rows"] if item["submission_id"] == submission_id]
+            stored = all(run.get("per_icp_score") is not None for run in selected.values())
+            closed = row["status"] in (
+                {"stage1_judged", "stage1_scored", "stage2", "stage2_closed", "stage2_scoring", "stage2_judged", "scored"}
+                if stage == 1 else {"stage2_judged", "scored"}
+            )
+            unfinished = [judges.get(item["scored_run_id"], {}) for item in items
+                          if judges.get(item["scored_run_id"], {}).get("status") != "accepted"]
+            if unfinished and (not stored or not closed or any(
+                judge.get("status") != "failed"
+                or judge.get("terminal_cause") not in contracts.TERMINAL_CAUSES
+                or judge.get("terminal_cause") == "accepted" for judge in unfinished
+            )):
+                continue
+            try:
+                runs = list(selected.values())
+                for item in items:
+                    run_id = item["scored_run_id"]
+                    run = selected[int(item["icp_position"])]
+                    if run["run_id"] != run_id or (
+                        judges[run_id]["status"] == "accepted"
+                        and not self._same_scoring_membership(judges[run_id], run, round_id=round_id)
+                    ):
+                        raise scoring.ScoringError("completed score membership differs")
+                if not stored:
+                    if icps is None:
+                        icps = self.evaluation_icps(round_id)
+                    outputs = {}
+                    breakdowns = {}
+                    for item in items:
+                        run_id = item["scored_run_id"]
+                        run = selected[int(item["icp_position"])]
+                        output = validate_output_document(json.loads(self._objects.get_bounded(run["output_ref"], MAX_OUTPUT_BYTES).decode("utf-8")))
+                        outputs[run_id] = output["companies"]
+                        breakdowns[run_id] = self._verified_breakdowns(
+                            judges[run_id], icp=icps[int(item["icp_position"])],
+                            companies=output["companies"], policy=configuration["scorer_policy"],
+                        )
+                    scores = scoring.build_stage_scores(
+                        plan={**plan, "work_items": items, "zero_rows": zeros},
+                        policy=configuration["scorer_policy"],
+                        icps_by_position=dict(enumerate(icps)), outputs_by_run=outputs,
+                        breakdowns_by_item=breakdowns, configuration=configuration,
+                    )
+                    records = {r["run_id"]: r for r in scoring.run_scores_for_store(scores, runs)}
+                    if set(records) != {run["run_id"] for run in runs}:
+                        continue
+                    # Match PostgreSQL NUMERIC(12, 6), which final publication
+                    # reads back. Preserve any already recorded per-ICP value.
+                    for record in records.values():
+                        record["per_icp_score"] = float(Decimal(str(record["per_icp_score"])).quantize(
+                            Decimal("0.000001"), rounding=ROUND_HALF_UP,
+                        ))
+                    runs = [run if run.get("per_icp_score") is not None else
+                            {**run, **records[run["run_id"]]} for run in runs]
+                eligibility = self._submission_cost_eligibility(row, submission_id, runs, positions=sorted(positions))
+                if not eligibility["eligible"]:
+                    continue  # Billing in flight/uncertain is not a completed score.
+                eligible_positions = {int(item["icp_position"]) for item in eligibility["cost_summary"]["per_icp"] if item["eligible"]}
+                value = verify.stage_score([
+                    float(run["per_icp_score"]) if int(run["icp_position"]) in eligible_positions else 0.0
+                    for run in sorted(runs, key=lambda item: item["icp_position"])
+                ], len(positions))
+                if not any(run.get("terminal_cause") == "accepted" for run in runs):
+                    continue
+                completed[submission_id] = {
+                    "submission_id": submission_id, "final_score": value,
+                    **eligibility, "execution_runs": runs,
+                }
+            except Exception as exc:
+                # Invalid evidence or a transient object-store failure for one
+                # model must not hide the rest of the competition snapshot.
+                logger.warning("Completed model score unavailable: round=%s submission=%s type=%s", round_id, submission_id, type(exc).__name__)
+        return completed
+
     def public_submissions(self, round_id: str) -> Dict[str, Any]:
         return public_dashboard.submissions_snapshot(self, round_id)
 
@@ -5113,10 +5246,11 @@ class ArenaService:
             raise ServiceError("submission_missing", 404)  # an empty id must never mean "every submission"
         row = self._round(round_id)
         round_status = str(row["status"])
-        if round_status != "published":
+        completed = self.completed_submission_scores(row).get(submission_id) if round_status != "published" else None
+        if round_status != "published" and completed is None:
             raise ServiceError("results_not_public", 403)
         publication = row.get("publication_doc") or {}
-        participants = publication.get("participants") or []
+        participants = (publication.get("participants") if round_status == "published" else row.get("participants")) or []
         participant = next(
             (
                 item
@@ -5130,6 +5264,10 @@ class ArenaService:
         disclosure = self._public_icp_disclosure(row)
         public_positions = set(disclosure["public_positions"]) if disclosure else set()
         source_execution_runs = self._store.list_runs(round_id, kind="execute")
+        if completed is not None:
+            # Projection only: preserve every stored output and write-once score.
+            projected = {run["run_id"]: run for run in completed["execution_runs"]}
+            source_execution_runs = [projected.get(run["run_id"], run) for run in source_execution_runs]
         execution_runs = [
             run for run in source_execution_runs
             if run.get("submission_id") == submission_id
@@ -5160,6 +5298,8 @@ class ArenaService:
         }
         stage1_entry = next((item for item in publication.get("stage1_ranking") or [] if item.get("submission_id") == submission_id), None)
         final_entry = next((item for item in publication.get("final_ranking") or [] if item.get("submission_id") == submission_id), None)
+        if completed is not None:
+            final_entry = completed
         run_results = [run["result_doc"] for run in runs if run.get("result_doc")]
         validated_results = []
         for document in run_results:
@@ -5171,13 +5311,14 @@ class ArenaService:
         result = {
             "round_id": round_id, "submission_id": submission_id, "submission": {
                 "miner_hotkey": participant.get("miner_hotkey"),
-                "is_baseline": bool(participant.get("is_baseline")),
+                "is_baseline": bool(participant.get("is_baseline", participant.get("is_king", False))),
             },
             "outputs": outputs, "run_results": run_results,
             "scores": scores,
             "public_icp_status": "ready" if disclosure else "pending",
             "public_icp_count": len(public_positions),
             "benchmark_icp_count": contracts.benchmark_icp_count(row.get("configuration_doc")),
+            "score_status": "published" if round_status == "published" else "complete",
             "submission_scores": {
                 "stage_1": None if stage1_entry is None else stage1_entry.get("stage1_score"),
                 "final": None if final_entry is None else final_entry.get("final_score"),

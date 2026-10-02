@@ -420,7 +420,7 @@ def _baseline_and_champion(row: Mapping[str, Any]) -> tuple[Optional[dict], Opti
     return baseline, champion
 
 
-def round_summary(row: Mapping[str, Any]) -> dict:
+def round_summary(row: Mapping[str, Any], *, completed_scores: Optional[Mapping[str, Any]] = None) -> dict:
     network_name, netuid, mode = _configuration_scope(row)
     configuration = row.get("configuration_doc")
     configuration = configuration if isinstance(configuration, Mapping) else {}
@@ -428,6 +428,10 @@ def round_summary(row: Mapping[str, Any]) -> dict:
     schedule = schedule if isinstance(schedule, Mapping) else {}
     disclosure = icp_disclosure.disclosure_metadata(row) or {}
     baseline, champion = _baseline_and_champion(row)
+    if baseline and row.get("status") != "published":
+        completed = (completed_scores or {}).get(baseline["submission_id"])
+        if completed:
+            baseline = {**baseline, "final_score": completed["final_score"], "score_status": "complete"}
     if champion is None or row.get("promotion_required") is not True:
         promotion_status = "not_required"
     elif row.get("baseline_promoted_at"):
@@ -514,7 +518,7 @@ def competition_snapshot(service: Any, *, limit: int = DEFAULT_RECENT_ROUND_LIMI
             netuid=netuid,
             limit=bounded_limit,
         )
-    summaries = [round_summary(row) for row in rows]
+    summaries = [round_summary(row, completed_scores=_completed_scores(service, row)) for row in rows]
     open_round = next((row for row in summaries if row["status"] == "open"), None)
     latest_round = next(
         (row for row in summaries if row["status"] != "open"),
@@ -545,8 +549,19 @@ def competition_snapshot(service: Any, *, limit: int = DEFAULT_RECENT_ROUND_LIMI
     }
 
 
+def _completed_scores(service: Any, row: Mapping[str, Any]) -> Dict[str, Any]:
+    configuration = row.get("configuration_doc") or {}
+    if (row.get("status") in {"open", "committed", "stage1", "stage1_closed", "published", "cancelled"}
+        or configuration.get("execution_sequence_policy") != contracts.BASELINE_SCORED_FIRST_POLICY
+        or configuration.get("sourcing_cost_eligibility_policy") != contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY):
+        return {}
+    # The summary SELECT deliberately excludes private scoring plans.
+    full_row = row if "stage1_scoring_plan_doc" in row else service._round(str(row["round_id"]))
+    return service.completed_submission_scores(full_row)
+
+
 def _stage1_scores(service: Any, row: Mapping[str, Any]) -> Dict[str, float]:
-    # Intermediate scores must not escape before evaluation is published.
+    # Legacy stage-one rankings remain private until round publication.
     if row.get("status") != "published":
         return {}
     configuration = row.get("configuration_doc")
@@ -625,7 +640,7 @@ def _submission_lifecycle(
         if final_score is None:
             return "scoring_failed"
         return "champion" if is_champion else "scored"
-    if round_status == "scored":
+    if final_score is not None:
         return "scored"
     return "scoring"
 
@@ -689,6 +704,9 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
     round_status = str(row.get("status") or "")
     stage1_scores = _stage1_scores(service, row)
     final_scores = _rankings(row, "final_ranking") if round_status == "published" else {}
+    completed_scores = _completed_scores(service, row)
+    if round_status != "published":
+        final_scores = completed_scores
     champion_id = _champion_submission_id(row)
     participants = {
         str(item.get("submission_id")): item for item in _participants(row)
@@ -750,6 +768,7 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
                 "stage1_score": stage1_scores.get(submission_id),
                 "final_score": final_score,
                 "is_champion": is_champion,
+                **({"score_status": "complete"} if submission_id in completed_scores else {}),
                 "code": source_disclosure.disclosure_status(
                     submission, service.now(), round_row=row
                 ),
@@ -763,7 +782,7 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
                 "final_score": None,
                 "is_champion": False,
             })
-        if round_status == "published" and not review_excluded:
+        if (round_status == "published" or submission_id in completed_scores) and not review_excluded:
             configuration = row.get("configuration_doc")
             configuration = (
                 configuration if isinstance(configuration, Mapping) else {}

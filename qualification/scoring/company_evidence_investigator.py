@@ -245,16 +245,26 @@ commercialization claim does not by itself prove a current commercial sale.
 When positive_semantic_review is true, treat prior positive labels as untrusted
 hypotheses, not source observations. The supplier_operator role establishes
 only the company's relationship to the cited activity; it does not establish
-that the activity satisfies the requested criterion. Return VERIFIED only when
-the fetched source directly supports every active requested sub-industry
-constraint and the active product/service and required-attribute constraints.
-Preserve each criterion's explicit AND/OR structure: prove every required
-conjunct and one supported alternative for each OR clause. Equivalent source
-language is sufficient; do not require literal taxonomy labels. An adjacent
-activity for the same customer group is UNPROVEN. Populate observed industry,
-sub-industry, and value only from the source; never copy a prior or requested
-label as if the source stated it. In reason, concisely explain which concrete
-sold capability and customer scope the evidence proves or fails to prove.
+that the activity satisfies the requested industry criterion. For the industry
+finding, verify that the company itself supplies or operates the requested
+sector activity, using the complete industry, sub-industry, product/service,
+and required-attribute context to identify that activity. Do not make the
+industry finding depend on a commercial or other condition that is separately
+stated in the required attribute; that condition needs its own independent
+required-attribute judgment and source proof before company fit can match.
+Still prove every active industry, sub-industry, and supplied-product condition
+that is not separately checked by the required attribute. Preserve explicit
+AND/BOTH/ALL requirements and OR alternatives in each criterion: prove every
+required conjunct and one supported alternative for each OR clause. A label
+that names two customer sectors as a category does not alone require customers
+in both sectors; use the full ICP wording to decide whether either or both are
+required. Equivalent source language is sufficient; do not require literal
+taxonomy labels. An adjacent activity for the same customer group is UNPROVEN.
+Populate observed industry, sub-industry, and value only from the source; never
+copy a prior or requested label as if the source stated it. In reason, concisely
+explain which concrete supplied capability and customer scope the evidence
+proves or fails to prove. Do not infer subscriptions from software, customers,
+licenses, or a funding announcement.
 CONTRADICTED requires direct customer, internal-function, or third-party
 evidence; a page that describes only a different business is UNPROVEN because
 it does not prove absence of another activity.

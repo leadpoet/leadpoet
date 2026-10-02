@@ -240,7 +240,7 @@ def test_positive_review_is_added_when_recoverable_stage_is_unavailable():
         company=_company(),
     )
     assert outside_region.decision == COMPANY_FIT_MISMATCH
-    assert outside_targets == ()
+    assert outside_targets == ("stage",)
     assert not lead_scorer._positive_semantic_review_needed(
         outside_region, icp, outside_targets
     )
@@ -266,7 +266,7 @@ def test_positive_review_reopens_industry_during_attribute_source_recovery():
     assert result.details["required_attribute_decision"] == (
         COMPANY_FIT_UNAVAILABLE
     )
-    assert targets == ()
+    assert targets == ("stage",)
     assert lead_scorer._positive_semantic_review_needed(result, icp, targets)
 
 

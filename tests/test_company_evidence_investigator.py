@@ -2174,7 +2174,7 @@ def test_typesafe_investigator_fetch_repairs_same_attribute_source_only(
         return candidate
 
     async def bounded_investigation(*, targets, **_kwargs):
-        assert targets == ("stage", "industry")
+        assert targets == ("stage", "industry", "required_attribute")
         return {
             "claims": {
                 "stage": stage_finding,
@@ -2191,6 +2191,11 @@ def test_typesafe_investigator_fetch_repairs_same_attribute_source_only(
                         "intelligence they can integrate directly into "
                         "software systems."
                     ),
+                ),
+                "required_attribute": _attribute_finding(
+                    "VERIFIED" if "..." not in repaired_quote else "UNPROVEN",
+                    url=requested_source_url,
+                    quote=repaired_quote,
                 ),
             },
             "_validated_stage_finding": stage_finding,
@@ -2242,19 +2247,18 @@ def test_typesafe_investigator_fetch_repairs_same_attribute_source_only(
 
     assert result.decision == expected_decision
     assert source_fetch.await_count == 1
-    assert len(prompts) == 2
-    assert "<untrusted_required_attribute_source>" in prompts[1]
-    assert "they can integrate directly into software systems" in prompts[1]
+    assert len(prompts) == 1
     receipt = result.details["investigation_receipt"]
+    assert receipt["targets"] == ["stage", "industry", "required_attribute"]
     assert investigator.PRIVATE_FETCHED_PAGES_KEY not in receipt
     assert source_text not in str(receipt)
     assert source_text not in str(result.details)
     grounding = result.details["required_attribute_grounding"]
-    assert grounding["cache_hit"] is True
+    assert grounding["cache_hit"] is (expected_decision == COMPANY_FIT_MATCH)
     assert grounding["status"] == (
         "grounded"
         if expected_decision == COMPANY_FIT_MATCH
-        else "quote_absent"
+        else "invalid_evidence"
     )
 
 
@@ -2362,7 +2366,7 @@ def test_crowdstrike_stage_industry_source_can_repair_required_attribute(
         return candidate
 
     async def bounded_investigation(*, targets, positive_semantic_review, **_kwargs):
-        assert targets == ("stage", "industry")
+        assert targets == ("stage", "industry", "required_attribute")
         assert positive_semantic_review is True
         stage = _finding(
             "stage",
@@ -2386,6 +2390,11 @@ def test_crowdstrike_stage_industry_source_can_repair_required_attribute(
                     activity_role="supplier_operator",
                     evidence_url=(source_url if repair_proves_required_function else ""),
                     evidence_quote=(attribute_quote if repair_proves_required_function else ""),
+                ),
+                "required_attribute": _attribute_finding(
+                    "VERIFIED" if repair_proves_required_function else "UNPROVEN",
+                    url=source_url,
+                    quote=attribute_quote,
                 ),
             },
             "_validated_stage_finding": stage,
@@ -2444,13 +2453,13 @@ def test_crowdstrike_stage_industry_source_can_repair_required_attribute(
     assert source_fetch.await_count == 1
     # The industry source can guide a separate attribute judgment, but cannot
     # by itself turn an unproven attribute into a match.
-    assert len(prompts) == (2 if repair_proves_required_function else 1)
+    assert len(prompts) == 1
     grounding = result.details["required_attribute_grounding"]
     assert grounding["cache_hit"] is repair_proves_required_function
     assert grounding["status"] == (
         "grounded"
         if expected_decision == COMPANY_FIT_MATCH
-        else "source_unavailable"
+        else "invalid_evidence"
     )
 
 
@@ -2497,7 +2506,7 @@ def test_rapid7_unproven_stage_and_industry_cannot_repair_attribute_source(
         return candidate
 
     async def unproven_investigation(*, targets, **_kwargs):
-        assert targets == ("stage", "industry")
+        assert targets == ("stage", "industry", "required_attribute")
         return {
             "claims": {
                 target: _finding(
@@ -2632,6 +2641,7 @@ def _finding(target: str, **overrides):
         "activity_role": "unresolved",
         "evidence_url": "https://acme.example/investors",
         "evidence_quote": "Acme common stock is listed on NASDAQ under ticker ACME.",
+        "supporting_evidence": [],
         "old_name": "",
         "new_name": "",
         "old_domain": "",
@@ -2641,6 +2651,21 @@ def _finding(target: str, **overrides):
     }
     finding.update(overrides)
     return finding
+
+
+def _attribute_finding(
+    status: str = "UNPROVEN", *, url: str = "", quote: str = "",
+    role: str = "supplier_operator",
+):
+    return _finding(
+        "required_attribute",
+        status=status,
+        observed_value=None,
+        activity_role=role if status != "UNPROVEN" else "unresolved",
+        evidence_url=url if status != "UNPROVEN" else "",
+        evidence_quote=quote if status != "UNPROVEN" else "",
+        reason="independently checked each required attribute condition",
+    )
 
 
 @pytest.mark.parametrize(
@@ -2786,7 +2811,7 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
 
     async def investigate(*, targets, prior_observations, **_kwargs):
         calls["investigator"] += 1
-        assert targets == ("industry",)
+        assert targets == ("industry", "required_attribute")
         assert prior_observations["submitted_source_urls"][0] == source_url
         page_text = {
             "supported": (
@@ -2856,7 +2881,12 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
                     ),
                     evidence_url=claim_url if resolved else "",
                     evidence_quote=page_text if resolved else "",
-                )
+                ),
+                "required_attribute": _attribute_finding(
+                    "VERIFIED" if semantic_verified else "UNPROVEN",
+                    url=claim_url,
+                    quote=page_text,
+                ),
             },
             "usage": {"reasoning_turns": 2, "search_calls": 0, "fetch_calls": 1},
             "failure_reason": "",
@@ -2892,9 +2922,7 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
     ))
 
     assert calls == {
-        "provider": 2 if investigator_mode in {
-            "supported", "alternate_supported"
-        } else 1,
+        "provider": 1,
         "investigator": 1,
         "direct_fetch": 1,
     }
@@ -2918,7 +2946,7 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
     assert attribute_receipt["status"] == (
         "grounded"
         if expected_decision == COMPANY_FIT_MATCH
-        else "source_unavailable"
+        else "invalid_evidence"
     )
     assert attribute_receipt["cache_hit"] is (
         investigator_mode in {"supported", "alternate_supported"}
@@ -2942,7 +2970,7 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
             False,
             "Acme uses identity verification tools for hiring.",
             False,
-            COMPANY_FIT_MISMATCH,
+            COMPANY_FIT_UNAVAILABLE,
         ),
         (
             True,
@@ -2996,7 +3024,7 @@ def test_grounded_attribute_gets_one_semantic_investigator_review(
 
     async def investigate(*, targets, **_kwargs):
         calls["investigator"] += 1
-        assert targets == ("industry",)
+        assert targets == ("industry", "required_attribute")
         return {
             "claims": {
                 "industry": _finding(
@@ -3007,7 +3035,12 @@ def test_grounded_attribute_gets_one_semantic_investigator_review(
                     activity_role="supplier_operator",
                     evidence_url=source_url,
                     evidence_quote=industry_quote,
-                )
+                ),
+                "required_attribute": _attribute_finding(
+                    "VERIFIED" if repair_satisfied is True else "UNPROVEN",
+                    url=source_url,
+                    quote=attribute_quote,
+                ),
             },
             investigator.PRIVATE_FETCHED_PAGES_KEY: {
                 source_url: {"final_url": source_url, "text": source_text},
@@ -3046,7 +3079,7 @@ def test_grounded_attribute_gets_one_semantic_investigator_review(
     assert result.decision == expected
     assert result.details["required_attribute_decision"] == expected
     assert calls == {
-        "provider": 2,
+        "provider": 1,
         "fetch": 1,
         "investigator": 1,
     }
@@ -6917,7 +6950,7 @@ def test_arena_conflict_check_collects_structured_size_without_replacing_direct_
     assert _employee_size_sources_conflict(refreshed, structured) is True
 
 
-def test_oxpay_schema_repair_recomputes_stale_employee_conflict(monkeypatch):
+def test_oxpay_unproven_geography_keeps_employee_conflict(monkeypatch):
     """A same-entity repair may omit size without erasing bound profile proof."""
 
     company = _company(
@@ -7040,7 +7073,9 @@ def test_oxpay_schema_repair_recomputes_stale_employee_conflict(monkeypatch):
 
     async def bounded_investigation(*, targets, **_kwargs):
         calls["investigator"] += 1
-        assert targets == ("stage", "geography", "industry")
+        assert targets == (
+            "stage", "geography", "industry", "required_attribute"
+        )
         stage = _finding(
             "stage",
             observed_value="Public",
@@ -7072,6 +7107,14 @@ def test_oxpay_schema_repair_recomputes_stale_employee_conflict(monkeypatch):
                     evidence_quote=(
                         "OxPay provides merchant payment services through an "
                         "integrated platform."
+                    ),
+                ),
+                "required_attribute": _attribute_finding(
+                    "VERIFIED",
+                    url="https://oxpayfinancial.com/about-us/",
+                    quote=(
+                        "OxPay helps merchants process payments through its "
+                        "integrated platform and announced a strategic partnership."
                     ),
                 ),
             },
@@ -7140,18 +7183,18 @@ def test_oxpay_schema_repair_recomputes_stale_employee_conflict(monkeypatch):
     ))
 
     assert calls == {
-        "provider": 2,
+        "provider": 1,
         "investigator": 1,
         "structured": 1,
-        "current": 2,
+        "current": 0,
     }
     assert grounding_calls == 2
-    assert result.decision == COMPANY_FIT_MATCH
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert result.details["dimension_decisions"]["employee_size"] == (
         COMPANY_FIT_MATCH
     )
     assert result.details["dimension_evidence"]["employee_size"] == structured
-    assert result.details["employee_size_conflict"] is False
+    assert result.details["employee_size_conflict"] is True
 
 
 @pytest.mark.parametrize(
@@ -7174,7 +7217,7 @@ def test_oxpay_schema_repair_recomputes_stale_employee_conflict(monkeypatch):
             True,
             COMPANY_FIT_MATCH,
             COMPANY_FIT_MATCH,
-            2,
+            1,
         ),
         (
             "CONTRADICTED",
@@ -7212,9 +7255,9 @@ def test_oxpay_schema_repair_recomputes_stale_employee_conflict(monkeypatch):
             "wrong",
             False,
             True,
-            COMPANY_FIT_UNAVAILABLE,
             COMPANY_FIT_MATCH,
-            2,
+            COMPANY_FIT_MATCH,
+            1,
         ),
         (
             "VERIFIED",
@@ -7222,9 +7265,9 @@ def test_oxpay_schema_repair_recomputes_stale_employee_conflict(monkeypatch):
             "same",
             False,
             False,
-            COMPANY_FIT_MISMATCH,
             COMPANY_FIT_MATCH,
-            2,
+            COMPANY_FIT_MATCH,
+            1,
         ),
     ],
 )
@@ -7304,7 +7347,7 @@ def test_schema_repair_reconciles_bounded_industry_decision(
 
     async def bounded_investigation(*, targets, **_kwargs):
         calls["investigator"] += 1
-        assert targets == ("industry",)
+        assert targets == ("industry", "required_attribute")
         finding = _finding(
             "industry",
             status=investigator_status,
@@ -7339,7 +7382,14 @@ def test_schema_repair_reconciles_bounded_industry_decision(
             reason="bounded industry decision",
         )
         return {
-            "claims": {"industry": finding},
+            "claims": {
+                "industry": finding,
+                "required_attribute": _attribute_finding(
+                    "VERIFIED" if investigator_status == "VERIFIED" else "UNPROVEN",
+                    url="https://acme.example/firewall",
+                    quote="Acme sells customer-operated web application firewall controls.",
+                ),
+            },
             "failure_reason": "",
             "usage": {"reasoning_turns": 1, "search_calls": 0, "fetch_calls": 1},
         }
@@ -7398,10 +7448,8 @@ def test_schema_repair_reconciles_bounded_industry_decision(
     assert result.details["dimension_decisions"]["industry"] == (
         expected_industry_decision
     )
-    if repair_attribute is False:
-        assert result.details["required_attribute_decision"] == (
-            COMPANY_FIT_MISMATCH
-        )
+    if investigator_status == "VERIFIED":
+        assert result.details["required_attribute_decision"] == COMPANY_FIT_MATCH
 
 
 def test_flam_industry_review_requires_separate_attribute_judgment(
@@ -7481,7 +7529,7 @@ def test_flam_industry_review_requires_separate_attribute_judgment(
 
     async def bounded_investigation(**kwargs):
         calls["investigator"] += 1
-        assert kwargs["targets"] == ("industry",)
+        assert kwargs["targets"] == ("industry", "required_attribute")
         assert kwargs["positive_semantic_review"] is True
         assert kwargs["homepage_navigation_locators"] == ({
             "url": flicks_url,
@@ -7498,7 +7546,12 @@ def test_flam_industry_review_requires_separate_attribute_judgment(
             },
         }
         return {
-            "claims": {"industry": finding},
+            "claims": {
+                "industry": finding,
+                "required_attribute": _attribute_finding(
+                    "VERIFIED", url=flicks_url, quote=flicks_quote
+                ),
+            },
             investigator.PRIVATE_FETCHED_PAGES_KEY: {
                 flicks_url: {
                     "final_url": flicks_final_url,
@@ -7556,7 +7609,7 @@ def test_flam_industry_review_requires_separate_attribute_judgment(
         evidence_investigator=True,
     ))
 
-    assert calls == {"provider": 2, "investigator": 1, "direct_fetch": 1}
+    assert calls == {"provider": 1, "investigator": 1, "direct_fetch": 1}
     assert result.decision == COMPANY_FIT_MATCH
     assert result.details["dimension_decisions"]["industry"] == COMPANY_FIT_MATCH
     assert result.details["required_attribute_decision"] == COMPANY_FIT_MATCH
@@ -7584,6 +7637,11 @@ def test_oct01_abre_sector_proof_does_not_imply_recurring_subscription(
         "Abre's Growth & Support Solution helps teams capture a need, build a "
         "plan, track progress, and evaluate what worked. For students and "
         "staff alike."
+    )
+    features_url = "https://abre.com/features/"
+    features_quote = (
+        "Abre brings district data, analytics, workflows, and people together "
+        "in one comprehensive platform."
     )
     stage_url = (
         "https://abre.com/resources/press/abre-secures-24-million-series-a-"
@@ -7649,9 +7707,9 @@ def test_oct01_abre_sector_proof_does_not_imply_recurring_subscription(
         stage_matches=True,
         stage_evidence_url=stage_url,
         stage_evidence_quote=stage_quote,
-        attribute_satisfied=None,
-        required_attribute_evidence_url="",
-        required_attribute_evidence_quote="",
+        attribute_satisfied=True,
+        required_attribute_evidence_url=features_url,
+        required_attribute_evidence_quote=features_quote,
     )
     finding = _finding(
         "industry",
@@ -7668,16 +7726,24 @@ def test_oct01_abre_sector_proof_does_not_imply_recurring_subscription(
         provider_calls.append(kwargs["telemetry_purpose"])
         return initial, ""
 
+    async def source_fetch(_session, url):
+        assert url == features_url
+        return 200, features_url, features_quote
+
     async def investigate(**kwargs):
-        assert kwargs["targets"] == ("stage", "industry")
+        assert kwargs["targets"] == ("stage", "industry", "required_attribute")
         assert kwargs["positive_semantic_review"] is True
         assert kwargs["requested_subindustry"] == icp.sub_industry
         assert growth_url in kwargs["prior_observations"]["submitted_source_urls"]
         return {
-            "claims": {"industry": finding, "stage": _finding(
-                "stage", observed_value="Series A", evidence_url=stage_url,
-                evidence_quote=stage_quote,
-            )},
+            "claims": {
+                "industry": finding,
+                "required_attribute": _attribute_finding(),
+                "stage": _finding(
+                    "stage", observed_value="Series A", evidence_url=stage_url,
+                    evidence_quote=stage_quote,
+                ),
+            },
             investigator.PRIVATE_FETCHED_PAGES_KEY: {
                 growth_url: {"final_url": growth_url, "text": growth_quote}
             },
@@ -7702,6 +7768,7 @@ def test_oct01_abre_sector_proof_does_not_imply_recurring_subscription(
     )
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", source_fetch)
     monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
     monkeypatch.setattr(
         lead_scorer, "_refresh_linkedin_employee_size_observation", keep_observation
@@ -7716,9 +7783,122 @@ def test_oct01_abre_sector_proof_does_not_imply_recurring_subscription(
         evidence_investigator=True,
     ))
 
-    assert provider_calls == [
-        "lead_scorer_reverify", "lead_scorer_reverify_schema_repair"
-    ]
+    assert provider_calls == ["lead_scorer_reverify"]
+    assert result.details["dimension_decisions"]["industry"] == COMPANY_FIT_MATCH
+    assert result.details["required_attribute_decision"] == COMPANY_FIT_UNAVAILABLE
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+
+
+def test_oct01_edvisorly_homepage_platform_quote_does_not_prove_recurring_sale(
+    monkeypatch,
+):
+    homepage_url = "https://www.edvisorly.com/"
+    homepage_quote = (
+        "AI-powered innovation built to modernize transcript evaluation and "
+        "unlock student enrollment success."
+    )
+    university_url = "https://edvisorly.com/university"
+    university_quote = (
+        "EdVisorly empowers institutions to Process and Evaluate High School, "
+        "Transfer & Graduate Transcripts with Artificial Intelligence Recruit, "
+        "Engage and Enroll Qualified Transfer Students"
+    )
+    company = _company(
+        name="EdVisorly", website=homepage_url,
+        linkedin="https://www.linkedin.com/company/edvisorly",
+    ).model_copy(update={"company_stage": "Series A"})
+    icp = _icp(
+        industry="Education",
+        sub_industry="K-12 and higher-ed software providers",
+        company_stage="Series A",
+        product_service=(
+            "A subscription platform that helps schools or universities "
+            "manage student workflows, communication, and operational reporting."
+        ),
+        required_attribute=(
+            "Sells a recurring software platform used by educational "
+            "institutions to streamline student-facing or administrative "
+            "workflows."
+        ),
+    )
+    initial = _complete_verdict(
+        observed_company_name="EdVisorly",
+        observed_company_website=homepage_url,
+        observed_company_linkedin="https://www.linkedin.com/company/edvisorly",
+        observed_industry="Education",
+        observed_subindustry="higher-education enrollment software",
+        industry_evidence_url=university_url,
+        industry_evidence_quote=university_quote,
+        observed_company_stage="Series A",
+        stage_matches=True,
+        stage_evidence_url="https://www.edvisorly.com/edvisorly-series-a-round",
+        stage_evidence_quote="EdVisorly announced the close of a Series A round.",
+        attribute_satisfied=True,
+        required_attribute_evidence_url=homepage_url,
+        required_attribute_evidence_quote=homepage_quote,
+    )
+    calls = []
+
+    async def provider(**kwargs):
+        calls.append(kwargs["telemetry_purpose"])
+        return initial, ""
+
+    async def fetch(_session, url):
+        assert url == homepage_url
+        return 200, homepage_url, homepage_quote
+
+    async def investigate(**kwargs):
+        assert kwargs["positive_semantic_review"] is True
+        assert "required_attribute" in kwargs["targets"]
+        return {
+            "claims": {
+                "industry": _finding(
+                    "industry", observed_industry="Education",
+                    observed_subindustry="higher-education enrollment software",
+                    activity_role="supplier_operator",
+                    evidence_url=university_url,
+                    evidence_quote=university_quote,
+                ),
+                "required_attribute": _attribute_finding(),
+                "stage": _finding(
+                    "stage", status="UNPROVEN", observed_value=None,
+                    evidence_url="", evidence_quote="",
+                ),
+            },
+            investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                university_url: {"final_url": university_url, "text": university_quote}
+            },
+            "failure_reason": "",
+        }
+
+    homepage_identity = lead_scorer.company_fit_match(
+        "homepage identity verified",
+        details={
+            "identity": {
+                "decision": COMPANY_FIT_MATCH,
+                "evidence_source": "company_homepage",
+                "observed_name": "edvisorly",
+                "observed_domain": "edvisorly.com",
+                "observed_linkedin_slug": "edvisorly",
+            },
+            "verified_homepage_transport_domain": "edvisorly.com",
+        },
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", fetch)
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
+    monkeypatch.setattr(
+        lead_scorer, "_refresh_linkedin_employee_size_observation",
+        lambda verdict, *_args, **_kwargs: asyncio.sleep(0, result=verdict),
+    )
+
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        company, icp, require_company_fit_dimensions=True,
+        verified_homepage_identity=homepage_identity,
+        company_quality=True, evidence_investigator=True,
+    ))
+    assert calls == ["lead_scorer_reverify"]
     assert result.details["dimension_decisions"]["industry"] == COMPANY_FIT_MATCH
     assert result.details["required_attribute_decision"] == COMPANY_FIT_UNAVAILABLE
     assert result.decision == COMPANY_FIT_UNAVAILABLE
@@ -7747,15 +7927,18 @@ def test_grounded_attribute_mismatch_unproven_review_stays_unqualified(
 
     async def investigate(*, targets, **_kwargs):
         calls["investigator"] += 1
-        assert targets == ("industry",)
+        assert targets == ("industry", "required_attribute")
         return {
-            "claims": {"industry": _finding(
-                "industry",
-                status="UNPROVEN",
-                observed_value=None,
-                evidence_url="",
-                evidence_quote="",
-            )},
+            "claims": {
+                "industry": _finding(
+                    "industry",
+                    status="UNPROVEN",
+                    observed_value=None,
+                    evidence_url="",
+                    evidence_quote="",
+                ),
+                "required_attribute": _attribute_finding(),
+            },
             "failure_reason": "",
         }
 
@@ -7847,7 +8030,7 @@ def test_attribute_conversion_requires_complete_matching_identity(
     ("repair_attribute", "expected_decision"),
     [
         (True, COMPANY_FIT_MATCH),
-        (False, COMPANY_FIT_MISMATCH),
+        (False, COMPANY_FIT_UNAVAILABLE),
     ],
 )
 def test_sentinelone_style_industry_repair_preserves_valid_public_stage(
@@ -7946,7 +8129,7 @@ def test_sentinelone_style_industry_repair_preserves_valid_public_stage(
         return (initial if len(provider_calls) == 1 else repaired), ""
 
     async def bounded_investigation(*, targets, **_kwargs):
-        assert targets == ("stage", "industry")
+        assert targets == ("stage", "industry", "required_attribute")
         stage = _finding(
             "stage",
             observed_value="Public",
@@ -7967,7 +8150,15 @@ def test_sentinelone_style_industry_repair_preserves_valid_public_stage(
                         "SentinelOne provides an AI-powered endpoint security "
                         "platform."
                     ),
-                )
+                ),
+                "required_attribute": _attribute_finding(
+                    "VERIFIED" if repair_attribute else "UNPROVEN",
+                    url="https://www.sentinelone.com/platform/",
+                    quote=(
+                        "SentinelOne provides an AI-powered endpoint security "
+                        "platform."
+                    ),
+                ),
             },
             "_validated_stage_finding": stage,
             "failure_reason": "",
@@ -8019,10 +8210,7 @@ def test_sentinelone_style_industry_repair_preserves_valid_public_stage(
         evidence_investigator=True,
     ))
 
-    assert provider_calls == [
-        "lead_scorer_reverify",
-        "lead_scorer_reverify_schema_repair",
-    ]
+    assert provider_calls == ["lead_scorer_reverify"]
     assert result.decision == expected_decision
     assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_MATCH
     assert result.details["dimension_evidence"]["stage"] == {
@@ -8032,7 +8220,7 @@ def test_sentinelone_style_industry_repair_preserves_valid_public_stage(
     assert result.details["required_attribute_decision"] == (
         COMPANY_FIT_MATCH
         if repair_attribute
-        else COMPANY_FIT_MISMATCH
+        else COMPANY_FIT_UNAVAILABLE
     )
 
 
@@ -8122,6 +8310,11 @@ def test_schema_repair_cannot_restore_unproven_current_stage(
                         "Generic Security provides an endpoint security platform."
                     ),
                 ),
+                "required_attribute": _attribute_finding(
+                    "VERIFIED",
+                    url="https://genericsecurity.example/platform/",
+                    quote="Generic Security provides an endpoint security platform.",
+                ),
             },
             "_validated_stage_finding": {},
             "failure_reason": "",
@@ -8173,11 +8366,10 @@ def test_schema_repair_cannot_restore_unproven_current_stage(
         evidence_investigator=True,
     ))
 
-    assert provider_calls == [
-        "lead_scorer_reverify",
-        "lead_scorer_reverify_schema_repair",
+    assert provider_calls == ["lead_scorer_reverify"]
+    assert investigator_calls == [
+        ("stage", "industry", "required_attribute")
     ]
-    assert investigator_calls == [("stage", "industry")]
     assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert result.details["dimension_decisions"]["stage"] == (
         COMPANY_FIT_UNAVAILABLE
@@ -13162,6 +13354,141 @@ def test_targeted_stage_classification_through_lab_scorer(
     assert receipt["company_fit_dimensions"]["stage"] == (
         COMPANY_FIT_UNAVAILABLE
     )
+
+
+@pytest.mark.parametrize("recurring_proved", [False, True])
+def test_reviewed_recurring_attribute_controls_arena_score(
+    monkeypatch, recurring_proved
+):
+    product_url = "https://acme.example/student-plans"
+    product_quote = "Acme supplies schools with student planning software."
+    terms_url = "https://acme.example/terms"
+    terms_quote = "Acme's student planning software plan renews annually."
+    calls = {"provider": 0, "investigator": 0, "intent": 0, "fetch": 0}
+
+    async def prechecks(*_args, **_kwargs):
+        return lead_scorer.company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return lead_scorer.company_fit_match(
+            "homepage identity verified",
+            details={
+                "identity": {
+                    "decision": COMPANY_FIT_MATCH,
+                    "evidence_source": "company_homepage",
+                    "observed_name": "acme",
+                    "observed_domain": "acme.example",
+                    "observed_linkedin_slug": "acme",
+                },
+                "verified_homepage_transport_domain": "acme.example",
+            },
+        )
+
+    async def provider(**_kwargs):
+        calls["provider"] += 1
+        return _complete_verdict(
+            observed_industry="Education",
+            observed_subindustry="school planning software",
+            industry_evidence_url=product_url,
+            industry_evidence_quote=product_quote,
+            attribute_satisfied=True,
+            required_attribute_evidence_url=product_url,
+            required_attribute_evidence_quote=product_quote,
+        ), ""
+
+    async def fetch(_session, url):
+        calls["fetch"] += 1
+        assert url == product_url
+        return 200, product_url, product_quote
+
+    async def investigate(**kwargs):
+        calls["investigator"] += 1
+        assert kwargs["targets"] == ("industry", "required_attribute")
+        claims = {
+            "industry": _finding(
+                "industry", observed_value="school planning software",
+                observed_industry="Education",
+                observed_subindustry="school planning software",
+                activity_role="supplier_operator",
+                evidence_url=product_url,
+                evidence_quote=product_quote,
+            ),
+            "required_attribute": _attribute_finding(
+                "VERIFIED" if recurring_proved else "UNPROVEN",
+                url=terms_url, quote=terms_quote,
+            ),
+        }
+        pages = {
+            product_url: {"final_url": product_url, "text": product_quote},
+        }
+        if recurring_proved:
+            pages[terms_url] = {"final_url": terms_url, "text": terms_quote}
+        return {
+            "claims": claims,
+            investigator.PRIVATE_FETCHED_PAGES_KEY: pages,
+            "failure_reason": "",
+        }
+
+    async def keep_observation(verdict, *_args, **_kwargs):
+        return verdict
+
+    async def intent_score(*_args, **_kwargs):
+        calls["intent"] += 1
+        return 54, 54, 1.0, 1.0, False, [{
+            "raw": 54,
+            "after_decay": 54,
+            "matched_icp_signal": 0,
+            "judge_verdict": {
+                "decision": "verified",
+                "pipeline_decision": "accept",
+                "verification_trace": {"intent_verdict": {
+                    "signal_evaluations": [{"signal_status": "supported"}],
+                }},
+            },
+        }]
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", fetch)
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
+    monkeypatch.setattr(
+        lead_scorer, "_refresh_linkedin_employee_size_observation",
+        keep_observation,
+    )
+    monkeypatch.setattr(
+        lead_scorer, "score_company_competition_intent_signal", intent_score
+    )
+    scorer = arena_scoring.lab_scorer(
+        arena_scoring.build_scorer_policy(
+            scoring_adapter_version="qualification_integrity_v2",
+            company_quality=True,
+        )
+    )
+    company = {
+        **_competition_company(),
+        "industry": "Education",
+    }
+    rows = arena_scoring.score_work_item(
+        {"scored_run_id": "reviewed-attribute-control"},
+        icp=_icp(
+            industry="Education",
+            sub_industry="school planning software",
+            product_service="student planning software used by schools",
+            required_attribute=(
+                "Sells a recurring student planning software platform to schools."
+            ),
+            intent_signals=["Announced a completed funding event"],
+        ).model_dump(mode="json"),
+        companies=[company], scorer=scorer, max_retries=1,
+    )
+    assert calls["provider"] == 1, (calls, rows)
+    assert calls["investigator"] == 1
+    assert calls["fetch"] == 1
+    assert rows[0]["company_qualified"] is recurring_proved
+    assert rows[0]["final_score"] == (54 if recurring_proved else 0.0)
+    assert calls["intent"] == (1 if recurring_proved else 0)
 
 
 def test_completed_same_domain_alias_is_terminal_zero_through_lab_scorer(

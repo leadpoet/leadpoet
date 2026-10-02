@@ -307,7 +307,94 @@ def test_prompt_preserves_negative_controls_and_all_required_conjuncts():
         "own internal console or workflow remain customer_user or internal_function"
     ) in prompt
     assert (
-        "Still prove every separate industry, sub-industry, product/service" in prompt
+        "Still prove every active industry, sub-industry, and supplied-product" in prompt
     )
-    assert "required-attribute, or other clause joined by AND" in prompt
+    assert "The independent required-attribute check must still prove" in prompt
     assert "An adjacent activity for the same customer group is UNPROVEN" in prompt
+    assert "product/service criterion explicitly lists those capabilities as OR" in prompt
+    assert "Do not convert an explicit BOTH, ALL" in prompt
+
+
+def test_attribute_review_binds_annual_terms_and_workflow_across_loaded_pages():
+    product_url = "https://acme.example/student-plans"
+    terms_url = "https://acme.example/terms"
+    product_quote = "Acme provides schools with a student planning platform."
+    terms_quote = "Acme school platform subscriptions renew every year."
+    industry = _finding(
+        status="VERIFIED", role="supplier_operator", url=product_url,
+        quote=product_quote, reason="Acme supplies student planning software.",
+    )
+    attribute = {
+        **_finding(
+            status="VERIFIED", role="supplier_operator", url=terms_url,
+            quote=terms_quote,
+            reason="The loaded product and annual terms pages prove both conjuncts.",
+        ),
+        "target": "required_attribute",
+        "supporting_evidence_url_1": product_url,
+        "supporting_evidence_quote_1": product_quote,
+    }
+    pages = {product_url: product_quote, terms_url: terms_quote}
+    kwargs = dict(
+        targets=("industry", "required_attribute"),
+        fetched_pages=pages,
+        fetched_final_urls={url: url for url in pages},
+        first_party_domains={"acme.example"},
+        identity_names={"acme"},
+        identity_anchor=_identity_anchor("Acme", "acme.example"),
+    )
+    accepted = investigator._validated_findings(
+        {"findings": [industry, attribute]}, **kwargs
+    )
+    assert accepted["industry"]["status"] == "VERIFIED"
+    assert accepted["required_attribute"]["status"] == "VERIFIED"
+    assert accepted["required_attribute"]["supporting_evidence"] == [
+        {"url": product_url, "quote": product_quote}
+    ]
+
+    forged = dict(attribute, supporting_evidence_quote_1="Acme sold no platform at all.")
+    rejected = investigator._validated_findings(
+        {"findings": [industry, forged]}, **kwargs
+    )
+    assert rejected["required_attribute"]["status"] == "UNPROVEN"
+
+
+def test_attribute_review_accepts_company_bound_third_party_and_internal_event():
+    news_url = "https://press.example/acme-expansion"
+    office_quote = "Acme opened its London office on September 1."
+    hiring_url = "https://acme.example/careers"
+    hiring_quote = "Acme is hiring software engineers for its London team."
+    attribute = {
+        **_finding(
+            status="VERIFIED", role="internal_function", url=news_url,
+            quote=office_quote,
+            reason="The office opening and hiring are both company-bound.",
+        ),
+        "target": "required_attribute",
+        "supporting_evidence_url_1": hiring_url,
+        "supporting_evidence_quote_1": hiring_quote,
+    }
+    pages = {news_url: office_quote, hiring_url: hiring_quote}
+    result = investigator._validated_findings(
+        {"findings": [attribute]},
+        targets=("required_attribute",),
+        fetched_pages=pages,
+        fetched_final_urls={url: url for url in pages},
+        first_party_domains={"acme.example"},
+        identity_names={"acme"},
+        identity_anchor=_identity_anchor("Acme", "acme.example"),
+    )
+    assert result["required_attribute"]["status"] == "VERIFIED"
+
+    wrong_company = dict(attribute, evidence_quote="OtherCo opened London office.")
+    pages[news_url] = wrong_company["evidence_quote"]
+    rejected = investigator._validated_findings(
+        {"findings": [wrong_company]},
+        targets=("required_attribute",),
+        fetched_pages=pages,
+        fetched_final_urls={url: url for url in pages},
+        first_party_domains={"acme.example"},
+        identity_names={"acme"},
+        identity_anchor=_identity_anchor("Acme", "acme.example"),
+    )
+    assert rejected["required_attribute"]["status"] == "UNPROVEN"

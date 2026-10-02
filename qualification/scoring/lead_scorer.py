@@ -2253,6 +2253,44 @@ def _hydrate_required_attribute_source_cache(
         )
 
 
+def _reviewed_required_attribute_source_cache(
+    investigation: Mapping[str, Any],
+    finding: Optional[Mapping[str, Any]],
+    fallback: Optional[dict[str, dict[str, Any]]],
+) -> dict[str, dict[str, Any]]:
+    """Ground a reviewed quote from its already loaded page without a refetch."""
+
+    value = finding or {}
+    raw_url = value.get("evidence_url")
+    quote = value.get("evidence_quote")
+    pages = investigation.get(PRIVATE_FETCHED_PAGES_KEY)
+    if not isinstance(raw_url, str) or not isinstance(quote, str) or not (
+        isinstance(pages, Mapping)
+    ):
+        return fallback if fallback is not None else {}
+    page = pages.get(raw_url)
+    if not isinstance(page, Mapping):
+        return fallback if fallback is not None else {}
+    try:
+        url = public_http_url(raw_url)
+        final_url = public_http_url(page.get("final_url"))
+    except (TypeError, ValueError):
+        return fallback if fallback is not None else {}
+    text = page.get("text")
+    if (
+        url != raw_url
+        or not isinstance(text, str)
+        or not text
+        or len(text) > MAX_PAGE_CHARACTERS
+        or not _quote_occurs(quote, text)
+    ):
+        return fallback if fallback is not None else {}
+    # The investigator has already spent its bounded source budget and
+    # validated the company-bound finding. Do not consume a third attribute
+    # source slot merely to re-fetch this same reviewed page.
+    return {url: {"status": "fetched", "final_url": final_url, "text": text}}
+
+
 _PARAGRAPH_COMPANY_CONTEXT_DIMENSIONS = (
     "required_attribute",
     "industry",
@@ -6211,22 +6249,24 @@ def _project_investigator_industry(
 
 def _project_investigator_required_attribute(
     verdict: Mapping[str, Any],
-    finding: Mapping[str, Any],
+    finding: Optional[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """Use one strict verified activity finding as required-attribute proof."""
+    """Project a separate, source-bound required-attribute judgment."""
 
     projected = dict(verdict)
-    url = _valid_web_evidence_url(finding.get("evidence_url"))
-    quote = str(finding.get("evidence_quote") or "").strip()[:2000]
+    _clear_required_attribute_evidence(projected)
+    value = finding or {}
+    status = value.get("status")
+    url = _valid_web_evidence_url(value.get("evidence_url"))
+    quote = str(value.get("evidence_quote") or "").strip()[:2000]
     if (
-        finding.get("status") != "VERIFIED"
-        or finding.get("activity_role") != "supplier_operator"
+        status not in {"VERIFIED", "CONTRADICTED"}
         or not url
         or not quote
     ):
         return projected
     projected.update(
-        attribute_satisfied=True,
+        attribute_satisfied=status == "VERIFIED",
         required_attribute_evidence_url=url,
         required_attribute_evidence_quote=quote,
     )
@@ -6235,6 +6275,36 @@ def _project_investigator_required_attribute(
         nested_copy = dict(nested)
         nested_copy["required_attribute"] = {"url": url, "quote": quote}
         projected["dimension_evidence"] = nested_copy
+    return projected
+
+
+def _preserve_reviewed_required_attribute(
+    reviewed: Mapping[str, Any], repaired: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Keep a bounded attribute judgment across unrelated schema repair."""
+
+    projected = dict(repaired)
+    for key in (
+        "attribute_satisfied",
+        "attribute_evidence",
+        "required_attribute_evidence_url",
+        "required_attribute_evidence_quote",
+        _REQUIRED_ATTRIBUTE_GROUNDING,
+    ):
+        if key in reviewed:
+            projected[key] = reviewed[key]
+        else:
+            projected.pop(key, None)
+    nested = projected.get("dimension_evidence")
+    reviewed_nested = reviewed.get("dimension_evidence")
+    if isinstance(nested, Mapping):
+        merged = dict(nested)
+        merged["required_attribute"] = (
+            dict(reviewed_nested.get("required_attribute") or {})
+            if isinstance(reviewed_nested, Mapping)
+            else {}
+        )
+        projected["dimension_evidence"] = merged
     return projected
 
 
@@ -6769,6 +6839,8 @@ async def _run_targeted_company_evidence_investigation(
         else {}
     )
     if (
+        "required_attribute" not in investigation_targets
+        and
         required_attribute_source_cache is not None
         and icp_attribute
         and prior_result is not None
@@ -6939,14 +7011,29 @@ async def _run_targeted_company_evidence_investigation(
             projected,
             industry_claim,
         )
-    if (
-        review_positive_semantics
-        and bool(icp_attribute)
-        and positive_semantic_resolved
-    ):
-        # The industry finding proves only the supplied activity. Reopen even
-        # a prior grounded attribute match for one independent schema repair.
-        _clear_required_attribute_evidence(projected)
+    if "required_attribute" in investigation_targets:
+        attribute_claim = (
+            claims.get("required_attribute")
+            if isinstance(claims.get("required_attribute"), Mapping)
+            else None
+        )
+        projected = _project_investigator_required_attribute(
+            projected, attribute_claim
+        )
+        projected, _unused_attribute_source = (
+            await _ground_required_attribute_evidence(
+                projected,
+                active_attribute=True,
+                source_cache=_reviewed_required_attribute_source_cache(
+                    investigation,
+                    attribute_claim,
+                    required_attribute_source_cache,
+                ),
+                successful_source_sink=(
+                    successful_required_attribute_source_sink
+                ),
+            )
+        )
     projected = _project_investigator_geography(
         projected,
         (
@@ -7506,7 +7593,11 @@ async def _llm_reverify_company(
     )
     if positive_semantic_review:
         investigation_targets = tuple(
-            dict.fromkeys((*investigation_targets, "industry"))
+            dict.fromkeys((
+                *investigation_targets,
+                "industry",
+                *(("required_attribute",) if icp_attribute else ()),
+            ))
         )
         # A verified industry source can be offered as untrusted context to
         # the separate required-attribute repair. It cannot set that decision.
@@ -7620,6 +7711,7 @@ async def _llm_reverify_company(
             "headcount": "employee_size",
             "rebrand": "identity",
             "industry": "industry",
+            "required_attribute": "required_attribute",
             "geography": "geography",
         }[target]
         for target in investigation_targets
@@ -7630,18 +7722,42 @@ async def _llm_reverify_company(
         # schema repair to re-run otherwise complete dimensions.
         if (
             result.decision == COMPANY_FIT_UNAVAILABLE
-            and _has_explicitly_unproven_fit_dimensions(
-                verdict,
-                incomplete,
-                icp=icp,
-                linkedin_refresh_outcome=str(
-                    current_profile_cache.get("refresh_outcome") or ""
-                ),
-                identity_receipt=(
-                    result.details.get("identity_receipt")
-                    if isinstance(result.details, Mapping)
-                    else None
-                ),
+            and (
+                (
+                    "required_attribute" in incomplete
+                    and isinstance(claims.get("required_attribute"), Mapping)
+                    and claims["required_attribute"].get("status") == "UNPROVEN"
+                    and (
+                        len(incomplete) == 1
+                        or _has_explicitly_unproven_fit_dimensions(
+                            verdict,
+                            tuple(dimension for dimension in incomplete
+                                  if dimension != "required_attribute"),
+                            icp=icp,
+                            linkedin_refresh_outcome=str(
+                                current_profile_cache.get("refresh_outcome") or ""
+                            ),
+                            identity_receipt=(
+                                result.details.get("identity_receipt")
+                                if isinstance(result.details, Mapping)
+                                else None
+                            ),
+                        )
+                    )
+                )
+                or _has_explicitly_unproven_fit_dimensions(
+                    verdict,
+                    incomplete,
+                    icp=icp,
+                    linkedin_refresh_outcome=str(
+                        current_profile_cache.get("refresh_outcome") or ""
+                    ),
+                    identity_receipt=(
+                        result.details.get("identity_receipt")
+                        if isinstance(result.details, Mapping)
+                        else None
+                    ),
+                )
             )
         ):
             return company_fit_unavailable(
@@ -7821,14 +7937,19 @@ async def _llm_reverify_company(
         verified_homepage_identity=verified_identity,
         verified_rebrand_identity=verified_rebrand_identity,
     )
-    repaired_verdict, _repaired_attribute_source = (
-        await _ground_required_attribute_evidence(
-            repaired_verdict,
-            active_attribute=bool(icp_attribute),
-            source_cache=required_attribute_source_cache,
-            successful_source_sink=required_attribute_retry_source_cache,
+    if "required_attribute" in investigation_targets:
+        repaired_verdict = _preserve_reviewed_required_attribute(
+            verdict, repaired_verdict
         )
-    )
+    else:
+        repaired_verdict, _repaired_attribute_source = (
+            await _ground_required_attribute_evidence(
+                repaired_verdict,
+                active_attribute=bool(icp_attribute),
+                source_cache=required_attribute_source_cache,
+                successful_source_sink=required_attribute_retry_source_cache,
+            )
+        )
     if require_company_fit_dimensions:
         repaired_verdict = await _refresh_linkedin_employee_size_observation(
             repaired_verdict,
@@ -7953,7 +8074,11 @@ async def _llm_reverify_company(
         if post_repair_positive_semantic_review:
             post_repair_investigation_targets = tuple(
                 dict.fromkeys(
-                    (*post_repair_investigation_targets, "industry")
+                    (
+                        *post_repair_investigation_targets,
+                        "industry",
+                        *(("required_attribute",) if icp_attribute else ()),
+                    )
                 )
             )
         if post_repair_investigation_targets:

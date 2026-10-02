@@ -65,7 +65,7 @@ DECLARE
   v_new_digest CONSTANT TEXT :=
     'sha256:342645a42b52363cb907c7b48627ead707e09547a7197b4b0d803e7e6e57a7ba';
   v_schedule CONSTANT JSONB :=
-    '{"benchmark_deadline":"2026-10-01T00:30:00Z","final_scoring_close":"2026-10-02T20:00:02Z","publication_deadline":"2026-10-02T20:00:03Z","stage_1_close":"2026-10-01T11:00:01Z","stage_1_scoring_close":"2026-10-02T02:00:01Z","stage_1_start":"2026-10-01T00:30:01Z","stage_2_close":"2026-10-02T14:00:02Z","stage_2_start":"2026-10-02T02:00:02Z","submission_cutoff":"2026-10-01T00:00:00Z","submission_open":"2026-09-30T00:00:00Z"}'::JSONB;
+    '{"benchmark_deadline":"2026-10-01T00:30:00Z","final_scoring_close":"2026-10-03T08:00:02Z","publication_deadline":"2026-10-03T08:00:03Z","stage_1_close":"2026-10-01T11:00:01Z","stage_1_scoring_close":"2026-10-02T14:00:01Z","stage_1_start":"2026-10-01T00:30:01Z","stage_2_close":"2026-10-03T02:00:02Z","stage_2_start":"2026-10-02T14:00:02Z","submission_cutoff":"2026-10-01T00:00:00Z","submission_open":"2026-09-30T00:00:00Z"}'::JSONB;
 BEGIN
   SELECT * INTO v_round FROM public.lab_arena_rounds
   WHERE round_id=v_round_id FOR UPDATE;

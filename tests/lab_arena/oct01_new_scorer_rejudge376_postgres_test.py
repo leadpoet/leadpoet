@@ -106,7 +106,7 @@ def test_rejudge_archives_history_and_reopens_only_baseline_scoring(database):
             status, status_gen, stage_gen, digest, schedule = cursor.fetchone()
             assert (status, status_gen, stage_gen) == ('stage1_closed', 12, 10)
             assert digest == 'sha256:342645a42b52363cb907c7b48627ead707e09547a7197b4b0d803e7e6e57a7ba'
-            assert schedule['stage_1_scoring_close'] == '2026-10-02T02:00:01Z'
+            assert schedule['stage_1_scoring_close'] == '2026-10-02T14:00:01Z'
             cursor.execute("SELECT count(*) FROM public.lab_arena_runs WHERE "
                            "round_id=%s AND kind='score'", (prior.ROUND,))
             assert cursor.fetchone()[0] == 0

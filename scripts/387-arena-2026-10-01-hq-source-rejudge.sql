@@ -271,7 +271,9 @@ BEGIN
   END IF;
   IF v_control.singleton IS NULL OR v_control.operator_paused IS DISTINCT FROM TRUE
      OR v_control.pause_reason IS DISTINCT FROM 'oct01_hq_source_review'
-     OR v_control.actor_ref IS DISTINCT FROM 'oct01-hq-source-hold386'
+     OR v_control.actor_ref IS DISTINCT FROM
+       'canonical-active-release:1caf74c9ee0bcd6a466976df4e00e0a16e1a6e42'
+     OR v_control.guard_generation IS DISTINCT FROM 313
      OR v_control.guard_commitment IS DISTINCT FROM ''
      OR v_control.owner_commitment IS DISTINCT FROM ''
      OR v_control.guard_expires_at IS NOT NULL
@@ -655,7 +657,8 @@ BEGIN
       updated_at=pg_catalog.clock_timestamp()
   WHERE singleton AND operator_paused
     AND pause_reason='oct01_hq_source_review'
-    AND actor_ref='oct01-hq-source-hold386';
+    AND actor_ref='canonical-active-release:1caf74c9ee0bcd6a466976df4e00e0a16e1a6e42'
+    AND guard_generation=313;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'Oct01 headquarters source hold release differs' USING ERRCODE='55000';
   END IF;

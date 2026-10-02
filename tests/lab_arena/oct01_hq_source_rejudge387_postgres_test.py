@@ -22,6 +22,10 @@ TEST_DIGEST = 'sha256:' + 'a' * 64
 
 def _prepare(cursor):
     cursor.execute(held._prepare(cursor))
+    cursor.execute("UPDATE public.lab_arena_restart_claim_control SET "
+                   "actor_ref='canonical-active-release:1caf74c9ee0bcd6a466976df4e00e0a16e1a6e42',"
+                   "guard_generation=313 WHERE singleton")
+    assert cursor.rowcount == 1
     cursor.execute('SET session_replication_role=replica')
     cursor.execute("UPDATE public.lab_arena_runs SET status='accepted',terminal_cause='accepted',"
                    "output_ref='arena/test/score387-old.json',lease_expires_at=NULL "
@@ -274,6 +278,8 @@ def test_rerun_namespace_rejudges_and_resumes_130_accepted_miner_outputs(databas
 
 @pytest.mark.parametrize('mutation', [
     "UPDATE public.lab_arena_restart_claim_control SET actor_ref='foreign' WHERE singleton",
+    "UPDATE public.lab_arena_restart_claim_control SET actor_ref='oct01-hq-source-hold386' WHERE singleton",
+    "UPDATE public.lab_arena_restart_claim_control SET guard_generation=312 WHERE singleton",
     "UPDATE public.lab_arena_restart_claim_control SET guard_commitment='sha256:'||repeat('a',64),"
     "owner_commitment='sha256:'||repeat('b',64),guard_generation=1,"
     "guard_expires_at=now()+interval '1 hour',candidate_commit=repeat('c',40),"
@@ -302,7 +308,7 @@ def test_wrong_state_fails_without_archive_or_hold_release(database, mutation):
             cursor.execute("SELECT count(*) FROM public.lab_arena_rounds WHERE round_id=%s", (ARCHIVE,))
             assert cursor.fetchone()[0] == 0
             cursor.execute("SELECT actor_ref FROM public.lab_arena_restart_claim_control WHERE singleton")
-            assert cursor.fetchone()[0] == 'oct01-hq-source-hold386'
+            assert cursor.fetchone()[0] == 'canonical-active-release:1caf74c9ee0bcd6a466976df4e00e0a16e1a6e42'
 
 
 def test_replay_rejects_archived_and_retained_payload_drift(database):

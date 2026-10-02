@@ -1111,7 +1111,7 @@ class ArenaStore:
     def pending_promotions(
         self, *, pinned_round_id: Optional[str] = None,
         network_name: Optional[str] = None, netuid: Optional[int] = None,
-        limit: int = 100
+        limit: int = 100, offset: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         if (network_name is None) != (netuid is None):
             raise ArenaStoreError("round network filters must be supplied together")
@@ -1133,6 +1133,7 @@ class ArenaStore:
             order="created_at",
             descending=False,
             limit=limit,
+            offset=offset,
             columns="round_id,publication_doc,promotion_doc,published_at,created_at",
         )
         return rows
@@ -1175,6 +1176,24 @@ class ArenaStore:
             offset=offset,
             columns=columns,
         )
+
+    def latest_published_day(
+        self, *, network_name: str, netuid: int
+    ) -> Optional[Dict[str, Any]]:
+        """Read the newest published live day in one chain scope."""
+
+        rows = self._transport.select(
+            "lab_arena_rounds",
+            filters={
+                "status": "published",
+                ROUND_MODE_FILTER: "live",
+                ROUND_NETWORK_COLUMN: str(network_name),
+                ROUND_NETUID_COLUMN: int(netuid),
+            },
+            order="evaluation_date", descending=True, limit=1,
+            columns="round_id,evaluation_date,configuration_doc",
+        )
+        return rows[0] if rows else None
 
     def published_reward_bases(
         self, *, mode: Optional[str] = None,

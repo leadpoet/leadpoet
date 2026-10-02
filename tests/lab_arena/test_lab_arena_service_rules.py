@@ -1106,6 +1106,11 @@ def test_reward_activation_carries_latest_miner_winner_and_honors_nonpaying_barr
 
         class Store:
             @staticmethod
+            def latest_published_day(**kwargs):
+                assert kwargs == {"network_name": "test", "netuid": 401}
+                return {"evaluation_date": "2026-09-02"}
+
+            @staticmethod
             def pending_promotions(**kwargs):
                 reward_queries.append(("promotions", kwargs))
                 return []
@@ -1137,6 +1142,7 @@ def test_reward_activation_carries_latest_miner_winner_and_honors_nonpaying_barr
         )
         service._round = lambda _round_id: {
             "round_id": "arena-2026-09-02",
+            "evaluation_date": "2026-09-02",
             "status": "published",
             "reward_activated_at": None,
             "champion_funding_frozen": True,
@@ -1167,7 +1173,8 @@ def test_reward_activation_carries_latest_miner_winner_and_honors_nonpaying_barr
         assert reward_queries == [
             (
                 "promotions",
-                {"network_name": "test", "netuid": 401, "limit": 1},
+                {"pinned_round_id": None, "network_name": "test", "netuid": 401,
+                 "limit": 100, "offset": 0},
             ),
             (
                 "bases",

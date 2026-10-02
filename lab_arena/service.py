@@ -12,7 +12,7 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
@@ -1644,10 +1644,7 @@ class ArenaService:
             except Exception:
                 try:
                     if str(configuration.get("mode") or self._config.mode) == "live":
-                        network_name, netuid = self._chain_scope()
-                        if self._store.pending_promotions(
-                            network_name=network_name, netuid=netuid
-                        ):
+                        if self._pending_promotion_blocks():
                             raise ServiceError("baseline_promotion_pending", 503)
                         selected_source_url = DEFAULT_BASELINE_SOURCE_URL
                     source_observation = (
@@ -3194,16 +3191,73 @@ class ArenaService:
             return {"status": "disabled", "promoted": 0}
         promoted = 0
         network_name, netuid = self._chain_scope()
-        for row in self._store.pending_promotions(
+        for row in self._pending_promotion_rows(
             pinned_round_id=self._config.pinned_round_id,
-            network_name=network_name,
-            netuid=netuid,
+            network_name=network_name, netuid=netuid,
         ):
             result = self.promote_baseline(str(row["round_id"]))
+            if result.get("status") == "superseded":
+                continue
             if result.get("status") not in ("promoted", "existing"):
                 return {"status": result.get("status", "pending"), "promoted": promoted}
             promoted += int(result.get("status") == "promoted")
         return {"status": "ok", "promoted": promoted}
+
+    @staticmethod
+    def _evaluation_day(row: Mapping[str, Any]) -> date:
+        value = row.get("evaluation_date")
+        if not isinstance(value, str) or len(value) != 10:
+            raise ServiceError("round_evaluation_date_invalid", 500)
+        try:
+            day = date.fromisoformat(value)
+        except ValueError as exc:
+            raise ServiceError("round_evaluation_date_invalid", 500) from exc
+        if day.isoformat() != value:
+            raise ServiceError("round_evaluation_date_invalid", 500)
+        return day
+
+    def _latest_published_day(self) -> Optional[date]:
+        """Find the newest completed live day in this chain scope."""
+
+        network_name, netuid = self._chain_scope()
+        latest = self._store.latest_published_day(
+            network_name=network_name, netuid=netuid
+        )
+        return self._evaluation_day(latest) if latest is not None else None
+
+    def _superseded_by_published_day(self, row: Mapping[str, Any]) -> bool:
+        latest = self._latest_published_day()
+        return latest is not None and latest > self._evaluation_day(row)
+
+    def _pending_promotion_rows(
+        self, *, pinned_round_id: Optional[str] = None,
+        network_name: str, netuid: int,
+    ) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        offset = 0
+        while True:
+            page = self._store.pending_promotions(
+                pinned_round_id=pinned_round_id,
+                network_name=network_name, netuid=netuid,
+                limit=100, offset=offset,
+            )
+            rows.extend(page)
+            if len(page) < 100:
+                return rows
+            offset += 100
+
+    def _pending_promotion_blocks(self) -> bool:
+        network_name, netuid = self._chain_scope()
+        latest = self._latest_published_day()
+        for item in self._pending_promotion_rows(
+            network_name=network_name, netuid=netuid
+        ):
+            row = self._store.get_round(str(item["round_id"]))
+            if row is None:
+                raise ServiceError("promotion_round_missing", 500)
+            if latest is None or latest <= self._evaluation_day(row):
+                return True
+        return False
 
     def promote_baseline(self, round_id: str) -> Dict[str, Any]:
         """Publish only the stored, scored winner, without executing its source."""
@@ -3220,6 +3274,8 @@ class ArenaService:
             or decision.get("outcome") != "crowned"
         ):
             return {"status": "not_required"}
+        if self._superseded_by_published_day(row):
+            return {"status": "superseded"}
         factory = self._config.baseline_promoter_factory
         if factory is None:
             raise ServiceError("baseline_promoter_unavailable", 503)
@@ -3260,6 +3316,8 @@ class ArenaService:
             plan = row.get("promotion_doc")
         if not isinstance(plan, dict):
             raise ServiceError("promotion_plan_missing", 500)
+        if self._superseded_by_published_day(row):
+            return {"status": "superseded"}
         commit = promoter.publish(
             payload, plan=plan, round_id=round_id, submission_id=submission_id
         )
@@ -3301,6 +3359,8 @@ class ArenaService:
         activated = 0
         for row in pending:
             result = self.activate_reward(str(row["round_id"]))
+            if result.get("status") == "superseded":
+                continue
             if result.get("status") not in ("activated", "existing"):
                 return {"status": str(result.get("status") or "stale"), "activated": activated}
             activated += int(result.get("status") == "activated")
@@ -3416,12 +3476,12 @@ class ArenaService:
             return {"status": "stale", "round_status": row.get("status")}
         if configuration.get("mode") != "live" or configuration.get("rewards_enabled") is not True:
             return {"status": "disabled"}
+        if self._superseded_by_published_day(row):
+            return {"status": "superseded"}
         # A later no-winner round must not activate while an earlier accepted
         # baseline in the same chain scope is still unpublished.
         network_name, netuid = self._chain_scope()
-        if self._store.pending_promotions(
-            network_name=network_name, netuid=netuid, limit=1
-        ):
+        if self._pending_promotion_blocks():
             return {"status": "waiting_for_promotion"}
         publication = row.get("publication_doc") or {}
         decision = publication.get("king_decision") or {}

@@ -1,0 +1,134 @@
+{
+  "note": "Saved Oct 1 KOHO submission and frozen position 7 ICP; verified source evidence is reduced to exact funding/workforce excerpts and the accepted company product quote. No judge Boolean is treated as ground truth.",
+  "company": {
+    "company_linkedin": "",
+    "company_name": "KOHO",
+    "company_stage": "Series C+",
+    "company_stage_evidence": [
+      {
+        "quote": "Canadian challenger bank Koho Financial has secured $130 million CAD in Series E financing as the FinTech company continues its quest to obtain a federal banking licence.",
+        "url": "https://betakit.com/koho-becomes-canadas-latest-unicorn-following-130-million-series-e-round/"
+      }
+    ],
+    "company_website": "https://www.koho.ca/",
+    "country": "Canada",
+    "employee_count": "201-500",
+    "industry": "Lending and Investments — Online lending platforms",
+    "intent_details": "KOHO secured $130 million CAD in Series E financing to provide the initial capital base needed for its banking plans and fund continued growth. The coverage identifies it as a Canadian company founded in Vancouver and reports a 250-person workforce. This fresh financing may support expansion of KOHO's consumer borrowing and credit products.",
+    "intent_signals": [
+      {
+        "date": "2026-06-11",
+        "description": "KOHO secured $130 million CAD in Series E financing, an all-equity round announced in June 2026.",
+        "matched_icp_signal": 0,
+        "url": "https://betakit.com/koho-becomes-canadas-latest-unicorn-following-130-million-series-e-round/"
+      }
+    ],
+    "required_attribute": {
+      "evidence_quote": "KOHO is a financial app with a prepaid Mastercard® that helps you spend smarter, save with market-leading interest, build credit, and get a cash advance when you need it.",
+      "evidence_url": "https://www.koho.ca/",
+      "explanation": "KOHO's own product page identifies a financial app that gives consumers access to cash advances and credit-building products; its Series E announcement supplies the recent public growth activity.",
+      "passed": true,
+      "text": "Operates a digital platform for lending, investing, or capital placement and has recent growth activity visible in public announcements."
+    },
+    "state": "British Columbia"
+  },
+  "icp": {
+    "bonus_intents": [
+      {
+        "intent_category": "MARKET_EXPANSION",
+        "intent_max_age_days": 365,
+        "intent_signal": "Expanded into a new country or region in the last year, per a press release or company announcement."
+      }
+    ],
+    "company_stage": "Series C+",
+    "country": "Canada",
+    "employee_count": [
+      "51-200",
+      "201-500",
+      "501-1,000",
+      "1,001-5,000"
+    ],
+    "excluded_companies": [
+      "nesto.ca"
+    ],
+    "geography": "Canada",
+    "icp_id": "icp_20260930_008",
+    "industry": "Lending and Investments",
+    "intent_category": "FUNDING",
+    "intent_max_age_days": 365,
+    "intent_signal": "Announced a Series B or later funding round in the last 12 months, per a press release, Crunchbase, or news coverage.",
+    "intent_signals": [
+      "Announced a Series B or later funding round in the last 12 months, per a press release, Crunchbase, or news coverage.",
+      "Expanded into a new country or region in the last year, per a press release or company announcement."
+    ],
+    "max_companies": 5,
+    "product_service": "A lending, brokerage, or investment platform that originates capital or intermediates financing for consumers or businesses.",
+    "prompt": "Find me lending platforms that got a new round and are pushing into a fresh market this year.",
+    "required_attribute": "Operates a digital platform for lending, investing, or capital placement and has recent growth activity visible in public announcements.",
+    "sub_industry": "Online lending and investment platforms",
+    "verified_example_company": "Wealthsimple"
+  },
+  "signal_results": [
+    {
+      "raw": 54.0,
+      "after_decay": 54.0,
+      "matched_icp_signal": 0,
+      "evidence_urls": [
+        "https://betakit.com/koho-becomes-canadas-latest-unicorn-following-130-million-series-e-round/"
+      ],
+      "judge_verdict": {
+        "decision": "verified",
+        "client_ready": true,
+        "authoritative_date": "2026-06-11",
+        "authoritative_date_basis": "event_date",
+        "verification_trace": {
+          "intent_verdict": {
+            "signal_evaluations": [
+              {
+                "signal_status": "supported",
+                "same_entity_check": "pass",
+                "supporting_quotes": [
+                  "Canadian challenger bank Koho Financial has secured $130 million CAD in Series E financing as the FinTech company continues its quest to obtain a federal banking licence. The all-equity round, which Koho closed in recent weeks and announced on Thursday, provides the initial capital base the company requires to become a federally regulated bank, and cash to invest in continued growth."
+                ],
+                "evidence_urls_used": [
+                  "https://betakit.com/koho-becomes-canadas-latest-unicorn-following-130-million-series-e-round/"
+                ]
+              }
+            ]
+          },
+          "verified_source_context": [
+            {
+              "url": "https://betakit.com/koho-becomes-canadas-latest-unicorn-following-130-million-series-e-round/",
+              "source_publication_date": "2026-06-11",
+              "text": "Canadian challenger bank Koho Financial has secured $130 million CAD in Series E financing as the FinTech company continues its quest to obtain a federal banking licence. The all-equity round, which Koho closed in recent weeks and announced on Thursday, provides the initial capital base the company requires to become a federally regulated bank, and cash to invest in continued growth.\nFounded in 2014 in Vancouver, with operations in Toronto, Eberhard said the 250-person company is now generating around $250 million CAD in annual revenue and growing 50 percent year-over-year."
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "company_fit": {
+    "gate": "company_fit",
+    "decision": "match",
+    "dimension_evidence": {
+      "industry": {
+        "decision": "match",
+        "observed_decision": "match",
+        "submitted_decision": "match",
+        "web_evidence": {
+          "quote": "Access our partner’s website through the KOHO app and complete an application with Fora to see if you’re eligible for a KOHO Line of Credit",
+          "url": "https://www.koho.ca/line-of-credit/"
+        }
+      },
+      "required_attribute": {
+        "decision": "match",
+        "web_evidence": {
+          "quote": "Access our partner’s website through the KOHO app and complete an application with Fora to see if you’re eligible for a KOHO Line of Credit",
+          "url": "https://www.koho.ca/line-of-credit/"
+        }
+      }
+    }
+  },
+  "funding_quote": "Canadian challenger bank Koho Financial has secured $130 million CAD in Series E financing as the FinTech company continues its quest to obtain a federal banking licence. The all-equity round, which Koho closed in recent weeks and announced on Thursday, provides the initial capital base the company requires to become a federally regulated bank, and cash to invest in continued growth.",
+  "workforce_quote": "Founded in 2014 in Vancouver, with operations in Toronto, Eberhard said the 250-person company is now generating around $250 million CAD in annual revenue and growing 50 percent year-over-year."
+}

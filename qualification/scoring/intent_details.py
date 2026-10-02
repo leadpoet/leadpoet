@@ -269,7 +269,8 @@ For verified_signals_covered, require all distinct supported activities below.
 For EACH distinct matched_icp_signal present in verified_signals, return that
 index once and a covered Boolean in signal_coverage.
 Return ONLY indexes present in verified_signals; do not add indexes merely
-because they occur in icp.intent_signals or the Intent Details paragraph. Set
+because they occur in icp.required_primary_intent, icp.optional_bonus_intents,
+or the Intent Details paragraph. Set
 verified_signals_covered to the logical AND of every returned covered Boolean.
 Read the original paragraph directly: covered is true only when it states that
 specific verified activity, including a supported paraphrase. Return
@@ -299,6 +300,19 @@ Do not require a specific use-of-proceeds plan or repeat every ICP constraint
 to make that conditional connection. The offering must still be supported and
 relevant to the actual ICP. "This matches the ICP" or "the company may grow"
 alone supplies no such specific connection.
+Use icp.required_primary_intent and icp.optional_bonus_intents for intent roles.
+The primary criterion at matched_icp_signal=0 is required; the remaining
+criteria are optional bonuses. This structured distinction takes precedence
+when icp.prompt joins primary and bonus activities with "and". For connects_icp,
+an otherwise grounded connection between the verified primary activity and the
+company's supported ICP offering does not require an unverified optional bonus
+activity to have occurred or to be discussed. Do not turn missing bonus evidence
+into an additional qualification requirement. This does not waive company,
+product, or required-attribute requirements, and a bonus never substitutes for
+the required primary activity. Still cover every distinct activity present in
+verified_signals, including verified bonuses. Every factual assertion in the
+paragraph must be supported, including any asserted bonus activity: calling a
+criterion optional cannot excuse an unsupported expansion, hire, or other claim.
 Assess every Boolean
 independently: a factual defect makes facts_supported false, but does not by
 itself make signal coverage, relevance, ICP connection or paragraph structure
@@ -1497,12 +1511,22 @@ def review_evidence(
                 bounded_company_text.encode("utf-8")
             )
         remaining_company_contexts -= 1
+    intent_criteria = list(icp.intent_signals)
     document = {
         "intent_details_units": _statement_units(paragraph),
         "company": {"name": company.company_name, "website": company.company_website},
         "icp": {
             "prompt": icp.prompt, "product_service": icp.product_service,
-            "intent_signals": list(icp.intent_signals),
+            # The normalized Arena contract and required-intent gate use
+            # index 0 for the primary and indexes 1+ for optional bonuses.
+            "required_primary_intent": (
+                {"matched_icp_signal": 0, "criterion": intent_criteria[0]}
+                if intent_criteria else None
+            ),
+            "optional_bonus_intents": [
+                {"matched_icp_signal": index, "criterion": criterion}
+                for index, criterion in enumerate(intent_criteria[1:], start=1)
+            ],
         },
         "verified_signals": verified,
         **(
@@ -1977,6 +2001,9 @@ For semantic_recheck_allowed=true, decide the entire unit again. VERIFIED means
 EVERY factual clause is supported. CONTRADICTED requires an incompatible fact;
 missing evidence is UNPROVEN. Check the actor, action, object, number, date and event.
 Different rounds, events, sources, or clauses are not interchangeable.
+The ICP's primary and optional-bonus criteria describe requested events, not evidence.
+An optional bonus need not have happened, but any paragraph assertion that it
+did happen still requires the same factual support as every other assertion.
 
 For relative_time_grounding_review, first classify the exact disputed clause,
 then classify every other factual clause in the unit. Bind a date to the same

@@ -1224,7 +1224,8 @@ def test_validated_signal_coverage_is_authoritative_over_false_aggregate(
             item["matched_icp_signal"]
             for item in document["verified_signals"]
         ] == [0]
-        assert len(document["icp"]["intent_signals"]) == 2
+        assert document["icp"]["required_primary_intent"]["matched_icp_signal"] == 0
+        assert len(document["icp"]["optional_bonus_intents"]) == 1
         assert "Return ONLY indexes present in verified_signals" in kwargs[
             "system_prompt"
         ]

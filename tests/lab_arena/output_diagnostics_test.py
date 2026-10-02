@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -861,6 +862,8 @@ def test_safe_diagnostic_is_private_until_existing_public_results_release():
         },
     }
     service = object.__new__(ArenaService)
+    service._completed_scores_lock = threading.Lock()
+    service._completed_scores_cache = {}
     service._round = lambda _round_id: round_row
     service._public_icp_disclosure = lambda _row: {
         "public_positions": [0]

@@ -10,6 +10,7 @@ from tests.lab_arena.baseline_scored_first_postgres_test import (
     _baseline_first_judge, _enable_verified_proxy_runtime,
     _verified_test_pool,
 )
+from tests.lab_arena.completed_model_scores_test import _wait_for_scores
 from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration
 from tests.lab_arena.test_integrity_round import IntegrityHarness
 
@@ -50,7 +51,7 @@ def test_completed_scores_and_diagnostics_precede_round_publication(database, tm
     harness.run_stage_with_runners(2)
     service._completed_scores_cache.clear()
     before = service.store.list_runs(rid)
-    completed = service.completed_submission_scores(service._round(rid))
+    completed = _wait_for_scores(service, service._round(rid), lambda scores: baseline in scores, attempts=6000)
     assert set(completed) == {baseline}
     assert completed[baseline]["final_score"] > 0
     # Public reads perform no scoring writes, transition, promotion or reward.
@@ -76,16 +77,22 @@ def test_completed_scores_and_diagnostics_precede_round_publication(database, tm
     runner = fixtures.Harness.runner(harness, 0, parallel=1)
     runner._config.proxy_worker_pool = _verified_test_pool(2)
     early = {}
+    plan = service._round(rid)["stage2_scoring_plan_doc"]
+    miner_items = {}
+    for item in plan["work_items"]:
+        miner_items.setdefault(item["submission_id"], set()).add(item["scored_run_id"])
     try:
         for _ in range(100):
             assert runner.run_once(max_claims=1)
-            service._completed_scores_cache.clear()
-            early = service.completed_submission_scores(service._round(rid))
-            if len(early) > 1:
+            chosen = service._scoring_outputs(rid, 2)
+            if any(all(chosen.get(run_id, {}).get("status") == "accepted" for run_id in run_ids)
+                   for run_ids in miner_items.values()):
                 break
     finally:
         runner.close()
         harness.clock.now = scheduled_now
+    service._completed_scores_cache.clear()
+    early = _wait_for_scores(service, service._round(rid), lambda scores: len(scores) > 1, attempts=6000)
     assert len(early) == 2
     pending = [r for r in service.store.list_runs(rid, kind="score", stage=2) if r["status"] != "accepted"]
     assert pending

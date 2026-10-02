@@ -533,7 +533,8 @@ class ArenaService:
         self._deepline_reconciliation_after: Dict[Tuple[str, str], int] = {}
         self._closed_deepline_reconciliation_after = 0
         self._completed_scores_lock = threading.Lock()
-        self._completed_scores_cache: Dict[str, Tuple[float, int, Dict[str, Any]]] = {}
+        self._completed_scores_cache: Dict[str, Dict[str, Any]] = {}
+        self._completed_scores_refresh_slots = threading.BoundedSemaphore(2)
 
     # -- accessors -------------------------------------------------------------
 
@@ -4547,8 +4548,9 @@ class ArenaService:
         Use the same accepted judgments, arithmetic and cost eligibility as
         final publication. Failed/retrying judges wait for the normal closed
         stage to record their outcome. Never turn unfinished work into a zero.
-        The bounded cache coalesces dashboard polling; costs are rechecked on
-        refresh, and a round transition immediately invalidates its entry.
+        A bounded background refresh keeps public reads responsive even when
+        many models need object-store and judgment verification. Completed
+        models appear as each check finishes; costs are rechecked on refresh.
         """
         configuration = row.get("configuration_doc") or {}
         if (row.get("status") not in {
@@ -4556,22 +4558,76 @@ class ArenaService:
             "stage2_closed", "stage2_scoring", "stage2_judged", "scored",
         } or configuration.get("execution_sequence_policy") != contracts.BASELINE_SCORED_FIRST_POLICY
             or configuration.get("sourcing_cost_eligibility_policy") != contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY):
+            with self._completed_scores_lock:
+                self._completed_scores_cache.pop(str(row["round_id"]), None)
             return {}
         round_id = str(row["round_id"])
         generation = int(row.get("status_generation") or 0)
+        worker = None
         with self._completed_scores_lock:
             cached = self._completed_scores_cache.get(round_id)
-            if cached and cached[1] == generation and time.monotonic() < cached[0]:
-                return cached[2]
-            result = self._read_completed_submission_scores(row)
-            # Public summaries enumerate a bounded recent history. Keep only
-            # recent active rounds, never an unbounded per-model cache.
-            if len(self._completed_scores_cache) >= 8:
-                self._completed_scores_cache.pop(next(iter(self._completed_scores_cache)))
-            self._completed_scores_cache[round_id] = (time.monotonic() + 15, generation, result)
-            return result
+            if cached is None or cached["generation"] != generation:
+                cached = {"generation": generation, "completed": {}, "refreshed_at": 0.0,
+                          "refreshing": False}
+                self._completed_scores_cache[round_id] = cached
+                # Public summaries enumerate a bounded recent history.
+                if len(self._completed_scores_cache) > 8:
+                    oldest = next(iter(self._completed_scores_cache))
+                    if oldest != round_id:
+                        self._completed_scores_cache.pop(oldest)
+            if (not cached["refreshing"]
+                    and (not cached["refreshed_at"] or time.monotonic() - cached["refreshed_at"] >= 15)
+                    and self._completed_scores_refresh_slots.acquire(blocking=False)):
+                cached["refreshing"] = True
+                worker = threading.Thread(
+                    target=self._refresh_completed_submission_scores,
+                    args=(dict(row), cached), daemon=True,
+                    name="arena-completed-scores",
+                )
+            result = dict(cached["completed"])
+        if worker is not None:
+            try:
+                worker.start()
+            except Exception:
+                with self._completed_scores_lock:
+                    cached["refreshing"] = False
+                self._completed_scores_refresh_slots.release()
+                raise
+        return result
 
-    def _read_completed_submission_scores(self, row: Mapping[str, Any]) -> Dict[str, Any]:
+    def _refresh_completed_submission_scores(self, row: Mapping[str, Any], entry: Dict[str, Any]) -> None:
+        round_id = str(row["round_id"])
+
+        def current() -> bool:
+            with self._completed_scores_lock:
+                return self._completed_scores_cache.get(round_id) is entry
+
+        def record(submission_id: str, result: Optional[Dict[str, Any]]) -> None:
+            with self._completed_scores_lock:
+                if self._completed_scores_cache.get(round_id) is entry:
+                    if result is None:
+                        entry["completed"].pop(submission_id, None)
+                    else:
+                        entry["completed"][submission_id] = result
+
+        try:
+            results = self._read_completed_submission_scores(row, on_completed=record, should_continue=current)
+        except Exception as exc:
+            logger.warning("Completed model score refresh unavailable: round=%s type=%s", round_id, type(exc).__name__)
+            results = {}
+        finally:
+            with self._completed_scores_lock:
+                if self._completed_scores_cache.get(round_id) is entry:
+                    entry["completed"] = results
+                    entry["refreshed_at"] = time.monotonic()
+                    entry["refreshing"] = False
+            self._completed_scores_refresh_slots.release()
+
+    def _read_completed_submission_scores(
+        self, row: Mapping[str, Any], *,
+        on_completed: Optional[Callable[[str, Optional[Dict[str, Any]]], None]] = None,
+        should_continue: Optional[Callable[[], bool]] = None,
+    ) -> Dict[str, Any]:
         round_id = str(row["round_id"])
         configuration = row["configuration_doc"]
         positions = set(range(contracts.benchmark_icp_count(configuration)))
@@ -4580,10 +4636,14 @@ class ArenaService:
         completed = {}
         icps = None
         for participant in row.get("participants") or []:
+            if should_continue is not None and not should_continue():
+                break
             submission_id = str(participant["submission_id"])
             stage = 1 if participant.get("is_king") else 2
             plan = row.get("stage%d_scoring_plan_doc" % stage)
             if not plan:
+                if on_completed is not None:
+                    on_completed(submission_id, None)
                 continue
             selected = {}
             for run in execution_runs:
@@ -4594,6 +4654,8 @@ class ArenaService:
                 if current is None or (run["status"] == "accepted", run["attempt"]) > (current["status"] == "accepted", current["attempt"]):
                     selected[position] = run
             if set(selected) != positions or any(run["status"] not in {"accepted", "failed"} for run in selected.values()):
+                if on_completed is not None:
+                    on_completed(submission_id, None)
                 continue
             items = [item for item in plan["work_items"] if item["submission_id"] == submission_id]
             zeros = [item for item in plan["zero_rows"] if item["submission_id"] == submission_id]
@@ -4609,6 +4671,8 @@ class ArenaService:
                 or judge.get("terminal_cause") not in contracts.TERMINAL_CAUSES
                 or judge.get("terminal_cause") == "accepted" for judge in unfinished
             )):
+                if on_completed is not None:
+                    on_completed(submission_id, None)
                 continue
             try:
                 runs = list(selected.values())
@@ -4642,6 +4706,8 @@ class ArenaService:
                     )
                     records = {r["run_id"]: r for r in scoring.run_scores_for_store(scores, runs)}
                     if set(records) != {run["run_id"] for run in runs}:
+                        if on_completed is not None:
+                            on_completed(submission_id, None)
                         continue
                     # Match PostgreSQL NUMERIC(12, 6), which final publication
                     # reads back. Preserve any already recorded per-ICP value.
@@ -4653,6 +4719,8 @@ class ArenaService:
                             {**run, **records[run["run_id"]]} for run in runs]
                 eligibility = self._submission_cost_eligibility(row, submission_id, runs, positions=sorted(positions))
                 if not eligibility["eligible"]:
+                    if on_completed is not None:
+                        on_completed(submission_id, None)
                     continue  # Billing in flight/uncertain is not a completed score.
                 eligible_positions = {int(item["icp_position"]) for item in eligibility["cost_summary"]["per_icp"] if item["eligible"]}
                 value = verify.stage_score([
@@ -4660,15 +4728,21 @@ class ArenaService:
                     for run in sorted(runs, key=lambda item: item["icp_position"])
                 ], len(positions))
                 if not any(run.get("terminal_cause") == "accepted" for run in runs):
+                    if on_completed is not None:
+                        on_completed(submission_id, None)
                     continue
                 completed[submission_id] = {
                     "submission_id": submission_id, "final_score": value,
                     **eligibility, "execution_runs": runs,
                 }
+                if on_completed is not None:
+                    on_completed(submission_id, completed[submission_id])
             except Exception as exc:
                 # Invalid evidence or a transient object-store failure for one
                 # model must not hide the rest of the competition snapshot.
                 logger.warning("Completed model score unavailable: round=%s submission=%s type=%s", round_id, submission_id, type(exc).__name__)
+                if on_completed is not None:
+                    on_completed(submission_id, None)
         return completed
 
     def public_submissions(self, round_id: str) -> Dict[str, Any]:

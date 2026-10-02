@@ -279,7 +279,8 @@ def test_industry_review_does_not_duplicate_separate_attribute_condition():
 def test_broad_subindustry_label_keeps_explicit_product_conjuncts():
     prompt = " ".join(investigator._SYSTEM_PROMPT.split())
 
-    assert "may name a category, not require two distinct product lines" in prompt
+    assert "industry and sub-industry labels name sector categories" in prompt
+    assert "Do not turn the category label into a second, narrower AND gate" in prompt
     assert "directly sold B2B workflow platform" in prompt
     assert "subscription model and business customer scope are proven" in prompt
     assert "without the requested capability is insufficient" in prompt
@@ -9830,9 +9831,9 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
     assert "prior positive labels as untrusted hypotheses" in system_prompt
     assert "supplier_operator role establishes" in system_prompt
     assert "required-attribute judgment and source proof" in system_prompt
-    assert "Preserve explicit AND/BOTH/ALL requirements" in system_prompt
-    assert "does not alone require customers in both sectors" in system_prompt
-    assert "one supported alternative for each OR clause" in system_prompt
+    assert "Do not convert an explicit BOTH, ALL, or separately required capability" in system_prompt
+    assert "capabilities or customer sectors" in system_prompt
+    assert "the explicit OR determines the required capability: prove one allowed alternative" in system_prompt
     assert "Equivalent source language is sufficient" in system_prompt
     assert "paid management console, policy control plane" in system_prompt
     assert "do not require cloud resource management" in system_prompt

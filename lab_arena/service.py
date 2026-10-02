@@ -3245,13 +3245,15 @@ class ArenaService:
     def _pending_promotion_blocks(self) -> bool:
         network_name, netuid = self._chain_scope()
         latest = self._latest_published_day()
-        return any(
-            latest is None
-            or latest <= self._evaluation_day(self._round(str(item["round_id"])))
-            for item in self._pending_promotion_rows(
-                network_name=network_name, netuid=netuid
-            )
-        )
+        for item in self._pending_promotion_rows(
+            network_name=network_name, netuid=netuid
+        ):
+            row = self._store.get_round(str(item["round_id"]))
+            if row is None:
+                raise ServiceError("promotion_round_missing", 500)
+            if latest is None or latest <= self._evaluation_day(row):
+                return True
+        return False
 
     def promote_baseline(self, round_id: str) -> Dict[str, Any]:
         """Publish only the stored, scored winner, without executing its source."""

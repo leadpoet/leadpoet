@@ -56,6 +56,9 @@ class _Store:
         start = kwargs.get("offset") or 0
         return self.pending[start:start + kwargs["limit"]]
 
+    def get_round(self, round_id):
+        return next((row for row in self.rows if row["round_id"] == round_id), None)
+
 
 def _service(rows: list[dict], pending: list[dict] | None = None) -> ArenaService:
     service = object.__new__(ArenaService)
@@ -119,6 +122,18 @@ def test_superseded_promotion_does_not_block_new_baseline_or_reward():
     )
     assert service.activate_pending_rewards() == {"status": "ok", "activated": 1}
     assert calls == [old["round_id"], newer["round_id"]]
+
+
+def test_pinned_live_service_can_ignore_other_superseded_round():
+    old, newer = _row("2026-10-01"), _row("2026-10-02")
+    service = _service([old, newer], [{"round_id": old["round_id"]}])
+    service._config.pinned_round_id = newer["round_id"]
+    service._round = lambda round_id: (
+        newer if round_id == newer["round_id"] else (_ for _ in ()).throw(
+            ServiceError("round_scope_mismatch", 409)
+        )
+    )
+    assert not service._pending_promotion_blocks()
 
 
 @pytest.mark.parametrize("value", [None, "2026-13-01", "2026-W40-4"])

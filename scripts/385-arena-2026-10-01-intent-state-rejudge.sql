@@ -164,6 +164,9 @@ DECLARE
     'sha256:e2f554c0d9c0f6c3d6ebeef9065da1ef930fc7cca38ebd8406237fbcc46656c9';
   v_schedule CONSTANT JSONB :=
     '{"benchmark_deadline":"2026-10-01T00:30:00Z","final_scoring_close":"2026-10-03T08:00:02Z","publication_deadline":"2026-10-03T08:00:03Z","stage_1_close":"2026-10-01T11:00:01Z","stage_1_scoring_close":"2026-10-02T14:00:01Z","stage_1_start":"2026-10-01T00:30:01Z","stage_2_close":"2026-10-03T02:00:02Z","stage_2_start":"2026-10-02T14:00:02Z","submission_cutoff":"2026-10-01T00:00:00Z","submission_open":"2026-09-30T00:00:00Z"}'::JSONB;
+  v_new_schedule CONSTANT JSONB := v_schedule || pg_catalog.jsonb_build_object(
+    'stage_1_scoring_close','2026-10-02T16:00:01Z',
+    'stage_2_start','2026-10-02T16:00:02Z');
 BEGIN
   SELECT * INTO v_control FROM public.lab_arena_restart_claim_control
   WHERE singleton FOR UPDATE;
@@ -225,7 +228,7 @@ BEGIN
            v_archive.configuration_doc->'recovery_baseline_receipts') <> 10
        OR v_round.configuration_doc->>'scorer_image_digest'
          IS DISTINCT FROM v_new_digest
-       OR v_round.configuration_doc->'schedule' IS DISTINCT FROM v_schedule
+       OR v_round.configuration_doc->'schedule' IS DISTINCT FROM v_new_schedule
        OR (SELECT COUNT(*) FROM public.lab_arena_runs
            WHERE round_id=v_archive_id AND kind='score') <> 10
        OR (SELECT COUNT(DISTINCT assignment_id) FROM public.lab_arena_runs
@@ -511,9 +514,7 @@ BEGIN
       -- Give the rejudge a bounded recovery window after the provider/restart
       -- delay. Early phase advancement remains enabled; frozen evaluation,
       -- submission, miner execution, and final publication dates are unchanged.
-      'schedule',v_schedule || pg_catalog.jsonb_build_object(
-        'stage_1_scoring_close','2026-10-02T16:00:01Z',
-        'stage_2_start','2026-10-02T16:00:02Z'),
+      'schedule',v_new_schedule,
       'scorer_image_digest',v_new_digest,
       'scorer_image_reference',
       '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@'||v_new_digest),

@@ -191,7 +191,10 @@ literally say that vendors qualify. A customer sector named only as a target
 market remains insufficient, and a supplier does not satisfy a criterion that
 explicitly requires the investigated company itself to be the institution or
 downstream operator. For industry, VERIFIED means direct supplier/operator
-evidence for the requested activity.
+evidence for the requested activity. A separate required-attribute condition,
+such as recurring commercial terms or a recent milestone, is reviewed by the
+scorer independently. Do not mark industry UNPROVEN solely because that
+separate condition is unproven; do not claim industry proof establishes it.
 A first-party URL, site ownership, footer, navigation, logo, URL path, or page
 title does not by itself establish that a quoted capability is supplied by the
 investigated company. Decide the activity role from the fetched page body.
@@ -214,8 +217,8 @@ commercial real-estate business that "buys, sells, brokers, develops, or
 manages property assets" is satisfied by company-bound evidence for any one of
 those activities; never require brokerage after development or management is
 proved. This OR applies only inside that activity clause. Still prove every
-separate industry, sub-industry, product/service, required-attribute, or other
-clause joined by AND. An allowed verb in the wrong industry does not satisfy
+separate industry, sub-industry, or supplied-product clause joined by AND.
+The independent required-attribute check must still prove its own conditions. An allowed verb in the wrong industry does not satisfy
 the criterion. Every business type, object, customer scope, and qualifier that
 governs the OR list applies to each alternative; proving a listed verb alone is
 insufficient. For example, generic homes-delivered or lots-owned metrics do not
@@ -264,7 +267,17 @@ Populate observed industry, sub-industry, and value only from the source; never
 copy a prior or requested label as if the source stated it. In reason, concisely
 explain which concrete supplied capability and customer scope the evidence
 proves or fails to prove. Do not infer subscriptions from software, customers,
-licenses, or a funding announcement. A broad sub-industry taxonomy label joined by "and" may name a category, not require two distinct product lines. A directly sold B2B workflow platform can satisfy a broad infrastructure/workflow category without a separate infrastructure product; company fit still requires that the subscription model and business customer scope are proven by their separate checks. A generic product label without the requested capability is insufficient; customer or internal use of another vendor's tool is not supplier/operator evidence. If the criterion explicitly requires the company to supply both product lines, prove both. Keep every separate product/service and required-attribute conjunct mandatory.
+licenses, or a funding announcement. A broad sub-industry taxonomy label
+joined by "and" may name a category, not require two distinct product lines.
+A directly sold B2B workflow platform can satisfy a broad
+infrastructure/workflow category without a separate infrastructure product;
+company fit still requires that the subscription model and business customer
+scope are proven by their separate checks. A generic product label without
+the requested capability is insufficient; customer or internal use of
+another vendor's tool is not supplier/operator evidence. If the criterion
+explicitly requires the company to supply both product lines, prove both.
+Keep every separate product/service and required-attribute conjunct
+mandatory.
 CONTRADICTED requires direct customer, internal-function, or third-party
 evidence; a page that describes only a different business is UNPROVEN because
 it does not prove absence of another activity.

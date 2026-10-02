@@ -269,6 +269,13 @@ def test_multitarget_budget_preserves_stage_conflict_and_locator_guards():
     ) in prompt
 
 
+def test_industry_review_does_not_duplicate_separate_attribute_condition():
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+    assert "Do not mark industry UNPROVEN solely because that separate condition is unproven" in prompt
+    assert "do not claim industry proof establishes it" in prompt
+    assert "independent required-attribute check must still prove its own conditions" in prompt
+
+
 def test_broad_subindustry_label_keeps_explicit_product_conjuncts():
     prompt = " ".join(investigator._SYSTEM_PROMPT.split())
 
@@ -5448,8 +5455,8 @@ def test_industry_activity_disjunction_keeps_explicit_and_requirements():
 
     assert "This OR applies only inside that activity clause" in prompt
     assert (
-        "Still prove every separate industry, sub-industry, product/service, "
-        "required-attribute, or other clause joined by AND"
+        "Still prove every separate industry, sub-industry, or supplied-product "
+        "clause joined by AND"
     ) in prompt
     assert (
         "Every business type, object, customer scope, and qualifier that "

@@ -3341,6 +3341,239 @@ def test_selector_researches_missing_headcount_and_hq_but_not_proven_region_mism
     ) == ()
 
 
+@pytest.mark.parametrize(
+    ("quote", "state", "flag"),
+    [
+        ("San Francisco, California, United States", "California", True),
+        ("Regional office: Raleigh, North Carolina, United States", "North Carolina", False),
+        ("Acme has a factory in California, United States", "California", True),
+    ],
+)
+def test_unlabelled_company_location_reopens_positive_and_negative_geography(
+    quote, state, flag,
+):
+    verdict = _complete_verdict(
+        observed_hq_state=state,
+        geography_matches=flag,
+        geography_evidence_url="https://www.linkedin.com/company/acme",
+        geography_evidence_quote=quote,
+    )
+    result = _reverify_decision(
+        verdict, "", "", icp=_icp(geography="United States, West Coast"),
+        company=_company(), company_quality=True,
+    )
+    assert result.details["dimension_decisions"]["geography"] == COMPANY_FIT_UNAVAILABLE
+    assert _targeted_company_investigation_dimensions(
+        result, icp_stage="", employee_size_conflict=False, company=_company(),
+    ) == ("geography",)
+    # The additional evidence gate belongs to the company-quality contract.
+    assert lead_scorer._decision_from_observed_geography(
+        verdict, _icp(geography="United States, West Coast"), company_quality=False,
+    ) == (COMPANY_FIT_MATCH if flag else COMPANY_FIT_MISMATCH)
+
+
+def test_exact_sysdig_current_headquarters_stays_a_region_mismatch():
+    # Exact current first-party quote from the audited production rejection.
+    verdict = _complete_verdict(
+        observed_hq_state="North Carolina",
+        geography_matches=False,
+        geography_evidence_url="https://www.sysdig.com/contact-us",
+        geography_evidence_quote=(
+            "Headquarters\n4000 Center at North Hills St Ste. 420\nRaleigh, NC 27609"
+        ),
+    )
+    result = _reverify_decision(
+        verdict, "", "", icp=_icp(geography="United States, West Coast"),
+        company=_company(), company_quality=True,
+    )
+    assert result.details["dimension_decisions"]["geography"] == COMPANY_FIT_MISMATCH
+    assert _targeted_company_investigation_dimensions(
+        result, icp_stage="", employee_size_conflict=False, company=_company(),
+    ) == ()
+
+
+@pytest.mark.parametrize("label", ["Headquarters", "HQ", "Head office"])
+def test_explicit_hq_label_does_not_require_country_spelling_parity(label):
+    company = _company().model_copy(update={"country": "United Kingdom", "state": ""})
+    verdict = _complete_verdict(
+        observed_hq_country="United Kingdom", observed_hq_state="",
+        geography_evidence_url=company.company_linkedin,
+        geography_evidence_quote=f"Acme {label}: London, UK",
+    )
+    result = _reverify_decision(
+        verdict, "", "", icp=_icp(geography="United Kingdom"),
+        company=company, company_quality=True,
+    )
+    assert result.details["dimension_decisions"]["geography"] == COMPANY_FIT_MATCH
+
+
+@pytest.mark.parametrize(
+    ("initial_quote", "initial_state", "current_quote", "current_state", "expected"),
+    [
+        pytest.param(
+            "San Francisco, California, United States", "California",
+            "Sysdig Headquarters\n4000 Center at North Hills St Ste. 420\nRaleigh, NC 27609",
+            "North Carolina", COMPANY_FIT_MISMATCH, id="sysdig-current-hq-outside-region",
+        ),
+        pytest.param(
+            "Regional office: Raleigh, North Carolina, United States", "North Carolina",
+            "Sysdig headquarters: San Francisco, California, United States",
+            "California", COMPANY_FIT_MATCH, id="regional-office-negative-recovered",
+        ),
+        pytest.param(
+            "San Francisco, California, United States", "California",
+            "Sysdig regional office: Raleigh, North Carolina, United States",
+            "North Carolina", COMPANY_FIT_UNAVAILABLE, id="other-office-is-not-hq",
+        ),
+        pytest.param(
+            "San Francisco, California, United States", "California",
+            "", "", COMPANY_FIT_UNAVAILABLE, id="fetch-failure-is-unproven",
+        ),
+    ],
+)
+def test_company_geography_repair_uses_bounded_current_contact_source(
+    monkeypatch, initial_quote, initial_state, current_quote, current_state, expected,
+):
+    company = _company(
+        name="Sysdig", website="https://www.sysdig.com",
+        linkedin="https://www.linkedin.com/company/sysdig",
+    )
+    contact_url = "https://www.sysdig.com/contact-us"
+    initial = _complete_verdict(
+        observed_company_name=company.company_name,
+        observed_company_website=company.company_website,
+        observed_company_linkedin=company.company_linkedin,
+        observed_hq_state=initial_state,
+        geography_matches=initial_state == "California",
+        geography_evidence_url=company.company_linkedin,
+        geography_evidence_quote=initial_quote,
+    )
+    homepage_identity = company_fit_match("independently bound company", details={
+        "identity": {
+            "decision": COMPANY_FIT_MATCH,
+            "evidence_source": "company_homepage",
+            "observed_name": "sysdig",
+            "observed_domain": "sysdig.com",
+            "observed_linkedin_slug": "sysdig",
+        },
+        "verified_homepage_transport_domain": "sysdig.com",
+    })
+    calls = {"broad": 0, "fetch": [], "judge": 0}
+
+    async def broad(**kwargs):
+        calls["broad"] += 1
+        assert "a bare city/state or profile location cannot" in kwargs["prompt"]
+        return initial, ""
+
+    async def keep_observation(verdict, *_args, **_kwargs):
+        return verdict
+
+    async def fetch(_session, url, **_kwargs):
+        calls["fetch"].append(url)
+        assert url == contact_url
+        if not current_quote:
+            return {"ok": False, "url": url, "error": "source_unavailable"}
+        return {"ok": True, "url": url, "final_url": url, "text": current_quote}
+
+    async def judge(_session, _url, *, headers, payload):
+        del headers
+        calls["judge"] += 1
+        # The real investigator, not a mocked finding, validates the exact
+        # fetched quote and the company-bound source before projection.
+        document = json.loads(payload["messages"][1]["content"].split("\n", 1)[1])
+        assert document["requested_targets"] == ["geography"]
+        assert document["server_priority_submitted_source"]["url"] == contact_url
+        assert document["investigation_limits"]["remaining_fetch_calls"] == 2
+        if isinstance(payload["tool_choice"], dict) and (
+            payload["tool_choice"]["function"]["name"] == "search_web"
+        ):
+            name, arguments = "search_web", {"query": "Sysdig current headquarters"}
+        else:
+            name = "submit_findings"
+            finding = _finding(
+                "geography", status="VERIFIED" if current_quote else "UNPROVEN",
+                observed_value=f"{current_state}, United States" if current_quote else None,
+                observed_country="United States" if current_quote else "",
+                observed_state=current_state,
+                evidence_url=contact_url if current_quote else "",
+                evidence_quote=current_quote,
+            )
+            arguments = {"findings": [finding]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"hq-{calls['judge']}", "type": "function",
+            "function": {
+                "name": name,
+                "arguments": json.dumps(arguments),
+            },
+        }]}}]}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", broad)
+    monkeypatch.setattr(lead_scorer, "_refresh_linkedin_employee_size_observation", keep_observation)
+    monkeypatch.setattr(investigator, "_fetch_page", fetch)
+    monkeypatch.setattr(investigator, "_post_json", judge)
+    monkeypatch.setattr(investigator, "_search_web", AsyncMock(return_value={"results": []}))
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        company, _icp(geography="United States, West Coast"),
+        require_company_fit_dimensions=True,
+        verified_homepage_identity=homepage_identity,
+        verified_homepage_navigation_locators=(
+            {"url": "https://www.sysdig.com/about", "label": "About"},
+            {"url": "https://unrelated.example/contact-us", "label": "Contact"},
+            {"url": contact_url, "label": "Contact us"},
+        ),
+        company_quality=True, evidence_investigator=True,
+    ))
+    assert result.decision == expected, json.dumps(result.details.get("investigation_receipt"))
+    assert result.details.get("dimension_decisions", {}).get("geography") == expected, (result.reason, result.details, calls)
+    assert calls["broad"] == 1
+    assert calls["fetch"] == [contact_url]
+    assert result.details["investigation_receipt"]["usage"]["fetch_calls"] == 1
+    if expected != COMPANY_FIT_UNAVAILABLE:
+        assert result.details["dimension_evidence"]["geography"] == {
+            "url": contact_url, "quote": current_quote,
+        }
+
+
+@pytest.mark.parametrize("source", ["linkedin", "first-party"])
+@pytest.mark.parametrize("company_page", ["", "Contact our regional office in Raleigh, North Carolina."])
+def test_explicit_profile_or_company_hq_survives_silent_or_regional_company_page(
+    monkeypatch, source, company_page,
+):
+    url = (
+        "https://www.linkedin.com/company/acme"
+        if source == "linkedin" else "https://acme.example/contact"
+    )
+    verdict = _complete_verdict(
+        geography_evidence_url=url,
+        geography_evidence_quote="Acme headquarters: San Francisco, California, United States",
+    )
+
+    async def broad(**_kwargs):
+        return verdict, ""
+
+    async def keep_observation(verdict, *_args, **_kwargs):
+        return verdict
+
+    async def must_not_investigate(**_kwargs):
+        raise AssertionError("A complete HQ does not require first-party-only proof")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", broad)
+    monkeypatch.setattr(lead_scorer, "_refresh_linkedin_employee_size_observation", keep_observation)
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", must_not_investigate)
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _company(), _icp(geography="United States, West Coast"),
+        require_company_fit_dimensions=True, company_quality=True,
+        evidence_investigator=True,
+        verified_homepage_pages={"https://acme.example": {
+            "final_url": "https://acme.example", "text": company_page,
+        }},
+    ))
+    assert result.decision == COMPANY_FIT_MATCH
+
+
 def test_investigator_activity_and_hq_facts_return_to_deterministic_gates():
     industry_finding = _finding(
         "industry",
@@ -7735,7 +7968,9 @@ def test_oct01_abre_sector_proof_does_not_imply_recurring_subscription(
         return 200, features_url, features_quote
 
     async def investigate(**kwargs):
-        assert kwargs["targets"] == ("stage", "industry", "required_attribute")
+        assert kwargs["targets"] == (
+            "stage", "geography", "industry", "required_attribute",
+        )
         assert kwargs["positive_semantic_review"] is True
         assert kwargs["requested_subindustry"] == icp.sub_industry
         assert growth_url in kwargs["prior_observations"]["submitted_source_urls"]
@@ -7743,6 +7978,11 @@ def test_oct01_abre_sector_proof_does_not_imply_recurring_subscription(
             "claims": {
                 "industry": finding,
                 "required_attribute": _attribute_finding(),
+                "geography": _finding(
+                    "geography", status="UNPROVEN", observed_value=None,
+                    evidence_url="", evidence_quote="",
+                    reason="The profile location did not explicitly identify HQ.",
+                ),
                 "stage": _finding(
                     "stage", observed_value="Series A", evidence_url=stage_url,
                     evidence_quote=stage_quote,

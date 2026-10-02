@@ -315,6 +315,9 @@ supporting_evidence_quote_1, then pair 2 if needed. Leave unused fields
 empty. Do not claim an unquoted source fact or use a search snippet as
 supporting evidence.
 For geography, find the current headquarters of the investigated company.
+Prefer a known current first-party contact or about navigation locator and
+fetch it before relying on a generic profile location. A navigation label is
+only a locator: its page must contain an explicit company-bound HQ statement.
 Incorporation, an office, factory, job, customer, event, service area, or parent
 company location is not headquarters. Return a country and, for a United
 States headquarters, a state. Use a quote that explicitly identifies the
@@ -642,11 +645,12 @@ def _validated_homepage_navigation_locators(
     *,
     positive_semantic_review: bool,
     verified_homepage_identity: Optional[Mapping[str, Any]],
+    headquarters_review: bool = False,
 ) -> list[dict[str, str]]:
     """Admit only bounded same-verified-domain untrusted navigation locators."""
 
     if (
-        not positive_semantic_review
+        not (positive_semantic_review or headquarters_review)
         or not isinstance(value, Sequence)
         or isinstance(value, (str, bytes))
         or not isinstance(verified_homepage_identity, Mapping)
@@ -1115,6 +1119,21 @@ def _priority_subscription_navigation_source(
     return ""
 
 
+def _priority_headquarters_navigation_source(
+    targets: Sequence[str],
+    homepage_navigation_locators: Sequence[Mapping[str, str]],
+) -> str:
+    """Choose a known company locator, never infer an HQ fact from its label."""
+
+    if "geography" not in targets:
+        return ""
+    for terms in (r"\b(?:contact|headquarters)\b", r"\babout\b"):
+        for locator in homepage_navigation_locators:
+            if re.search(terms, f"{locator['url']} {locator['label']}", re.I):
+                return locator["url"]
+    return ""
+
+
 def _fetched_bound_public_market_sources(
     fetched_pages: Mapping[str, str],
     identity_names: set[str],
@@ -1550,6 +1569,15 @@ def _quote_supports_headcount(quote: str, observed_value: Any) -> bool:
     )
 
 
+def _quote_identifies_headquarters(quote: str) -> bool:
+    """Distinguish an explicit HQ claim from a generic location or office."""
+
+    return bool(re.search(
+        r"\b(?:headquarters|headquartered|head offices?|hq|principal executive offices?)\b",
+        _normalized_span(html.unescape(quote)),
+    ))
+
+
 def _quote_supports_headquarters(
     quote: str,
     *,
@@ -1560,10 +1588,7 @@ def _quote_supports_headquarters(
 
     decoded_quote = html.unescape(quote)
     normalized = _normalized_span(decoded_quote)
-    if not re.search(
-        r"\b(?:headquarters|headquartered|principal executive offices?)\b",
-        normalized,
-    ):
+    if not _quote_identifies_headquarters(quote):
         return False
     country = _normalized_span(observed_country)
     state = _normalized_span(observed_state)
@@ -2518,6 +2543,7 @@ async def investigate_company_evidence(
             homepage_navigation_locators,
             positive_semantic_review=positive_semantic_review,
             verified_homepage_identity=verified_homepage_identity,
+            headquarters_review="geography" in requested_targets,
         )
     )
 
@@ -2719,18 +2745,20 @@ async def investigate_company_evidence(
                     identity_names=identity_names,
                     fetched_pages=fetched_pages,
                 )
-            elif positive_semantic_review:
+            elif positive_semantic_review or "geography" in requested_targets:
                 priority_source_kind = "company"
-                priority_source_url = (
-                    _priority_subscription_navigation_source(
+                priority_source_url = _priority_headquarters_navigation_source(
+                    requested_targets, bounded_homepage_navigation_locators,
+                )
+                if not priority_source_url and positive_semantic_review:
+                    priority_source_url = _priority_subscription_navigation_source(
                         targets=requested_targets,
                         requested_product_service=requested_product_service,
                         requested_attribute=requested_attribute,
                         homepage_navigation_locators=(
                             bounded_homepage_navigation_locators
                         ),
-                    )
-                    or _priority_submitted_company_source(
+                    ) or _priority_submitted_company_source(
                         targets=requested_targets,
                         requested_private_equity_stage=(
                             requested_private_equity_stage
@@ -2741,7 +2769,6 @@ async def investigate_company_evidence(
                         ),
                         first_party_domains=first_party_domains,
                     )
-                )
             if priority_source_url:
                 priority_cache_hit = priority_source_url in fetched_pages
                 if (

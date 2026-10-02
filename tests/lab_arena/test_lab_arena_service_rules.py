@@ -1858,6 +1858,7 @@ def test_public_results_take_valid_identity_from_the_round_publication():
         "public_icp_status": "pending",
         "public_icp_count": 0,
         "benchmark_icp_count": 20,
+        "score_status": "published",
         "submission_scores": {"stage_1": None, "final": None},
         "scoring_attribution": {
             "validators": [],
@@ -1908,6 +1909,8 @@ def test_cancelled_results_refuse_an_unrelated_submission_before_run_lookup():
             pytest.fail("global submission identity must not authorize results")
 
     service = object.__new__(ArenaService)
+    service._completed_scores_lock = threading.Lock()
+    service._completed_scores_cache = {}
     service._store = Store()
     service._round = lambda _round_id: {
         "round_id": "arena-2026-09-07",
@@ -1930,6 +1933,8 @@ def test_cancelled_results_refuse_an_unrelated_submission_before_run_lookup():
 @pytest.mark.parametrize("status", [state for state in contracts.ROUND_STATUSES if state != "published"])
 def test_public_results_keep_unpublished_rounds_private(status):
     service = object.__new__(ArenaService)
+    service._completed_scores_lock = threading.Lock()
+    service._completed_scores_cache = {}
     service._round = lambda _round_id: {
         "round_id": "arena-2026-09-08",
         "status": status,

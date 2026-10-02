@@ -5488,9 +5488,12 @@ def test_industry_activity_disjunction_keeps_explicit_and_requirements():
 
     assert "This OR applies only inside that activity clause" in prompt
     assert (
-        "Still prove every separate industry, sub-industry, or supplied-product "
-        "clause joined by AND"
+        "Still prove every independent mandatory capability and scope condition "
+        "under the precedence above"
     ) in prompt
+    assert "Do not turn the category label into a second, narrower AND gate" in prompt
+    assert "Do not convert an explicit BOTH, ALL, or separately required capability" in prompt
+    assert "every separate industry, sub-industry, or supplied-product clause joined by AND" not in prompt
     assert (
         "Every business type, object, customer scope, and qualifier that "
         "governs the OR list applies to each alternative"

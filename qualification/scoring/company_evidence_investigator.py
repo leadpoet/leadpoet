@@ -173,6 +173,21 @@ first-party sources for completed stage events. If a saved source does not
 prove the fact, use at least one targeted search before returning UNPROVEN when
 search budget remains. An unavailable page does not prove the fact absent.
 
+For industry, first resolve the requested capability using this precedence:
+industry and sub-industry labels name sector categories. When a broad label
+joins capabilities or customer sectors with "and", but the product/service
+criterion explicitly lists those capabilities or sectors as OR alternatives,
+the explicit OR determines the required capability: prove one allowed
+alternative. Do not turn the category label into a second, narrower AND gate.
+Do not convert an explicit BOTH, ALL, or separately required capability into
+an OR. Prove every independent mandatory capability and required customer,
+business-type, object, or scope condition. These conditions apply to every
+allowed alternative. A different sector or an adjacent activity does not
+qualify merely because it shares an allowed verb or customer group.
+This precedence applies to every industry finding, including positive
+semantic reviews and corrected findings. Keep the required attribute as a
+separate mandatory judgment; industry proof does not prove that attribute.
+
 For industry, investigate what the company itself supplies or operates. A
 customer's use of a product, an internal department, a partner, a portfolio
 company, or an industry named only as a target market does not establish that
@@ -211,16 +226,15 @@ A qualifying customer-facing commercial capability can be sold within a larger
 platform without being the company's main business or a standalone product,
 unless the exact criterion explicitly requires either condition. Distinguish
 controls that customers operate in the sold product from the vendor's internal
-compliance, internal use, or badges. Preserve the criterion's explicit AND/OR
-structure. Prove each conjunct. For alternatives joined by OR, evidence for one
-qualifying alternative is sufficient; do not require all alternatives.
+compliance, internal use, or badges. Apply the industry precedence above.
 Missing discussion is not a contradiction.
 Read activity lists literally. For example, a criterion that requires a
 commercial real-estate business that "buys, sells, brokers, develops, or
 manages property assets" is satisfied by company-bound evidence for any one of
 those activities; never require brokerage after development or management is
 proved. This OR applies only inside that activity clause. Still prove every
-separate industry, sub-industry, or supplied-product clause joined by AND.
+independent mandatory capability and scope condition under the precedence
+above; do not treat a sector category label as a separate AND requirement.
 The independent required-attribute check must still prove its own conditions. An allowed verb in the wrong industry does not satisfy
 the criterion. Every business type, object, customer scope, and qualifier that
 governs the OR list applies to each alternative; proving a listed verb alone is
@@ -258,20 +272,15 @@ and required-attribute context to identify that activity. Do not make the
 industry finding depend on a commercial or other condition that is separately
 stated in the required attribute; that condition needs its own independent
 required-attribute judgment and source proof before company fit can match.
-Still prove every active industry, sub-industry, and supplied-product condition
-that is not separately checked by the required attribute. Preserve explicit
-AND/BOTH/ALL requirements and OR alternatives in each criterion: prove every
-required conjunct and one supported alternative for each OR clause. A label
-that names two customer sectors as a category does not alone require customers
-in both sectors; use the full ICP wording to decide whether either or both are
-required. Equivalent source language is sufficient; do not require literal
+Apply the industry precedence above and prove every independent mandatory
+condition that is not separately checked by the required attribute.
+Equivalent source language is sufficient; do not require literal
 taxonomy labels. An adjacent activity for the same customer group is UNPROVEN.
 Populate observed industry, sub-industry, and value only from the source; never
 copy a prior or requested label as if the source stated it. In reason, concisely
 explain which concrete supplied capability and customer scope the evidence
 proves or fails to prove. Do not infer subscriptions from software, customers,
-licenses, or a funding announcement. A broad sub-industry taxonomy label
-joined by "and" may name a category, not require two distinct product lines.
+licenses, or a funding announcement.
 A directly sold B2B workflow platform can satisfy a broad
 infrastructure/workflow category without a separate infrastructure product;
 company fit still requires that the subscription model and business customer
@@ -279,11 +288,6 @@ scope are proven by their separate checks. A generic product label without
 the requested capability is insufficient; customer or internal use of
 another vendor's tool is not supplier/operator evidence. If the criterion
 explicitly requires the company to supply both product lines, prove both.
-When a broad sub-industry label joins capabilities with "and" but the complete
-product/service criterion explicitly lists those capabilities as OR
-alternatives, treat the label as a category and prove one allowed alternative.
-Do not convert an explicit BOTH, ALL, or separately required capability into
-an OR merely because the product/service also lists alternatives.
 Keep every separate product/service and required-attribute conjunct
 mandatory.
 For industry, CONTRADICTED requires direct customer, internal-function, or
@@ -3586,7 +3590,11 @@ async def investigate_company_evidence(
                                     "the cited concrete customer-facing functions directly "
                                     "perform every requested capability instead of requiring "
                                     "the source to repeat the criterion's label. Preserve "
-                                    "every AND/OR condition, qualifier, and exclusion. "
+                                    "every explicit mandatory condition, qualifier, and exclusion, "
+                                    "using the industry precedence in the system instructions: "
+                                    "an explicit product/service OR is not narrowed by a broad "
+                                    "sector category label joined with and; independently required "
+                                    "BOTH/ALL capabilities remain mandatory. "
                                     if non_rejected_source_context
                                     else ""
                                 )

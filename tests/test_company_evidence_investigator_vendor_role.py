@@ -307,12 +307,15 @@ def test_prompt_preserves_negative_controls_and_all_required_conjuncts():
         "own internal console or workflow remain customer_user or internal_function"
     ) in prompt
     assert (
-        "Still prove every active industry, sub-industry, and supplied-product" in prompt
+        "prove every independent mandatory condition that is not separately checked "
+        "by the required attribute" in prompt
     )
     assert "The independent required-attribute check must still prove" in prompt
     assert "An adjacent activity for the same customer group is UNPROVEN" in prompt
-    assert "product/service criterion explicitly lists those capabilities as OR" in prompt
+    assert "criterion explicitly lists those capabilities or sectors as OR alternatives" in prompt
     assert "Do not convert an explicit BOTH, ALL" in prompt
+    assert "This precedence applies to every industry finding" in prompt
+    assert "Still prove every active industry, sub-industry" not in prompt
 
 
 def test_attribute_review_binds_annual_terms_and_workflow_across_loaded_pages():

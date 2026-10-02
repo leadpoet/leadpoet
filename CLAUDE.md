@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: October 2 scoring audit
+
+On 2026-10-02 the user authorized a deep audit of the published October 2
+Arena baseline and miner scoring, independent primary-source checks, latest
+Tyche comparison, narrow general fixes for confirmed verifier/scoring bugs,
+focused positive/negative tests, protected provider-backed saved-output
+validation, safe pushes, scorer-image publication and canonical paired
+gateway/normal-validator deployment through the overnight validation skill.
+Preserve published results, frozen banks and model sources, qualification
+standards, deterministic scoring, sourcing/verifier cost separation, provider
+credential ownership, promotions, rewards, weights and concurrent work.
+Do not loosen standards just to increase scores or interrupt unrelated runs.
+This authority ends when the audit and confirmed fixes are verified in production.
+
 ## Scoped production authorization: October 1 production audit and recovery
 
 On 2026-10-01 the user authorized end-to-end production audit and recovery of

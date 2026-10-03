@@ -51,7 +51,7 @@ HOST_KEYS = {
 @pytest.fixture
 def champion_database():
     yield from database_with_lab_arena_migration(
-        CURRENT_SERVICE_MIGRATIONS + ("227-lab-arena-champion-funding.sql",)
+        CURRENT_SERVICE_MIGRATIONS
     )
 
 
@@ -214,6 +214,7 @@ class ChampionHarness(Harness):
                 banned_hotkeys_source=lambda: list(self.banned),
                 broker_factory=broker_factory,
                 defaults=svc.RoundDefaults(
+                    benchmark_icp_count=contracts.BENCHMARK_ICP_COUNT,
                     checkpoint_deadline_enabled=False, runner_slot_ceiling=8,
                     runner_hotkeys=tuple(self.runner_keys),
                     baseline_hotkey=self.baseline_hotkey,

@@ -5696,10 +5696,13 @@ def test_fiuu_parent_listing_stays_an_explicit_unproven_stage_control():
     assert "Never inherit Public or another stage" in prompt
 
 
-def test_rebel_headquarters_conflict_requires_dates_or_move_evidence():
+def test_headquarters_source_priority_preserves_current_first_party_conflicts():
     prompt = " ".join(investigator._SYSTEM_PROMPT.split())
 
-    assert "source dates or explicit move evidence" in prompt
+    assert "use that location and its exact continuous source quote" in prompt
+    assert "over a different undated third-party profile HQ" in prompt
+    assert "If current first-party sources disagree" in prompt
+    assert "source dates or an explicit move statement" in prompt
     assert "return UNPROVEN" in prompt
     assert "A factory opening cannot prove an HQ move" in prompt
 

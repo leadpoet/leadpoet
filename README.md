@@ -185,9 +185,11 @@ Only one replacement attempt is allowed per hotkey per daily round: reserving it
 For example, a queued model submitted at 09:00 UTC on December 9 can be replaced using the same submission command and hotkey with updated source, as long as upload and validation finish before 23:00 UTC that day.
 
 First submissions retain the normal 00:00 UTC submission deadline. Hotkeys
-under the same coldkey may each submit. Each round admits up to 20 challengers,
-plus the baseline. Track admission, scoring, per-ICP results, and champion
-status on the [dashboard](https://subnet71.com).
+under the same coldkey may each submit. Each registered miner hotkey can enter
+one model per daily round. The default round supports up to 256 challengers,
+plus the baseline; there is no separate 20-challenger admission limit. Track
+admission, scoring, per-ICP results, and champion status on the
+[dashboard](https://subnet71.com).
 
 Once the round's ICPs are public, open a submission and expand an ICP to see each company's recorded checks, including company-fit, intent, failed checks, and checks that were not evaluated.
 

@@ -1,4 +1,4 @@
-"""Current-schema admission and a full twenty-challenger competition."""
+"""Current-schema admission and a competition beyond the former twenty-challenger cap."""
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -30,12 +30,12 @@ def self_dealing_connect(self_dealing_database):
     return lambda: psycopg2.connect(**dsn)
 
 
-def test_default_admission_is_twenty_with_one_planned_runner(connect, tmp_path, monkeypatch):
+def test_default_admission_includes_all_miner_slots_with_one_planned_runner(connect, tmp_path, monkeypatch):
     harness = fixtures.Harness(connect, tmp_path, challengers=[], runners=["alpha"])
     harness.service.config.defaults = replace(harness.service.config.defaults, max_challengers=contracts.DEFAULT_MAX_CHALLENGERS)
     cutoff = datetime.now(timezone.utc) + timedelta(hours=12)
     configuration = harness.service.create_round(cutoff, round_id="arena-2098-01-01-capdefault")
-    assert configuration["max_challengers"] == 20
+    assert configuration["max_challengers"] == 256
     assert capacity.daily_challenger_capacity(configuration) == 8
     assert configuration["runner_slot_ceiling"] == 8
     assert configuration["max_attempts_per_assignment"] == 2
@@ -44,14 +44,14 @@ def test_default_admission_is_twenty_with_one_planned_runner(connect, tmp_path, 
         harness.service.create_round(cutoff, round_id="arena-2098-01-02-capzero")
 
 
-def test_twenty_shared_owner_hotkeys_publish_with_intact_source_and_credentials(connect, tmp_path):
+def test_twenty_one_shared_owner_hotkeys_publish_with_intact_source_and_credentials(connect, tmp_path):
     """Signed intake, real PostgreSQL/broker/runner, nonempty contact results, publication."""
-    flavors = [f"SharedOwner{index:02d}" for index in range(20)]
+    flavors = [f"SharedOwner{index:02d}" for index in range(21)]
     harness = ContactHarness(connect, tmp_path, challengers=flavors, runners=["alpha"])
     _install_contact_sandbox(harness)
     harness.service.config.defaults = replace(harness.service.config.defaults, max_challengers=contracts.DEFAULT_MAX_CHALLENGERS)
     original_metagraph = harness.chain.metagraph
-    shared_owner = fixtures.keypair("twenty-shared-coldkey").ss58_address
+    shared_owner = fixtures.keypair("twenty-one-shared-coldkey").ss58_address
 
     def metagraph(*, finalized=True):
         snapshot = original_metagraph(finalized=finalized)
@@ -64,8 +64,8 @@ def test_twenty_shared_owner_hotkeys_publish_with_intact_source_and_credentials(
     harness.chain.epoch = 49_000
     harness.clock.now = datetime.now(timezone.utc)
     harness.round_id = "arena-2098-01-03-capfull"
-    configuration = harness.service.create_round(harness.clock.now + timedelta(hours=12), round_id=harness.round_id)
-    assert configuration["max_challengers"] == 20
+    configuration = harness.service.create_round(harness.clock.now + timedelta(minutes=30), round_id=harness.round_id)
+    assert configuration["max_challengers"] == 256
     assert configuration["integrity_policy"] == "arena_integrity_v1"
     assert configuration["contact_policy"] == "contacts_v1"
     submitted = [harness.submit(flavor, harness.round_id) for flavor in flavors]
@@ -73,22 +73,20 @@ def test_twenty_shared_owner_hotkeys_publish_with_intact_source_and_credentials(
     original_source = {submission: harness.objects.get(row["source_ref"]) for submission, row in original_rows.items()}
     assert {row["owner_coldkey"] for row in original_rows.values()} == {shared_owner}
 
-    # Accepted source is immutable, including when its owner has other hotkeys.
-    with pytest.raises(svc.ServiceError, match="submission_conflict"):
-        harness.submit("ChangedSourceWithADifferentSize", harness.round_id, miner_label=flavors[0])
-    with pytest.raises(svc.ServiceError, match="submission_rejected:capacity.round_full"):
-        harness.submit("TwentyFirst", harness.round_id)
+    # A transport retry cannot add another entry for the same miner.
+    assert harness.submit(flavors[0], harness.round_id) == submitted[0]
+    assert len(harness.service.store.list_submissions(harness.round_id, status="accepted")) == 21
     assert all(harness.service.store.get_submission(submission) == row for submission, row in original_rows.items())
 
     harness.clock.advance_to(harness.schedule()["submission_cutoff"])
     published = harness.advance_until("published", runners=1, max_steps=100)
-    assert len(published["participants"]) == 21
+    assert len(published["participants"]) == 22
     assert sum(participant["is_king"] for participant in published["participants"]) == 1
-    assert len(published["publication_doc"]["final_ranking"]) == 21
+    assert len(published["publication_doc"]["final_ranking"]) == 22
     for stage in (1, 2):
         for kind in ("execute", "score"):
             runs = harness.service.store.list_runs(harness.round_id, stage=stage, kind=kind)
-            assert len(runs) == 21 * 10
+            assert len(runs) == 22 * 10
             assert {run["status"] for run in runs} == {"accepted"}
     assert harness.service.store.has_recent_participation(
         "finney", 71, harness.runner_keys[0]
@@ -156,7 +154,7 @@ def test_shared_owner_validator_cannot_claim_sibling_submissions(
     harness.clock.now = datetime.now(timezone.utc)
     harness.round_id = "arena-2098-01-04-selfdeal"
     harness.service.create_round(
-        harness.clock.now + timedelta(hours=12), round_id=harness.round_id
+        harness.clock.now + timedelta(minutes=30), round_id=harness.round_id
     )
     submitted = {
         flavor: harness.submit(flavor, harness.round_id) for flavor in flavors

@@ -326,7 +326,7 @@ Set these values on the Arena service host:
 Common optional values are `AWS_REGION`, `LAB_ARENA_NETUID`,
 `LAB_ARENA_NETWORK`, `LAB_ARENA_CHAIN_TIMEOUT_SECONDS`,
 `LAB_ARENA_DAILY_CUTOFF_UTC` (default `0`),
-`LAB_ARENA_MAX_CHALLENGERS` (default `20`, hard schema limit `256`),
+`LAB_ARENA_MAX_CHALLENGERS` (default and hard schema limit `256`),
 `LAB_ARENA_MAX_IMAGE_BYTES` for the trusted scorer image,
 `LAB_ARENA_POOL_PERCENT` (default `30`), and
 `LAB_ARENA_BANNED_HOTKEYS_PATH`. `LAB_ARENA_REWARDS_ENABLED` defaults to
@@ -339,6 +339,14 @@ replacement freeze. Different hotkeys can share a coldkey. The configured
 admission limit is not reduced by the conservative
 runner workload estimate. Worker concurrency, stage deadlines, and spending
 limits remain enforced; a full round can require more runner capacity.
+
+When deploying the per-miner admission default, remove any explicit
+`LAB_ARENA_MAX_CHALLENGERS=20` override (or set it to `256`). Apply
+`395-lab-arena-per-miner-daily-admission.sql` to raise the former default only
+for standard, open Finney 71 rounds whose cutoff has not passed and which have
+no frozen participants, benchmark, or runs. The migration preserves submissions
+and credentials and leaves started, historical, shadow, and custom-cap rounds
+unchanged. Future rounds use the configured default.
 
 `LAB_ARENA_BENCHMARK_DISCLOSURE_FROM` is an optional aware timestamp, normalized
 to UTC. For example, `2026-09-13T00:00:00Z` freezes

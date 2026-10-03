@@ -144,8 +144,9 @@ def test_daily_cutoff_hour_rejects_values_outside_the_day(monkeypatch, raw):
 
 def test_daily_capacity_defaults_are_bounded(monkeypatch):
     monkeypatch.delenv("LAB_ARENA_MAX_CHALLENGERS", raising=False)
+    assert wiring._max_challengers_from_environment() == wiring.contracts.MAX_CHALLENGERS == 256
+    monkeypatch.setenv("LAB_ARENA_MAX_CHALLENGERS", "20")
     assert wiring._max_challengers_from_environment() == 20
-    assert wiring._max_challengers_from_environment() < wiring.contracts.MAX_CHALLENGERS
 
 
 def test_runner_wiring_keeps_proxy_inventory_but_uses_memory_supported_slots(

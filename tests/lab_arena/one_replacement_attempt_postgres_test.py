@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from lab_arena import contracts
 from lab_arena.owner_admission import OwnerAdmission
 from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport
 from tests.lab_arena.hotkey_admission_postgres_test import (
@@ -47,9 +48,13 @@ def store(database):
 
 
 def _round(store, round_id):
-    assert store.create_round(
-        round_id, _config(round_id, cutoff_after=timedelta(hours=3))
-    )["status"] == "created"
+    config = _config(round_id, cutoff_after=timedelta(hours=3))
+    config.update(
+        stage_1_icp_count=contracts.STAGE_1_ICP_COUNT,
+        stage_2_icp_count=contracts.STAGE_2_ICP_COUNT,
+        max_challengers=contracts.DEFAULT_MAX_CHALLENGERS,
+    )
+    assert store.create_round(round_id, config)["status"] == "created"
 
 
 def _first(store, round_id, hotkey, submission_id):

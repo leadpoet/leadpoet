@@ -316,6 +316,19 @@ def test_prompt_preserves_negative_controls_and_all_required_conjuncts():
     assert "Do not convert an explicit BOTH, ALL" in prompt
     assert "This precedence applies to every industry finding" in prompt
     assert "Still prove every active industry, sub-industry" not in prompt
+    assert (
+        "If a conjunct remains unsupported by concrete company-bound source "
+        "evidence, return UNPROVEN" in prompt
+    )
+    assert (
+        "The requested taxonomy or marketing label need not appear verbatim"
+        in prompt
+    )
+    assert (
+        "VERIFIED requires evidence for every conjunct for the same company "
+        "and product" in prompt
+    )
+    assert "Cite the source and exact quote for the conjunct" in prompt
 
 
 def test_attribute_review_binds_annual_terms_and_workflow_across_loaded_pages():
@@ -360,6 +373,56 @@ def test_attribute_review_binds_annual_terms_and_workflow_across_loaded_pages():
         {"findings": [industry, forged]}, **kwargs
     )
     assert rejected["required_attribute"]["status"] == "UNPROVEN"
+
+
+def test_descriptive_attribute_uses_bound_capability_and_separate_terms():
+    product_url = "https://routeworks.example/ordering"
+    terms_url = "https://routeworks.example/terms"
+    product_quote = (
+        "RouteWorks offers retailers a configurable ordering platform with "
+        "workflow APIs."
+    )
+    terms_quote = (
+        "RouteWorks contracts renew annually for that ordering platform."
+    )
+    finding = {
+        **_finding(
+            status="VERIFIED", role="supplier_operator", url=product_url,
+            quote=product_quote,
+            reason=(
+                "The supplied platform and its annual contract terms support "
+                "the described workflow capability and recurring agreement."
+            ),
+        ),
+        "target": "required_attribute",
+        "supporting_evidence_url_1": terms_url,
+        "supporting_evidence_quote_1": terms_quote,
+    }
+    kwargs = dict(
+        targets=("required_attribute",),
+        fetched_pages={product_url: product_quote, terms_url: terms_quote},
+        fetched_final_urls={product_url: product_url, terms_url: terms_url},
+        first_party_domains={"routeworks.example"},
+        identity_names={"routeworks"},
+        identity_anchor=_identity_anchor("RouteWorks", "routeworks.example"),
+    )
+    accepted = investigator._validated_findings(
+        {"findings": [finding]}, **kwargs
+    )["required_attribute"]
+    assert accepted["status"] == "VERIFIED"
+    assert accepted["supporting_evidence"] == [
+        {"url": terms_url, "quote": terms_quote}
+    ]
+
+    for unsupported_quote in (
+        "RouteWorks contracts renew monthly for that ordering platform.",
+        "OtherCo contracts renew annually for that ordering platform.",
+    ):
+        unsupported = dict(finding, supporting_evidence_quote_1=unsupported_quote)
+        rejected = investigator._validated_findings(
+            {"findings": [unsupported]}, **kwargs
+        )["required_attribute"]
+        assert rejected["status"] == "UNPROVEN"
 
 
 def test_attribute_review_accepts_company_bound_third_party_and_internal_event():

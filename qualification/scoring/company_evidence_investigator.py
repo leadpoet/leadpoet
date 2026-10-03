@@ -304,12 +304,16 @@ The industry finding may provide the product/activity quote, but cannot by
 itself prove a separate recurring, customer, commercial, or milestone term.
 Cite the source and exact quote for the conjunct not established by the
 industry finding; explain how the loaded sources jointly prove the complete
-criterion. If a conjunct remains unstated, return UNPROVEN, even if the
-company likely qualifies. CONTRADICTED requires direct company-bound
-counterevidence, not a page's silence. A generic platform, software, pricing
+criterion. If a conjunct remains unsupported by concrete company-bound source
+evidence, return UNPROVEN, even if the company likely qualifies. CONTRADICTED
+requires direct company-bound counterevidence, not a page's silence. A generic
+platform, software, pricing
 contact, license, or customer quote never proves recurring terms by inference.
-Equivalent semantic evidence is sufficient: for example, an annual fee for
-the same supplied platform proves recurrence without the word subscription.
+Equivalent semantic evidence is sufficient: concrete source facts about the
+capability and its relationship to the same company and product may establish
+a descriptive criterion. The requested taxonomy or marketing label need not
+appear verbatim. For example, an annual fee for the same supplied platform
+proves recurrence without the word subscription.
 When a compound attribute needs more than its primary quote and the separate
 industry finding, put up to two additional exact company-bound loaded-source
 URL/quote pairs in supporting_evidence_url_1 and

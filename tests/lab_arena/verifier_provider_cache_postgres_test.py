@@ -22,6 +22,7 @@ from tests.lab_arena.test_lab_arena_broker import FakeTransport, price_table
 
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = "391-lab-arena-verifier-provider-request-cache.sql"
+LEASE_MIGRATION = "392-lab-arena-judgment-cache-extended-lease.sql"
 ROUND = "arena-2099-10-02"
 DATE = "2099-10-02"
 POLICY = scoring.build_scorer_policy(
@@ -37,11 +38,21 @@ def _sha(value: str) -> str:
 @pytest.fixture(scope="module")
 def database():
     yield from database_with_lab_arena_migration(
-        CURRENT_SERVICE_MIGRATIONS + (
+        tuple(
+            migration for migration in CURRENT_SERVICE_MIGRATIONS
+            if migration not in (MIGRATION, LEASE_MIGRATION)
+        ) + (
+            "264-lab-arena-codex-cost-reconciliation.sql",
             "289-lab-arena-per-icp-cost-policy.sql",
+            "311-lab-arena-per-icp-closed-billing-reconciliation.sql",
             "312-lab-arena-temporary-hold-admission.sql",
             "314-lab-arena-openrouter-web-search-reservation.sql",
+            "319-lab-arena-quota-sourcing-cost.sql",
+            "321-lab-arena-confirmed-cost-admission.sql",
+            "329-lab-arena-explicit-90m-lease.sql",
+            "354-lab-arena-60m-lease.sql",
             MIGRATION,
+            LEASE_MIGRATION,
         )
     )
 
@@ -143,14 +154,14 @@ def _call(database, function: str, *args):
 
 
 def _reserve(database, label: str, request: str, action: str,
-             *, call_doc=None, funding=None, amount=500):
+             *, call_doc=None, funding=None, amount=500, ttl=120):
     document = _call_doc(request) if call_doc is None else call_doc
     return _call(
         database, "lab_arena_reserve_judgment_call",
         "cache-run-" + label, _sha("lease-" + label), _sha(action),
         document["judgment_cache_scope"]["requested_operation_id"], "openrouter",
         funding or ("host" if label == "baseline" else "miner_key"),
-        amount, json.dumps(document), 120,
+        amount, json.dumps(document), ttl,
     )
 
 
@@ -378,13 +389,13 @@ def test_failures_malformed_replies_and_expired_claims_do_not_poison_key(seeded)
     assert _reserve(seeded, "miner_b", "expiry", "expired-follower")["status"] == "reserved"
 
 
-def test_acl_and_replay(seeded):
+def test_acl_and_extended_lease_migration_replay(seeded):
     psycopg2, dsn = seeded
     signature = (
         "public.lab_arena_reserve_judgment_call(text,text,text,text,text,"
         "text,bigint,jsonb,integer)"
     )
-    sql = (ROOT / "scripts" / MIGRATION).read_text(encoding="utf-8")
+    sql = (ROOT / "scripts" / LEASE_MIGRATION).read_text(encoding="utf-8")
     with psycopg2.connect(**dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -402,7 +413,17 @@ def test_acl_and_replay(seeded):
             assert cursor.fetchone()[0] == before
 
 
-def test_broker_replays_exact_score_request_through_real_ledger(seeded):
+def test_extended_lease_rejects_other_values(seeded):
+    for ttl in (59, 3601, 4499, 4501, 6299, 6301):
+        with pytest.raises(Exception, match="lab_arena_judgment_cache_input_invalid"):
+            _reserve(seeded, "baseline", "invalid-ttl", "invalid-ttl", ttl=ttl)
+    assert not _ledger(seeded, "invalid-ttl")
+
+
+@pytest.mark.parametrize("lease_ttl_seconds", (120, 4500, 6300))
+def test_broker_replays_exact_score_request_through_real_ledger(
+    seeded, lease_ttl_seconds,
+):
     psycopg2, dsn = seeded
     transport = PsycopgTransport(lambda: psycopg2.connect(**dsn))
     store = ArenaStore(transport)
@@ -443,7 +464,7 @@ def test_broker_replays_exact_score_request_through_real_ledger(seeded):
         price_table=price_table(),
         judge_models=["openai/gpt-4o-mini"],
         transport=provider,
-        lease_ttl_seconds=120,
+        lease_ttl_seconds=lease_ttl_seconds,
     )
     parameters = {
         "model": "openai/gpt-4o-mini",

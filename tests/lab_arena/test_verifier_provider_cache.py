@@ -269,6 +269,51 @@ def test_incomplete_answers_do_not_freeze_request(body):
     assert len(transport.sent) == 2
 
 
+def test_complete_no_format_json_reuses_exact_company_criteria():
+    request = {
+        key: value for key, value in _REQUEST.items() if key != "response_format"
+    }
+    request["messages"] = [
+        {"role": "system", "content": "Return one JSON company-fit judgment."},
+        {"role": "user", "content": "Storika: employee range 11-50."},
+    ]
+    answer = _answer()
+    answer["choices"][0]["message"]["content"] = json.dumps({
+        "employee_size_matches": True, "reason": "The stated range matches."
+    })
+    store = JudgmentLedger()
+    instance, _, transport = _broker(store, [(200, answer), (200, answer)])
+    source = _call(instance, _context("fit-source"), request)
+    hit = _call(instance, _context("fit-hit"), request)
+    changed = {**request, "messages": [
+        request["messages"][0],
+        {"role": "user", "content": "Storika: employee range 51-200."},
+    ]}
+    miss = _call(instance, _context("fit-changed"), changed)
+    assert source.status == hit.status == miss.status == 200
+    assert hit.call["cached"] is True
+    assert hit.body == source.body
+    assert miss.call.get("cached") is None
+    assert len(transport.sent) == 2
+
+
+@pytest.mark.parametrize("content", [
+    "{}", "", "Company matches the range.", "```json\n{\"fits\":true}\n```",
+    '{"fits":', '{"error":"provider failed"}',
+])
+def test_no_format_incomplete_content_is_not_replayed(content):
+    request = {key: value for key, value in _REQUEST.items() if key != "response_format"}
+    incomplete = _answer()
+    incomplete["choices"][0]["message"]["content"] = content
+    store = JudgmentLedger()
+    instance, _, transport = _broker(store, [(200, incomplete), (200, _answer())])
+    first = _call(instance, _context("incomplete-first"), request)
+    second = _call(instance, _context("incomplete-second"), request)
+    assert first.call.get("cached") is None
+    assert second.call.get("cached") is None
+    assert len(transport.sent) == 2
+
+
 def test_frozen_scope_version_and_execution_bypass():
     store = JudgmentLedger()
     instance, _, transport = _broker(store, [(200, _answer())] * 5)

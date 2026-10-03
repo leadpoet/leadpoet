@@ -2004,16 +2004,21 @@ def _complete_judgment_response(
         ):
             return False
         response_format = request.get("response_format")
-        if isinstance(response_format, Mapping) and response_format.get("type") in {
-            "json_object", "json_schema",
-        }:
+        if response_format is None or (
+            isinstance(response_format, Mapping)
+            and response_format.get("type") in {"json_object", "json_schema"}
+        ):
             try:
                 parsed = json.loads(content)
-                if not isinstance(parsed, Mapping) or not parsed:
+                if (
+                    not isinstance(parsed, Mapping)
+                    or not parsed
+                    or parsed.get("error") is not None
+                ):
                     return False
             except ValueError:
                 return False
-            if response_format.get("type") == "json_schema":
+            if isinstance(response_format, Mapping) and response_format.get("type") == "json_schema":
                 declared = response_format.get("json_schema")
                 if (
                     not isinstance(declared, Mapping)
@@ -2036,7 +2041,7 @@ def _complete_judgment_response(
                     ):
                         return False
         else:
-            # Free-form prose is not an accepted verifier verdict contract.
+            # Free-form prose and unknown response formats are not replayable.
             return False
         return True
     if operation_id == "openrouter.responses":

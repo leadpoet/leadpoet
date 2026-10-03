@@ -157,6 +157,8 @@ async def test_archive_card_uses_existing_one_fetch_one_judge_and_date_gate(
         SOKIN_QUOTE, SOKIN_CARD,
     ]
     assert "not by itself the date" in calls.await_args_list[1].args[2]
+    assert "one visible same-host archive card" in calls.await_args_list[1].args[2]
+    assert "does not establish company ownership" in calls.await_args_list[1].args[2]
     item = result["verdict"]["signal_evaluations"][0]
     event, publications = source_dates_from_verdict(
         item, result["source_publication_dates"],

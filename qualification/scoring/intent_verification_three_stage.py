@@ -3045,8 +3045,10 @@ def _build_final_judge_prompt(
         )
         if row.get("_article_archive_card") is True:
             suffix += (
-                " The additional text is only one visible first-party archive "
+                " The additional text is only one visible same-host archive "
                 "card whose link exactly identifies the submitted article. "
+                "Sharing the article's host does not establish company ownership "
+                "or make the publisher a first-party company source. "
                 "Its date is the linked article's publication date, not by "
                 "itself the date on which the event occurred. Use "
                 "source_publication_date for that card date; do not report "

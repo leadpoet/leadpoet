@@ -170,6 +170,33 @@ class _VisibleHTMLTextParser(HTMLParser):
                 self.heading_parts.append(data)
 
 
+class _VisibleHTMLLinkParser(_VisibleHTMLTextParser):
+    """Keep visible anchor labels, including links in navigation and indexes."""
+
+    _HIDDEN_ELEMENTS = frozenset({"noscript", "script", "style", "template"})
+    _NON_ARTICLE_PREFIXES = ()
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.link_labels: list[tuple[str, str]] = []
+        self._active_link: Optional[tuple[str, int]] = None
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        super().handle_starttag(tag, attrs)
+        if tag.casefold() == "a" and not self._hidden_depth:
+            href = self._attribute_map(attrs).get("href", "").strip()
+            if href:
+                self._active_link = (href, len(self.parts))
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.casefold() == "a" and self._active_link is not None:
+            href, start = self._active_link
+            if len(self.link_labels) < 500:
+                self.link_labels.append((href, " ".join(self.parts[start:])))
+            self._active_link = None
+        super().handle_endtag(tag)
+
+
 _CSS_HIDDEN_DECLARATION_RE = re.compile(
     r"(?:display\s*:\s*none|visibility\s*:\s*hidden)",
     re.IGNORECASE,
@@ -281,6 +308,24 @@ def visible_html_links(content: str) -> tuple[str, ...]:
     except Exception:
         return ()
     return tuple(dict.fromkeys(parser.links))
+
+
+def visible_html_link_labels(content: str) -> tuple[tuple[str, str], ...]:
+    """Return raw-page anchor pairs after the shared visibility checks."""
+
+    if not content:
+        return ()
+    hidden_classes, hidden_ids = _css_hidden_selectors(content)
+    parser = _VisibleHTMLLinkParser(
+        hidden_classes=hidden_classes,
+        hidden_ids=hidden_ids,
+    )
+    try:
+        parser.feed(content)
+        parser.close()
+    except Exception:
+        return ()
+    return tuple(parser.link_labels)
 
 
 _HEADING_STOPWORDS = frozenset({

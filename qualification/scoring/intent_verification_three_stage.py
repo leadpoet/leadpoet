@@ -259,39 +259,9 @@ def _is_careers_index_url(url: str) -> bool:
 def _visible_page_links(body: str) -> list[tuple[str, str]]:
     """Parse a bounded set of visible links from one rendered HTML page."""
 
-    class Links(HTMLParser):
-        _HIDDEN = frozenset({"script", "style", "template", "noscript"})
+    from qualification.scoring.verification_helpers import visible_html_link_labels
 
-        def __init__(self):
-            super().__init__()
-            self.links: list[tuple[str, str]] = []
-            self.href: str | None = None
-            self.parts: list[str] = []
-            self.hidden_depth = 0
-
-        def handle_starttag(self, tag, attrs):
-            if tag in self._HIDDEN:
-                self.hidden_depth += 1
-            if tag == "a" and not self.hidden_depth:
-                self.href = dict(attrs).get("href")
-                self.parts = []
-
-        def handle_data(self, data):
-            if self.href is not None and not self.hidden_depth:
-                self.parts.append(data)
-
-        def handle_endtag(self, tag):
-            if tag == "a" and self.href is not None:
-                if len(self.links) < 500:
-                    self.links.append((self.href, " ".join(self.parts)))
-                self.href = None
-                self.parts = []
-            if tag in self._HIDDEN and self.hidden_depth:
-                self.hidden_depth -= 1
-
-    document = Links()
-    document.feed(body)
-    return document.links
+    return list(visible_html_link_labels(body))
 
 
 def _same_host_event_links(body: str, source_url: str) -> list[Dict[str, str]]:
@@ -4063,16 +4033,17 @@ def _bound_article_archive_card(
     if len(cards) != 1:
         return None
     label = " ".join(str(cards[0].get("label") or "").split())
-    page_text = str(result.get("text") or "")
     company_tokens = _company_core_tokens(str(row.get("company") or ""))
     label_tokens = _link_tokens(label)
     title_tokens = _link_tokens(unquote(urlsplit(article_url).path.rsplit("/", 1)[-1]))
     title_tokens -= company_tokens
     claim_tokens = _link_tokens(row.get("claim")) - company_tokens
     date_value = _archive_card_date(label)
+    # The label is a server-extracted visible anchor from the fetched raw
+    # page. Article-body extraction may omit archive cards, so its text is
+    # not the authority for this exact href/label pair.
     if (
         not date_value
-        or not _grounded_exact_text(page_text, label)
         or (company_tokens and not company_tokens & label_tokens)
         or not title_tokens
         or len(title_tokens & label_tokens) < min(2, len(title_tokens))

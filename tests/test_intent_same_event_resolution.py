@@ -53,6 +53,62 @@ def _sokin_archive_result(*, card=SOKIN_CARD, href=SOKIN_ARTICLE,
     }
 
 
+def test_archive_card_survives_article_focused_text_projection():
+    raw_index = (
+        '<html><body><main class="blog-index"><h1>News</h1>'
+        f'<a href="{SOKIN_ARTICLE}">{SOKIN_CARD}</a>'
+        '</main></body></html>'
+    )
+    links = verifier._same_host_event_links(raw_index, SOKIN_INDEX)
+    row = {"company": "Sokin", "claim": SOKIN_CLAIM,
+           "claimed_source_urls": [SOKIN_ARTICLE]}
+    assert verifier._bound_article_archive_card([{
+        "url": SOKIN_INDEX,
+        "text": "News index summary without the card",
+        "meta": {"same_host_event_links": links},
+    }], archive_url=SOKIN_INDEX, article_url=SOKIN_ARTICLE, row=row) == {
+        "text": SOKIN_CARD, "source_publication_date": "2025-12-01",
+    }
+
+
+@pytest.mark.parametrize("wrapper", [
+    '<div hidden>{card}</div>',
+    '<section aria-hidden="true">{card}</section>',
+    '<div style="display: none">{card}</div>',
+    '<div style="visibility: hidden">{card}</div>',
+    '<div class="hidden-card">{card}</div>',
+    '<div id="hidden-card">{card}</div>',
+    '<a href="{article}" hidden>{label}</a>',
+    '<a href="{article}" aria-hidden="true">{label}</a>',
+    '<a href="{article}" style="display:none">{label}</a>',
+    '<script>{card}</script>',
+    '<template>{card}</template>',
+])
+def test_archive_link_in_hidden_ancestor_cannot_supply_date(wrapper):
+    card = f'<a href="{SOKIN_ARTICLE}">{SOKIN_CARD}</a>'
+    html = (
+        '<style>.hidden-card, #hidden-card { display: none }</style>'
+        + wrapper.format(card=card, article=SOKIN_ARTICLE, label=SOKIN_CARD)
+        + '<nav><a href="/news">News</a></nav>'
+    )
+    links = verifier._same_host_event_links(html, SOKIN_INDEX)
+    assert all(link["url"] != SOKIN_ARTICLE for link in links)
+
+
+def test_visible_archive_index_and_navigation_links_remain_available():
+    html = (
+        '<nav><a href="/news">News</a></nav>'
+        '<section class="blog-index">'
+        f'<a href="{SOKIN_ARTICLE}">{SOKIN_CARD}</a>'
+        '</section>'
+    )
+    links = verifier._same_host_event_links(html, SOKIN_ARTICLE)
+    assert [link["url"] for link in links] == [SOKIN_INDEX]
+    assert verifier._same_host_event_links(html, SOKIN_INDEX) == [{
+        "url": SOKIN_ARTICLE, "label": SOKIN_CARD,
+    }]
+
+
 def test_sokin_shaped_archive_card_binds_original_article_and_one_date():
     article_html = (
         '<a href="/news">News Learn more what’s happening</a>'
@@ -134,7 +190,19 @@ async def test_archive_card_uses_existing_one_fetch_one_judge_and_date_gate(
                 ]},
             }], "statuses": []}
         assert urls == [SOKIN_INDEX]
-        return {"results": [_sokin_archive_result()], "statuses": []}
+        raw_index = (
+            '<html><body><main class="blog-index"><h1>News</h1>'
+            f'<a href="{SOKIN_ARTICLE}">{SOKIN_CARD}</a>'
+            '</main></body></html>'
+        )
+        return {"results": [{
+            "url": SOKIN_INDEX,
+            "text": "News index summary without the dated card",
+            "source_publication_date": "",
+            "meta": {"same_host_event_links": verifier._same_host_event_links(
+                raw_index, SOKIN_INDEX,
+            )},
+        }], "statuses": []}
 
     fetched = AsyncMock(side_effect=fetch)
     monkeypatch.setattr(verifier, "_fetch_sd_then_exa", fetched)

@@ -40,23 +40,31 @@ def _finding(target: str, *, status: str = "UNPROVEN") -> dict:
     }
 
 
-def _run_priority_case(monkeypatch, *, cached=False, geography=False):
+def _run_priority_case(
+    monkeypatch, *, cached=False, geography=False, fetch_failure=False,
+):
     homepage = "https://sokin.com/"
     investors = "https://sokin.com/investors"
     contact = "https://sokin.com/contact-us"
     requests = []
-    fetch = AsyncMock(return_value={
-        "ok": True, "url": contact if geography else ROUND_URL,
-        "final_url": contact if geography else ROUND_URL,
-        "text": "Sokin headquarters: London, United Kingdom." if geography
-        else ROUND_QUOTE,
-    })
+    fetch = AsyncMock(return_value=(
+        {"ok": False, "error": "http_404"}
+        if fetch_failure else {
+            "ok": True, "url": contact if geography else ROUND_URL,
+            "final_url": contact if geography else ROUND_URL,
+            "text": "Sokin headquarters: London, United Kingdom." if geography
+            else ROUND_QUOTE,
+        }
+    ))
 
     async def fake_post(_session, _url, *, headers, payload):
         del headers
         requests.append(payload)
         findings = [
-            _finding("stage", status="UNPROVEN" if geography else "VERIFIED"),
+            _finding(
+                "stage",
+                status="UNPROVEN" if geography or fetch_failure else "VERIFIED",
+            ),
         ]
         if geography:
             findings.append(_finding("geography"))
@@ -153,6 +161,29 @@ def test_headquarters_locator_keeps_priority_over_submitted_round(monkeypatch):
     search.assert_awaited_once()
 
 
+def test_failed_submitted_round_fetch_keeps_its_consumed_budget(monkeypatch):
+    result, document, fetch, search = _run_priority_case(
+        monkeypatch, fetch_failure=True,
+    )
+
+    assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["_validated_stage_finding"] == {}
+    assert result["usage"]["fetch_calls"] == 1
+    assert document["server_priority_submitted_source"] == {
+        "url": ROUND_URL,
+        "ok": False,
+        "cache_hit": False,
+        "error": "http_404",
+        "notice": "server_selected_first_party_locator_is_untrusted_evidence",
+    }
+    assert document["investigation_limits"]["remaining_fetch_calls"] == 2
+    assert all(
+        page["url"] != ROUND_URL for page in document["prefetched_sources"]
+    )
+    fetch.assert_awaited_once()
+    search.assert_awaited_once()
+
+
 @pytest.mark.parametrize("change", [
     "different_company", "different_stage", "other_domain", "disputed_stage",
     "missing_identity",
@@ -167,7 +198,7 @@ def test_saved_round_priority_rejects_unbound_or_disputed_hint(change):
         quote = quote.replace("Series B", "Series A")
     elif change == "other_domain":
         url = url.replace("sokin.com", "other.example")
-    else:
+    elif change == "disputed_stage":
         disputes = ("https://sokin.com/news/completed-series-c",)
 
     assert investigator._venture_stage_submitted_source_to_prefetch(

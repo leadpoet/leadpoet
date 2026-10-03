@@ -2,11 +2,13 @@
 
 import builtins
 import errno
+import os
 import shlex
 import stat
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -319,6 +321,30 @@ def test_hanging_version_check_terminates_helpers_and_reaps_parent(
     def record_process(*args, **kwargs):
         process = real_popen(*args, **kwargs)
         parents.append(process)
+        # Start the one-second product timeout only after this fixture has
+        # spawned and recorded its helper. On a loaded host, the shell may not
+        # run before the timeout otherwise.
+        deadline = time.monotonic() + 5
+        child_pid = None
+        while process.poll() is None and time.monotonic() < deadline:
+            try:
+                child_pid = int(child_file.read_text().strip())
+            except (FileNotFoundError, ValueError):
+                pass
+            if child_pid is not None and child_pid > 0:
+                break
+            time.sleep(0.01)
+        if child_pid is None or child_pid <= 0:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+            pytest.fail("hanging version-check fixture did not start its helper")
         return process
 
     monkeypatch.setattr(host.subprocess, "Popen", record_process)

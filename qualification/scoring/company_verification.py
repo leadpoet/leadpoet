@@ -922,7 +922,12 @@ def _homepage_navigation_locators(
     return locators
 
 
-def _homepage_company_names(page_text: str) -> list[str]:
+def _homepage_company_names(
+    page_text: str,
+    *,
+    observed_domain: str = "",
+    observed_linkedin: str = "",
+) -> list[str]:
     """Return names actually observed in title or first-party metadata."""
 
     parser = _HomepageIdentityParser()
@@ -931,6 +936,32 @@ def _homepage_company_names(page_text: str) -> list[str]:
     except Exception:
         return []
     candidates = [*parser.metadata_names, *parser.copyright_legal_names]
+    # A tagline-only title can omit the operating brand even though the root
+    # Organization record explicitly binds it to this domain and LinkedIn.
+    # Do not promote legal names, nested organizations, or conflicting records.
+    organization_names: dict[str, str] = {}
+    if observed_domain and observed_linkedin:
+        for record in parser.organization_records:
+            name = record.get("name")
+            organization_url = record.get("url")
+            if (
+                not isinstance(name, str)
+                or not 2 < len(name.strip()) <= _MAX_ORGANIZATION_NAME_LENGTH
+                or not isinstance(organization_url, str)
+                or not 0 < len(organization_url) <= 2048
+                or record.get("linkedin_urls") != [observed_linkedin]
+            ):
+                continue
+            try:
+                organization_domain = _registrable_domain(
+                    public_http_url(organization_url)
+                )
+            except (NormalizationError, TypeError, ValueError):
+                continue
+            if organization_domain == observed_domain and _company_name(name):
+                organization_names.setdefault(_company_name(name), name.strip())
+        if len(organization_names) == 1:
+            candidates = [*organization_names.values(), *candidates]
     if parser.title:
         candidates.append(parser.title)
         candidates.extend(
@@ -1292,8 +1323,14 @@ async def verify_company_exists(
             verified_homepage_transport_domain=domain,
             failure_reason_code="malformed_response",
         )
-    observed_names = _homepage_company_names(text)
     observed_linkedins = _homepage_company_linkedin_urls(text)
+    observed_names = _homepage_company_names(
+        text,
+        observed_domain=observed_domain,
+        observed_linkedin=(
+            observed_linkedins[0] if len(observed_linkedins) == 1 else ""
+        ),
+    )
     if observed_names and not observed_linkedins:
         source_url = _linked_identity_source_url(
             text,

@@ -89,6 +89,7 @@ class _VisibleHTMLTextParser(HTMLParser):
         semantic_values = classes | ({element_id} if element_id else set())
         return bool(
             tag in self._HIDDEN_ELEMENTS
+            or element_id == "cybotcookiebotdialog"
             or "hidden" in values
             or values.get("aria-hidden", "").strip().casefold() in {"true", "1"}
             or "display:none" in style

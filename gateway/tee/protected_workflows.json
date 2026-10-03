@@ -757,7 +757,7 @@
       "symbol": "__module__"
     },
     {
-      "ast_sha256": "sha256:7176fd12231e4e551715721ce4f2be6633ab73670d76e0666147802c03dc4eda",
+      "ast_sha256": "sha256:341015b3f85a71e67d233ecccae1653f49c011bd0c9298851900c3559817d8e0",
       "path": "leadpoet_canonical/subtensor_events_v2.py",
       "symbol": "__module__"
     },
@@ -807,7 +807,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:77d528ad1c86bf7b51d2f98b5286cfdd1926ae8bbf5d336344b7403e185d407f",
-  "protected_source_commit": "363ec7d670e37c7832f3a6c34f2e7a59f7e2d70e",
+  "manifest_hash": "sha256:329b25cf7453380a3998ae36b368253c2b32162fd4c938a9c6363090a999f6cb",
+  "protected_source_commit": "9c6079ebebfad32d20fb77716ddd40be1d52c209",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

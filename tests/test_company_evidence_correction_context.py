@@ -688,7 +688,11 @@ def test_stage_quote_correction_keeps_untrusted_industry_source_context(
     )
     assert "does not force acceptance" in correction["instruction"]
     assert "perform every requested capability" in correction["instruction"]
-    assert "Preserve every AND/OR condition, qualifier, and exclusion" in (
+    assert "Preserve every explicit mandatory condition, qualifier, and exclusion" in (
+        correction["instruction"]
+    )
+    assert "an explicit product/service OR is not narrowed" in correction["instruction"]
+    assert "independently required BOTH/ALL capabilities remain mandatory" in (
         correction["instruction"]
     )
     assert result["claims"]["stage"]["status"] == "VERIFIED"

@@ -1161,6 +1161,40 @@ def _public_stage_submitted_source_to_prefetch(
     return first_party_candidates[0] if first_party_candidates else ""
 
 
+def _venture_stage_submitted_source_to_prefetch(
+    *,
+    requested_stage: str,
+    submitted_stage_evidence: Any,
+    submitted_stage_source_urls: Sequence[str],
+    stage_dispute_urls: Sequence[str],
+    first_party_domains: set[str],
+    identity_names: set[str],
+) -> str:
+    """Fetch one matching saved first-party round before discretionary research."""
+
+    # A disputed later stage takes precedence over retaining the older round.
+    if (
+        stage_dispute_urls
+        or not identity_names
+        or not isinstance(submitted_stage_evidence, Sequence)
+    ):
+        return ""
+    for item in submitted_stage_evidence[:MAX_SUBMITTED_SOURCE_URLS]:
+        if not isinstance(item, Mapping):
+            continue
+        url = _safe_https_url(item.get("url"))
+        quote = str(item.get("quote") or "")
+        if (
+            url in submitted_stage_source_urls
+            and _first_party_url(url, first_party_domains)
+            and urlsplit(url).path.strip("/")
+            and _quote_names_company(quote, identity_names)
+            and _quote_names_compatible_venture_stage(requested_stage, quote)
+        ):
+            return url
+    return ""
+
+
 def _priority_submitted_company_source(
     *,
     targets: Sequence[str],
@@ -2949,32 +2983,47 @@ async def investigate_company_evidence(
                     identity_names=identity_names,
                     fetched_pages=fetched_pages,
                 )
-            if not priority_source_url and (
-                positive_semantic_review or "geography" in requested_targets
-            ):
-                priority_source_kind = "company"
+            if not priority_source_url and "geography" in requested_targets:
                 priority_source_url = _priority_headquarters_navigation_source(
                     requested_targets, bounded_homepage_navigation_locators,
                 )
-                if not priority_source_url and positive_semantic_review:
-                    priority_source_url = _priority_subscription_navigation_source(
-                        targets=requested_targets,
-                        requested_product_service=requested_product_service,
-                        requested_attribute=requested_attribute,
-                        homepage_navigation_locators=(
-                            bounded_homepage_navigation_locators
-                        ),
-                    ) or _priority_submitted_company_source(
-                        targets=requested_targets,
-                        requested_private_equity_stage=(
-                            requested_private_equity_stage
-                        ),
-                        submitted_source_urls=submitted_source_urls,
-                        submitted_stage_source_urls=(
-                            submitted_stage_source_urls
-                        ),
-                        first_party_domains=first_party_domains,
-                    )
+                if priority_source_url:
+                    priority_source_kind = "company"
+            if (
+                not priority_source_url
+                and requested_venture_stage
+                and fetch_calls < MAX_FETCH_CALLS
+            ):
+                priority_source_url = _venture_stage_submitted_source_to_prefetch(
+                    requested_stage=requested_venture_stage,
+                    submitted_stage_evidence=raw_stage_evidence,
+                    submitted_stage_source_urls=submitted_stage_source_urls,
+                    stage_dispute_urls=stage_dispute_urls,
+                    first_party_domains=first_party_domains,
+                    identity_names=identity_names,
+                )
+                if priority_source_url:
+                    priority_source_kind = "venture"
+            if not priority_source_url and positive_semantic_review:
+                priority_source_kind = "company"
+                priority_source_url = _priority_subscription_navigation_source(
+                    targets=requested_targets,
+                    requested_product_service=requested_product_service,
+                    requested_attribute=requested_attribute,
+                    homepage_navigation_locators=(
+                        bounded_homepage_navigation_locators
+                    ),
+                ) or _priority_submitted_company_source(
+                    targets=requested_targets,
+                    requested_private_equity_stage=(
+                        requested_private_equity_stage
+                    ),
+                    submitted_source_urls=submitted_source_urls,
+                    submitted_stage_source_urls=(
+                        submitted_stage_source_urls
+                    ),
+                    first_party_domains=first_party_domains,
+                )
             if priority_source_url:
                 priority_cache_hit = priority_source_url in fetched_pages
                 if (
@@ -3005,7 +3054,7 @@ async def investigate_company_evidence(
                     "ok": bool(source_result.get("ok")),
                     **(
                         {"cache_hit": priority_cache_hit}
-                        if priority_source_kind == "company"
+                        if priority_source_kind in {"company", "venture"}
                         else {}
                     ),
                     **(
@@ -3039,7 +3088,7 @@ async def investigate_company_evidence(
                 input_document["investigation_limits"].update(
                     prefetched_pages=(
                         prefetched_count
-                        if priority_source_kind == "public"
+                        if priority_source_kind in {"public", "venture"}
                         else len(fetched_pages)
                     ),
                     remaining_fetch_calls=max(0, MAX_FETCH_CALLS - fetch_calls),

@@ -129,12 +129,22 @@ CONTRADICTED through the normal stage finding contract.
 Use grounded dates to order material competing stage events, from fetched body
 text or a server-visible archive card whose exact link targets that already
 fetched article. Search publication dates and fetch order are discovery, never
-event chronology. Do not require an exact date as an extra field for an
-otherwise proven completed matching stage when the required current-stage
-search and review of submitted and disputed sources exposes no concrete
-material competing stage event. If a material competing stage article has no
-grounded date and an observed first-party news index is available, fetch that
-index within the remaining three-call budget before calling the article later.
+event chronology. Before another fetch, review already loaded first-party
+timelines for explicitly company-bound versions of the same events. Distinct
+year headings bound to those events can order nonoverlapping years without
+inventing a month or day. More precise dates or explicit source ordering can
+resolve events within one year; a later-discovered article is not a later event.
+An investment grounded before a matching completed round cannot supersede it
+merely because that older investment's subtype is unspecified. If available
+date intervals for material competing events overlap and ordering remains
+unresolved, dates conflict, or a material newer event remains unclear, return
+stage UNPROVEN. Do not require an exact date as an extra field for an otherwise
+proven completed matching stage when the required current-stage search and
+review of submitted and disputed sources exposes no
+concrete material competing stage event. If a material competing stage article
+has no grounded date and an observed first-party news index is available, fetch
+that index within the remaining three-call budget before calling the article
+later.
 A linked archive card dates the article; it does not prove that its transaction
 completed or changed the company's stage. If material chronology or
 transaction type remains unresolved, return stage UNPROVEN.

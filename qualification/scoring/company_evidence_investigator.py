@@ -1211,8 +1211,9 @@ def _submitted_venture_overview_url(
     submitted_source_urls: Sequence[str],
     stage_dispute_urls: Sequence[str],
     verified_identity: Mapping[str, Any],
+    homepage_navigation_locators: Sequence[Mapping[str, str]] = (),
 ) -> str:
-    """Choose one submitted investor overview as untrusted chronology context."""
+    """Choose a submitted or observed investor overview as untrusted context."""
 
     identity_name = _normalized_span(verified_identity.get("normalized_name"))
     identity_domain = _registrable_domain(
@@ -1226,7 +1227,10 @@ def _submitted_venture_overview_url(
         or not verified_identity.get("linkedin_company_slug")
     ):
         return ""
-    for url in submitted_source_urls:
+    for url in (
+        *submitted_source_urls,
+        *(locator["url"] for locator in homepage_navigation_locators),
+    ):
         parsed = urlsplit(url)
         if (
             _first_party_url(url, {identity_domain})
@@ -3150,6 +3154,7 @@ async def investigate_company_evidence(
                     verified_identity=(
                         verified_homepage_identity or verified_navigation_identity or {}
                     ),
+                    homepage_navigation_locators=bounded_homepage_navigation_locators,
                 )
                 if requested_venture_stage else ""
             )

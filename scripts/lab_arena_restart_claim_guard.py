@@ -30,7 +30,7 @@ _SAFE_FIELDS = frozenset(
         "guard_active", "guard_commitment", "owner_commitment",
         "guard_generation", "guard_expires_at", "candidate_commit",
         "restart_scope", "restart_phase", "drain", "captured_count",
-        "accepted_receipt_count", "reported_terminal_receipt_count",
+        "accepted_receipt_count", "reported_terminal_receipt_count", "expired_receipt_count",
         "still_leased_count", "lost_or_mutated_count", "current_leased_count",
         "pending_retry_count", "snapshot_commitment", "outcome_commitment",
         "preserved", "mode",
@@ -225,6 +225,10 @@ def _require_drain(value: Mapping[str, Any], schema: str) -> dict[str, Any]:
         item = value.get(field)
         if isinstance(item, bool) or not isinstance(item, int) or item < 0:
             raise GuardError("Arena restart drain counts are invalid")
+    # Older database releases omit this additive, independently proved outcome.
+    expired = value.get("expired_receipt_count", 0)
+    if isinstance(expired, bool) or not isinstance(expired, int) or expired < 0:
+        raise GuardError("Arena restart drain counts are invalid")
     if not isinstance(value.get("preserved"), bool):
         raise GuardError("Arena restart drain result is invalid")
     return dict(value)

@@ -89,6 +89,21 @@ def _state_for(candidate, *, phase, generation):
     return value
 
 
+@pytest.mark.parametrize("expired", [-1, True, False, "1", None, 1.0])
+def test_drain_rejects_malformed_expired_receipt_count(expired):
+    value = _drain_state(preserved=True)
+    value["expired_receipt_count"] = expired
+    with pytest.raises(guard_cli.GuardError, match="counts are invalid"):
+        guard_cli._require_drain(value, value["schema_version"])
+
+
+def test_drain_accepts_legacy_and_explicit_expiry_receipts():
+    value = _drain_state(preserved=True)
+    assert guard_cli._require_drain(value, value["schema_version"]) == value
+    value.update(accepted_receipt_count=0, expired_receipt_count=1)
+    assert guard_cli._require_drain(value, value["schema_version"]) == value
+
+
 class _Response:
     status = 200
 

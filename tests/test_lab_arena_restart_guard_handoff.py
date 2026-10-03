@@ -202,6 +202,32 @@ def test_permit_rejects_unpreserved_drain_arithmetic(handoff_root: Path) -> None
     assert "authorization is invalid" in result.stderr
 
 
+@pytest.mark.parametrize("expired", [0, 1, 4])
+def test_permit_accepts_proved_expiry_in_preserved_count(handoff_root: Path, expired) -> None:
+    state = _authorized_state()
+    state["drain"]["expired_receipt_count"] = expired
+    state["drain"]["captured_count"] += expired
+    path = handoff_root / "leadpoet-permit.json"
+    result = subprocess.run(
+        _args("write-permit", path), input=json.dumps(state),
+        capture_output=True, text=True, env=ENV,
+    )
+    assert result.returncode == 0, result.stderr
+    subprocess.run(_args("validate-permit", path), check=True,
+                   capture_output=True, text=True, env=ENV)
+
+
+def test_permit_rejects_expiry_count_that_exceeds_captured(handoff_root: Path) -> None:
+    state = _authorized_state()
+    state["drain"]["expired_receipt_count"] = 1
+    result = subprocess.run(
+        _args("write-permit", handoff_root / "leadpoet-permit.json"),
+        input=json.dumps(state), capture_output=True, text=True, env=ENV,
+    )
+    assert result.returncode == 1
+    assert "authorization is invalid" in result.stderr
+
+
 @pytest.mark.parametrize("unsafe_kind", ["mode", "symlink", "fifo"])
 def test_handoff_reader_rejects_unsafe_files(
     handoff_root: Path, unsafe_kind: str,

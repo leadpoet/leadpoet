@@ -176,6 +176,7 @@ def _permit(args: argparse.Namespace, state: Mapping[str, Any]) -> dict[str, Any
         or drain.get("captured_count")
         != drain.get("accepted_receipt_count", -1)
         + drain.get("reported_terminal_receipt_count", -1)
+        + drain.get("expired_receipt_count", 0)
     ):
         raise GuardError("Arena restart guard authorization is invalid")
     expiry = normalized.get("guard_expires_at")

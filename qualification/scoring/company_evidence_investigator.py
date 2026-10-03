@@ -319,9 +319,10 @@ Prefer a known current first-party contact or about navigation locator and
 fetch it before relying on a generic profile location. A navigation label is
 only a locator: its page must contain an explicit company-bound HQ statement.
 When a fetched current company contact or about page explicitly names that
-company's headquarters, prefer that direct fact over an undated profile HQ.
-A dated headquarters move or a newer company-bound source can resolve a real
-conflict; otherwise return UNPROVEN rather than choosing the matching place.
+company's headquarters, use that location and its exact continuous source quote
+over a different undated third-party profile HQ. That profile discrepancy alone
+does not require a dated move announcement and does not make the current
+first-party headquarters fact UNPROVEN.
 Do not transfer a customer's, parent company's, or regional office location
 to the investigated company.
 Incorporation, an office, factory, job, customer, event, service area, or parent
@@ -329,11 +330,11 @@ company location is not headquarters. Return a country and, for a United
 States headquarters, a state. Use a quote that explicitly identifies the
 location as the headquarters or principal executive office. Do not decide
 whether that location is inside a requested region; the deterministic scorer
-does that after the investigation. Compare a fetched headquarters claim with
-prior headquarters observations for the exact company. If independent sources
-give different current headquarters and source dates or explicit move evidence
-do not resolve the conflict, return UNPROVEN. A factory opening cannot prove an
-HQ move.
+does that after the investigation. Compare sources for the exact company using
+the first-party priority above. If current first-party sources disagree, or a
+dated company-bound source gives a newer conflicting headquarters, resolve the
+chronology with source dates or an explicit move statement; otherwise return
+UNPROVEN. A factory opening cannot prove an HQ move.
 
 Private Equity stage means current controlling private-equity ownership of
 the investigated company. Being a private-equity investor, managing funds, or

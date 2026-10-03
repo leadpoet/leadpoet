@@ -32,7 +32,7 @@ MIGRATION = "393-lab-arena-superseded-champion-funding.sql"
 @pytest.fixture(scope="module")
 def database():
     yield from database_with_lab_arena_migration(
-        CURRENT_SERVICE_MIGRATIONS + (MIGRATION,)
+        CURRENT_SERVICE_MIGRATIONS
     )
 
 

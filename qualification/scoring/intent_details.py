@@ -502,12 +502,16 @@ def _continuous_source_window(
     value: str,
     maximum_bytes: int,
     anchors: Sequence[str],
+    *,
+    paragraph: str = "",
 ) -> str:
-    """Return one continuous byte-bounded span near grounded source text."""
+    """Return one continuous span near paragraph facts or grounded source text."""
 
     encoded = value.encode("utf-8")
     if len(encoded) <= maximum_bytes:
         return value
+    if maximum_bytes <= 0:
+        return ""
     anchor_start = 0
     for anchor in anchors:
         if not anchor:
@@ -516,12 +520,29 @@ def _continuous_source_window(
         if match is not None:
             anchor_start = len(value[:match.start()].encode("utf-8"))
             break
-    start = max(0, anchor_start - maximum_bytes // 3)
-    while start > 0 and encoded[start] & 0xC0 == 0x80:
-        start -= 1
-    return encoded[start:start + maximum_bytes].decode(
-        "utf-8", errors="ignore",
-    )
+    anchor_start = max(0, anchor_start - maximum_bytes // 3)
+    starts = [anchor_start]
+    if paragraph:
+        # The fit quote binds the page, but the paragraph can assert separate
+        # facts elsewhere on that same page. Inspect a fixed set of overlapping
+        # windows; no text is joined and the original byte cap still applies.
+        starts.extend(range(0, len(encoded), max(1, maximum_bytes // 2)))
+    best = ""
+    best_score = (-1, -1)
+    for raw_start in dict.fromkeys(starts):
+        start = min(raw_start, max(0, len(encoded) - maximum_bytes))
+        while start > 0 and encoded[start] & 0xC0 == 0x80:
+            start -= 1
+        candidate = encoded[start:start + maximum_bytes].decode(
+            "utf-8", errors="ignore",
+        )
+        score = (
+            _source_overlap_score(paragraph, candidate),
+            _source_term_overlap(paragraph, candidate),
+        ) if paragraph else (0, 0)
+        if score > best_score:
+            best, best_score = candidate, score
+    return best
 
 
 def _source_overlap_score(paragraph: str, source_text: str) -> int:
@@ -538,6 +559,19 @@ def _source_overlap_score(paragraph: str, source_text: str) -> int:
         }
 
     return len(spans(paragraph) & spans(source_text))
+
+
+def _source_term_overlap(paragraph: str, source_text: str) -> int:
+    """Count distinct longer paragraph words present in fetched source text."""
+
+    def terms(value: str) -> set[str]:
+        return {
+            word[:6] for word in re.findall(
+                r"[\w%$]+", _typography_normalized_span(value).casefold(),
+            ) if len(word) >= 5
+        }
+
+    return len(terms(paragraph) & terms(source_text))
 
 
 def _statement_units(paragraph: str) -> list[dict[str, Any]]:
@@ -1319,6 +1353,7 @@ def review_evidence(
     company_context_candidates: list[dict[str, Any]] = []
     if company_source_contexts is not None:
         from qualification.scoring.company_evidence_investigator import (
+            MAX_PAGE_CHARACTERS,
             _quote_occurs,
             _registrable_domain,
             _safe_https_url,
@@ -1338,13 +1373,18 @@ def review_evidence(
             "geography": 3,
             "stage": 4,
             "first_party_company": 5,
+            "first_party_context": 6,
         }
         prior_order = -1
         observed_context_urls: set[str] = set()
         for raw_context in company_source_contexts:
             if (
                 not isinstance(raw_context, Mapping)
-                or set(raw_context) != {"dimension", "url", "text"}
+                or set(raw_context) != (
+                    {"dimension", "url", "final_url", "text"}
+                    if raw_context.get("dimension") == "first_party_context"
+                    else {"dimension", "url", "text"}
+                )
             ):
                 raise ValueError("invalid company source context")
             dimension = raw_context.get("dimension")
@@ -1392,6 +1432,42 @@ def review_evidence(
                         "quote": submitted_quote,
                     }
                     company_facts["first_party_company"] = company_fact
+            elif dimension == "first_party_context":
+                identity = _mapping(
+                    _mapping(dimensions.get("identity")).get(
+                        "web_identity_receipt"
+                    )
+                )
+                final_url = raw_context.get("final_url")
+                observed_domain = str(
+                    identity.get("observed_domain") or ""
+                ).casefold()
+                normalized_name = _compact_company_name(company.company_name)
+                if (
+                    company_fit_receipt.get("decision") == "match"
+                    and identity.get("decision") == "match"
+                    and all(identity.get(field) for field in (
+                        "observed_name", "observed_domain",
+                        "observed_linkedin_slug",
+                    ))
+                    and normalized_name
+                    == _compact_company_name(identity["observed_name"])
+                    and isinstance(source_url, str)
+                    and isinstance(final_url, str)
+                    and _safe_https_url(source_url) == source_url
+                    and _safe_https_url(final_url) == final_url
+                    and _registrable_domain(source_url) == observed_domain
+                    and _registrable_domain(final_url) == observed_domain
+                    and isinstance(source_text, str)
+                    and 0 < len(source_text) <= MAX_PAGE_CHARACTERS
+                    and normalized_name in _compact_company_name(source_text)
+                    and (
+                        _source_overlap_score(paragraph, source_text)
+                        or _source_term_overlap(paragraph, source_text) >= 3
+                    )
+                ):
+                    company_fact = {"url": source_url}
+                    company_facts["first_party_context"] = company_fact
             if (
                 order is None
                 or order <= prior_order
@@ -1412,8 +1488,11 @@ def review_evidence(
                 and isinstance(company_fact.get(quote_key), str)
                 and company_fact.get(quote_key)
             ]
-            if not dimension_quotes or not any(
-                _quote_occurs(quote, source_text) for quote in dimension_quotes
+            if dimension != "first_party_context" and (
+                not dimension_quotes or not any(
+                    _quote_occurs(quote, source_text)
+                    for quote in dimension_quotes
+                )
             ):
                 raise ValueError("unbound company source context")
             paired_quotes = list(dict.fromkeys(
@@ -1500,6 +1579,7 @@ def review_evidence(
             selected_company_context["text"],
             context_allowance,
             selected_company_context["paired_quotes"][:1],
+            paragraph=paragraph,
         )
         if bounded_company_text:
             selected_company_fact["source_context"] = {
@@ -1903,6 +1983,26 @@ def _validate_review_response(
     return {name: checks[name] for name in _CHECKS}
 
 
+def _failed_factual_unit_receipt(
+    response: str, document: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Retain bounded unit IDs and cited source indexes, never source prose."""
+
+    units = json.loads(response)["unit_grounding"]
+    _validate_unit_grounding(units, document)
+    return [
+        {
+            "unit_id": unit["unit_id"],
+            "status": unit["status"],
+            "source_indexes": [
+                binding["source_index"] for binding in unit["evidence"]
+            ],
+        }
+        for unit in units
+        if unit["contains_factual_claim"] and unit["status"] != "VERIFIED"
+    ]
+
+
 def _citation_repair_machine_fields(
     issues: Mapping[int, Sequence[str]],
     held_response: Mapping[str, Any],
@@ -2296,6 +2396,7 @@ missing review into an accepted paragraph or a terminal company mismatch.
             "failure_reason_code": "provider_error",
         }
     citation_failure = False
+    validated_response = response
     try:
         checks = _validate_review_response(response, document)
     except _BoundedReviewRepairNeeded as exc:
@@ -2353,8 +2454,11 @@ missing review into an accepted paragraph or a terminal company mismatch.
                         repair_response, exc.held_response,
                         set(exc.issues),
                     )
+                validated_response = json.dumps(
+                    merged, ensure_ascii=False, separators=(",", ":"),
+                )
                 checks = _validate_review_response(
-                    json.dumps(merged, ensure_ascii=False, separators=(",", ":")),
+                    validated_response,
                     document,
                     initial_review=False,
                 )
@@ -2372,5 +2476,14 @@ missing review into an accepted paragraph or a terminal company mismatch.
             ),
             "failure_reason_code": "malformed_response",
         }
-    return {**receipt, "decision": "match" if all(checks.values()) else "mismatch",
-            "checks": checks}
+    return {
+        **receipt,
+        "decision": "match" if all(checks.values()) else "mismatch",
+        "checks": checks,
+        **(
+            {"failed_factual_units": _failed_factual_unit_receipt(
+                validated_response, document,
+            )}
+            if not checks["facts_supported"] else {}
+        ),
+    }

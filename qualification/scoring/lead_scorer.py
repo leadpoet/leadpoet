@@ -2307,6 +2307,7 @@ _PARAGRAPH_COMPANY_CONTEXT_DIMENSIONS = (
     "geography",
     "stage",
     "first_party_company",
+    "first_party_context",
 )
 _MAX_PARAGRAPH_COMPANY_CONTEXTS = 2
 _MAX_RETAINED_INVESTIGATOR_CONTEXTS = 4
@@ -2433,7 +2434,7 @@ def _retain_matched_investigator_source_contexts(
     *,
     company: Optional["CompanyOutput"] = None,
 ) -> None:
-    """Retain matched pages and one fetched, identity-bound first-party page."""
+    """Retain matched pages and bounded relevant fetched first-party pages."""
 
     if source_sink is None or not _complete_company_identity(result):
         return
@@ -2488,14 +2489,60 @@ def _retain_matched_investigator_source_contexts(
         and len(evidence_by_url) < _MAX_RETAINED_INVESTIGATOR_CONTEXTS
     ):
         evidence_by_url[first_party_url] = submitted_quote
-    for stale_url in set(source_sink) - set(evidence_by_url):
-        source_sink.pop(stale_url, None)
-    if not evidence_by_url:
-        return
-    pages, final_urls = _validated_prefetched_pages(
-        investigation.get(PRIVATE_FETCHED_PAGES_KEY),
-        submitted_source_urls=tuple(evidence_by_url),
+    raw_pages = investigation.get(PRIVATE_FETCHED_PAGES_KEY)
+    admitted_urls = (
+        tuple(raw_pages) if isinstance(raw_pages, Mapping) else ()
     )
+    pages, final_urls = _validated_prefetched_pages(
+        raw_pages, submitted_source_urls=admitted_urls,
+    )
+    auxiliary_urls: set[str] = set()
+    if (
+        company is not None
+        and company.intent_details
+        and submitted_name
+        and isinstance(identity, Mapping)
+        and identity.get("observed_domain")
+    ):
+        from qualification.scoring.intent_details import (
+            _source_overlap_score, _source_term_overlap,
+        )
+
+        domain = str(identity["observed_domain"]).casefold()
+        candidates: list[tuple[int, int, str]] = []
+        for url in sorted(set(pages) | set(source_sink)):
+            if url in evidence_by_url:
+                continue
+            page = pages.get(url)
+            final_url = final_urls.get(url)
+            if page is None:
+                prior = source_sink.get(url)
+                if isinstance(prior, Mapping):
+                    page, final_url = prior.get("text"), prior.get("final_url")
+            if (
+                not isinstance(page, str)
+                or not page
+                or len(page) > MAX_PAGE_CHARACTERS
+                or not isinstance(final_url, str)
+                or _valid_web_evidence_url(url) != url
+                or _valid_web_evidence_url(final_url) != final_url
+                or urlsplit(url).scheme != "https"
+                or urlsplit(final_url).scheme != "https"
+                or _registrable_domain(url) != domain
+                or _registrable_domain(final_url) != domain
+                or submitted_name not in _compact_company_name(page)
+            ):
+                continue
+            phrase_overlap = _source_overlap_score(company.intent_details, page)
+            term_overlap = _source_term_overlap(company.intent_details, page)
+            if phrase_overlap or term_overlap >= 3:
+                candidates.append((phrase_overlap, term_overlap, url))
+        for _phrases, _terms, url in sorted(
+            candidates, key=lambda item: (-item[0], -item[1], item[2]),
+        )[:min(1, max(0, _MAX_RETAINED_INVESTIGATOR_CONTEXTS - len(evidence_by_url)))]:
+            auxiliary_urls.add(url)
+    for stale_url in set(source_sink) - set(evidence_by_url) - auxiliary_urls:
+        source_sink.pop(stale_url, None)
     for source_url, quote in evidence_by_url.items():
         text = pages.get(source_url)
         final_url = final_urls.get(source_url)
@@ -2516,6 +2563,12 @@ def _retain_matched_investigator_source_contexts(
             "final_url": final_url,
             "text": text,
         }
+    for source_url in auxiliary_urls:
+        if source_url in pages:
+            source_sink[source_url] = {
+                "final_url": final_urls[source_url],
+                "text": pages[source_url],
+            }
 
 
 def _retain_matched_company_retry_sources(
@@ -9153,10 +9206,13 @@ def _matched_company_source_contexts(
     *,
     paragraph: str = "",
     company: Optional["CompanyOutput"] = None,
+    verified_signal_source_urls: Sequence[str] = (),
 ) -> Optional[list[dict[str, str]]]:
     """Project at most two deduplicated final matched company sources."""
 
-    from qualification.scoring.intent_details import _source_overlap_score
+    from qualification.scoring.intent_details import (
+        _source_overlap_score, _source_term_overlap,
+    )
 
     contexts: list[dict[str, str]] = []
     required_attribute = _matched_required_attribute_source_context(
@@ -9226,6 +9282,48 @@ def _matched_company_source_contexts(
             "url": submitted_url,
             "text": source_entry["text"],
         })
+    if (
+        company is not None
+        and company_fit.decision == COMPANY_FIT_MATCH
+        and submitted_name
+        and isinstance(identity, Mapping)
+        and isinstance(matched_company_source_cache, Mapping)
+        and len(matched_company_source_cache)
+        <= _MAX_RETAINED_INVESTIGATOR_CONTEXTS
+    ):
+        domain = str(identity.get("observed_domain") or "").casefold()
+        matched_urls = {context["url"] for context in contexts}
+        for url, entry in matched_company_source_cache.items():
+            if url in matched_urls or not isinstance(entry, Mapping):
+                continue
+            final_url, page = entry.get("final_url"), entry.get("text")
+            if (
+                not isinstance(url, str)
+                or not isinstance(final_url, str)
+                or not isinstance(page, str)
+                or not page
+                or len(page) > MAX_PAGE_CHARACTERS
+                or _valid_web_evidence_url(url) != url
+                or _valid_web_evidence_url(final_url) != final_url
+                or urlsplit(url).scheme != "https"
+                or urlsplit(final_url).scheme != "https"
+                or not domain
+                or _registrable_domain(url) != domain
+                or _registrable_domain(final_url) != domain
+                or submitted_name not in _compact_company_name(page)
+                or not (
+                    _source_overlap_score(paragraph, page)
+                    or _source_term_overlap(paragraph, page) >= 3
+                )
+            ):
+                continue
+            contexts.append({
+                "dimension": "first_party_context",
+                "url": url,
+                "final_url": final_url,
+                "text": page,
+            })
+            break
     deduplicated: list[dict[str, str]] = []
     seen_urls: set[str] = set()
     for context in contexts:
@@ -9240,16 +9338,71 @@ def _matched_company_source_contexts(
                 paragraph,
                 item[1]["text"],
             ),
+            -_source_term_overlap(paragraph, item[1]["text"]),
             item[0],
         ),
-    )[:_MAX_PARAGRAPH_COMPANY_CONTEXTS]
-    selected = [context for _index, context in ranked]
+    )
+    selected = [
+        context for _index, context in ranked
+        if context["url"] not in verified_signal_source_urls
+    ][:_MAX_PARAGRAPH_COMPANY_CONTEXTS]
     selected.sort(
         key=lambda item: _PARAGRAPH_COMPANY_CONTEXT_DIMENSIONS.index(
             item["dimension"]
         )
     )
     return selected or None
+
+
+def _verified_signal_context_urls(
+    signal_results: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Identify a bound signal body that survives the fixed context budget."""
+
+    from qualification.scoring.intent_details import (
+        _COMPANY_SOURCE_CONTEXT_RESERVATION_BYTES,
+        _MAX_SOURCE_CONTEXT_BYTES,
+    )
+
+    positive = [
+        result for result in signal_results
+        if isinstance(result, Mapping)
+        and float(result.get("after_decay") or 0) > 0
+    ]
+    if len(positive) != 1:
+        return ()
+    result = positive[0]
+    verdict = result.get("judge_verdict")
+    if not isinstance(verdict, Mapping) or (
+        verdict.get("decision") != "verified"
+        or verdict.get("client_ready") is not True
+    ):
+        return ()
+    trace = verdict.get("verification_trace")
+    if not isinstance(trace, Mapping):
+        return ()
+    contexts = trace.get("verified_source_context")
+    if not isinstance(contexts, list) or len(contexts) != 1:
+        return ()
+    context = contexts[0]
+    declared_urls = result.get("evidence_urls")
+    if not isinstance(context, Mapping) or not isinstance(
+        declared_urls, list
+    ):
+        return ()
+    url, body = context.get("url"), context.get("text")
+    if (
+        not isinstance(url, str)
+        or url not in declared_urls
+        or not isinstance(body, str)
+        or not body
+        or len(body.encode("utf-8")) > (
+            _MAX_SOURCE_CONTEXT_BYTES
+            - _COMPANY_SOURCE_CONTEXT_RESERVATION_BYTES
+        )
+    ):
+        return ()
+    return (url,)
 
 
 def _matched_provider_observation(
@@ -9449,6 +9602,9 @@ async def score_company_competition_intent(
                 matched_company_source_cache,
                 paragraph=str(company.intent_details or ""),
                 company=company,
+                verified_signal_source_urls=_verified_signal_context_urls(
+                    signal_results
+                ),
             ),
             **(
                 {

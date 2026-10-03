@@ -6756,6 +6756,15 @@ async def _run_targeted_company_evidence_investigation(
             and identity_receipt.get("submitted_domain") == submitted_domain
             and identity_receipt.get("observed_domain") == submitted_domain
             and verified_transport_domain == submitted_domain
+            and all(
+                isinstance(page, Mapping)
+                and (
+                    "observed_linkedin_slug" not in page
+                    or page["observed_linkedin_slug"]
+                    == identity_receipt.get("observed_linkedin_slug")
+                )
+                for page in homepage_pages.values()
+            )
         )
         if not independently_bound_homepage:
             homepage_pages = {}
@@ -6925,9 +6934,12 @@ async def _run_targeted_company_evidence_investigation(
         verified_homepage_rebrand_redirect=verified_rebrand_redirect,
         homepage_navigation_locators=(
             homepage_navigation_locators
-            if review_positive_semantics
-            or "geography" in investigation_targets
-            or "stage" in investigation_targets
+            if (verified_identity or homepage_pages)
+            and (
+                review_positive_semantics
+                or "geography" in investigation_targets
+                or "stage" in investigation_targets
+            )
             else ()
         ),
         prefetched_pages=_investigator_prefetched_pages(

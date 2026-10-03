@@ -1292,52 +1292,6 @@ async def verify_company_exists(
             verified_homepage_transport_domain=domain,
             failure_reason_code="malformed_response",
         )
-    # Keep the already fetched, same-domain page as untrusted source context
-    # even when its title is a tagline. The investigator admits this cache
-    # only after its separate company-web identity check binds the company.
-    from qualification.scoring.company_evidence_investigator import _plain_text
-
-    evidence_text = _plain_text(text)
-    visible_text = evidence_text.partition(
-        "[[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]]"
-    )[0]
-    name_pattern = re.escape(" ".join(company_name.split())).replace(r"\ ", r"\s+")
-    name_visible = bool(
-        name_pattern
-        and re.search(rf"(?<!\w){name_pattern}(?!\w)", visible_text, re.I)
-    )
-    if homepage_evidence_sink is not None and name_visible:
-        try:
-            canonical_request_url = public_http_url(request_url)
-            canonical_final_url = public_http_url(observed_url)
-            request_parts = urlsplit(canonical_request_url)
-            final_parts = urlsplit(canonical_final_url)
-        except (TypeError, ValueError):
-            canonical_request_url = canonical_final_url = ""
-            request_parts = final_parts = None
-        if (
-            request_parts is not None
-            and final_parts is not None
-            and request_parts.scheme == final_parts.scheme == "https"
-            and request_parts.username is None
-            and request_parts.password is None
-            and final_parts.username is None
-            and final_parts.password is None
-            and request_parts.fragment == final_parts.fragment == ""
-            and request_parts.port in {None, 443}
-            and final_parts.port in {None, 443}
-            and evidence_text
-        ):
-            homepage_evidence_sink[canonical_request_url] = {
-                "final_url": canonical_final_url,
-                "text": evidence_text,
-            }
-    if homepage_navigation_locator_sink is not None and name_visible:
-        homepage_navigation_locator_sink.extend(
-            _homepage_navigation_locators(
-                text, final_url=observed_url, verified_domain=domain,
-            )
-        )
     observed_names = _homepage_company_names(text)
     observed_linkedins = _homepage_company_linkedin_urls(text)
     if observed_names and not observed_linkedins:
@@ -1479,7 +1433,7 @@ async def verify_company_exists(
         )
         if legal_name_aliases:
             matched_receipt["verified_legal_name_aliases"] = legal_name_aliases
-        if homepage_navigation_locator_sink is not None and not name_visible:
+        if homepage_navigation_locator_sink is not None:
             homepage_navigation_locator_sink.extend(
                 _homepage_navigation_locators(
                     text,
@@ -1536,6 +1490,64 @@ async def verify_company_exists(
             "and exact LinkedIn company identity",
             actual_final_url=observed_url,
         )
+    if len(observed_linkedins) == 1 and homepage_evidence_sink is not None:
+        # An incomplete homepage identity can still supply untrusted source
+        # text. Carry its observed LinkedIn slug so the later independent web
+        # identity gate can reject a different company on the same domain.
+        from qualification.scoring.company_evidence_investigator import _plain_text
+
+        evidence_text = _plain_text(text)
+        visible_text = evidence_text.partition(
+            "[[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]]"
+        )[0]
+        name_pattern = re.escape(" ".join(company_name.split())).replace(
+            r"\ ", r"\s+"
+        )
+        name_visible = bool(
+            name_pattern
+            and re.search(rf"(?<!\w){name_pattern}(?!\w)", visible_text, re.I)
+        )
+        try:
+            canonical_request_url = public_http_url(request_url)
+            canonical_final_url = public_http_url(observed_url)
+            request_parts = urlsplit(canonical_request_url)
+            final_parts = urlsplit(canonical_final_url)
+        except (TypeError, ValueError):
+            canonical_request_url = canonical_final_url = ""
+            request_parts = final_parts = None
+        if (
+            request_parts is not None
+            and final_parts is not None
+            and request_parts.scheme == final_parts.scheme == "https"
+            and request_parts.username is None
+            and request_parts.password is None
+            and final_parts.username is None
+            and final_parts.password is None
+            and request_parts.fragment == final_parts.fragment == ""
+            and request_parts.port in {None, 443}
+            and final_parts.port in {None, 443}
+            and evidence_text
+            and (
+                name_visible
+                or any(
+                    _company_name(name) == _company_name(company_name)
+                    for name in observed_names
+                )
+            )
+        ):
+            homepage_evidence_sink[canonical_request_url] = {
+                "final_url": canonical_final_url,
+                "text": evidence_text,
+                "observed_linkedin_slug": urlsplit(
+                    observed_linkedins[0]
+                ).path.rstrip("/").rsplit("/", 1)[-1].casefold(),
+            }
+            if homepage_navigation_locator_sink is not None:
+                homepage_navigation_locator_sink.extend(
+                    _homepage_navigation_locators(
+                        text, final_url=observed_url, verified_domain=domain,
+                    )
+                )
     conflict = next(
         (receipt for receipt in identity_receipts if receipt["decision"] == "mismatch"),
         None,

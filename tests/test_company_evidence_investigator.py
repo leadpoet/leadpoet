@@ -10563,6 +10563,7 @@ def test_positive_semantic_review_model_is_already_in_judge_allowlist():
 
 @pytest.mark.parametrize("identity_case", [
     "bound", "wrong_name", "wrong_domain", "wrong_transport", "missing_slug",
+    "customer_otherco",
 ])
 @pytest.mark.parametrize("positive_review", [True, False])
 def test_tagline_homepage_requires_independent_identity_before_prefetch(
@@ -10570,11 +10571,18 @@ def test_tagline_homepage_requires_independent_identity_before_prefetch(
 ):
     homepage_url = "https://sokin.com/"
     news_url = "https://sokin.com/news"
+    homepage_slug = "otherco" if identity_case == "customer_otherco" else "sokin"
     page = (
-        "<html><title>Unified global business banking | Payments for the "
-        "global stage</title><body><main>Sokin's platform supports business "
-        "payments through banking partners and regional licenses.</main>"
-        f'<a href="{news_url}">Company news</a></body></html>'
+        (
+            "<html><title>OtherCo</title><body><main>Sokin is our customer. "
+            "OtherCo provides global payments.</main>"
+            if identity_case == "customer_otherco" else
+            "<html><title>Unified global business banking | Payments for the "
+            "global stage</title><body><main>Sokin's platform supports business "
+            "payments through banking partners and regional licenses.</main>"
+        )
+        + f'<a href="https://www.linkedin.com/company/{homepage_slug}">LinkedIn</a>'
+        + f'<a href="{news_url}">Company news</a></body></html>'
     )
 
     async def homepage_fetch(_session, _url):
@@ -10590,7 +10598,9 @@ def test_tagline_homepage_requires_independent_identity_before_prefetch(
     ))
     assert homepage.decision == COMPANY_FIT_UNAVAILABLE
     assert news_url in {row["url"] for row in locators}
-    assert "regional licenses" in pages[homepage_url]["text"]
+    assert pages[homepage_url]["observed_linkedin_slug"] == homepage_slug
+    if identity_case == "bound":
+        assert "regional licenses" in pages[homepage_url]["text"]
 
     company = _company(name="Sokin", website=homepage_url, linkedin="")
     captured: dict = {}
@@ -10643,7 +10653,9 @@ def test_tagline_homepage_requires_independent_identity_before_prefetch(
         homepage_navigation_locators=locators,
     ))
     assert (homepage_url in captured["prefetched_pages"]) is bound_identity
-    assert news_url in {row["url"] for row in captured["homepage_navigation_locators"]}
+    assert (
+        news_url in {row["url"] for row in captured["homepage_navigation_locators"]}
+    ) is bound_identity
     assert captured["verified_homepage_identity"] == {}
     assert bool(captured["verified_navigation_identity"]) is bound_identity
     admitted = investigator._validated_homepage_navigation_locators(
@@ -10656,6 +10668,31 @@ def test_tagline_homepage_requires_independent_identity_before_prefetch(
         ),
     )
     assert (news_url in {row["url"] for row in admitted}) is bound_identity
+
+
+def test_tagline_homepage_with_two_linkedin_identities_is_not_cached(monkeypatch):
+    url = "https://example.com/"
+    page = (
+        "<title>Global payments for everyone</title><main>Acme provides "
+        "business payments.</main>"
+        '<a href="https://www.linkedin.com/company/acme">Acme</a>'
+        '<a href="https://www.linkedin.com/company/otherco">OtherCo</a>'
+        '<a href="/news">News</a>'
+    )
+
+    async def fetch(_session, _url):
+        return 200, url, page
+
+    monkeypatch.setattr(company_verification, "_fetch_bounded_html", fetch)
+    pages: dict = {}
+    locators: list = []
+    result = asyncio.run(company_verification.verify_company_exists(
+        "Acme", url, homepage_evidence_sink=pages,
+        homepage_navigation_locator_sink=locators,
+    ))
+    assert result.decision != COMPANY_FIT_MATCH
+    assert pages == {}
+    assert locators == []
 
 
 def test_stage_archive_card_is_exact_visible_link_not_neighbor_or_hidden():
@@ -10672,18 +10709,27 @@ def test_stage_archive_card_is_exact_visible_link_not_neighbor_or_hidden():
       <a href="https://foreign.example/news/meridian-capital-acquires-stake-in-acme">
         Meridian Capital acquires stake in Acme Nov 4, 2026</a>
     """
-    cards = investigator._visible_stage_archive_cards(page, archive, [article])
+    cards = investigator._visible_stage_archive_cards(
+        page, archive, [article], ["Acme"],
+    )
     assert len(cards) == 1
     assert cards[0]["article_url"] == article
     assert cards[0]["publication_date"] == "2024-07-03"
     assert "Other company" not in cards[0]["label"]
     conflicting = page + f'<a href="{article}">Meridian Capital acquires stake in Acme Dec 1, 2026</a>'
     assert investigator._visible_stage_archive_cards(
-        conflicting, archive, [article],
+        conflicting, archive, [article], ["Acme"],
     ) == []
     assert investigator._visible_stage_archive_cards(
         '<a href="/news/other-funding">Meridian Capital acquires stake in Acme Jul 3, 2024</a>',
-        archive, [article],
+        archive, [article], ["Acme"],
+    ) == []
+    assert investigator._visible_stage_archive_cards(
+        f'<a href="{article}">Meridian Capital acquires stake in OtherCo Jul 3, 2024</a>',
+        archive, [article], ["Acme"],
+    ) == []
+    assert investigator._visible_stage_archive_cards(
+        page, archive, [article], [],
     ) == []
 
 
@@ -10694,21 +10740,21 @@ def test_stage_archive_card_requires_full_short_label_without_hidden_date():
     assert investigator._visible_stage_archive_cards(
         f'<a href="{article}">Meridian Capital acquires stake in Acme '
         + "x" * 300 + " Jul 3, 2024</a>",
-        archive, [article],
+        archive, [article], ["Acme"],
     ) == []
     assert investigator._visible_stage_archive_cards(
         valid + f'<a href="{article}">Meridian Capital acquires stake in Acme '
         + "x" * 300 + " Sep 2, 2026</a>",
-        archive, [article],
+        archive, [article], ["Acme"],
     ) == []
     assert investigator._visible_stage_archive_cards(
         valid + f'<a href="{article}">Meridian Capital acquires stake in Acme '
         "Jul 3, 2024 and Sep 2, 2026</a>",
-        archive, [article],
+        archive, [article], ["Acme"],
     ) == []
     assert investigator._visible_stage_archive_cards(
         f'<a href="{article}">Acme Jul 3, 2024</a>',
-        archive, [article],
+        archive, [article], ["Acme"],
     ) == []
 
 
@@ -10729,6 +10775,7 @@ def test_fetch_page_transports_only_exact_visible_stage_archive_card(monkeypatch
     monkeypatch.setattr(investigator, "_fetch_bounded_html", fetch)
     result = asyncio.run(investigator._fetch_page(
         object(), archive, archive_targets=(article,),
+        archive_company_names=("Acme",),
     ))
     assert result["server_visible_archive_cards"] == [{
         "article_url": article,
@@ -10750,8 +10797,12 @@ def test_stage_archive_handoff_stays_within_existing_three_fetches(monkeypatch):
     calls: list[tuple[str, tuple[str, ...]]] = []
     requests: list[dict] = []
 
-    async def fetch(_session, url, *, archive_targets=()):
+    async def fetch(
+        _session, url, *, archive_targets=(), archive_company_names=(),
+    ):
         calls.append((url, tuple(archive_targets)))
+        if url == archive:
+            assert archive_company_names[0] == "Acme"
         card = ([{
             "article_url": stake,
             "label": "Meridian Capital acquires stake in Acme Jul 3, 2024",

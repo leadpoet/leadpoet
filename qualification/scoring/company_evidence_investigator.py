@@ -814,6 +814,7 @@ def _visible_stage_archive_cards(
     raw_html: str,
     archive_url: str,
     article_urls: Sequence[str],
+    company_names: Sequence[str],
 ) -> list[dict[str, str]]:
     """Date only exact, visible links to already fetched same-host articles."""
 
@@ -823,6 +824,12 @@ def _visible_stage_archive_cards(
     )
 
     archive_host = (urlsplit(archive_url).hostname or "").casefold()
+    names = tuple(
+        _normalized_span(name) for name in company_names
+        if isinstance(name, str) and _normalized_span(name)
+    )
+    if not names:
+        return []
     targets = {
         url for url in article_urls
         if (urlsplit(url).hostname or "").casefold() == archive_host
@@ -842,6 +849,12 @@ def _visible_stage_archive_cards(
         ))
         label_words = set(re.findall(r"[a-z0-9]{3,}", label.lower()))
         if len(linked_title) < 2 or len(linked_title & label_words) < 2:
+            continue
+        normalized_label = _normalized_span(label)
+        if not any(
+            re.search(rf"(?<!\w){re.escape(name)}(?!\w)", normalized_label)
+            for name in names
+        ):
             continue
         if len(label) > 300:
             ambiguous.add(linked_url)
@@ -1850,6 +1863,7 @@ async def _fetch_page(
     *,
     stealth_mode: bool = False,
     archive_targets: Sequence[str] = (),
+    archive_company_names: Sequence[str] = (),
 ) -> dict[str, Any]:
     safe_url = _safe_https_url(url)
     if not safe_url:
@@ -1926,6 +1940,7 @@ async def _fetch_page(
             if archive_targets and (
                 cards := _visible_stage_archive_cards(
                     raw, safe_final_url, archive_targets,
+                    archive_company_names,
                 )
             ) else {}
         ),
@@ -2886,7 +2901,17 @@ async def investigate_company_evidence(
                     if url in observed_stage_archive_urls else ()
                 )
                 fetch_options = (
-                    {"archive_targets": archive_targets}
+                    {
+                        "archive_targets": archive_targets,
+                        "archive_company_names": (
+                            str(company_locator.get("name") or ""),
+                            str(
+                                (verified_homepage_identity or {}).get(
+                                    "normalized_name"
+                                ) or ""
+                            ),
+                        ),
+                    }
                     if archive_targets else {}
                 )
                 result = await _fetch_page(session, url, **fetch_options)

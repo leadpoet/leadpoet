@@ -318,7 +318,7 @@ For geography, find the current headquarters of the investigated company.
 Prefer a known current first-party contact or about navigation locator and
 fetch it before relying on a generic profile location. A navigation label is
 only a locator: its page must contain an explicit company-bound HQ statement.
-When a fetched current company contact or about page explicitly names that
+When a fetched current company contact or about page explicitly identifies that
 company's headquarters, use that location and its exact continuous source quote
 over a different undated third-party profile HQ. That profile discrepancy alone
 does not require a dated move announcement and does not make the current
@@ -440,11 +440,17 @@ resubmit. A quote must be one continuous, exact span from its fetched page;
 never join separate passages or insert an ellipsis. When the decisive sentence
 does not name the company, extend the quote to one continuous adjacent span that
 includes both the company name and the decisive sentence when such a span
-exists. For industry only, a shorter exact capability quote may omit the company
+exists. For industry, a shorter exact capability quote may omit the company
 name when the supplied complete verified homepage identity and the fetched
 first-party page body independently establish that the investigated company is
-the supplier_operator. Never add the name to source text or splice separate
-passages. When a rejected quote paraphrases or joins fetched text, repair it
+the supplier_operator. For geography, an exact continuous quote beginning with
+a Headquarters heading and its numeric street address may omit the company name
+only on the server-prioritized current company contact or about page, when the
+complete verified first-party identity independently binds both the requested
+URL and fetched final URL to the investigated company. This does not apply to a
+customer's headquarters, a regional office, or another page. Never add the
+name to source text or splice separate passages. When a rejected quote
+paraphrases or joins fetched text, repair it
 from the already fetched page before spending another fetch. UNPROVEN must have empty
 evidence_url and evidence_quote fields. Return one finding for every requested
 target and no other target.

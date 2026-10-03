@@ -277,10 +277,12 @@ def test_first_party_hq_review_preserves_supported_fallbacks(
             "California", COMPANY_FIT_MATCH,
         ),
         ("Our Raleigh regional office serves East Coast customers.", "", COMPANY_FIT_MATCH),
+        ("Customer Acme is headquartered in Raleigh, NC 27609.", "", COMPANY_FIT_MATCH),
         ("Contact Sysdig sales. No headquarters listed.", "", COMPANY_FIT_MATCH),
     ],
     ids=["raleigh_first_party", "san_francisco_first_party_agrees",
-         "regional_office_is_not_hq", "first_party_silent"],
+         "regional_office_is_not_hq", "customer_hq_is_not_company_hq",
+         "first_party_silent"],
 )
 def test_real_bounded_investigator_fetches_contact_before_profile_fallback(
     monkeypatch, contact_text, state, expected,
@@ -303,9 +305,15 @@ def test_real_bounded_investigator_fetches_contact_before_profile_fallback(
     async def judge(_session, _url, *, headers, payload):
         del headers
         judged.append(payload)
+        # The actual judge request must allow the exact unnamed HQ block that
+        # the server's first-party identity validator already accepts.
+        prompt = payload["messages"][0]["content"]
+        assert "For geography, an exact continuous quote beginning with" in prompt
+        assert "both the requested\nURL and fetched final URL" in prompt
         document = json.loads(payload["messages"][1]["content"].split("\n", 1)[1])
         assert document["requested_targets"] == ["geography"]
         assert document["server_priority_submitted_source"]["url"] == _SYSDIG_CONTACT_URL
+        assert document["prefetched_sources"][0]["text"] == contact_text
         if isinstance(payload["tool_choice"], dict) and (
             payload["tool_choice"]["function"]["name"] == "search_web"
         ):

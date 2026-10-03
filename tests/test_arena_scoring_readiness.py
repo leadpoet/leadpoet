@@ -2,6 +2,7 @@
 
 import builtins
 import errno
+import shlex
 import stat
 import signal
 import subprocess
@@ -305,11 +306,12 @@ def test_hanging_version_check_terminates_helpers_and_reaps_parent(
     binary, work = scoring_host
     child_file = binary.parent / "helper.pid"
     binary.write_text(
-        "#!%s\nimport subprocess, time\n" % sys.executable
-        + "child = subprocess.Popen(['/bin/sleep', '60'])\n"
-        + "with open(%r, 'w') as output: output.write(str(child.pid))\n"
-        % str(child_file)
-        + "time.sleep(60)\n"
+        "#!/bin/sh\n"
+        "/bin/sleep 60 &\n"
+        "helper_pid=$!\n"
+        "printf '%s\\n' \"$helper_pid\" > "
+        + shlex.quote(str(child_file))
+        + "\nwait\n"
     )
     real_popen = subprocess.Popen
     parents = []

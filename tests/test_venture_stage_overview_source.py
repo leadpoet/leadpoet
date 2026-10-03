@@ -81,7 +81,7 @@ def test_unbound_or_disputed_overview_is_not_selected(change):
     ) == ""
 
 
-@pytest.mark.parametrize("mode", ["fresh", "cached", "failed", "no_round"])
+@pytest.mark.parametrize("mode", ["fresh", "cached", "failed", "no_round", "hq"])
 def test_investor_overview_reaches_judge_with_existing_fetch_budget(
     monkeypatch, mode,
 ):
@@ -90,11 +90,14 @@ def test_investor_overview_reaches_judge_with_existing_fetch_budget(
     async def fake_post(_session, _url, *, headers, payload):
         del headers
         requests.append(payload)
-        status = "VERIFIED" if mode in {"fresh", "cached"} else "UNPROVEN"
+        status = "VERIFIED" if mode in {"fresh", "cached", "hq"} else "UNPROVEN"
+        findings = [_finding(status)]
+        if mode == "hq":
+            findings.append({**_finding("UNPROVEN"), "target": "geography"})
         return 200, {"choices": [{"message": {"tool_calls": [{
             "id": "submit", "type": "function",
             "function": {"name": "submit_findings", "arguments": json.dumps({
-                "findings": [_finding(status)],
+                "findings": findings,
             })},
         }]}}]}
 
@@ -103,6 +106,14 @@ def test_investor_overview_reaches_judge_with_existing_fetch_budget(
         {"ok": True, "url": OVERVIEW_URL,
          "final_url": OVERVIEW_URL, "text": TIMELINE}
     ))
+    contact_url = f"https://{DOMAIN}/contact-us"
+    if mode == "hq":
+        fetch.side_effect = [
+            {"ok": True, "url": contact_url, "final_url": contact_url,
+             "text": "Contact Acme for sales information."},
+            {"ok": True, "url": OVERVIEW_URL, "final_url": OVERVIEW_URL,
+             "text": TIMELINE},
+        ]
     search = AsyncMock(return_value={"results": []})
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("EXA_API_KEY", "test-key")
@@ -116,7 +127,12 @@ def test_investor_overview_reaches_judge_with_existing_fetch_budget(
         pages[OVERVIEW_URL] = {"final_url": OVERVIEW_URL, "text": TIMELINE}
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": f"https://{DOMAIN}"},
-        targets=("stage",), requested_stage="Series B",
+        targets=("stage", "geography") if mode == "hq" else ("stage",),
+        requested_stage="Series B",
+        requested_geography="United Kingdom" if mode == "hq" else "",
+        homepage_navigation_locators=[
+            {"url": contact_url, "label": "Contact us"},
+        ] if mode == "hq" else (),
         prior_observations={
             "submitted_source_urls": [ROUND_URL, OVERVIEW_URL],
             **({"untrusted_company_stage_evidence": [{
@@ -131,19 +147,21 @@ def test_investor_overview_reaches_judge_with_existing_fetch_budget(
     )
 
     assert result["claims"]["stage"]["status"] == (
-        "VERIFIED" if mode in {"fresh", "cached"} else "UNPROVEN"
+        "VERIFIED" if mode in {"fresh", "cached", "hq"} else "UNPROVEN"
     )
     assert document["server_current_stage_discovery"]["ok"] is True
     assert document["server_venture_stage_overview_fetch"]["url"] == OVERVIEW_URL
     assert document["server_venture_stage_overview_fetch"]["cache_hit"] == (
         mode == "cached"
     )
-    assert result["usage"]["fetch_calls"] == (0 if mode == "cached" else 1)
+    assert result["usage"]["fetch_calls"] == (
+        0 if mode == "cached" else 2 if mode == "hq" else 1
+    )
     assert document["investigation_limits"]["prefetched_pages"] == (
         0 if mode == "no_round" else 2 if mode == "cached" else 1
     )
     assert document["investigation_limits"]["remaining_fetch_calls"] == (
-        3 if mode == "cached" else 2
+        3 if mode == "cached" else 1 if mode == "hq" else 2
     )
     assert any(
         source["url"] == OVERVIEW_URL and source["text"] == TIMELINE
@@ -151,6 +169,11 @@ def test_investor_overview_reaches_judge_with_existing_fetch_budget(
     ) == (mode != "failed")
     if mode == "cached":
         fetch.assert_not_awaited()
+    elif mode == "hq":
+        assert [call.args[1] for call in fetch.await_args_list] == [
+            contact_url, OVERVIEW_URL,
+        ]
+        assert document["server_priority_submitted_source"]["url"] == contact_url
     else:
         fetch.assert_awaited_once()
         assert fetch.await_args.args[1] == OVERVIEW_URL

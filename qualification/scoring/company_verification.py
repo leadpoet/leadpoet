@@ -1407,9 +1407,16 @@ async def verify_company_exists(
         for observed_name in observed_names
         for observed_linkedin in observed_linkedins
     ]
+    matched_receipts = [
+        receipt for receipt in identity_receipts if receipt["decision"] == "match"
+    ]
+    submitted_name_key = _company_name(company_name)
     matched = next(
-        (receipt for receipt in identity_receipts if receipt["decision"] == "match"),
-        None,
+        (
+            receipt for receipt in matched_receipts
+            if receipt["observed_name"] == submitted_name_key
+        ),
+        matched_receipts[0] if matched_receipts else None,
     )
     if matched is not None:
         matched_receipt: dict[str, object] = dict(matched)

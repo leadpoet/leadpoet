@@ -13,7 +13,10 @@ from qualification.scoring.company_fit_decision import (
     company_quality_receipt_matches_claim,
     evaluate_company_identity,
 )
-from qualification.scoring.company_evidence_investigator import MAX_PAGE_CHARACTERS
+from qualification.scoring.company_evidence_investigator import (
+    MAX_PAGE_CHARACTERS,
+    _validated_findings,
+)
 from qualification.scoring.company_verification import (
     MAX_HOMEPAGE_NAVIGATION_LOCATORS,
     VERIFIED_REBRAND_REDIRECT_KEY,
@@ -377,6 +380,107 @@ def test_homepage_name_is_a_match(monkeypatch):
         )
     )
     assert result.decision == COMPANY_FIT_MATCH
+
+
+def test_exact_homepage_brand_wins_over_earlier_matched_title(monkeypatch):
+    payload = (
+        b"<title>Example Company | Cloud Security Starts at Runtime</title>"
+        b'<a href="https://www.linkedin.com/company/example-company">'
+        b"LinkedIn</a>"
+    )
+    result = asyncio.run(_verify_with_response(monkeypatch, 200, payload))
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert result.details["identity"]["observed_name"] == "example"
+    assert _verified_homepage_identity_anchor(result)["normalized_name"] == "example"
+
+
+@pytest.mark.parametrize(
+    ("company_linkedin", "final_url"),
+    [
+        ("https://www.linkedin.com/company/other", ""),
+        ("https://www.linkedin.com/company/example-company",
+         "https://unrelated.example/"),
+    ],
+)
+def test_exact_homepage_brand_cannot_override_wrong_identity_binding(
+    monkeypatch, company_linkedin, final_url,
+):
+    payload = (
+        b"<title>Example Company | Cloud Security Starts at Runtime</title>"
+        b'<a href="https://www.linkedin.com/company/example-company">'
+        b"LinkedIn</a>"
+    )
+    result = asyncio.run(_verify_with_response(
+        monkeypatch, 200, payload, company_linkedin=company_linkedin,
+        final_url=final_url,
+    ))
+
+    assert result.decision != COMPANY_FIT_MATCH
+
+
+def test_homepage_title_first_match_remains_when_no_exact_brand(monkeypatch):
+    payload = (
+        b"<title>Example Company Platform</title>"
+        b'<a href="https://www.linkedin.com/company/example-company">'
+        b"LinkedIn</a>"
+    )
+    result = asyncio.run(_verify_with_response(monkeypatch, 200, payload))
+
+    assert result.decision == COMPANY_FIT_MATCH
+    assert result.details["identity"]["observed_name"] == (
+        "examplecompanyplatform"
+    )
+
+
+def test_sysdig_exact_brand_handoff_binds_country_hq_quote(monkeypatch):
+    payload = (
+        b"<title>Sysdig | Cloud Security Starts at Runtime</title>"
+        b'<a href="https://www.linkedin.com/company/sysdig">LinkedIn</a>'
+    )
+    response = _Response(200, payload, "https://sysdig.com/")
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification.aiohttp.ClientSession",
+        lambda **_kwargs: _Session(response),
+    )
+    homepage = asyncio.run(verify_company_exists(
+        "Sysdig", "https://sysdig.com/",
+        company_linkedin="https://www.linkedin.com/company/sysdig",
+    ))
+    anchor = _verified_homepage_identity_anchor(homepage)
+    contact_url = "https://sysdig.com/contact-us"
+    quote = (
+        "United States Headquarters 4000 Center at North Hills St Ste. 420 "
+        "Raleigh, NC 27609"
+    )
+    identity = {
+        "submitted_name": "Sysdig", "observed_name": "Sysdig",
+        "verified_name": anchor.get("normalized_name"),
+        "submitted_domain": "sysdig.com", "observed_domain": "sysdig.com",
+        "verified_domain": anchor.get("registrable_dns_domain"),
+        "submitted_linkedin_slug": "sysdig",
+        "observed_linkedin_slug": "sysdig",
+        "verified_linkedin_slug": anchor.get("linkedin_company_slug"),
+    }
+    finding = {
+        "target": "geography", "status": "CONTRADICTED",
+        "observed_value": "North Carolina, United States",
+        "observed_country": "United States", "observed_state": "North Carolina",
+        "evidence_url": contact_url, "evidence_quote": quote,
+        "supporting_evidence": [], "reason": "first-party contact page",
+    }
+    projected = _validated_findings(
+        {"findings": [finding]}, targets=("geography",),
+        fetched_pages={contact_url: quote},
+        fetched_final_urls={contact_url: "https://www.sysdig.com/contact-us"},
+        first_party_domains={"sysdig.com"}, identity_names={"sysdig"},
+        identity_anchor=identity, priority_headquarters_url=contact_url,
+    )
+
+    assert homepage.decision == COMPANY_FIT_MATCH
+    assert anchor["normalized_name"] == "sysdig"
+    assert projected is not None
+    assert projected["geography"]["status"] == "CONTRADICTED"
 
 
 def _copyright_identity_html(*, meta: str = "") -> str:

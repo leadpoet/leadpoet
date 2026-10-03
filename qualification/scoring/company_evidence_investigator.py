@@ -1205,6 +1205,40 @@ def _venture_stage_submitted_source_to_prefetch(
     return ""
 
 
+def _submitted_venture_overview_url(
+    *,
+    company_name: str,
+    submitted_source_urls: Sequence[str],
+    stage_dispute_urls: Sequence[str],
+    verified_identity: Mapping[str, Any],
+) -> str:
+    """Choose one submitted investor overview as untrusted chronology context."""
+
+    identity_name = _normalized_span(verified_identity.get("normalized_name"))
+    identity_domain = _registrable_domain(
+        verified_identity.get("registrable_dns_domain")
+    )
+    if (
+        stage_dispute_urls
+        or not identity_name
+        or identity_name != _normalized_span(company_name)
+        or not identity_domain
+        or not verified_identity.get("linkedin_company_slug")
+    ):
+        return ""
+    for url in submitted_source_urls:
+        parsed = urlsplit(url)
+        if (
+            _first_party_url(url, {identity_domain})
+            and not parsed.query
+            and not parsed.fragment
+            and parsed.path.rstrip("/").casefold()
+            in {"/investors", "/investor-relations", "/funding-history"}
+        ):
+            return url
+    return ""
+
+
 def _priority_submitted_company_source(
     *,
     targets: Sequence[str],
@@ -3107,6 +3141,61 @@ async def investigate_company_evidence(
                         if not priority_cache_hit
                         else {}
                     ),
+                )
+            overview_url = (
+                _submitted_venture_overview_url(
+                    company_name=str(company_locator.get("name") or ""),
+                    submitted_source_urls=submitted_source_urls,
+                    stage_dispute_urls=stage_dispute_urls,
+                    verified_identity=(
+                        verified_homepage_identity or verified_navigation_identity or {}
+                    ),
+                )
+                if requested_venture_stage else ""
+            )
+            if (
+                overview_url
+                and (
+                    overview_url in fetched_pages
+                    or fetch_calls < MAX_FETCH_CALLS - 1
+                )
+                and time.monotonic() - started < ADMISSION_DEADLINE_SECONDS
+            ):
+                overview_cached = overview_url in fetched_pages
+                overview_result = (
+                    {
+                        "ok": True,
+                        "url": overview_url,
+                        "final_url": fetched_final_urls[overview_url],
+                        "text": fetched_pages[overview_url],
+                    }
+                    if overview_cached else await fetch_fresh_page(overview_url)
+                )
+                input_document["server_venture_stage_overview_fetch"] = {
+                    "url": overview_url,
+                    "ok": bool(overview_result.get("ok")),
+                    "cache_hit": overview_cached,
+                    "notice": "server_selected_first_party_locator_is_untrusted_evidence",
+                    **(
+                        {}
+                        if overview_result.get("ok")
+                        else {"error": str(overview_result.get("error") or "fetch_failed")}
+                    ),
+                }
+                if overview_result.get("ok") and not overview_cached:
+                    fetched_pages[overview_url] = str(overview_result["text"])
+                    fetched_final_urls[overview_url] = str(
+                        overview_result.get("final_url") or overview_url
+                    )
+                    input_document["prefetched_sources"] = [
+                        {"url": url, "text": text}
+                        for url, text in fetched_pages.items()
+                    ]
+                input_document["investigation_limits"].update(
+                    prefetched_pages=prefetched_count,
+                    remaining_fetch_calls=max(0, MAX_FETCH_CALLS - fetch_calls),
+                    **({"server_prefetch_fetch_calls": fetch_calls}
+                       if not overview_cached else {}),
                 )
             if (
                 requested_venture_stage

@@ -311,7 +311,7 @@ def _same_host_event_links(body: str, source_url: str) -> list[Dict[str, str]]:
         return []
     source_key = _normalize_url(source_url)
     rows: list[Dict[str, str]] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for href, label in _visible_page_links(body):
         title = " ".join(str(label or "").split())[:300]
         if not title:
@@ -330,9 +330,12 @@ def _same_host_event_links(body: str, source_url: str) -> list[Dict[str, str]]:
             (parsed.scheme, parsed.netloc, parsed.path, parsed.query, "")
         )
         key = _normalize_url(canonical)
-        if key == source_key or key in seen:
+        # Retain distinct labels for the same URL. An archive can repeat one
+        # article with conflicting dates; the date resolver must see both.
+        label_key = (key, title)
+        if key == source_key or label_key in seen:
             continue
-        seen.add(key)
+        seen.add(label_key)
         rows.append({"url": canonical, "label": title})
         if len(rows) >= 80:
             break
@@ -3040,6 +3043,16 @@ def _build_final_judge_prompt(
             "that binds the event and its date. Do not shorten quotes with "
             "ellipses or borrow a date from another event on the page."
         )
+        if row.get("_article_archive_card") is True:
+            suffix += (
+                " The additional text is only one visible first-party archive "
+                "card whose link exactly identifies the submitted article. "
+                "Its date is the linked article's publication date, not by "
+                "itself the date on which the event occurred. Use "
+                "source_publication_date for that card date; do not report "
+                "source_event_date or source_event_month solely from the card. "
+                "The original article must still prove the event and company."
+            )
     prefix = ""
     if row.get("_integrity_policy"):
         prefix = (
@@ -3931,6 +3944,142 @@ def _same_event_link_candidates(
     return [link for _score, link in ranked[:12]]
 
 
+_ARCHIVE_PATH_NAMES = frozenset({
+    "articles", "blog", "media", "news", "press", "stories", "updates",
+})
+_ARCHIVE_CALENDAR_DATE_RE = re.compile(
+    r"(?<!\d)20\d{2}-\d{2}-\d{2}(?!\d)|"
+    r"\b[A-Za-z]{3,9}\.?\s+\d{1,2},?\s+20\d{2}\b"
+)
+
+
+def _article_archive_locator(
+    contents: Mapping[str, Any], row: Mapping[str, Any],
+) -> str:
+    """Use only an observed same-host link to the article's parent index."""
+
+    sources = row.get("claimed_source_urls")
+    if not isinstance(sources, list) or len(sources) != 1:
+        return ""
+    source_url = _prompt_exact_url_or_empty(sources[0])
+    if not source_url:
+        return ""
+    source = urlsplit(source_url)
+    segments = [part for part in source.path.split("/") if part]
+    if len(segments) != 2 or segments[0].casefold() not in _ARCHIVE_PATH_NAMES:
+        return ""
+    parent = _normalize_url(urlunsplit((
+        source.scheme, source.netloc, "/" + segments[0], "", "",
+    )))
+    for result in contents.get("results") or []:
+        if (
+            not isinstance(result, Mapping)
+            or _normalize_url(str(result.get("url") or ""))
+            != _normalize_url(source_url)
+        ):
+            continue
+        meta = result.get("meta")
+        links = meta.get("same_host_event_links") if isinstance(meta, Mapping) else None
+        if not isinstance(links, list):
+            continue
+        for link in links:
+            if (
+                isinstance(link, Mapping)
+                and _normalize_url(str(link.get("url") or "")) == parent
+            ):
+                return str(link["url"])
+    return ""
+
+
+def _archive_card_date(label: str) -> str:
+    """Require one calendar date inside the exact linked article card."""
+
+    months = {
+        name: number for number, name in enumerate((
+            "january", "february", "march", "april", "may", "june",
+            "july", "august", "september", "october", "november",
+            "december",
+        ), start=1)
+    }
+    dates: set[str] = set()
+    for match in _ARCHIVE_CALENDAR_DATE_RE.finditer(label):
+        value = match.group(0).strip().rstrip(".")
+        normalized = _source_publication_date(value)
+        if not normalized:
+            english = re.fullmatch(
+                r"([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(20\d{2})",
+                value,
+            )
+            if english is None:
+                return ""
+            month_text = english.group(1).casefold()
+            month = months.get(month_text) or next((
+                number for name, number in months.items()
+                if month_text == name[:3]
+                or (month_text == "sept" and name == "september")
+            ), None)
+            if month is None:
+                return ""
+            try:
+                normalized = date(
+                    int(english.group(3)), month, int(english.group(2)),
+                ).isoformat()
+            except ValueError:
+                return ""
+        dates.add(normalized)
+    return next(iter(dates)) if len(dates) == 1 else ""
+
+
+def _bound_article_archive_card(
+    linked_results: List[Dict[str, Any]],
+    *,
+    archive_url: str,
+    article_url: str,
+    row: Mapping[str, Any],
+) -> Optional[Dict[str, str]]:
+    """Bind a date only to one visible card linking the exact submitted URL."""
+
+    archive_key = _normalize_url(archive_url)
+    article_key = _normalize_url(article_url)
+    results = [
+        item for item in linked_results
+        if isinstance(item, Mapping)
+        and _normalize_url(str(item.get("url") or "")) == archive_key
+    ]
+    if len(results) != 1:
+        return None
+    result = results[0]
+    meta = result.get("meta")
+    links = meta.get("same_host_event_links") if isinstance(meta, Mapping) else None
+    if not isinstance(links, list):
+        return None
+    cards = [
+        link for link in links
+        if isinstance(link, Mapping)
+        and _normalize_url(str(link.get("url") or "")) == article_key
+    ]
+    if len(cards) != 1:
+        return None
+    label = " ".join(str(cards[0].get("label") or "").split())
+    page_text = str(result.get("text") or "")
+    company_tokens = _company_core_tokens(str(row.get("company") or ""))
+    label_tokens = _link_tokens(label)
+    title_tokens = _link_tokens(unquote(urlsplit(article_url).path.rsplit("/", 1)[-1]))
+    title_tokens -= company_tokens
+    claim_tokens = _link_tokens(row.get("claim")) - company_tokens
+    date_value = _archive_card_date(label)
+    if (
+        not date_value
+        or not _grounded_exact_text(page_text, label)
+        or (company_tokens and not company_tokens & label_tokens)
+        or not title_tokens
+        or len(title_tokens & label_tokens) < min(2, len(title_tokens))
+        or not claim_tokens & label_tokens
+    ):
+        return None
+    return {"text": label, "source_publication_date": date_value}
+
+
 def _grounded_event_months(
     item: Mapping[str, Any], source_text: str, submitted_claim: str,
 ) -> set[str]:
@@ -4056,6 +4205,7 @@ def _has_grounded_source_event_date(
 def _same_event_resolution_outcome(
     verdict: Mapping[str, Any], linked_results: list[Mapping[str, Any]],
     selected_urls: list[str], *, submitted_claim: str,
+    archive_card_date: str = "",
 ) -> str:
     """Classify a linked-page judgment as verified, contradicted, or unproven."""
 
@@ -4112,6 +4262,18 @@ def _same_event_resolution_outcome(
         if _grounded_exact_text(linked_text, value)
     )
     notes = [str(note or "") for note in (item.get("risk_notes") or [])]
+    if archive_card_date:
+        # An archive card dates its linked article, not necessarily the
+        # underlying event. It cannot manufacture an event-date assertion.
+        if any(note.startswith(("source_event_date:", "source_event_month:"))
+               for note in notes):
+            return "unproven"
+        if not any(
+            _date_is_grounded_in_text(archive_card_date, quote)
+            and (_link_tokens(quote) & _link_tokens(submitted_claim))
+            for quote in quotes
+        ):
+            return "unproven"
     event_dates = []
     claimed_event_date = False
     for note in notes:
@@ -4149,6 +4311,11 @@ def _same_event_resolution_outcome(
         for note in notes if note.startswith("source_publication_date:")
     }
     if claimed_event_date and not event_dates:
+        return "unproven"
+    if archive_card_date and (
+        publication_dates != {archive_card_date}
+        or archive_card_date not in cited_publications
+    ):
         return "unproven"
     if event_dates or publication_dates & cited_publications:
         return "verified"
@@ -4847,11 +5014,16 @@ async def verify_three_stage(
         if integrity_policy
         else False
     )
+    archive_url = (
+        _article_archive_locator(contents, row)
+        if integrity_policy and not source_publication_dates
+        and not has_grounded_event_date else ""
+    )
     should_resolve_same_event = bool(
         integrity_policy
         and len(bundle) <= 1
         and not is_hiring_claim
-        and same_event_candidates
+        and (same_event_candidates or archive_url)
         and s3_item.get("signal_status") in {
             "supported", "partially_supported", "unable_to_verify",
         }
@@ -4863,14 +5035,18 @@ async def verify_three_stage(
         # The overlap score only bounds transport work. The existing final
         # source-grounded judge must still prove same company, event, quote,
         # and date from the fetched page.
-        selected_urls = [
-            candidate["url"] for candidate in same_event_candidates[:1]
-        ]
+        selected_urls = (
+            [archive_url] if archive_url else
+            [candidate["url"] for candidate in same_event_candidates[:1]]
+        )
         same_event_resolution = {
             "attempted": True,
             "status": "unproven",
             "selected_urls": selected_urls,
-            "reason": "ranked_visible_same_host_links",
+            "reason": (
+                "observed_article_archive_locator"
+                if archive_url else "ranked_visible_same_host_links"
+            ),
         }
         if selected_urls:
             linked_fetched = await _fetch_sd_then_exa(selected_urls)
@@ -4885,6 +5061,27 @@ async def verify_three_stage(
                 url for url in selected_urls
                 if _normalize_url(url) in fetched_link_keys
             ]
+            archive_card = None
+            if archive_url and fetched_selected_urls:
+                archive_card = _bound_article_archive_card(
+                    linked_results,
+                    archive_url=archive_url,
+                    article_url=row["claimed_source_urls"][0],
+                    row=row,
+                )
+                if archive_card is None:
+                    fetched_selected_urls = []
+                    same_event_resolution["reason"] = "archive_card_unbound"
+                else:
+                    linked_results = [{
+                        **item,
+                        "text": archive_card["text"],
+                        "source_publication_date": archive_card[
+                            "source_publication_date"
+                        ],
+                        "meta": {},
+                    } for item in linked_results]
+                    linked_contents["results"] = linked_results
             if fetched_selected_urls:
                 chain_row = {
                     **row,
@@ -4892,6 +5089,7 @@ async def verify_three_stage(
                         *row["claimed_source_urls"], *fetched_selected_urls,
                     ],
                     "_same_event_resolution": True,
+                    **({"_article_archive_card": True} if archive_card else {}),
                 }
                 chain_contents = {
                     "results": [
@@ -4933,6 +5131,10 @@ async def verify_three_stage(
                     outcome = _same_event_resolution_outcome(
                         chain_verdict, linked_results, fetched_selected_urls,
                         submitted_claim=str(chain_row["claim"]),
+                        archive_card_date=(
+                            archive_card["source_publication_date"]
+                            if archive_card else ""
+                        ),
                     )
                     same_event_resolution["status"] = outcome
                     if outcome in {"verified", "contradicted"}:
@@ -4963,7 +5165,10 @@ async def verify_three_stage(
                         "judge_error:" + str(chain_envelope.get("_error"))
                     )[:300]
             else:
-                same_event_resolution["reason"] = "selected_link_fetch_unproven"
+                if same_event_resolution["reason"] != "archive_card_unbound":
+                    same_event_resolution["reason"] = (
+                        "selected_link_fetch_unproven"
+                    )
     identity_clarification: Optional[Dict[str, Any]] = None
     evidence_clarification: Optional[Dict[str, Any]] = None
     clarification_kind = None
@@ -5301,6 +5506,16 @@ async def verify_three_stage(
         })
         if client_ready:
             cited = {_normalize_url(url) for url in s3_item.get("evidence_urls_used") or []}
+            if (
+                row.get("_article_archive_card") is True
+                and same_event_resolution
+                and same_event_resolution.get("status") == "verified"
+            ):
+                # The archive card supplies publication timing only. The
+                # initially verified article still supplies event details for
+                # the downstream paragraph review, even if the second judge
+                # cites only the card when resolving the missing date.
+                cited.add(_normalize_url(row["claimed_source_urls"][0]))
             declared = {
                 _normalize_url(url): url for url in row["claimed_source_urls"]
                 if _normalize_url(url) in cited

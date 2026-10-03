@@ -20,6 +20,197 @@ MAX_QUOTE = (
     "On March 3, 2026, Max Retail announced its new point-of-sale integration "
     "with RICS Software, available immediately."
 )
+SOKIN_ARTICLE = (
+    "https://sokin.com/news/"
+    "sokin-raises-50m-series-b-following-100-year-on-year-growth"
+)
+SOKIN_INDEX = "https://sokin.com/news"
+SOKIN_CLAIM = (
+    "Sokin announced that it secured $50 million in Series B funding for "
+    "global expansion, financial infrastructure, and product capabilities."
+)
+SOKIN_QUOTE = (
+    "Sokin today announced it has secured $50 million in Series B funding "
+    "to accelerate its global expansion and product capabilities."
+)
+SOKIN_CARD = (
+    "Sokin raises $50M Series B following 100% year-on-year growth "
+    "The investment will power Sokin’s next phase of global expansion, "
+    "platform enhancement and cross-border payments innovation. "
+    "Company news Dec 1, 2025"
+)
+
+
+def _sokin_archive_result(*, card=SOKIN_CARD, href=SOKIN_ARTICLE,
+                          extra_cards=()):
+    return {
+        "url": SOKIN_INDEX,
+        "text": "Earlier news. " + card + " Later news Dec 2, 2025.",
+        "source_publication_date": "",
+        "meta": {"same_host_event_links": [
+            {"url": href, "label": card}, *extra_cards,
+        ]},
+    }
+
+
+def test_sokin_shaped_archive_card_binds_original_article_and_one_date():
+    article_html = (
+        '<a href="/news">News Learn more what’s happening</a>'
+        '<a href="/news/in-an-agent-rush-own-the-infrastructure">'
+        'Company news Jul 30, 2026 In an agent rush, own the infrastructure'
+        '</a>'
+    )
+    contents = {"results": [{"url": SOKIN_ARTICLE, "meta": {
+        "same_host_event_links": verifier._same_host_event_links(
+            article_html, SOKIN_ARTICLE,
+        ),
+    }}]}
+    row = {"company": "Sokin", "claim": SOKIN_CLAIM,
+           "claimed_source_urls": [SOKIN_ARTICLE]}
+    assert verifier._article_archive_locator(contents, row) == SOKIN_INDEX
+    assert verifier._same_event_link_candidates(contents, row)[0]["url"] != (
+        SOKIN_INDEX
+    )
+    assert verifier._bound_article_archive_card(
+        [_sokin_archive_result()], archive_url=SOKIN_INDEX,
+        article_url=SOKIN_ARTICLE, row=row,
+    ) == {
+        "text": SOKIN_CARD, "source_publication_date": "2025-12-01",
+    }
+
+
+@pytest.mark.parametrize("mutation", [
+    "adjacent_date", "wrong_href", "wrong_title", "wrong_company",
+    "conflicting_card_dates", "conflicting_dates_in_card",
+])
+def test_archive_card_rejects_unbound_or_ambiguous_dates(mutation):
+    row = {"company": "Sokin", "claim": SOKIN_CLAIM,
+           "claimed_source_urls": [SOKIN_ARTICLE]}
+    card = SOKIN_CARD
+    href = SOKIN_ARTICLE
+    extras = ()
+    if mutation == "adjacent_date":
+        card = card.replace(" Dec 1, 2025", "")
+    elif mutation == "wrong_href":
+        href = "https://sokin.com/news/other-series-b"
+    elif mutation == "wrong_title":
+        card = "Sokin opens a new office. Company news Dec 1, 2025"
+    elif mutation == "wrong_company":
+        card = card.replace("Sokin", "OtherCo")
+    elif mutation == "conflicting_card_dates":
+        extras = ({"url": href, "label": card.replace(
+            "Dec 1, 2025", "Jan 2, 2026",
+        )},)
+    elif mutation == "conflicting_dates_in_card":
+        card += " Updated Jan 2, 2026"
+    assert verifier._bound_article_archive_card(
+        [_sokin_archive_result(card=card, href=href, extra_cards=extras)],
+        archive_url=SOKIN_INDEX, article_url=SOKIN_ARTICLE, row=row,
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_archive_card_uses_existing_one_fetch_one_judge_and_date_gate(
+    monkeypatch,
+):
+    calls = AsyncMock(side_effect=[
+        _verdict(claim=SOKIN_CLAIM, url=SOKIN_ARTICLE, quote=SOKIN_QUOTE),
+        _verdict(
+            claim=SOKIN_CLAIM, url=SOKIN_INDEX, quote=SOKIN_CARD,
+            risk_notes=["same_event_as_submitted:verified",
+                        "source_publication_date:2025-12-01"],
+        ),
+    ])
+
+    async def fetch(urls, *args, **kwargs):
+        if urls == [SOKIN_ARTICLE]:
+            return {"results": [{
+                "url": SOKIN_ARTICLE, "text": SOKIN_QUOTE,
+                "source_publication_date": "",
+                "meta": {"same_host_event_links": [
+                    {"url": SOKIN_INDEX, "label": "News"},
+                    {"url": "https://sokin.com/news/in-an-agent-rush-own-the-infrastructure",
+                     "label": "Company news Jul 30, 2026 In an agent rush, own the infrastructure"},
+                ]},
+            }], "statuses": []}
+        assert urls == [SOKIN_INDEX]
+        return {"results": [_sokin_archive_result()], "statuses": []}
+
+    fetched = AsyncMock(side_effect=fetch)
+    monkeypatch.setattr(verifier, "_fetch_sd_then_exa", fetched)
+    monkeypatch.setattr(verifier, "_call_openrouter", calls)
+    result = await verifier.verify_three_stage(
+        object(), company_name="Sokin", company_linkedin="",
+        company_website="https://sokin.com/", source_url=SOKIN_ARTICLE,
+        miner_claim=SOKIN_CLAIM,
+        miner_signal_date="2026-06-18",
+        target_signal_text="Raised Series B funding in the last 12 months.",
+        evidence_type="FUNDING", stage1_soft_reject=True,
+        integrity_policy=True, buyer_max_age_days=365,
+    )
+    assert fetched.await_count == 2  # original + one resolution fetch
+    assert calls.await_count == 2  # initial + one resolution judge
+    assert result["source_resolution"]["selected_urls"] == [SOKIN_INDEX]
+    assert result["source_resolution"]["status"] == "verified"
+    assert result["source_publication_dates"] == ["2025-12-01"]
+    assert [item["text"] for item in result["verified_source_context"]] == [
+        SOKIN_QUOTE, SOKIN_CARD,
+    ]
+    assert "not by itself the date" in calls.await_args_list[1].args[2]
+    item = result["verdict"]["signal_evaluations"][0]
+    event, publications = source_dates_from_verdict(
+        item, result["source_publication_dates"],
+    )
+    freshness = source_grounded_date_verdict(
+        event_date=event, publication_dates=publications,
+        buyer_cap_days=365, evaluated_on=date(2026, 10, 1),
+    )
+    assert event is None
+    assert freshness.verdict == "in_window"
+    assert freshness.authoritative_date == "2025-12-01"
+    assert freshness.basis == "publication_date"
+    assert freshness.age_days == 304
+
+
+def test_generic_archive_card_and_future_out_of_window_dates():
+    article = "https://acme.test/blog/acme-unveils-atlas-routing"
+    index = "https://acme.test/blog"
+    claim = "Acme unveils Atlas routing for business workflows."
+    row = {"company": "Acme", "claim": claim,
+           "claimed_source_urls": [article]}
+    assert verifier._article_archive_locator({"results": [{"url": article, "meta": {
+        "same_host_event_links": [{"url": index, "label": "Blog"}],
+    }}]}, row) == index
+    for label, expected in (
+        ("Acme unveils Atlas routing. Blog Mar 3, 2026", "in_window"),
+        ("Acme unveils Atlas routing. Blog Mar 3, 2024", "out_of_window"),
+        ("Acme unveils Atlas routing. Blog Mar 3, 2027", "uncertain"),
+    ):
+        card = verifier._bound_article_archive_card([{
+            "url": index, "text": label,
+            "meta": {"same_host_event_links": [{"url": article, "label": label}]},
+        }], archive_url=index, article_url=article, row=row)
+        assert card is not None
+        assert source_grounded_date_verdict(
+            event_date=None,
+            publication_dates=[card["source_publication_date"]],
+            buyer_cap_days=365, evaluated_on=date(2026, 10, 1),
+        ).verdict == expected
+
+
+def test_archive_card_cannot_be_promoted_to_actual_event_date():
+    verdict = _verdict(
+        claim=SOKIN_CLAIM, url=SOKIN_INDEX, quote=SOKIN_CARD,
+        risk_notes=["same_event_as_submitted:verified",
+                    "source_event_date:2025-12-01"],
+    )["answer"]
+    result = _sokin_archive_result()
+    result["text"] = SOKIN_CARD
+    result["source_publication_date"] = "2025-12-01"
+    assert verifier._same_event_resolution_outcome(
+        verdict, [result], [SOKIN_INDEX],
+        submitted_claim=SOKIN_CLAIM, archive_card_date="2025-12-01",
+    ) == "unproven"
 
 
 def _stage1_review():

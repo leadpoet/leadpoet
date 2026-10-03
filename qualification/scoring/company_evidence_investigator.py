@@ -29,6 +29,7 @@ from lab_arena.operations import OPENROUTER_MAX_CONTENT_CHARS
 from leadpoet_verifier.identity.normalization import NormalizationError, normalize_host
 from qualification.competition_models import public_http_url
 from qualification.scoring.company_fit_decision import _company_name
+from qualification.scoring.country_data import US_STATES
 from qualification.scoring.company_verification import (
     MAX_HOMEPAGE_NAVIGATION_LABEL_LENGTH,
     MAX_HOMEPAGE_NAVIGATION_LOCATORS,
@@ -44,6 +45,7 @@ from qualification.scoring.linkedin_company_size import (
     VERIFIER_FAILURE_REASON_KEY,
     linkedin_company_page_slug,
 )
+from qualification.scoring.pre_checks import _resolve_country
 from qualification.scoring.verification_helpers import (
     visible_html_links,
     visible_html_text,
@@ -323,6 +325,15 @@ company's headquarters, use that location and its exact continuous source quote
 over a different undated third-party profile HQ. That profile discrepancy alone
 does not require a dated move announcement and does not make the current
 first-party headquarters fact UNPROVEN.
+If the headquarters heading omits the company name, first use one continuous
+adjacent span that includes both the investigated company's name and the
+heading with its address when that span exists on the fetched page.
+On a fully verified first-party contact or about page, a country-qualified
+heading such as "United States Headquarters 123..." may identify that
+company's HQ without repeating its name in the exact quote. Quote the whole
+heading and address continuously, and report that same country and location.
+Do not use a state, region, customer, parent, or regional-office heading as
+the investigated company's headquarters.
 Do not transfer a customer's, parent company's, or regional office location
 to the investigated company.
 Incorporation, an office, factory, job, customer, event, service area, or parent
@@ -444,7 +455,8 @@ exists. For industry, a shorter exact capability quote may omit the company
 name when the supplied complete verified homepage identity and the fetched
 first-party page body independently establish that the investigated company is
 the supplier_operator. For geography, an exact continuous quote beginning with
-a Headquarters heading and its numeric street address may omit the company name
+a bare, corporate, global, or matching country-qualified Headquarters heading
+and its numeric street address may omit the company name
 only on the server-prioritized current company contact or about page, when the
 complete verified first-party identity independently binds both the requested
 URL and fetched final URL to the investigated company. This does not apply to a
@@ -1591,6 +1603,40 @@ def _quote_identifies_headquarters(quote: str) -> bool:
     ))
 
 
+def _priority_first_party_hq_heading(quote: str, observed_country: str) -> bool:
+    """Recognize only a leading HQ/address heading for the claimed country."""
+
+    heading = re.match(
+        r"^\s*(?:#{1,6}\s*)?(?:(?:corporate\s+|global\s+)?"
+        r"headquarters|(?P<country>[A-Za-z][A-Za-z .'-]{0,60}?)\s+"
+        r"headquarters)\s*(?:[:\n]\s*)?\d{1,6}\b",
+        quote, flags=re.I,
+    )
+    if not heading:
+        return False
+    prefix = heading.group("country")
+    if prefix is None:
+        return True
+    resolved = _resolve_country(prefix)
+    claimed = _resolve_country(observed_country)
+    if not resolved or not claimed or resolved != claimed:
+        return False
+    # _resolve_country also accepts constituent regions and colloquial names.
+    # Only the canonical country or these unambiguous country spellings may
+    # qualify an unnamed headquarters heading. Ambiguous state names/codes
+    # stay outside this exception even when also valid country names/codes.
+    normalized = _normalized_span(prefix)
+    if normalized in US_STATES or prefix.upper() in US_STATES:
+        return False
+    return bool(
+        normalized == resolved
+        or normalized in {
+            "us", "usa", "u.s.", "u.s.a.", "united states of america",
+            "uk", "u.k.",
+        }
+    )
+
+
 def _quote_supports_headquarters(
     quote: str,
     *,
@@ -1979,10 +2025,9 @@ def _validated_findings(
                 and not (
                     target == "geography"
                     and evidence_url == priority_headquarters_url
-                    and re.match(
-                        r"^\s*(?:#{1,6}\s*)?(?:corporate\s+|global\s+)?"
-                        r"headquarters\s*(?:[:\n]\s*)?\d{1,6}\b",
-                        finding["evidence_quote"], flags=re.I,
+                    and _priority_first_party_hq_heading(
+                        finding["evidence_quote"],
+                        finding["observed_country"],
                     )
                     and _complete_verified_first_party_identity(
                         evidence_url, first_party_domains, identity_anchor or {},

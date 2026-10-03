@@ -315,6 +315,7 @@ def test_unibuddy_industry_only_quote_failure_uses_remaining_search(monkeypatch)
             observed_subindustry="Higher education services",
             evidence_url=homepage_url,
             evidence_quote=exact_industry_quote,
+            supporting_evidence=[],
         )
     }
     assert _core_usage(result["usage"]) == {

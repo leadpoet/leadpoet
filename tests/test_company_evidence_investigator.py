@@ -4198,6 +4198,114 @@ def test_complete_identity_keeps_nonindustry_literal_company_binding(
     )
 
 
+def _country_heading_hq_finding(
+    quote: str,
+    *,
+    url: str = "https://sysdig.com/contact-us",
+    final_url: str = "https://www.sysdig.com/contact-us",
+    priority_url: str = "https://sysdig.com/contact-us",
+    country: str = "United States",
+    state: str = "North Carolina",
+    verified_name: str = "Sysdig",
+):
+    anchor = {
+        "submitted_name": "Sysdig",
+        "observed_name": "Sysdig",
+        "verified_name": verified_name,
+        "submitted_domain": "sysdig.com",
+        "observed_domain": "sysdig.com",
+        "verified_domain": "sysdig.com",
+        "submitted_linkedin_slug": "sysdig",
+        "observed_linkedin_slug": "sysdig",
+        "verified_linkedin_slug": "sysdig",
+    }
+    finding = _finding(
+        "geography", status="CONTRADICTED", observed_value=country,
+        observed_country=country, observed_state=state,
+        evidence_url=url, evidence_quote=quote,
+    )
+    return _validated_findings(
+        {"findings": [finding]}, targets=("geography",),
+        fetched_pages={url: quote}, fetched_final_urls={url: final_url},
+        first_party_domains={"sysdig.com"}, identity_names={"sysdig"},
+        identity_anchor=anchor, priority_headquarters_url=priority_url,
+    )["geography"]
+
+
+@pytest.mark.parametrize("heading", (
+    "United States Headquarters 4000 Center at North Hills St Ste. 420 Raleigh, NC 27609",
+    "US Headquarters 4000 Center at North Hills St Ste. 420 Raleigh, NC 27609",
+    "Headquarters 4000 Center at North Hills St Ste. 420 Raleigh, NC 27609",
+    "Corporate Headquarters: 4000 Center at North Hills St Ste. 420 Raleigh, NC 27609",
+    "Global Headquarters\n4000 Center at North Hills St Ste. 420 Raleigh, NC 27609",
+))
+def test_priority_company_contact_country_hq_heading_keeps_exact_binding(heading):
+    assert _country_heading_hq_finding(heading)["status"] == "CONTRADICTED"
+
+
+def test_priority_company_contact_second_country_hq_heading():
+    assert _country_heading_hq_finding(
+        "Canada Headquarters 100 King Street Toronto, Ontario, Canada",
+        country="Canada", state="",
+    )["status"] == "CONTRADICTED"
+
+
+def test_country_hq_heading_reaches_existing_region_gate_without_changing_it():
+    quote = "United States Headquarters 4000 Center at North Hills St Ste. 420 Raleigh, NC 27609"
+    finding = _country_heading_hq_finding(quote)
+    company = _company(
+        name="Sysdig", website="https://sysdig.com",
+        linkedin="https://www.linkedin.com/company/sysdig",
+    ).model_copy(update={"state": "North Carolina"})
+    prior = _complete_verdict(
+        observed_hq_country="United States", observed_hq_state="California",
+        geography_matches=True,
+    )
+    southern = _project_investigator_geography(
+        prior, finding, icp=_icp(geography="United States, South"),
+        company=company, company_quality=True,
+    )
+    western = _project_investigator_geography(
+        prior, finding, icp=_icp(geography="United States, West Coast"),
+        company=company, company_quality=True,
+    )
+    assert southern["geography_matches"] is True
+    assert western["geography_matches"] is False
+    assert southern["observed_hq_state"] == western["observed_hq_state"] == "North Carolina"
+
+
+@pytest.mark.parametrize("heading", (
+    "Canada Headquarters 4000 Center at North Hills St Ste. 420 Raleigh, NC 27609",
+    "West Coast Headquarters 4000 Center at North Hills St Ste. 420 Raleigh, NC 27609",
+    "North Carolina Headquarters 4000 Center at North Hills St Ste. 420 Raleigh, NC 27609",
+    "Customer United States Headquarters 4000 Center at North Hills St Ste. 420 Raleigh, NC 27609",
+    "Parent United States Headquarters 4000 Center at North Hills St Ste. 420 Raleigh, NC 27609",
+    "United States Regional Headquarters 4000 Center at North Hills St Ste. 420 Raleigh, NC 27609",
+))
+def test_priority_country_hq_heading_rejects_other_entities_and_regions(heading):
+    assert _country_heading_hq_finding(heading)["status"] == "UNPROVEN"
+
+
+def test_priority_country_hq_heading_rejects_country_state_homonym():
+    assert _country_heading_hq_finding(
+        "Georgia Headquarters 100 Peachtree Street Atlanta, Georgia",
+        country="Georgia", state="",
+    )["status"] == "UNPROVEN"
+
+
+@pytest.mark.parametrize("change", (
+    {"priority_url": "https://sysdig.com/about"},
+    {"final_url": "https://unrelated.example/contact-us"},
+    {"verified_name": "Other Company"},
+    {"url": "https://unrelated.example/contact-us",
+     "priority_url": "https://unrelated.example/contact-us"},
+    {"state": "California"},
+))
+def test_priority_country_hq_heading_rejects_unbound_source_or_location(change):
+    quote = "United States Headquarters 4000 Center at North Hills St Ste. 420 Raleigh, NC 27609"
+    assert _country_heading_hq_finding(quote, **change)["status"] == "UNPROVEN"
+
+
 def test_activity_and_hq_reject_same_name_wrong_domain_and_accept_bound_company():
     wrong_domain = "https://abec.co.uk/about"
     wrong_industry = _finding(
@@ -5700,6 +5808,8 @@ def test_headquarters_source_priority_preserves_current_first_party_conflicts():
     prompt = " ".join(investigator._SYSTEM_PROMPT.split())
 
     assert "use that location and its exact continuous source quote" in prompt
+    assert "one continuous adjacent span that includes both the investigated company's name" in prompt
+    assert "matching country-qualified Headquarters heading" in prompt
     assert "over a different undated third-party profile HQ" in prompt
     assert "If current first-party sources disagree" in prompt
     assert "source dates or an explicit move statement" in prompt

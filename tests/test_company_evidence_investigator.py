@@ -10561,6 +10561,275 @@ def test_positive_semantic_review_model_is_already_in_judge_allowlist():
     )
 
 
+@pytest.mark.parametrize("identity_case", [
+    "bound", "wrong_name", "wrong_domain", "wrong_transport", "missing_slug",
+])
+@pytest.mark.parametrize("positive_review", [True, False])
+def test_tagline_homepage_requires_independent_identity_before_prefetch(
+    monkeypatch, identity_case, positive_review,
+):
+    homepage_url = "https://sokin.com/"
+    news_url = "https://sokin.com/news"
+    page = (
+        "<html><title>Unified global business banking | Payments for the "
+        "global stage</title><body><main>Sokin's platform supports business "
+        "payments through banking partners and regional licenses.</main>"
+        f'<a href="{news_url}">Company news</a></body></html>'
+    )
+
+    async def homepage_fetch(_session, _url):
+        return 200, homepage_url, page
+
+    monkeypatch.setattr(company_verification, "_fetch_bounded_html", homepage_fetch)
+    pages: dict = {}
+    locators: list = []
+    homepage = asyncio.run(company_verification.verify_company_exists(
+        "Sokin", homepage_url, require_https_transport=True,
+        homepage_evidence_sink=pages,
+        homepage_navigation_locator_sink=locators,
+    ))
+    assert homepage.decision == COMPANY_FIT_UNAVAILABLE
+    assert news_url in {row["url"] for row in locators}
+    assert "regional licenses" in pages[homepage_url]["text"]
+
+    company = _company(name="Sokin", website=homepage_url, linkedin="")
+    captured: dict = {}
+
+    async def capture(**kwargs):
+        captured.update(kwargs)
+        return {"claims": {}, "failure_reason": ""}
+
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", capture)
+    bound_identity = identity_case == "bound"
+    prior = company_fit_match("independent company web identity", details={
+        "identity_decision": COMPANY_FIT_MATCH,
+        "identity_receipt": {
+            "decision": COMPANY_FIT_MATCH,
+            "evidence_source": "company_web_reverification",
+            "submitted_domain": "sokin.com",
+            "observed_domain": (
+                "other.example" if identity_case == "wrong_domain" else "sokin.com"
+            ),
+            "observed_name": (
+                "anothercompany" if identity_case == "wrong_name" else "sokin"
+            ),
+            "observed_linkedin_slug": (
+                "" if identity_case == "missing_slug" else "sokin"
+            ),
+        },
+    })
+    asyncio.run(lead_scorer._run_targeted_company_evidence_investigation(
+        company=company,
+        icp=_icp(company_stage="Series B"),
+        verdict=_complete_verdict(
+            observed_company_name="Sokin",
+            observed_company_website=homepage_url,
+            observed_company_linkedin="https://www.linkedin.com/company/sokin",
+        ),
+        investigation_targets=("stage",),
+        icp_attribute="",
+        icp_stage="Series B",
+        verified_identity={},
+        verified_transport_domain=(
+            "other.example" if identity_case == "wrong_transport" else "sokin.com"
+        ),
+        structured_employee_size_evidence=None,
+        structured_public_company_evidence=None,
+        employee_size_conflict=False,
+        company_quality=True,
+        prior_result=prior,
+        review_positive_semantics=positive_review,
+        verified_homepage_pages=pages,
+        homepage_navigation_locators=locators,
+    ))
+    assert (homepage_url in captured["prefetched_pages"]) is bound_identity
+    assert news_url in {row["url"] for row in captured["homepage_navigation_locators"]}
+    assert captured["verified_homepage_identity"] == {}
+    assert bool(captured["verified_navigation_identity"]) is bound_identity
+    admitted = investigator._validated_homepage_navigation_locators(
+        captured["homepage_navigation_locators"],
+        positive_semantic_review=positive_review,
+        stage_review=True,
+        verified_homepage_identity=(
+            captured["verified_homepage_identity"]
+            or captured["verified_navigation_identity"]
+        ),
+    )
+    assert (news_url in {row["url"] for row in admitted}) is bound_identity
+
+
+def test_stage_archive_card_is_exact_visible_link_not_neighbor_or_hidden():
+    article = "https://example.com/news/meridian-capital-acquires-stake-in-acme"
+    archive = "https://example.com/news"
+    page = f"""
+      <a href="{article}">Meridian Capital acquires stake in Acme
+        Company news Jul 3, 2024</a>
+      <a href="/news/other-funding">Other company funding Aug 1, 2026</a>
+      <div hidden><a href="{article}">Meridian Capital acquires stake in Acme
+        Sep 2, 2026</a></div>
+      <div aria-hidden="true"><a href="{article}">Meridian Capital acquires
+        stake in Acme Oct 3, 2026</a></div>
+      <a href="https://foreign.example/news/meridian-capital-acquires-stake-in-acme">
+        Meridian Capital acquires stake in Acme Nov 4, 2026</a>
+    """
+    cards = investigator._visible_stage_archive_cards(page, archive, [article])
+    assert len(cards) == 1
+    assert cards[0]["article_url"] == article
+    assert cards[0]["publication_date"] == "2024-07-03"
+    assert "Other company" not in cards[0]["label"]
+    conflicting = page + f'<a href="{article}">Meridian Capital acquires stake in Acme Dec 1, 2026</a>'
+    assert investigator._visible_stage_archive_cards(
+        conflicting, archive, [article],
+    ) == []
+    assert investigator._visible_stage_archive_cards(
+        '<a href="/news/other-funding">Meridian Capital acquires stake in Acme Jul 3, 2024</a>',
+        archive, [article],
+    ) == []
+
+
+def test_stage_archive_card_requires_full_short_label_without_hidden_date():
+    article = "https://example.com/news/meridian-capital-acquires-stake-in-acme"
+    archive = "https://example.com/news"
+    valid = f'<a href="{article}">Meridian Capital acquires stake in Acme Jul 3, 2024</a>'
+    assert investigator._visible_stage_archive_cards(
+        f'<a href="{article}">Meridian Capital acquires stake in Acme '
+        + "x" * 300 + " Jul 3, 2024</a>",
+        archive, [article],
+    ) == []
+    assert investigator._visible_stage_archive_cards(
+        valid + f'<a href="{article}">Meridian Capital acquires stake in Acme '
+        + "x" * 300 + " Sep 2, 2026</a>",
+        archive, [article],
+    ) == []
+    assert investigator._visible_stage_archive_cards(
+        valid + f'<a href="{article}">Meridian Capital acquires stake in Acme '
+        "Jul 3, 2024 and Sep 2, 2026</a>",
+        archive, [article],
+    ) == []
+    assert investigator._visible_stage_archive_cards(
+        f'<a href="{article}">Acme Jul 3, 2024</a>',
+        archive, [article],
+    ) == []
+
+
+def test_fetch_page_transports_only_exact_visible_stage_archive_card(monkeypatch):
+    archive = "https://example.com/news"
+    article = "https://example.com/news/meridian-capital-acquires-stake-in-acme"
+    body = (
+        f'<a href="{article}">Meridian Capital acquires stake in Acme '
+        "Company news Jul 3, 2024</a>"
+        '<a href="/news/other-round">Other round Sep 4, 2026</a>'
+    )
+
+    async def fetch(_session, _url):
+        return 200, archive, body
+
+    monkeypatch.delenv("SCRAPINGDOG_API_KEY", raising=False)
+    monkeypatch.delenv("QUALIFICATION_SCRAPINGDOG_API_KEY", raising=False)
+    monkeypatch.setattr(investigator, "_fetch_bounded_html", fetch)
+    result = asyncio.run(investigator._fetch_page(
+        object(), archive, archive_targets=(article,),
+    ))
+    assert result["server_visible_archive_cards"] == [{
+        "article_url": article,
+        "label": "Meridian Capital acquires stake in Acme Company news Jul 3, 2024",
+        "publication_date": "2024-07-03",
+    }]
+    assert len(result["text"]) <= investigator.MAX_PAGE_CHARACTERS
+    assert "server_visible_archive_cards" not in asyncio.run(
+        investigator._fetch_page(object(), archive)
+    )
+
+
+def test_stage_archive_handoff_stays_within_existing_three_fetches(monkeypatch):
+    homepage = "https://example.com/"
+    archive = "https://example.com/news"
+    stake = "https://example.com/news/meridian-capital-acquires-stake-in-acme"
+    debt = "https://example.com/news/acme-secures-debt-facility"
+    investor = "https://investor.example/acme-series-b"
+    calls: list[tuple[str, tuple[str, ...]]] = []
+    requests: list[dict] = []
+
+    async def fetch(_session, url, *, archive_targets=()):
+        calls.append((url, tuple(archive_targets)))
+        card = ([{
+            "article_url": stake,
+            "label": "Meridian Capital acquires stake in Acme Jul 3, 2024",
+            "publication_date": "2024-07-03",
+        }] if url == archive else [])
+        return {
+            "ok": True, "url": url, "final_url": url,
+            "text": {
+                stake: "Meridian Capital acquired a minority stake in Acme.",
+                debt: "Acme secured a debt facility after its Series B.",
+                archive: "Acme company news archive.",
+            }[url],
+            **({"server_visible_archive_cards": card} if card else {}),
+        }
+
+    async def post(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        turn = len(requests)
+        if turn < 4:
+            name, arguments = "fetch_page", {"url": (stake, debt, archive)[turn-1]}
+        else:
+            name, arguments = "submit_findings", {"findings": [{
+                "target": "stage", "status": "UNPROVEN",
+                "evidence_url": "", "evidence_quote": "",
+            }]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"stage-{turn}", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def search(_session, _query, *, key):
+        del key
+        return {"results": [{"url": stake}, {"url": debt}]}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_fetch_page", fetch)
+    monkeypatch.setattr(investigator, "_post_json", post)
+    monkeypatch.setattr(investigator, "_search_web", search)
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": homepage},
+        targets=("stage",), requested_stage="Series B",
+        prior_observations={"submitted_source_urls": [homepage, investor]},
+        verified_homepage_identity={},
+        verified_navigation_identity={
+            "normalized_name": "Acme", "registrable_dns_domain": "example.com",
+            "linkedin_company_slug": "acme",
+        },
+        homepage_navigation_locators=[{"url": archive, "label": "News"}],
+        prefetched_pages={
+            homepage: {"final_url": homepage, "text": "Acme platform."},
+            investor: {
+                "final_url": investor,
+                "text": "Acme completed its Series B in December 2025.",
+            },
+        },
+    ))
+    assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["usage"]["fetch_calls"] == 3
+    first_input = json.loads(
+        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+    )
+    assert first_input["verified_homepage_identity"] == {}
+    assert first_input["untrusted_homepage_navigation_locators"] == [{
+        "url": archive, "label": "News",
+    }]
+    assert calls == [
+        (stake, ()), (debt, ()), (archive, (stake, debt)),
+    ]
+    last_messages = requests[-1]["messages"]
+    assert any(
+        "server_visible_archive_cards" in str(message.get("content"))
+        and "2024-07-03" in str(message.get("content"))
+        for message in last_messages
+    )
+
+
 def test_homepage_navigation_label_cannot_confer_industry_qualification():
     url = "https://flamapp.ai/careers"
     submitted = _finding(

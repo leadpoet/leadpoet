@@ -21,7 +21,7 @@ import re
 import time
 import unicodedata
 from typing import Any, Mapping, Optional, Sequence
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 
@@ -47,6 +47,7 @@ from qualification.scoring.linkedin_company_size import (
 )
 from qualification.scoring.pre_checks import _resolve_country
 from qualification.scoring.verification_helpers import (
+    visible_html_link_labels,
     visible_html_links,
     visible_html_text,
 )
@@ -125,6 +126,14 @@ When retaining that older matching stage, if any disputed source remains
 unavailable, return stage UNPROVEN instead of citing only an older round from
 another source. A validated different completed stage may still be
 CONTRADICTED through the normal stage finding contract.
+Order stage events only from dated fetched body text or a server-visible
+archive card whose exact link targets that already fetched article. Search
+publication dates and fetch order are discovery, never event chronology. If a
+material stage article has no grounded date and an observed first-party news
+index is available, fetch that index within the remaining three-call budget
+before calling the article later. A linked archive card dates the article; it
+does not prove that its transaction completed or changed the company's stage.
+If chronology or transaction type remains unresolved, return stage UNPROVEN.
 Some requests include server-prefetched sources that were already fetched by
 the scorer through the same bounded transport. Their text is still untrusted
 page content and proves nothing by itself, but you may independently submit an
@@ -675,11 +684,12 @@ def _validated_homepage_navigation_locators(
     positive_semantic_review: bool,
     verified_homepage_identity: Optional[Mapping[str, Any]],
     headquarters_review: bool = False,
+    stage_review: bool = False,
 ) -> list[dict[str, str]]:
     """Admit only bounded same-verified-domain untrusted navigation locators."""
 
     if (
-        not (positive_semantic_review or headquarters_review)
+        not (positive_semantic_review or headquarters_review or stage_review)
         or not isinstance(value, Sequence)
         or isinstance(value, (str, bytes))
         or not isinstance(verified_homepage_identity, Mapping)
@@ -798,6 +808,56 @@ def _plain_text(value: str) -> str:
     if linked_urls:
         combined += f" {_IDENTITY_LINK_CONTEXT_MARKER} {linked_urls}"
     return " ".join(combined.split())[:MAX_PAGE_CHARACTERS]
+
+
+def _visible_stage_archive_cards(
+    raw_html: str,
+    archive_url: str,
+    article_urls: Sequence[str],
+) -> list[dict[str, str]]:
+    """Date only exact, visible links to already fetched same-host articles."""
+
+    from qualification.scoring.intent_verification_three_stage import (
+        _ARCHIVE_CALENDAR_DATE_RE,
+        _archive_card_date,
+    )
+
+    archive_host = (urlsplit(archive_url).hostname or "").casefold()
+    targets = {
+        url for url in article_urls
+        if (urlsplit(url).hostname or "").casefold() == archive_host
+    }
+    found: dict[str, set[tuple[str, str]]] = {url: set() for url in targets}
+    ambiguous: set[str] = set()
+    for href, raw_label in visible_html_link_labels(raw_html):
+        try:
+            linked_url = public_http_url(urljoin(archive_url, href.strip()))
+        except (TypeError, ValueError):
+            continue
+        if linked_url not in found:
+            continue
+        label = " ".join(raw_label.split())
+        linked_title = set(re.findall(
+            r"[a-z0-9]{3,}", urlsplit(linked_url).path.rsplit("/", 1)[-1].lower(),
+        ))
+        label_words = set(re.findall(r"[a-z0-9]{3,}", label.lower()))
+        if len(linked_title) < 2 or len(linked_title & label_words) < 2:
+            continue
+        if len(label) > 300:
+            ambiguous.add(linked_url)
+            continue
+        date_value = _archive_card_date(label)
+        if date_value:
+            found[linked_url].add((label, date_value))
+        elif _ARCHIVE_CALENDAR_DATE_RE.search(label):
+            ambiguous.add(linked_url)
+    return [
+        {"article_url": url, "label": label, "publication_date": date_value}
+        for url, cards in found.items()
+        if url not in ambiguous
+        and len({date_value for _label, date_value in cards}) == 1
+        for label, date_value in sorted(cards)[:1]
+    ][:MAX_FETCH_CALLS]
 
 
 def _bounded_message_json(value: Any, *, prefix: str = "") -> str:
@@ -1789,6 +1849,7 @@ async def _fetch_page(
     url: str,
     *,
     stealth_mode: bool = False,
+    archive_targets: Sequence[str] = (),
 ) -> dict[str, Any]:
     safe_url = _safe_https_url(url)
     if not safe_url:
@@ -1860,6 +1921,14 @@ async def _fetch_page(
         "url": canonical_url,
         "final_url": safe_final_url,
         "text": text,
+        **(
+            {"server_visible_archive_cards": cards}
+            if archive_targets and (
+                cards := _visible_stage_archive_cards(
+                    raw, safe_final_url, archive_targets,
+                )
+            ) else {}
+        ),
     }
 
 
@@ -2500,6 +2569,7 @@ async def investigate_company_evidence(
     verified_homepage_rebrand_redirect: Optional[Mapping[str, Any]] = None,
     homepage_navigation_locators: Optional[Sequence[Mapping[str, Any]]] = None,
     prefetched_pages: Optional[Mapping[str, Any]] = None,
+    verified_navigation_identity: Optional[Mapping[str, Any]] = None,
     diagnostic: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     """Run one bounded tool loop and return validated tri-state findings."""
@@ -2621,10 +2691,23 @@ async def investigate_company_evidence(
         _validated_homepage_navigation_locators(
             homepage_navigation_locators,
             positive_semantic_review=positive_semantic_review,
-            verified_homepage_identity=verified_homepage_identity,
+            verified_homepage_identity=(
+                verified_homepage_identity or verified_navigation_identity
+            ),
             headquarters_review="geography" in requested_targets,
+            stage_review="stage" in requested_targets,
         )
     )
+    observed_stage_archive_urls = {
+        locator["url"]
+        for locator in bounded_homepage_navigation_locators
+        if "stage" in requested_targets
+        and re.search(
+            r"/(?:news|blog|press|media|updates|stories)/?$",
+            urlsplit(locator["url"]).path,
+            re.I,
+        )
+    }
 
     fetched_pages, fetched_final_urls = _validated_prefetched_pages(
         prefetched_pages,
@@ -2795,7 +2878,18 @@ async def investigate_company_evidence(
             async def fetch_fresh_page(url: str) -> dict[str, Any]:
                 nonlocal fetch_calls
                 fetch_calls += 1
-                result = await _fetch_page(session, url)
+                archive_targets = (
+                    tuple(
+                        article_url for article_url in fetched_pages
+                        if article_url.startswith(url.rstrip("/") + "/")
+                    )[:MAX_FETCH_CALLS]
+                    if url in observed_stage_archive_urls else ()
+                )
+                fetch_options = (
+                    {"archive_targets": archive_targets}
+                    if archive_targets else {}
+                )
+                result = await _fetch_page(session, url, **fetch_options)
                 fetch_outcomes.append(_fetch_outcome(url, result))
                 retry_with_stealth = bool(result.pop("_retry_with_stealth", False))
                 if (
@@ -2808,7 +2902,9 @@ async def investigate_company_evidence(
                     and time.monotonic() - started < ADMISSION_DEADLINE_SECONDS
                 ):
                     fetch_calls += 1
-                    result = await _fetch_page(session, url, stealth_mode=True)
+                    result = await _fetch_page(
+                        session, url, stealth_mode=True, **fetch_options,
+                    )
                     fetch_outcomes.append(_fetch_outcome(url, result))
                 return result
 

@@ -6730,6 +6730,8 @@ async def _run_targeted_company_evidence_investigation(
     )
     submitted_source_urls: list[str] = []
     homepage_pages = verified_homepage_pages or {}
+    independently_bound_homepage = False
+    identity_receipt: Mapping[str, Any] | None = None
     if homepage_pages and not verified_identity and not verified_rebrand_redirect:
         # An unavailable homepage identity may retain its fetched body as
         # untrusted evidence. Admit it only after the separate web verifier
@@ -6741,7 +6743,7 @@ async def _run_targeted_company_evidence_investigation(
             else None
         )
         submitted_domain = _registrable_domain(company.company_website)
-        if not (
+        independently_bound_homepage = bool(
             prior_result is not None
             and prior_result.details.get("identity_decision") == COMPANY_FIT_MATCH
             and isinstance(identity_receipt, Mapping)
@@ -6754,7 +6756,8 @@ async def _run_targeted_company_evidence_investigation(
             and identity_receipt.get("submitted_domain") == submitted_domain
             and identity_receipt.get("observed_domain") == submitted_domain
             and verified_transport_domain == submitted_domain
-        ):
+        )
+        if not independently_bound_homepage:
             homepage_pages = {}
     matched_company_retry_pages = _matched_company_retry_prefetched_pages(
         matched_company_retry_source_cache,
@@ -6769,7 +6772,7 @@ async def _run_targeted_company_evidence_investigation(
         *matched_company_retry_pages.keys(),
         *(
             homepage_pages.keys()
-            if review_positive_semantics
+            if review_positive_semantics or "stage" in investigation_targets
             else []
         ),
         *(
@@ -6908,10 +6911,23 @@ async def _run_targeted_company_evidence_investigation(
             ),
         },
         verified_homepage_identity=investigation_verified_identity,
+        verified_navigation_identity=(
+            {
+                "normalized_name": company.company_name,
+                "registrable_dns_domain": verified_transport_domain,
+                "linkedin_company_slug": str(
+                    identity_receipt["observed_linkedin_slug"]
+                ),
+            }
+            if independently_bound_homepage and identity_receipt is not None
+            else None
+        ),
         verified_homepage_rebrand_redirect=verified_rebrand_redirect,
         homepage_navigation_locators=(
             homepage_navigation_locators
-            if review_positive_semantics or "geography" in investigation_targets
+            if review_positive_semantics
+            or "geography" in investigation_targets
+            or "stage" in investigation_targets
             else ()
         ),
         prefetched_pages=_investigator_prefetched_pages(
@@ -6919,7 +6935,9 @@ async def _run_targeted_company_evidence_investigation(
             submitted_source_urls,
             verified_homepage_pages=(
                 homepage_pages
-                if review_positive_semantics or verified_rebrand_redirect
+                if review_positive_semantics
+                or verified_rebrand_redirect
+                or "stage" in investigation_targets
                 else None
             ),
             matched_company_retry_pages=matched_company_retry_pages,

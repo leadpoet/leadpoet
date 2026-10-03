@@ -218,8 +218,9 @@ def test_investor_overview_reaches_judge_with_existing_fetch_budget(
 @pytest.mark.parametrize("change", [
     "valid", "missing_identity", "wrong_domain", "dispute", "wrong_path",
 ])
+@pytest.mark.parametrize("stage_article_prefetched", [True, False])
 def test_observed_homepage_overview_after_hq_priority_uses_two_of_three_calls(
-    monkeypatch, change,
+    monkeypatch, change, stage_article_prefetched,
 ):
     contact_url = f"https://{DOMAIN}/contact-us"
     observed_overview = (
@@ -278,6 +279,10 @@ def test_observed_homepage_overview_after_hq_priority_uses_two_of_three_calls(
         },
         prefetched_pages={
             ROUND_URL: {"final_url": ROUND_URL, "text": ROUND_QUOTE},
+        } if stage_article_prefetched else {
+            f"https://{DOMAIN}/": {
+                "final_url": f"https://{DOMAIN}/", "text": "Acme homepage.",
+            },
         },
         homepage_navigation_locators=locators,
         verified_homepage_identity=identity,

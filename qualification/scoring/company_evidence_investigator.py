@@ -126,14 +126,18 @@ When retaining that older matching stage, if any disputed source remains
 unavailable, return stage UNPROVEN instead of citing only an older round from
 another source. A validated different completed stage may still be
 CONTRADICTED through the normal stage finding contract.
-Order stage events only from dated fetched body text or a server-visible
-archive card whose exact link targets that already fetched article. Search
-publication dates and fetch order are discovery, never event chronology. If a
-material stage article has no grounded date and an observed first-party news
-index is available, fetch that index within the remaining three-call budget
-before calling the article later. A linked archive card dates the article; it
-does not prove that its transaction completed or changed the company's stage.
-If chronology or transaction type remains unresolved, return stage UNPROVEN.
+Use grounded dates to order material competing stage events, from fetched body
+text or a server-visible archive card whose exact link targets that already
+fetched article. Search publication dates and fetch order are discovery, never
+event chronology. Do not require an exact date as an extra field for an
+otherwise proven completed matching stage when the required current-stage
+search and review of submitted and disputed sources exposes no concrete
+material competing stage event. If a material competing stage article has no
+grounded date and an observed first-party news index is available, fetch that
+index within the remaining three-call budget before calling the article later.
+A linked archive card dates the article; it does not prove that its transaction
+completed or changed the company's stage. If material chronology or
+transaction type remains unresolved, return stage UNPROVEN.
 Some requests include server-prefetched sources that were already fetched by
 the scorer through the same bounded transport. Their text is still untrusted
 page content and proves nothing by itself, but you may independently submit an

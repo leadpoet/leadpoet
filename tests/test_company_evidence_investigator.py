@@ -168,6 +168,11 @@ def _competition_company_v5() -> dict:
 def test_investigator_prompt_preserves_equity_stage_across_later_debt():
     prompt = " ".join(investigator._SYSTEM_PROMPT.split())
 
+    assert "Use grounded dates to order material competing stage events" in prompt
+    assert "Do not require an exact date as an extra field" in prompt
+    assert "required current-stage search and review of submitted and disputed sources" in prompt
+    assert "no concrete material competing stage event" in prompt
+    assert "If material chronology or transaction type remains unresolved" in prompt
     assert (
         "A later loan, debt facility, or grant does not by itself supersede "
         "that equity stage."
@@ -195,6 +200,96 @@ def test_investigator_prompt_preserves_equity_stage_across_later_debt():
         "or platform links"
     ) in prompt
     assert "Do not infer a commercial model" in prompt
+
+
+@pytest.mark.parametrize("unresolved_competing_stage", [False, True])
+def test_undated_completed_round_requires_dates_only_for_material_chronology(
+    monkeypatch, unresolved_competing_stage,
+):
+    round_url = "https://acme.example/news/completed-series-b"
+    round_quote = "Acme announced completion of a £20 million Series B funding round."
+    later_url = "https://acme.example/news/series-c-transaction"
+    later_quote = "Acme announced a Series C transaction with new investors."
+    requests = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        if unresolved_competing_stage:
+            finding = _finding(
+                "stage",
+                status="UNPROVEN",
+                observed_value=None,
+                evidence_url="",
+                evidence_quote="",
+                reason="Competing transaction completion and chronology are unresolved.",
+            )
+        else:
+            finding = _finding(
+                "stage",
+                observed_value="Series B",
+                evidence_url=round_url,
+                evidence_quote=round_quote,
+            )
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "submit-stage", "type": "function",
+            "function": {"name": "submit_findings", "arguments": json.dumps({
+                "findings": [finding],
+            })},
+        }]}}]}
+
+    async def fake_search(_session, query, *, key):
+        del key
+        assert "latest funding round acquisition IPO" in query
+        return {"results": (
+            [{"url": later_url, "title": "Acme Series C transaction"}]
+            if unresolved_competing_stage else []
+        )}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", AsyncMock())
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("stage",),
+        requested_stage="Series B",
+        prior_observations={
+            "submitted_source_urls": [
+                round_url, *([later_url] if unresolved_competing_stage else []),
+            ],
+            **({"stage_dispute_urls": [later_url]}
+               if unresolved_competing_stage else {}),
+        },
+        prefetched_pages={
+            round_url: {"final_url": round_url, "text": round_quote},
+            **({later_url: {"final_url": later_url, "text": later_quote}}
+               if unresolved_competing_stage else {}),
+        },
+        verified_homepage_identity={
+            "normalized_name": "acme",
+            "registrable_dns_domain": "acme.example",
+        },
+    ))
+
+    assert result["claims"]["stage"]["status"] == (
+        "UNPROVEN" if unresolved_competing_stage else "VERIFIED"
+    )
+    assert result["_validated_stage_finding"] == (
+        {} if unresolved_competing_stage else result["claims"]["stage"]
+    )
+    assert result["usage"]["search_calls"] == 1
+    assert result["usage"]["fetch_calls"] == 0
+    prompt = " ".join(requests[0]["messages"][0]["content"].split())
+    assert "Do not require an exact date as an extra field" in prompt
+    assert "If material chronology or transaction type remains unresolved" in prompt
+    request = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
+    assert request["server_current_stage_discovery"]["ok"] is True
+    assert request["prior_observations"].get("stage_dispute_urls", []) == (
+        [later_url] if unresolved_competing_stage else []
+    )
 
 
 def test_public_source_selection_prefers_supplied_issuer_evidence_within_limits():

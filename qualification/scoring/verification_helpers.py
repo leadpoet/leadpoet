@@ -36,6 +36,12 @@ class _VisibleHTMLTextParser(HTMLParser):
         "blog-index", "blog-posts-grid", "entry-related", "recommend-",
         "recommended", "related-", "related_",
     )
+    _RELATED_ARTICLE_COMPONENT = re.compile(
+        r"(?:^|[-_])(?:news(?:room)?|articles?|blogs?|posts?|stor(?:y|ies)|entr(?:y|ies))"
+        r"[-_]related(?:$|[-_](?:cms|cards?|grid|list|items?|widgets?|"
+        r"wrapper|section|content)(?:$|[-_]))"
+    )
+    _HIDE_RELATED_ARTICLE_COMPONENTS = True
 
     def __init__(
         self,
@@ -98,9 +104,10 @@ class _VisibleHTMLTextParser(HTMLParser):
             or element_id in self._hidden_ids
             or any(
                 value == "related"
-                or any(
-                    value.startswith(prefix)
-                    for prefix in self._NON_ARTICLE_PREFIXES
+                or any(value.startswith(prefix) for prefix in self._NON_ARTICLE_PREFIXES)
+                or (
+                    self._HIDE_RELATED_ARTICLE_COMPONENTS
+                    and self._RELATED_ARTICLE_COMPONENT.search(value)
                 )
                 for value in semantic_values
             )
@@ -175,6 +182,7 @@ class _VisibleHTMLLinkParser(_VisibleHTMLTextParser):
 
     _HIDDEN_ELEMENTS = frozenset({"noscript", "script", "style", "template"})
     _NON_ARTICLE_PREFIXES = ()
+    _HIDE_RELATED_ARTICLE_COMPONENTS = False
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)

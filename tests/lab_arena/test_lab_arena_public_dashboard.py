@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ import pytest
 
 from lab_arena import contracts, public_dashboard, source_disclosure
 from lab_arena.service import ArenaService, ServiceError
+from lab_arena.store import ArenaStore
 
 
 BASELINE_HOTKEY = "5" + "A" * 47
@@ -149,6 +151,117 @@ def test_round_summary_projects_only_the_crowned_miner_and_promotion_state():
     no_promotion = _published_round(outcome="crowned")
     no_promotion["promotion_required"] = False
     assert public_dashboard.round_summary(no_promotion)["promotion_status"] == "not_required"
+
+
+def _promotion_round(day, **overrides):
+    row = _published_round(outcome="crowned")
+    row.update(
+        round_id=f"arena-{day}", evaluation_date=day,
+        created_at=f"{day}T00:00:00Z", arena_network_name="finney", arena_netuid=71,
+    )
+    row.update(overrides)
+    return row
+
+
+def _promotion_service(rows, *, pinned_round_id=None, mode="live"):
+    class ReadOnlyTransport:
+        def __init__(self):
+            self.queries = []
+
+        def select(self, table, *, filters, order, descending, limit, offset=None, **_kwargs):
+            assert table == "lab_arena_rounds"
+            self.queries.append((order, filters))
+            selected = [row for row in rows if all(
+                (row["configuration_doc"]["mode"] if key == "configuration_doc->>mode"
+                 else row.get(key)) == value for key, value in filters.items()
+            )]
+            selected.sort(key=lambda row: row[order], reverse=descending)
+            start = offset or 0
+            return selected[start:start + limit]
+
+    transport = ReadOnlyTransport()
+    service = object.__new__(ArenaService)
+    service._config = SimpleNamespace(mode=mode, pinned_round_id=pinned_round_id)
+    service._store = ArenaStore(transport)
+    service._chain_scope = lambda: ("finney", 71)
+    service._round = lambda round_id: next(row for row in rows if row["round_id"] == round_id)
+    return service, transport
+
+
+def test_snapshot_supersedes_only_pending_promotions_without_changing_published_results():
+    rows = [
+        _promotion_round("2026-10-03"),
+        _promotion_round("2026-10-02"),
+        _promotion_round("2026-10-01", baseline_promoted_at="2026-10-01T15:00:00Z"),
+        _promotion_round("2026-09-30", promotion_required=False),
+        _promotion_round("2026-09-29"),
+    ]
+    original = deepcopy(rows)
+    service, transport = _promotion_service(rows)
+
+    result = public_dashboard.competition_snapshot(service)
+
+    assert [row["promotion_status"] for row in result["rounds"]] == [
+        "pending", "superseded", "promoted", "not_required", "superseded",
+    ]
+    assert result["latest_round"]["promotion_status"] == "pending"
+    assert result["latest_completed_round"]["promotion_status"] == "pending"
+    for row, summary in zip(rows, result["rounds"]):
+        unchanged = public_dashboard.round_summary(row)
+        unchanged["promotion_status"] = summary["promotion_status"]
+        assert summary == unchanged
+    assert rows == original
+    assert sum(order == "evaluation_date" for order, _ in transport.queries) == 1
+
+
+@pytest.mark.parametrize("newer_overrides", [
+    {"status": "open"}, {"status": "stage2"}, {"status": "scored"},
+    {"status": "cancelled"}, {"evaluation_date": "2026-10-01"},
+    {"arena_network_name": "testnet", "configuration_doc": _configuration(network="testnet")},
+    {"arena_netuid": 72, "configuration_doc": _configuration(netuid=72)},
+    {"configuration_doc": _configuration(mode="shadow")},
+])
+def test_snapshot_does_not_supersede_without_a_newer_published_live_day_in_scope(newer_overrides):
+    old = _promotion_round("2026-10-01")
+    newer = _promotion_round("2026-10-02", **newer_overrides)
+    service, _ = _promotion_service([old, newer], pinned_round_id=old["round_id"])
+
+    result = public_dashboard.competition_snapshot(service)
+
+    assert result["latest_completed_round"]["promotion_status"] == "pending"
+
+
+@pytest.mark.parametrize("view", ["pinned", "limited", "fallback"])
+def test_snapshot_supersedes_when_newer_published_day_is_outside_visible_rounds(view):
+    # Publication/creation order is deliberately different from evaluation order.
+    old = _promotion_round("2026-10-01", created_at="2026-10-04T00:00:00Z")
+    newer = _promotion_round("2026-10-02")
+    newer["publication_doc"]["king_decision"] = {"outcome": "no_king"}
+    rows = [old, newer]
+    if view == "fallback":
+        rows.append(_promotion_round("2026-10-05", status="open"))
+    service, transport = _promotion_service(
+        rows, pinned_round_id=old["round_id"] if view == "pinned" else None,
+    )
+
+    result = public_dashboard.competition_snapshot(service, limit=1)
+
+    assert result["latest_completed_round"]["round_id"] == old["round_id"]
+    assert result["latest_completed_round"]["promotion_status"] == "superseded"
+    if view != "fallback":
+        assert result["latest_round"]["promotion_status"] == "superseded"
+        assert result["rounds"][0]["promotion_status"] == "superseded"
+    assert sum(order == "evaluation_date" for order, _ in transport.queries) == 1
+
+
+def test_snapshot_does_not_apply_live_supersession_to_shadow_rounds():
+    shadow = _promotion_round("2026-10-01", configuration_doc=_configuration(mode="shadow"))
+    service, transport = _promotion_service([shadow, _promotion_round("2026-10-02")], mode="shadow")
+
+    result = public_dashboard.competition_snapshot(service)
+
+    assert result["latest_completed_round"]["promotion_status"] == "pending"
+    assert all(order != "evaluation_date" for order, _ in transport.queries)
 
 
 def test_competition_snapshot_is_scoped_and_separates_open_running_and_completed():

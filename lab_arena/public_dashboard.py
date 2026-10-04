@@ -519,6 +519,7 @@ def competition_snapshot(service: Any, *, limit: int = DEFAULT_RECENT_ROUND_LIMI
             limit=bounded_limit,
         )
     summaries = [round_summary(row, completed_scores=_completed_scores(service, row)) for row in rows]
+    summarized_rounds = list(zip(rows, summaries))
     open_round = next((row for row in summaries if row["status"] == "open"), None)
     latest_round = next(
         (row for row in summaries if row["status"] != "open"),
@@ -537,6 +538,20 @@ def competition_snapshot(service: Any, *, limit: int = DEFAULT_RECENT_ROUND_LIMI
             columns=_ROUND_COLUMNS,
         )
         latest_completed = round_summary(published[0]) if published else None
+        if latest_completed is not None:
+            summarized_rounds.append((published[0], latest_completed))
+
+    pending_promotions = [
+        (row, summary) for row, summary in summarized_rounds
+        if summary["mode"] == "live" and summary["promotion_status"] == "pending"
+    ]
+    if pending_promotions:
+        # Use the same frozen evaluation-day authority as promotion. Read it
+        # once, including when the newer day is outside this page or pinned view.
+        latest_day = service._latest_published_day()
+        for row, summary in pending_promotions:
+            if latest_day is not None and latest_day > service._evaluation_day(row):
+                summary["promotion_status"] = "superseded"
     return {
         "mode": service._config.mode,
         "network_name": network_name,

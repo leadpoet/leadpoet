@@ -2732,6 +2732,81 @@ def test_company_identity_does_not_remove_leading_legal_looking_name_terms():
     )["decision"] == COMPANY_FIT_MISMATCH
 
 
+@pytest.mark.parametrize(
+    ("submitted_name", "observed_name", "expected_name"),
+    [
+        ("Secure Trust Bank Public Limited Company", "Secure Trust Bank", "securetrustbank"),
+        ("Example Public Limited Company", "Example", "example"),
+        ("Public Storage Public Limited Company", "Public Storage", "publicstorage"),
+    ],
+)
+def test_company_identity_recognizes_full_public_limited_company_suffix(
+    submitted_name, observed_name, expected_name,
+):
+    receipt = evaluate_company_identity(
+        submitted_name=submitted_name,
+        submitted_website="https://securetrustbank.com/",
+        submitted_linkedin="",
+        observed_name=observed_name,
+        observed_website="https://www.securetrustbank.com/",
+        observed_linkedin="https://www.linkedin.com/company/secure-trust-bank",
+        evidence_source="company_web_reverification",
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_MATCH
+    assert receipt["submitted_name"] == expected_name
+    assert receipt["observed_name"] == expected_name
+
+
+@pytest.mark.parametrize(
+    ("submitted_name", "observed_name"),
+    [
+        ("Secure Trust Bank Public", "Secure Trust Bank"),
+        ("Example Public Services", "Example Services"),
+        ("Public Storage Public Limited Company", "Storage"),
+        ("AG Grid Public Limited Company", "Grid"),
+        ("Example Private Limited Company", "Example"),
+    ],
+)
+def test_company_identity_preserves_non_suffix_name_terms(
+    submitted_name, observed_name,
+):
+    receipt = evaluate_company_identity(
+        submitted_name=submitted_name,
+        submitted_website="https://example.com/",
+        submitted_linkedin="",
+        observed_name=observed_name,
+        observed_website="https://www.example.com/",
+        observed_linkedin="https://www.linkedin.com/company/example",
+        evidence_source="company_web_reverification",
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    ("observed_website", "observed_linkedin"),
+    [
+        ("https://other.example/", "https://linkedin.com/company/secure-trust-bank"),
+        ("https://securetrustbank.com/", "https://linkedin.com/company/other-bank"),
+    ],
+)
+def test_public_limited_company_suffix_keeps_domain_and_linkedin_binding(
+    observed_website, observed_linkedin,
+):
+    receipt = evaluate_company_identity(
+        submitted_name="Secure Trust Bank Public Limited Company",
+        submitted_website="https://securetrustbank.com/",
+        submitted_linkedin="https://linkedin.com/company/secure-trust-bank",
+        observed_name="Secure Trust Bank",
+        observed_website=observed_website,
+        observed_linkedin=observed_linkedin,
+        evidence_source="company_web_reverification",
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_MISMATCH
+
+
 def test_shared_verifier_persists_complete_dimension_receipt(monkeypatch):
     import qualification.scoring.lead_scorer as scorer
 

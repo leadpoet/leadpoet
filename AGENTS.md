@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: October 4 cycle validation
+
+The user authorized monitoring the merged capacity/status changes through the
+October 4 baseline, miner scoring, publication, promotion and weights, with
+narrow fixes for confirmed bugs. This includes the reproduced terminal legal
+name suffix mismatch, focused controls, protected saved-output validation,
+safe push/merge, scorer-image publication and canonical paired deployment.
+Preserve frozen round inputs, scorer identity and accepted results; do not
+restart the baseline or rescore accepted work. Keep qualification standards,
+costs, credentials, rewards and concurrent work unchanged. Use the overnight
+validation procedures. This authority ends when the cycle and fixes are verified.
+
 ## Scoped production authorization: October 3 capacity and superseded status
 
 On 2026-10-03 the user authorized review, minimal safety fixes, merge and

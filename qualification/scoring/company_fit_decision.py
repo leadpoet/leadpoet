@@ -162,8 +162,13 @@ def _company_name(value: Any) -> str:
     """
 
     words = re.findall(r"[a-z0-9]+", str(value or "").casefold())
-    while words and words[-1] in _LEGAL_SUFFIXES:
-        words.pop()
+    while words:
+        if len(words) > 3 and words[-3:] == ["public", "limited", "company"]:
+            del words[-3:]
+        elif words[-1] in _LEGAL_SUFFIXES:
+            words.pop()
+        else:
+            break
     return "".join(words)
 
 

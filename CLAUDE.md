@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: October 3 capacity and superseded status
+
+On 2026-10-03 the user authorized review, minimal safety fixes, merge and
+production deployment of Arena PR205/PR206 and dashboard PR13. Authority covers
+protected state/provider/proxy inspection, bounded production-style load tests
+in isolated namespaces, committed migrations, safe pushes/merges, normal
+dashboard deployment and canonical paired gateway/normal-validator restarts.
+Reuse existing workers and proxy infrastructure. Preserve active runs, private
+inputs, credentials, scoring, cost rules, promotion, rewards, weights, signed
+journals, operator controls and concurrent work. Do not fabricate production
+miner submissions or rewrite historical scores. Verify higher-volume intake,
+worker isolation, publication and superseded display before completion.
+This authority ends after this deployed flow is verified.
+
 ## Scoped production authorization: exact verifier judgment reuse
 
 On 2026-10-02 the user authorized narrow deterministic reuse of identical

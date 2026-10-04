@@ -25,11 +25,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lab_arena import contracts, runtime
+from lab_arena.runtime_host import require_parallel_memory
 from lab_arena.runner import RunState, WorkerSocketServer
 from scripts._lab_arena_runsc_probe_ci import MODEL_OK, ProbeApi, make_spec, probe_work_dir
 
 MEMORY_BYTES = 256 * 1024 * 1024
 HOLD_SECONDS = 20  # Keep lightweight parallel processes alive for observation.
+
+
+def _worker_count(value: str) -> int:
+    count = int(value)
+    if not 2 <= count <= 20:
+        raise argparse.ArgumentTypeError("workers must be between 2 and 20")
+    return count
 
 
 def _source(index: int, *, parallel: bool) -> str:
@@ -60,11 +68,12 @@ def _one(engine, spec):
     frame = frames[0]
     assert frame["operation_id"] == "exa.search"
     assert calls[0]["actual_microusd"] == 5000
+    assert calls[0]["call_identity"] == contracts.document_hash(frame)
     return {
         "exit_code": result.exit_code, "timed_out": result.timed_out,
         "output_error": result.output_error,
         "output": json.loads(result.output_bytes) if result.output_bytes else None,
-        "call_identity": contracts.document_hash(frame),
+        "call_identity": calls[0]["call_identity"],
         "actual_microusd": calls[0]["actual_microusd"],
         "wall_seconds": round(time.monotonic() - start, 3),
         "runsc_max_rss_bytes": result.max_rss_bytes,
@@ -105,13 +114,14 @@ def _batch(engine, specs, *, parallel: bool, work: Path):
     finally:
         stop.set()
         observer.join(timeout=2)
-    assert _live_count(work) == 0, "sandbox bundles remain after execution"
+        assert _live_count(work) == 0, "live sandbox remains after execution"
+        assert not any((work / "sandboxes").iterdir()), "sandbox bundle remains after execution"
     return results, high_water, round(time.monotonic() - started, 3)
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--workers", type=int, choices=(9, 20), default=20)
+    parser.add_argument("--workers", type=_worker_count, default=20)
     parser.add_argument("--runsc-path", type=Path, default=Path("/usr/local/bin/runsc"))
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
@@ -119,6 +129,7 @@ def main(argv=None) -> int:
         if os.geteuid() != 0:
             raise RuntimeError("runsc parallel probe requires root")
         runtime.require_linux_x86_64()
+        require_parallel_memory(args.workers, MEMORY_BYTES)
     with probe_work_dir(dry_run=args.dry_run) as work:
         work.chmod(0o755)
         rootfs = Path("/") if args.dry_run else work / "rootfs"
@@ -175,10 +186,12 @@ def main(argv=None) -> int:
             print("ARENA_PARALLEL_RUNSC_PROBE_PASSED", flush=True)
             return 0
         finally:
-            for directory in socket_dirs:
-                shutil.rmtree(directory, ignore_errors=True)
-            if not args.dry_run:
-                subprocess.run(["umount", "--", str(rootfs / "usr")], check=True)
+            try:
+                if not args.dry_run:
+                    subprocess.run(["umount", "--", str(rootfs / "usr")], check=True)
+            finally:
+                for directory in socket_dirs:
+                    shutil.rmtree(directory)
 
 
 if __name__ == "__main__":

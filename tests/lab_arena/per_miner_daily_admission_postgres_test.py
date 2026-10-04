@@ -49,6 +49,10 @@ def test_upgrade_admits_twenty_first_without_changing_existing_entries(database)
             assert _accept(store, round_id, submission_id, miner)["status"] == "ok"
     with pytest.raises(ArenaStoreError, match="lab_arena_round_full"):
         _accept(store, round_id, *entries[-1])
+    assert store.update_submission(
+        round_id, entries[-1][0], "uploading", "rejected",
+        {"rejection_rule": "capacity.round_full"},
+    )["status"] == "ok"
     rows_before = store.list_submissions(round_id)
     credentials_before = [
         store.get_submission_credential(submission_id, miner, "openrouter")
@@ -60,7 +64,12 @@ def test_upgrade_admits_twenty_first_without_changing_existing_entries(database)
     assert store.get_round(round_id)["configuration_doc"] == {
         **config, "max_challengers": 256,
     }
-    assert store.list_submissions(round_id) == rows_before
+    rows_after = store.list_submissions(round_id)
+    assert rows_after[:-1] == rows_before[:-1]
+    assert rows_after[-1]["status"] == "uploading"
+    assert rows_after[-1]["rejection_rule"] is None
+    assert rows_after[-1]["source_ref"] == rows_before[-1]["source_ref"]
+    assert store.get_submission_credential(*entries[-1], "openrouter") is None
     assert [
         store.get_submission_credential(submission_id, miner, "openrouter")
         for submission_id, miner in entries[:-1]
@@ -110,6 +119,99 @@ def test_full_miner_set_keeps_one_current_entry_per_hotkey_and_cap(database):
         _accept(store, round_id, extra, extra_miner)
     accepted = store.list_submissions(round_id, status="accepted")
     assert len(accepted) == len({row["miner_hotkey"] for row in accepted}) == 256
+    store._transport.close()
+
+
+def test_upgrade_reopens_only_latest_capacity_rejection_for_signed_refinalize(database):
+    store = _store(database)
+    round_id = "arena-2098-12-01"
+    config = _config(round_id, cap=20)
+    config["schedule"]["submission_cutoff"] = (
+        datetime.now(timezone.utc) + timedelta(hours=3)
+    ).isoformat().replace("+00:00", "Z")
+    assert store.create_round(round_id, config)["status"] == "created"
+    owner = hotkey("reopen-daily-owner")
+    miner = hotkey("reopen-daily-miner")
+    original = "sub-reopen-daily-original"
+    replacement = "sub-reopen-daily-replacement"
+    assert _register(store, round_id, original, miner, owner)["status"] == "registered"
+    assert store.update_submission(
+        round_id, original, "uploading", "rejected",
+        {"rejection_rule": "capacity.round_full"},
+    )["status"] == "ok"
+    assert _register(store, round_id, replacement, miner, owner)["status"] == "registered"
+    assert store.get_submission(replacement)["replaces_submission_id"] == original
+    assert store.update_submission(
+        round_id, replacement, "uploading", "rejected",
+        {"rejection_rule": "capacity.round_full"},
+    )["status"] == "ok"
+
+    unrelated = "sub-reopen-unrelated"
+    unrelated_miner = hotkey("reopen-unrelated-miner")
+    assert _register(store, round_id, unrelated, unrelated_miner, owner)["status"] == "registered"
+    assert store.update_submission(
+        round_id, unrelated, "uploading", "rejected",
+        {"rejection_rule": "source.invalid"},
+    )["status"] == "ok"
+
+    superseded = "sub-reopen-superseded-original"
+    other_miner = hotkey("reopen-superseded-miner")
+    assert _register(store, round_id, superseded, other_miner, owner)["status"] == "registered"
+    assert store.update_submission(
+        round_id, superseded, "uploading", "rejected",
+        {"rejection_rule": "capacity.round_full"},
+    )["status"] == "ok"
+    terminal = "sub-reopen-superseded-terminal"
+    assert _register(store, round_id, terminal, other_miner, owner)["status"] == "registered"
+    assert store.update_submission(
+        round_id, terminal, "uploading", "rejected",
+        {"rejection_rule": "source.invalid"},
+    )["status"] == "ok"
+
+    frozen = "sub-reopen-frozen"
+    frozen_miner = hotkey("reopen-frozen-miner")
+    assert _register(store, round_id, frozen, frozen_miner, owner)["status"] == "registered"
+    assert _accept(store, round_id, frozen, frozen_miner)["status"] == "ok"
+    psycopg2, dsn = database
+    with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE public.lab_arena_submissions SET "
+            "code_review_status='passed', code_review_attempts=1, "
+            "code_review_doc='{}'::jsonb, "
+            "code_review_claim='sha256:' || repeat('a',64), "
+            "code_review_started_at=clock_timestamp() "
+            "WHERE submission_id=%s", (frozen,),
+        )
+    assert store.update_submission(round_id, frozen, "accepted", "frozen")["status"] == "ok"
+    before = {submission_id: store.get_submission(submission_id) for submission_id in (
+        original, replacement, unrelated, superseded, terminal, frozen,
+    )}
+
+    _apply(database)
+    reopened = store.get_submission(replacement)
+    assert reopened == {**before[replacement], "status": "uploading", "rejection_rule": None,
+                        "updated_at": reopened["updated_at"]}
+    assert reopened["replaces_submission_id"] == original
+    assert store.get_submission_credential(replacement, miner, "openrouter") is None
+    assert {submission_id: store.get_submission(submission_id) for submission_id in (
+        original, unrelated, superseded, terminal, frozen,
+    )} == {submission_id: before[submission_id] for submission_id in (
+        original, unrelated, superseded, terminal, frozen,
+    )}
+    _apply(database)
+    assert store.get_submission(replacement) == reopened
+    with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT tgenabled FROM pg_trigger "
+            "WHERE tgrelid='public.lab_arena_submissions'::regclass "
+            "AND tgname='lab_arena_submissions_frozen'"
+        )
+        assert cursor.fetchone() == ("O",)
+        with pytest.raises(psycopg2.Error, match="rejected submission cannot be reopened"):
+            cursor.execute(
+                "UPDATE public.lab_arena_submissions SET status='uploading' "
+                "WHERE submission_id=%s", (original,),
+            )
     store._transport.close()
 
 

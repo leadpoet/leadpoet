@@ -455,6 +455,12 @@ inside gVisor. Start the runner with:
 python3 scripts/run_lab_arena_runner.py
 ```
 
+If three distinct execute leases on one runner expire in the same stage after
+lease-bound `RuntimeHostError` reports and no provider cost or result, the
+service stops new execute claims from that runner for one frozen lease-TTL
+window. It does not end current leases early or change scoring. Inspect and
+repair that host before restarting it; healthy runners can claim the retries.
+
 ## Miner flow
 
 Run `python scripts/lab_arena_miner.py interactive`. It reads the local source

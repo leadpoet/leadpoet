@@ -128,6 +128,116 @@ ARENA_NO_ERROR = "-"
 # Upper bound on a reported count: an operational magnitude, never a payload.
 _ARENA_MAX_COUNT = 1_000_000
 
+# ---------------------------------------------------------------------------
+# Arena provider calls, run outcomes, and provider-gate contention
+# ---------------------------------------------------------------------------
+#
+# Each of these is a SEPARATE envelope with its own exact attribute allowlist
+# and its own frozen vocabularies. Every vocabulary below is a copy of a
+# server-side constant that already exists in ``lab_arena`` — copied rather
+# than imported so this module stays importable with nothing but the standard
+# library, and so a change to the pipeline can never silently widen what is
+# exported. ``tests/test_otel_boundary_guard.py`` asserts the copies match.
+
+ARENA_PROVIDER_SCOPE = "arena.provider"
+ARENA_RUN_SCOPE = "arena.run"
+ARENA_GATE_SCOPE = "arena.gate"
+
+# ``lab_arena.contracts.PROVIDERS`` plus the fixed label used when an
+# operation is not in the table at all.
+ARENA_PROVIDER_UNKNOWN = "unknown"
+ARENA_PROVIDERS = frozenset(
+    {"scrapingdog", "deepline", "openrouter", "unknown"}
+)
+
+# How a provider call ended, from the gateway's point of view:
+#   ok        — the provider answered and the ledger settled
+#   refused   — the call was declined before or at the provider (budget, cap,
+#               policy, credentials) and the ledger settled
+#   uncertain — the ledger could not be settled; cost is reconciled later
+#   failed    — the broker raised instead of returning a result
+ARENA_PROVIDER_OUTCOMES = frozenset({"ok", "refused", "uncertain", "failed"})
+
+# Every error code the broker and the operation table can produce, as a frozen
+# vocabulary. A code outside this set is dropped whole.
+ARENA_PROVIDER_ERROR_CODES = frozenset(
+    {
+        # broker._error_result / BrokerError
+        "broker_unavailable",
+        "budget_refused",
+        "call_refused",
+        "call_uncertain",
+        "invalid_request",
+        "lease_stale",
+        "miner_credentials_unavailable",
+        "miner_provider_not_configured",
+        "model_not_allowed",
+        "provider_request_refused",
+        "provider_unavailable",
+        # operations.ERROR_CODES
+        "no_matching_operation",
+        "request_too_large",
+        "invalid_body",
+        "invalid_query",
+        "unknown_header",
+        "forbidden_header",
+        "unknown_field",
+        "forbidden_field",
+        "missing_field",
+        "invalid_field",
+        "invalid_url",
+        "invalid_response",
+        "response_too_large",
+    }
+)
+
+# ``lab_arena.contracts.TERMINAL_CAUSES`` — how one evaluation run ended.
+ARENA_TERMINAL_CAUSES = frozenset(
+    {
+        "accepted",
+        "model_timeout",
+        "invalid_output",
+        "budget_exhausted",
+        "credential_error",
+        "model_error",
+        "lease_expired",
+        "worker_lost",
+        "result_rejected",
+        "provider_error",
+        "stage_closed",
+        "judge_error",
+        "judge_timeout",
+    }
+)
+
+# A run is either a miner execution or an Arena judge scoring pass.
+ARENA_RUN_KINDS = frozenset({"execute", "score"})
+
+# How a wait on the shared OpenRouter concurrency gate ended. A call admitted
+# with no wait at all emits nothing, so gate spans appear only under
+# contention.
+ARENA_GATE_OUTCOMES = frozenset(
+    {"admitted_after_wait", "timed_out", "cancelled", "no_capacity"}
+)
+
+# An operation id is ``<provider>.<operation>``; the provider half must be a
+# member of the frozen provider vocabulary and the operation half is
+# shape-checked. Nothing else is exported.
+_ARENA_OPERATION_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}\.[a-z][a-z0-9_]{0,31}$")
+ARENA_OPERATION_UNKNOWN = "unknown"
+
+# A refusal code is the literal prefix of a ``ServiceError`` code, i.e. the
+# part before the first ":". The suffix can carry an exception message and is
+# never exported; the prefix is always a literal written in the source.
+_ARENA_DENIAL_RE = re.compile(r"^[a-z][a-z0-9_]{0,47}$")
+ARENA_NO_DENIAL = "-"
+
+# Upper bound on a reported cost. Micro-USD, so this is $1,000 per call.
+_ARENA_MAX_MICROUSD = 1_000_000_000
+
+# Upper bound on reported provider attempts (champion credential retries).
+_ARENA_MAX_ATTEMPTS = 4
+
 # Fixed batching limits. Passing every value explicitly prevents ambient
 # ``OTEL_BSP_*`` variables from changing gateway memory or shutdown behavior.
 _BATCH_MAX_QUEUE_SIZE = 2048
@@ -169,6 +279,59 @@ TASK_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
 }
 
 TASK_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(TASK_SPAN_ATTRIBUTE_TYPES)
+
+# The Arena sidecar's HTTP envelope: the gateway's four, plus the refusal code
+# the sidecar itself produced. The gateway's own envelope is UNCHANGED — this
+# fifth attribute exists only on the sidecar, where a 4xx with no reason is
+# the difference between "a runner was denied a claim" and "a runner is
+# broken". Its vocabulary is the literal prefix of a ``ServiceError`` code.
+ARENA_HTTP_ATTRIBUTE_TYPES: Dict[str, tuple] = {
+    "http.request.method": (str,),
+    "http.route": (str,),
+    "http.response.status_code": (int,),
+    "arena.denial": (str,),
+    "duration_ms": (int, float),
+}
+
+ARENA_HTTP_ATTRIBUTE_ALLOWLIST = frozenset(ARENA_HTTP_ATTRIBUTE_TYPES)
+
+# The ONLY attributes a provider-call span may carry. Every text field is a
+# member of a frozen vocabulary above; every numeric field is bounded. No
+# prompt, completion, model output, miner hotkey, run id, submission id,
+# credential, URL, or response body can pass this allowlist.
+PROVIDER_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
+    "arena.provider": (str,),
+    "arena.operation": (str,),
+    "arena.outcome": (str,),
+    "arena.error_code": (str,),
+    "arena.error_type": (str,),
+    "arena.http_status": (int,),
+    "arena.provider_status": (int,),
+    "arena.attempts": (int,),
+    "arena.cost_microusd": (int,),
+    "duration_ms": (int, float),
+}
+
+PROVIDER_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(PROVIDER_SPAN_ATTRIBUTE_TYPES)
+
+# The ONLY attributes a run-outcome span may carry. There is deliberately no
+# duration here: the sidecar records when a run ENDS, and the run row carries
+# no start time, so any duration would be invented rather than measured.
+RUN_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
+    "arena.run_kind": (str,),
+    "arena.terminal_cause": (str,),
+    "arena.outcome": (str,),
+}
+
+RUN_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(RUN_SPAN_ATTRIBUTE_TYPES)
+
+# The ONLY attributes a provider-gate span may carry.
+GATE_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
+    "arena.gate_outcome": (str,),
+    "duration_ms": (int, float),
+}
+
+GATE_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(GATE_SPAN_ATTRIBUTE_TYPES)
 
 # Log tokens, written out in full so the CI boundary guard can grep them.
 _GATEWAY_LOG = {
@@ -239,9 +402,18 @@ def _attributes_conform(
 class _GatewayOtelMiddleware:
     """Raw-ASGI request telemetry that cannot affect request behavior."""
 
-    def __init__(self, app: Any, *, emit: Callable[..., None]) -> None:
+    def __init__(
+        self,
+        app: Any,
+        *,
+        emit: Callable[..., None],
+        on_request_start: Optional[Callable[[], None]] = None,
+    ) -> None:
         self.app = app
         self._emit = emit
+        # Optional per-request reset, so a value recorded while serving one
+        # request can never be read back while serving the next one.
+        self._on_request_start = on_request_start
 
     def _emit_safely(
         self,
@@ -271,6 +443,13 @@ class _GatewayOtelMiddleware:
         if scope.get("path") in _SUPPRESSED_ROUTES:
             await self.app(scope, receive, send)
             return
+
+        if self._on_request_start is not None:
+            try:
+                self._on_request_start()
+            except BaseException:
+                # Telemetry setup must never refuse to serve a request.
+                pass
 
         start_ns = time.time_ns()
         start_mono = time.monotonic()
@@ -313,11 +492,20 @@ def _validating_exporter(
     dropped entirely — never mutated, never partially exported. Drops are
     logged as a per-reason count WITHOUT the rejected values.
 
-    ``scopes`` maps each ACCEPTED instrumentation scope to its envelope kind —
-    ``"http"`` (a SERVER request span carrying exactly the four approved HTTP
-    attributes) or ``"task"`` (an INTERNAL pipeline-stage span carrying exactly
-    the five approved Arena stage attributes). A span whose scope is not listed
-    is dropped, so one process can never emit through another's envelope.
+    ``scopes`` maps each ACCEPTED instrumentation scope to its envelope kind.
+    Each kind has its own exact attribute allowlist and its own frozen
+    vocabularies:
+
+    ``http``        SERVER span, the four approved gateway HTTP attributes
+    ``arena_http``  SERVER span, those four plus the Arena refusal code
+    ``task``        INTERNAL span, the five approved pipeline-stage attributes
+    ``provider``    INTERNAL span, the ten approved provider-call attributes
+    ``run``         INTERNAL span, the four approved run-outcome attributes
+    ``gate``        INTERNAL span, the two approved provider-gate attributes
+
+    A span whose scope is not listed is dropped, so one process can never emit
+    through another's envelope and one envelope can never borrow another's
+    allowlist.
     """
     from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
     from opentelemetry.trace import SpanKind
@@ -340,6 +528,80 @@ def _validating_exporter(
             return "route"
         return None
 
+    def _arena_http_violation(span: Any, attributes: Dict[str, Any]) -> Optional[str]:
+        if not _attributes_conform(attributes, ARENA_HTTP_ATTRIBUTE_TYPES):
+            return "attributes"
+        denial = attributes["arena.denial"]
+        if denial != ARENA_NO_DENIAL and not _ARENA_DENIAL_RE.fullmatch(denial):
+            return "denial"
+        trimmed = {
+            key: value
+            for key, value in attributes.items()
+            if key != "arena.denial"
+        }
+        return _http_violation(span, trimmed)
+
+    def _provider_violation(span: Any, attributes: Dict[str, Any]) -> Optional[str]:
+        if not _attributes_conform(attributes, PROVIDER_SPAN_ATTRIBUTE_TYPES):
+            return "attributes"
+        provider = attributes["arena.provider"]
+        if provider not in ARENA_PROVIDERS:
+            return "provider"
+        operation = attributes["arena.operation"]
+        if operation != ARENA_OPERATION_UNKNOWN:
+            if not _ARENA_OPERATION_RE.fullmatch(operation):
+                return "operation"
+            if operation.split(".", 1)[0] != provider:
+                return "operation"
+        if attributes["arena.outcome"] not in ARENA_PROVIDER_OUTCOMES:
+            return "outcome"
+        error_code = attributes["arena.error_code"]
+        if (
+            error_code != ARENA_NO_ERROR
+            and error_code not in ARENA_PROVIDER_ERROR_CODES
+        ):
+            return "error_code"
+        error_type = attributes["arena.error_type"]
+        if error_type != ARENA_NO_ERROR and not _ERROR_TYPE_RE.fullmatch(error_type):
+            return "error_type"
+        for key, ceiling in (
+            ("arena.http_status", 999),
+            ("arena.provider_status", 999),
+            ("arena.cost_microusd", _ARENA_MAX_MICROUSD),
+        ):
+            value = attributes[key]
+            if value < 0 or value > ceiling:
+                return key.split(".", 1)[-1]
+        attempts = attributes["arena.attempts"]
+        if attempts < 1 or attempts > _ARENA_MAX_ATTEMPTS:
+            return "attempts"
+        if span.name != "arena.provider.%s" % provider:
+            return "name"
+        return None
+
+    def _run_violation(span: Any, attributes: Dict[str, Any]) -> Optional[str]:
+        if not _attributes_conform(attributes, RUN_SPAN_ATTRIBUTE_TYPES):
+            return "attributes"
+        run_kind = attributes["arena.run_kind"]
+        if run_kind not in ARENA_RUN_KINDS:
+            return "run_kind"
+        if attributes["arena.terminal_cause"] not in ARENA_TERMINAL_CAUSES:
+            return "terminal_cause"
+        if attributes["arena.outcome"] not in ARENA_TASK_OUTCOMES:
+            return "outcome"
+        if span.name != "arena.run.%s" % run_kind:
+            return "name"
+        return None
+
+    def _gate_violation(span: Any, attributes: Dict[str, Any]) -> Optional[str]:
+        if not _attributes_conform(attributes, GATE_SPAN_ATTRIBUTE_TYPES):
+            return "attributes"
+        if attributes["arena.gate_outcome"] not in ARENA_GATE_OUTCOMES:
+            return "gate_outcome"
+        if span.name != "arena.gate":
+            return "name"
+        return None
+
     def _task_violation(span: Any, attributes: Dict[str, Any]) -> Optional[str]:
         if not _attributes_conform(attributes, TASK_SPAN_ATTRIBUTE_TYPES):
             return "attributes"
@@ -358,6 +620,15 @@ def _validating_exporter(
             return "name"
         return None
 
+    _ENVELOPE_CHECKERS = {
+        "http": _http_violation,
+        "arena_http": _arena_http_violation,
+        "task": _task_violation,
+        "provider": _provider_violation,
+        "run": _run_violation,
+        "gate": _gate_violation,
+    }
+
     def _violation(span: Any) -> Optional[str]:
         try:
             scope = _span_scope(span)
@@ -366,7 +637,11 @@ def _validating_exporter(
                 return "scope"
             if getattr(scope, "version", None) or getattr(scope, "schema_url", None):
                 return "scope_metadata"
-            expected_kind = SpanKind.SERVER if envelope == "http" else SpanKind.INTERNAL
+            expected_kind = (
+                SpanKind.SERVER
+                if envelope in ("http", "arena_http")
+                else SpanKind.INTERNAL
+            )
             if getattr(span, "kind", None) is not expected_kind:
                 return "kind"
             if getattr(span, "parent", None) is not None:
@@ -376,11 +651,10 @@ def _validating_exporter(
             if trace_state is not None and len(trace_state) > 0:
                 return "trace_state"
             attributes = dict(span.attributes or {})
-            shape = (
-                _http_violation(span, attributes)
-                if envelope == "http"
-                else _task_violation(span, attributes)
-            )
+            checker = _ENVELOPE_CHECKERS.get(envelope)
+            if checker is None:
+                return "envelope"
+            shape = checker(span, attributes)
             if shape is not None:
                 return shape
             if getattr(span, "events", None):
@@ -603,16 +877,201 @@ def configure_gateway_otel(app: Any, *, span_exporter: Optional[Any] = None) -> 
 
 
 class ArenaTelemetry:
-    """Records Arena pipeline-stage spans. Never raises, never blocks.
+    """Records Arena spans. Never raises, never blocks, never reorders work.
 
-    One INTERNAL root span per stage, carrying only the five approved
-    attributes. The caller supplies a stage name and an outcome from the
-    frozen vocabularies; anything else is dropped by the same fail-closed
-    validator that guards the HTTP envelope.
+    Four INTERNAL envelopes, each a root span with its own exact allowlist:
+    pipeline stages, provider calls, run outcomes, and provider-gate waits.
+    The caller supplies values from the frozen vocabularies; anything else is
+    dropped whole by the same fail-closed validator that guards the HTTP
+    envelope. Every public method swallows its own failures — an exporter
+    problem can never surface as an Arena failure.
     """
 
-    def __init__(self, tracer: Any) -> None:
+    def __init__(
+        self,
+        tracer: Any,
+        *,
+        provider_tracer: Any = None,
+        run_tracer: Any = None,
+        gate_tracer: Any = None,
+    ) -> None:
         self._tracer = tracer
+        self._provider_tracer = provider_tracer
+        self._run_tracer = run_tracer
+        self._gate_tracer = gate_tracer
+        # Per-request refusal code, read back by the Arena HTTP middleware.
+        # A raw ASGI chain shares one context per request, so this is set and
+        # read within a single request and never crosses between them.
+        import contextvars
+
+        self._denial = contextvars.ContextVar("arena_denial", default=ARENA_NO_DENIAL)
+
+    # -- refusal code ----------------------------------------------------
+
+    def note_denial(self, code: str) -> None:
+        """Record the refusal code for the request currently being served."""
+        try:
+            self._denial.set(str(code))
+        except BaseException:
+            pass
+
+    def reset_denial(self) -> None:
+        try:
+            self._denial.set(ARENA_NO_DENIAL)
+        except BaseException:
+            pass
+
+    def take_denial(self) -> str:
+        """Return the refusal code's exported form, or the fixed no-denial mark.
+
+        Only the literal prefix before the first ":" is ever returned; a
+        ``ServiceError`` code can interpolate an exception message after it.
+        """
+        try:
+            raw = str(self._denial.get() or "")
+        except BaseException:
+            return ARENA_NO_DENIAL
+        prefix = raw.split(":", 1)[0]
+        if prefix and _ARENA_DENIAL_RE.fullmatch(prefix):
+            return prefix
+        return ARENA_NO_DENIAL
+
+    # -- provider calls --------------------------------------------------
+
+    def record_provider(
+        self,
+        provider: str,
+        operation: str,
+        outcome: str,
+        *,
+        error_code: str = ARENA_NO_ERROR,
+        error_type: str = ARENA_NO_ERROR,
+        http_status: int = 0,
+        provider_status: int = 0,
+        attempts: int = 1,
+        cost_microusd: int = 0,
+        duration_ms: float = 0.0,
+        start_ns: Optional[int] = None,
+    ) -> None:
+        try:
+            self._record_provider(
+                provider,
+                operation,
+                outcome,
+                error_code=error_code,
+                error_type=error_type,
+                http_status=http_status,
+                provider_status=provider_status,
+                attempts=attempts,
+                cost_microusd=cost_microusd,
+                duration_ms=duration_ms,
+                start_ns=start_ns,
+            )
+        except BaseException as exc:
+            self._log_emit_failure(exc)
+
+    def _record_provider(
+        self,
+        provider: str,
+        operation: str,
+        outcome: str,
+        *,
+        error_code: str,
+        error_type: str,
+        http_status: int,
+        provider_status: int,
+        attempts: int,
+        cost_microusd: int,
+        duration_ms: float,
+        start_ns: Optional[int],
+    ) -> None:
+        if self._provider_tracer is None:
+            return
+        from opentelemetry.trace import Status, StatusCode
+
+        span = self._start(
+            self._provider_tracer, "arena.provider.%s" % provider, start_ns
+        )
+        span.set_attribute("arena.provider", str(provider))
+        span.set_attribute("arena.operation", str(operation))
+        span.set_attribute("arena.outcome", str(outcome))
+        span.set_attribute("arena.error_code", str(error_code))
+        span.set_attribute("arena.error_type", str(error_type))
+        span.set_attribute("arena.http_status", int(http_status))
+        span.set_attribute("arena.provider_status", int(provider_status))
+        span.set_attribute("arena.attempts", int(attempts))
+        span.set_attribute("arena.cost_microusd", int(cost_microusd))
+        span.set_attribute("duration_ms", float(duration_ms))
+        if outcome in ("failed", "uncertain"):
+            span.set_status(Status(StatusCode.ERROR))
+        span.end()
+
+    # -- run outcomes ----------------------------------------------------
+
+    def record_run(self, run_kind: str, terminal_cause: str) -> None:
+        try:
+            if self._run_tracer is None:
+                return
+            from opentelemetry.trace import Status, StatusCode
+
+            span = self._start(
+                self._run_tracer, "arena.run.%s" % run_kind, None
+            )
+            outcome = "ok" if terminal_cause == "accepted" else "failed"
+            span.set_attribute("arena.run_kind", str(run_kind))
+            span.set_attribute("arena.terminal_cause", str(terminal_cause))
+            span.set_attribute("arena.outcome", outcome)
+            if outcome == "failed":
+                span.set_status(Status(StatusCode.ERROR))
+            span.end()
+        except BaseException as exc:
+            self._log_emit_failure(exc)
+
+    # -- provider-gate contention ----------------------------------------
+
+    def record_gate(
+        self,
+        gate_outcome: str,
+        *,
+        duration_ms: float = 0.0,
+        start_ns: Optional[int] = None,
+    ) -> None:
+        try:
+            if self._gate_tracer is None:
+                return
+            from opentelemetry.trace import Status, StatusCode
+
+            span = self._start(self._gate_tracer, "arena.gate", start_ns)
+            span.set_attribute("arena.gate_outcome", str(gate_outcome))
+            span.set_attribute("duration_ms", float(duration_ms))
+            if gate_outcome in ("timed_out", "no_capacity"):
+                span.set_status(Status(StatusCode.ERROR))
+            span.end()
+        except BaseException as exc:
+            self._log_emit_failure(exc)
+
+    # -- shared ----------------------------------------------------------
+
+    def _start(self, tracer: Any, name: str, start_ns: Optional[int]) -> Any:
+        from opentelemetry.context import Context
+        from opentelemetry.trace import SpanKind
+
+        return tracer.start_span(
+            name,
+            kind=SpanKind.INTERNAL,
+            # A fresh root context: these spans never adopt a caller's parent.
+            context=Context(),
+            start_time=start_ns if start_ns is not None else time.time_ns(),
+        )
+
+    def _log_emit_failure(self, exc: BaseException) -> None:
+        try:
+            print(
+                "%s error=%s" % (_ARENA_LOG["emit_failed"], type(exc).__name__),
+                flush=True,
+            )
+        except BaseException:
+            pass
 
     def record(
         self,
@@ -635,13 +1094,7 @@ class ArenaTelemetry:
             )
         except BaseException as exc:
             # Telemetry is observational only — the pipeline must not notice.
-            try:
-                print(
-                    "%s error=%s" % (_ARENA_LOG["emit_failed"], type(exc).__name__),
-                    flush=True,
-                )
-            except BaseException:
-                pass
+            self._log_emit_failure(exc)
 
     def _record(
         self,
@@ -653,16 +1106,9 @@ class ArenaTelemetry:
         duration_ms: float,
         start_ns: Optional[int],
     ) -> None:
-        from opentelemetry.context import Context
-        from opentelemetry.trace import SpanKind, Status, StatusCode
+        from opentelemetry.trace import Status, StatusCode
 
-        span = self._tracer.start_span(
-            "arena.%s" % stage,
-            kind=SpanKind.INTERNAL,
-            # A fresh root context: stage spans never adopt a caller's parent.
-            context=Context(),
-            start_time=start_ns if start_ns is not None else time.time_ns(),
-        )
+        span = self._start(self._tracer, "arena.%s" % stage, start_ns)
         span.set_attribute("arena.stage", str(stage))
         span.set_attribute("arena.outcome", str(outcome))
         span.set_attribute("arena.error_type", str(error_type))
@@ -678,12 +1124,15 @@ def configure_arena_otel(
 ) -> Optional[ArenaTelemetry]:
     """Wire Arena sidecar telemetry. No-op (returns None) unless enabled.
 
-    Installs two things on the SAME fail-closed pipeline the gateway uses:
+    Installs, on the SAME fail-closed pipeline the gateway uses:
 
     - request spans under ``arena.http`` for the sidecar's own route
       templates, which the gateway's ``/arena/{arena_path:path}`` catch-all
-      cannot express;
-    - a recorder for pipeline-stage spans under ``arena.task``.
+      cannot express, each carrying the refusal code the sidecar produced;
+    - a recorder for pipeline-stage spans under ``arena.task``;
+    - a recorder for provider-call spans under ``arena.provider``;
+    - a recorder for run-outcome spans under ``arena.run``;
+    - a recorder for provider-gate contention under ``arena.gate``.
 
     The returned recorder is what ``lab_arena.telemetry`` installs; when this
     returns None the pipeline keeps calling a no-op and nothing changes.
@@ -734,7 +1183,13 @@ def configure_arena_otel(
             delegate,
             allowed_routes=_registered_routes,
             expected_resource=expected_resource,
-            scopes={ARENA_HTTP_SCOPE: "http", ARENA_TASK_SCOPE: "task"},
+            scopes={
+                ARENA_HTTP_SCOPE: "arena_http",
+                ARENA_TASK_SCOPE: "task",
+                ARENA_PROVIDER_SCOPE: "provider",
+                ARENA_RUN_SCOPE: "run",
+                ARENA_GATE_SCOPE: "gate",
+            },
             log=_ARENA_LOG,
         )
         processor = _build_span_processor(
@@ -745,6 +1200,13 @@ def configure_arena_otel(
         # A dedicated provider, never the global one.
         provider = TracerProvider(resource=resource)
         provider.add_span_processor(processor)
+
+        telemetry = ArenaTelemetry(
+            provider.get_tracer(ARENA_TASK_SCOPE),
+            provider_tracer=provider.get_tracer(ARENA_PROVIDER_SCOPE),
+            run_tracer=provider.get_tracer(ARENA_RUN_SCOPE),
+            gate_tracer=provider.get_tracer(ARENA_GATE_SCOPE),
+        )
 
         if app is not None:
 
@@ -762,6 +1224,7 @@ def configure_arena_otel(
                 span.set_attribute("http.request.method", method)
                 span.set_attribute("http.route", route)
                 span.set_attribute("http.response.status_code", int(status_code))
+                span.set_attribute("arena.denial", telemetry.take_denial())
                 span.set_attribute(
                     "duration_ms", (time.monotonic() - start_mono) * 1000.0
                 )
@@ -769,9 +1232,13 @@ def configure_arena_otel(
                     span.set_status(Status(StatusCode.ERROR))
                 span.end()
 
-            app.add_middleware(_GatewayOtelMiddleware, emit=_emit)
+            app.add_middleware(
+                _GatewayOtelMiddleware,
+                emit=_emit,
+                on_request_start=telemetry.reset_denial,
+            )
 
-        return ArenaTelemetry(provider.get_tracer(ARENA_TASK_SCOPE))
+        return telemetry
     except Exception as exc:  # never let telemetry break the Arena service
         try:
             print(

@@ -308,3 +308,98 @@ def test_arena_pipeline_seam_cannot_acquire_an_exporter() -> None:
     assert "GATEWAY_OTEL" not in source, (
         "the seam must not read the telemetry destination"
     )
+
+
+def _frozen_literal(source: str, name: str) -> list[str]:
+    """Return the string literals of ``name = frozenset({...})``, or fail."""
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if name not in [t.id for t in node.targets if isinstance(t, ast.Name)]:
+            continue
+        call = node.value
+        assert isinstance(call, ast.Call) and getattr(call.func, "id", "") == "frozenset", (
+            f"{name} must be a frozenset literal"
+        )
+        (elements,) = call.args
+        assert isinstance(elements, ast.Set), f"{name} must wrap a set literal"
+        values = []
+        for element in elements.elts:
+            assert isinstance(element, ast.Constant) and isinstance(element.value, str), (
+                f"every member of {name} must be a string literal"
+            )
+            values.append(element.value)
+        return values
+    raise AssertionError(f"{name} must exist in the bootstrap")
+
+
+def test_arena_deep_capture_vocabularies_are_frozen_and_literal() -> None:
+    """Provider, run, and gate labels come from closed literal sets.
+
+    Deep capture widens what the sidecar says, not how freely it may say it.
+    Every exported string must still be a literal written in this repo, so a
+    provider name, operation id, error code, terminal cause, or gate outcome
+    can never carry a value computed from a request.
+    """
+    source = _read(BOOTSTRAP)
+    for constant in (
+        'ARENA_PROVIDER_SCOPE = "arena.provider"',
+        'ARENA_RUN_SCOPE = "arena.run"',
+        'ARENA_GATE_SCOPE = "arena.gate"',
+    ):
+        assert constant in source, f"missing fixed scope constant: {constant}"
+    for name in (
+        "ARENA_PROVIDERS",
+        "ARENA_PROVIDER_OUTCOMES",
+        "ARENA_PROVIDER_ERROR_CODES",
+        "ARENA_TERMINAL_CAUSES",
+        "ARENA_RUN_KINDS",
+        "ARENA_GATE_OUTCOMES",
+    ):
+        assert _frozen_literal(source, name), f"{name} must not be empty"
+
+
+def test_bootstrap_vocabularies_match_the_arena_source_of_truth() -> None:
+    """The copies in the bootstrap must track the real lab_arena constants.
+
+    The bootstrap stays import-free of ``lab_arena`` so it remains a
+    stdlib-plus-OTel module, which means these vocabularies are copies. A copy
+    that drifts would silently drop every span carrying the new member, so CI
+    compares them instead of trusting the comment.
+    """
+    from lab_arena import contracts
+
+    source = _read(BOOTSTRAP)
+    assert set(_frozen_literal(source, "ARENA_PROVIDERS")) == set(
+        contracts.PROVIDERS
+    ) | {"unknown"}
+    assert set(_frozen_literal(source, "ARENA_TERMINAL_CAUSES")) == set(
+        contracts.TERMINAL_CAUSES
+    )
+
+
+def test_arena_error_code_vocabulary_covers_the_operation_table() -> None:
+    from lab_arena import operations
+
+    codes = set(_frozen_literal(_read(BOOTSTRAP), "ARENA_PROVIDER_ERROR_CODES"))
+    assert set(operations.ERROR_CODES) <= codes, (
+        "an operation error code outside the exported vocabulary would drop "
+        "the whole provider span, losing the failure it describes"
+    )
+
+
+def test_denial_codes_export_only_the_literal_prefix() -> None:
+    """``ServiceError.code`` can interpolate an exception message.
+
+    ``"run_result_invalid:%s" % str(exc)[:80]`` and ``"contract:%s"`` both put
+    arbitrary text after a colon. Only the literal prefix may ever be
+    exported, so the recorder must split on the first colon.
+    """
+    source = _read(BOOTSTRAP)
+    assert 'raw.split(":", 1)[0]' in source, (
+        "the denial recorder must keep only the prefix before the first colon"
+    )
+    assert "_ARENA_DENIAL_RE" in source, (
+        "the denial prefix must still be shape-checked against a frozen regex"
+    )

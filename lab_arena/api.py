@@ -13,7 +13,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
-from lab_arena import contracts, source_bundle, trajectory
+from lab_arena import contracts, source_bundle, telemetry, trajectory
 from lab_arena.contracts import ArenaContractError
 from lab_arena.service import ArenaService, ServiceError
 from lab_arena.store import ArenaStoreUnavailable
@@ -85,6 +85,7 @@ def create_app(service: ArenaService) -> FastAPI:
         try:
             content = await run_in_threadpool(call, *args, **kwargs)
         except ServiceError as exc:
+            telemetry.note_denial(exc.code)
             return JSONResponse(
                 status_code=exc.status,
                 content={"status": "rejected", "code": exc.code},
@@ -94,6 +95,7 @@ def create_app(service: ArenaService) -> FastAPI:
 
     @app.exception_handler(ServiceError)
     async def _service_error(request: Request, exc: ServiceError) -> JSONResponse:
+        telemetry.note_denial(exc.code)
         content = {"status": "rejected", "code": exc.code}
         if exc.code == "submission_rejected:source_contains_credentials" and exc.source_path:
             content["source_path"] = exc.source_path
@@ -124,10 +126,12 @@ def create_app(service: ArenaService) -> FastAPI:
 
     @app.exception_handler(ArenaContractError)
     async def _contract_error(request: Request, exc: ArenaContractError) -> JSONResponse:
+        telemetry.note_denial("contract")
         return JSONResponse(status_code=400, content={"status": "rejected", "code": "contract:%s" % str(exc)[:100]})
 
     @app.exception_handler(ArenaStoreUnavailable)
     async def _store_unavailable(request: Request, exc: ArenaStoreUnavailable) -> JSONResponse:
+        telemetry.note_denial("arena_store_unavailable")
         return JSONResponse(
             status_code=503,
             content={"status": "unavailable", "code": "arena_store_unavailable"},

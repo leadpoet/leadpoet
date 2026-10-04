@@ -27,7 +27,10 @@ from lab_arena.driver import drive_once  # noqa: E402
 
 
 def _install_arena_telemetry(app) -> None:
-    """Attach request + pipeline-stage spans. A complete no-op when disabled."""
+    """Attach request, stage, provider, run, and gate spans.
+
+    A complete no-op when telemetry is disabled.
+    """
 
     try:
         from gateway.observability.otel_bootstrap import configure_arena_otel

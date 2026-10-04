@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 import secrets
 import threading
@@ -17,6 +18,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
+from lab_arena import telemetry
 from lab_arena import code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, trajectory
 from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, operations, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
@@ -38,6 +40,74 @@ from gateway.utils.hotkey_roles import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Provider error codes that mean "the call was declined before or instead of
+# doing upstream work" versus "the call may have happened and we cannot tell"
+# versus "our own machinery failed". Telemetry only; dispatch never reads it.
+_TELEMETRY_UNCERTAIN_CODES = frozenset({"call_uncertain"})
+_TELEMETRY_FAILED_CODES = frozenset({"broker_unavailable", "provider_unavailable"})
+
+
+_TELEMETRY_OPERATION_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}\.[a-z][a-z0-9_]{0,31}$")
+
+
+def _telemetry_provider_operation(provider: str, operation_id: str) -> Tuple[str, str]:
+    """Reduce a provider/operation pair to the frozen telemetry vocabulary.
+
+    An operation the table does not know, or one whose provider half does not
+    agree with the resolved provider, reports as "unknown" rather than being
+    exported verbatim.
+    """
+
+    if provider not in contracts.PROVIDERS:
+        return "unknown", "unknown"
+    if (
+        _TELEMETRY_OPERATION_RE.fullmatch(operation_id)
+        and operation_id.split(".", 1)[0] == provider
+    ):
+        return provider, operation_id
+    return provider, "unknown"
+
+
+def _provider_telemetry_fields(
+    call: Mapping[str, Any], http_status: Any, attempts: int
+) -> Dict[str, Any]:
+    """Project one broker call summary into bounded telemetry fields.
+
+    Mirrors the existing ``_provider_attempt_summary`` projection in the
+    broker: vocabulary members and bounded integers only, never an identity,
+    a body, a URL, or a credential.
+    """
+
+    error_code = call.get("error_code")
+    error_code = error_code if isinstance(error_code, str) else ""
+    if not error_code:
+        outcome = "uncertain" if call.get("outcome") == "uncertain" else "ok"
+    elif error_code in _TELEMETRY_UNCERTAIN_CODES or call.get("outcome") == "uncertain":
+        outcome = "uncertain"
+    elif error_code in _TELEMETRY_FAILED_CODES:
+        outcome = "failed"
+    else:
+        outcome = "refused"
+    operation_id = call.get("operation_id")
+    operation_id = operation_id if isinstance(operation_id, str) else ""
+    provider = call.get("provider")
+    if not isinstance(provider, str) or provider not in contracts.PROVIDERS:
+        provider = operation_id.split(".", 1)[0] if "." in operation_id else ""
+    provider, operation = _telemetry_provider_operation(provider, operation_id)
+    provider_status = call.get("provider_status")
+    cost = call.get("actual_microusd")
+    return {
+        "provider": provider,
+        "operation": operation,
+        "outcome": outcome,
+        "error_code": error_code or telemetry.NO_ERROR,
+        "http_status": max(0, min(int(http_status), 999)) if isinstance(http_status, int) and not isinstance(http_status, bool) else 0,
+        "provider_status": max(0, min(int(provider_status), 999)) if isinstance(provider_status, int) and not isinstance(provider_status, bool) else 0,
+        "attempts": max(1, min(int(attempts), 4)),
+        "cost_microusd": max(0, min(int(cost), 1_000_000_000)) if isinstance(cost, int) and not isinstance(cost, bool) else 0,
+    }
+
 _TRAJECTORY_WARNING_LOCK = threading.Lock()
 _TRAJECTORY_WARNING_LAST: Dict[str, float] = {}
 
@@ -4213,8 +4283,27 @@ class ArenaService:
                 )
             except Exception as diagnostic_exc:
                 _warn_trajectory_failure("provider_error", diagnostic_exc)
+            raised_provider, raised_operation = _telemetry_provider_operation(
+                operation.provider if operation is not None else "",
+                operation_id,
+            )
+            telemetry.record_provider(
+                raised_provider,
+                raised_operation,
+                "failed",
+                error_type=type(exc).__name__,
+                duration_ms=(time.monotonic() - started) * 1000.0,
+            )
             raise
         document = result.to_document()
+        telemetry.record_provider(
+            duration_ms=(time.monotonic() - started) * 1000.0,
+            **_provider_telemetry_fields(
+                result.call if isinstance(result.call, Mapping) else {},
+                result.status,
+                len(result.attempt_trace) or 1,
+            ),
+        )
         try:
             response_content = trajectory.provider_response_content(
                 document,
@@ -4491,6 +4580,7 @@ class ArenaService:
             output_hash=output_hash if company_quality_run else "",
             completion_request_hash=completion_request_hash,
         )
+        telemetry.record_run(kind, str(terminal_status))
         return result
 
     def _lease_token_for_run(self, validated: Mapping[str, Any], run: Mapping[str, Any]) -> str:

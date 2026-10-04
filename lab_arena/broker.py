@@ -36,6 +36,7 @@ from urllib.parse import quote, unquote_to_bytes, urlsplit
 import httpx
 
 from lab_arena import contracts, operations, provider_costs, scoring_provider_compat
+from lab_arena import telemetry
 from lab_arena.contracts import ArenaContractError
 from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable
 
@@ -297,12 +298,25 @@ class OpenRouterSharedGate:
     ) -> Optional[OpenRouterGateLease]:
         if _CREDENTIAL_FINGERPRINT_RE.fullmatch(credential_fingerprint) is None:
             raise ValueError("OpenRouter credential fingerprint is invalid")
+        # Contention telemetry only. An uncontended admission records nothing,
+        # so gate span volume tracks the problem rather than the traffic.
+        gate_entered_ns = time.time_ns()
+        gate_entered = time.monotonic()
+
+        def _record_gate(outcome: str) -> None:
+            telemetry.record_gate(
+                outcome,
+                duration_ms=(time.monotonic() - gate_entered) * 1000.0,
+                start_ns=gate_entered_ns,
+            )
+
         with self._condition:
             now = time.monotonic()
             self._cleanup_locked(now)
             state = self._states.get(credential_fingerprint)
             if state is None:
                 if len(self._states) >= self._max_states:
+                    _record_gate("no_capacity")
                     return None
                 state = _OpenRouterGateState(last_used=now)
                 self._states[credential_fingerprint] = state
@@ -331,6 +345,7 @@ class OpenRouterSharedGate:
                     state.last_used = now
                     self._condition.notify_all()
                     self._cleanup_locked(now)
+                    _record_gate("cancelled")
                     raise OpenRouterGateCancelled
                 # A short caller timeout is valid when the gate is idle. Its
                 # queue deadline can equal entry time, so allow this first
@@ -346,6 +361,8 @@ class OpenRouterSharedGate:
                         state.cooldown_generation,
                     )
                     self._condition.notify_all()
+                    if not first_check:
+                        _record_gate("admitted_after_wait")
                     return lease
                 if now >= deadline:
                     try:
@@ -355,6 +372,7 @@ class OpenRouterSharedGate:
                     state.last_used = now
                     self._condition.notify_all()
                     self._cleanup_locked(now)
+                    _record_gate("timed_out")
                     return None
                 wake_at = deadline
                 if (

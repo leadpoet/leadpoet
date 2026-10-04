@@ -1338,6 +1338,169 @@ def test_scrapingdog_known_charge_survives_settlement_failure():
     assert store.log == ["reserve", "dispatch", "settle", "settle", "settle", "uncertain"]
 
 
+_LARGE_SCRAPINGDOG_PAGE = b"<html>" + b"x" * 177_206 + b"</html>"
+
+
+def test_scrapingdog_storage_403_settles_exact_charge_with_compact_error():
+    assert len(_LARGE_SCRAPINGDOG_PAGE) == 177_219
+
+    class EdgeRejectingStore(FakeLedgerStore):
+        def settle_call(self, **kwargs):
+            if kwargs["terminal_response"]["status"] == 200:
+                self.log.append("settle")
+                assert len(kwargs["terminal_response"]["body_b64"]) == 236_292
+                raise br.ArenaStoreError(
+                    "rpc lab_arena_settle_call failed: HTTP 403"
+                )
+            return super().settle_call(**kwargs)
+
+    store = EdgeRejectingStore()
+    broker, _, transport = make_broker(
+        store=store, transport=FakeTransport([(200, _LARGE_SCRAPINGDOG_PAGE)]),
+    )
+    result = broker.execute(
+        CONTEXT, operation_id="scrapingdog.scrape",
+        parameters={"url": "https://example.com/about"},
+        action_sequence=0, timeout_ms=5000,
+    )
+    replay = broker.execute(
+        CONTEXT, operation_id="scrapingdog.scrape",
+        parameters={"url": "https://example.com/about"},
+        action_sequence=0, timeout_ms=5000,
+    )
+
+    assert result.status == 502
+    assert replay.status == 502 and replay.body == result.body
+    assert replay.call["idempotent"] is True
+    assert json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
+    assert result.call["outcome"] == "settled"
+    assert result.call["actual_microusd"] == 250
+    assert len(transport.sent) == 1
+    assert store.log == ["reserve", "dispatch", "settle", "settle", "settle", "settle", "reserve"]
+    saved = store.calls[result.call["call_identity"]]
+    assert saved["kind"] == "settlement" and saved["actual"] == 250
+    assert saved["terminal"]["call_succeeded"] is False
+    assert saved["terminal"]["provider_cost"] == {
+        "basis": "scrapingdog_legacy_endpoint_map", "units": "5",
+        "unit_name": "credits", "operation": "scrapingdog.scrape",
+    }
+
+
+def test_scrapingdog_storage_403_preserves_original_already_committed_settlement():
+    class LostReplyStore(FakeLedgerStore):
+        def settle_call(self, **kwargs):
+            if kwargs["terminal_response"]["status"] == 200:
+                if self.calls[kwargs["call_identity"]]["kind"] == "dispatch":
+                    super().settle_call(**kwargs)
+                self.log.append("settle")
+                raise br.ArenaStoreError(
+                    "rpc lab_arena_settle_call failed: HTTP 403"
+                )
+            return super().settle_call(**kwargs)
+
+    store = LostReplyStore()
+    broker, _, transport = make_broker(
+        store=store, transport=FakeTransport([(200, _LARGE_SCRAPINGDOG_PAGE)]),
+    )
+    result = broker.execute(
+        CONTEXT, operation_id="scrapingdog.scrape",
+        parameters={"url": "https://example.com/about"},
+        action_sequence=0, timeout_ms=5000,
+    )
+
+    assert result.status == 200 and result.body == _LARGE_SCRAPINGDOG_PAGE
+    assert result.call["outcome"] == "settled" and result.call["actual_microusd"] == 250
+    assert len(transport.sent) == 1
+    assert store.calls[result.call["call_identity"]]["kind"] == "settlement"
+    assert store.calls[result.call["call_identity"]]["terminal"]["call_succeeded"] is True
+
+
+@pytest.mark.parametrize("conflict", ["amount", "terminal", "status"])
+def test_scrapingdog_storage_403_compact_readback_conflict_fails_closed(conflict):
+    class ConflictingStore(FakeLedgerStore):
+        def settle_call(self, **kwargs):
+            self.log.append("settle")
+            if kwargs["terminal_response"]["status"] == 200:
+                raise br.ArenaStoreError(
+                    "rpc lab_arena_settle_call failed: HTTP 403"
+                )
+            if conflict == "status":
+                return {"status": "uncertain"}
+            return {
+                "status": "settled", "idempotent": True,
+                "amount_microusd": 251 if conflict == "amount" else 250,
+                "terminal_response": (
+                    {"status": 200} if conflict == "terminal"
+                    else kwargs["terminal_response"]
+                ),
+            }
+
+    store = ConflictingStore()
+    broker, _, transport = make_broker(
+        store=store, transport=FakeTransport([(200, _LARGE_SCRAPINGDOG_PAGE)]),
+    )
+    result = broker.execute(
+        CONTEXT, operation_id="scrapingdog.scrape",
+        parameters={"url": "https://example.com/about"},
+        action_sequence=0, timeout_ms=5000,
+    )
+
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert "actual_microusd" not in result.call
+    assert len(transport.sent) == 1
+    assert store.calls[result.call["call_identity"]]["kind"] == "uncertain"
+
+
+@pytest.mark.parametrize("error", [
+    "rpc lab_arena_settle_call failed: HTTP 403 code=auth message=denied",
+    "rpc lab_arena_settle_call failed: HTTP 503",
+    "rpc lab_arena_other_call failed: HTTP 403",
+])
+def test_scrapingdog_storage_refusal_without_compact_acceptance_stays_uncertain(error):
+    class RefusingStore(FakeLedgerStore):
+        def settle_call(self, **kwargs):
+            self.log.append("settle")
+            raise br.ArenaStoreError(error)
+
+    store = RefusingStore()
+    broker, _, transport = make_broker(
+        store=store, transport=FakeTransport([(200, _LARGE_SCRAPINGDOG_PAGE)]),
+    )
+    result = broker.execute(
+        CONTEXT, operation_id="scrapingdog.scrape",
+        parameters={"url": "https://example.com/about"},
+        action_sequence=0, timeout_ms=5000,
+    )
+
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert len(transport.sent) == 1
+    assert store.log.count("settle") == (
+        4 if "HTTP 403" in error and "lab_arena_settle_call" in error else 3
+    )
+    assert store.calls[result.call["call_identity"]]["uncertain_doc"]["known_actual_microusd"] == 250
+
+
+def test_scrapingdog_storage_403_without_known_cost_does_not_compact_settle():
+    class RefusingStore(FakeLedgerStore):
+        def settle_call(self, **kwargs):
+            self.log.append("settle")
+            raise br.ArenaStoreError("rpc lab_arena_settle_call failed: HTTP 403")
+
+    store = RefusingStore()
+    broker, _, transport = make_broker(
+        store=store, transport=FakeTransport([(503, b"upstream unavailable")]),
+    )
+    result = broker.execute(
+        CONTEXT, operation_id="scrapingdog.scrape",
+        parameters={"url": "https://example.com/about"},
+        action_sequence=0, timeout_ms=5000,
+    )
+
+    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    assert len(transport.sent) == 1 and store.log.count("settle") == 3
+    assert "known_actual_microusd" not in store.calls[result.call["call_identity"]]["uncertain_doc"]
+
+
 @pytest.mark.parametrize(
     ("response_headers", "expected_generation_id"),
     (

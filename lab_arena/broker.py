@@ -4441,8 +4441,49 @@ class Broker:
             for attempt in range(_SETTLEMENT_STORE_MAX_ATTEMPTS):
                 try:
                     settled = self._store.settle_call(**settlement)
-                except ArenaStoreError:
+                except ArenaStoreError as exc:
                     if attempt + 1 == _SETTLEMENT_STORE_MAX_ATTEMPTS:
+                        if (
+                            effective_operation.provider == "scrapingdog"
+                            and raw_actual is not None
+                            and cost_record is not None
+                            and not isinstance(exc, ArenaStoreUnavailable)
+                            and re.match(
+                                r"^rpc lab_arena_settle_call failed: HTTP 403(?: |$)",
+                                str(exc),
+                            )
+                        ):
+                            # A storage edge can reject a large successful page
+                            # before the settlement reaches SQL. Keep the exact
+                            # charge, but give the worker a compact error when
+                            # the full response cannot be saved. The provider
+                            # request is never sent again.
+                            refused = _error_result("provider_unavailable", summary)
+                            compact_terminal = _terminal_response_document(
+                                refused.status, refused.headers, refused.body,
+                                call_succeeded=False, provider_cost=cost_record,
+                            )
+                            settled = self._store.settle_call(
+                                **dict(settlement, terminal_response=compact_terminal)
+                            )
+                            if settled.get("status") != "settled":
+                                raise ArenaContractError("compact settlement did not settle")
+                            saved_amount = settled.get(
+                                "amount_microusd" if settled.get("idempotent")
+                                else "actual_microusd"
+                            )
+                            if saved_amount != actual:
+                                raise ArenaContractError("compact settlement cost changed")
+                            saved_terminal = settled.get("terminal_response")
+                            if saved_terminal == compact_terminal:
+                                summary.update(
+                                    outcome="settled", actual_microusd=actual,
+                                    provider_status=provider_status_for_summary,
+                                )
+                                return _error_result("provider_unavailable", summary)
+                            if saved_terminal == terminal:
+                                break  # The original settlement committed before its reply failed.
+                            raise ArenaContractError("compact settlement terminal changed")
                         raise
                     continue
                 if attempt and settled.get("status") == "settled":

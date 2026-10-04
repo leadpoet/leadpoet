@@ -345,8 +345,10 @@ When deploying the per-miner admission default, remove any explicit
 `395-lab-arena-per-miner-daily-admission.sql` to raise the former default only
 for standard, open Finney 71 rounds whose cutoff has not passed and which have
 no frozen participants, benchmark, or runs. The migration preserves submissions
-and credentials and leaves started, historical, shadow, and custom-cap rounds
-unchanged. Future rounds use the configured default.
+and credentials and leaves started, historical, shadow, and rounds with caps
+other than `20` unchanged. Inspect matching open rounds before applying it:
+an intentional cap of `20` has the same stored value as the former default.
+Future rounds use the configured default.
 
 `LAB_ARENA_BENCHMARK_DISCLOSURE_FROM` is an optional aware timestamp, normalized
 to UTC. For example, `2026-09-13T00:00:00Z` freezes

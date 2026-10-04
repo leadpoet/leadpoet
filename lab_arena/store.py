@@ -296,6 +296,7 @@ class StoreTransport:
         descending: bool = False,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
+        after_run_id: Optional[str] = None,
         status_in: Optional[Sequence[str]] = None,
         columns: str = "*",
     ) -> List[Dict[str, Any]]:  # pragma: no cover - interface
@@ -438,6 +439,7 @@ class PostgrestTransport(StoreTransport):
         descending=False,
         limit=None,
         offset=None,
+        after_run_id=None,
         status_in=None,
         columns="*",
     ):
@@ -464,6 +466,10 @@ class PostgrestTransport(StoreTransport):
             if offset < 0:
                 raise ArenaStoreError("offset must be nonnegative")
             query.append(("offset", str(offset)))
+        if after_run_id is not None:
+            if table != "lab_arena_runs" or order != "run_id" or "run_id" in (filters or {}):
+                raise ArenaStoreError("run cursor requires ordered Arena runs")
+            query.append(("run_id", "gt." + _check_filter_value(after_run_id)))
         # Only SELECT is safe to replay after an ambiguous read failure.
         # RPCs can mutate state and retain their separate retry policy.
         for attempt in range(2):
@@ -605,6 +611,7 @@ class PsycopgTransport(StoreTransport):
         descending=False,
         limit=None,
         offset=None,
+        after_run_id=None,
         status_in=None,
         columns="*",
     ):
@@ -634,6 +641,11 @@ class PsycopgTransport(StoreTransport):
                 raise ArenaStoreError("status inclusion filter is empty")
             clauses.append("status = ANY(%s)")
             values.append(list(statuses))
+        if after_run_id is not None:
+            if table != "lab_arena_runs" or order != "run_id" or "run_id" in (filters or {}):
+                raise ArenaStoreError("run cursor requires ordered Arena runs")
+            clauses.append("run_id > %s")
+            values.append(_check_filter_value(after_run_id))
         sql = "SELECT row_to_json(t) FROM (SELECT %s FROM public.%s" % (columns, table)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
@@ -1932,7 +1944,20 @@ class ArenaStore:
             filters["submission_id"] = submission_id
         if kind:
             filters["kind"] = kind
-        return self._transport.select("lab_arena_runs", filters=filters, order="run_id")
+        # A full miner set creates more rows per stage than PostgREST's usual
+        # 1,000-row response cap. Keep every caller's run_id ordering intact.
+        rows: List[Dict[str, Any]] = []
+        page_size = 500
+        after_run_id = None
+        while True:
+            page = self._transport.select(
+                "lab_arena_runs", filters=filters, order="run_id",
+                limit=page_size, after_run_id=after_run_id,
+            )
+            rows.extend(page)
+            if len(page) < page_size:
+                return rows
+            after_run_id = str(page[-1]["run_id"])
 
     def list_ledger(
         self,

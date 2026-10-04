@@ -88,6 +88,31 @@ def test_upgrade_admits_twenty_first_without_changing_existing_entries(database)
             )
 
 
+def test_full_miner_set_keeps_one_current_entry_per_hotkey_and_cap(database):
+    store = _store(database)
+    round_id = "arena-2098-10-05"
+    assert store.create_round(round_id, _config(round_id, cap=256))["status"] == "created"
+    owner = hotkey("full-daily-admission-owner")
+    first = None
+    for index in range(256):
+        submission_id = f"sub-full-daily-{index}"
+        miner = hotkey(f"full-daily-miner-{index}")
+        assert _register(store, round_id, submission_id, miner, owner)["status"] == "registered"
+        assert _accept(store, round_id, submission_id, miner)["status"] == "ok"
+        if index == 0:
+            first = (submission_id, miner)
+    assert first is not None
+    assert _register(store, round_id, "sub-full-daily-retry", first[1], owner)["submission_id"] == first[0]
+    extra = "sub-full-daily-overflow"
+    extra_miner = hotkey("full-daily-overflow-miner")
+    assert _register(store, round_id, extra, extra_miner, owner)["status"] == "registered"
+    with pytest.raises(ArenaStoreError, match="lab_arena_round_full"):
+        _accept(store, round_id, extra, extra_miner)
+    accepted = store.list_submissions(round_id, status="accepted")
+    assert len(accepted) == len({row["miner_hotkey"] for row in accepted}) == 256
+    store._transport.close()
+
+
 def test_upgrade_preserves_started_expired_custom_and_nonproduction_rounds(database):
     store = _store(database)
     expired = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()

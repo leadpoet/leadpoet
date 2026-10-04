@@ -131,8 +131,9 @@ def test_active_threshold_distinct_and_healthy_handoff(database, migrated, kind,
     "no_event", "wrong_class", "wrong_stage_code", "wrong_status",
     "wrong_event_run", "wrong_event_runner", "wrong_event_kind",
     "ledger", "result", "output",
-    "expired", "old_generation", "old_stage", "other_round", "other_kind",
-    "other_runner",
+    "expired_without_transition", "old_expired", "wrong_expiry_cause",
+    "failed_before_expiry", "old_generation", "old_stage", "other_round",
+    "other_kind", "other_runner",
 ])
 def test_unqualified_active_faults_do_not_block(database, migrated, change):
     psycopg, dsn = database
@@ -173,9 +174,17 @@ def test_unqualified_active_faults_do_not_block(database, migrated, change):
                 cursor.execute("UPDATE public.lab_arena_runs SET result_doc='{}'::jsonb WHERE run_id=%s", (run,))
             elif change == "output":
                 cursor.execute("UPDATE public.lab_arena_runs SET output_ref='present' WHERE run_id=%s", (run,))
-            elif change == "expired":
+            elif change == "expired_without_transition":
                 cursor.execute("UPDATE public.lab_arena_runs SET lease_expires_at=now()-interval '1 second' "
                                "WHERE run_id=%s", (run,))
+            elif change in ("old_expired", "wrong_expiry_cause", "failed_before_expiry"):
+                cause = "model_error" if change == "wrong_expiry_cause" else "lease_expired"
+                age = "421 seconds" if change == "old_expired" else "1 second"
+                direction = "+" if change == "failed_before_expiry" else "-"
+                cursor.execute("UPDATE public.lab_arena_runs SET status='failed',"
+                               "terminal_cause=%s,lease_expires_at=now()" + direction
+                               + "(%s::interval) WHERE run_id=%s",
+                               (cause, age, run))
             elif change == "old_generation":
                 cursor.execute("UPDATE public.lab_arena_runs SET stage_generation=0 WHERE run_id=%s", (run,))
             elif change == "old_stage":
@@ -187,6 +196,49 @@ def test_unqualified_active_faults_do_not_block(database, migrated, change):
             elif change == "other_runner":
                 cursor.execute("UPDATE public.lab_arena_runs SET runner_hotkey=%s WHERE run_id=%s",
                                (prior.RUNNER_B, run))
+            cursor.execute("SET session_replication_role=origin")
+        conn.commit()
+        assert prior._claim(conn, prior.RUNNER_A, "c")["run_id"] == fresh
+
+
+@pytest.mark.parametrize("kind", ["execute", "score"])
+@pytest.mark.parametrize("expired_count", [1, 2, 3])
+def test_active_and_recently_expired_faults_share_threshold(database, migrated, kind, expired_count):
+    psycopg, dsn = database
+    with psycopg.connect(**dsn) as conn:
+        fresh, faults = _seed(conn, kind=kind)
+        with conn.cursor() as cursor:
+            cursor.execute("SET session_replication_role=replica")
+            cursor.execute("UPDATE public.lab_arena_runs SET status='failed',"
+                           "terminal_cause='lease_expired',"
+                           "lease_expires_at=now()-interval '1 second' "
+                           "WHERE run_id=ANY(%s)", (faults[:expired_count],))
+            cursor.execute("SET session_replication_role=origin")
+        conn.commit()
+        assert prior._claim(conn, prior.RUNNER_A, "a") == {"status": "no_pending"}
+        assert prior._claim(conn, prior.RUNNER_B, "b")["run_id"] == fresh
+
+
+@pytest.mark.parametrize("kind", ["execute", "score"])
+def test_guard_continues_across_staggered_expiry_then_ages_out(database, migrated, kind):
+    psycopg, dsn = database
+    with psycopg.connect(**dsn) as conn:
+        fresh, faults = _seed(conn, kind=kind)
+        for index in range(3):
+            assert prior._claim(conn, prior.RUNNER_A, "a") == {"status": "no_pending"}
+            with conn.cursor() as cursor:
+                cursor.execute("SET session_replication_role=replica")
+                cursor.execute("UPDATE public.lab_arena_runs SET status='failed',"
+                               "terminal_cause='lease_expired',"
+                               "lease_expires_at=now()-interval '1 second' "
+                               "WHERE run_id=%s", (faults[index],))
+                cursor.execute("SET session_replication_role=origin")
+            conn.commit()
+        assert prior._claim(conn, prior.RUNNER_A, "b") == {"status": "no_pending"}
+        with conn.cursor() as cursor:
+            cursor.execute("SET session_replication_role=replica")
+            cursor.execute("UPDATE public.lab_arena_runs SET lease_expires_at="
+                           "now()-interval '421 seconds' WHERE run_id=%s", (faults[0],))
             cursor.execute("SET session_replication_role=origin")
         conn.commit()
         assert prior._claim(conn, prior.RUNNER_A, "c")["run_id"] == fresh

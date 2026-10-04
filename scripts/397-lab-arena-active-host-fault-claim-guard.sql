@@ -13,36 +13,47 @@ DECLARE
   v_volatility "char";
   v_config TEXT[];
   v_anchor CONSTANT TEXT := $anchor$    -- lab_arena_execute_host_cooldown_v1: three distinct, lease-bound host$anchor$;
-  v_insert CONSTANT TEXT := $insert$    -- lab_arena_active_host_fault_claim_guard_v1: three current, distinct
-    -- lease-bound runtime host faults stop further claims on this runner.
-    AND NOT EXISTS (
-      SELECT 1 FROM public.lab_arena_runs AS active_fault
-      WHERE active_fault.round_id=p_round_id
-        AND active_fault.stage=v_stage
-        AND active_fault.stage_generation=v_round.stage_generation
-        AND active_fault.kind=runs.kind
-        AND active_fault.runner_hotkey=p_runner_hotkey
-        AND active_fault.status='leased'
-        AND active_fault.lease_expires_at>pg_catalog.clock_timestamp()
-        AND active_fault.result_doc IS NULL
-        AND active_fault.output_ref IS NULL
+  v_insert CONSTANT TEXT := $insert$    -- lab_arena_active_host_fault_claim_guard_v1: three distinct
+    -- current or recently expired lease-bound host faults stop new claims.
+    AND (v_round.status NOT IN ('stage1', 'stage2', 'stage1_scoring', 'stage2_scoring')
+      OR NOT EXISTS (
+       SELECT 1 FROM public.lab_arena_runs AS host_fault
+       WHERE host_fault.round_id=p_round_id
+         AND host_fault.stage=v_stage
+         AND host_fault.stage_generation=v_round.stage_generation
+         AND host_fault.kind=CASE
+           WHEN v_round.status IN ('stage1', 'stage2') THEN 'execute'
+           ELSE 'score' END
+         AND host_fault.runner_hotkey=p_runner_hotkey
+         AND (
+           (host_fault.status='leased'
+             AND host_fault.lease_expires_at>pg_catalog.clock_timestamp())
+           OR (host_fault.status='failed'
+             AND host_fault.terminal_cause='lease_expired'
+             AND host_fault.lease_expires_at<=pg_catalog.clock_timestamp()
+             AND host_fault.lease_expires_at>
+               pg_catalog.clock_timestamp()-pg_catalog.make_interval(
+                 secs => (v_round.configuration_doc->>'lease_ttl_seconds')::INTEGER))
+         )
+         AND host_fault.result_doc IS NULL
+         AND host_fault.output_ref IS NULL
         AND NOT EXISTS (
           SELECT 1 FROM public.lab_arena_ledger AS prior_cost
-          WHERE prior_cost.run_id=active_fault.run_id
+          WHERE prior_cost.run_id=host_fault.run_id
         )
         AND EXISTS (
           SELECT 1 FROM public.lab_arena_trajectory_events AS host_error
-          WHERE host_error.run_id=active_fault.run_id
-            AND host_error.runner_hotkey=active_fault.runner_hotkey
-            AND host_error.run_kind=active_fault.kind
+          WHERE host_error.run_id=host_fault.run_id
+            AND host_error.runner_hotkey=host_fault.runner_hotkey
+            AND host_error.run_kind=host_fault.kind
             AND host_error.event_kind='runtime.error'
             AND host_error.content->>'status'='abandoned'
             AND host_error.content->>'failure_stage'='runtime'
             AND host_error.content->>'error_class'='RuntimeHostError'
         )
-      GROUP BY active_fault.runner_hotkey
-      HAVING COUNT(DISTINCT active_fault.assignment_id)>=3
-    )
+       GROUP BY host_fault.runner_hotkey
+       HAVING COUNT(DISTINCT host_fault.assignment_id)>=3
+      ))
 $insert$;
 BEGIN
   SELECT pg_catalog.pg_get_functiondef(p.oid), owner.rolname, p.proacl,

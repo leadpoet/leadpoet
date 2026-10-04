@@ -255,3 +255,56 @@ def test_batch_processor_limits_are_explicit() -> None:
             "BatchSpanProcessor must not inherit ambient process settings: "
             f"missing {argument}"
         )
+
+
+def test_arena_identity_and_scopes_are_constants() -> None:
+    source = _read(BOOTSTRAP)
+    assert re.search(r'^ARENA_SERVICE_NAME = "leadpoet-arena"$', source, re.M), (
+        "the Arena sidecar is a second emitting service and must carry its "
+        "own fixed identity — never the gateway's, and never an env value"
+    )
+    for constant in ('ARENA_HTTP_SCOPE = "arena.http"', 'ARENA_TASK_SCOPE = "arena.task"'):
+        assert constant in source, f"missing fixed scope constant: {constant}"
+    assert re.search(r"Resource\(\s*expected_resource\s*\)", source), (
+        "both emitters must build the resource from a fixed attribute dict"
+    )
+
+
+def test_arena_stage_vocabulary_is_frozen_and_literal() -> None:
+    """A stage label must be a literal from a closed set, never computed.
+
+    A formatted stage name would be a channel out of the process, which is
+    exactly what the fail-closed envelope exists to prevent.
+    """
+    tree = ast.parse(_read(BOOTSTRAP))
+    stages = None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if "ARENA_TASK_STAGES" not in targets:
+            continue
+        call = node.value
+        assert isinstance(call, ast.Call) and getattr(call.func, "id", "") == "frozenset", (
+            "the stage vocabulary must be a frozenset literal"
+        )
+        stages = call.args[0]
+    assert stages is not None, "ARENA_TASK_STAGES must exist"
+    assert isinstance(stages, ast.Set), "the stage vocabulary must be a set literal"
+    for element in stages.elts:
+        assert isinstance(element, ast.Constant) and isinstance(element.value, str), (
+            "every stage name must be a string literal, never a computed value"
+        )
+
+
+def test_arena_pipeline_seam_cannot_acquire_an_exporter() -> None:
+    """``lab_arena`` records through a seam; it never owns a destination."""
+    source = _read("lab_arena/telemetry.py")
+    assert source, "lab_arena/telemetry.py must exist"
+    assert "opentelemetry" not in source, (
+        "the pipeline seam must stay a plain no-op module — the single "
+        "exporter construction site is the gateway bootstrap"
+    )
+    assert "GATEWAY_OTEL" not in source, (
+        "the seam must not read the telemetry destination"
+    )

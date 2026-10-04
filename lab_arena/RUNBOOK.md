@@ -221,13 +221,20 @@ A shared provider account failure, rate limit, or provider server failure is
 an infrastructure failure. It does not give a miner a score of zero. A real
 caller error, such as invalid request data, is returned to the bundle.
 
-The judge uses bounded retries. If no valid judge result is available after
-those retries, the service cancels the incomplete round before publishing a
-ranking. It does not exclude one challenger for a judge or provider failure.
-A successful accepted retry takes precedence over a failed attempt. A miner's
-own credential or budget failure retains its existing ineligibility rule.
+The judge uses bounded retries. A failed review after the scoring window closes
+gives zero only to that participant's affected ICP. The other accepted ICPs
+remain valid. A successful accepted retry takes precedence over a failed
+attempt. If no baseline score remains, the round cannot publish a ranking.
 Malformed accepted scoring artifacts also cancel the round before scores are
 recorded; they are not company-verification failures.
+
+One narrow host exception applies to score attempt 2. If its lease expires
+naturally during scoring before the frozen close time, and a lease-authenticated
+`RuntimeHostError` records abandonment before any provider event, ledger entry,
+result, or output, expiry creates attempt 3. The original paid or failed
+attempts remain unchanged. The retry keeps the frozen scoring input and shared
+judgment identity, and the zero-call handoff keeps it off the failed runner.
+Attempt 3 is final unless a separate authorized recovery is made.
 
 Failed judge runs can include `result_doc.failure_diagnostic.reason`: one of
 `source_blocked`, `malformed_response`, `provider_error`,

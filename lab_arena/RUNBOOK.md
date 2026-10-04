@@ -473,7 +473,9 @@ at the runtime stage, no provider ledger, and no result or output stop that
 runner from claiming more work of the same kind in the current round, stage,
 and generation. The guard counts both active leases and naturally expired
 leases within one frozen lease-TTL window. Existing leases keep their normal
-deadlines. Healthy runners can continue claiming pending work. The guard ends
+deadlines. A fault remains counted during that window even if the expiry tick
+has not yet changed its run from `leased` to `failed`. Healthy runners can
+continue claiming pending work. The guard ends
 when fewer than three matching leases remain in that window; the separate
 expired-lease cooldown remains in force under its existing rules.
 

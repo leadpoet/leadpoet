@@ -1998,9 +1998,25 @@ async def _fetch_page(
     except (TypeError, ValueError):
         return {"ok": False, "error": "invalid_url"}
     if status != 200:
+        # The broker emits this exact code only for a validated per-request
+        # provider refusal. An untyped 403 can be an account failure.
+        request_refused = False
+        if api_key and status == 403:
+            try:
+                refusal = json.loads(raw)
+            except (TypeError, ValueError):
+                refusal = {}
+            request_refused = bool(
+                isinstance(refusal, Mapping)
+                and isinstance(refusal.get("error"), Mapping)
+                and refusal["error"].get("code") == "provider_request_refused"
+            )
         return {
             "ok": False,
-            "error": f"http_{status}",
+            "error": (
+                "provider_request_refused" if request_refused
+                else f"http_{status}"
+            ),
             **(
                 {"_retry_with_stealth": True}
                 if (
@@ -2043,6 +2059,7 @@ def _fetch_outcome(url: str, result: Mapping[str, Any]) -> dict[str, Any]:
         error_class = "http_error"
     elif raw_error in {
         "invalid_url", "unsupported_binary_content", "empty_page",
+        "provider_request_refused",
     }:
         error_class = raw_error
     else:
@@ -4081,6 +4098,7 @@ async def investigate_company_evidence(
                         stage_finding = claims.get("stage") or {}
                         return {
                             "claims": claims,
+                            "_completed_submit": True,
                             # This receipt is constructed only after fetched-page,
                             # exact-quote, company-attribution, URL, and canonical
                             # stage validation. It is never read from model JSON.

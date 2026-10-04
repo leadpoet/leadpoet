@@ -2123,6 +2123,48 @@ def test_investigator_fetch_uses_bounded_transport_and_validates_final_url(
     assert bounded_fetch.await_count == 2
 
 
+@pytest.mark.parametrize(
+    ("status", "body", "provider_key", "expected_error"),
+    [
+        (403, '{"error":{"code":"provider_request_refused"}}', True,
+         "provider_request_refused"),
+        (403, '{"error":{"code":"provider_request_refused"}}', False,
+         "http_403"),
+        (403, '{"error":{"code":"unauthorized"}}', True, "http_403"),
+        (403, "not JSON", True, "http_403"),
+        (401, '{"error":{"code":"provider_request_refused"}}', True,
+         "http_401"),
+        (429, '{"error":{"code":"provider_request_refused"}}', True,
+         "http_429"),
+        (503, '{"error":{"code":"provider_request_refused"}}', True,
+         "http_503"),
+    ],
+)
+def test_only_broker_typed_provider_refusal_is_local_fetch_failure(
+    monkeypatch, status, body, provider_key, expected_error,
+):
+    if provider_key:
+        monkeypatch.setenv("SCRAPINGDOG_API_KEY", "test-key")
+    else:
+        monkeypatch.delenv("SCRAPINGDOG_API_KEY", raising=False)
+        monkeypatch.delenv("QUALIFICATION_SCRAPINGDOG_API_KEY", raising=False)
+
+    async def fake_bounded(_session, url, **_kwargs):
+        return status, url, body
+
+    monkeypatch.setattr(investigator, "_fetch_bounded_html", fake_bounded)
+    result = asyncio.run(investigator._fetch_page(
+        object(), "https://acme.example/news",
+    ))
+
+    assert result == {"ok": False, "error": expected_error}
+    outcome = investigator._fetch_outcome("https://acme.example/news", result)
+    assert outcome["error_class"] == (
+        "provider_request_refused"
+        if expected_error == "provider_request_refused" else "http_error"
+    )
+
+
 def test_schema_repair_does_not_get_a_second_targeted_investigation(monkeypatch):
     initial = _complete_verdict(
         observed_company_stage="Public",
@@ -5083,6 +5125,7 @@ def test_audited_stage_quotes_get_source_context_then_exact_correction(
     ))
 
     assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["_completed_submit"] is True
     assert result["claims"]["stage"]["evidence_quote"] == corrected_quote
     correction = json.loads(requests[2]["messages"][-1]["content"])
     rejected = correction["rejected_findings"][0]
@@ -7093,6 +7136,167 @@ def test_incomplete_or_unbound_unproven_rebrand_stays_retryable(updates):
     )
 
 
+def _completed_cross_domain_rebrand_receipts():
+    identity = _completed_same_domain_unproven_rebrand_receipt(
+        submitted_name="abacus",
+        submitted_domain="abacustechnology.com",
+        submitted_linkedin_slug="abacus-group",
+        observed_name="abacustechnologycorporation",
+        observed_domain="abacustech.com",
+        observed_linkedin_slug="abacus-technology",
+    )
+    investigation = {
+        "gate": "company_evidence_investigation",
+        "completed_submitted_findings": True,
+        "failure_reason": "",
+        "targets": ["rebrand", "headcount", "stage"],
+        "claims": {"rebrand": {"status": "UNPROVEN"}},
+    }
+    return identity, investigation
+
+
+@pytest.mark.parametrize("typed_refusal", [False, True])
+def test_completed_cross_domain_unproven_rebrand_is_company_local(
+    typed_refusal,
+):
+    identity, investigation = _completed_cross_domain_rebrand_receipts()
+    investigation["usage"] = {"fetch_outcomes": [
+        {"ok": False, "error_class": "provider_request_refused"}
+        if typed_refusal else {"ok": True, "error_class": ""},
+    ]}
+
+    assert lead_scorer._has_explicitly_unproven_fit_dimensions(
+        {}, ("identity",), identity_receipt=identity,
+        investigation_receipt=investigation,
+    )
+
+
+@pytest.mark.parametrize(
+    ("identity_update", "investigation_update"),
+    [
+        ({}, {"completed_submitted_findings": False}),
+        ({}, {"failure_reason": "provider_error"}),
+        ({}, {"failure_reason": "malformed_response"}),
+        ({}, {"targets": ["headcount", "stage"]}),
+        ({}, {"claims": {"rebrand": {"status": "VERIFIED"}}}),
+        ({"observed_linkedin_slug": ""}, {}),
+        ({"evidence_source": "company_homepage"}, {}),
+        ({"reason_code": "identity_provider_error"}, {}),
+        ({}, {"usage": {"fetch_outcomes": [
+            {"ok": False, "error_class": "http_error"},
+        ]}}),
+        ({}, {"usage": {"fetch_outcomes": [
+            {"ok": False, "error_class": "fetch_failed"},
+        ]}}),
+    ],
+)
+def test_cross_domain_rebrand_without_completed_unproven_review_stays_retryable(
+    identity_update, investigation_update,
+):
+    identity, investigation = _completed_cross_domain_rebrand_receipts()
+    identity.update(identity_update)
+    investigation.update(investigation_update)
+
+    assert not lead_scorer._has_explicitly_unproven_fit_dimensions(
+        {}, ("identity",), identity_receipt=identity,
+        investigation_receipt=investigation,
+    )
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_required_attribute_unproven_grounding_requires_completed_review(
+    monkeypatch, completed,
+):
+    async def reviewed_attribute(**_kwargs):
+        return {
+            "claims": {"required_attribute": _attribute_finding()},
+            "_completed_submit": completed,
+            "failure_reason": "" if completed else "provider_error",
+        }
+
+    monkeypatch.setattr(
+        lead_scorer, "investigate_company_evidence", reviewed_attribute,
+    )
+    projected, result, _claims, _rebrand, _stage = asyncio.run(
+        lead_scorer._run_targeted_company_evidence_investigation(
+            company=_company(),
+            icp=_icp(required_attribute="Uses a specific platform."),
+            verdict=_complete_verdict(
+                attribute_satisfied=None,
+                required_attribute_evidence_url="",
+                required_attribute_evidence_quote="",
+            ),
+            investigation_targets=("required_attribute",),
+            icp_attribute="Uses a specific platform.",
+            icp_stage="",
+            verified_identity={},
+            verified_transport_domain="acme.example",
+            structured_employee_size_evidence=None,
+            structured_public_company_evidence=None,
+            employee_size_conflict=False,
+            company_quality=True,
+        )
+    )
+
+    grounding = projected[lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING]
+    assert result.details["investigation_receipt"][
+        "completed_submitted_findings"
+    ] is completed
+    if completed:
+        assert grounding["status"] == "unproven"
+        assert not lead_scorer._required_attribute_grounding_failure_reason(
+            projected
+        )
+    else:
+        assert grounding["status"] == "invalid_evidence"
+        assert lead_scorer._required_attribute_grounding_failure_reason(
+            projected
+        ) == MALFORMED_RESPONSE_FAILURE_REASON
+
+
+@pytest.mark.parametrize("error_class", ["http_error", "fetch_failed"])
+def test_completed_attribute_review_with_transport_fault_stays_retryable(
+    error_class,
+):
+    receipt = {
+        "gate": "company_evidence_investigation",
+        "completed_submitted_findings": True,
+        "failure_reason": "",
+        "targets": ["required_attribute"],
+        "claims": {"required_attribute": {"status": "UNPROVEN"}},
+        "usage": {"fetch_outcomes": [
+            {"ok": False, "error_class": error_class},
+        ]},
+    }
+    verdict = {
+        lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING: {"status": "unproven"},
+    }
+
+    assert not lead_scorer._has_explicitly_unproven_fit_dimensions(
+        verdict, ("required_attribute",), investigation_receipt=receipt,
+    )
+
+
+def test_completed_attribute_review_with_typed_source_refusal_is_company_local():
+    receipt = {
+        "gate": "company_evidence_investigation",
+        "completed_submitted_findings": True,
+        "failure_reason": "",
+        "targets": ["required_attribute"],
+        "claims": {"required_attribute": {"status": "UNPROVEN"}},
+        "usage": {"fetch_outcomes": [
+            {"ok": False, "error_class": "provider_request_refused"},
+        ]},
+    }
+    verdict = {
+        lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING: {"status": "unproven"},
+    }
+
+    assert lead_scorer._has_explicitly_unproven_fit_dimensions(
+        verdict, ("required_attribute",), investigation_receipt=receipt,
+    )
+
+
 @pytest.mark.parametrize("receipt", [None, {}, {"decision": "unavailable"}])
 def test_empty_or_malformed_identity_receipt_stays_retryable(receipt):
     assert not lead_scorer._is_same_domain_unproven_web_identity(receipt)
@@ -8320,6 +8524,7 @@ def test_oct01_edvisorly_homepage_platform_quote_does_not_prove_recurring_sale(
             investigator.PRIVATE_FETCHED_PAGES_KEY: {
                 university_url: {"final_url": university_url, "text": university_quote}
             },
+            "_completed_submit": True,
             "failure_reason": "",
         }
 
@@ -13967,6 +14172,7 @@ def test_harness_closes_search_budget_and_admission_boundary(monkeypatch):
         targets=("stage",),
     ))
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["_completed_submit"] is True
     assert result["usage"]["reasoning_turns"] == investigator.MAX_REASONING_TURNS
     assert result["usage"]["search_calls"] == investigator.MAX_SEARCH_CALLS
     assert len(provider_searches) == investigator.MAX_SEARCH_CALLS
@@ -13986,6 +14192,7 @@ def test_harness_closes_search_budget_and_admission_boundary(monkeypatch):
         targets=("stage",),
     ))
     assert admission_result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert "_completed_submit" not in admission_result
     assert admission_result["usage"]["reasoning_turns"] == 0
 
 
@@ -14200,6 +14407,7 @@ def test_reviewed_recurring_attribute_controls_arena_score(
         return {
             "claims": claims,
             investigator.PRIVATE_FETCHED_PAGES_KEY: pages,
+            "_completed_submit": True,
             "failure_reason": "",
         }
 
@@ -14265,13 +14473,25 @@ def test_reviewed_recurring_attribute_controls_arena_score(
     assert calls["intent"] == (1 if recurring_proved else 0)
 
 
-def test_completed_same_domain_alias_is_terminal_zero_through_lab_scorer(
-    monkeypatch,
+@pytest.mark.parametrize("cross_domain", [False, True])
+def test_completed_unproven_alias_is_terminal_zero_through_lab_scorer(
+    monkeypatch, cross_domain,
 ):
+    submitted_name = "Abacus" if cross_domain else "DBS"
+    submitted_domain = (
+        "abacustechnology.com" if cross_domain else "dbs.com"
+    )
+    observed_name = (
+        "Abacus Technology Corporation" if cross_domain else "DBS Bank Ltd"
+    )
+    observed_domain = "abacustech.com" if cross_domain else "dbs.com"
+    observed_slug = "abacus-technology" if cross_domain else "dbs-bank"
     verdict = _complete_verdict(
-        observed_company_name="DBS Bank Ltd",
-        observed_company_website="https://www.dbs.com/",
-        observed_company_linkedin="https://www.linkedin.com/company/dbs-bank",
+        observed_company_name=observed_name,
+        observed_company_website=f"https://www.{observed_domain}/",
+        observed_company_linkedin=(
+            f"https://www.linkedin.com/company/{observed_slug}"
+        ),
         observed_industry="Financial Services",
         observed_subindustry="Banking",
         industry_evidence_url="https://www.dbs.com/about-us/default.page",
@@ -14293,11 +14513,13 @@ def test_completed_same_domain_alias_is_terminal_zero_through_lab_scorer(
                 "identity": {
                     "decision": COMPANY_FIT_MATCH,
                     "evidence_source": "company_homepage",
-                    "observed_name": "dbs",
-                    "observed_domain": "dbs.com",
-                    "observed_linkedin_slug": "dbs-bank",
+                    "observed_name": submitted_name.casefold(),
+                    "observed_domain": submitted_domain,
+                    "observed_linkedin_slug": (
+                        "abacus-group" if cross_domain else "dbs-bank"
+                    ),
                 },
-                "verified_homepage_transport_domain": "dbs.com",
+                "verified_homepage_transport_domain": submitted_domain,
             },
         )
 
@@ -14314,13 +14536,15 @@ def test_completed_same_domain_alias_is_terminal_zero_through_lab_scorer(
     async def bounded_investigation(*, targets, **_kwargs):
         calls["investigator"] += 1
         assert targets == ("stage", "rebrand")
-        stage_finding = _finding(
-            "stage",
-            status="VERIFIED",
-            observed_value="Public",
-            evidence_url="https://www.dbs.com/investors/fixed-income/overview",
-            evidence_quote="DBS Group Holdings Ltd is listed in Singapore.",
-            reason="The cited parent is publicly listed.",
+        stage_finding = (
+            _finding("stage", status="UNPROVEN", observed_value=None,
+                     evidence_url="", evidence_quote="")
+            if cross_domain else _finding(
+                "stage", status="VERIFIED", observed_value="Public",
+                evidence_url="https://www.dbs.com/investors/fixed-income/overview",
+                evidence_quote="DBS Group Holdings Ltd is listed in Singapore.",
+                reason="The cited parent is publicly listed.",
+            )
         )
         return {
             "claims": {
@@ -14338,13 +14562,19 @@ def test_completed_same_domain_alias_is_terminal_zero_through_lab_scorer(
                 )
             },
             "failure_reason": "",
-            "_validated_stage_finding": stage_finding,
+            "_completed_submit": True,
+            "_validated_stage_finding": (
+                {} if cross_domain else stage_finding
+            ),
+            "usage": {"fetch_outcomes": [
+                {"ok": False, "error_class": "provider_request_refused"}
+            ]},
         }
 
     original_score_company = lead_scorer.score_company_competition_intent
 
     async def score_company(**kwargs):
-        if kwargs["company"].company_name == "DBS":
+        if kwargs["company"].company_name == submitted_name:
             return await original_score_company(**kwargs)
         calls["good"] += 1
         return lead_scorer.LeadScoreBreakdown(
@@ -14386,14 +14616,28 @@ def test_completed_same_domain_alias_is_terminal_zero_through_lab_scorer(
             scoring_adapter_version="qualification_integrity_v2"
         )
     )
-    dbs = {
+    submitted = {
         **_competition_company(),
-        "company_name": "DBS",
-        "company_website": "https://www.dbs.com/",
-        "company_linkedin": "",
+        "company_name": submitted_name,
+        "company_website": f"https://www.{submitted_domain}/",
+        "company_linkedin": (
+            "https://www.linkedin.com/company/abacus-group"
+            if cross_domain else ""
+        ),
         "industry": "Financial Services",
         "company_stage": "Public",
     }
+    good_companies = [
+        {
+            **_competition_company(),
+            "company_name": f"Good Company {index}",
+            "company_website": f"https://good{index}.example/",
+            "company_linkedin": (
+                f"https://www.linkedin.com/company/good{index}"
+            ),
+        }
+        for index in range(1, 5 if cross_domain else 2)
+    ]
     accepted = arena_scoring.score_work_item(
         {"scored_run_id": "same-domain-unproven-alias"},
         icp=_icp(
@@ -14403,25 +14647,31 @@ def test_completed_same_domain_alias_is_terminal_zero_through_lab_scorer(
             company_stage="Public",
             intent_signals=["Announced a completed funding event"],
         ).model_dump(mode="json"),
-        companies=[dbs, _competition_company()],
+        companies=[submitted, *good_companies],
         scorer=scorer,
         max_retries=3,
     )
 
-    assert calls == {"broad": 1, "investigator": 1, "good": 1}
-    assert [row["final_score"] for row in accepted] == [0.0, 77.0]
-    dbs_result = accepted[0]
-    receipt = dbs_result["verifier_gate_receipts"][0]
+    assert calls == {
+        "broad": 1, "investigator": 1, "good": len(good_companies),
+    }
+    assert [row["final_score"] for row in accepted] == [
+        0.0, *([77.0] * len(good_companies))
+    ]
+    submitted_result = accepted[0]
+    receipt = submitted_result["verifier_gate_receipts"][0]
     assert receipt["decision"] == COMPANY_FIT_UNAVAILABLE
     assert receipt["failure_class"] == "insufficient_fit_evidence"
     assert receipt["company_fit_dimensions"]["identity"] == (
         COMPANY_FIT_UNAVAILABLE
     )
-    assert receipt["company_fit_dimensions"]["stage"] == COMPANY_FIT_MATCH
+    assert receipt["company_fit_dimensions"]["stage"] == (
+        COMPANY_FIT_UNAVAILABLE if cross_domain else COMPANY_FIT_MATCH
+    )
     assert receipt["dimension_evidence"]["identity"][
         "web_identity_receipt"
     ]["reason_code"] == "rebrand_continuity_unproven"
-    assert dbs_result["company_qualified"] is False
+    assert submitted_result["company_qualified"] is False
 
 
 @pytest.mark.parametrize("reject_submission", [False, True])

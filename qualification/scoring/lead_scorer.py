@@ -5686,6 +5686,7 @@ def _has_explicitly_unproven_fit_dimensions(
     icp: Optional[ICPPrompt] = None,
     linkedin_refresh_outcome: str = "",
     identity_receipt: Optional[Mapping[str, Any]] = None,
+    investigation_receipt: Optional[Mapping[str, Any]] = None,
 ) -> bool:
     """Recognize unavailable proof after one complete repair response."""
 
@@ -5712,14 +5713,97 @@ def _has_explicitly_unproven_fit_dimensions(
         ),
     }
     if not incomplete or any(
-        dimension not in {*fields, "identity"} for dimension in incomplete
+        dimension not in {*fields, "identity", "required_attribute"}
+        for dimension in incomplete
     ):
         return False
+    usage = (
+        investigation_receipt.get("usage")
+        if isinstance(investigation_receipt, Mapping)
+        else None
+    )
+    fetch_outcomes = (
+        usage.get("fetch_outcomes") if isinstance(usage, Mapping) else None
+    )
+    review_has_transport_fault = bool(
+        isinstance(fetch_outcomes, list)
+        and any(
+            isinstance(outcome, Mapping)
+            and outcome.get("ok") is False
+            and outcome.get("error_class") != "provider_request_refused"
+            for outcome in fetch_outcomes
+        )
+    )
     for dimension in incomplete:
+        if dimension == "required_attribute":
+            claims = (
+                investigation_receipt.get("claims")
+                if isinstance(investigation_receipt, Mapping)
+                else None
+            )
+            finding = (
+                claims.get("required_attribute")
+                if isinstance(claims, Mapping)
+                else None
+            )
+            grounding = verdict.get(_REQUIRED_ATTRIBUTE_GROUNDING)
+            if not (
+                isinstance(investigation_receipt, Mapping)
+                and investigation_receipt.get("gate")
+                == "company_evidence_investigation"
+                and investigation_receipt.get("completed_submitted_findings")
+                is True
+                and investigation_receipt.get("failure_reason") == ""
+                and "required_attribute" in (
+                    investigation_receipt.get("targets") or ()
+                )
+                and isinstance(finding, Mapping)
+                and finding.get("status") == "UNPROVEN"
+                and isinstance(grounding, Mapping)
+                and grounding.get("status") == "unproven"
+                and not review_has_transport_fault
+                and linkedin_refresh_outcome != "retryable_failure"
+            ):
+                return False
+            continue
         if dimension == "identity":
             if not (
                 _is_same_domain_unproven_web_identity(identity_receipt)
                 or _is_verified_homepage_web_identity_conflict(identity_receipt)
+                or (
+                    isinstance(identity_receipt, Mapping)
+                    and identity_receipt.get("decision") == COMPANY_FIT_UNAVAILABLE
+                    and identity_receipt.get("reason_code")
+                    == "rebrand_continuity_unproven"
+                    and identity_receipt.get("evidence_source")
+                    == "company_web_reverification"
+                    and all(
+                        isinstance(identity_receipt.get(field), str)
+                        and bool(identity_receipt[field].strip())
+                        for field in (
+                            "submitted_name", "submitted_domain",
+                            "submitted_linkedin_slug", "observed_name",
+                            "observed_domain", "observed_linkedin_slug",
+                        )
+                    )
+                    and identity_receipt["submitted_domain"]
+                    != identity_receipt["observed_domain"]
+                    and isinstance(investigation_receipt, Mapping)
+                    and investigation_receipt.get("gate")
+                    == "company_evidence_investigation"
+                    and investigation_receipt.get("completed_submitted_findings")
+                    is True
+                    and investigation_receipt.get("failure_reason") == ""
+                    and "rebrand" in (investigation_receipt.get("targets") or ())
+                    and isinstance(investigation_receipt.get("claims"), Mapping)
+                    and isinstance(
+                        investigation_receipt["claims"].get("rebrand"), Mapping
+                    )
+                    and investigation_receipt["claims"]["rebrand"].get("status")
+                    == "UNPROVEN"
+                    and not review_has_transport_fault
+                    and linkedin_refresh_outcome != "retryable_failure"
+                )
             ):
                 return False
             continue
@@ -7011,6 +7095,9 @@ async def _run_targeted_company_evidence_investigation(
             )
     investigation_receipt = {
         "gate": "company_evidence_investigation",
+        "completed_submitted_findings": (
+            investigation.get("_completed_submit") is True
+        ),
         "targets": list(investigation_targets),
         "prior_decision": (
             prior_result.decision if prior_result is not None else ""
@@ -7159,20 +7246,31 @@ async def _run_targeted_company_evidence_investigation(
         projected = _project_investigator_required_attribute(
             projected, attribute_claim
         )
-        projected, _unused_attribute_source = (
-            await _ground_required_attribute_evidence(
-                projected,
-                active_attribute=True,
-                source_cache=_reviewed_required_attribute_source_cache(
-                    investigation,
-                    attribute_claim,
-                    required_attribute_source_cache,
-                ),
-                successful_source_sink=(
-                    successful_required_attribute_source_sink
-                ),
+        if (
+            investigation.get("_completed_submit") is True
+            and isinstance(attribute_claim, Mapping)
+            and attribute_claim.get("status") == "UNPROVEN"
+        ):
+            # A completed review explicitly found no attribute proof. The
+            # empty projected evidence is intentional, not malformed JSON.
+            projected[_REQUIRED_ATTRIBUTE_GROUNDING] = (
+                _required_attribute_source_receipt(status="unproven")
             )
-        )
+        else:
+            projected, _unused_attribute_source = (
+                await _ground_required_attribute_evidence(
+                    projected,
+                    active_attribute=True,
+                    source_cache=_reviewed_required_attribute_source_cache(
+                        investigation,
+                        attribute_claim,
+                        required_attribute_source_cache,
+                    ),
+                    successful_source_sink=(
+                        successful_required_attribute_source_sink
+                    ),
+                )
+            )
     projected = _project_investigator_geography(
         projected,
         (
@@ -7869,42 +7967,23 @@ async def _llm_reverify_company(
         # schema repair to re-run otherwise complete dimensions.
         if (
             result.decision == COMPANY_FIT_UNAVAILABLE
-            and (
-                (
-                    "required_attribute" in incomplete
-                    and isinstance(claims.get("required_attribute"), Mapping)
-                    and claims["required_attribute"].get("status") == "UNPROVEN"
-                    and (
-                        len(incomplete) == 1
-                        or _has_explicitly_unproven_fit_dimensions(
-                            verdict,
-                            tuple(dimension for dimension in incomplete
-                                  if dimension != "required_attribute"),
-                            icp=icp,
-                            linkedin_refresh_outcome=str(
-                                current_profile_cache.get("refresh_outcome") or ""
-                            ),
-                            identity_receipt=(
-                                result.details.get("identity_receipt")
-                                if isinstance(result.details, Mapping)
-                                else None
-                            ),
-                        )
-                    )
-                )
-                or _has_explicitly_unproven_fit_dimensions(
-                    verdict,
-                    incomplete,
-                    icp=icp,
-                    linkedin_refresh_outcome=str(
-                        current_profile_cache.get("refresh_outcome") or ""
-                    ),
-                    identity_receipt=(
-                        result.details.get("identity_receipt")
-                        if isinstance(result.details, Mapping)
-                        else None
-                    ),
-                )
+            and _has_explicitly_unproven_fit_dimensions(
+                verdict,
+                incomplete,
+                icp=icp,
+                linkedin_refresh_outcome=str(
+                    current_profile_cache.get("refresh_outcome") or ""
+                ),
+                identity_receipt=(
+                    result.details.get("identity_receipt")
+                    if isinstance(result.details, Mapping)
+                    else None
+                ),
+                investigation_receipt=(
+                    result.details.get("investigation_receipt")
+                    if isinstance(result.details, Mapping)
+                    else None
+                ),
             )
         ):
             return company_fit_unavailable(
@@ -8352,6 +8431,11 @@ async def _llm_reverify_company(
                     if isinstance(repaired_result.details, Mapping)
                     else None
                 ),
+                investigation_receipt=(
+                    repaired_result.details.get("investigation_receipt")
+                    if isinstance(repaired_result.details, Mapping)
+                    else None
+                ),
             )
         )
     )
@@ -8409,6 +8493,11 @@ async def _llm_reverify_company(
                     if isinstance(repaired_result.details, Mapping)
                     else None
                 ),
+                investigation_receipt=(
+                    repaired_result.details.get("investigation_receipt")
+                    if isinstance(repaired_result.details, Mapping)
+                    else None
+                ),
             )
         )
     )
@@ -8455,6 +8544,11 @@ async def _llm_reverify_company(
             linkedin_refresh_outcome=linkedin_refresh_outcome,
             identity_receipt=(
                 repaired_result.details.get("identity_receipt")
+                if isinstance(repaired_result.details, Mapping)
+                else None
+            ),
+            investigation_receipt=(
+                repaired_result.details.get("investigation_receipt")
                 if isinstance(repaired_result.details, Mapping)
                 else None
             ),

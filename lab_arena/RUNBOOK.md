@@ -344,9 +344,12 @@ When deploying the per-miner admission default, remove any explicit
 `LAB_ARENA_MAX_CHALLENGERS=20` override (or set it to `256`). Apply
 `395-lab-arena-per-miner-daily-admission.sql` to raise the former default only
 for standard, open Finney 71 rounds whose cutoff has not passed and which have
-no frozen participants, benchmark, or runs. The migration preserves submissions
-and credentials and leaves started, historical, shadow, and rounds with caps
-other than `20` unchanged. Inspect matching open rounds before applying it:
+no frozen participants, benchmark, or runs. It restores each affected hotkey's
+latest `capacity.round_full` rejection to `uploading` so the miner can retry
+signed finalization with valid credentials before cutoff. It does not accept a
+source or restore credentials automatically. Earlier submission history and
+credentials stay intact. Started, historical, shadow, and rounds with caps
+other than `20` stay unchanged. Inspect matching open rounds before applying it:
 an intentional cap of `20` has the same stored value as the former default.
 Future rounds use the configured default.
 

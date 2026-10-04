@@ -461,6 +461,15 @@ service stops new execute claims from that runner for one frozen lease-TTL
 window. It does not end current leases early or change scoring. Inspect and
 repair that host before restarting it; healthy runners can claim the retries.
 
+Three distinct current leases with authenticated `RuntimeHostError` reports
+at the runtime stage, no provider ledger, and no result or output stop that
+runner from claiming more work of the same kind in the current round, stage,
+and generation. The guard counts both active leases and naturally expired
+leases within one frozen lease-TTL window. Existing leases keep their normal
+deadlines. Healthy runners can continue claiming pending work. The guard ends
+when fewer than three matching leases remain in that window; the separate
+expired-lease cooldown remains in force under its existing rules.
+
 ## Miner flow
 
 Run `python scripts/lab_arena_miner.py interactive`. It reads the local source

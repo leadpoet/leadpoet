@@ -9,6 +9,7 @@ import sys
 
 from lab_arena.miner_submit import (
     MinerSubmissionError,
+    retry_credit_failures,
     run_interactive_submission,
     submission_credentials_from_environment,
     submit_agent_source,
@@ -45,6 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
         "interactive", help="prompt for a local agent fork and submit it"
     )
     _common_arguments(interactive)
+    retry = commands.add_parser(
+        "retry-credit-failures", help="after a credit top-up, retry eligible failed work once",
+    )
+    retry.add_argument("--round-id", required=True)
+    retry.add_argument("--submission-id", required=True)
+    _common_arguments(retry)
     return parser
 
 
@@ -88,6 +95,19 @@ def interactive(args) -> int:
     return 0 if run_interactive_submission(_keypair(args), args.api_base_url) else 2
 
 
+def retry_credits(args) -> int:
+    try:
+        result = retry_credit_failures(
+            round_id=args.round_id, submission_id=args.submission_id,
+            api_base_url=args.api_base_url, keypair=_keypair(args),
+        )
+    except MinerSubmissionError as exc:
+        print("credit retry failed: %s" % exc.format_for_cli(), file=sys.stderr)
+        return 2
+    print(json.dumps(dict(result), sort_keys=True))
+    return 0 if result["status"] in {"queued", "replayed"} else 2
+
+
 def main(argv=None) -> int:
     if argv is None and len(sys.argv) == 1:
         argv = ["interactive"]
@@ -96,4 +116,6 @@ def main(argv=None) -> int:
         return submit_source(args)
     if args.command == "interactive":
         return interactive(args)
+    if args.command == "retry-credit-failures":
+        return retry_credits(args)
     return 2

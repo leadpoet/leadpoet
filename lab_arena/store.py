@@ -56,6 +56,10 @@ SERVICE_ROLE_NAME = "lab_arena_service"
 SCORE_BATCH_SIZE = 500
 
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
+    "lab_arena_retry_credit_failures_v1": (
+        ("p_round_id", "text"), ("p_submission_id", "text"),
+        ("p_miner_hotkey", "text"), ("p_request_hash", "text"),
+    ),
     "lab_arena_operator_hold_active_v1": (),
     "lab_arena_append_trajectory_events_v1": (
         ("p_run_id", "text"),
@@ -1317,6 +1321,16 @@ class ArenaStore:
             ),
             "update_submission",
         )
+
+    def retry_credit_failures(
+        self, round_id: str, submission_id: str, miner_hotkey: str,
+        request_hash: str,
+    ) -> Dict[str, Any]:
+        return _require_mapping(self._transport.rpc(
+            "lab_arena_retry_credit_failures_v1",
+            {"p_round_id": round_id, "p_submission_id": submission_id,
+             "p_miner_hotkey": miner_hotkey, "p_request_hash": request_hash},
+        ), "retry_credit_failures")
 
     def accept_submission_with_credentials(
         self,

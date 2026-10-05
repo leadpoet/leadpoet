@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: credit failure recovery
+
+On 2026-10-04/05 the user authorized implementing the reviewed credit-recovery
+fix, deploying and restarting it, and monitoring the gateway and normal
+validator. This covers protected inspection, narrow code and exact committed
+migrations, tests, safe push/merge, canonical paired restarts and reward-disabled
+validation. Add only a bounded owner-signed fresh attempt for confirmed
+zero-charge credit failures under existing attempt limits and stage deadlines.
+Retain error and billing history, unresolved-charge reservations, shared-cache
+success gates, credential isolation, frozen inputs, accepted results, scoring,
+rewards, weights and concurrent work. Do not buy credits, reopen closed rounds
+or rescore accepted work. This authority ends when deployment and verification
+are complete.
+
 ## Scoped production authorization: October 5 proxy-based model capacity
 
 On 2026-10-04/05 the user authorized reviewing the supplied Webshare list,

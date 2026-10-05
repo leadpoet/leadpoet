@@ -242,6 +242,7 @@ SCOPE_CLAIM = "lab_arena.claim.v1"
 SCOPE_COMPLETE = "lab_arena.complete.v1"
 SCOPE_SUBMISSION_PRESIGN = "lab_arena.submission.presign.v1"
 SCOPE_SUBMISSION_FINALIZE = "lab_arena.submission.finalize.v1"
+SCOPE_SUBMISSION_CREDIT_RETRY = "lab_arena.submission.credit_retry.v1"
 SCOPE_WEIGHT_STATE = "lab_arena.weight_state.v1"
 REQUEST_SCOPES = frozenset(
     {
@@ -249,6 +250,7 @@ REQUEST_SCOPES = frozenset(
         SCOPE_COMPLETE,
         SCOPE_SUBMISSION_PRESIGN,
         SCOPE_SUBMISSION_FINALIZE,
+        SCOPE_SUBMISSION_CREDIT_RETRY,
         SCOPE_WEIGHT_STATE,
     }
 )
@@ -1117,6 +1119,44 @@ def validate_submission_costs(document: Any) -> Dict[str, Any]:
 SUBMISSION_CONSENT_FIELDS = (
     F("public_rerun", "bool"),
 )
+SUBMISSION_CREDIT_RETRY_BODY_FIELDS = (
+    F("submission_id", "str", minimum=1, maximum=64),
+)
+CREDIT_RETRY_STATUSES = frozenset({"queued", "replayed", "no_eligible"})
+CREDIT_RETRY_REASONS = frozenset({
+    "invalid_request_hash", "submission_unavailable", "stage_unavailable",
+    "deadline_unavailable", "deadline_passed", "benchmark_unavailable",
+    "no_proved_failures",
+})
+
+
+def validate_submission_credit_retry_body(body: Any) -> Dict[str, Any]:
+    document = validate_document(body, SUBMISSION_CREDIT_RETRY_BODY_FIELDS)
+    if not SUBMISSION_ID_RE.fullmatch(document["submission_id"]):
+        raise ArenaContractError("submission_id has an invalid shape")
+    return document
+
+
+def validate_credit_retry_result(value: Any) -> Dict[str, Any]:
+    """Return only the bounded public receipt, never private run evidence."""
+    if not isinstance(value, Mapping):
+        raise ArenaContractError("credit retry result invalid")
+    status, count = value.get("status"), value.get("requeued_count")
+    if (
+        not isinstance(status, str) or status not in CREDIT_RETRY_STATUSES
+        or type(count) is not int or not 0 <= count <= 20
+        or (status == "no_eligible" and count != 0)
+        or (status != "no_eligible" and count == 0)
+    ):
+        raise ArenaContractError("credit retry result invalid")
+    result = {"status": status, "requeued_count": count}
+    if status == "no_eligible":
+        reason = value.get("reason")
+        if not isinstance(reason, str) or reason not in CREDIT_RETRY_REASONS:
+            raise ArenaContractError("credit retry reason invalid")
+        result["reason"] = reason
+    return result
+
 SUBMISSION_PRESIGN_BODY_FIELDS = (
     F("source_size_bytes", "int", minimum=1, maximum=10 * 1024 * 1024),
     F("source_content_md5", "str", required=False, minimum=24, maximum=24),

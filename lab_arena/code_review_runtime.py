@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import secrets
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
-from lab_arena import broker, code_review, code_review_policy, contracts, operations, source_bundle
+from lab_arena import broker, code_review, code_review_policy, contracts, operations, source_bundle, submission_similarity
 
 
 class SubmissionCodeReviewer:
@@ -17,12 +18,14 @@ class SubmissionCodeReviewer:
         self, *, store: Any, objects: Any,
         credential_for: Callable[[Mapping[str, Any]], str],
         price_table: Mapping[str, Any], transport: broker.ProviderTransport,
+        similarity_references_for: Callable[[Mapping[str, Any]], list[Mapping[str, Any]]] | None = None,
     ) -> None:
         self._store = store
         self._objects = objects
         self._credential_for = credential_for
         self._prices = broker.validate_price_table(price_table)
         self._transport = transport
+        self._similarity_references_for = similarity_references_for
 
     def review(self, row: Mapping[str, Any]) -> Mapping[str, Any]:
         state = row.get("code_review_status")
@@ -45,6 +48,7 @@ class SubmissionCodeReviewer:
         hotkey = str(row["miner_hotkey"])
         prepared = None
         preparation_error = None
+        exact_duplicate = False
         reservation = 0
         try:
             payload = self._objects.get_bounded(
@@ -52,11 +56,68 @@ class SubmissionCodeReviewer:
             )
             if len(payload) != int(row["source_size_bytes"]):
                 raise code_review.CodeReviewError("code_review_source_size_mismatch")
+            # First validate the full archive, even when a local duplicate can
+            # skip the paid review. Persisted digests bind rows to object bytes.
             prepared = code_review.prepare_request(payload)
-            reservation = broker.max_openrouter_cost_microusd(
-                self._prices, prepared.parameters["model"], prepared.parameters,
-                max_output_tokens=prepared.parameters["max_tokens"],
-            )
+            if (self._similarity_references_for is not None or row.get("source_archive_sha256")
+                    or row.get("source_normalized_sha256")):
+                candidate = submission_similarity.inspect_archive(payload)
+                if row.get("source_archive_sha256") and row["source_archive_sha256"] != candidate.archive_sha256:
+                    raise code_review.CodeReviewError("code_review_source_digest_mismatch")
+                if row.get("source_normalized_sha256") and row["source_normalized_sha256"] != candidate.normalized_sha256:
+                    raise code_review.CodeReviewError("code_review_source_digest_mismatch")
+            if self._similarity_references_for is not None:
+                contexts = []
+                references = self._similarity_references_for(row)
+                if not isinstance(references, (list, tuple)) or len(references) > 257:
+                    raise ValueError("similarity reference set unavailable")
+                for entry in references:
+                    reference_row = entry["row"]
+                    reference_id = str(reference_row.get("submission_id") or "public-bootstrap")
+                    if reference_id == submission_id:
+                        continue
+                    if "payload" in entry and not isinstance(entry["payload"], bytes):
+                        raise ValueError("bootstrap reference invalid")
+                    reference_payload = (
+                        entry["payload"] if "payload" in entry else
+                        self._objects.get_bounded(
+                            str(reference_row["source_ref"]), source_bundle.MAX_SOURCE_ARCHIVE_BYTES
+                        )
+                    )
+                    if len(reference_payload) != int(reference_row["source_size_bytes"]):
+                        raise ValueError("reference source size mismatch")
+                    reference = submission_similarity.inspect_archive(reference_payload)
+                    if reference_row.get("source_archive_sha256") and reference_row["source_archive_sha256"] != reference.archive_sha256:
+                        raise ValueError("reference source digest mismatch")
+                    if reference_row.get("source_normalized_sha256") and reference_row["source_normalized_sha256"] != reference.normalized_sha256:
+                        raise ValueError("reference normalized digest mismatch")
+                    comparison = submission_similarity.compare(candidate, reference)
+                    if comparison.status == "exact":
+                        exact_duplicate = True
+                    if comparison.status != "exact" and (
+                        comparison.status == "ambiguous" or entry["source_public"] is True
+                    ):
+                        comparison_id = hashlib.sha256(
+                            f"{submission_id}:{reference_id}".encode("utf-8")
+                        ).hexdigest()[:24]
+                        context = submission_similarity.comparison_context(
+                            candidate, reference,
+                            reference_public=entry["source_public"] is True,
+                            comparison_id=comparison_id,
+                        )
+                        if context is None and comparison.status == "ambiguous":
+                            raise ValueError("similarity context unavailable")
+                        if context is not None:
+                            contexts.append(context)
+                if contexts and not exact_duplicate:
+                    prepared = code_review.prepare_request(
+                        payload, similarity_contexts=tuple(contexts)
+                    )
+            if not exact_duplicate:
+                reservation = broker.max_openrouter_cost_microusd(
+                    self._prices, prepared.parameters["model"], prepared.parameters,
+                    max_output_tokens=prepared.parameters["max_tokens"],
+                )
         except code_review.CodeReviewError as exc:
             preparation_error = code_review_policy.source_diagnostic(exc.code)
         except Exception:
@@ -83,6 +144,15 @@ class SubmissionCodeReviewer:
                 {**preparation_error, "model": code_review.DEFAULT_REVIEW_MODEL,
                  "file_count": len(prepared.reviewed_files) if prepared else 0,
                  "source_bytes": prepared.reviewed_file_bytes if prepared else 0}, 0,
+            )
+        if exact_duplicate:
+            return self._store.finish_submission_review(
+                submission_id, hotkey, token, "rejected",
+                {"passed": False, "verdict": "reject",
+                 "categories": ["duplicate_submission"],
+                 "model": code_review.DEFAULT_REVIEW_MODEL,
+                 "file_count": len(prepared.reviewed_files),
+                 "source_bytes": prepared.reviewed_file_bytes}, 0,
             )
         actual = 0
         status = "error"

@@ -81,6 +81,33 @@ The archive limits are 10 MiB compressed, 50 MiB unpacked, and 1,000 entries.
 The result gives a submission ID and round ID. **Accepted means admitted, not
 scored.** Validator execution and scoring follow through that round's queue.
 
+## Duplicate models
+
+The gateway checks a model against earlier accepted submissions from other
+hotkeys in the same round, and against the current champion. The first accepted
+submission has priority; reserving an upload earlier does not give priority.
+An exact copy, including safely normalized Python comments and formatting,
+returns HTTP 409 with `submission_rejected:duplicate_submission` at finalize.
+
+Supported near matches enter the existing source review before execution.
+This includes local variable and parameter renames and minor cosmetic edits.
+The submitting miner's OpenRouter key pays for that single bounded review.
+The review rejects a duplicate only with strong evidence that its behavior is
+unchanged. Meaningful changes and uncertain comparisons can pass. A review
+failure or missing credit remains an incomplete review, never a pass.
+
+Private source comparisons stay inside the gateway. The review can receive
+only the candidate's code and locally verified edit categories for a private
+reference. It can compare full reference code only after that code is public.
+An arbitrary rewrite of an undisclosed prompt cannot be judged from those
+categories, so it is allowed rather than assumed to be a duplicate. No
+comparison changes a round's existing disclosure time.
+
+Near-duplicate rejections appear in the submission's code review as the
+`duplicate_submission` category. An accepted upload still requires a passing
+review before execution. The gateway verifies the admitted archive's hash
+again when it supplies source to the validator.
+
 ## Recover after a provider credit failure
 
 Add credit to the same provider account, or increase its exhausted key limit.
@@ -113,8 +140,11 @@ attempt, so it does not reuse the failed call's identity or delete its history.
 Retry an unchanged archive with the same hotkey. The gateway reuses its upload
 reservation. If an unfinished archive changes, the gateway keeps the old row
 and bytes and assigns a new upload target. A late finalize for the replaced
-reservation returns `submission_superseded`. An accepted submission cannot be
-replaced during that round. The existing MD5 transport checksum prevents a
+reservation returns `submission_superseded`. One replacement is allowed before
+the published replacement cutoff, including an accepted source that has not
+started review or execution. The prior accepted source remains available until
+the replacement is finalized. The duplicate check excludes that same hotkey's
+prior source. The existing MD5 transport checksum prevents a
 same-size changed archive from silently finalizing older bytes.
 
 Use the returned IDs to read the result after the round publishes:

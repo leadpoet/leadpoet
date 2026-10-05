@@ -8,7 +8,7 @@ from tests.lab_arena.test_lab_arena_service_round import Harness, connect, datab
 def test_database_stamps_acceptance_once_and_preserves_it(connect, tmp_path):
     harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
     config = harness.service.create_round(
-        datetime.now(timezone.utc) + timedelta(hours=12), round_id="arena-2026-09-09-disclosure"
+        datetime.now(timezone.utc) + timedelta(minutes=30), round_id="arena-2026-09-09-disclosure"
     )
     harness.round_id = config["round_id"]
     harness.clock.now = datetime.now(timezone.utc)

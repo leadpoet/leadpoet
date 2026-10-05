@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: private Arena submission duplicate check
+
+On 2026-10-05 the user authorized a narrow gateway duplicate and near-duplicate
+submission gate, focused and real-path tests, exact committed migrations,
+safe push/merge, canonical paired deployment and production verification.
+Use the submitting miner's OpenRouter key for bounded ambiguous reviews.
+Keep other miners' undisclosed source inside the gateway. Preserve meaningful
+model improvements, normal same-hotkey replacement, existing disclosure times,
+accepted work, scoring, credentials, billing, promotion, rewards and weights.
+Use isolated reward-disabled validation; do not manufacture rewarding miner
+submissions. This authority ends after deployment and verification complete.
+
 ## Scoped production authorization: credit failure recovery
 
 On 2026-10-04/05 the user authorized implementing the reviewed credit-recovery

@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from lab_arena import telemetry
-from lab_arena import code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, trajectory
-from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, operations, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, verify, weight_state
+from lab_arena import code_review, code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, trajectory
+from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, operations, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, submission_similarity, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
     validate_accepted_weight_state,
@@ -766,6 +766,10 @@ class ArenaService:
         except ArenaStoreError as exc:
             raise ServiceError("code_review_schema_unavailable", 500) from exc
         try:
+            self._store.submission_similarity_schema()
+        except ArenaStoreError as exc:
+            raise ServiceError("submission_similarity_schema_unavailable", 500) from exc
+        try:
             self._store.validator_scoring_authority_schema()
         except ArenaStoreError as exc:
             raise ServiceError(
@@ -1427,6 +1431,75 @@ class ArenaService:
         reviewed = sum(result.get("status") in ("passed", "rejected", "error", "ok") for result in results)
         return {"reviewed": reviewed}
 
+    def submission_similarity_references(self, row: Mapping[str, Any]) -> List[Dict[str, Any]]:
+        """Select earlier admitted sources privately, with the frozen champion.
+
+        Admission time, not upload-reservation time, determines precedence.
+        Replaced sources and the miner's own entry never block a replacement.
+        No reference identity or source is returned through the miner API.
+        """
+        round_row = self._round(str(row["round_id"]))
+        order = lambda item: (
+            datetime.fromisoformat(str(item.get("accepted_at") or item["created_at"]).replace("Z", "+00:00")),
+            str(item["submission_id"]),
+        )
+        references = []
+        rows = self._store.list_submissions(str(row["round_id"]))
+        for other in rows:
+            if other["submission_id"] == row["submission_id"]:
+                continue
+            baseline = self._is_daily_baseline(other, round_row)
+            if not baseline and (
+                other.get("miner_hotkey") == row.get("miner_hotkey")
+                or other.get("status") not in ("accepted", "frozen")
+                or other.get("code_review_status") == "rejected"
+                or order(other) >= order(row)
+            ):
+                continue
+            if baseline and other.get("status") not in ("accepted", "frozen"):
+                raise ServiceError("similarity_reference_unavailable", 503)
+            references.append({
+                "row": other,
+                "source_public": source_disclosure.disclosure_status(
+                    other, self.now(), round_row=round_row,
+                )["available"],
+            })
+        champion = self._store.submission_similarity_champion(str(row["round_id"]))
+        if champion.get("status") != "ready":
+            raise ServiceError("similarity_reference_unavailable", 503)
+        champion_id = champion.get("submission_id")
+        if champion_id:
+            champion_row = self._store.get_submission(str(champion_id))
+            if not champion_row:
+                raise ServiceError("similarity_reference_unavailable", 503)
+            champion_round = self._round(str(champion_row["round_id"]))
+            references.append({
+                "row": champion_row,
+                "source_public": source_disclosure.disclosure_status(
+                    champion_row, self.now(), round_row=champion_round,
+                )["available"],
+            })
+        else:
+            # Bootstrap champion: use only the public source URL the
+            # existing baseline path uses, without freezing it early.
+            fetcher = self._config.baseline_source_fetcher
+            if fetcher is None:
+                raise ServiceError("similarity_reference_unavailable", 503)
+            config = round_row.get("configuration_doc") or {}
+            source_url = (
+                DEFAULT_BASELINE_SOURCE_URL if config.get("mode") == "live"
+                else config.get("baseline_source_url") or self.defaults.baseline_source_url
+            )
+            payload = bytes(fetcher(source_url, source_bundle.MAX_SOURCE_ARCHIVE_BYTES))
+            references.append({
+                "row": {"source_size_bytes": len(payload)},
+                "payload": payload,
+                "source_public": source_url == DEFAULT_BASELINE_SOURCE_URL,
+            })
+        if len(references) > contracts.MAX_CHALLENGERS + 1:
+            raise ServiceError("similarity_reference_limit", 503)
+        return references
+
     @staticmethod
     def _submission_replacement_cutoff(round_row: Mapping[str, Any]) -> datetime:
         schedule = (round_row.get("configuration_doc") or {}).get("schedule") or {}
@@ -1551,7 +1624,7 @@ class ArenaService:
         *,
         forbidden_values: Sequence[str] = (),
         require_license: bool = False,
-    ) -> None:
+    ) -> bytes:
         expected_size = int(row.get("source_size_bytes") or 0)
         source_ref = str(row.get("source_ref") or "")
         try:
@@ -1584,6 +1657,7 @@ class ArenaService:
                 "submission_rejected:%s" % exc.code, 400,
                 source_path=path[:source_bundle.MAX_SOURCE_PATH_BYTES],
             ) from exc
+        return payload
 
     def handle_submission_finalize(
         self, submission_id: str, envelope: Any
@@ -1633,11 +1707,18 @@ class ArenaService:
             raise ServiceError("submission_replacement_closed", 409)
         self._enforce_submission_request_limit(validated["hotkey"])
         try:
-            self._validate_uploaded_source(
+            payload = self._validate_uploaded_source(
                 row,
                 forbidden_values=tuple(body["credentials"].values()),
                 require_license=True,
             )
+            identity = submission_similarity.inspect_archive(payload)
+        except code_review.CodeReviewError as exc:
+            self._store.update_submission(
+                str(round_row["round_id"]), submission_id, "uploading", "rejected",
+                {"rejection_rule": exc.code},
+            )
+            raise ServiceError("submission_rejected:%s" % exc.code, 400) from exc
         except ServiceError as exc:
             if exc.code.startswith("submission_rejected:"):
                 self._store.update_submission(
@@ -1669,13 +1750,17 @@ class ArenaService:
             )
             raise ServiceError("submission_rejected:%s" % exc.code, 400) from exc
         try:
-            result = self._store.accept_submission_with_credentials(
+            result = self._store.accept_submission_source_with_credentials(
                 str(round_row["round_id"]),
                 submission_id,
                 validated["hotkey"],
                 encrypted_credentials,
+                identity.archive_sha256,
+                identity.normalized_sha256,
             )
         except ArenaStoreError as exc:
+            if "lab_arena_source_digest_conflict" in str(exc):
+                raise ServiceError("submission_source_immutable", 409) from exc
             if "lab_arena_submission_credentials_immutable" in str(exc):
                 raise ServiceError("submission_credentials_immutable", 409) from exc
             if "lab_arena_submission_replacement_closed" in str(exc):
@@ -1700,6 +1785,8 @@ class ArenaService:
             raise ServiceError("submission_window_closed", 409)
         if result.get("status") == "replacement_closed":
             raise ServiceError("submission_replacement_closed", 409)
+        if result.get("status") == "rejected_duplicate":
+            raise ServiceError("submission_rejected:duplicate_submission", 409)
         if result.get("status") not in ("ok", "existing"):
             raise ServiceError("submission_finalize_failed", 500)
         return {"status": "accepted", "submission_id": submission_id}
@@ -4135,6 +4222,11 @@ class ArenaService:
         except Exception as exc:
             raise ServiceError("run_source_unavailable", 503) from exc
         if len(payload) != expected_size:
+            raise ServiceError("run_source_integrity_failed", 500)
+        expected_digest = submission.get("source_archive_sha256")
+        if expected_digest and not hmac.compare_digest(
+            str(expected_digest), "sha256:" + hashlib.sha256(payload).hexdigest()
+        ):
             raise ServiceError("run_source_integrity_failed", 500)
         return payload
 

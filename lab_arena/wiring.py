@@ -529,6 +529,7 @@ def build_service_from_environment(mode: str):
         code_reviewer=SubmissionCodeReviewer(
             store=store, objects=objects, credential_for=submission_keys.code_review_key,
             price_table=price_table, transport=broker_module.HttpxProviderTransport(),
+            similarity_references_for=lambda row: service.submission_similarity_references(row),
         ),
         network_name=chain_config.network_name,
         netuid=chain_config.netuid,

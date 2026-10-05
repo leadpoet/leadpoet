@@ -12,6 +12,7 @@ TRANSIENT_BACKOFF_SECONDS = (60, 120, 240, 480, 900)
 
 SOURCE_ERROR_CODES = frozenset({
     "code_review_source_size_mismatch",
+    "code_review_source_digest_mismatch",
     "review_context_limit_invalid",
     "review_model_invalid",
     "review_output_cannot_report_coverage",

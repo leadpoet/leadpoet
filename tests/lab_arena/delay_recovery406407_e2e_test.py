@@ -22,6 +22,7 @@ def migrated(database, migrated399):
                 "406-lab-arena-round-host-fault-quarantine.sql",
                 "407-lab-arena-cost-run-lookup.sql",
                 "408-lab-arena-cost-run-index.sql",
+                "409-lab-arena-publication-cost-document-reuse.sql",
             ):
                 cursor.execute((Path(__file__).parents[2] / "scripts" / name).read_text())
 

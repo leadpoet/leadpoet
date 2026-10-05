@@ -49,24 +49,28 @@ _TELEMETRY_FAILED_CODES = frozenset({"broker_unavailable", "provider_unavailable
 
 
 _TELEMETRY_OPERATION_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}\.[a-z][a-z0-9_]{0,31}$")
+_TELEMETRY_ERROR_CODES = operations.ERROR_CODES | frozenset({
+    "broker_unavailable", "budget_refused", "call_refused", "call_uncertain",
+    "invalid_request", "lease_stale", "miner_credentials_unavailable",
+    "miner_provider_not_configured", "model_not_allowed",
+    "provider_request_refused", "provider_unavailable",
+})
 
 
-def _telemetry_provider_operation(provider: str, operation_id: str) -> Tuple[str, str]:
+def _telemetry_provider_operation(operation_id: str) -> Tuple[str, str]:
     """Reduce a provider/operation pair to the frozen telemetry vocabulary.
 
-    An operation the table does not know, or one whose provider half does not
-    agree with the resolved provider, reports as "unknown" rather than being
-    exported verbatim.
+    The operation table, not the broker summary or the operation prefix, owns
+    provider attribution. An Exa compatibility operation therefore belongs to
+    Deepline while retaining its registered Exa operation name.
     """
 
-    if provider not in contracts.PROVIDERS:
+    operation = operations.OPERATIONS.get(operation_id)
+    if operation is None or operation.provider not in contracts.PROVIDERS:
         return "unknown", "unknown"
-    if (
-        _TELEMETRY_OPERATION_RE.fullmatch(operation_id)
-        and operation_id.split(".", 1)[0] == provider
-    ):
-        return provider, operation_id
-    return provider, "unknown"
+    if _TELEMETRY_OPERATION_RE.fullmatch(operation_id):
+        return operation.provider, operation_id
+    return operation.provider, "unknown"
 
 
 def _provider_telemetry_fields(
@@ -79,9 +83,13 @@ def _provider_telemetry_fields(
     a body, a URL, or a credential.
     """
 
-    error_code = call.get("error_code")
-    error_code = error_code if isinstance(error_code, str) else ""
-    if not error_code:
+    reported_error = call.get("error_code")
+    error_code = (
+        reported_error
+        if isinstance(reported_error, str) and reported_error in _TELEMETRY_ERROR_CODES
+        else ""
+    )
+    if not reported_error:
         outcome = "uncertain" if call.get("outcome") == "uncertain" else "ok"
     elif error_code in _TELEMETRY_UNCERTAIN_CODES or call.get("outcome") == "uncertain":
         outcome = "uncertain"
@@ -90,11 +98,9 @@ def _provider_telemetry_fields(
     else:
         outcome = "refused"
     operation_id = call.get("operation_id")
-    operation_id = operation_id if isinstance(operation_id, str) else ""
-    provider = call.get("provider")
-    if not isinstance(provider, str) or provider not in contracts.PROVIDERS:
-        provider = operation_id.split(".", 1)[0] if "." in operation_id else ""
-    provider, operation = _telemetry_provider_operation(provider, operation_id)
+    provider, operation = _telemetry_provider_operation(
+        operation_id if isinstance(operation_id, str) else ""
+    )
     provider_status = call.get("provider_status")
     cost = call.get("actual_microusd")
     return {
@@ -4283,10 +4289,7 @@ class ArenaService:
                 )
             except Exception as diagnostic_exc:
                 _warn_trajectory_failure("provider_error", diagnostic_exc)
-            raised_provider, raised_operation = _telemetry_provider_operation(
-                operation.provider if operation is not None else "",
-                operation_id,
-            )
+            raised_provider, raised_operation = _telemetry_provider_operation(operation_id)
             telemetry.record_provider(
                 raised_provider,
                 raised_operation,
@@ -4296,14 +4299,14 @@ class ArenaService:
             )
             raise
         document = result.to_document()
-        telemetry.record_provider(
-            duration_ms=(time.monotonic() - started) * 1000.0,
-            **_provider_telemetry_fields(
-                result.call if isinstance(result.call, Mapping) else {},
-                result.status,
-                len(result.attempt_trace) or 1,
-            ),
-        )
+        call = result.call if isinstance(result.call, Mapping) else {}
+        if call.get("cached") is not True and call.get("idempotent") is not True:
+            telemetry.record_provider(
+                duration_ms=(time.monotonic() - started) * 1000.0,
+                **_provider_telemetry_fields(
+                    call, result.status, len(result.attempt_trace) or 1,
+                ),
+            )
         try:
             response_content = trajectory.provider_response_content(
                 document,

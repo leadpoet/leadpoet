@@ -19,8 +19,12 @@ from lab_arena import (
     source_bundle,
     telemetry,
 )
+from lab_arena.broker import BrokerResult
 from lab_arena.output import validate_output_document
-from lab_arena.service import ArenaService, S3ObjectStore, ServiceError, _parse_iso
+from lab_arena.service import (
+    ArenaService, S3ObjectStore, ServiceError, _parse_iso,
+    _provider_telemetry_fields, _telemetry_provider_operation,
+)
 from lab_arena.store import ArenaStoreError, hash_lease_token
 
 
@@ -776,6 +780,67 @@ def test_completion_records_newly_committed_accepted_run(monkeypatch):
 
     assert service.handle_complete({}) == committed
     assert observed == [("execute", "accepted")]
+
+
+@pytest.mark.parametrize(
+    ("call_patch", "expected_outcome", "expected_cost"),
+    [
+        ({"outcome": "settled", "actual_microusd": 125}, "ok", 125),
+        ({"error_code": "provider_unavailable"}, "failed", 0),
+        ({"outcome": "settled", "cached": True, "actual_microusd": 0}, None, None),
+        ({"outcome": "settled", "idempotent": True, "actual_microusd": 125}, None, None),
+    ],
+)
+def test_provider_telemetry_counts_only_fresh_broker_results(
+    monkeypatch, call_patch, expected_outcome, expected_cost,
+):
+    call = {"operation_id": "openrouter.chat", "provider": "openrouter", **call_patch}
+    result = BrokerResult(200, {}, b'{"answer":"ok"}', call)
+    service = object.__new__(ArenaService)
+    service._run_context = lambda *_args: (
+        {"round_id": "arena-a"}, SimpleNamespace(lease_token_hash="sha256:" + "a" * 64),
+    )
+    service._broker_for = lambda _round_id: SimpleNamespace(
+        execute=lambda *_args, **_kwargs: result,
+    )
+    service._store = SimpleNamespace(
+        append_trajectory_events=lambda _run_id, _lease_hash, events: {
+            "status": "accepted", "accepted": len(events),
+        },
+    )
+    observed = []
+    monkeypatch.setattr(
+        telemetry, "record_provider",
+        lambda *args, **kwargs: observed.append((args, kwargs)),
+    )
+    frame = {
+        "operation_id": "openrouter.chat", "parameters": {},
+        "timeout_ms": 1000, "action_sequence": 1,
+    }
+
+    assert service.handle_provider("run-1", "lease-token", frame) == result.to_document()
+    if expected_outcome is None:
+        assert observed == []
+    else:
+        assert len(observed) == 1
+        assert observed[0][1]["outcome"] == expected_outcome
+        assert observed[0][1]["cost_microusd"] == expected_cost
+
+
+def test_provider_telemetry_uses_registered_provider_and_safe_fallbacks():
+    assert _telemetry_provider_operation("exa.search") == ("deepline", "exa.search")
+    assert _telemetry_provider_operation("exa.contents") == ("deepline", "exa.contents")
+    assert _telemetry_provider_operation("openrouter.injected") == ("unknown", "unknown")
+    fields = _provider_telemetry_fields(
+        {"operation_id": "exa.search", "provider": "openrouter",
+         "error_code": "private-secret-value", "actual_microusd": 15},
+        503, 1,
+    )
+    assert (
+        fields["provider"], fields["operation"], fields["error_code"], fields["outcome"],
+    ) == (
+        "deepline", "exa.search", telemetry.NO_ERROR, "refused",
+    )
 
 
 @pytest.mark.parametrize(

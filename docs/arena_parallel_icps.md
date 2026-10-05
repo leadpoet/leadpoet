@@ -42,7 +42,7 @@ Use your own [Webshare Proxy Server](https://www.webshare.io/proxy-server)
 datacenter proxies. In the dashboard, go to **Subscription → My Plan → Proxy
 Server → Upgrade** and select:
 
-- **20 US proxies**; configure nineteen and keep the remaining proxy as a spare.
+- **19 US proxies**.
 - **1,000 GB bandwidth per month**.
 - **High Priority Network**.
 - **No Automatic Proxy List Refreshes**, so scheduled refreshes do not replace

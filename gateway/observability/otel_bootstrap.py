@@ -120,6 +120,22 @@ ARENA_TASK_STAGES = frozenset(
         "activate_rewards",
         "reconcile_provider_costs",
         "review_submissions",
+        # Steps inside one advance_round. The parent stage reports only that
+        # the whole transition failed, which is not enough to tell a slow
+        # billing read from a blocked service lock from a slow SQL function.
+        "advance_billing_read",
+        "advance_admission",
+        "advance_lock_wait",
+        "advance_expire_leases",
+        "advance_list_scoring_runs",
+        "advance_commit_benchmark",
+        "advance_open_stage",
+        "advance_close_stage",
+        "advance_commit_scoring_plan",
+        "advance_open_scoring",
+        "advance_close_scoring",
+        "advance_score_stage",
+        "advance_publish",
     }
 )
 

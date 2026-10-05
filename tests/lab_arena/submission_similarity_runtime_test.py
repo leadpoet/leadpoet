@@ -278,3 +278,36 @@ def test_review_cannot_silently_skip_similarity_comparisons():
         }]}
         with pytest.raises(code_review.CodeReviewError):
             code_review.parse_response(response, prepared)
+
+
+def test_pinned_review_can_read_champion_disclosure_without_admitting_its_round(monkeypatch):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from lab_arena.service import ArenaService, ServiceError
+    from lab_arena import source_disclosure
+
+    current = {"round_id": "arena-2026-10-06", "configuration_doc": {"mode": "shadow"}}
+    previous = {"round_id": "arena-2026-10-05", "configuration_doc": {"mode": "shadow"}}
+    champion = {"submission_id": "prior-champion", "round_id": previous["round_id"]}
+    candidate = {"submission_id": "candidate", "round_id": current["round_id"]}
+    service = object.__new__(ArenaService)
+    service._config = SimpleNamespace(pinned_round_id=current["round_id"])
+    service._store = SimpleNamespace(
+        get_round=lambda rid: {current["round_id"]: current, previous["round_id"]: previous}.get(rid),
+        list_submissions=lambda _rid: [],
+        submission_similarity_champion=lambda _rid: {"status": "ready", "submission_id": "prior-champion"},
+        get_submission=lambda _sid: champion,
+    )
+    checked_modes = []
+    def require_mode(row):
+        checked_modes.append(row["round_id"])
+        return row
+    monkeypatch.setattr(service, "_require_round_mode", require_mode)
+    monkeypatch.setattr(service, "now", lambda: datetime.now(timezone.utc))
+    monkeypatch.setattr(source_disclosure, "disclosure_status", lambda row, now, *, round_row: {
+        "available": round_row["round_id"] == previous["round_id"],
+    })
+    assert service.submission_similarity_references(candidate) == [{"row": champion, "source_public": True}]
+    assert checked_modes == [current["round_id"], previous["round_id"]]
+    with pytest.raises(ServiceError, match="round_scope_mismatch"):
+        service._round(previous["round_id"])

@@ -9,18 +9,19 @@ import pytest
 
 from tests.lab_arena import execute_host_cooldown396_postgres_test as prior396
 from tests.lab_arena import active_host_fault_guard397_postgres_test as prior397
-from tests.lab_arena import untransitioned_host_fault_guard399_postgres_test as prior399
+from tests.lab_arena import proxy_model_capacity401_postgres_test as prior401
 from tests.lab_arena import zero_setup_runner_handoff360_postgres_test as prior
 
 
 SQL406 = Path(__file__).parents[2] / "scripts/406-lab-arena-round-host-fault-quarantine.sql"
 LIVE_PREIMAGE = "f1f82a1dc510e9339ad76e0b08ad29d8dad3d8194d99700603d359b5d85ac7f7"
-database = prior399.database
+database = prior401.database
 
 
 @pytest.fixture(scope="module")
 def migrated(database):
-    prior399.migrated.__wrapped__(database)
+    prior401.prior399.migrated.__wrapped__(database)
+    prior401.migrated.__wrapped__(database, True)
     psycopg, dsn = database
     with psycopg.connect(**dsn) as conn:
         conn.autocommit = True
@@ -29,7 +30,7 @@ def migrated(database):
             local_hash = prior396._hash(cursor)
             sql = SQL406.read_text()
             assert LIVE_PREIMAGE in sql
-            sql = sql.replace(LIVE_PREIMAGE, local_hash)
+            assert local_hash == LIVE_PREIMAGE
             cursor.execute("BEGIN")
             with pytest.raises(psycopg.Error, match="preimage differs"):
                 cursor.execute(sql.replace(local_hash, "0" * 64, 1))

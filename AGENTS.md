@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: October 5 proxy-based model capacity
+
+On 2026-10-04/05 the user authorized reviewing the supplied Webshare list,
+expanding the primary validator to nineteen verified proxies, and deriving
+concurrent model capacity from available proxy-backed ICP slots and the frozen
+benchmark count. Reuse the existing workers, claims, sandbox, proxy checks and
+recovery paths for all validators. Authority includes protected credential and
+production inspection, narrow code and secret-environment changes, focused and
+production-style tests, exact committed migrations if required, push/merge,
+canonical paired restarts and October 5 monitoring. Preserve completed work,
+frozen inputs and policies, resource safety, provider accounting, scoring,
+promotion, weights and concurrent changes. Never print or commit proxy secrets.
+This authority ends after the deployed capacity and October 5 flow are verified.
+
 ## Scoped production authorization: Arena OnePatch telemetry PRs 211–213
 
 The user authorized joint review, minimal safety fixes, integration and merge

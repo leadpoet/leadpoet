@@ -151,6 +151,11 @@ exit). Historical rounds retain their frozen ceiling, including a twenty-slot
 ceiling where present. Each validator declares its own resource-safe capacity;
 it cannot raise a frozen round limit by supplying more proxies.
 
+Migration 401 retains the original twenty-slot capability response for older
+gateway releases. New gateways request the versioned capability check when
+their configured ceiling exceeds twenty. A missing migration fails startup
+before the gateway can advertise unsupported capacity.
+
 ## Model web access
 
 The sandbox still has no direct external network route. For new parallel

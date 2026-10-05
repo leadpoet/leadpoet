@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import leadpoet_canonical.subtensor_events_v2 as event_module
 from leadpoet_canonical.subtensor_events_v2 import (
     PROOF_SCHEMA_VERSION,
     SYSTEM_EVENT_COUNT_STORAGE_KEY,
@@ -35,6 +36,7 @@ CURRENT_RUNTIME_FIXTURES = {
     469: ROOT / "tests" / "fixtures" / "subtensor_events_spec469_block9128207.json",
     470: ROOT / "tests" / "fixtures" / "subtensor_events_spec470_block9141889.json",
     472: ROOT / "tests" / "fixtures" / "subtensor_events_spec472_block9198408.json",
+    473: ROOT / "tests" / "fixtures" / "subtensor_events_spec473_block9217488.json",
 }
 
 
@@ -218,6 +220,12 @@ def test_real_spec455_archive_events_prove_exact_adjacent_reveal():
             "0x43bc67be9df30636d7e948e7bdb1ed065f2fb92029458cc939abf89d76d8ada3",
             233,
         ),
+        (
+            473,
+            "054f253ec4e57a441ef79cddb7a9c0d9cd98efffbb8384add69b31315013632a",
+            "0x7773f5c0a6d6e9ea9ff347edcc491246eec08a5cf441d964ee96f40d7fa65a08",
+            921,
+        ),
     ),
 )
 def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
@@ -307,7 +315,7 @@ def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
     assert proof["account_id_hex"] == expected["account_id_hex"]
 
 
-@pytest.mark.parametrize("spec_version", [464, 466, 467, 468, 469, 470, 472])
+@pytest.mark.parametrize("spec_version", [464, 466, 467, 468, 469, 470, 472, 473])
 def test_exact_runtime_and_reveal_tampering_fail_closed(spec_version):
     fixture = json.loads(
         CURRENT_RUNTIME_FIXTURES[spec_version].read_text(encoding="utf-8")
@@ -348,6 +356,49 @@ def test_exact_runtime_and_reveal_tampering_fail_closed(spec_version):
 def test_unknown_runtime_profile_fails_closed():
     with pytest.raises(SubtensorEventsV2Error, match="unavailable"):
         load_subtensor_events_profile_v2(spec_version=460)
+
+
+def test_spec473_missing_or_wrong_profile_fails_closed(monkeypatch):
+    fixture = json.loads(CURRENT_RUNTIME_FIXTURES[473].read_text(encoding="utf-8"))
+    metadata_raw = bytes.fromhex(fixture["metadata_hex"][2:])
+    with pytest.raises(SubtensorEventsV2Error, match="observed spec version differs"):
+        validate_subtensor_events_profile_v2(
+            load_subtensor_events_profile_v2(spec_version=472),
+            genesis_hash="0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03",
+            spec_version=473,
+            transaction_version=1,
+            metadata_raw=metadata_raw,
+            runtime_code_hash=fixture["runtime_code_storage_hash"],
+        )
+    monkeypatch.delitem(event_module.DEFAULT_PROFILE_PATHS, 473)
+    with pytest.raises(SubtensorEventsV2Error, match="unavailable"):
+        load_subtensor_events_profile_v2(spec_version=473)
+
+
+def test_spec473_measured_normal_validator_reveal_is_exact():
+    fixture = json.loads(CURRENT_RUNTIME_FIXTURES[473].read_text(encoding="utf-8"))
+    assert fixture["block_hash"] == (
+        "0x5fa9bd3db1fde91945fbd5785bd3b0919ecdbc92f5877b1a7a5ab0bcf515517d"
+    )
+    proof = _proof(
+        load_subtensor_events_profile_v2(spec_version=473),
+        fixture,
+        bytes.fromhex(fixture["system_events"][2:]),
+        bytes.fromhex(fixture["system_event_count"][2:]),
+    )
+    assert proof["profile_sha256"] == (
+        "sha256:dc7811102cec3ece5295be968a37200b38ea33752c0e0eaff7c9f667848b5e43"
+    )
+    assert proof["events_sha256"] == (
+        "sha256:f84f78c8a45f66feca5530ab3b5eb4f107c68cb97b5939f93112faf79aa4c6ef"
+    )
+    assert (proof["weights_set_record_index"], proof["reveal_record_index"]) == (
+        69,
+        70,
+    )
+    assert proof["account_id_hex"] == (
+        "924620afb270acb1ee27bd034aa9e97108ef276da5079db982883cd70294741a"
+    )
 
 
 @pytest.mark.parametrize(

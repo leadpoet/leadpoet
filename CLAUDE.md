@@ -1,5 +1,20 @@
 # Agent Instructions
 
+## Scoped production authorization: Arena OnePatch telemetry PRs 211–213
+
+The user authorized joint review, minimal safety fixes, integration and merge
+of PR211, PR212 and PR213, with production deployment and end-to-end telemetry
+validation through the overnight validation procedures. Reuse existing Arena
+trajectory, run, lease and provider paths. Preserve active work, frozen results,
+qualification, costs, credentials, promotion, rewards and weights. Authority
+includes protected read-only inspection, focused tests, reward-disabled real
+runtime probes, exact committed migrations if needed, pushes and canonical
+gateway/normal-validator restarts. Export only approved operational metadata;
+never export credentials, hidden ICP content, prompts or model/provider bodies.
+Do not introduce a second diagnostic store or unrelated architecture. Preserve
+concurrent work. This authority ends after these PRs and live telemetry are
+verified.
+
 ## Scoped production authorization: October 4 cycle validation
 
 The user authorized monitoring the merged capacity/status changes through the

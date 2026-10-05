@@ -14,6 +14,8 @@ DECLARE
   v_wrapper_identity JSONB;
   v_guard_identity JSONB;
   v_helper_identity JSONB;
+  v_public_acl ACLITEM[];
+  v_granted_create BOOLEAN := FALSE;
   v_old_calls TEXT := $old$  v_expected_execution := public.lab_arena__cost_kind_summary_v1(
     v_submission_id, 'execute'
   );
@@ -28,6 +30,9 @@ DECLARE
     v_cost_document, 'score'
   );$new$;
 BEGIN
+  SELECT namespace.nspacl INTO v_public_acl
+  FROM pg_catalog.pg_namespace AS namespace
+  WHERE namespace.nspname = 'public';
   SELECT pg_catalog.pg_get_functiondef(procedure.oid),
          pg_catalog.jsonb_build_array(owner.rolname, procedure.proacl::TEXT,
            procedure.prosecdef, procedure.provolatile, procedure.proconfig)
@@ -96,6 +101,12 @@ BEGIN
     RAISE EXCEPTION 'lab_arena_publication_cost_409_helper_invalid';
   END IF;
   EXECUTE v_helper;
+  -- ALTER OWNER requires the target role to have CREATE on the schema. The
+  -- migration role can grant this as schema owner; remove only our grant.
+  IF NOT pg_catalog.has_schema_privilege('lab_arena_owner', 'public', 'CREATE') THEN
+    GRANT CREATE ON SCHEMA public TO lab_arena_owner;
+    v_granted_create := TRUE;
+  END IF;
   ALTER FUNCTION public.lab_arena__cost_kind_summary_from_doc_v1(JSONB,TEXT)
     OWNER TO lab_arena_owner;
   REVOKE ALL ON FUNCTION public.lab_arena__cost_kind_summary_from_doc_v1(JSONB,TEXT)
@@ -152,6 +163,13 @@ $wrapper$;
            'public.lab_arena__cost_kind_summary_from_doc_v1(jsonb,text)'::REGPROCEDURE)
        IS DISTINCT FROM v_wrapper_identity THEN
     RAISE EXCEPTION 'lab_arena_publication_cost_409_readback_changed';
+  END IF;
+  IF v_granted_create THEN
+    REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
+  END IF;
+  IF (SELECT namespace.nspacl FROM pg_catalog.pg_namespace AS namespace
+      WHERE namespace.nspname = 'public') IS DISTINCT FROM v_public_acl THEN
+    RAISE EXCEPTION 'lab_arena_publication_cost_409_schema_acl_changed';
   END IF;
 END;
 $publication_cost_409$;

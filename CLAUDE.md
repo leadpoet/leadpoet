@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped candidate authorization: closed-ledger restart drain recovery
+
+This candidate is a narrow recovery fix found during the user-authorized
+October 5 proxy-capacity deployment. Extend the existing canonical restart
+guard to naturally expire captured paid Arena leases only after their provider
+call heads are terminal. Preserve the exact owner,
+generation, stage, lease, result and output checks, signed completion authority,
+immutable ledger, ordinary expiry accounting, retries, operator pause and all
+concurrent work. This task permits local source and PostgreSQL tests and a local
+commit. It does not authorize a push, production migration, restart or direct
+production write. This task scope ends after the candidate is handed to review.
+
 ## Scoped production authorization: credit failure recovery
 
 On 2026-10-04/05 the user authorized implementing the reviewed credit-recovery

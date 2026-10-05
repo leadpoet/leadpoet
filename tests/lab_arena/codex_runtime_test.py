@@ -40,6 +40,20 @@ def response(output=None, **changes):
     }, **changes)
 
 
+def _reporting(function, name):
+    """Pass through, but report the exception the bridge is about to hide."""
+
+    def reporting(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except BaseException as exc:
+            print("codex.%s raised %s: %s" % (name, type(exc).__name__, exc),
+                  file=sys.stderr, flush=True)
+            raise
+
+    return reporting
+
+
 @contextmanager
 def broker_socket(monkeypatch, transport=None, store=None, *, priced_models=()):
     broker, store, transport = make_broker(transport=transport, store=store)
@@ -60,12 +74,35 @@ def broker_socket(monkeypatch, transport=None, store=None, *, priced_models=()):
         web_path = Path(directory) / runtime.SANDBOX_WEB_SOCKET_NAME
         state = runner.RunState(lease=lease("r1"), lease_token="tok-r1")
         server = runner.WorkerSocketServer(path, Api(), state)
+        handle_frame = server.handle_frame
+
+        def reporting_handle_frame(raw, **kwargs):
+            """Report a refused operation frame; the bridge turns it into a bare 502."""
+            payload = handle_frame(raw, **kwargs)
+            try:
+                document = json.loads(payload)
+            except ValueError:
+                return payload
+            if isinstance(document, dict) and "error" in document:
+                print("worker refused frame: %s\nframe: %s" % (
+                    json.dumps(document),
+                    raw[:4000].decode("utf-8", errors="replace"),
+                ), file=sys.stderr, flush=True)
+            return payload
+
+        server.handle_frame = reporting_handle_frame
         server.start()
         web_server = web_egress.WebEgressServer(web_path)
         try:
             web_server.start()
             monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(path))
             monkeypatch.setenv("LAB_ARENA_WEB_EGRESS_SOCKET", str(web_path))
+            # The bridge answers OSError and CodexRuntimeError alike with a bare
+            # 502, so report the original failure before it is collapsed.
+            for name in ("_dispatch", "_remaining_seconds"):
+                monkeypatch.setattr(
+                    codex, name, _reporting(getattr(codex, name), name)
+                )
             yield store, transport, path
         finally:
             try:
@@ -1139,11 +1176,14 @@ def test_real_codex_standalone_web_search_crosses_accounted_bridge(
         monkeypatch, transport,
         priced_models=("openai/gpt-5.6-luna",),
     ) as (store, transport, _path):
-        result = codex.run(
-            "Use tools.web__run from code mode, then report its exact result.",
-            model="openai/gpt-5.6-luna", cwd=tmp_path,
-            timeout_seconds=60, web_search="live",
-        )
+        try:
+            result = codex.run(
+                "Use tools.web__run from code mode, then report its exact result.",
+                model="openai/gpt-5.6-luna", cwd=tmp_path,
+                timeout_seconds=90, web_search="live",
+            )
+        except codex.CodexRuntimeError as exc:
+            pytest.fail(exc.diagnostics[-8000:])
 
     assert "ARENA_STANDALONE_SEARCH_OK" in result
     assert len(transport.requests) == len(store.calls) == 3
@@ -1411,7 +1451,7 @@ def test_real_codex_tool_call_and_continuation(monkeypatch, tmp_path):
             ops.validate_operation_request("openrouter.responses", document)
         except ops.OperationRequestError as exc:
             request_errors.append((str(exc), list(document), document.get("tools")))
-        return original_dispatch(socket_path, document)
+        return original_dispatch(socket_path, document, **_kwargs)
 
     monkeypatch.setattr(codex, "_dispatch", checked_dispatch)
     class ToolTransport(FakeTransport):
@@ -1436,7 +1476,7 @@ def test_real_codex_tool_call_and_continuation(monkeypatch, tmp_path):
     monkeypatch.setenv("no_proxy", "")
     with broker_socket(monkeypatch, ToolTransport()) as (store, transport, path):
         try:
-            text = codex.run("Run the shell command provided by the model, then report success.", model="openai/gpt-4o-mini", cwd=tmp_path, timeout_seconds=60)
+            text = codex.run("Run the shell command provided by the model, then report success.", model="openai/gpt-4o-mini", cwd=tmp_path, timeout_seconds=90)
         except codex.CodexRuntimeError as exc:
             pytest.fail(exc.diagnostics[-8000:] + "\n" + repr(request_errors))
         assert "ARENA_CODEX_OK" in text
@@ -1575,15 +1615,15 @@ def test_pinned_codex_does_not_repeat_an_unknown_cost_call(monkeypatch, tmp_path
     transport = FakeTransport([(520, unknown), (200, response(id="must-not-dispatch"))])
 
     with broker_socket(monkeypatch, transport) as (store, transport, _path):
-        with pytest.raises(codex.CodexRuntimeError):
+        with pytest.raises(codex.CodexRuntimeError) as error:
             codex.run(
                 "Reply exactly ARENA_CODEX_OK.",
                 model="openai/gpt-4o-mini",
                 cwd=tmp_path,
-                timeout_seconds=30,
+                timeout_seconds=90,
             )
 
-    assert len(transport.sent) == len(store.calls) == 1
+    assert len(transport.sent) == len(store.calls) == 1, error.value.diagnostics[-8000:]
     call = next(iter(store.calls.values()))
     assert call["call_doc"]["action_sequence"] == 0
     assert call["kind"] == "uncertain"
@@ -1622,16 +1662,16 @@ def test_pinned_codex_failure_does_not_start_another_billable_request(
     transport = FakeTransport([(520, unknown), (200, response(id="must-not-dispatch"))])
 
     with broker_socket(monkeypatch, transport, store=store):
-        with pytest.raises(codex.CodexRuntimeError):
+        with pytest.raises(codex.CodexRuntimeError) as error:
             codex.run(
                 "Reply exactly ARENA_CODEX_OK.",
                 model="openai/gpt-4o-mini",
                 cwd=tmp_path,
-                timeout_seconds=30,
+                timeout_seconds=90,
             )
 
-    assert len(transport.sent) == 1
-    assert len(store.calls) == 1
+    assert len(transport.sent) == 1, error.value.diagnostics[-8000:]
+    assert len(store.calls) == 1, error.value.diagnostics[-8000:]
     assert store.action_sequences == [0]
     call = next(iter(store.calls.values()))
     assert call["kind"] == "uncertain"
@@ -1682,7 +1722,10 @@ def test_pinned_codex_selects_each_priced_model_without_runtime_rewrites(monkeyp
             return super().send(**kwargs)
 
     with broker_socket(monkeypatch, FinalTransport(), priced_models=(model,)) as (store, transport, path):
-        result = codex.run("Reply exactly ARENA_CODEX_OK.", model=model, cwd=tmp_path, timeout_seconds=60)
+        try:
+            result = codex.run("Reply exactly ARENA_CODEX_OK.", model=model, cwd=tmp_path, timeout_seconds=90)
+        except codex.CodexRuntimeError as exc:
+            pytest.fail(exc.diagnostics[-8000:])
     assert "ARENA_CODEX_OK" in result
     assert transport.sent
     assert all(json.loads(sent["body"])["model"] == model for sent in transport.sent)

@@ -20,6 +20,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 from gateway.observability.otel_bootstrap import (
     ARENA_GATE_SCOPE,
     ARENA_HTTP_SCOPE,
+    ARENA_OPERATION_PROVIDERS,
     ARENA_PROVIDER_OUTCOMES,
     ARENA_PROVIDER_SCOPE,
     ARENA_PROVIDERS,
@@ -70,6 +71,7 @@ def test_request_spans_name_the_operation_without_leaking_the_run_id():
         "http.request.method": "POST",
         "http.route": "/arena/v1/runs/{run_id}/complete",
         "http.response.status_code": 200,
+        "arena.denial": "-",
         "duration_ms": pytest.approx(span.attributes["duration_ms"]),
     }
     haystack = repr(dict(span.attributes)) + span.name
@@ -212,6 +214,18 @@ def test_every_provider_and_outcome_in_the_vocabulary_is_admitted():
     assert len(exp.get_finished_spans()) == len(pairs)
 
 
+def test_exact_operation_provider_pairs_are_required():
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_provider("deepline", "exa.search", "ok")
+    assert exp.get_finished_spans()[0].attributes["arena.operation"] == "exa.search"
+    exp.clear()
+    recorder.record_provider("openrouter", "openrouter.private_token", "refused")
+    recorder.record_provider("openrouter", "exa.search", "ok")
+    assert exp.get_finished_spans() == ()
+    assert ARENA_OPERATION_PROVIDERS["exa.search"] == "deepline"
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -266,7 +280,7 @@ def test_the_service_projection_only_produces_admissible_provider_spans():
          "error_code": "budget_refused", "outcome": "settled"},
         {"operation_id": "openrouter.responses", "provider": "openrouter",
          "error_code": "provider_unavailable", "outcome": "uncertain"},
-        {"operation_id": "scrapingdog.search", "provider": "scrapingdog",
+        {"operation_id": "scrapingdog.google", "provider": "scrapingdog",
          "error_code": "call_uncertain"},
         # an operation the table does not know must degrade, not leak
         {"operation_id": "anthropic/claude-sonnet-4", "provider": "anthropic"},
@@ -404,6 +418,27 @@ def test_a_denial_code_does_not_leak_into_the_next_request():
     refused, served = exp.get_finished_spans()
     assert refused.attributes["arena.denial"] == "lease_token_invalid"
     assert served.attributes["arena.denial"] == "-"
+
+
+def test_a_shape_valid_unknown_denial_code_is_not_exported():
+    exp = InMemorySpanExporter()
+    app = FastAPI()
+
+    @app.get("/arena/v1/current")
+    def _current():
+        telemetry.note_denial("private_token")
+        return JSONResponse(status_code=403, content={"status": "rejected"})
+
+    recorder = configure_arena_otel(app, span_exporter=exp)
+    telemetry.install_recorder(recorder)
+    try:
+        with TestClient(app) as client:
+            assert client.get("/arena/v1/current").status_code == 403
+    finally:
+        telemetry.install_recorder(None)
+
+    (span,) = exp.get_finished_spans()
+    assert span.attributes["arena.denial"] == "-"
 
 
 def test_the_deep_capture_seam_is_a_no_op_until_a_recorder_is_installed():

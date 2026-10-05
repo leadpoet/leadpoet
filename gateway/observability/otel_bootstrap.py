@@ -220,10 +220,33 @@ ARENA_GATE_OUTCOMES = frozenset(
     {"admitted_after_wait", "timed_out", "cancelled", "no_capacity"}
 )
 
-# An operation id is ``<provider>.<operation>``; the provider half must be a
-# member of the frozen provider vocabulary and the operation half is
-# shape-checked. Nothing else is exported.
-_ARENA_OPERATION_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}\.[a-z][a-z0-9_]{0,31}$")
+# Exact operation-to-provider pairs from ``lab_arena.operations.OPERATIONS``.
+# Exa operations use Deepline, so the operation prefix is not the provider.
+# The service must reduce unknown caller-supplied operation ids to "unknown".
+ARENA_OPERATION_PROVIDERS = {
+    "deepline.execute": "deepline",
+    "exa.contents": "deepline",
+    "exa.search": "deepline",
+    "openrouter.chat": "openrouter",
+    "openrouter.responses": "openrouter",
+    "scrapingdog.google": "scrapingdog",
+    "scrapingdog.google_jobs": "scrapingdog",
+    "scrapingdog.google_news": "scrapingdog",
+    "scrapingdog.indeed": "scrapingdog",
+    "scrapingdog.instagram_profile": "scrapingdog",
+    "scrapingdog.jobs": "scrapingdog",
+    "scrapingdog.linkedinjobs": "scrapingdog",
+    "scrapingdog.profile": "scrapingdog",
+    "scrapingdog.profile_post": "scrapingdog",
+    "scrapingdog.scrape": "scrapingdog",
+    "scrapingdog.tiktok_profile": "scrapingdog",
+    "scrapingdog.x_post": "scrapingdog",
+    "scrapingdog.x_profile": "scrapingdog",
+    "scrapingdog.youtube_channel": "scrapingdog",
+    "scrapingdog.youtube_search": "scrapingdog",
+    "scrapingdog.youtube_transcripts": "scrapingdog",
+    "scrapingdog.youtube_video": "scrapingdog",
+}
 ARENA_OPERATION_UNKNOWN = "unknown"
 
 # A refusal code is the literal prefix of a ``ServiceError`` code, i.e. the
@@ -231,6 +254,183 @@ ARENA_OPERATION_UNKNOWN = "unknown"
 # never exported; the prefix is always a literal written in the source.
 _ARENA_DENIAL_RE = re.compile(r"^[a-z][a-z0-9_]{0,47}$")
 ARENA_NO_DENIAL = "-"
+
+# Only explicit source-defined refusal codes may leave the sidecar. A shape
+# check alone would admit a caller-controlled identifier such as "private_key".
+ARENA_DENIAL_CODES = frozenset(
+    {
+        "accepted_weight_epoch_not_current",
+        "accepted_weight_epoch_scope_unavailable",
+        "accepted_weight_state_conflict",
+        "accepted_weight_state_invalid",
+        "accepted_weight_state_reward_conflict",
+        "arena_schema_version_invalid",
+        "arena_store_unavailable",
+        "baseline_cost_eligibility_schema_invalid",
+        "baseline_cost_eligibility_schema_unavailable",
+        "baseline_hotkey_missing",
+        "baseline_hotkey_reserved",
+        "baseline_promoter_unavailable",
+        "baseline_promotion_pending",
+        "baseline_registration_failed",
+        "baseline_source_fetcher_missing",
+        "baseline_source_invalid",
+        "baseline_source_not_ready",
+        "baseline_source_rejected",
+        "baseline_submission_invalid",
+        "benchmark_data_invalid",
+        "benchmark_disclosure_activation_invalid",
+        "benchmark_disclosure_policy_invalid",
+        "benchmark_icp_count_invalid",
+        "benchmark_not_committed",
+        "benchmark_not_public",
+        "cancel_reason_invalid",
+        "chain_outcome_conflict",
+        "chain_outcome_scope_mismatch",
+        "chain_outcome_signature_invalid",
+        "chain_outcome_state_unknown",
+        "champion_funding_freeze_failed",
+        "champion_funding_schema_unavailable",
+        "champion_funding_state_invalid",
+        "closed_provider_cost_candidate_invalid",
+        "code_review_pending",
+        "code_review_required",
+        "code_review_schema_unavailable",
+        "code_review_unavailable",
+        "company_judgment_cache_invalid",
+        "company_judgment_output_invalid",
+        "company_quality_activation_invalid",
+        "company_quality_requires_integrity",
+        "company_quality_schema_invalid",
+        "company_quality_schema_unavailable",
+        "company_quality_scorer_policy_mismatch",
+        "contact_activation_invalid",
+        "contact_policy_requires_integrity",
+        "contact_schema_invalid",
+        "contact_schema_unavailable",
+        "contract",
+        "credential_validation_unavailable",
+        "daily_cutoff_hour_invalid",
+        "daily_icp_source_invalid",
+        "daily_round_dates_exhausted",
+        "daily_runner_capacity_insufficient",
+        "declared_parallelism_invalid",
+        "dynamic_benchmark_schema_unavailable",
+        "execution_sequence_activation_invalid",
+        "frame_invalid",
+        "function_probe_invalid",
+        "function_unavailable",
+        "hotkey_banned",
+        "hotkey_unregistered",
+        "integrity_activation_invalid",
+        "integrity_schema_invalid",
+        "integrity_schema_unavailable",
+        "integrity_scorer_policy_mismatch",
+        "intent_details_activation_invalid",
+        "intent_details_policy_requires_integrity",
+        "intent_details_scorer_policy_mismatch",
+        "judgment_cache_authority_invalid",
+        "judgment_cache_invalid",
+        "lease_expired",
+        "lease_inactive",
+        "lease_invalid",
+        "lease_stale",
+        "lease_token_invalid",
+        "mode_invalid",
+        "mode_off",
+        "netuid_invalid",
+        "network_name_invalid",
+        "object_store_mismatch",
+        "object_store_unavailable",
+        "output_invalid",
+        "parallel_execution_schema_unavailable",
+        "parallel_twenty_icp_execution_invalid",
+        "participant_missing",
+        "participant_source_missing",
+        "per_icp_cost_schema_unavailable",
+        "pinned_round_id_invalid",
+        "promotion_commit_mismatch",
+        "promotion_margin_invalid",
+        "promotion_plan_missing",
+        "promotion_round_missing",
+        "promotion_source_size_mismatch",
+        "promotion_winner_invalid",
+        "public_output_unavailable",
+        "public_result_unavailable",
+        "quota_unavailable",
+        "request_invalid",
+        "results_not_public",
+        "reward_history_invalid",
+        "reward_signer_unavailable",
+        "round_cost_policy_missing",
+        "round_create_failed",
+        "round_ended",
+        "round_evaluation_date_invalid",
+        "round_missing",
+        "round_mode_mismatch",
+        "round_network_mismatch",
+        "round_scope_mismatch",
+        "round_unknown",
+        "run_missing",
+        "run_result_budget_unproved",
+        "run_result_cause_kind_mismatch",
+        "run_result_invalid",
+        "run_round_mismatch",
+        "run_runner_mismatch",
+        "run_source_integrity_failed",
+        "run_source_unavailable",
+        "runner_banned",
+        "runner_benchmark_eligibility_unavailable",
+        "runner_hotkey_unregistered",
+        "runner_slot_ceiling_invalid",
+        "runner_validator_authority_unavailable",
+        "runner_validator_required",
+        "score_invalid",
+        "scored_run_missing",
+        "scorer_image_access_unavailable",
+        "scorer_image_access_unsupported",
+        "scorer_image_invalid",
+        "scores_not_recorded",
+        "scoring_plan_invalid",
+        "scoring_plan_missing",
+        "scoring_plan_run_mismatch",
+        "signature_invalid",
+        "source_upload_not_configured",
+        "source_upload_unavailable",
+        "stage_invalid",
+        "submission_conflict",
+        "submission_credentials_immutable",
+        "submission_credentials_missing",
+        "submission_finalize_failed",
+        "submission_id_mismatch",
+        "submission_missing",
+        "submission_not_uploading",
+        "submission_owner_changed",
+        "submission_rate_limited",
+        "submission_registration_failed",
+        "submission_rejected",
+        "submission_replacement_closed",
+        "submission_replacement_ineligible",
+        "submission_replacement_limit_reached",
+        "submission_replacement_schema_unavailable",
+        "submission_superseded",
+        "submission_transport_mismatch",
+        "submission_window_closed",
+        "successful_call_cost_schema_unavailable",
+        "table_unavailable",
+        "trajectory_invalid",
+        "trajectory_unavailable",
+        "unsupported_integrity_policy",
+        "validator_checkpoint_upgrade_required",
+        "validator_output_schema_upgrade_required",
+        "validator_proxy_execution_upgrade_required",
+        "validator_scoring_authority_schema_unavailable",
+        "validator_snapshot_unavailable",
+        "weight_state_request_invalid",
+        "weight_state_scope_mismatch",
+    }
+)
+
 
 # Upper bound on a reported cost. Micro-USD, so this is $1,000 per call.
 _ARENA_MAX_MICROUSD = 1_000_000_000
@@ -532,7 +732,10 @@ def _validating_exporter(
         if not _attributes_conform(attributes, ARENA_HTTP_ATTRIBUTE_TYPES):
             return "attributes"
         denial = attributes["arena.denial"]
-        if denial != ARENA_NO_DENIAL and not _ARENA_DENIAL_RE.fullmatch(denial):
+        if denial != ARENA_NO_DENIAL and (
+            not _ARENA_DENIAL_RE.fullmatch(denial)
+            or denial not in ARENA_DENIAL_CODES
+        ):
             return "denial"
         trimmed = {
             key: value
@@ -548,11 +751,8 @@ def _validating_exporter(
         if provider not in ARENA_PROVIDERS:
             return "provider"
         operation = attributes["arena.operation"]
-        if operation != ARENA_OPERATION_UNKNOWN:
-            if not _ARENA_OPERATION_RE.fullmatch(operation):
-                return "operation"
-            if operation.split(".", 1)[0] != provider:
-                return "operation"
+        if operation != ARENA_OPERATION_UNKNOWN and ARENA_OPERATION_PROVIDERS.get(operation) != provider:
+            return "operation"
         if attributes["arena.outcome"] not in ARENA_PROVIDER_OUTCOMES:
             return "outcome"
         error_code = attributes["arena.error_code"]
@@ -904,20 +1104,26 @@ class ArenaTelemetry:
         # read within a single request and never crosses between them.
         import contextvars
 
-        self._denial = contextvars.ContextVar("arena_denial", default=ARENA_NO_DENIAL)
+        # A worker thread receives a copy of the request context. Sharing one
+        # mutable value lets a sync route report its denial back to ASGI.
+        self._denial = contextvars.ContextVar("arena_denial", default=None)
 
     # -- refusal code ----------------------------------------------------
 
     def note_denial(self, code: str) -> None:
         """Record the refusal code for the request currently being served."""
         try:
-            self._denial.set(str(code))
+            state = self._denial.get()
+            if state is None:
+                state = [ARENA_NO_DENIAL]
+                self._denial.set(state)
+            state[0] = str(code)
         except BaseException:
             pass
 
     def reset_denial(self) -> None:
         try:
-            self._denial.set(ARENA_NO_DENIAL)
+            self._denial.set([ARENA_NO_DENIAL])
         except BaseException:
             pass
 
@@ -928,11 +1134,12 @@ class ArenaTelemetry:
         ``ServiceError`` code can interpolate an exception message after it.
         """
         try:
-            raw = str(self._denial.get() or "")
+            state = self._denial.get()
+            raw = str(state[0]) if state is not None else ""
         except BaseException:
             return ARENA_NO_DENIAL
         prefix = raw.split(":", 1)[0]
-        if prefix and _ARENA_DENIAL_RE.fullmatch(prefix):
+        if _ARENA_DENIAL_RE.fullmatch(prefix) and prefix in ARENA_DENIAL_CODES:
             return prefix
         return ARENA_NO_DENIAL
 

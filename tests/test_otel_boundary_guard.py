@@ -389,6 +389,31 @@ def test_arena_error_code_vocabulary_covers_the_operation_table() -> None:
     )
 
 
+def test_arena_operation_pairs_are_literal_and_match_the_table() -> None:
+    from lab_arena import operations
+
+    tree = ast.parse(_read(BOOTSTRAP))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if "ARENA_OPERATION_PROVIDERS" not in [
+            target.id for target in node.targets if isinstance(target, ast.Name)
+        ]:
+            continue
+        assert isinstance(node.value, ast.Dict)
+        pairs = {}
+        for key, value in zip(node.value.keys, node.value.values):
+            assert isinstance(key, ast.Constant) and isinstance(key.value, str)
+            assert isinstance(value, ast.Constant) and isinstance(value.value, str)
+            pairs[key.value] = value.value
+        assert pairs == {
+            operation_id: operation.provider
+            for operation_id, operation in operations.OPERATIONS.items()
+        }
+        return
+    raise AssertionError("literal Arena operation map missing")
+
+
 def test_denial_codes_export_only_the_literal_prefix() -> None:
     """``ServiceError.code`` can interpolate an exception message.
 
@@ -403,3 +428,27 @@ def test_denial_codes_export_only_the_literal_prefix() -> None:
     assert "_ARENA_DENIAL_RE" in source, (
         "the denial prefix must still be shape-checked against a frozen regex"
     )
+    assert _frozen_literal(source, "ARENA_DENIAL_CODES"), (
+        "the denial prefix must also belong to a literal vocabulary"
+    )
+
+
+def test_literal_service_denial_codes_remain_exportable() -> None:
+    allowed = set(_frozen_literal(_read(BOOTSTRAP), "ARENA_DENIAL_CODES"))
+    tree = ast.parse(_read("lab_arena/service.py"))
+    required = {"contract", "arena_store_unavailable"}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name) or node.func.id != "ServiceError":
+            continue
+        if not node.args:
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.BinOp) and isinstance(first.op, ast.Mod):
+            first = first.left
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            prefix = first.value.split(":", 1)[0]
+            if re.fullmatch(r"[a-z][a-z0-9_]{0,47}", prefix):
+                required.add(prefix)
+    assert required <= allowed

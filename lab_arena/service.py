@@ -1472,7 +1472,12 @@ class ArenaService:
             champion_row = self._store.get_submission(str(champion_id))
             if not champion_row:
                 raise ServiceError("similarity_reference_unavailable", 503)
-            champion_round = self._round(str(champion_row["round_id"]))
+            # A pinned service may review the historical champion without
+            # admitting requests or work for that champion's previous round.
+            champion_round = self._store.get_round(str(champion_row["round_id"]))
+            if champion_round is None:
+                raise ServiceError("similarity_reference_unavailable", 503)
+            champion_round = self._require_round_mode(champion_round)
             references.append({
                 "row": champion_row,
                 "source_public": source_disclosure.disclosure_status(

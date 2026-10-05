@@ -67,7 +67,9 @@ class PerIcpHarness(QualityHarness):
 
 @pytest.fixture
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from database_with_lab_arena_migration(
+        CURRENT_SERVICE_MIGRATIONS + ("409-lab-arena-publication-cost-document-reuse.sql",)
+    )
 
 
 def test_per_icp_overshoot_preserves_output_other_icps_restart_and_rewards(database, tmp_path):
@@ -179,6 +181,17 @@ def test_per_icp_overshoot_preserves_output_other_icps_restart_and_rewards(datab
     forged = deepcopy(genuine)
     forged["final_score"] += 1
     forged_documents.append(forged)
+    # The shared full-cost read must still reject either altered cost kind,
+    # including unresolved and reserved judge charges.
+    for cost_kind, field in (
+        ("execution", "settled_microusd"),
+        ("judge", "settled_microusd"),
+        ("judge", "success_unresolved_calls"),
+        ("judge", "reserved_or_uncertain_microusd"),
+    ):
+        forged = deepcopy(genuine)
+        forged["cost_summary"][cost_kind][field] += 1
+        forged_documents.append(forged)
     for forged in forged_documents:
         with connect() as connection:
             with connection.cursor() as cursor, pytest.raises(psycopg2.Error) as rejected:

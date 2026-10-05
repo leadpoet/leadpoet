@@ -24,6 +24,7 @@ import httpx
 from lab_arena.contracts import (
     ArenaContractError,
     LEASE_TTL_SECONDS,
+    RUNNER_SLOT_CEILING,
     canonical_json,
     validate_submission_costs,
 )
@@ -950,11 +951,14 @@ class ArenaStore:
             self._transport.rpc("lab_arena_parallel_execution_schema_v1", {}),
             "parallel_execution_schema",
         )
-        if result != {
-            "schema_version": PARALLEL_EXECUTION_SCHEMA_VERSION,
-            "version": 255,
-            "max_parallel_icps": 20,
-        }:
+        if (
+            set(result) != {"schema_version", "version", "max_parallel_icps"}
+            or result["schema_version"] != PARALLEL_EXECUTION_SCHEMA_VERSION
+            or type(result["version"]) is not int
+            or result["version"] != 255
+            or type(result["max_parallel_icps"]) is not int
+            or result["max_parallel_icps"] not in (20, RUNNER_SLOT_CEILING)
+        ):
             raise ArenaStoreError("parallel execution schema mismatch")
         return result
 

@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: October 5 delay recovery
+
+On 2026-10-05 the user authorized the simple necessary fixes identified in the
+scoring-delay investigation. This includes protected inspection, narrow code
+and exact committed migrations, focused tests, safe push/merge, canonical
+paired deployment and production verification. Prevent repeated confirmed
+validator host failures from delaying healthy work and repair the confirmed
+publication blocker. Preserve frozen inputs, accepted results, qualification,
+cost accounting, promotion, weights and concurrent changes. Do not fabricate
+completions, shorten active leases or weaken memory and budget guards.
+This authority ends after deployment and verification complete.
+
 ## Scoped production authorization: private Arena submission duplicate check
 
 On 2026-10-05 the user authorized a narrow gateway duplicate and near-duplicate

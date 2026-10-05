@@ -60,6 +60,23 @@ def broker_socket(monkeypatch, transport=None, store=None, *, priced_models=()):
         web_path = Path(directory) / runtime.SANDBOX_WEB_SOCKET_NAME
         state = runner.RunState(lease=lease("r1"), lease_token="tok-r1")
         server = runner.WorkerSocketServer(path, Api(), state)
+        handle_frame = server.handle_frame
+
+        def reporting_handle_frame(raw, **kwargs):
+            """Report a refused operation frame; the bridge turns it into a bare 502."""
+            payload = handle_frame(raw, **kwargs)
+            try:
+                document = json.loads(payload)
+            except ValueError:
+                return payload
+            if isinstance(document, dict) and "error" in document:
+                print("worker refused frame: %s\nframe: %s" % (
+                    json.dumps(document),
+                    raw[:4000].decode("utf-8", errors="replace"),
+                ), file=sys.stderr, flush=True)
+            return payload
+
+        server.handle_frame = reporting_handle_frame
         server.start()
         web_server = web_egress.WebEgressServer(web_path)
         try:

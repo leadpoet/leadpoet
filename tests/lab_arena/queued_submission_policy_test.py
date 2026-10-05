@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from lab_arena.api import create_app
 from lab_arena.service import ArenaService, ServiceError
 from lab_arena.store import ArenaStoreError
+from tests.lab_arena.test_lab_arena_code_review_runtime import _archive, _source
 
 CUTOFF = datetime(2026, 9, 15, 23, tzinfo=timezone.utc)
 ROUND = {
@@ -20,6 +21,7 @@ ROUND = {
 
 
 def _service(moment, *, replacement=True):
+    source_payload = _archive(_source())
     row = {
         'submission_id': 'sub-new', 'round_id': ROUND['round_id'],
         'miner_hotkey': '5' + 'A' * 47, 'status': 'uploading',
@@ -30,6 +32,7 @@ def _service(moment, *, replacement=True):
     counts = {'source': 0, 'credentials': 0, 'accept': 0}
     def source(*args, **kwargs):
         counts['source'] += 1
+        return source_payload
     def encrypt(*args, **kwargs):
         counts['credentials'] += 1
         return {'openrouter': 'ciphertext', 'deepline': 'ciphertext'}
@@ -38,7 +41,7 @@ def _service(moment, *, replacement=True):
         return {'status': 'ok'}
     svc = ArenaService.__new__(ArenaService)
     svc._clock = lambda: moment
-    svc._store = SimpleNamespace(get_submission=lambda _: row, accept_submission_with_credentials=accept)
+    svc._store = SimpleNamespace(get_submission=lambda _: row, accept_submission_source_with_credentials=accept)
     svc._config = SimpleNamespace(credential_manager=SimpleNamespace(validate_and_encrypt=encrypt))
     svc._validate_uploaded_source = source
     svc._enforce_submission_request_limit = lambda _: None
@@ -65,7 +68,7 @@ def test_finalize_cutoff_is_exclusive_to_the_microsecond(delta):
 
 def test_late_validation_cannot_bypass_database_cutoff():
     svc, counts = _service(CUTOFF - timedelta(microseconds=1))
-    svc._store.accept_submission_with_credentials = lambda *args: {'status': 'replacement_closed'}
+    svc._store.accept_submission_source_with_credentials = lambda *args: {'status': 'replacement_closed'}
     with pytest.raises(ServiceError, match='submission_replacement_closed'):
         svc.handle_submission_finalize('sub-new', {})
     assert counts['credentials'] == 1
@@ -109,7 +112,7 @@ def test_final_database_deadline_failure_is_a_clear_conflict(code):
     svc, _ = _service(CUTOFF - timedelta(microseconds=1))
     def expired(*args):
         raise ArenaStoreError('lab_arena_' + code)
-    svc._store.accept_submission_with_credentials = expired
+    svc._store.accept_submission_source_with_credentials = expired
     with TestClient(create_app(svc)) as http:
         response = http.post('/arena/v1/submissions/sub-new/finalize', json={'body': {'submission_id': 'sub-new'}})
     assert response.status_code == 409

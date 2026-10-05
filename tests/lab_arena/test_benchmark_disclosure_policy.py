@@ -354,6 +354,7 @@ def test_cutoff_policy_is_consistent_across_service_round_bank_and_source_endpoi
     service._store = store
     service._objects = objects
     service._clock = lambda: CUTOFF
+    service.completed_submission_scores = lambda _round: {}
     service.benchmark_icps = lambda _round_id: [
         {"icp_id": "icp-%02d" % position}
         for position in range(contracts.BENCHMARK_ICP_COUNT)

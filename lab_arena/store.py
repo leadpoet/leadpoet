@@ -142,6 +142,13 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     ),
     "lab_arena_update_submission": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
     "lab_arena_accept_submission_with_credentials": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_credentials", "jsonb")),
+    "lab_arena_accept_submission_source_with_credentials": (
+        ("p_round_id", "text"), ("p_submission_id", "text"),
+        ("p_miner_hotkey", "text"), ("p_credentials", "jsonb"),
+        ("p_archive_sha256", "text"), ("p_normalized_sha256", "text"),
+    ),
+    "lab_arena_submission_duplicate_schema_v1": (),
+    "lab_arena_submission_similarity_champion": (("p_round_id", "text"),),
     "lab_arena_get_submission_credential": (("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_provider", "text")),
     "lab_arena_begin_submission_review": (
         ("p_submission_id", "text"),
@@ -1285,6 +1292,34 @@ class ArenaStore:
             raise ArenaStoreError("submission replacement schema mismatch")
         return result
 
+    def submission_similarity_schema(self) -> Dict[str, Any]:
+        result = _require_mapping(
+            self._transport.rpc("lab_arena_submission_duplicate_schema_v1", {}),
+            "submission_similarity_schema",
+        )
+        if result != {
+            "schema_version": "leadpoet.lab_arena.submission_duplicate.v1",
+            "version": 405,
+            "digest_format": "sha256:hex",
+            "cross_hotkey_scope": "round",
+        }:
+            raise ArenaStoreError("submission similarity schema mismatch")
+        return result
+
+    def submission_similarity_champion(self, round_id: str) -> Dict[str, Any]:
+        result = _require_mapping(
+            self._transport.rpc(
+                "lab_arena_submission_similarity_champion",
+                {"p_round_id": round_id},
+            ),
+            "submission_similarity_champion",
+        )
+        if (result.get("status") not in ("ready", "promotion_pending")
+                or result.get("submission_id") is not None
+                and not isinstance(result.get("submission_id"), str)):
+            raise ArenaStoreError("submission similarity champion invalid")
+        return result
+
     def register_submission(
         self,
         round_id: str,
@@ -1350,6 +1385,26 @@ class ArenaStore:
                 },
             ),
             "accept_submission_with_credentials",
+        )
+
+    def accept_submission_source_with_credentials(
+        self, round_id: str, submission_id: str, miner_hotkey: str,
+        encrypted_credentials: Mapping[str, str], archive_sha256: str,
+        normalized_sha256: str,
+    ) -> Dict[str, Any]:
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_accept_submission_source_with_credentials",
+                {
+                    "p_round_id": round_id,
+                    "p_submission_id": submission_id,
+                    "p_miner_hotkey": miner_hotkey,
+                    "p_credentials": dict(encrypted_credentials),
+                    "p_archive_sha256": archive_sha256,
+                    "p_normalized_sha256": normalized_sha256,
+                },
+            ),
+            "accept_submission_source_with_credentials",
         )
 
     def get_submission_credential(

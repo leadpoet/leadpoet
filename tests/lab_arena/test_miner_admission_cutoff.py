@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from lab_arena.service import ArenaService, ServiceError
+from tests.lab_arena.test_lab_arena_code_review_runtime import _archive, _source
 
 
 def test_finalize_reports_a_database_cutoff_race_without_accepting():
@@ -18,13 +19,14 @@ def test_finalize_reports_a_database_cutoff_race_without_accepting():
         "status": "uploading",
     }
     calls = []
+    source_payload = _archive(_source())
     service = object.__new__(ArenaService)
     service._clock = lambda: datetime(2026, 9, 5, 5, 59, 59, tzinfo=timezone.utc)
     service._store = SimpleNamespace(
         get_submission=lambda _id: row,
-        accept_submission_with_credentials=lambda *args: calls.append(args) or {"status": "window_closed"},
+        accept_submission_source_with_credentials=lambda *args: calls.append(args) or {"status": "window_closed"},
     )
-    service._validate_uploaded_source = lambda *args, **kwargs: None
+    service._validate_uploaded_source = lambda *args, **kwargs: source_payload
     service._config = SimpleNamespace(credential_manager=SimpleNamespace(
         validate_and_encrypt=lambda *args, **kwargs: {"openrouter": "encrypted-or", "deepline": "encrypted-dl"},
     ))

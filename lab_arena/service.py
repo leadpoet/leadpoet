@@ -1341,6 +1341,34 @@ class ArenaService:
 
     # -- submissions (sections 6, 7, 14.2) -------------------------------------
 
+    def handle_submission_credit_retry(
+        self, submission_id: str, envelope: Any,
+    ) -> Dict[str, Any]:
+        """Request a fresh bounded attempt after the owner replenishes credit."""
+        validated, round_row = self._request_round(
+            envelope, scope=contracts.SCOPE_SUBMISSION_CREDIT_RETRY
+        )
+        body = contracts.validate_submission_credit_retry_body(validated["body"])
+        if body["submission_id"] != submission_id:
+            raise ServiceError("credit_retry_request_invalid", 400)
+        self._enforce_submission_request_limit(validated["hotkey"])
+        row = self._store.get_submission(submission_id)
+        if (
+            row is None or row.get("round_id") != round_row["round_id"]
+            or row.get("miner_hotkey") != validated["hotkey"]
+        ):
+            raise ServiceError("credit_retry_owner_required", 403)
+        # SQL repeats authorization and checks the deadline, proof, budget
+        # ledger and attempt limit under locks. A signature is not cost proof.
+        receipt = self._store.retry_credit_failures(
+            round_row["round_id"], submission_id, validated["hotkey"],
+            contracts.request_bytes_hash(validated),
+        )
+        try:
+            return contracts.validate_credit_retry_result(receipt)
+        except ArenaContractError as exc:
+            raise ServiceError("credit_retry_unavailable", 503) from exc
+
     def submission_status(self, submission_id: str) -> Dict[str, Any]:
         row = self._store.get_submission(submission_id)
         if row is None:

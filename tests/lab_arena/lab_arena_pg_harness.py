@@ -127,6 +127,7 @@ CURRENT_SERVICE_MIGRATIONS = POSTGREST_MIGRATIONS + (
     "393-lab-arena-superseded-champion-funding.sql",
     "394-lab-arena-restart-expired-zero-call-drain.sql",
     "402-lab-arena-restart-expired-zero-call-execute-drain.sql",
+    "403-lab-arena-credit-failure-retry.sql",
 )
 
 

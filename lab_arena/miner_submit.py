@@ -217,6 +217,8 @@ _SAFE_ADMISSION_ERRORS = frozenset({
     "submission_rejected:scrapingdog_api_key_invalid",
     "submission_rejected:submission_credentials_invalid",
     "submission_credentials_immutable",
+    "credit_retry_request_invalid", "credit_retry_owner_required",
+    "credit_retry_unavailable", "signature_invalid", "hotkey_banned",
 })
 
 
@@ -281,6 +283,48 @@ def _signed_request(
         )
     except (AttributeError, TypeError, contracts.ArenaContractError) as exc:
         raise MinerSubmissionError("wallet_signing_failed", type(exc).__name__) from exc
+
+
+def retry_credit_failures(
+    *, round_id: str, submission_id: str, api_base_url: str,
+    keypair: Any, session: Any = requests, now: Callable[[], float] = time.time,
+) -> Mapping[str, Any]:
+    """Retry eligible work after a top-up, without changing stored credentials."""
+    base = _api_base_url(api_base_url)
+    try:
+        body = contracts.validate_submission_credit_retry_body(
+            {"submission_id": submission_id}
+        )
+        if not isinstance(round_id, str) or not contracts.ROUND_ID_RE.fullmatch(round_id):
+            raise contracts.ArenaContractError("round_id invalid")
+    except contracts.ArenaContractError as exc:
+        raise MinerSubmissionError("credit_retry_request_invalid") from exc
+    envelope = _signed_request(
+        scope=contracts.SCOPE_SUBMISSION_CREDIT_RETRY, round_id=round_id,
+        body=body, keypair=keypair, now=now,
+    )
+    # Reuse the same signed request if its response is lost. The database
+    # receipts this hash and never creates a second retry for one assignment.
+    for attempt in range(3):
+        try:
+            response = session.post(
+                base + "/arena/v1/submissions/" + submission_id + "/retry-credit-failures",
+                json=envelope, timeout=30, allow_redirects=False,
+            )
+        except requests.RequestException as exc:
+            if attempt == 2:
+                raise MinerSubmissionError("arena_unreachable", type(exc).__name__) from exc
+            time.sleep(1 << attempt)
+            continue
+        if response.status_code in (502, 503, 504) and attempt < 2:
+            time.sleep(1 << attempt)
+            continue
+        document = _json_response(response, "retry_credit_failures")
+        try:
+            return contracts.validate_credit_retry_result(document)
+        except contracts.ArenaContractError as exc:
+            raise MinerSubmissionError("arena_response_invalid", "retry_credit_failures") from exc
+    raise MinerSubmissionError("arena_unreachable")  # defensive; loop returns or raises
 
 
 def _upload_source(

@@ -1771,6 +1771,7 @@ def _terminal_response_document(
     *, call_succeeded: bool,
     provider_cost: Optional[Mapping[str, Any]] = None,
     account_failure_evidence: Optional[Mapping[str, Any]] = None,
+    credit_failure_proof: Optional[Mapping[str, Any]] = None,
     judgment_cache_eligible: bool = False,
 ) -> Dict[str, Any]:
     document = {
@@ -1783,9 +1784,82 @@ def _terminal_response_document(
         document["provider_cost"] = dict(provider_cost)
     if account_failure_evidence is not None:
         document["account_failure_evidence"] = dict(account_failure_evidence)
+    if credit_failure_proof is not None:
+        document["credit_failure_proof"] = dict(credit_failure_proof)
     if judgment_cache_eligible:
         document["judgment_cache_eligible"] = True
     return document
+
+
+def _confirmed_credit_failure_proof(
+    *, provider: str, funding_source: str, response: ProviderResponse,
+    raw_document: Any, raw_actual: Optional[int], actual: int,
+    call_succeeded: bool,
+    openrouter_generation_present: bool,
+) -> Optional[Dict[str, Any]]:
+    """Mark only a settled credit refusal with a proved zero charge.
+
+    A direct OpenRouter 402 without a generation has no dispatched generation
+    to bill. Embedded OpenRouter failures need a zero-cost receipt. Deepline
+    needs its strict refusal or exact billing proof. Scrapingdog charges its
+    fixed tariff only for an authenticated successful response.
+    """
+
+    if (
+        funding_source not in ("host", "miner_key")
+        or response.status != 402
+        or response.internal_provenance is not None
+        or call_succeeded
+        or type(actual) is not int
+        or actual != 0
+    ):
+        return None
+    if provider == "openrouter":
+        if raw_actual != 0 and (
+            openrouter_generation_present
+            or (
+                isinstance(raw_document, Mapping)
+                and any(
+                    field in raw_document
+                    for field in ("usage", "cost", "total_cost")
+                )
+            )
+        ):
+            return None
+    elif provider == "deepline":
+        if raw_actual != 0:
+            return None
+    elif provider != "scrapingdog":
+        return None
+    return {
+        "schema_version": "leadpoet.lab_arena.credit_failure_proof.v1",
+        "provider": provider,
+        "reason": "out_of_credit",
+        "provider_status": 402,
+        "actual_microusd": 0,
+    }
+
+
+def _validated_credit_failure_proof(value: Any) -> Optional[Mapping[str, Any]]:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != {
+            "schema_version", "provider", "reason", "provider_status",
+            "actual_microusd",
+        }
+        or value.get("schema_version")
+        != "leadpoet.lab_arena.credit_failure_proof.v1"
+        or value.get("provider") not in ("openrouter", "deepline", "scrapingdog")
+        or value.get("reason") != "out_of_credit"
+        or type(value.get("provider_status")) is not int
+        or value["provider_status"] != 402
+        or type(value.get("actual_microusd")) is not int
+        or value["actual_microusd"] != 0
+    ):
+        raise BrokerError("broker_unavailable")
+    return value
 
 
 def _judgment_cache_material(
@@ -2134,6 +2208,7 @@ def _decode_terminal(
         "call_succeeded",
         "provider_cost",
         "account_failure_evidence",
+        "credit_failure_proof",
         "judgment_cache_eligible",
         "judgment_cache_key",
         "judgment_cache_source_call_identity",
@@ -2174,12 +2249,15 @@ def _decode_terminal(
     _validated_account_failure_evidence(
         document.get("account_failure_evidence")
     )
+    _validated_credit_failure_proof(document.get("credit_failure_proof"))
     try:
         status = int(document["status"])
         headers = dict(document["headers"])
         body = base64.b64decode(str(document["body_b64"]), validate=True)
     except (KeyError, TypeError, ValueError) as exc:
         raise BrokerError("broker_unavailable") from exc
+    if document.get("credit_failure_proof") is not None and call_succeeded is not False:
+        raise BrokerError("broker_unavailable")
     trusted_names = [
         name
         for name in headers
@@ -3696,6 +3774,18 @@ class Broker:
                     "response_hash": contracts.hash_bytes(terminal_body),
                 })
             summary.update({"outcome": "settled", "idempotent": True, "actual_microusd": reserved.get("amount_microusd")})
+            credit_failure_proof = _validated_credit_failure_proof(
+                terminal_document.get("credit_failure_proof")
+                if isinstance(terminal_document, Mapping) else None
+            )
+            if credit_failure_proof is not None:
+                if (
+                    reserved.get("amount_microusd") != 0
+                    or funding_source not in ("host", "miner_key")
+                    or credit_failure_proof["provider"] != effective_operation.provider
+                ):
+                    return _error_result("broker_unavailable", summary)
+                summary["credit_failure_proof"] = dict(credit_failure_proof)
             if terminal_status == 403:
                 try:
                     terminal_error = json.loads(terminal_body).get("error")
@@ -4431,11 +4521,22 @@ class Broker:
                 actual = 0 if raw_actual is None else raw_actual
             else:
                 actual = 0  # providers without a reported charge: record the bounded call, not an invented price
+            credit_failure_proof = _confirmed_credit_failure_proof(
+                provider=effective_operation.provider,
+                funding_source=funding_source,
+                response=response,
+                raw_document=raw_document,
+                raw_actual=raw_actual,
+                actual=actual,
+                call_succeeded=call_succeeded,
+                openrouter_generation_present=openrouter_generation_present,
+            )
             failure_stage = "terminal_response"
             terminal = _terminal_response_document(
                 sanitized_status, sanitized_headers, sanitized_body,
                 call_succeeded=call_succeeded,
                 provider_cost=cost_record,
+                credit_failure_proof=credit_failure_proof,
                 judgment_cache_eligible=judgment_cache_eligible,
                 account_failure_evidence=(
                     {
@@ -4605,6 +4706,17 @@ class Broker:
                 summary.update({"outcome": "uncertain"})
             return _error_result("provider_unavailable", summary)
         settle_status = settled.get("status")
+        if settle_status == "settled" and credit_failure_proof is not None:
+            saved_amount = settled.get(
+                "amount_microusd" if settled.get("idempotent") else "actual_microusd"
+            )
+            if (
+                type(saved_amount) is not int
+                or saved_amount != 0
+                or settled.get("terminal_response") != terminal
+            ):
+                return _error_result("broker_unavailable", summary)
+            summary["credit_failure_proof"] = dict(credit_failure_proof)
         if settle_status == "settled" and request_refused:
             summary.update(
                 {

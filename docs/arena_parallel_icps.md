@@ -119,21 +119,37 @@ The slot formula is:
 
 ```text
 local execution slots = min(verified Webshare proxies + 1 native slot,
-                            memory-supported slots, 20)
+                            memory-supported slots, frozen round slot ceiling)
+active model limit = max(1, floor(local execution slots / frozen ICP count))
 ```
 
 The native coordinator is slot 0. Webshare routes are slots 1 through N. All
 slots use the same validator hotkey. They are sandbox execution slots, not
 extra Bittensor validators or wallet workers.
 
-With sufficient available memory, nine proxies give ten slots, so a ten-ICP
-benchmark fits in one group. A twenty-ICP benchmark needs two groups with
-those same slots. Nineteen proxies give twenty slots. A larger bank uses
-additional groups under the same slot limit. The round freezes its benchmark
-count separately from its concurrency limit. With validators of different sizes, each one
-declares its own smaller local capacity. A larger eligible validator can claim
-a later group when it becomes available, but it cannot raise the frozen round
-limit.
+With sufficient available memory and a sufficient frozen round ceiling, nine
+proxies give ten slots and one active model in a ten-ICP benchmark. Nineteen
+proxies give twenty slots and two active models; twenty-nine proxies give
+thirty slots and three active models. A larger ICP bank uses additional groups
+under the same slot limit. Hosts with fewer slots than ICPs can still process
+one model over multiple groups.
+
+The gateway enforces this limit in its existing atomic assignment claim. It
+counts submissions with live execute leases on that validator, and admits
+another submission when an active submission's leases finish. Initial ICPs of
+a newly admitted model stay with that validator while its leases are active,
+so several validators do not split the same model groups and leave slots idle.
+Existing shared work and independent retry handoffs remain valid. A smaller local
+capacity does not revoke existing leases. Each ICP keeps its own sandbox,
+output and accounting. Scoring claims retain their existing concurrency and
+per-submission serialization; the model execution limit does not reduce judge
+throughput.
+
+The round freezes its benchmark count separately from its concurrency limit.
+New rounds support up to 251 slots (250 configured proxies plus the native
+exit). Historical rounds retain their frozen ceiling, including a twenty-slot
+ceiling where present. Each validator declares its own resource-safe capacity;
+it cannot raise a frozen round limit by supplying more proxies.
 
 ## Model web access
 
@@ -164,12 +180,11 @@ The paid Scrapingdog, Deepline, and OpenRouter paths remain on the existing
 broker. More exit IPs can reduce IP-based public-site throttling. They do not
 increase account quotas, provider budgets, or paid API allowances.
 
-Paid calls also retain the broker's existing cost-admission rules. A Deepline
-call without an authoritative maximum price reserves the submission's remaining
-execution budget until its charge settles. Such calls serialize across that
-submission's ICPs and can cause other calls to return `budget_busy`. Proxy IPs
-cannot remove this limit. Observed charges and provider price estimates are
-not safe substitutes for an enforced maximum price.
+Paid calls retain the round's existing broker and cost-admission rules. Current
+rounds use confirmed per-ICP sourcing spend; pending bills do not reserve
+money or block new sourcing. More proxies do not change sourcing budgets,
+cost eligibility, provider-call identity or billing reconciliation. See
+[cost admission](arena-codex-runtime.md) for the runtime contract.
 
 Two groups of ten reduce sandbox execution time when model work can proceed
 independently. They do not guarantee a complete benchmark in two single-ICP
@@ -179,10 +194,10 @@ checked as well as completed attempt counts.
 
 ## Round and host safeguards
 
-Only a round frozen with `parallel_twenty_icp_execution=true` uses the new
-twenty-ICP scheduling and web bridge. Existing and frozen historical rounds
-keep their prior stage behavior. A validator restart cannot rewrite that
-round-level decision.
+Parallel execution follows the round's frozen execution policy, including the
+current baseline-first flow. Historical rounds keep their prior stage behavior;
+a validator restart cannot rewrite that round-level decision. Migration 401
+adds proxy-based model admission without changing those stage transitions.
 
 The readiness guard reserves 2 GiB for each active slot, 2 GiB for the host,
 and another 128 MiB for each slot. Twenty slots therefore require 44.5 GiB;

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lab_arena import telemetry, trajectory
+from lab_arena import contracts, telemetry, trajectory
 from lab_arena.broker import BrokerResult
 from lab_arena.service import ArenaService, ServiceError
 from lab_arena.store import ArenaStoreError, hash_lease_token
@@ -300,19 +300,29 @@ def test_service_trajectory_passes_only_lease_hash_and_sanitized_events():
 
 
 @pytest.mark.parametrize(
-    ("kinds", "inserted", "existing", "status", "expected_flags"),
+    ("kinds", "finish_status", "inserted", "existing", "status", "expected_flags"),
     [
-        (["runtime.started"], 1, 0, "accepted", (True, False, False)),
-        (["runtime.finished"], 1, 0, "accepted", (False, True, False)),
-        (["runtime.error"], 1, 0, "accepted", (False, False, True)),
-        (["runtime.error", "runtime.stdout"], 1, 1, "accepted", (False, False, True)),
-        (["runtime.error"], 0, 1, "accepted", None),
-        (["runtime.stdout"], 1, 0, "accepted", None),
-        (["runtime.error"], 0, 0, "stale", None),
+        (["runtime.started"], None, 1, 0, "accepted", (True, False, False)),
+        (["runtime.finished"], None, 1, 0, "accepted", (False, True, False)),
+        (["runtime.finished"], "accepted", 1, 0, "accepted", (False, True, False)),
+        *[
+            (["runtime.finished"], cause, 1, 0, "accepted", (False, True, True))
+            for cause in contracts.TERMINAL_CAUSES if cause != "accepted"
+        ],
+        (["runtime.finished"], "unknown", 1, 0, "accepted", (False, True, False)),
+        (["runtime.finished"], ["model_error"], 1, 0, "accepted", (False, True, False)),
+        (["runtime.provider_error", "runtime.started"], None, 2, 0, "accepted", (True, False, False)),
+        (["runtime.error"], None, 1, 0, "accepted", (False, False, True)),
+        (["runtime.error", "runtime.stdout"], None, 1, 1, "accepted", (False, False, True)),
+        (["runtime.finished", "runtime.stdout"], "model_error", 1, 1, "accepted", (False, True, True)),
+        (["runtime.finished"], "model_error", 0, 1, "accepted", None),
+        (["runtime.error"], None, 0, 1, "accepted", None),
+        (["runtime.stdout"], None, 1, 0, "accepted", None),
+        (["runtime.error"], None, 0, 0, "stale", None),
     ],
 )
 def test_runtime_upload_telemetry_only_after_new_accepted_lifecycle_batch(
-    monkeypatch, kinds, inserted, existing, status, expected_flags,
+    monkeypatch, kinds, finish_status, inserted, existing, status, expected_flags,
 ):
     run = dict(_run(),
         run_id="run-2026-10-04-1",
@@ -342,6 +352,7 @@ def test_runtime_upload_telemetry_only_after_new_accepted_lifecycle_batch(
         trajectory.event(kind, {
             "run_id": "forged-run", "runner_hotkey": "forged-validator",
             "message": "private-runtime-content",
+            **({"status": finish_status} if kind == "runtime.finished" and finish_status is not None else {}),
         }) for kind in kinds
     ]}
 

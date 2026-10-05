@@ -22,7 +22,8 @@ The same seam carries five other kinds of observation, all equally bounded:
   which of the thirteen terminal causes ended it.
 - ``record_runtime_upload`` — one accepted upload of runtime events that
   inserted at least one event. Its flags name lifecycle kinds present in the
-  batch; mixed new/replayed batches do not prove fresh transitions.
+  batch; ``has_error`` also covers a known failed ``runtime.finished`` status.
+  Mixed new/replayed batches do not prove fresh transitions.
 - ``record_gate`` — one wait on the shared provider concurrency gate, emitted
   only when a call actually waited, timed out, was cancelled, or found no
   capacity. An uncontended call emits nothing.

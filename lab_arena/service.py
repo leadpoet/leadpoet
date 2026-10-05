@@ -4041,12 +4041,19 @@ class ArenaService:
                 # The RPC proves that at least one event was newly persisted.
                 # A lifecycle flag describes the accepted batch, which may
                 # also contain replayed events; it is not a transition count.
+                failed_finish = any(
+                    event["kind"] == "runtime.finished"
+                    and type(status := event["content"].get("status")) is str
+                    and status in contracts.TERMINAL_CAUSES
+                    and status != "accepted"
+                    for event in events
+                )
                 telemetry.record_runtime_upload(
                     inserted_count=inserted,
                     replayed_count=existing,
                     has_started="runtime.started" in kinds,
                     has_finished="runtime.finished" in kinds,
-                    has_error="runtime.error" in kinds,
+                    has_error="runtime.error" in kinds or failed_finish,
                     run_identity=_telemetry_run_identity(run),
                 )
         return result

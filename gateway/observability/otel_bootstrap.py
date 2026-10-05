@@ -548,9 +548,9 @@ RUN_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
 
 RUN_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(RUN_SPAN_ATTRIBUTE_TYPES)
 
-# Runtime uploads report only batch counts and whether the validated batch
-# contains these three lifecycle kinds. The flags do not assert that each kind
-# was newly inserted when the accepted batch also replayed older event IDs.
+# Runtime uploads report only batch counts and lifecycle flags from the
+# validated batch. has_error covers runtime.error or a runtime.finished event
+# with a known failed status. Mixed replay does not prove a fresh transition.
 RUNTIME_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
     "arena.inserted_count": (int,),
     "arena.replayed_count": (int,),

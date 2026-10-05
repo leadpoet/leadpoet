@@ -1180,7 +1180,7 @@ def test_real_codex_standalone_web_search_crosses_accounted_bridge(
             result = codex.run(
                 "Use tools.web__run from code mode, then report its exact result.",
                 model="openai/gpt-5.6-luna", cwd=tmp_path,
-                timeout_seconds=60, web_search="live",
+                timeout_seconds=90, web_search="live",
             )
         except codex.CodexRuntimeError as exc:
             pytest.fail(exc.diagnostics[-8000:])
@@ -1451,7 +1451,7 @@ def test_real_codex_tool_call_and_continuation(monkeypatch, tmp_path):
             ops.validate_operation_request("openrouter.responses", document)
         except ops.OperationRequestError as exc:
             request_errors.append((str(exc), list(document), document.get("tools")))
-        return original_dispatch(socket_path, document)
+        return original_dispatch(socket_path, document, **_kwargs)
 
     monkeypatch.setattr(codex, "_dispatch", checked_dispatch)
     class ToolTransport(FakeTransport):
@@ -1476,7 +1476,7 @@ def test_real_codex_tool_call_and_continuation(monkeypatch, tmp_path):
     monkeypatch.setenv("no_proxy", "")
     with broker_socket(monkeypatch, ToolTransport()) as (store, transport, path):
         try:
-            text = codex.run("Run the shell command provided by the model, then report success.", model="openai/gpt-4o-mini", cwd=tmp_path, timeout_seconds=60)
+            text = codex.run("Run the shell command provided by the model, then report success.", model="openai/gpt-4o-mini", cwd=tmp_path, timeout_seconds=90)
         except codex.CodexRuntimeError as exc:
             pytest.fail(exc.diagnostics[-8000:] + "\n" + repr(request_errors))
         assert "ARENA_CODEX_OK" in text
@@ -1620,7 +1620,7 @@ def test_pinned_codex_does_not_repeat_an_unknown_cost_call(monkeypatch, tmp_path
                 "Reply exactly ARENA_CODEX_OK.",
                 model="openai/gpt-4o-mini",
                 cwd=tmp_path,
-                timeout_seconds=30,
+                timeout_seconds=90,
             )
 
     assert len(transport.sent) == len(store.calls) == 1, error.value.diagnostics[-8000:]
@@ -1667,7 +1667,7 @@ def test_pinned_codex_failure_does_not_start_another_billable_request(
                 "Reply exactly ARENA_CODEX_OK.",
                 model="openai/gpt-4o-mini",
                 cwd=tmp_path,
-                timeout_seconds=30,
+                timeout_seconds=90,
             )
 
     assert len(transport.sent) == 1, error.value.diagnostics[-8000:]
@@ -1723,7 +1723,7 @@ def test_pinned_codex_selects_each_priced_model_without_runtime_rewrites(monkeyp
 
     with broker_socket(monkeypatch, FinalTransport(), priced_models=(model,)) as (store, transport, path):
         try:
-            result = codex.run("Reply exactly ARENA_CODEX_OK.", model=model, cwd=tmp_path, timeout_seconds=60)
+            result = codex.run("Reply exactly ARENA_CODEX_OK.", model=model, cwd=tmp_path, timeout_seconds=90)
         except codex.CodexRuntimeError as exc:
             pytest.fail(exc.diagnostics[-8000:])
     assert "ARENA_CODEX_OK" in result

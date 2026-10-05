@@ -164,7 +164,7 @@ def test_publication_allows_database_validation_without_changing_other_deadlines
         assert transport.select("lab_arena_rounds") == []
         assert client.timeout == timeout
     assert requests[0].extensions["timeout"] == {
-        "connect": 2, "read": 35.0, "write": 3, "pool": 4
+        "connect": 2, "read": 65.0, "write": 3, "pool": 4
     }
     assert all(request.extensions["timeout"] == timeout.as_dict() for request in requests[1:])
 
@@ -184,7 +184,7 @@ def test_publication_response_loss_is_not_blindly_replayed(error_type):
         with pytest.raises(ArenaStoreUnavailable, match="lab_arena_transition_round"):
             store.transition_round("arena-2026-09-30", "scored", "published", {})
     assert len(requests) == 1
-    assert requests[0].extensions["timeout"]["read"] == 35.0
+    assert requests[0].extensions["timeout"]["read"] == 65.0
 
 
 @pytest.mark.parametrize("response", [

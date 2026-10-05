@@ -39,13 +39,22 @@ LAB_ARENA_WEBSHARE_PROXY_2=http://USER:PASSWORD@PROXY_IP_2:PORT_2
 ### Webshare setup for validators
 
 Use your own [Webshare Proxy Server](https://www.webshare.io/proxy-server)
-datacenter proxies. Select **Username/Password** authentication and **Direct
-Connection** on the Proxy List page. Use the address, port, username and
-password shown on each row. Start with nine different US proxies. The
-coordinator/main validator runs one ICP through its native host route; the nine
-proxies run the other nine ICPs. Rotating residential proxies are not needed
-for this setup. Plan prices and bandwidth allowances can change, so check them
-before purchase.
+datacenter proxies. In the dashboard, go to **Subscription → My Plan → Proxy
+Server → Upgrade** and select:
+
+- **20 US proxies**; configure nineteen and keep the remaining proxy as a spare.
+- **1,000 GB bandwidth per month**.
+- **High Priority Network**.
+- **No Automatic Proxy List Refreshes**, so scheduled refreshes do not replace
+  the configured endpoints.
+
+On the **Proxy List** page, select **Username/Password** authentication and
+**Direct Connection**. Use the address, port, username and password shown on
+each row. The recommended validator configuration is nineteen different US
+proxies plus the coordinator's native host route, for up to twenty execution
+slots. Actual capacity still depends on available memory and the frozen round
+ceiling. Rotating residential proxies are not needed for this setup. Check the
+plan options and checkout price before purchase; these can change.
 
 Use `http://` for Webshare's standard direct endpoints, including when the
 destination is HTTPS. The host opens a CONNECT tunnel and verifies TLS to the
@@ -55,8 +64,8 @@ matches [Webshare's direct connection example](https://apidocs.webshare.io/proxy
 
 Create a private file outside the repository, for example
 `$HOME/.config/leadpoet/validator-proxies.env`, containing the indexed settings
-above, with your own values. Continue through `LAB_ARENA_WEBSHARE_PROXY_9` for
-nine proxies. Quote each URL with single quotes. URL-encode special characters
+above, with your own values. Continue through `LAB_ARENA_WEBSHARE_PROXY_19` for
+nineteen proxies. Quote each URL with single quotes. URL-encode special characters
 in the username or password, such as `@` as `%40`. Do not paste credentials
 into Discord, Git, shell command arguments, or screenshots.
 
@@ -69,6 +78,14 @@ Set that export in the environment used to start your validator. The normal
 command does not source an arbitrary `.env` file. The private proxy file is
 parsed as data; only the indexed proxy settings are imported. Existing direct
 environment values must not conflict with values in the file.
+
+If upgrading from nine proxies, add `LAB_ARENA_WEBSHARE_PROXY_10` through
+`LAB_ARENA_WEBSHARE_PROXY_19` to the same private file or service environment.
+Check that entries 1 through 9 still match the current Proxy List. Keep the
+existing wallet, weight-state and runner paths. Pull the latest `main`, run the
+scoring check below with the service's environment, then restart the existing
+validator through its normal process manager. Do not start a second process
+for the same hotkey. No fixed parallel-worker override is needed.
 
 After the one-time [host setup](arena_normal_validator_weights.md#run-a-validator),
 check the exact Python environment and proxy settings before starting:

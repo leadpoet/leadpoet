@@ -51,6 +51,29 @@ def test_preflight_shares_host_proxy_and_memory_capacity(args, monkeypatch):
     assert calls[2] == (3, runtime_host.DEFAULT_SANDBOX_MEMORY_BYTES)
 
 
+def test_thirty_verified_exits_use_memory_limited_capacity(args, monkeypatch):
+    monkeypatch.setattr(
+        proxy_workers,
+        "preflight_proxy_workers",
+        lambda inventory: _verified(len(inventory.workers)),
+    )
+    environment = {
+        "LAB_ARENA_WEBSHARE_PROXY_%d" % index:
+            "http://user:private@proxy-%d.example:80" % index
+        for index in range(1, 30)
+    }
+    calls = []
+    result = scoring_startup.prepare_validator_scoring(
+        args,
+        environment=environment,
+        prepare_host=lambda *_args: None,
+        memory_capacity=lambda slots, sandbox: calls.append(slots) or 13,
+    )
+    assert calls == [30]
+    assert result.verified_proxies.total_process_capacity == 30
+    assert result.parallelism == 13
+
+
 @pytest.mark.parametrize(
     "reason,environment",
     [

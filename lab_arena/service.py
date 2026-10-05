@@ -850,11 +850,19 @@ class ArenaService:
             ) is not None
         ):
             try:
-                self._store.parallel_execution_schema()
+                parallel_schema = self._store.parallel_execution_schema(
+                    self._config.defaults.runner_slot_ceiling
+                )
             except ArenaStoreError as exc:
                 raise ServiceError(
                     "parallel_execution_schema_unavailable", 500
                 ) from exc
+            if int(parallel_schema["max_parallel_icps"]) < int(
+                self._config.defaults.runner_slot_ceiling
+            ):
+                raise ServiceError(
+                    "parallel_execution_schema_unavailable", 500
+                )
         today = int(self.now().strftime("%Y%m%d"))
         source = self._config.daily_icp_source(set_id=today, active_at=self.now())
         if not isinstance(source, Mapping) or source.get("status") not in (

@@ -35,7 +35,7 @@ def signed(keypair: Keypair, **overrides):
 
 def test_public_constants_are_the_plan_values():
     assert (c.STAGE_1_ICP_COUNT, c.STAGE_2_ICP_COUNT, c.BENCHMARK_ICP_COUNT, c.FINALIST_COUNT) == (10, 10, 20, 10)
-    assert (c.MAX_CHALLENGERS, c.RUNNER_SLOT_CEILING, c.MAX_ATTEMPTS_PER_ASSIGNMENT) == (256, 20, 2)
+    assert (c.MAX_CHALLENGERS, c.RUNNER_SLOT_CEILING, c.MAX_ATTEMPTS_PER_ASSIGNMENT) == (256, 251, 2)
     assert c.LAB_ARENA_POOL_PERCENT == 30
     assert c.KING_POOL_SHARE_PERCENT_BY_WEEK == (100, 80, 60, 40, 20)
     assert (c.EPOCHS_PER_REWARD_WEEK, c.ELIGIBILITY_MAX_EPOCHS) == (140, 45)
@@ -241,7 +241,7 @@ def test_round_configuration_contains_only_plain_public_settings():
         lambda d: d.update(stage_2_icp_count=91),
         lambda d: d.update(finalist_count=9),
         lambda d: d.update(max_challengers=257),
-        lambda d: d.update(runner_slot_ceiling=21),
+        lambda d: d.update(runner_slot_ceiling=252),
         lambda d: d["call_quotas"].update(scrapingdog=1),
         lambda d: d.update(providers=["scrapingdog"]),
         lambda d: d["reward_constants"].update(epochs_per_reward_week=141),

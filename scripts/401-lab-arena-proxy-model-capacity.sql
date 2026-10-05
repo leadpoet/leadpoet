@@ -9,6 +9,8 @@ DECLARE
   v_claim TEXT;
   v_open TEXT;
   v_schema TEXT;
+  v_schema_v2 TEXT;
+  v_expected_schema_v2 TEXT;
   v_owner NAME;
   v_acl ACLITEM[];
   v_security_definer BOOLEAN;
@@ -98,12 +100,48 @@ BEGIN
   SELECT pg_catalog.pg_get_functiondef(
     'public.lab_arena_parallel_execution_schema_v1()'::REGPROCEDURE
   ) INTO v_schema;
+  v_expected_schema_v2 := pg_catalog.replace(
+    v_schema, 'lab_arena_parallel_execution_schema_v1',
+    'lab_arena_parallel_execution_schema_v2'
+  );
+  v_expected_schema_v2 := pg_catalog.replace(
+    v_expected_schema_v2, 'parallel_execution_schema.v1',
+    'parallel_execution_schema.v2'
+  );
+  v_expected_schema_v2 := pg_catalog.replace(
+    v_expected_schema_v2, '''version'', 255', '''version'', 401'
+  );
+  v_expected_schema_v2 := pg_catalog.replace(
+    v_expected_schema_v2, '''max_parallel_icps'', 20', '''max_parallel_icps'', 251'
+  );
+  SELECT pg_catalog.pg_get_functiondef(p.oid)
+  INTO v_schema_v2
+  FROM pg_catalog.pg_proc AS p
+  JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace
+  WHERE n.nspname = 'public'
+    AND p.proname = 'lab_arena_parallel_execution_schema_v2'
+    AND p.pronargs = 0;
   IF pg_catalog.strpos(v_claim, 'lab_arena_proxy_model_capacity_v1') > 0 THEN
-    IF pg_catalog.strpos(v_claim, v_new_bound) = 0
+    IF pg_catalog.encode(extensions.digest(v_schema, 'sha256'), 'hex')
+         IS DISTINCT FROM '7fe3ae026c4a3df847e1c24760028fef73a0f0ef8401c03c100368ec33c39278'
+       OR pg_catalog.strpos(v_claim, v_new_bound) = 0
        OR pg_catalog.strpos(v_open, v_new_bound) = 0
-       OR pg_catalog.strpos(v_schema, '''max_parallel_icps'', 251') = 0
+       OR v_schema_v2 IS DISTINCT FROM v_expected_schema_v2
        OR pg_catalog.strpos(v_claim, v_old_declaration) > 0
-       OR pg_catalog.strpos(v_claim, v_new_pending) = 0 THEN
+       OR pg_catalog.strpos(v_claim, v_new_pending) = 0
+       OR NOT EXISTS (
+         SELECT 1 FROM pg_catalog.pg_proc AS p
+         JOIN pg_catalog.pg_namespace AS n ON n.oid = p.pronamespace
+         JOIN pg_catalog.pg_roles AS owner ON owner.oid = p.proowner
+         WHERE n.nspname = 'public'
+           AND p.proname = 'lab_arena_parallel_execution_schema_v2'
+           AND p.pronargs = 0
+           AND owner.rolname = 'lab_arena_owner'
+           AND p.proacl =
+             '{lab_arena_owner=X/lab_arena_owner,lab_arena_service=X/lab_arena_owner}'::ACLITEM[]
+           AND p.prosecdef AND p.provolatile = 's'
+           AND 'search_path=pg_catalog, public' = ANY(p.proconfig)
+       ) THEN
       RAISE EXCEPTION 'Arena model capacity migration replay differs' USING ERRCODE = '55000';
     END IF;
     RETURN;
@@ -125,7 +163,8 @@ BEGIN
      OR (pg_catalog.length(v_open)-pg_catalog.length(pg_catalog.replace(v_open,v_old_bound,'')))
           <> pg_catalog.length(v_old_bound)
      OR (pg_catalog.length(v_schema)-pg_catalog.length(pg_catalog.replace(v_schema,'''max_parallel_icps'', 20','')))
-          <> pg_catalog.length('''max_parallel_icps'', 20') THEN
+          <> pg_catalog.length('''max_parallel_icps'', 20')
+     OR v_schema_v2 IS NOT NULL THEN
     RAISE EXCEPTION 'Arena model capacity function preimage differs' USING ERRCODE = '55000';
   END IF;
   v_claim := pg_catalog.replace(v_claim, v_old_declaration, v_new_declaration);
@@ -133,7 +172,10 @@ BEGIN
   v_claim := pg_catalog.replace(v_claim, v_old_pending, v_new_pending);
   EXECUTE pg_catalog.replace(v_claim, v_old_bound, v_new_bound);
   EXECUTE pg_catalog.replace(v_open, v_old_bound, v_new_bound);
-  EXECUTE pg_catalog.replace(v_schema, '''max_parallel_icps'', 20', '''max_parallel_icps'', 251');
+  EXECUTE v_expected_schema_v2;
+  EXECUTE 'ALTER FUNCTION public.lab_arena_parallel_execution_schema_v2() OWNER TO lab_arena_owner';
+  EXECUTE 'REVOKE ALL ON FUNCTION public.lab_arena_parallel_execution_schema_v2() FROM PUBLIC, anon, authenticated, service_role';
+  EXECUTE 'GRANT EXECUTE ON FUNCTION public.lab_arena_parallel_execution_schema_v2() TO lab_arena_service';
 END;
 $model_capacity$;
 

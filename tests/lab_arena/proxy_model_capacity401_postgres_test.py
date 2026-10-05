@@ -60,6 +60,12 @@ def migrated(database, migrated399):
                  "text[],text,text,text,integer)",),
             )
             assert "hashtextextended('lab-arena-claim-control', 0)" in cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT pg_get_functiondef('public.lab_arena_parallel_execution_schema_v1()'::regprocedure)"
+            )
+            legacy_definition = cursor.fetchone()[0]
+            cursor.execute("SELECT public.lab_arena_parallel_execution_schema_v1()")
+            legacy_capability = cursor.fetchone()[0]
             sql = SQL401.read_text()
             cursor.execute("BEGIN")
             with pytest.raises(psycopg.Error, match="preimage differs"):
@@ -68,11 +74,63 @@ def migrated(database, migrated399):
             assert _hash(cursor) == old_hash
             cursor.execute(sql)
             applied_hash = _hash(cursor)
+            cursor.execute(
+                "SELECT pg_get_functiondef('public.lab_arena_parallel_execution_schema_v2()'::regprocedure)"
+            )
+            actual_v2 = cursor.fetchone()[0]
+            expected_v2 = legacy_definition.replace(
+                "lab_arena_parallel_execution_schema_v1",
+                "lab_arena_parallel_execution_schema_v2",
+            ).replace("parallel_execution_schema.v1", "parallel_execution_schema.v2").replace(
+                "'version', 255", "'version', 401"
+            ).replace("'max_parallel_icps', 20", "'max_parallel_icps', 251")
+            assert actual_v2 == expected_v2
+            cursor.execute(
+                "SELECT encode(extensions.digest(pg_get_functiondef("
+                "'public.lab_arena_parallel_execution_schema_v1()'::regprocedure),"
+                "'sha256'),'hex')"
+            )
+            assert cursor.fetchone()[0] == "7fe3ae026c4a3df847e1c24760028fef73a0f0ef8401c03c100368ec33c39278"
+            cursor.execute(
+                "SELECT p.proacl::text FROM pg_catalog.pg_proc AS p "
+                "WHERE p.oid='public.lab_arena_parallel_execution_schema_v2()'::regprocedure"
+            )
+            assert cursor.fetchone()[0] == (
+                "{lab_arena_owner=X/lab_arena_owner,"
+                "lab_arena_service=X/lab_arena_owner}"
+            )
             cursor.execute(sql)
             assert _hash(cursor) == applied_hash
             assert _security(cursor) == before
+            cursor.execute(
+                "SELECT pg_get_functiondef('public.lab_arena_parallel_execution_schema_v1()'::regprocedure)"
+            )
+            assert cursor.fetchone()[0] == legacy_definition
             cursor.execute("SELECT public.lab_arena_parallel_execution_schema_v1()")
-            assert cursor.fetchone()[0]["max_parallel_icps"] == 251
+            assert cursor.fetchone()[0] == legacy_capability == {
+                "schema_version": "leadpoet.lab_arena.parallel_execution_schema.v1",
+                "version": 255,
+                "max_parallel_icps": 20,
+            }
+            cursor.execute("SELECT public.lab_arena_parallel_execution_schema_v2()")
+            assert cursor.fetchone()[0] == {
+                "schema_version": "leadpoet.lab_arena.parallel_execution_schema.v2",
+                "version": 401,
+                "max_parallel_icps": 251,
+            }
+            cursor.execute(
+                "SELECT p.provolatile, p.prosecdef, owner.rolname, "
+                "p.proacl = "
+                "'{lab_arena_owner=X/lab_arena_owner,lab_arena_service=X/lab_arena_owner}'::aclitem[] "
+                "FROM pg_catalog.pg_proc AS p "
+                "JOIN pg_catalog.pg_roles AS owner ON owner.oid=p.proowner "
+                "WHERE p.oid='public.lab_arena_parallel_execution_schema_v2()'::regprocedure"
+            )
+            volatility, security_definer, owner, acl_matches = cursor.fetchone()
+            assert (volatility, security_definer, owner) == (
+                "s", True, "lab_arena_owner"
+            )
+            assert acl_matches is True
     return True
 
 
@@ -198,6 +256,21 @@ def test_new_service_startup_accepts_expanded_schema(connect, tmp_path):
         runner_slot_ceiling=contracts.RUNNER_SLOT_CEILING,
         parallel_twenty_icp_execution=True,
     )
+    harness.service.startup_checks()
+
+
+def test_legacy_gateway_capability_still_starts_after_migration(connect, tmp_path):
+    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    harness.service.config.defaults = replace(
+        harness.service.config.defaults,
+        runner_slot_ceiling=20,
+        parallel_twenty_icp_execution=True,
+    )
+    assert harness.service.store.parallel_execution_schema() == {
+        "schema_version": "leadpoet.lab_arena.parallel_execution_schema.v1",
+        "version": 255,
+        "max_parallel_icps": 20,
+    }
     harness.service.startup_checks()
 
 

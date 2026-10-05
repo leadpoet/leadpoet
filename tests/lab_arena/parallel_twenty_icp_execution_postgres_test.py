@@ -162,9 +162,9 @@ def test_parallel_default_startup_requires_the_255_capability(connect, tmp_path)
     observed = []
     real_capability = harness.service.store.parallel_execution_schema
 
-    def checked_capability():
+    def checked_capability(max_parallel_icps):
         observed.append("checked")
-        return real_capability()
+        return real_capability(max_parallel_icps)
 
     harness.service.store.parallel_execution_schema = checked_capability
     harness.service.startup_checks()
@@ -189,7 +189,7 @@ def test_parallel_default_startup_requires_the_255_capability(connect, tmp_path)
         runner_slot_ceiling=8,
     )
 
-    def unavailable_capability():
+    def unavailable_capability(max_parallel_icps):
         raise ArenaStoreError("function is unavailable")
 
     harness.service.store.parallel_execution_schema = unavailable_capability

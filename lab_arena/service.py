@@ -850,7 +850,9 @@ class ArenaService:
             ) is not None
         ):
             try:
-                parallel_schema = self._store.parallel_execution_schema()
+                parallel_schema = self._store.parallel_execution_schema(
+                    self._config.defaults.runner_slot_ceiling
+                )
             except ArenaStoreError as exc:
                 raise ServiceError(
                     "parallel_execution_schema_unavailable", 500

@@ -43,6 +43,9 @@ PER_ICP_COST_SCHEMA_VERSION = "leadpoet.lab_arena.per_icp_cost_schema.v1"
 PARALLEL_EXECUTION_SCHEMA_VERSION = (
     "leadpoet.lab_arena.parallel_execution_schema.v1"
 )
+PARALLEL_EXECUTION_SCHEMA_V2_VERSION = (
+    "leadpoet.lab_arena.parallel_execution_schema.v2"
+)
 DYNAMIC_BENCHMARK_SCHEMA_VERSION = "leadpoet.lab_arena.dynamic_benchmark_schema.v1"
 RUN_QUOTA_SNAPSHOT_SCHEMA_VERSION = "leadpoet.lab_arena.quota_snapshot.v1"
 SERVICE_ROLE_NAME = "lab_arena_service"
@@ -94,6 +97,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_twenty_icp_promotion_schema_v1": (),
     "lab_arena_baseline_cost_eligibility_schema_v1": (),
     "lab_arena_parallel_execution_schema_v1": (),
+    "lab_arena_parallel_execution_schema_v2": (),
     "lab_arena_dynamic_benchmark_schema_v1": (),
     "lab_arena_submission_replacement_schema_v1": (),
     "lab_arena_contact_schema_v1": (),
@@ -944,20 +948,29 @@ class ArenaStore:
             raise ArenaStoreError("per-ICP cost schema mismatch")
         return result
 
-    def parallel_execution_schema(self) -> Dict[str, Any]:
-        """Require the migration-255 parallel execution RPC and SQL guards."""
+    def parallel_execution_schema(self, max_parallel_icps: int = 20) -> Dict[str, Any]:
+        """Require the capability version for the configured runner ceiling."""
 
+        expanded = max_parallel_icps > 20
         result = _require_mapping(
-            self._transport.rpc("lab_arena_parallel_execution_schema_v1", {}),
+            self._transport.rpc(
+                "lab_arena_parallel_execution_schema_v2" if expanded
+                else "lab_arena_parallel_execution_schema_v1", {}
+            ),
             "parallel_execution_schema",
         )
         if (
             set(result) != {"schema_version", "version", "max_parallel_icps"}
-            or result["schema_version"] != PARALLEL_EXECUTION_SCHEMA_VERSION
+            or result["schema_version"] != (
+                PARALLEL_EXECUTION_SCHEMA_V2_VERSION if expanded
+                else PARALLEL_EXECUTION_SCHEMA_VERSION
+            )
             or type(result["version"]) is not int
-            or result["version"] != 255
+            or result["version"] != (401 if expanded else 255)
             or type(result["max_parallel_icps"]) is not int
-            or result["max_parallel_icps"] not in (20, RUNNER_SLOT_CEILING)
+            or result["max_parallel_icps"] != (
+                RUNNER_SLOT_CEILING if expanded else 20
+            )
         ):
             raise ArenaStoreError("parallel execution schema mismatch")
         return result

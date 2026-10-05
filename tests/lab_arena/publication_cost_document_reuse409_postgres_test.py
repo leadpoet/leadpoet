@@ -64,6 +64,50 @@ def test_migration_is_exact_idempotent_and_preserves_security(database):
                 for name in (wrapper, guard)} == after
 
 
+def test_non_superuser_migration_restores_public_schema_acl():
+    # Supabase's migration role can own the schema but cannot bypass the
+    # target function owner's missing CREATE permission.
+    database = database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    psycopg2, dsn = next(database)
+    connection = psycopg2.connect(**dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("CREATE ROLE arena_migration_test NOLOGIN")
+            cursor.execute("GRANT lab_arena_owner TO arena_migration_test")
+            cursor.execute("ALTER SCHEMA public OWNER TO arena_migration_test")
+            cursor.execute("REVOKE CREATE ON SCHEMA public FROM lab_arena_owner")
+            cursor.execute("SELECT nspacl FROM pg_namespace WHERE nspname='public'")
+            original_acl = cursor.fetchone()[0]
+            cursor.execute("SET ROLE arena_migration_test")
+            cursor.execute("BEGIN")
+            cursor.execute(
+                "CREATE FUNCTION public.arena_409_permission_probe() "
+                "RETURNS integer LANGUAGE sql AS 'SELECT 1'"
+            )
+            with pytest.raises(psycopg2.Error) as denied:
+                cursor.execute(
+                    "ALTER FUNCTION public.arena_409_permission_probe() "
+                    "OWNER TO lab_arena_owner"
+                )
+            assert denied.value.pgcode == "42501"
+            cursor.execute("ROLLBACK")
+
+            cursor.execute(MIGRATION.read_text())
+            cursor.execute(MIGRATION.read_text())
+            cursor.execute("SELECT nspacl FROM pg_namespace WHERE nspname='public'")
+            assert cursor.fetchone()[0] == original_acl
+            cursor.execute(
+                "SELECT has_schema_privilege('lab_arena_owner','public','CREATE'),"
+                "pg_get_userbyid(proowner) FROM pg_proc WHERE oid=%s::regprocedure",
+                ("public.lab_arena__cost_kind_summary_from_doc_v1(jsonb,text)",),
+            )
+            assert cursor.fetchone() == (False, "lab_arena_owner")
+    finally:
+        connection.close()
+        database.close()
+
+
 @pytest.mark.parametrize("kind", ["execute", "score", "unknown", None])
 def test_helper_matches_original_aggregation_and_rejects_tampered_costs(database, kind):
     psycopg2, dsn = database

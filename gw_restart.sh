@@ -349,10 +349,11 @@ abort_lab_arena_restart_guard_before_destructive() {
 
 drain_lab_arena_for_restart() {
   local source_root="$1" report
-  # Cover the signed one-hour Arena lease plus completion and poll margin.
+  # Cover the longest supported lease (90-minute recovery plus 15 minutes)
+  # and five minutes for natural expiry and completion polling.
   report="$(run_lab_arena_restart_guard "$source_root" drain \
     --scope "$GATEWAY_ACTIVE_RELEASE_COMPONENT" \
-    --timeout-seconds 3900)" || return 1
+    --timeout-seconds 6600)" || return 1
   LAB_ARENA_RESTART_GUARD_GENERATION="$(
     "$GATEWAY_PYTHON_BIN" -c \
       'import json,sys; value=json.load(sys.stdin); generation=value.get("guard_generation"); assert type(generation) is int and generation > 0; print(generation)' \

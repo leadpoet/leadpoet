@@ -50,7 +50,10 @@ def test_gateway_restart_drains_arena_claims_before_shutdown() -> None:
     completed = script.index('GATEWAY_DEPLOY_STAGE="completed"', release)
 
     assert drain < authorize < destructive < ready < attestation < release < completed
-    assert "--timeout-seconds 3900" in drain_function
+    from lab_arena.contracts import CHECKPOINT_DEADLINE_PROFILES
+
+    drain_timeout = int(re.search(r"--timeout-seconds (\d+)", drain_function).group(1))
+    assert drain_timeout == max(profile[1] for profile in CHECKPOINT_DEADLINE_PROFILES.values()) + 300
     assert ')" || return 1' in drain_function
     assert "abort_lab_arena_restart_guard_before_destructive" in _shell_function_source(
         script, "on_gateway_restart_exit"
@@ -88,7 +91,7 @@ def test_gateway_arena_drain_timeout_fails_before_recording_guard(
 
     assert completed.returncode == 0
     assert capture.read_text(encoding="utf-8").splitlines() == [
-        "/prepared", "drain", "--scope", "all", "--timeout-seconds", "3900",
+        "/prepared", "drain", "--scope", "all", "--timeout-seconds", "6600",
     ]
 
 

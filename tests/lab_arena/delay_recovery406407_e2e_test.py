@@ -23,6 +23,7 @@ def migrated(database, migrated399):
                 "407-lab-arena-cost-run-lookup.sql",
                 "408-lab-arena-cost-run-index.sql",
                 "409-lab-arena-publication-cost-document-reuse.sql",
+                "411-lab-arena-settlement-success-json-once.sql",
             ):
                 cursor.execute((Path(__file__).parents[2] / "scripts" / name).read_text())
 

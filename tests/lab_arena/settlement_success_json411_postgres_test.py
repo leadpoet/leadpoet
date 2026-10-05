@@ -1,4 +1,4 @@
-"""410 decodes settlement success once without changing cost decisions."""
+"""411 decodes settlement success once without changing cost decisions."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ MIGRATIONS = tuple(
     for name in (
         "407-lab-arena-cost-run-lookup.sql",
         "408-lab-arena-cost-run-index.sql",
-        "410-lab-arena-settlement-success-json-once.sql",
+        "411-lab-arena-settlement-success-json-once.sql",
     )
 )
 
@@ -42,7 +42,7 @@ def _entry(cursor, participant, round_id, label, entry_kind, amount, *,
         "%s,%s::jsonb,%s::jsonb) RETURNING entry_id",
         (entry_kind, participant["miner_hotkey"], round_id,
          participant["submission_id"], run_id or participant["run_id"],
-         sha("410-" + label), provider, amount, json.dumps(entry_doc or {}),
+         sha("411-" + label), provider, amount, json.dumps(entry_doc or {}),
          json.dumps(terminal) if terminal is not None else None),
     )
     return cursor.fetchone()[0]
@@ -133,13 +133,13 @@ def test_settlement_success_json_once_matches_all_cost_states(database):
                 "(run_id,assignment_id,round_id,submission_id,miner_hotkey,stage,"
                 "icp_position,attempt,status,stage_generation,kind,scored_run_id) "
                 "VALUES (%s,%s,%s,%s,%s,1,0,1,'pending',1,'score',%s)",
-                (round_id + ':score:410', round_id + ':assignment:410', round_id,
+                (round_id + ':score:411', round_id + ':assignment:411', round_id,
                  participant["submission_id"], participant["miner_hotkey"],
                  participant["run_id"]),
             )
             _entry(cursor, participant, round_id, "score", "settlement", 20,
                    terminal={"call_succeeded": True},
-                   run_id=round_id + ':score:410')
+                   run_id=round_id + ':score:411')
             cursor.execute(MIGRATIONS[0])
             cursor.execute(MIGRATIONS[1])
             before = _states(cursor, round_id, participant["submission_id"])
@@ -176,7 +176,7 @@ def test_settlement_success_json_once_rejects_changed_preimage(database):
             changed = definition.replace("  FROM heads\n", "  FROM heads /* changed */\n")
             assert changed != definition
             cursor.execute(changed)
-            with pytest.raises(psycopg2.Error, match="cost_410_call_preimage_changed"):
+            with pytest.raises(psycopg2.Error, match="cost_411_call_preimage_changed"):
                 cursor.execute(MIGRATIONS[2])
             connection.rollback()
     finally:

@@ -47,7 +47,7 @@ The boundary is CODE-ENFORCED, not discipline-enforced:
 
 The same module also wires the **Lab Arena sidecar** (``leadpoet-arena``),
 which runs the Arena competition pipeline in its own process. It reuses the
-identical fail-closed machinery under two additional scopes:
+identical fail-closed machinery under separate Arena scopes:
 
 - ``arena.http`` — one SERVER span per sidecar request, carrying the SAME four
   attributes. At the gateway every Arena call collapses into the catch-all
@@ -63,8 +63,11 @@ identical fail-closed machinery under two additional scopes:
 - ``arena.provider`` and ``arena.run`` — fixed operational fields and, after
   exact lease match or terminal commit, seven bounded identifiers from the trusted
   run row. No request content, ICP text, provider body, or credential is read.
+- ``arena.runtime`` — one span for an accepted runtime event upload that
+  inserted at least one event. Batch flags describe event kinds present in the
+  upload; mixed new/replayed batches do not prove a fresh lifecycle transition.
 
-Both Arena scopes share the gateway's destination (the same private
+All Arena scopes share the gateway's destination (the same private
 ``GATEWAY_OTEL_*`` values, read from the same protected env file) so enabling
 them requires no new secret and no new host configuration.
 
@@ -144,6 +147,7 @@ _ARENA_MAX_COUNT = 1_000_000
 
 ARENA_PROVIDER_SCOPE = "arena.provider"
 ARENA_RUN_SCOPE = "arena.run"
+ARENA_RUNTIME_SCOPE = "arena.runtime"
 ARENA_GATE_SCOPE = "arena.gate"
 
 # ``lab_arena.contracts.PROVIDERS`` plus the fixed label used when an
@@ -498,7 +502,7 @@ ARENA_HTTP_ATTRIBUTE_TYPES: Dict[str, tuple] = {
 
 ARENA_HTTP_ATTRIBUTE_ALLOWLIST = frozenset(ARENA_HTTP_ATTRIBUTE_TYPES)
 
-# The only per-run fields admitted on provider and terminal spans. The Arena
+# The only per-run fields admitted on provider, terminal, and runtime spans. The Arena
 # service takes these from the authenticated database run row, not a request.
 # No ICP content, miner output, provider body, or credential is admitted.
 RUN_IDENTITY_ATTRIBUTE_TYPES: Dict[str, tuple] = {
@@ -543,6 +547,20 @@ RUN_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
 }
 
 RUN_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(RUN_SPAN_ATTRIBUTE_TYPES)
+
+# Runtime uploads report only batch counts and whether the validated batch
+# contains these three lifecycle kinds. The flags do not assert that each kind
+# was newly inserted when the accepted batch also replayed older event IDs.
+RUNTIME_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
+    "arena.inserted_count": (int,),
+    "arena.replayed_count": (int,),
+    "arena.has_started": (bool,),
+    "arena.has_finished": (bool,),
+    "arena.has_error": (bool,),
+}
+RUNTIME_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(
+    RUNTIME_SPAN_ATTRIBUTE_TYPES
+) | RUN_IDENTITY_ATTRIBUTE_ALLOWLIST
 
 # The ONLY attributes a provider-gate span may carry.
 GATE_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
@@ -613,7 +631,10 @@ def _attributes_conform(
         return False
     for key, allowed_types in required.items():
         value = attributes[key]
-        if isinstance(value, bool) or not isinstance(value, allowed_types):
+        if isinstance(value, bool):
+            if bool not in allowed_types:
+                return False
+        elif not isinstance(value, allowed_types):
             return False
     return True
 
@@ -640,7 +661,7 @@ def _attributed_run_violation(
         return "run_identity"
     if not 0 <= attributes["arena.icp_position"] < 100:
         return "run_identity"
-    if not 1 <= attributes["arena.attempt"] <= 2:
+    if not 1 <= attributes["arena.attempt"] <= _ARENA_MAX_COUNT:
         return "run_identity"
     return None
 
@@ -747,6 +768,7 @@ def _validating_exporter(
     ``task``        INTERNAL span, the five approved pipeline-stage attributes
     ``provider``    INTERNAL span, the ten approved provider-call attributes
     ``run``         INTERNAL span, the four approved run-outcome attributes
+    ``runtime``     INTERNAL span, a bounded accepted runtime-upload batch
     ``gate``        INTERNAL span, the two approved provider-gate attributes
 
     A span whose scope is not listed is dropped, so one process can never emit
@@ -841,6 +863,26 @@ def _validating_exporter(
             return "name"
         return None
 
+    def _runtime_violation(span: Any, attributes: Dict[str, Any]) -> Optional[str]:
+        if set(attributes) != RUNTIME_SPAN_ATTRIBUTE_ALLOWLIST:
+            return "attributes"
+        run_identity_error = _attributed_run_violation(
+            attributes, RUNTIME_SPAN_ATTRIBUTE_TYPES
+        )
+        if run_identity_error is not None:
+            return run_identity_error
+        inserted = attributes["arena.inserted_count"]
+        replayed = attributes["arena.replayed_count"]
+        if inserted < 1 or replayed < 0 or inserted + replayed > 32:
+            return "runtime_count"
+        if not any(attributes[key] for key in (
+            "arena.has_started", "arena.has_finished", "arena.has_error",
+        )):
+            return "runtime_kind"
+        if span.name != "arena.runtime.upload":
+            return "name"
+        return None
+
     def _gate_violation(span: Any, attributes: Dict[str, Any]) -> Optional[str]:
         if not _attributes_conform(attributes, GATE_SPAN_ATTRIBUTE_TYPES):
             return "attributes"
@@ -874,6 +916,7 @@ def _validating_exporter(
         "task": _task_violation,
         "provider": _provider_violation,
         "run": _run_violation,
+        "runtime": _runtime_violation,
         "gate": _gate_violation,
     }
 
@@ -1127,8 +1170,9 @@ def configure_gateway_otel(app: Any, *, span_exporter: Optional[Any] = None) -> 
 class ArenaTelemetry:
     """Records Arena spans. Never raises, never blocks, never reorders work.
 
-    Four INTERNAL envelopes, each a root span with its own exact allowlist:
-    pipeline stages, provider calls, run outcomes, and provider-gate waits.
+    Five INTERNAL envelopes, each a root span with its own exact allowlist:
+    pipeline stages, provider calls, run outcomes, runtime uploads, and
+    provider-gate waits.
     The caller supplies values from the frozen vocabularies; anything else is
     dropped whole by the same fail-closed validator that guards the HTTP
     envelope. Every public method swallows its own failures — an exporter
@@ -1141,11 +1185,13 @@ class ArenaTelemetry:
         *,
         provider_tracer: Any = None,
         run_tracer: Any = None,
+        runtime_tracer: Any = None,
         gate_tracer: Any = None,
     ) -> None:
         self._tracer = tracer
         self._provider_tracer = provider_tracer
         self._run_tracer = run_tracer
+        self._runtime_tracer = runtime_tracer
         self._gate_tracer = gate_tracer
         # Per-request refusal code, read back by the Arena HTTP middleware.
         # A raw ASGI chain shares one context per request, so this is set and
@@ -1294,6 +1340,35 @@ class ArenaTelemetry:
                     span.set_attribute(key, value)
             if outcome == "failed":
                 span.set_status(Status(StatusCode.ERROR))
+            span.end()
+        except BaseException as exc:
+            self._log_emit_failure(exc)
+
+    # -- accepted runtime uploads --------------------------------------
+
+    def record_runtime_upload(
+        self,
+        *,
+        inserted_count: int,
+        replayed_count: int,
+        has_started: bool,
+        has_finished: bool,
+        has_error: bool,
+        run_identity: Mapping[str, Any],
+    ) -> None:
+        try:
+            if self._runtime_tracer is None:
+                return
+            if set(run_identity) != RUN_IDENTITY_ATTRIBUTE_ALLOWLIST:
+                return
+            span = self._start(self._runtime_tracer, "arena.runtime.upload", None)
+            span.set_attribute("arena.inserted_count", inserted_count)
+            span.set_attribute("arena.replayed_count", replayed_count)
+            span.set_attribute("arena.has_started", has_started)
+            span.set_attribute("arena.has_finished", has_finished)
+            span.set_attribute("arena.has_error", has_error)
+            for key, value in run_identity.items():
+                span.set_attribute(key, value)
             span.end()
         except BaseException as exc:
             self._log_emit_failure(exc)
@@ -1459,6 +1534,7 @@ def configure_arena_otel(
                 ARENA_TASK_SCOPE: "task",
                 ARENA_PROVIDER_SCOPE: "provider",
                 ARENA_RUN_SCOPE: "run",
+                ARENA_RUNTIME_SCOPE: "runtime",
                 ARENA_GATE_SCOPE: "gate",
             },
             log=_ARENA_LOG,
@@ -1476,6 +1552,7 @@ def configure_arena_otel(
             provider.get_tracer(ARENA_TASK_SCOPE),
             provider_tracer=provider.get_tracer(ARENA_PROVIDER_SCOPE),
             run_tracer=provider.get_tracer(ARENA_RUN_SCOPE),
+            runtime_tracer=provider.get_tracer(ARENA_RUNTIME_SCOPE),
             gate_tracer=provider.get_tracer(ARENA_GATE_SCOPE),
         )
 

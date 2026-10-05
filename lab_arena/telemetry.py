@@ -13,13 +13,16 @@ frozen vocabularies; the recorder (installed at startup by
 one span. With no recorder installed every call is a cheap no-op, so the
 pipeline behaves identically whether or not telemetry is configured.
 
-The same seam carries four other kinds of observation, all equally bounded:
+The same seam carries five other kinds of observation, all equally bounded:
 
 - ``record_provider`` — one provider call: which provider and operation, how
   it ended, the HTTP and upstream status, how many credential attempts it
   took, what it cost in micro-USD, and how long it ran.
 - ``record_run`` — one finished evaluation run: execution or scoring, and
   which of the thirteen terminal causes ended it.
+- ``record_runtime_upload`` — one accepted upload of runtime events that
+  inserted at least one event. Its flags name lifecycle kinds present in the
+  batch; mixed new/replayed batches do not prove fresh transitions.
 - ``record_gate`` — one wait on the shared provider concurrency gate, emitted
   only when a call actually waited, timed out, was cancelled, or found no
   capacity. An uncontended call emits nothing.
@@ -27,7 +30,7 @@ The same seam carries four other kinds of observation, all equally bounded:
   current request, so a 4xx stops being anonymous. Only the literal prefix
   before the first ":" is ever exported.
 
-Provider and committed-run spans may carry seven bounded identifiers copied
+Provider, committed-run, and accepted-runtime-upload spans may carry seven bounded identifiers copied
 from the gateway's authenticated run row. No ICP content, source bundle,
 prompt, completion, score, model output, URL, or credential is accepted.
 Stage and gate spans remain aggregate.
@@ -143,6 +146,32 @@ def record_run(
         pass
 
 
+def record_runtime_upload(
+    *,
+    inserted_count: int,
+    replayed_count: int,
+    has_started: bool,
+    has_finished: bool,
+    has_error: bool,
+    run_identity: Mapping[str, Any],
+) -> None:
+    """Record a successful upload batch, never an inferred lifecycle event."""
+    recorder = _recorder
+    if recorder is None:
+        return
+    try:
+        recorder.record_runtime_upload(
+            inserted_count=inserted_count,
+            replayed_count=replayed_count,
+            has_started=has_started,
+            has_finished=has_finished,
+            has_error=has_error,
+            run_identity=run_identity,
+        )
+    except BaseException:
+        pass
+
+
 def record_gate(
     gate_outcome: str,
     *,
@@ -210,5 +239,6 @@ __all__ = [
     "record_gate",
     "record_provider",
     "record_run",
+    "record_runtime_upload",
     "stage",
 ]

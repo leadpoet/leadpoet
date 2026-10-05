@@ -24,11 +24,13 @@ from gateway.observability.otel_bootstrap import (
     ARENA_PROVIDER_SCOPE,
     ARENA_PROVIDERS,
     ARENA_RUN_SCOPE,
+    ARENA_RUNTIME_SCOPE,
     ARENA_SERVICE_NAME,
     ARENA_TASK_SCOPE,
     ARENA_TASK_STAGES,
     PROVIDER_SPAN_ATTRIBUTE_ALLOWLIST,
     RUN_IDENTITY_ATTRIBUTE_ALLOWLIST,
+    RUNTIME_SPAN_ATTRIBUTE_ALLOWLIST,
     TASK_SPAN_ATTRIBUTE_ALLOWLIST,
     configure_arena_otel,
 )
@@ -236,7 +238,6 @@ def test_provider_and_terminal_spans_share_only_bounded_run_identity():
     "patch",
     [
         {"arena.attempt": True},
-        {"arena.attempt": 3},
         {"arena.icp_position": 100},
         {"arena.runner_hotkey": "forged-validator"},
         {"arena.round_id": "round with prompt"},
@@ -279,6 +280,83 @@ def test_retry_terminal_spans_keep_distinct_run_ids_and_attempts():
     assert [(span.attributes["arena.run_id"], span.attributes["arena.attempt"])
             for span in spans] == [("run-2026-10-04-1", 1), ("run-2026-10-04-2", 2)]
     assert spans[0].attributes["arena.runner_hotkey"] != spans[1].attributes["arena.runner_hotkey"]
+
+
+def test_recovery_attempt_three_is_admitted_on_run_and_runtime_spans():
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recovery = dict(TRUSTED_RUN_IDENTITY, **{"arena.attempt": 3})
+    recorder.record_run("execute", "accepted", run_identity=recovery)
+    recorder.record_runtime_upload(
+        inserted_count=1, replayed_count=0,
+        has_started=False, has_finished=False, has_error=True,
+        run_identity=recovery,
+    )
+
+    run_span, runtime_span = exp.get_finished_spans()
+    assert run_span.attributes["arena.attempt"] == 3
+    assert runtime_span.attributes["arena.attempt"] == 3
+    assert runtime_span.name == "arena.runtime.upload"
+    assert runtime_span.instrumentation_scope.name == ARENA_RUNTIME_SCOPE
+    assert set(runtime_span.attributes) == RUNTIME_SPAN_ATTRIBUTE_ALLOWLIST
+    assert runtime_span.attributes["arena.has_error"] is True
+
+
+@pytest.mark.parametrize("attempt", [0, -1, 1_000_001, True])
+def test_invalid_recovery_attempt_drops_run_and_runtime_spans(attempt):
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    identity = dict(TRUSTED_RUN_IDENTITY, **{"arena.attempt": attempt})
+    recorder.record_run("execute", "accepted", run_identity=identity)
+    recorder.record_runtime_upload(
+        inserted_count=1, replayed_count=0,
+        has_started=False, has_finished=False, has_error=True,
+        run_identity=identity,
+    )
+    assert exp.get_finished_spans() == ()
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"inserted_count": 0},
+        {"inserted_count": -1},
+        {"inserted_count": 33},
+        {"replayed_count": -1},
+        {"replayed_count": 32},
+        {"has_error": 1},
+        {"has_error": False},
+    ],
+)
+def test_runtime_upload_rejects_invalid_counts_and_flags(patch):
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    args = {
+        "inserted_count": 1, "replayed_count": 0,
+        "has_started": False, "has_finished": False, "has_error": True,
+        "run_identity": TRUSTED_RUN_IDENTITY,
+    }
+    recorder.record_runtime_upload(**{**args, **patch})
+    assert exp.get_finished_spans() == ()
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {**TRUSTED_RUN_IDENTITY, "arena.lease_token": "secret"},
+        {**TRUSTED_RUN_IDENTITY, "arena.attempt": 0},
+        {"arena.run_id": TRUSTED_RUN_IDENTITY["arena.run_id"]},
+    ],
+)
+def test_runtime_upload_drops_extra_or_partial_identity(identity):
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_runtime_upload(
+        inserted_count=1, replayed_count=0,
+        has_started=False, has_finished=False, has_error=True,
+        run_identity=identity,
+    )
+    assert exp.get_finished_spans() == ()
 
 
 def test_every_provider_and_outcome_in_the_vocabulary_is_admitted():
@@ -541,6 +619,11 @@ def test_a_broken_recorder_never_breaks_a_provider_call():
     try:
         telemetry.record_provider("openrouter", "openrouter.responses", "ok")
         telemetry.record_run("execute", "accepted")
+        telemetry.record_runtime_upload(
+            inserted_count=1, replayed_count=0,
+            has_started=False, has_finished=False, has_error=True,
+            run_identity=TRUSTED_RUN_IDENTITY,
+        )
         telemetry.record_gate("timed_out")
         telemetry.note_denial("lease_token_invalid")
     finally:

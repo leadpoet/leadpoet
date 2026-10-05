@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lab_arena import trajectory
+from lab_arena import telemetry, trajectory
 from lab_arena.broker import BrokerResult
 from lab_arena.service import ArenaService, ServiceError
 from lab_arena.store import ArenaStoreError, hash_lease_token
@@ -297,6 +297,105 @@ def test_service_trajectory_passes_only_lease_hash_and_sanitized_events():
             "lease-token",
             {"events": [trajectory.event("provider.request", {})]},
         )
+
+
+@pytest.mark.parametrize(
+    ("kinds", "inserted", "existing", "status", "expected_flags"),
+    [
+        (["runtime.started"], 1, 0, "accepted", (True, False, False)),
+        (["runtime.finished"], 1, 0, "accepted", (False, True, False)),
+        (["runtime.error"], 1, 0, "accepted", (False, False, True)),
+        (["runtime.error", "runtime.stdout"], 1, 1, "accepted", (False, False, True)),
+        (["runtime.error"], 0, 1, "accepted", None),
+        (["runtime.stdout"], 1, 0, "accepted", None),
+        (["runtime.error"], 0, 0, "stale", None),
+    ],
+)
+def test_runtime_upload_telemetry_only_after_new_accepted_lifecycle_batch(
+    monkeypatch, kinds, inserted, existing, status, expected_flags,
+):
+    run = dict(_run(),
+        run_id="run-2026-10-04-1",
+        round_id="arena-2026-10-04",
+        submission_id="baseline-2026-10-04",
+        runner_hotkey="5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9",
+        lease_token_hash=hash_lease_token("lease-token"),
+    )
+
+    class Store:
+        get_run = staticmethod(lambda _run_id: run)
+
+        @staticmethod
+        def append_trajectory_events(_run_id, lease_hash, events):
+            assert lease_hash == hash_lease_token("lease-token")
+            return {
+                "status": status, "accepted": len(events),
+                "inserted": inserted, "existing": existing,
+            }
+
+    service = _service_for_trajectory(Store())
+    observed = []
+    monkeypatch.setattr(
+        telemetry, "record_runtime_upload", lambda **kwargs: observed.append(kwargs),
+    )
+    document = {"events": [
+        trajectory.event(kind, {
+            "run_id": "forged-run", "runner_hotkey": "forged-validator",
+            "message": "private-runtime-content",
+        }) for kind in kinds
+    ]}
+
+    if status == "stale":
+        with pytest.raises(ServiceError, match="lease_stale"):
+            service.handle_trajectory(run["run_id"], "lease-token", document)
+    else:
+        service.handle_trajectory(run["run_id"], "lease-token", document)
+    if expected_flags is None:
+        assert observed == []
+    else:
+        assert observed == [{
+            "inserted_count": inserted,
+            "replayed_count": existing,
+            "has_started": expected_flags[0],
+            "has_finished": expected_flags[1],
+            "has_error": expected_flags[2],
+            "run_identity": {
+                "arena.run_id": run["run_id"],
+                "arena.round_id": run["round_id"],
+                "arena.submission_id": run["submission_id"],
+                "arena.runner_hotkey": run["runner_hotkey"],
+                "arena.stage": run["stage"],
+                "arena.icp_position": run["icp_position"],
+                "arena.attempt": run["attempt"],
+            },
+        }]
+
+
+def test_runtime_upload_telemetry_excludes_wrong_lease_and_invalid_batch(monkeypatch):
+    run = dict(_run(), lease_token_hash=hash_lease_token("lease-token"))
+    calls = []
+
+    class Store:
+        get_run = staticmethod(lambda _run_id: run)
+
+        @staticmethod
+        def append_trajectory_events(_run_id, lease_hash, events):
+            calls.append(lease_hash)
+            return {"status": "stale"}
+
+    service = _service_for_trajectory(Store())
+    observed = []
+    monkeypatch.setattr(
+        telemetry, "record_runtime_upload", lambda **kwargs: observed.append(kwargs),
+    )
+    document = {"events": [trajectory.event("runtime.error", {"message": "private"})]}
+
+    with pytest.raises(ServiceError, match="lease_stale"):
+        service.handle_trajectory(run["run_id"], "wrong-token", document)
+    with pytest.raises(ServiceError, match="trajectory_invalid"):
+        service.handle_trajectory(run["run_id"], "lease-token", {"events": []})
+    assert calls == [hash_lease_token("wrong-token")]
+    assert observed == []
 
 
 def test_provider_trajectory_failures_never_change_provider_result():

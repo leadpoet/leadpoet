@@ -40,6 +40,20 @@ def response(output=None, **changes):
     }, **changes)
 
 
+def _reporting(function, name):
+    """Pass through, but report the exception the bridge is about to hide."""
+
+    def reporting(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except BaseException as exc:
+            print("codex.%s raised %s: %s" % (name, type(exc).__name__, exc),
+                  file=sys.stderr, flush=True)
+            raise
+
+    return reporting
+
+
 @contextmanager
 def broker_socket(monkeypatch, transport=None, store=None, *, priced_models=()):
     broker, store, transport = make_broker(transport=transport, store=store)
@@ -83,6 +97,12 @@ def broker_socket(monkeypatch, transport=None, store=None, *, priced_models=()):
             web_server.start()
             monkeypatch.setenv("LAB_ARENA_WORKER_SOCKET", str(path))
             monkeypatch.setenv("LAB_ARENA_WEB_EGRESS_SOCKET", str(web_path))
+            # The bridge answers OSError and CodexRuntimeError alike with a bare
+            # 502, so report the original failure before it is collapsed.
+            for name in ("_dispatch", "_remaining_seconds"):
+                monkeypatch.setattr(
+                    codex, name, _reporting(getattr(codex, name), name)
+                )
             yield store, transport, path
         finally:
             try:

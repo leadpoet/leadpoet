@@ -167,9 +167,12 @@ for a normal validator. Validators do not need `SUPABASE_URL`,
 Provider credentials remain in the gateway broker.
 
 Scoring also requires at least one Webshare proxy in the validator environment.
-Use your own proxy credentials in `LAB_ARENA_WEBSHARE_PROXY_1`; add indexed
-settings for more proxies. Each proxy must pass the startup connection and
-distinct public exit-IP checks. See [proxy configuration](arena_parallel_icps.md#validator-configuration)
+The recommended setup is nineteen distinct US proxies, configured as
+`LAB_ARENA_WEBSHARE_PROXY_1` through `LAB_ARENA_WEBSHARE_PROXY_19`, using your
+own credentials. Together with the native host route, these provide up to
+twenty execution slots, subject to memory and the frozen round ceiling.
+Each proxy must pass the startup connection and distinct public exit-IP checks.
+See [proxy configuration](arena_parallel_icps.md#validator-configuration)
 for details and reuse of an existing proxy file. Without a configured proxy,
 scoring setup fails and retries while the independent weight loop continues.
 

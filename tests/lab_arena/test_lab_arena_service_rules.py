@@ -24,6 +24,7 @@ from lab_arena.output import validate_output_document
 from lab_arena.service import (
     ArenaService, S3ObjectStore, ServiceError, _parse_iso,
     _provider_telemetry_fields, _telemetry_provider_operation,
+    _telemetry_run_identity,
 )
 from lab_arena.store import ArenaStoreError, hash_lease_token
 
@@ -690,7 +691,11 @@ def _completion_service(*, registered=True, role="validator", run_runner="runner
     run = {
         "run_id": "run-1",
         "round_id": "arena-a",
+        "submission_id": "baseline-a",
         "runner_hotkey": run_runner,
+        "stage": 1,
+        "icp_position": 0,
+        "attempt": 1,
         "kind": "execute",
         "lease_token_hash": hash_lease_token(lease_token),
     }
@@ -759,10 +764,12 @@ def test_completion_records_only_newly_committed_matching_outcome(
     service = _completion_service()
     service._store.complete_attempt = lambda **_kwargs: store_result
     observed = []
-    monkeypatch.setattr(telemetry, "record_run", lambda *args: observed.append(args))
+    monkeypatch.setattr(telemetry, "record_run", lambda *args, **kwargs: observed.append((args, kwargs)))
 
     assert service.handle_complete({}) == store_result
-    assert observed == ([("execute", "model_error")] if recorded else [])
+    assert observed == ([(("execute", "model_error"), {
+        "run_identity": _telemetry_run_identity(service._store.get_run("run-1")),
+    })] if recorded else [])
 
 
 def test_completion_records_newly_committed_accepted_run(monkeypatch):
@@ -776,10 +783,56 @@ def test_completion_records_newly_committed_accepted_run(monkeypatch):
     committed = {"status": "accepted", "idempotent": False}
     service._store.complete_attempt = lambda **_kwargs: committed
     observed = []
-    monkeypatch.setattr(telemetry, "record_run", lambda *args: observed.append(args))
+    monkeypatch.setattr(telemetry, "record_run", lambda *args, **kwargs: observed.append((args, kwargs)))
 
     assert service.handle_complete({}) == committed
-    assert observed == [("execute", "accepted")]
+    assert observed == [(("execute", "accepted"), {
+        "run_identity": _telemetry_run_identity(service._store.get_run("run-1")),
+    })]
+
+
+@pytest.mark.parametrize(
+    ("submission_id", "runner_hotkey", "attempt"),
+    [
+        ("baseline-2026-10-04", "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9", 1),
+        ("sub-" + "a" * 32, "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo8", 2),
+    ],
+)
+def test_completion_identity_comes_from_committed_run_not_request(
+    monkeypatch, submission_id, runner_hotkey, attempt,
+):
+    service = _completion_service()
+    run = service._store.get_run("run-1")
+    run.update(
+        run_id="run-2026-10-04-1" if attempt == 1 else "run-2026-10-04-2",
+        round_id="arena-2026-10-04",
+        submission_id=submission_id,
+        runner_hotkey=runner_hotkey,
+        stage=1 if attempt == 1 else 2,
+        icp_position=3 if attempt == 1 else 14,
+        attempt=attempt,
+    )
+    validated, round_row = service._request_round()
+    validated["hotkey"] = runner_hotkey
+    validated["body"]["run_id"] = run["run_id"]
+    validated["body"].update(
+        submission_id="sub-forged", icp_position=99, attempt=2,
+        runner_hotkey="forged-validator",
+    )
+    round_row["round_id"] = run["round_id"]
+    service._request_round = lambda *_args, **_kwargs: (validated, round_row)
+    service._store.complete_attempt = lambda **_kwargs: {
+        "status": "failed", "idempotent": False,
+    }
+    observed = []
+    monkeypatch.setattr(telemetry, "record_run", lambda *args, **kwargs: observed.append((args, kwargs)))
+
+    service.handle_complete({})
+    assert observed == [(("execute", "model_error"), {
+        "run_identity": _telemetry_run_identity(run),
+    })]
+    assert observed[0][1]["run_identity"]["arena.runner_hotkey"] == runner_hotkey
+    assert observed[0][1]["run_identity"]["arena.attempt"] == attempt
 
 
 @pytest.mark.parametrize(
@@ -798,7 +851,15 @@ def test_provider_telemetry_counts_only_fresh_broker_results(
     result = BrokerResult(200, {}, b'{"answer":"ok"}', call)
     service = object.__new__(ArenaService)
     service._run_context = lambda *_args: (
-        {"round_id": "arena-a"}, SimpleNamespace(lease_token_hash="sha256:" + "a" * 64),
+        {
+            "run_id": "run-2026-10-04-1",
+            "round_id": "arena-2026-10-04",
+            "submission_id": "baseline-2026-10-04",
+            "runner_hotkey": "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9",
+            "stage": 1, "icp_position": 3, "attempt": 1,
+            "lease_token_hash": hash_lease_token("lease-token"),
+        },
+        SimpleNamespace(lease_token_hash=hash_lease_token("lease-token")),
     )
     service._broker_for = lambda _round_id: SimpleNamespace(
         execute=lambda *_args, **_kwargs: result,
@@ -825,6 +886,92 @@ def test_provider_telemetry_counts_only_fresh_broker_results(
         assert len(observed) == 1
         assert observed[0][1]["outcome"] == expected_outcome
         assert observed[0][1]["cost_microusd"] == expected_cost
+
+
+@pytest.mark.parametrize(
+    ("broker_call", "lease_hash_matches", "expected_identity"),
+    [
+        ({"outcome": "settled", "actual_microusd": 125}, True, True),
+        ({"outcome": "settled", "error_code": "provider_unavailable"}, True, True),
+        ({"outcome": "settled", "actual_microusd": 125}, False, False),
+        ({"error_code": "lease_stale"}, True, True),
+        ({"outcome": "refused", "error_code": "budget_refused"}, True, True),
+        ({"outcome": "uncertain", "error_code": "provider_unavailable"}, True, True),
+    ],
+)
+def test_provider_identity_requires_matching_lease_even_for_failed_calls(
+    monkeypatch, broker_call, lease_hash_matches, expected_identity,
+):
+    run = {
+        "run_id": "run-2026-10-04-1",
+        "round_id": "arena-2026-10-04",
+        "submission_id": "baseline-2026-10-04",
+        "runner_hotkey": "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9",
+        "stage": 1, "icp_position": 3, "attempt": 1,
+        "lease_token_hash": hash_lease_token("lease-token"),
+    }
+    supplied_lease = "lease-token" if lease_hash_matches else "forged-token"
+    context_hash = hash_lease_token(supplied_lease)
+    service = object.__new__(ArenaService)
+    service._run_context = lambda *_args: (run, SimpleNamespace(lease_token_hash=context_hash))
+    call = {"operation_id": "openrouter.chat", **broker_call}
+    broker_result = BrokerResult(200, {}, b"{}", call)
+    service._broker_for = lambda _round_id: SimpleNamespace(
+        execute=lambda *_args, **_kwargs: broker_result,
+    )
+    service._store = SimpleNamespace(append_trajectory_events=lambda _run_id, _lease_hash, events: {
+        "status": "accepted", "accepted": len(events),
+    })
+    observed = []
+    monkeypatch.setattr(telemetry, "record_provider", lambda *args, **kwargs: observed.append(kwargs))
+    frame = {
+        "operation_id": "openrouter.chat",
+        "parameters": {"submission_id": "sub-forged", "runner_hotkey": "forged"},
+        "timeout_ms": 1000,
+        "action_sequence": 1,
+    }
+
+    service.handle_provider(run["run_id"], supplied_lease, frame)
+    assert len(observed) == 1
+    assert observed[0]["run_identity"] == (
+        _telemetry_run_identity(run) if expected_identity else None
+    )
+
+
+@pytest.mark.parametrize("lease_hash_matches", [True, False])
+def test_provider_exception_uses_only_matching_run_lease(monkeypatch, lease_hash_matches):
+    run = {
+        "run_id": "run-2026-10-04-1",
+        "round_id": "arena-2026-10-04",
+        "submission_id": "baseline-2026-10-04",
+        "runner_hotkey": "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9",
+        "stage": 1, "icp_position": 3, "attempt": 1,
+        "lease_token_hash": hash_lease_token("lease-token"),
+    }
+    service = object.__new__(ArenaService)
+    supplied_lease = "lease-token" if lease_hash_matches else "forged-token"
+    service._run_context = lambda *_args: (
+        run, SimpleNamespace(lease_token_hash=hash_lease_token(supplied_lease)),
+    )
+    service._broker_for = lambda _round_id: SimpleNamespace(
+        execute=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("broker lost")),
+    )
+    service._store = SimpleNamespace(append_trajectory_events=lambda _run_id, _lease_hash, events: {
+        "status": "accepted", "accepted": len(events),
+    })
+    observed = []
+    monkeypatch.setattr(telemetry, "record_provider", lambda *args, **kwargs: observed.append(kwargs))
+    frame = {
+        "operation_id": "openrouter.chat", "parameters": {},
+        "timeout_ms": 1000, "action_sequence": 1,
+    }
+
+    with pytest.raises(RuntimeError, match="broker lost"):
+        service.handle_provider(run["run_id"], supplied_lease, frame)
+    assert len(observed) == 1
+    assert observed[0]["run_identity"] == (
+        _telemetry_run_identity(run) if lease_hash_matches else None
+    )
 
 
 def test_provider_telemetry_uses_registered_provider_and_safe_fallbacks():

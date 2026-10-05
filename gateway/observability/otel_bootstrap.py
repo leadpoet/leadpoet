@@ -60,6 +60,9 @@ identical fail-closed machinery under two additional scopes:
   vocabulary, an outcome from a frozen vocabulary, an exception CLASS name
   (code-controlled, shape-validated) and a bounded integer count. No round id,
   submission id, hotkey, source, prompt, score, or model output can pass it.
+- ``arena.provider`` and ``arena.run`` — fixed operational fields and, after
+  exact lease match or terminal commit, seven bounded identifiers from the trusted
+  run row. No request content, ICP text, provider body, or credential is read.
 
 Both Arena scopes share the gateway's destination (the same private
 ``GATEWAY_OTEL_*`` values, read from the same protected env file) so enabling
@@ -76,7 +79,7 @@ from __future__ import annotations
 import os
 import re
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
@@ -495,10 +498,26 @@ ARENA_HTTP_ATTRIBUTE_TYPES: Dict[str, tuple] = {
 
 ARENA_HTTP_ATTRIBUTE_ALLOWLIST = frozenset(ARENA_HTTP_ATTRIBUTE_TYPES)
 
-# The ONLY attributes a provider-call span may carry. Every text field is a
-# member of a frozen vocabulary above; every numeric field is bounded. No
-# prompt, completion, model output, miner hotkey, run id, submission id,
-# credential, URL, or response body can pass this allowlist.
+# The only per-run fields admitted on provider and terminal spans. The Arena
+# service takes these from the authenticated database run row, not a request.
+# No ICP content, miner output, provider body, or credential is admitted.
+RUN_IDENTITY_ATTRIBUTE_TYPES: Dict[str, tuple] = {
+    "arena.run_id": (str,),
+    "arena.round_id": (str,),
+    "arena.submission_id": (str,),
+    "arena.runner_hotkey": (str,),
+    "arena.stage": (int,),
+    "arena.icp_position": (int,),
+    "arena.attempt": (int,),
+}
+RUN_IDENTITY_ATTRIBUTE_ALLOWLIST = frozenset(RUN_IDENTITY_ATTRIBUTE_TYPES)
+_ARENA_RUN_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,200}$")
+_ARENA_ROUND_ID_RE = re.compile(r"^arena-[0-9]{4}-[0-9]{2}-[0-9]{2}(?:-[a-z0-9]{1,16})?$")
+_ARENA_SUBMISSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+_ARENA_RUNNER_HOTKEY_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{46,48}$")
+
+# The base provider envelope plus the complete trusted run identity when the
+# service has one. Partial identities and any additional field drop the span.
 PROVIDER_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
     "arena.provider": (str,),
     "arena.operation": (str,),
@@ -563,7 +582,7 @@ def _safe_route_label(scope_or_request: Any) -> str:
     """Return the low-cardinality route template, never the concrete path.
 
     Using the matched route template (e.g. ``/research-lab/allocations/attested/
-    {epoch}``) keeps ids, hotkeys, and epoch numbers out of telemetry. When the
+    {epoch}``) keeps ids, hotkeys, and epoch numbers out of HTTP spans. When the
     template cannot be resolved the label is the fixed ``/_unmatched`` literal —
     a client-controlled path segment is never exported.
     """
@@ -597,6 +616,33 @@ def _attributes_conform(
         if isinstance(value, bool) or not isinstance(value, allowed_types):
             return False
     return True
+
+
+def _attributed_run_violation(
+    attributes: Dict[str, Any], base_types: Dict[str, tuple]
+) -> Optional[str]:
+    """Accept the base envelope or all seven bounded run fields, never a part."""
+
+    if _attributes_conform(attributes, base_types):
+        return None
+    full_types = {**base_types, **RUN_IDENTITY_ATTRIBUTE_TYPES}
+    if not _attributes_conform(attributes, full_types):
+        return "attributes"
+    if not _ARENA_RUN_ID_RE.fullmatch(attributes["arena.run_id"]):
+        return "run_identity"
+    if not _ARENA_ROUND_ID_RE.fullmatch(attributes["arena.round_id"]):
+        return "run_identity"
+    if not _ARENA_SUBMISSION_ID_RE.fullmatch(attributes["arena.submission_id"]):
+        return "run_identity"
+    if not _ARENA_RUNNER_HOTKEY_RE.fullmatch(attributes["arena.runner_hotkey"]):
+        return "run_identity"
+    if attributes["arena.stage"] not in (1, 2):
+        return "run_identity"
+    if not 0 <= attributes["arena.icp_position"] < 100:
+        return "run_identity"
+    if not 1 <= attributes["arena.attempt"] <= 2:
+        return "run_identity"
+    return None
 
 
 class _GatewayOtelMiddleware:
@@ -745,8 +791,9 @@ def _validating_exporter(
         return _http_violation(span, trimmed)
 
     def _provider_violation(span: Any, attributes: Dict[str, Any]) -> Optional[str]:
-        if not _attributes_conform(attributes, PROVIDER_SPAN_ATTRIBUTE_TYPES):
-            return "attributes"
+        run_identity_error = _attributed_run_violation(attributes, PROVIDER_SPAN_ATTRIBUTE_TYPES)
+        if run_identity_error is not None:
+            return run_identity_error
         provider = attributes["arena.provider"]
         if provider not in ARENA_PROVIDERS:
             return "provider"
@@ -780,8 +827,9 @@ def _validating_exporter(
         return None
 
     def _run_violation(span: Any, attributes: Dict[str, Any]) -> Optional[str]:
-        if not _attributes_conform(attributes, RUN_SPAN_ATTRIBUTE_TYPES):
-            return "attributes"
+        run_identity_error = _attributed_run_violation(attributes, RUN_SPAN_ATTRIBUTE_TYPES)
+        if run_identity_error is not None:
+            return run_identity_error
         run_kind = attributes["arena.run_kind"]
         if run_kind not in ARENA_RUN_KINDS:
             return "run_kind"
@@ -1159,6 +1207,7 @@ class ArenaTelemetry:
         cost_microusd: int = 0,
         duration_ms: float = 0.0,
         start_ns: Optional[int] = None,
+        run_identity: Optional[Mapping[str, Any]] = None,
     ) -> None:
         try:
             self._record_provider(
@@ -1173,6 +1222,7 @@ class ArenaTelemetry:
                 cost_microusd=cost_microusd,
                 duration_ms=duration_ms,
                 start_ns=start_ns,
+                run_identity=run_identity,
             )
         except BaseException as exc:
             self._log_emit_failure(exc)
@@ -1191,8 +1241,11 @@ class ArenaTelemetry:
         cost_microusd: int,
         duration_ms: float,
         start_ns: Optional[int],
+        run_identity: Optional[Mapping[str, Any]],
     ) -> None:
         if self._provider_tracer is None:
+            return
+        if run_identity is not None and set(run_identity) != RUN_IDENTITY_ATTRIBUTE_ALLOWLIST:
             return
         from opentelemetry.trace import Status, StatusCode
 
@@ -1209,15 +1262,23 @@ class ArenaTelemetry:
         span.set_attribute("arena.attempts", int(attempts))
         span.set_attribute("arena.cost_microusd", int(cost_microusd))
         span.set_attribute("duration_ms", float(duration_ms))
+        if run_identity is not None:
+            for key, value in run_identity.items():
+                span.set_attribute(key, value)
         if outcome in ("failed", "uncertain"):
             span.set_status(Status(StatusCode.ERROR))
         span.end()
 
     # -- run outcomes ----------------------------------------------------
 
-    def record_run(self, run_kind: str, terminal_cause: str) -> None:
+    def record_run(
+        self, run_kind: str, terminal_cause: str,
+        *, run_identity: Optional[Mapping[str, Any]] = None,
+    ) -> None:
         try:
             if self._run_tracer is None:
+                return
+            if run_identity is not None and set(run_identity) != RUN_IDENTITY_ATTRIBUTE_ALLOWLIST:
                 return
             from opentelemetry.trace import Status, StatusCode
 
@@ -1228,6 +1289,9 @@ class ArenaTelemetry:
             span.set_attribute("arena.run_kind", str(run_kind))
             span.set_attribute("arena.terminal_cause", str(terminal_cause))
             span.set_attribute("arena.outcome", outcome)
+            if run_identity is not None:
+                for key, value in run_identity.items():
+                    span.set_attribute(key, value)
             if outcome == "failed":
                 span.set_status(Status(StatusCode.ERROR))
             span.end()

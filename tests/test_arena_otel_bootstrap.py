@@ -2,11 +2,10 @@
 still be unable to export anything beyond operational metadata.
 
 At the gateway every Arena call collapses into the ``/arena/{arena_path:path}``
-catch-all, so the operation is unrecoverable. These tests pin the two things
-that fixes it — per-route request spans and per-stage pipeline spans — to the
-same fail-closed envelope: a round id, submission id, hotkey, source path,
-prompt, score, or model output must never reach a span, and a stage name or
-outcome outside the frozen vocabulary must drop the span whole.
+catch-all, so the operation is unrecoverable. These tests pin per-route,
+per-stage, provider, and terminal spans to exact fail-closed envelopes. Only
+provider and committed terminal spans may carry bounded run-row identifiers;
+source paths, prompts, scores, and model outputs must never reach a span.
 """
 
 import pytest
@@ -29,10 +28,22 @@ from gateway.observability.otel_bootstrap import (
     ARENA_TASK_SCOPE,
     ARENA_TASK_STAGES,
     PROVIDER_SPAN_ATTRIBUTE_ALLOWLIST,
+    RUN_IDENTITY_ATTRIBUTE_ALLOWLIST,
     TASK_SPAN_ATTRIBUTE_ALLOWLIST,
     configure_arena_otel,
 )
 from lab_arena import telemetry
+
+
+TRUSTED_RUN_IDENTITY = {
+    "arena.run_id": "run-2026-10-04-1",
+    "arena.round_id": "arena-2026-10-04",
+    "arena.submission_id": "baseline-2026-10-04",
+    "arena.runner_hotkey": "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9",
+    "arena.stage": 1,
+    "arena.icp_position": 3,
+    "arena.attempt": 1,
+}
 
 
 def _app(exporter=None):
@@ -199,6 +210,75 @@ def test_provider_span_carries_only_the_approved_attributes():
     assert span.attributes["arena.error_code"] == "-"
     assert span.attributes["arena.cost_microusd"] == 1375
     assert span.attributes["arena.attempts"] == 2
+
+
+def test_provider_and_terminal_spans_share_only_bounded_run_identity():
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_provider(
+        "deepline", "exa.search", "ok", run_identity=TRUSTED_RUN_IDENTITY,
+    )
+    recorder.record_run(
+        "execute", "accepted", run_identity=TRUSTED_RUN_IDENTITY,
+    )
+
+    provider, terminal = exp.get_finished_spans()
+    assert set(TRUSTED_RUN_IDENTITY) == RUN_IDENTITY_ATTRIBUTE_ALLOWLIST
+    for span in (provider, terminal):
+        assert {key: span.attributes[key] for key in TRUSTED_RUN_IDENTITY} == TRUSTED_RUN_IDENTITY
+        assert "arena.miner_hotkey" not in span.attributes
+        assert "arena.icp_identifier" not in span.attributes
+    assert set(provider.attributes) == PROVIDER_SPAN_ATTRIBUTE_ALLOWLIST | RUN_IDENTITY_ATTRIBUTE_ALLOWLIST
+    assert terminal.attributes["arena.terminal_cause"] == "accepted"
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"arena.attempt": True},
+        {"arena.attempt": 3},
+        {"arena.icp_position": 100},
+        {"arena.runner_hotkey": "forged-validator"},
+        {"arena.round_id": "round with prompt"},
+        {"arena.submission_id": "sub-" + "x" * 100},
+        {"arena.run_id": "run-id\nsecret"},
+        {"arena.lease_token": "secret"},
+        {"arena.provider": "openrouter"},
+    ],
+)
+def test_extra_or_invalid_run_identity_drops_provider_and_terminal_spans(patch):
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    identity = {**TRUSTED_RUN_IDENTITY, **patch}
+    recorder.record_provider("deepline", "exa.search", "ok", run_identity=identity)
+    recorder.record_run("execute", "accepted", run_identity=identity)
+    assert exp.get_finished_spans() == ()
+
+
+def test_partial_run_identity_drops_provider_and_terminal_spans():
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    identity = {"arena.run_id": TRUSTED_RUN_IDENTITY["arena.run_id"]}
+    recorder.record_provider("deepline", "exa.search", "ok", run_identity=identity)
+    recorder.record_run("execute", "accepted", run_identity=identity)
+    assert exp.get_finished_spans() == ()
+
+
+def test_retry_terminal_spans_keep_distinct_run_ids_and_attempts():
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    retry = dict(TRUSTED_RUN_IDENTITY)
+    retry["arena.run_id"] = "run-2026-10-04-2"
+    retry["arena.attempt"] = 2
+    retry["arena.runner_hotkey"] = "5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo8"
+    recorder.record_run("execute", "model_error", run_identity=TRUSTED_RUN_IDENTITY)
+    recorder.record_run("execute", "accepted", run_identity=retry)
+
+    spans = exp.get_finished_spans()
+    assert len(spans) == 2
+    assert [(span.attributes["arena.run_id"], span.attributes["arena.attempt"])
+            for span in spans] == [("run-2026-10-04-1", 1), ("run-2026-10-04-2", 2)]
+    assert spans[0].attributes["arena.runner_hotkey"] != spans[1].attributes["arena.runner_hotkey"]
 
 
 def test_every_provider_and_outcome_in_the_vocabulary_is_admitted():

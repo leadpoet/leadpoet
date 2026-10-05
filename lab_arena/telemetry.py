@@ -27,17 +27,17 @@ The same seam carries four other kinds of observation, all equally bounded:
   current request, so a 4xx stops being anonymous. Only the literal prefix
   before the first ":" is ever exported.
 
-Nothing here can observe a round id, submission id, hotkey, source bundle,
-prompt, completion, score, model output, URL, or credential. A stage records
-its NAME, whether it worked, the exception CLASS if it did not, and a
-magnitude; a provider call records vocabulary members and bounded integers.
+Provider and committed-run spans may carry seven bounded identifiers copied
+from the gateway's authenticated run row. No ICP content, source bundle,
+prompt, completion, score, model output, URL, or credential is accepted.
+Stage and gate spans remain aggregate.
 """
 
 from __future__ import annotations
 
 import time
 from contextlib import contextmanager
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator, Mapping, Optional
 
 NO_ERROR = "-"
 
@@ -100,6 +100,7 @@ def record_provider(
     cost_microusd: int = 0,
     duration_ms: float = 0.0,
     start_ns: Optional[int] = None,
+    run_identity: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """Record one provider call. Never raises."""
     recorder = _recorder
@@ -118,12 +119,16 @@ def record_provider(
             cost_microusd=cost_microusd,
             duration_ms=duration_ms,
             start_ns=start_ns,
+            run_identity=run_identity,
         )
     except BaseException:
         pass
 
 
-def record_run(run_kind: str, terminal_cause: str) -> None:
+def record_run(
+    run_kind: str, terminal_cause: str,
+    *, run_identity: Optional[Mapping[str, Any]] = None,
+) -> None:
     """Record one finished evaluation run. Never raises.
 
     No duration: the run row carries no start time, so the sidecar can only
@@ -133,7 +138,7 @@ def record_run(run_kind: str, terminal_cause: str) -> None:
     if recorder is None:
         return
     try:
-        recorder.record_run(run_kind, terminal_cause)
+        recorder.record_run(run_kind, terminal_cause, run_identity=run_identity)
     except BaseException:
         pass
 

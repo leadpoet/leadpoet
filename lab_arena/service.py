@@ -114,6 +114,20 @@ def _provider_telemetry_fields(
         "cost_microusd": max(0, min(int(cost), 1_000_000_000)) if isinstance(cost, int) and not isinstance(cost, bool) else 0,
     }
 
+
+def _telemetry_run_identity(run: Mapping[str, Any]) -> Dict[str, Any]:
+    """Project only database-owned run identity into private host telemetry."""
+
+    return {
+        "arena.run_id": run.get("run_id"),
+        "arena.round_id": run.get("round_id"),
+        "arena.submission_id": run.get("submission_id"),
+        "arena.runner_hotkey": run.get("runner_hotkey"),
+        "arena.stage": run.get("stage"),
+        "arena.icp_position": run.get("icp_position"),
+        "arena.attempt": run.get("attempt"),
+    }
+
 _TRAJECTORY_WARNING_LOCK = threading.Lock()
 _TRAJECTORY_WARNING_LAST: Dict[str, float] = {}
 
@@ -4225,6 +4239,15 @@ class ArenaService:
         broker = self._broker_for(run["round_id"])
         operation_id = str(frame["operation_id"])
         operation = operations.OPERATIONS.get(operation_id)
+        # The lease hash is derived from the supplied token in _run_context.
+        # Only a match to the canonical run row can attach run attribution;
+        # broker refusal and host failure still belong to that attempt.
+        run_identity = (
+            _telemetry_run_identity(run)
+            if context.lease_token_hash == hash_lease_token(lease_token)
+            and context.lease_token_hash == run.get("lease_token_hash")
+            else None
+        )
 
         def persist_provider_event(document: Mapping[str, Any]) -> None:
             # A fixed event UUID makes one replay safe when the first RPC
@@ -4296,6 +4319,7 @@ class ArenaService:
                 "failed",
                 error_type=type(exc).__name__,
                 duration_ms=(time.monotonic() - started) * 1000.0,
+                run_identity=run_identity,
             )
             raise
         document = result.to_document()
@@ -4303,6 +4327,7 @@ class ArenaService:
         if call.get("cached") is not True and call.get("idempotent") is not True:
             telemetry.record_provider(
                 duration_ms=(time.monotonic() - started) * 1000.0,
+                run_identity=run_identity,
                 **_provider_telemetry_fields(
                     call, result.status, len(result.attempt_trace) or 1,
                 ),
@@ -4588,7 +4613,9 @@ class ArenaService:
         # one run outcome to telemetry.
         expected_status = "accepted" if terminal_status == "accepted" else "failed"
         if result.get("status") == expected_status and result.get("idempotent") is False:
-            telemetry.record_run(kind, terminal_status)
+            telemetry.record_run(
+                kind, terminal_status, run_identity=_telemetry_run_identity(run)
+            )
         return result
 
     def _lease_token_for_run(self, validated: Mapping[str, Any], run: Mapping[str, Any]) -> str:

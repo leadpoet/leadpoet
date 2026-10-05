@@ -262,9 +262,9 @@ ROUND_NETUID_COLUMN = "arena_netuid"
 DEADLOCK_SQLSTATE = "40P01"
 DEADLOCK_RETRIES = 3
 # Publication validates the complete round in one atomic database transaction.
-# Let its existing 30-second server deadline return a result before giving up
+# Let its bounded 60-second database deadline return a result before giving up
 # on the response. Other RPCs keep the normal short transport deadline.
-PUBLICATION_RPC_READ_TIMEOUT_SECONDS = 35.0
+PUBLICATION_RPC_READ_TIMEOUT_SECONDS = 65.0
 
 
 class ArenaStoreError(RuntimeError):

@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import time
+
+from lab_arena import telemetry
+
 
 def drive_once(service) -> str:
     """Advance all active rounds and ensure one submission round is open."""
 
+    tick_start_ns = time.time_ns()
+    tick_start_mono = time.monotonic()
     parts = []
     try:
-        promotion = service.promote_pending_baselines()
+        with telemetry.stage("promote_baselines") as observed:
+            promotion = service.promote_pending_baselines()
+            observed.count = int(promotion.get("promoted") or 0)
+            observed.idle = observed.count == 0
     except Exception as exc:
         parts.append("failed promote_baselines: %s" % type(exc).__name__)
     else:
@@ -19,7 +28,10 @@ def drive_once(service) -> str:
     if outcome != "idle":
         parts.append(outcome)
     try:
-        rewards = service.activate_pending_rewards()
+        with telemetry.stage("activate_rewards") as observed:
+            rewards = service.activate_pending_rewards()
+            observed.count = int(rewards.get("activated") or 0)
+            observed.idle = observed.count == 0
     except Exception as exc:
         parts.append("failed activate_rewards: %s" % type(exc).__name__)
     else:
@@ -27,24 +39,42 @@ def drive_once(service) -> str:
         if activated:
             parts.append("activated rewards %d" % activated)
     try:
-        billing = service.reconcile_closed_provider_costs()
+        with telemetry.stage("reconcile_provider_costs") as observed:
+            billing = service.reconcile_closed_provider_costs()
+            observed.idle = billing.get("status") != "settled"
+            observed.count = 0 if observed.idle else 1
     except Exception as exc:
         parts.append("failed closed_provider_costs: %s" % type(exc).__name__)
     else:
         if billing.get("status") == "settled":
             parts.append("reconciled closed provider cost")
-    return "; ".join(parts) if parts else "idle"
+    summary = "; ".join(parts) if parts else "idle"
+    # One span per tick is the liveness signal: without it a wedged driver and
+    # an idle one are indistinguishable from outside the process.
+    telemetry.record(
+        "driver_tick",
+        "failed" if "failed" in summary else ("idle" if summary == "idle" else "ok"),
+        count=len(parts),
+        duration_ms=(time.monotonic() - tick_start_mono) * 1000.0,
+        start_ns=tick_start_ns,
+    )
+    return summary
 
 
 def _advance_active(service) -> str:
     try:
-        active = list(service.active_rounds())
+        with telemetry.stage("active_rounds") as observed:
+            active = list(service.active_rounds())
+            observed.count = len(active)
+            observed.idle = not active
     except Exception as exc:
         return "failed active_rounds: %s" % type(exc).__name__
     outcomes = []
     for row in active:
         try:
-            service.advance_round(row["round_id"])
+            with telemetry.stage("advance_round") as observed:
+                service.advance_round(row["round_id"])
+                observed.count = 1
         except Exception as exc:
             outcomes.append(
                 "failed advance_round %s: %s"
@@ -54,7 +84,10 @@ def _advance_active(service) -> str:
             outcomes.append("advanced %s" % row["round_id"])
     if not any(row.get("status") == "open" for row in active):
         try:
-            ensured = service.ensure_daily_round()
+            with telemetry.stage("ensure_daily_round") as observed:
+                ensured = service.ensure_daily_round()
+                observed.idle = ensured.get("status") != "created"
+                observed.count = 0 if observed.idle else 1
         except Exception as exc:
             outcomes.append("failed ensure_daily_round: %s" % type(exc).__name__)
         else:

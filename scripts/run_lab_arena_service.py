@@ -22,7 +22,22 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from lab_arena import telemetry  # noqa: E402
 from lab_arena.driver import drive_once  # noqa: E402
+
+
+def _install_arena_telemetry(app) -> None:
+    """Attach request, stage, provider, run, and gate spans.
+
+    A complete no-op when telemetry is disabled.
+    """
+
+    try:
+        from gateway.observability.otel_bootstrap import configure_arena_otel
+
+        telemetry.install_recorder(configure_arena_otel(app))
+    except Exception as exc:
+        print("arena telemetry unavailable", type(exc).__name__, file=sys.stderr)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -101,10 +116,44 @@ def load_scoped_environment(path: Path) -> None:
         os.environ.setdefault(name, value)
 
 
+OTEL_ENVIRONMENT_KEYS = (
+    "GATEWAY_OTEL_ENABLED",
+    "GATEWAY_OTEL_ENDPOINT",
+    "GATEWAY_OTEL_TOKEN",
+)
+
+
+def load_otel_environment(path: Path) -> None:
+    """Load ONLY the three telemetry values from the protected gateway env.
+
+    ``load_scoped_environment`` deliberately refuses everything outside
+    ``LAB_ARENA_*`` so gateway provider credentials cannot be resurrected in
+    this process. The telemetry destination is the one documented exception:
+    endpoint plus ingest token are a write-only pair that can do nothing but
+    append spans, and reusing them is what lets Arena telemetry turn on with
+    no new secret and no new host configuration. The keys are enumerated by
+    the dedicated reader, which never executes the file.
+    """
+
+    try:
+        from gateway.observability.read_gateway_otel_env import parse_env_file
+
+        values = parse_env_file(Path(path))
+    except Exception as exc:
+        # Telemetry configuration can never stop the Arena service starting.
+        print("arena otel environment unavailable", type(exc).__name__, file=sys.stderr)
+        return
+    for name in OTEL_ENVIRONMENT_KEYS:
+        value = values.get(name, "")
+        if value:
+            os.environ.setdefault(name, value)
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     if args.environment_file is not None:
         load_scoped_environment(args.environment_file)
+        load_otel_environment(args.environment_file)
     mode = os.environ.get("LAB_ARENA_MODE", "off").strip().lower()
     if mode == "off":
         print("LAB_ARENA_MODE=off: nothing starts and nothing is served")
@@ -112,6 +161,7 @@ def main(argv=None) -> int:
     from lab_arena.wiring import build_service_from_environment  # lazy: production dependencies
 
     service, app = build_service_from_environment(mode)
+    _install_arena_telemetry(app)
     checks = service.startup_checks()
     print("lab arena service identity", {k: v for k, v in checks.items() if k != "database_identity"}, "role", checks["database_identity"].get("current_user"))
     if args.check_only:
@@ -121,7 +171,8 @@ def main(argv=None) -> int:
     def review_submissions() -> None:
         while not stop.is_set():
             try:
-                service.review_pending_submissions()
+                with telemetry.stage("review_submissions"):
+                    service.review_pending_submissions()
             except Exception as exc:
                 # Never emit source, model responses, or credential errors.
                 print("code review worker unavailable", type(exc).__name__, file=sys.stderr)

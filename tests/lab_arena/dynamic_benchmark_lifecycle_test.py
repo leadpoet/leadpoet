@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from copy import deepcopy
 import json
 import math
@@ -182,7 +183,7 @@ def test_ten_parallel_icps_form_one_execution_wave(connect, tmp_path):
 
 
 @pytest.mark.parametrize("count", [5, 10, 15, 17, 20, 30])
-def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_judge_cost(connect, tmp_path, count):
+def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_judge_cost(connect, tmp_path, count, monkeypatch):
     harness = PerIcpHarness(connect, tmp_path, challengers=["Miner"], runners=["alpha", "beta"])
     harness.service.config.defaults = replace(
         harness.service.config.defaults,
@@ -286,9 +287,73 @@ def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_ju
     assert configuration["execution_sequence_policy"] == contracts.BASELINE_SCORED_FIRST_POLICY
     harness.clock.advance_to(harness.schedule()["stage_1_start"])
     assert harness.service.advance_round(harness.round_id)["assignments"] == count
-    harness.advance_until("published", runners=2)
+    if count == 5:
+        harness.advance_until("scored", runners=2)
+        reads = Counter()
+        service = harness.service
+        original_list_runs = service.store.list_runs
+        original_evaluation_icps = service.evaluation_icps
+        original_scoring_outputs = service._scoring_outputs
+        original_qualified_counts = service._qualified_company_counts
+
+        def list_runs(*args, **kwargs):
+            if kwargs.get("kind") == "execute":
+                reads["execution_runs"] += 1
+            return original_list_runs(*args, **kwargs)
+
+        def evaluation_icps(*args, **kwargs):
+            reads["icp_bank"] += 1
+            return original_evaluation_icps(*args, **kwargs)
+
+        def scoring_outputs(*args, **kwargs):
+            reads["score_runs"] += 1
+            return original_scoring_outputs(*args, **kwargs)
+
+        def qualified_counts(*args, **kwargs):
+            reads["qualification"] += 1
+            return original_qualified_counts(*args, **kwargs)
+
+        monkeypatch.setattr(service.store, "list_runs", list_runs)
+        monkeypatch.setattr(service, "evaluation_icps", evaluation_icps)
+        monkeypatch.setattr(service, "_scoring_outputs", scoring_outputs)
+        monkeypatch.setattr(service, "_qualified_company_counts", qualified_counts)
+        assert service.publish(harness.round_id)["status"] == "ok"
+        assert reads["execution_runs"] == 1
+        assert reads["icp_bank"] == 1
+        assert reads["score_runs"] <= 2
+        assert reads["qualification"] == len(participants)
+    else:
+        harness.advance_until("published", runners=2)
     published = harness.service.store.get_round(harness.round_id)
     assert published["status"] == "published"
+    if count == 5:
+        # Independently recompute the same publication from uncached readers.
+        # This checks the rankings, eligibility report and promotion decision.
+        service = harness.service
+        raw_entries = service._score_entries_from_runs(
+            published, range(count), "final_score"
+        )
+        expected_stage1 = verify.stage1_ranking(service._score_entries_from_runs(
+            published, range(count), "stage1_score"
+        ))
+        runs = service.store.list_runs(harness.round_id, kind="execute")
+        expected_costs = {
+            entry["submission_id"]: service._submission_cost_eligibility(
+                published, entry["submission_id"], runs, positions=range(count)
+            ) for entry in raw_entries
+        }
+        expected_ranking = verify.final_ranking(raw_entries)
+        for entry in expected_ranking:
+            entry.update(expected_costs[entry["submission_id"]])
+        king = next(entry for entry in raw_entries if entry["is_king"])
+        expected_decision = verify.king_decision(
+            [entry for entry in raw_entries if not entry["is_king"]
+             and expected_costs[entry["submission_id"]]["eligible"]],
+            king, configuration,
+        )
+        assert published["publication_doc"]["stage1_ranking"] == expected_stage1
+        assert published["publication_doc"]["final_ranking"] == expected_ranking
+        assert published["publication_doc"]["king_decision"] == expected_decision
     assert published["king_outcome"] == "crowned"
     miner_id = next(participant["submission_id"] for participant in participants if not participant["is_king"])
     assert published["publication_doc"]["king_decision"]["winner_submission_id"] == miner_id

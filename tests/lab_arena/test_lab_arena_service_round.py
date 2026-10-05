@@ -1338,8 +1338,8 @@ def test_publish_cancels_an_existing_scored_state_with_no_valid_baseline(
 
     original_entries = harness.service._score_entries_from_runs
 
-    def entries_with_invalid_baseline(round_row, positions, score_key):
-        entries = original_entries(round_row, positions, score_key)
+    def entries_with_invalid_baseline(round_row, positions, score_key, **kwargs):
+        entries = original_entries(round_row, positions, score_key, **kwargs)
         if score_key == "final_score":
             entries = [
                 {

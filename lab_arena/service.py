@@ -603,6 +603,63 @@ def round_id_for_cutoff(cutoff: datetime) -> str:
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class _PublicationReads:
+    """Validated reads shared only within one publication attempt."""
+
+    service: ArenaService
+    round_row: Mapping[str, Any]
+    runs: Sequence[Mapping[str, Any]]
+    icps: Optional[Sequence[Mapping[str, Any]]] = None
+    judges_by_stage: Dict[int, Dict[str, Mapping[str, Any]]] = field(default_factory=dict)
+    outputs_by_ref: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    qualified_by_submission: Dict[str, Dict[int, int]] = field(default_factory=dict)
+    costs_by_position: Dict[Tuple[str, int], Dict[str, Any]] = field(default_factory=dict)
+
+    def evaluation_icps(self) -> Sequence[Mapping[str, Any]]:
+        if self.icps is None:
+            self.icps = self.service.evaluation_icps(str(self.round_row["round_id"]))
+        return self.icps
+
+    def scoring_outputs(self, stage: int) -> Dict[str, Mapping[str, Any]]:
+        if stage not in self.judges_by_stage:
+            self.judges_by_stage[stage] = self.service._scoring_outputs(
+                str(self.round_row["round_id"]), stage
+            )
+        return self.judges_by_stage[stage]
+
+    def output(self, ref: str) -> Dict[str, Any]:
+        if ref not in self.outputs_by_ref:
+            raw = self.service._objects.get_bounded(ref, MAX_OUTPUT_BYTES)
+            try:
+                document = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise OutputInvalid("accepted output is not valid JSON") from exc
+            self.outputs_by_ref[ref] = validate_output_document(document)
+        return self.outputs_by_ref[ref]
+
+    def qualified_counts(self, submission_id: str, positions: Sequence[int]) -> Dict[int, int]:
+        cached = self.qualified_by_submission.setdefault(submission_id, {})
+        missing = sorted(set(positions) - cached.keys())
+        if missing:
+            counted = self.service._qualified_company_counts(
+                self.round_row, submission_id, self.runs,
+                positions=missing, publication_reads=self,
+            )
+            cached.update({position: counted.get(position, 0) for position in missing})
+        return {position: cached[position] for position in positions}
+
+    def per_icp_cost(self, submission_id: str, position: int) -> Dict[str, Any]:
+        key = (submission_id, position)
+        if key not in self.costs_by_position:
+            qualified = self.qualified_counts(submission_id, (position,))[position]
+            self.costs_by_position[key] = self.service._per_icp_cost_eligibility(
+                self.round_row, submission_id, position, self.runs,
+                qualified=qualified,
+            )
+        return self.costs_by_position[key]
+
+
 class ArenaService:
     def __init__(self, config: ServiceConfig) -> None:
         self._config = config
@@ -2863,11 +2920,15 @@ class ArenaService:
         round_row: Mapping[str, Any],
         positions: Sequence[int],
         score_key: str,
+        *, publication_reads: Optional[_PublicationReads] = None,
     ) -> List[Dict[str, Any]]:
         """Derive one score per participant from write-once run scores."""
 
         wanted = set(int(position) for position in positions)
-        all_runs = self._store.list_runs(str(round_row["round_id"]), kind="execute")
+        all_runs = (
+            publication_reads.runs if publication_reads is not None
+            else self._store.list_runs(str(round_row["round_id"]), kind="execute")
+        )
         selected: Dict[Tuple[str, int], Mapping[str, Any]] = {}
         for run in all_runs:
             position = int(run["icp_position"])
@@ -2890,14 +2951,20 @@ class ArenaService:
                 )
                 == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
             ):
-                qualified_by_position = self._qualified_company_counts(
-                    round_row, submission_id, all_runs, positions=sorted(wanted)
+                qualified_by_position = (
+                    publication_reads.qualified_counts(submission_id, sorted(wanted))
+                    if publication_reads is not None else self._qualified_company_counts(
+                        round_row, submission_id, all_runs, positions=sorted(wanted)
+                    )
                 )
                 adjusted = []
                 for position, value in zip(sorted(wanted), values):
-                    cost = self._per_icp_cost_eligibility(
-                        round_row, submission_id, position, all_runs,
-                        qualified=qualified_by_position.get(position, 0),
+                    cost = (
+                        publication_reads.per_icp_cost(submission_id, position)
+                        if publication_reads is not None else self._per_icp_cost_eligibility(
+                            round_row, submission_id, position, all_runs,
+                            qualified=qualified_by_position.get(position, 0),
+                        )
                     )
                     adjusted.append(value if cost["eligible"] else 0.0)
                 values = adjusted
@@ -2949,6 +3016,7 @@ class ArenaService:
     def _returned_company_counts(
         self, submission_id: str, runs: Sequence[Mapping[str, Any]],
         *, positions: Optional[Sequence[int]] = None,
+        publication_reads: Optional[_PublicationReads] = None,
     ) -> Dict[int, int]:
         selected = self._selected_accepted_execution_runs(runs, submission_id)
         counts: Dict[int, int] = {}
@@ -2960,12 +3028,15 @@ class ArenaService:
             output_ref = str(run.get("output_ref") or "")
             if not output_ref:
                 raise OutputInvalid("accepted output has no object reference")
-            raw = self._objects.get_bounded(output_ref, MAX_OUTPUT_BYTES)
-            try:
-                document = json.loads(raw.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError) as exc:
-                raise OutputInvalid("accepted output is not valid JSON") from exc
-            output = validate_output_document(document)
+            if publication_reads is not None:
+                output = publication_reads.output(output_ref)
+            else:
+                raw = self._objects.get_bounded(output_ref, MAX_OUTPUT_BYTES)
+                try:
+                    document = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, ValueError) as exc:
+                    raise OutputInvalid("accepted output is not valid JSON") from exc
+                output = validate_output_document(document)
             domains = set()
             for company in output["companies"]:
                 domains.add(
@@ -3003,19 +3074,27 @@ class ArenaService:
         submission_id: str,
         runs: Sequence[Mapping[str, Any]],
         positions: Sequence[int],
+        *, publication_reads: Optional[_PublicationReads] = None,
     ) -> Dict[str, Any]:
         wanted = sorted(set(int(value) for value in positions))
-        qualified = self._qualified_company_counts(
-            round_row, submission_id, runs, positions=wanted
+        qualified = (
+            publication_reads.qualified_counts(submission_id, wanted)
+            if publication_reads is not None else self._qualified_company_counts(
+                round_row, submission_id, runs, positions=wanted
+            )
         )
         returned = self._returned_company_counts(
-            submission_id, runs, positions=wanted
+            submission_id, runs, positions=wanted,
+            publication_reads=publication_reads,
         )
         rows = []
         for position in wanted:
-            row = self._per_icp_cost_eligibility(
-                round_row, submission_id, position, runs,
-                qualified=qualified.get(position, 0),
+            row = (
+                dict(publication_reads.per_icp_cost(submission_id, position))
+                if publication_reads is not None else self._per_icp_cost_eligibility(
+                    round_row, submission_id, position, runs,
+                    qualified=qualified.get(position, 0),
+                )
             )
             row["returned_company_count"] = returned.get(position, 0)
             rows.append(row)
@@ -3075,11 +3154,15 @@ class ArenaService:
     def _qualified_company_counts(
         self, round_row: Mapping[str, Any], submission_id: str,
         runs: Sequence[Mapping[str, Any]], *, positions: Optional[Sequence[int]] = None,
+        publication_reads: Optional[_PublicationReads] = None,
     ) -> Dict[int, int]:
         """Count qualified entities per ICP in one judgment/object pass."""
         policy = round_row["configuration_doc"]["scorer_policy"]
         round_id = str(round_row["round_id"])
-        icps = self.evaluation_icps(round_id)
+        icps = (
+            publication_reads.evaluation_icps() if publication_reads is not None
+            else self.evaluation_icps(round_id)
+        )
         wanted = set(range(len(icps)) if positions is None else positions)
         selected = self._selected_accepted_execution_runs(runs, submission_id)
         judges = {}
@@ -3089,7 +3172,10 @@ class ArenaService:
             if position in wanted
         }
         for stage in judged_stages:
-            judges.update(self._scoring_outputs(round_id, stage))
+            judges.update(
+                publication_reads.scoring_outputs(stage)
+                if publication_reads is not None else self._scoring_outputs(round_id, stage)
+            )
         counts: Dict[int, int] = {}
         for position in sorted(wanted):
             execution = selected.get(position)
@@ -3109,8 +3195,11 @@ class ArenaService:
                 continue
             if judge is None or judge.get("status") != "accepted":
                 raise scoring.ScoringError("qualified count requires accepted judgment")
-            document = json.loads(self._objects.get_bounded(execution["output_ref"], MAX_OUTPUT_BYTES).decode("utf-8"))
-            output = validate_output_document(document)
+            if publication_reads is not None:
+                output = publication_reads.output(str(execution["output_ref"]))
+            else:
+                document = json.loads(self._objects.get_bounded(execution["output_ref"], MAX_OUTPUT_BYTES).decode("utf-8"))
+                output = validate_output_document(document)
             companies = output["companies"]
             rows = self._verified_breakdowns(judge, icp=icps[position], companies=companies, policy=policy)
             scored_indexes, _ = verify.bucket_skip(icps[position], verify.slice_first_n(companies, verify.icp_company_goal(icps[position])))
@@ -3189,6 +3278,7 @@ class ArenaService:
         submission_id: str,
         runs: Sequence[Mapping[str, Any]],
         *, positions: Optional[Sequence[int]] = None,
+        publication_reads: Optional[_PublicationReads] = None,
     ) -> Dict[str, Any]:
         """Build final cost reporting without changing the quality score."""
 
@@ -3205,6 +3295,7 @@ class ArenaService:
                     range(contracts.benchmark_icp_count(round_row.get("configuration_doc")))
                     if positions is None else positions
                 ),
+                publication_reads=publication_reads,
             )
         if "cost_per_company_microusd" not in configuration:
             return {
@@ -3321,6 +3412,9 @@ class ArenaService:
             configuration.get("execution_sequence_policy")
             == contracts.BASELINE_SCORED_FIRST_POLICY
         )
+        publication_reads = _PublicationReads(
+            self, round_row, self._store.list_runs(round_id, kind="execute")
+        )
         stage1_ranking = verify.stage1_ranking(
             self._score_entries_from_runs(
                 round_row,
@@ -3330,19 +3424,21 @@ class ArenaService:
                     else contracts.stage_positions(1, configuration)
                 ),
                 "stage1_score",
+                publication_reads=publication_reads,
             )
         )
         finalists = list(round_row.get("finalists") or [])
         final_entries = self._score_entries_from_runs(
-            round_row, range(contracts.benchmark_icp_count(round_row.get("configuration_doc"))), "final_score"
+            round_row, range(contracts.benchmark_icp_count(round_row.get("configuration_doc"))), "final_score",
+            publication_reads=publication_reads,
         )
-        execution_runs = self._store.list_runs(round_id, kind="execute")
         eligibility = {
             str(entry["submission_id"]): self._submission_cost_eligibility(
                 round_row,
                 str(entry["submission_id"]),
-                execution_runs,
+                publication_reads.runs,
                 positions=range(contracts.benchmark_icp_count(round_row.get("configuration_doc"))),
+                publication_reads=publication_reads,
             )
             for entry in final_entries
         }

@@ -23,14 +23,14 @@ The gateway proxies every Arena call through a single catch-all route
 template, `/arena/{arena_path:path}`, so from gateway telemetry alone the
 operation that was invoked is not recoverable — a weight-state read, a run
 claim and a scoring completion are one indistinguishable label. The sidecar
-therefore emits its own spans, on the same envelope, under five scopes.
+therefore emits its own spans, on the same exporter, under six scopes.
 
 **`arena.http`** — one SERVER span per sidecar request, carrying exactly the
 same four attributes as above. The difference is the route: `http.route` is
 the sidecar's own template (`/arena/v1/runs/{run_id}/complete`,
 `/arena/v1/submissions/{submission_id}/finalize`, …), so each Arena
 operation gets its own rate, error rate and latency. Still a template — run
-ids, submission ids, hotkeys and epochs never appear. It carries one extra
+ids, submission ids, hotkeys and epochs never appear in HTTP spans. It carries one extra
 attribute the gateway envelope does not have:
 
 | attribute | example |
@@ -41,7 +41,7 @@ A refused Arena call is otherwise an anonymous 4xx. `arena.denial` names it
 with the refusal code the sidecar returned. `ServiceError.code` can
 interpolate an exception message after a colon (`"contract:%s"`), so only
 the literal prefix before the first colon is ever exported, and only when it
-matches a strict shape.
+belongs to the fixed refusal-code vocabulary.
 
 **`arena.task`** — one INTERNAL span per pipeline stage. The Arena does its
 real work off the request path (a once-a-minute driver tick plus the code
@@ -71,7 +71,7 @@ throttled provider looked the same.
 | attribute | example |
 |---|---|
 | `arena.provider` | `openrouter` (`ARENA_PROVIDERS`; `unknown` when the operation is not in the table) |
-| `arena.operation` | `openrouter.responses` (`<provider>.<operation>`; must agree with `arena.provider`, else `unknown`) |
+| `arena.operation` | `openrouter.responses` (registered operation/provider pair; Exa compatibility operations belong to Deepline) |
 | `arena.outcome` | `ok` \| `refused` \| `uncertain` \| `failed` |
 | `arena.error_code` | `budget_refused` (`ARENA_PROVIDER_ERROR_CODES`; `-` when none) |
 | `arena.error_type` | `HTTPError` (exception CLASS only; `-` when none) |
@@ -87,10 +87,14 @@ raised rather than returning a result. The projection is the same one the
 repo already trusts for private diagnostics
 (`broker._provider_attempt_summary`): vocabulary members and bounded
 integers, never a call identity, response hash, credential fingerprint,
-model id, prompt, URL, or body.
+model id, prompt, URL, or body. Cached and idempotent responses do not emit a
+new provider span. The cost is the confirmed amount on the immediate broker
+result, not a replacement for the billing ledger: late settlements are not
+reconstructed from telemetry.
 
 **`arena.run`** — one INTERNAL span per finished evaluation run, recorded
-when the attempt commits.
+when a new terminal attempt commits. Stale leases, open accounting, and
+idempotent completion responses do not count as new completed runs.
 
 | attribute | example |
 |---|---|
@@ -101,6 +105,29 @@ when the attempt commits.
 Span name is `arena.run.<kind>`. There is deliberately no duration: the run
 row carries no start time, so any duration here would be invented rather
 than measured.
+
+Provider and terminal spans can also carry the existing database run identity:
+`arena.run_id`, `arena.round_id`, `arena.submission_id`, `arena.runner_hotkey`,
+`arena.stage`, `arena.icp_position`, and `arena.attempt`. Provider attribution
+requires the supplied lease token to hash to that run's saved lease hash;
+terminal attribution follows the successful completion RPC. These identifiers
+join to the existing private run, submission, and trajectory records, including
+baseline/miner role. No extra database lookup or diagnostic store is added.
+The exporter requires the whole bounded identity set, or none of it. Request
+paths, claimed identity fields, lease tokens, ICP content, and provider bodies
+are never copied into these attributes.
+
+**`arena.runtime`** — `arena.runtime.upload` observes an accepted upload through
+the existing lease-authenticated trajectory endpoint. It carries the same run
+identity plus `arena.inserted_count`, `arena.replayed_count`, and the boolean
+batch flags `arena.has_started`, `arena.has_finished`, and `arena.has_error`.
+Only batches containing one of those lifecycle events and at least one new
+persisted event emit a span. Invalid, stale, and fully replayed uploads emit
+nothing. A mixed new/replayed batch can contain an older lifecycle event, so
+these flags describe the batch, not exactly-once transitions. Runtime error
+details stay in the existing private trajectory, joined by run ID. This makes
+worker-reported errors visible even when the worker never submits completion;
+it does not infer a failure for a worker that sends no runtime event at all.
 
 **`arena.gate`** — one INTERNAL span per *contended* wait on the shared
 OpenRouter concurrency gate. A call admitted with no wait emits nothing, so
@@ -127,9 +154,8 @@ The Arena sidecar reads the SAME three values from the same protected env
 file (`scripts/run_lab_arena_service.py --environment-file`), through the
 enumerating reader in `gateway/observability/read_gateway_otel_env.py` that
 never executes the file. Arena telemetry therefore needs no new secret and
-no new host configuration — it follows the gateway's switch. The endpoint
-and token are a write-only ingest pair; they can append spans and do nothing
-else.
+no new host configuration — it follows the gateway's switch. The token is
+used only to authenticate telemetry ingestion.
 
 All three variables are required; anything less is a complete no-op. The
 token must be non-empty (an empty explicit headers dict would let the pinned
@@ -167,9 +193,11 @@ telemetry can never delay or break gateway startup.
    carry exactly the five stage attributes with a stage name and outcome
    from their frozen vocabularies, a shape-checked exception class name,
    and a bounded count. An `arena.provider`, `arena.run` or `arena.gate`
-   span is held to the same rule against its own table: every exported
-   string must be a member of a frozen literal vocabulary and every integer
-   inside its stated bound, or the span is dropped whole. The vocabularies
+   span is held to the same rule against its own table: operational strings
+   use a frozen vocabulary, optional trusted run identities use bounded
+   formats, and integers stay inside their stated bounds, or the span is
+   dropped whole. Runtime-upload spans require the complete run identity
+   and bounded batch counts/booleans. The vocabularies
    are copies of `lab_arena` constants (the bootstrap imports no
    `lab_arena`), and CI compares the copies against the originals so a new
    provider or terminal cause cannot silently start dropping spans.
@@ -189,7 +217,8 @@ telemetry can never delay or break gateway startup.
 - Unresolved routes export the fixed `/_unmatched` label — a
   client-controlled path segment is never exported.
 - Host processes only — the gateway and the Arena sidecar, never the
-  attested enclaves; no new dependencies, so no PCR0 change.
+  attested enclaves; no new dependencies. Normal release and attestation
+  checks remain required.
 - Distinct service identities (`leadpoet-gateway`, `leadpoet-arena`), each a
   fixed constant, so an Arena reading is never attributed to the gateway.
 - The Arena pipeline seam observes but never swallows: a stage span records

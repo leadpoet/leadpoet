@@ -17,6 +17,7 @@ from lab_arena import (
     scoring,
     signing,
     source_bundle,
+    telemetry,
 )
 from lab_arena.output import validate_output_document
 from lab_arena.service import ArenaService, S3ObjectStore, ServiceError, _parse_iso
@@ -736,6 +737,45 @@ def test_completion_requires_lease_owner_and_accepts_authorized_owner():
         wrong_owner.handle_complete({})
 
     assert _completion_service().handle_complete({}) == {"status": "failed"}
+
+
+@pytest.mark.parametrize(
+    ("store_result", "recorded"),
+    [
+        ({"status": "failed", "idempotent": False}, True),
+        ({"status": "failed", "idempotent": True}, False),
+        ({"status": "stale"}, False),
+        ({"status": "accounting_open", "open_calls": 1}, False),
+        ({"status": "accepted", "idempotent": False}, False),
+    ],
+)
+def test_completion_records_only_newly_committed_matching_outcome(
+    monkeypatch, store_result, recorded,
+):
+    service = _completion_service()
+    service._store.complete_attempt = lambda **_kwargs: store_result
+    observed = []
+    monkeypatch.setattr(telemetry, "record_run", lambda *args: observed.append(args))
+
+    assert service.handle_complete({}) == store_result
+    assert observed == ([("execute", "model_error")] if recorded else [])
+
+
+def test_completion_records_newly_committed_accepted_run(monkeypatch):
+    service = _completion_service()
+    validated, round_row = service._request_round()
+    validated["body"]["result"]["terminal_status"] = "accepted"
+    validated["body"]["output"] = _stored_public_output("Accepted Company")
+    round_row["configuration_doc"] = {}
+    service._request_round = lambda *_args, **_kwargs: (validated, round_row)
+    service._objects = SimpleNamespace(put=lambda *_args: None)
+    committed = {"status": "accepted", "idempotent": False}
+    service._store.complete_attempt = lambda **_kwargs: committed
+    observed = []
+    monkeypatch.setattr(telemetry, "record_run", lambda *args: observed.append(args))
+
+    assert service.handle_complete({}) == committed
+    assert observed == [("execute", "accepted")]
 
 
 @pytest.mark.parametrize(

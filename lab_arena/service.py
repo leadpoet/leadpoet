@@ -4580,7 +4580,12 @@ class ArenaService:
             output_hash=output_hash if company_quality_run else "",
             completion_request_hash=completion_request_hash,
         )
-        telemetry.record_run(kind, str(terminal_status))
+        # The completion RPC can also report a stale lease, open accounting,
+        # or an idempotent replay. Only a newly committed terminal contributes
+        # one run outcome to telemetry.
+        expected_status = "accepted" if terminal_status == "accepted" else "failed"
+        if result.get("status") == expected_status and result.get("idempotent") is False:
+            telemetry.record_run(kind, terminal_status)
         return result
 
     def _lease_token_for_run(self, validated: Mapping[str, Any], run: Mapping[str, Any]) -> str:

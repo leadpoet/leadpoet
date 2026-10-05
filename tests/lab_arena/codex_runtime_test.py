@@ -1139,11 +1139,14 @@ def test_real_codex_standalone_web_search_crosses_accounted_bridge(
         monkeypatch, transport,
         priced_models=("openai/gpt-5.6-luna",),
     ) as (store, transport, _path):
-        result = codex.run(
-            "Use tools.web__run from code mode, then report its exact result.",
-            model="openai/gpt-5.6-luna", cwd=tmp_path,
-            timeout_seconds=60, web_search="live",
-        )
+        try:
+            result = codex.run(
+                "Use tools.web__run from code mode, then report its exact result.",
+                model="openai/gpt-5.6-luna", cwd=tmp_path,
+                timeout_seconds=60, web_search="live",
+            )
+        except codex.CodexRuntimeError as exc:
+            pytest.fail(exc.diagnostics[-8000:])
 
     assert "ARENA_STANDALONE_SEARCH_OK" in result
     assert len(transport.requests) == len(store.calls) == 3
@@ -1575,7 +1578,7 @@ def test_pinned_codex_does_not_repeat_an_unknown_cost_call(monkeypatch, tmp_path
     transport = FakeTransport([(520, unknown), (200, response(id="must-not-dispatch"))])
 
     with broker_socket(monkeypatch, transport) as (store, transport, _path):
-        with pytest.raises(codex.CodexRuntimeError):
+        with pytest.raises(codex.CodexRuntimeError) as error:
             codex.run(
                 "Reply exactly ARENA_CODEX_OK.",
                 model="openai/gpt-4o-mini",
@@ -1583,7 +1586,7 @@ def test_pinned_codex_does_not_repeat_an_unknown_cost_call(monkeypatch, tmp_path
                 timeout_seconds=30,
             )
 
-    assert len(transport.sent) == len(store.calls) == 1
+    assert len(transport.sent) == len(store.calls) == 1, error.value.diagnostics[-8000:]
     call = next(iter(store.calls.values()))
     assert call["call_doc"]["action_sequence"] == 0
     assert call["kind"] == "uncertain"
@@ -1622,7 +1625,7 @@ def test_pinned_codex_failure_does_not_start_another_billable_request(
     transport = FakeTransport([(520, unknown), (200, response(id="must-not-dispatch"))])
 
     with broker_socket(monkeypatch, transport, store=store):
-        with pytest.raises(codex.CodexRuntimeError):
+        with pytest.raises(codex.CodexRuntimeError) as error:
             codex.run(
                 "Reply exactly ARENA_CODEX_OK.",
                 model="openai/gpt-4o-mini",
@@ -1630,8 +1633,8 @@ def test_pinned_codex_failure_does_not_start_another_billable_request(
                 timeout_seconds=30,
             )
 
-    assert len(transport.sent) == 1
-    assert len(store.calls) == 1
+    assert len(transport.sent) == 1, error.value.diagnostics[-8000:]
+    assert len(store.calls) == 1, error.value.diagnostics[-8000:]
     assert store.action_sequences == [0]
     call = next(iter(store.calls.values()))
     assert call["kind"] == "uncertain"
@@ -1682,7 +1685,10 @@ def test_pinned_codex_selects_each_priced_model_without_runtime_rewrites(monkeyp
             return super().send(**kwargs)
 
     with broker_socket(monkeypatch, FinalTransport(), priced_models=(model,)) as (store, transport, path):
-        result = codex.run("Reply exactly ARENA_CODEX_OK.", model=model, cwd=tmp_path, timeout_seconds=60)
+        try:
+            result = codex.run("Reply exactly ARENA_CODEX_OK.", model=model, cwd=tmp_path, timeout_seconds=60)
+        except codex.CodexRuntimeError as exc:
+            pytest.fail(exc.diagnostics[-8000:])
     assert "ARENA_CODEX_OK" in result
     assert transport.sent
     assert all(json.loads(sent["body"])["model"] == model for sent in transport.sent)

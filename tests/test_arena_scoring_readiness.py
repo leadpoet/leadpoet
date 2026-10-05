@@ -19,7 +19,16 @@ from lab_arena import runtime_host as host, validator
 
 @pytest.fixture
 def scoring_host(tmp_path, monkeypatch):
-    from lab_arena import proxy_workers
+    from lab_arena import proxy_workers, validator_startup
+
+    # `validator.main` replaces its own process with `sudo ... validator` when
+    # it is not root and the host already grants non-interactive sudo. CI
+    # runners grant exactly that, so any check here that lowers the effective
+    # uid would execve the test session away mid-run -- the suite then ends
+    # with no summary and no failing test name. These tests are about the
+    # readiness diagnostics, not the re-exec, which has its own coverage in
+    # tests/test_arena_validator_privilege_startup.py.
+    monkeypatch.setattr(validator_startup, "maybe_reexec_rootful", lambda *_: None)
 
     monkeypatch.setattr(host.platform, "system", lambda: "Linux")
     monkeypatch.setattr(host.platform, "machine", lambda: "x86_64")

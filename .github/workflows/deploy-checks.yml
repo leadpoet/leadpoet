@@ -105,8 +105,14 @@ jobs:
 
       - name: Run pytest suite
         # This lane owns the public gateway, scoring, and pre-spend checks.
+        # Report each test as it finishes (-v) rather than as a dot. The suite
+        # has been terminating partway through, and -q buffers the failure
+        # list into an end-of-run summary that a terminated process never
+        # prints -- so the names of the failing tests were unrecoverable from
+        # the log. -v streams them, and -rf still summarises when the run
+        # completes normally.
         run: |
-          python -m pytest -q \
+          python -m pytest -v -rf --tb=short \
             --cov=Leadpoet \
             --cov=gateway \
             --cov=leadpoet_canonical \

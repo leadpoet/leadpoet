@@ -28,8 +28,9 @@ MIGRATION = Path(__file__).parents[2] / "scripts/394-lab-arena-restart-expired-z
 @pytest.fixture(scope="module")
 def database():
     preimage = tuple(name for name in CURRENT_SERVICE_MIGRATIONS
-                     if name != MIGRATION.name)
-    assert len(preimage) + 1 == len(CURRENT_SERVICE_MIGRATIONS)
+                     if name not in (MIGRATION.name,
+                                     "402-lab-arena-restart-expired-zero-call-execute-drain.sql"))
+    assert len(preimage) + 2 == len(CURRENT_SERVICE_MIGRATIONS)
     yield from database_with_lab_arena_migration(
         preimage + (source.MIGRATION_359.name, source.MIGRATION.name)
     )

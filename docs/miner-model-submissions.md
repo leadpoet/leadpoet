@@ -81,6 +81,35 @@ The archive limits are 10 MiB compressed, 50 MiB unpacked, and 1,000 entries.
 The result gives a submission ID and round ID. **Accepted means admitted, not
 scored.** Validator execution and scoring follow through that round's queue.
 
+## Recover after a provider credit failure
+
+Add credit to the same provider account, or increase its exhausted key limit.
+Then use the hotkey that owns the submission:
+
+```bash
+python3 scripts/lab_arena_miner.py retry-credit-failures \
+  --round-id ROUND_ID --submission-id SUBMISSION_ID \
+  --wallet-name YOUR_WALLET --hotkey-name YOUR_HOTKEY
+```
+
+This signed request creates attempt 2 only for a failed attempt 1 with a
+gateway-verified, settled zero-charge credit error. The original execution or
+scoring stage must still be open and before its frozen deadline. It uses the
+existing stored keys and two-attempt limit. Top up before retrying: another
+credit failure can use the remaining attempt. Recovery is not automatic.
+
+The receipt reports `queued`, `replayed`, or `no_eligible`, with a run count.
+`no_eligible` includes a safe reason. Old failures without the new zero-charge
+proof, uncertain charges, accepted results, closed stages, and closed rounds
+cannot use this recovery path. Existing spend still counts against the same
+budget; a top-up does not raise Arena spending limits.
+
+Credit errors are excluded from shared result caches. Their error and billing
+records remain stored for audit and exact-call replay. A recovery uses a fresh
+attempt, so it does not reuse the failed call's identity or delete its history.
+
+## Submission status and results
+
 Retry an unchanged archive with the same hotkey. The gateway reuses its upload
 reservation. If an unfinished archive changes, the gateway keeps the old row
 and bytes and assigns a new upload target. A late finalize for the replaced

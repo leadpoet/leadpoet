@@ -219,6 +219,13 @@ def create_app(service: ArenaService) -> FastAPI:
     async def submission_status(submission_id: str) -> Any:
         return await run_in_threadpool(service.submission_status, submission_id)
 
+    @app.post("/arena/v1/submissions/{submission_id}/retry-credit-failures")
+    async def submission_credit_retry(submission_id: str, request: Request) -> JSONResponse:
+        envelope = await _read_json(request)
+        return await no_store_public_call(
+            service.handle_submission_credit_retry, submission_id, envelope
+        )
+
     # -- runner -------------------------------------------------------------
 
     @app.post("/arena/v1/runs/claim")

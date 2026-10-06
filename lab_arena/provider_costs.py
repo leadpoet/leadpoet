@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Mapping, Optional, Sequence, Tuple
 
 
 MICROUSD_PER_USD = Decimal("1000000")
@@ -315,6 +315,77 @@ def deepline_billing_history_cost(
     )
 
 
+def deepline_exact_request_cost(
+    response_json: Any, *, request_id: str, operation: str,
+    provider: Optional[str] = None,
+    operation_aliases: Sequence[str] = (),
+) -> Tuple[str, Optional[ProviderCost]]:
+    """Price the final answer to one authenticated by-request billing GET.
+
+    Missing records, grouped charges and asynchronous zeroes are not charges.
+    This stricter contract does not change the historical paginated parser.
+    """
+
+    if not isinstance(response_json, Mapping):
+        return "invalid", None
+    recent = response_json.get("recent")
+    if not isinstance(recent, Mapping) or recent.get("request_id") != request_id:
+        return "invalid", None
+    entries = recent.get("entries")
+    if not isinstance(entries, list):
+        return "invalid", None
+    if not entries:
+        return "pending", None
+    if len(entries) != 1 or not isinstance(entries[0], Mapping):
+        return "invalid", None
+    entry = entries[0]
+    entry_provider = entry.get("provider")
+    if (
+        entry.get("request_id") != request_id
+        or entry.get("operation") not in (operation, *operation_aliases)
+        or not isinstance(entry.get("id"), str) or not entry["id"]
+        or not isinstance(entry_provider, str) or not entry_provider
+        or (provider is not None and entry_provider != provider)
+        or (provider is None and not operation.casefold().startswith(entry_provider.casefold() + "_"))
+        or entry.get("batch_count") not in (None, 1)
+        or isinstance(entry.get("batch_count"), bool)
+    ):
+        return "invalid", None
+    metadata = entry.get("metadata")
+    if metadata is not None and not isinstance(metadata, Mapping):
+        return "invalid", None
+    groups = metadata.get("chargeGroupIds", []) if isinstance(metadata, Mapping) else []
+    if not isinstance(groups, list) or groups not in ([], [request_id]):
+        return "invalid", None
+    if isinstance(metadata, Mapping) and any(
+        name in metadata and metadata[name] != expected
+        for name, expected in (("requestId", request_id), ("chargeGroupId", request_id),
+                               ("provider", entry_provider), ("operation", entry.get("operation")))
+    ):
+        return "invalid", None
+    credits = _decimal(entry.get("credits"))
+    delta = _signed_decimal(entry.get("delta"))
+    if credits is None or delta is None or delta != -credits:
+        return "invalid", None
+    charge_state = entry.get("charge_state")
+    if entry.get("charge_finality") != "final" or charge_state in ("temporary_hold", "pending"):
+        return "nonterminal", None
+    if entry.get("billing_mode") == "async_hold" and credits == 0:
+        return "nonterminal", None
+    if (
+        charge_state not in ("posted", "free", "hold_release", "failed")
+        or (charge_state != "posted" and credits != 0)
+        or (entry.get("billing_mode") == "no_bill" and credits != 0)
+    ):
+        return "invalid", None
+    return "matched", ProviderCost(
+        microusd=_microusd_ceiling(credits * DEEPLINE_USD_PER_CREDIT),
+        units=credits,
+        unit_name="credits",
+        price_basis="deepline_exact_request_credits_x_0.10_usd",
+    )
+
+
 def deepline_billing_ledger_cost(
     response_json: Any,
     *,
@@ -461,7 +532,8 @@ def deepline_billing_ledger_cost(
 
 
 def deepline_free_completed_cost(
-    parameters: Mapping[str, Any], response_status: Any, response_json: Any
+    parameters: Mapping[str, Any], response_status: Any, response_json: Any,
+    *, catalog_entry: Optional[Mapping[str, Any]] = None,
 ) -> Optional[ProviderCost]:
     """Prove a verified Deepline no-bill operation used zero credits.
 
@@ -478,6 +550,19 @@ def deepline_free_completed_cost(
         if isinstance(tool, str)
         else None
     )
+    if catalog_entry is not None:
+        pricing = catalog_entry.get("pricing")
+        if (
+            catalog_entry.get("tool_id") == tool
+            and isinstance(pricing, Mapping)
+            and pricing.get("unit") in ("call", "request")
+            and pricing.get("billing_source") == "free"
+            and _decimal(pricing.get("usd_per_unit")) == 0
+            and _decimal(pricing.get("credits_per_unit")) == 0
+        ):
+            basis = "deepline_frozen_catalog_completed_zero"
+        else:
+            basis = None
     if (
         basis is None
         or isinstance(response_status, bool)
@@ -549,9 +634,20 @@ def deepline_payment_refusal_cost(
     )
 
 
-def deepline_reservation_cost(parameters: Mapping[str, Any]) -> Optional[ProviderCost]:
+def deepline_reservation_cost(
+    parameters: Mapping[str, Any], *, catalog_entry: Optional[Mapping[str, Any]] = None,
+) -> Optional[ProviderCost]:
     """Return a published fixed-call estimate; None means dynamically priced."""
 
+    if catalog_entry is not None:
+        pricing = catalog_entry.get("pricing")
+        if not isinstance(pricing, Mapping) or pricing.get("unit") not in ("call", "request"):
+            return None
+        usd = _decimal(pricing.get("usd_per_unit"))
+        if usd is None or pricing.get("currency") != "USD":
+            return None
+        return ProviderCost(microusd=_microusd_ceiling(usd), units=usd,
+                            unit_name="USD", price_basis="deepline_frozen_catalog_call_usd")
     credits = _DEEPLINE_FIXED_CREDITS.get(str(parameters.get("tool") or ""))
     if credits is None:
         return None
@@ -705,6 +801,7 @@ __all__ = [
     "ProviderCost",
     "SCRAPINGDOG_USD_PER_CREDIT",
     "deepline_billing_history_cost",
+    "deepline_exact_request_cost",
     "deepline_cost",
     "deepline_free_completed_cost",
     "deepline_payment_refusal_cost",

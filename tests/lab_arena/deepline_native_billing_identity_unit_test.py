@@ -21,6 +21,8 @@ from tests.lab_arena.test_lab_arena_broker import (
     ({"x-vercel-id": NATIVE_REQUEST_ID}, NATIVE_REQUEST_ID),
     ({"x-vercel-id": "iad1::" + NATIVE_REQUEST_ID}, NATIVE_REQUEST_ID),
     ({"x-deepline-request-id": NATIVE_REQUEST_ID}, NATIVE_REQUEST_ID),
+    ({"x-deepline-request-id": "execution_native_123"}, "execution_native_123"),
+    ({"x-deepline-request-id": "bad/request/id"}, None),
     ({"x-vercel-id": "bad/edge::" + NATIVE_REQUEST_ID}, None),
     ({"x-vercel-id": "arbitrary"}, None),
     ({"x-deepline-request-id": "invalid", "x-vercel-id": NATIVE_REQUEST_ID}, None),
@@ -95,8 +97,12 @@ def test_lost_body_uses_native_receipt_and_never_repeats_paid_call(known_cost):
             return httpx.Response(200, headers={"x-vercel-id": "iad1::" + NATIVE_REQUEST_ID},
                                   stream=_ReadTimeoutAfterHeaders())
         return httpx.Response(200, json={
-            "entries": [_ledger_entry(credits=0.02, request_id=NATIVE_REQUEST_ID)]
-            if known_cost else "invalid", "has_more": False,
+            "recent": {"request_id": NATIVE_REQUEST_ID, "entries": [{
+                "id": "usage-row-1", "request_id": NATIVE_REQUEST_ID,
+                "provider": "firecrawl", "operation": "firecrawl_scrape",
+                "credits": 0.02, "delta": -0.02, "charge_state": "posted",
+                "charge_finality": "final", "metadata": {},
+            }] if known_cost else "invalid"},
         })
     transport = br.HttpxProviderTransport(
         client_factory=_async_client_factory(respond)

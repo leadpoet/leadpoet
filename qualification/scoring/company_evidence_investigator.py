@@ -1316,6 +1316,12 @@ def _priority_headquarters_navigation_source(
     if "geography" not in targets:
         return ""
     for terms in (r"\b(?:contact|headquarters)\b", r"\babout\b"):
+        # A sales CTA can have a "Contact Sales" label while pointing to a
+        # demo form. Prefer an actual contact/HQ path before that fallback so
+        # one generic form does not consume the bounded source-fetch budget.
+        for locator in homepage_navigation_locators:
+            if re.search(terms, urlsplit(locator["url"]).path, re.I):
+                return locator["url"]
         for locator in homepage_navigation_locators:
             if re.search(terms, f"{locator['url']} {locator['label']}", re.I):
                 return locator["url"]

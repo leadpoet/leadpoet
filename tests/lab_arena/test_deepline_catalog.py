@@ -304,8 +304,9 @@ def test_optional_disabled_workflow_fields_remain_blocked_in_payload(field):
 
 
 def test_public_content_search_can_omit_optional_person_attribution_selector():
-    public = row("vendor_search_posts", categories=["research"], inputSchema={"type": "object", "properties": {"query": {"type": "string"}, "mentioning_member": {"type": "string"}}, "required": ["query"]})
+    public = row("vendor_search_posts", categories=["research"], inputSchema={"type": "object", "properties": {"query": {"type": "string"}, "mentioning_member": {"type": "string"}, "profileId": {"type": "string"}, "company": {"type": "string"}}, "required": ["query"]})
     snapshot = frozen(public)
     assert catalog.validate_payload(snapshot, public["toolId"], {"query": "company launch"}) == {"query": "company launch"}
-    with pytest.raises(catalog.CatalogError):
-        catalog.validate_payload(snapshot, public["toolId"], {"query": "company launch", "mentioning_member": "person"})
+    for field in ("mentioning_member", "profileId"):
+        with pytest.raises(catalog.CatalogError):
+            catalog.validate_payload(snapshot, public["toolId"], {"query": "company launch", field: "person"})

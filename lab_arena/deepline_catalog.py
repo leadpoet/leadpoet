@@ -336,7 +336,7 @@ def freeze_catalog(document: Mapping[str, Any], allow_people: bool = False) -> d
         except CatalogError:
             continue
         required = schema.get("required", [])
-        if not _schema_controls_safe(schema, allow_people=allow_people, company_category=bool(set(row["categories"]) & {"company_search", "company_enrich", "smb"})):
+        if not _schema_controls_safe(schema, allow_people=allow_people, company_category=bool(set(row["categories"]) & {"company_search", "company_enrich", "smb"} or {_name(name) for name in schema["properties"]} & {"company", "company_id", "company_domain", "company_url"})):
             continue
         if not allow_people and _requires_person_input(schema):
             continue

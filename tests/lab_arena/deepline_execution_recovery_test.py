@@ -79,13 +79,13 @@ def test_timeout_key_is_durable_before_dispatch_and_cost_is_exact_once():
     assert first.call["outcome"] == "settled"
     assert first.status == 502  # A lost result remains a failed call even with a known charge.
     assert first.call["actual_microusd"] == 3_000
-    assert [request["method"] for request in transport.sent] == ["POST", "GET", "GET"]
+    assert [request["method"] for request in transport.sent] == ["POST", "GET", "GET", "GET"]
     call = store.calls[first.call["call_identity"]]
     assert call["terminal"]["provider_cost"]["request_id"] == NATIVE_REQUEST_ID
     assert transport.execution_key not in json.dumps(first.to_document())
     second = execute(broker)
     assert second.call["idempotent"] is True
-    assert len(transport.sent) == 3
+    assert len(transport.sent) == 4
     assert store.openrouter_capacity == 49_942_650
 
 

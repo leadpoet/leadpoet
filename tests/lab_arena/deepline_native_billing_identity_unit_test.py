@@ -1,6 +1,7 @@
 """Retain a native billing receipt without accepting a different call's cost."""
 
 import json
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -96,6 +97,12 @@ def test_lost_body_uses_native_receipt_and_never_repeats_paid_call(known_cost):
         if request.method == "POST":
             return httpx.Response(200, headers={"x-vercel-id": "iad1::" + NATIVE_REQUEST_ID},
                                   stream=_ReadTimeoutAfterHeaders())
+        if "/executions/by-key/" in str(request.url):
+            key = unquote(str(request.url).rsplit("/", 1)[-1])
+            return httpx.Response(200, headers={"x-deepline-idempotency-supported": "true"}, json={
+                "executionRecovery": {"idempotencyKey": key, "state": "completed"},
+                "toolId": "firecrawl_scrape", "requestId": NATIVE_REQUEST_ID,
+            })
         return httpx.Response(200, json={
             "recent": {"request_id": NATIVE_REQUEST_ID, "entries": [{
                 "id": "usage-row-1", "request_id": NATIVE_REQUEST_ID,
@@ -117,7 +124,7 @@ def test_lost_body_uses_native_receipt_and_never_repeats_paid_call(known_cost):
                                 action_sequence=0, timeout_ms=30_000)
     finally:
         transport.close()
-    assert [r.method for r in requests] == ["POST", "GET"]
+    assert [r.method for r in requests] == ["POST", "GET", "GET", "GET"]
     retained = store.calls[result.call["call_identity"]]
     assert result.call["outcome"] == ("settled" if known_cost else "uncertain")
     if known_cost:

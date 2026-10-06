@@ -2116,8 +2116,6 @@ class ArenaService:
         schedule = round_row["configuration_doc"]["schedule"]
         if started < _parse_iso(schedule["submission_cutoff"]):
             return {"status": "waiting", "round_status": "open"}
-        self._freeze_deepline_catalog(refreshed_configuration)
-        contracts.validate_round_configuration(refreshed_configuration)
         submission_open = _parse_iso(schedule["submission_open"])
         icp_set_date = submission_open.astimezone(timezone.utc).date().isoformat()
         set_id = int(icp_set_date.replace("-", ""))
@@ -2186,6 +2184,8 @@ class ArenaService:
         evaluation_date = _parse_iso(
             schedule["submission_cutoff"]
         ).astimezone(timezone.utc).date().isoformat()
+        self._freeze_deepline_catalog(refreshed_configuration)
+        contracts.validate_round_configuration(refreshed_configuration)
         benchmark_ref = "arena/%s/benchmark.json" % round_id
         self._objects.put(benchmark_ref, contracts.canonical_json({"schema_version": "leadpoet.lab_arena.benchmark.v1", "round_id": round_id, "icps": icps}).encode("utf-8"))
         transition = self._store.commit_round_v2(

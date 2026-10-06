@@ -163,3 +163,28 @@ def test_valid_optional_async_flags_and_untrusted_response_controls():
     assert br._deepline_async_response_accepted(br.ProviderResponse(200, {}, b'', 'credential_echo'), document) is False
     del data['success']
     assert br._deepline_async_response_accepted(br.ProviderResponse(200, {}, b''), document) is True
+
+
+@pytest.mark.parametrize('credits', [0, .02])
+def test_nonterminal_inline_bill_requires_explicit_finality(monkeypatch, credits):
+    monkeypatch.setattr(br, '_DEEPLINE_BILLING_MAX_ATTEMPTS', 1)
+    document = receipt()
+    document['billing'] = {'credits_charged': credits}
+    broker, store, _ = make_broker(store=ZeroHoldStore(), transport=AsyncTransport(document))
+    result = execute(broker, replace(CONTEXT, deepline_catalog=snapshot()))
+    assert result.status == 200 and result.call['outcome'] == 'uncertain'
+    assert 'actual_microusd' not in result.call
+    assert store.calls[result.call['call_identity']]['kind'] == 'uncertain'
+
+
+@pytest.mark.parametrize('credits', [0, .02])
+def test_explicit_final_nonterminal_inline_bill_settles_once(monkeypatch, credits):
+    document = receipt()
+    document['billing'] = {'credits_charged': credits, 'pricing_status': 'final'}
+    transport = AsyncTransport(document)
+    broker, store, _ = make_broker(store=ZeroHoldStore(), transport=transport)
+    result = execute(broker, replace(CONTEXT, deepline_catalog=snapshot()))
+    assert result.status == 200 and result.call['outcome'] == 'settled'
+    assert result.call['actual_microusd'] == round(credits * 100000)
+    assert len(transport.requests) == 1
+    assert store.calls[result.call['call_identity']]['terminal']['call_succeeded'] is True

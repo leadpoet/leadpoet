@@ -65,12 +65,14 @@ CALL_QUOTAS_PER_ICP = {
     "deepline": 200,
     "openrouter": 2000,
 }
+DEEPLINE_BUDGET_ONLY_CALL_QUOTAS = {**CALL_QUOTAS_PER_ICP, "deepline": 0}
 EXECUTION_CALL_QUOTA_PROFILES = (
     LEGACY_CALL_QUOTAS_PER_ICP,
     OPENROUTER_200_CALL_QUOTAS_PER_ICP,
     ALL_PROVIDER_200_CALL_QUOTAS_PER_ICP,
     OPENROUTER_500_CALL_QUOTAS_PER_ICP,
     CALL_QUOTAS_PER_ICP,
+    DEEPLINE_BUDGET_ONLY_CALL_QUOTAS,
 )
 # Judge calls made while scoring one work item (one output on one ICP), using
 # the same organizer-supplied provider accounts as bundle execution. Signed
@@ -85,9 +87,11 @@ SCORING_CALL_QUOTAS_PER_WORK_ITEM = {
     "deepline": 2000,
     "openrouter": 2000,
 }
+DEEPLINE_BUDGET_ONLY_SCORING_QUOTAS = {**SCORING_CALL_QUOTAS_PER_WORK_ITEM, "deepline": 0}
 SCORING_CALL_QUOTA_PROFILES = (
     LEGACY_SCORING_CALL_QUOTAS_PER_WORK_ITEM,
     SCORING_CALL_QUOTAS_PER_WORK_ITEM,
+    DEEPLINE_BUDGET_ONLY_SCORING_QUOTAS,
 )
 # Assignment kinds: a validator either executes a miner's model on one ICP or
 # scores one output on one ICP with the Arena judge.
@@ -860,8 +864,8 @@ ROUND_CONFIGURATION_FIELDS = (
     F("lease_ttl_seconds", "int", minimum=60),
     F("companies_per_icp", "int", minimum=1, maximum=50),
     F("providers", "list[str]", minimum=1, maximum=8),
-    F("call_quotas", "object", fields=tuple(F(provider, "int", minimum=1) for provider in PROVIDERS)),
-    F("scoring_call_quotas", "object", fields=tuple(F(provider, "int", minimum=1) for provider in PROVIDERS)),
+    F("call_quotas", "object", fields=tuple(F(provider, "int", minimum=0 if provider == "deepline" else 1) for provider in PROVIDERS)),
+    F("scoring_call_quotas", "object", fields=tuple(F(provider, "int", minimum=0 if provider == "deepline" else 1) for provider in PROVIDERS)),
     F("icp_wall_clock_seconds", "int", minimum=30),
     # An opted-in round freezes one common deadline and checkpoint protocol.
     # Absence preserves every previously signed round's execution behavior.
@@ -873,6 +877,7 @@ ROUND_CONFIGURATION_FIELDS = (
     ),
     F("scoring_wall_clock_seconds", "int", minimum=30),
     F("scorer_policy", "object"),
+    F("deepline_catalog", "object", required=False),
     F("execution_cap_microusd", "int", minimum=1),
     # New rounds freeze the final cost-per-returned-company eligibility rule.
     # It is optional only so historical configuration documents stay valid.
@@ -995,16 +1000,28 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
         raise ArenaContractError("max challengers exceeds the public constant")
     call_quotas = dict(config["call_quotas"])
     if tuple(config["providers"]) != PROVIDERS or not any(
-        call_quotas == dict(profile)
+        call_quotas == dict(profile) or call_quotas == {**profile, "deepline": 0}
         for profile in EXECUTION_CALL_QUOTA_PROFILES
     ):
         raise ArenaContractError("providers and call quotas are fixed public constants")
     scoring_call_quotas = dict(config["scoring_call_quotas"])
     if not any(
-        scoring_call_quotas == dict(profile)
+        scoring_call_quotas == dict(profile) or scoring_call_quotas == {**profile, "deepline": 0}
         for profile in SCORING_CALL_QUOTA_PROFILES
     ):
         raise ArenaContractError("scoring call quotas are fixed public constants")
+    catalog = config.get("deepline_catalog")
+    if catalog is not None:
+        from lab_arena.deepline_catalog import CatalogError, validate_catalog
+        try:
+            catalog = validate_catalog(catalog)
+        except CatalogError as exc:
+            raise ArenaContractError("invalid Deepline catalog") from exc
+        if catalog["allow_people"] != (config.get("contact_policy") == "contacts_v1"):
+            raise ArenaContractError("Deepline catalog must match the round contact policy")
+    if call_quotas["deepline"] == 0 or scoring_call_quotas["deepline"] == 0:
+        if catalog is None or config.get("sourcing_cost_eligibility_policy") != PER_ICP_SUCCESSFUL_CALLS_COST_POLICY:
+            raise ArenaContractError("budget-only Deepline requires a frozen catalog and per-ICP cost policy")
     if not config["scorer_image_reference"].endswith("@" + config["scorer_image_digest"]):
         raise ArenaContractError("scorer image reference must pin the scorer image digest")
     if not config["baseline_source_url"].startswith("https://"):

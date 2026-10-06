@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+from functools import lru_cache
 import json
 import os
 import re
@@ -60,12 +61,15 @@ FRAME_FIELDS = ("schema_version", "operation_id", "parameters", "timeout_ms")
 RESPONSE_FIELDS = ("status", "headers", "body_b64")
 DEFAULT_TIMEOUT_MS = 30_000
 SOCKET_GRACE_SECONDS = 15.0
+SETTLED_MICROUSD_HEADER = "x-leadpoet-settled-microusd"
+CALL_IDENTITY_HEADER = "x-leadpoet-call-identity"
 ERROR_PREFIX = "lab arena: "
 SITECUSTOMIZE_SOURCE = "import lab_arena.shim as _lab_arena_shim\n_lab_arena_shim.install()\n"
 SHIM_IMAGE_MODULES = (
     "lab_arena/__init__.py",
     "lab_arena/contracts.py",
     "lab_arena/operations.py",
+    "lab_arena/deepline_catalog.py",
     "lab_arena/shim.py",
 )
 FRAME_ERROR_CODES = frozenset(
@@ -123,10 +127,29 @@ class OperationFrameError(ShimError):
 # ---------------------------------------------------------------------------
 
 
+def _input_deepline_catalog() -> Optional[Mapping[str, Any]]:
+    return _read_input_deepline_catalog(os.environ.get("LAB_ARENA_INPUT_PATH", "/input/icp.json"))
+
+
+@lru_cache(maxsize=4)
+def _read_input_deepline_catalog(path: str) -> Optional[Mapping[str, Any]]:
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(16 * 1024 * 1024 + 1)
+        if len(raw) > 16 * 1024 * 1024:
+            raise ShimRequestError("invalid_request")
+        document = json.loads(raw)
+        return document.get("deepline_catalog") if isinstance(document, dict) else None
+    except FileNotFoundError:
+        return None
+    except (ValueError, OSError):
+        raise ShimRequestError("invalid_request") from None
+
+
 def build_operation_frame(operation_id: str, parameters: Mapping[str, Any], timeout_ms: int) -> bytes:
     """Encode one request frame; ``parameters`` must already be normalized."""
 
-    operation = operations.OPERATIONS.get(operation_id)
+    operation = operations.get_operation(operation_id)
     if operation is None:
         raise ShimRequestError("no_matching_operation")
     if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms < 1:
@@ -143,7 +166,7 @@ def build_operation_frame(operation_id: str, parameters: Mapping[str, Any], time
     return encoded
 
 
-def validate_operation_frame(frame: Any) -> Tuple[str, Dict[str, Any], int]:
+def validate_operation_frame(frame: Any, *, deepline_catalog: Optional[Mapping[str, Any]] = None) -> Tuple[str, Dict[str, Any], int]:
     """Worker-side frame check: exact keys, known operation, bounded timeout,
     and a full re-validation of the parameters. Extra keys such as
     ``round_id``, ``lease_token`` or ``miner`` are rejected outright."""
@@ -153,7 +176,7 @@ def validate_operation_frame(frame: Any) -> Tuple[str, Dict[str, Any], int]:
     if frame["schema_version"] != OPERATION_FRAME_SCHEMA_VERSION:
         raise OperationFrameError("invalid_frame")
     operation_id = frame["operation_id"]
-    operation = operations.OPERATIONS.get(operation_id) if isinstance(operation_id, str) else None
+    operation = operations.get_operation(operation_id) if isinstance(operation_id, str) else None
     if operation is None:
         raise OperationFrameError("no_matching_operation")
     timeout_ms = frame["timeout_ms"]
@@ -161,18 +184,18 @@ def validate_operation_frame(frame: Any) -> Tuple[str, Dict[str, Any], int]:
         raise OperationFrameError("invalid_frame")
     if not 1 <= timeout_ms <= operation.timeout_seconds * 1000:
         raise OperationFrameError("invalid_frame")
-    parameters = operations.validate_operation_request(operation_id, frame["parameters"])
+    parameters = operations.validate_operation_request(operation_id, frame["parameters"], deepline_catalog=deepline_catalog)
     return operation_id, parameters, timeout_ms
 
 
-def decode_operation_frame(data: bytes) -> Tuple[str, Dict[str, Any], int]:
+def decode_operation_frame(data: bytes, *, deepline_catalog: Optional[Mapping[str, Any]] = None) -> Tuple[str, Dict[str, Any], int]:
     if len(data) > MAX_FRAME_BYTES:
         raise OperationFrameError("frame_too_large")
     try:
         frame = json.loads(bytes(data).decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
         raise OperationFrameError("invalid_frame") from exc
-    return validate_operation_frame(frame)
+    return validate_operation_frame(frame, deepline_catalog=deepline_catalog)
 
 
 def encode_worker_response(status: int, headers: Mapping[str, str], body: bytes) -> bytes:
@@ -218,6 +241,21 @@ def _parse_worker_response_with_url(
             trusted_names.append(name)
         elif normalized_name in ("content-type", "content-length"):
             headers[normalized_name] = value
+        elif normalized_name in (SETTLED_MICROUSD_HEADER, CALL_IDENTITY_HEADER):
+            # The host strips provider copies and adds proofs bound to its
+            # ledger. Preserve those proofs through Python HTTP adapters.
+            if normalized_name in headers:
+                raise ShimTransportError("invalid_response")
+            if normalized_name == CALL_IDENTITY_HEADER:
+                valid = contracts.SHA256_RE.fullmatch(value) is not None
+            else:
+                valid = re.fullmatch(r"0|[1-9][0-9]{0,18}", value) is not None
+                valid = valid and int(value) <= 2**63 - 1
+            if not valid:
+                raise ShimTransportError("invalid_response")
+            headers[normalized_name] = value
+    if SETTLED_MICROUSD_HEADER in headers and CALL_IDENTITY_HEADER not in headers:
+        raise ShimTransportError("invalid_response")
     if len(trusted_names) > 1:
         raise ShimTransportError("invalid_response")
     try:
@@ -276,7 +314,7 @@ def _dispatch_with_response_url(
 
     encoded = build_operation_frame(operation_id, parameters, timeout_ms)
     bounded_timeout_ms = min(
-        timeout_ms, operations.OPERATIONS[operation_id].timeout_seconds * 1000
+        timeout_ms, operations.get_operation(operation_id).timeout_seconds * 1000
     )
     path = worker_socket_path()
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -340,7 +378,7 @@ def _execute_with_response_url(
     if trusted:
         url, headers = strip_caller_credentials(url, headers)
     try:
-        operation_id, parameters = operations.match_request(method, url, body, headers)
+        operation_id, parameters = operations.match_request(method, url, body, headers, deepline_catalog=_input_deepline_catalog())
     except operations.OperationError as exc:
         page_fetch = _trusted_page_fetch(method, url, body) if trusted and exc.code == "no_matching_operation" else None
         if page_fetch is None:

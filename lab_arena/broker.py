@@ -35,7 +35,7 @@ from urllib.parse import quote, unquote_to_bytes, urlsplit
 
 import httpx
 
-from lab_arena import contracts, operations, provider_costs, scoring_provider_compat
+from lab_arena import contracts, deepline_catalog, operations, provider_costs, scoring_provider_compat
 from lab_arena import telemetry
 from lab_arena.contracts import ArenaContractError
 from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable
@@ -70,6 +70,8 @@ OPENROUTER_GPT6_LUNA_LONG_CONTEXT_COMPLETION_PRICE = Decimal("0.00000075")
 OPENROUTER_PRICE_PER_MILLION = Decimal("1000000")
 OPENROUTER_NATIVE_WEB_SEARCH_RESERVATION_USD_PER_CALL = Decimal("0.01")
 DEEPLINE_BILLING_LEDGER_URL = "https://code.deepline.com/api/v2/billing/ledger"
+DEEPLINE_EXACT_BILLING_URL = "https://code.deepline.com/api/v2/billing/usage?request_id="
+DEEPLINE_EXECUTION_BY_KEY_URL = "https://code.deepline.com/api/v2/executions/by-key/"
 DEEPLINE_BILLING_HISTORY_URL = (
     "https://code.deepline.com/api/v2/billing/usage?recent_limit=50"
 )
@@ -156,6 +158,11 @@ OPENROUTER_DELAYED_RECONCILIATION_TIMEOUT_SECONDS = 5.0
 _SETTLEMENT_STORE_MAX_ATTEMPTS = 3
 DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS = 5.0
 _DEEPLINE_REQUEST_ID_RE = re.compile(r"^ctx-tool-[0-9a-f]{32}$")
+_DEEPLINE_EXECUTION_KEY_RE = re.compile(r"^arena:[0-9a-f]{64}$")
+_DEEPLINE_NATIVE_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
+# This batch submission does not honor Deepline execution keys. It needs its
+# own submission receipt; never treat a missing key lookup as a free request.
+_DEEPLINE_UNKEYED_TOOLS = frozenset({"firecrawl_batch_scrape"})
 _DEEPLINE_BILLING_REQUEST_ID_RE = re.compile(
     r"^(?:ctx-tool-[0-9a-f]{32}|[a-z0-9]{3,8}::[a-z0-9]{1,16}-[0-9]{13}-[a-f0-9]{12,64})$"
 )
@@ -506,7 +513,7 @@ class ProviderTransportError(RuntimeError):
         )
         self.deepline_job_id = (
             deepline_job_id if isinstance(deepline_job_id, str)
-            and _DEEPLINE_BILLING_REQUEST_ID_RE.fullmatch(deepline_job_id)
+            and _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(deepline_job_id)
             else None
         )
         self.observed_status = (
@@ -943,6 +950,7 @@ def _missing_provider_cost_call_doc(
     call_succeeded: bool,
     deepline_request_id: Optional[str] = None,
     deepline_response_request_id: Optional[str] = None,
+    deepline_execution_key: Optional[str] = None,
     deepline_operation: Optional[str] = None,
     openrouter_generation_id: Optional[str] = None,
     openrouter_model: Optional[str] = None,
@@ -981,6 +989,8 @@ def _missing_provider_cost_call_doc(
         )
     if deepline_response_request_id is not None:
         diagnostics["deepline_job_id"] = deepline_response_request_id
+    if deepline_execution_key is not None:
+        diagnostics["deepline_execution_key"] = deepline_execution_key
     if (
         deepline_request_id is not None
         and credential_fingerprint is not None
@@ -1124,7 +1134,7 @@ def _deepline_response_header_request_id(headers: Mapping[str, str]) -> Optional
             return None
     valid_vercel = vercel if _DEEPLINE_BILLING_REQUEST_ID_RE.fullmatch(vercel) else None
     if explicit is not None:
-        if not _DEEPLINE_BILLING_REQUEST_ID_RE.fullmatch(explicit):
+        if not _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(explicit):
             return None
         if valid_vercel is not None and explicit != valid_vercel:
             return None
@@ -1276,6 +1286,36 @@ def _deepline_job_request_id(document: Any) -> Optional[str]:
     return present[0]
 
 
+def _deepline_async_job_ids(document: Any, flow: Mapping[str, Any]) -> Sequence[str]:
+    """Read only declared provider-job paths, excluding the billing envelope ID."""
+
+    if not isinstance(document, Mapping):
+        return ()
+    containers = []
+    for name in ("result", "toolResponse"):
+        value = document.get(name)
+        if isinstance(value, Mapping):
+            containers.append(value)
+            if isinstance(value.get("rawV2"), Mapping):
+                containers.append(value["rawV2"])
+            if isinstance(value.get("data"), Mapping):
+                containers.append(value["data"])
+    if not containers and not any(name in document for name in ("job_id", "request_id", "requestId")):
+        containers.append(document)
+    result = []
+    for path in flow.get("job_id_paths", ()):
+        if not isinstance(path, str) or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*){0,7}", path) is None:
+            continue
+        for container in containers:
+            value = container
+            for component in path.split("."):
+                value = value.get(component) if isinstance(value, Mapping) else None
+            if (isinstance(value, str) and _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(value)
+                and value not in result):
+                result.append(value)
+    return tuple(result[:32])
+
+
 def _deepline_billing_readback(
     *,
     transport: ProviderTransport,
@@ -1354,6 +1394,109 @@ def _deepline_billing_readback(
         history_url = DEEPLINE_BILLING_HISTORY_URL
         current_offset = 0
     return None
+
+
+def _deepline_exact_readback(
+    *, transport: ProviderTransport, secret: str,
+    request_id: Optional[str], execution_key: Optional[str], operation: str,
+    reconciliation_deadline: float, provider: Optional[str] = None,
+    operation_aliases: Sequence[str] = (),
+) -> Tuple[Optional[str], Optional[provider_costs.ProviderCost]]:
+    """Recover one execution identity and read only its own final charge.
+
+    All retries are GETs. Neither an unsupported key lookup nor a missing
+    execution or charge permits replay of a paid request.
+    """
+
+    native_id = request_id
+    if native_id is not None and (
+        _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(native_id) is None
+        or _DEEPLINE_REQUEST_ID_RE.fullmatch(native_id) is not None
+    ):
+        native_id = None
+    if execution_key is not None and _DEEPLINE_EXECUTION_KEY_RE.fullmatch(execution_key) is None:
+        return native_id, None
+    deadline = min(reconciliation_deadline,
+                   time.monotonic() + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS)
+    headers = {
+        "accept": "application/json", "authorization": "Bearer " + secret,
+        "user-agent": "leadpoet-lab-arena-broker/1",
+    }
+    for index in range(_DEEPLINE_BILLING_MAX_ATTEMPTS):
+        now = time.monotonic()
+        if now >= deadline:
+            break
+        if index:
+            time.sleep(min(_DEEPLINE_BILLING_POLL_SECONDS, deadline - now))
+            now = time.monotonic()
+            if now >= deadline:
+                break
+        if native_id is None:
+            if execution_key is None:
+                return None, None
+            url = DEEPLINE_EXECUTION_BY_KEY_URL + quote(execution_key, safe="")
+        else:
+            url = DEEPLINE_EXACT_BILLING_URL + quote(native_id, safe="")
+        try:
+            response = transport.send(method="GET", url=url, headers=headers, body=b"",
+                                      timeout_seconds=max(0.001, deadline - now))
+        except ProviderTransportError:
+            continue
+        if _response_contains_credential(response, secret):
+            return native_id, None
+        if native_id is None:
+            supported = [value for name, value in response.headers.items()
+                         if name.lower() == "x-deepline-idempotency-supported"]
+            if supported != ["true"]:
+                return None, None
+        if response.status == 404:
+            # Absence is not proof that no dispatch or charge occurred.
+            continue
+        if response.status != 200:
+            continue
+        try:
+            document = json.loads(response.body.decode("utf-8"), parse_float=Decimal)
+        except (UnicodeDecodeError, ValueError):
+            return native_id, None
+        if native_id is None:
+            recovery = document.get("executionRecovery") if isinstance(document, Mapping) else None
+            recovered_id = document.get("requestId") if isinstance(document, Mapping) else None
+            if (
+                not isinstance(recovery, Mapping)
+                or recovery.get("idempotencyKey") != execution_key
+                or document.get("toolId") not in (operation, *operation_aliases)
+                or not isinstance(recovered_id, str)
+                or _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(recovered_id) is None
+                or _DEEPLINE_REQUEST_ID_RE.fullmatch(recovered_id) is not None
+            ):
+                return None, None
+            native_id = recovered_id
+            # Key recovery is a read, not a polling interval. Read the charge
+            # within this same deadline before the next paced poll.
+            try:
+                response = transport.send(
+                    method="GET", url=DEEPLINE_EXACT_BILLING_URL + quote(native_id, safe=""),
+                    headers=headers, body=b"", timeout_seconds=max(0.001, deadline - time.monotonic()),
+                )
+            except ProviderTransportError:
+                continue
+            if _response_contains_credential(response, secret):
+                return native_id, None
+            if response.status != 200:
+                continue
+            try:
+                document = json.loads(response.body.decode("utf-8"), parse_float=Decimal)
+            except (UnicodeDecodeError, ValueError):
+                return native_id, None
+        state, cost = provider_costs.deepline_exact_request_cost(
+            document, request_id=native_id, operation=operation, provider=provider,
+            operation_aliases=operation_aliases,
+        )
+        if state == "matched":
+            return native_id, cost
+        if state == "invalid":
+            return native_id, None
+    return native_id, None
 
 
 def _deepline_ledger_readback(
@@ -1571,6 +1714,8 @@ class RunContext:
     round_id: str = ""
     # Gateway-owned frozen scorer identity. An absent scope disables replay.
     judgment_cache_scope: Optional[Mapping[str, Any]] = None
+    # Gateway-owned, hash-bound tool and pricing snapshot for this round.
+    deepline_catalog: Optional[Mapping[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -2213,8 +2358,16 @@ def _decode_terminal(
         "judgment_cache_key",
         "judgment_cache_source_call_identity",
         "judgment_cache_source_run_id",
+        "deepline_async_job_ids",
     }
     if not isinstance(document, Mapping) or not required <= set(document) <= allowed:
+        raise BrokerError("broker_unavailable")
+    async_ids = document.get("deepline_async_job_ids")
+    if async_ids is not None and (
+        not isinstance(async_ids, list) or not 1 <= len(async_ids) <= 32
+        or any(not isinstance(value, str) or _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(value) is None
+               for value in async_ids)
+    ):
         raise BrokerError("broker_unavailable")
     provider_cost = document.get("provider_cost")
     if provider_cost is not None and (
@@ -2887,7 +3040,9 @@ class Broker:
             "reservation_at",
             "operation",
         }
-        if not isinstance(candidate, Mapping) or set(candidate) != required:
+        optional = {"execution_key", "billing_provider", "operation_aliases"}
+        if (not isinstance(candidate, Mapping) or not required <= set(candidate)
+            or not set(candidate) <= required | optional):
             return {"status": "invalid"}
         try:
             timeout = float(timeout_seconds)
@@ -2895,14 +3050,21 @@ class Broker:
             return {"status": "invalid"}
         operation = candidate.get("operation")
         request_id = candidate.get("request_id")
+        execution_key = candidate.get("execution_key")
+        billing_provider = candidate.get("billing_provider")
+        operation_aliases = candidate.get("operation_aliases") or ()
         credential_fingerprint = candidate.get("credential_fingerprint")
         if (
             not isinstance(candidate.get("call_identity"), str)
             or _CREDENTIAL_FINGERPRINT_RE.fullmatch(candidate["call_identity"]) is None
             or not isinstance(operation, str)
-            or operation not in operations.DEEPLINE_TOOLS
+            or not operation
             or not isinstance(request_id, str)
-            or _DEEPLINE_BILLING_REQUEST_ID_RE.fullmatch(request_id) is None
+            or (
+                _DEEPLINE_BILLING_REQUEST_ID_RE.fullmatch(request_id) is None
+                and ((execution_key is None and billing_provider is None)
+                     or _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(request_id) is None)
+            )
             or (
                 request_id.startswith("ctx-tool-")
                 and request_id != "ctx-tool-" + candidate["call_identity"][7:39]
@@ -2915,6 +3077,18 @@ class Broker:
             or candidate.get("kind") not in ("execute", "score")
             or candidate.get("funding_source") not in ("host", "miner_key")
             or not 0 < timeout <= DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS
+            or (
+                execution_key is not None
+                and execution_key != "arena:" + candidate["call_identity"][7:]
+            )
+            or (billing_provider is not None and (
+                not isinstance(billing_provider, str)
+                or re.fullmatch(r"[A-Za-z0-9_-]{1,100}", billing_provider) is None
+            ))
+            or not isinstance(operation_aliases, (list, tuple))
+            or len(operation_aliases) > 100
+            or any(not isinstance(alias, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,200}", alias) is None
+                   for alias in operation_aliases)
         ):
             return {"status": "invalid"}
         try:
@@ -2956,14 +3130,26 @@ class Broker:
             )
             if reservation_at.tzinfo is None:
                 return {"status": "invalid"}
-            cost = _deepline_ledger_readback(
-                transport=self._transport,
-                secret=secret,
-                request_id=request_id,
-                operation=operation,
-                since_at=max(0, int(reservation_at.timestamp() * 1000) - 1000),
-                reconciliation_deadline=time.monotonic() + timeout,
-            )
+            recovered_request_id = None
+            if execution_key is not None or billing_provider is not None:
+                recovered_request_id, cost = _deepline_exact_readback(
+                    transport=self._transport, secret=secret,
+                    request_id=request_id, execution_key=execution_key,
+                    operation=operation,
+                    provider=billing_provider, operation_aliases=operation_aliases,
+                    reconciliation_deadline=time.monotonic() + timeout,
+                )
+            else:
+                # Historical reservations predate execution keys and retain
+                # their authenticated, request-bound ledger recovery path.
+                if operation not in operations.DEEPLINE_TOOLS:
+                    return {"status": "invalid"}
+                cost = _deepline_ledger_readback(
+                    transport=self._transport, secret=secret,
+                    request_id=request_id, operation=operation,
+                    since_at=max(0, int(reservation_at.timestamp() * 1000) - 1000),
+                    reconciliation_deadline=time.monotonic() + timeout,
+                )
         except (BrokerError, KeyError, TypeError, ValueError):
             return {"status": "unavailable"}
         finally:
@@ -2982,7 +3168,118 @@ class Broker:
             credential_fingerprint=credential_fingerprint,
             actual_microusd=cost.microusd,
             cost_units=format(cost.units, "f"),
+            **({"execution_key": execution_key,
+                "recovered_request_id": recovered_request_id}
+               if execution_key is not None or billing_provider is not None else {}),
         )
+
+    def _catalog_discovery(
+        self, context: RunContext, operation: operations.Operation,
+        parameters: Mapping[str, Any], action_sequence: int,
+    ) -> BrokerResult:
+        """Return frozen public metadata after a read-only active-lease check."""
+
+        summary = {"operation_id": operation.operation_id, "provider": "deepline",
+                   "action_sequence": action_sequence, "outcome": "local_catalog",
+                   "actual_microusd": 0}
+        try:
+            if context.deepline_catalog is None:
+                return _error_result("invalid_request", summary)
+            snapshot = self._store.run_quota_snapshot(context.run_id, context.lease_token_hash)
+            if not isinstance(snapshot, Mapping) or snapshot.get("status") == "stale":
+                return _error_result("lease_stale", summary)
+            catalog = deepline_catalog.validate_catalog(context.deepline_catalog)
+            if operation.operation_id == "deepline.tools.get":
+                document = deepline_catalog.public_tool_definition(
+                    deepline_catalog.tool_entry(catalog, parameters["tool"])
+                )
+            else:
+                rows = catalog["tools"]
+                categories = parameters.get("categories")
+                if isinstance(categories, str) and categories:
+                    requested = {value.strip().casefold() for value in categories.split(",") if value.strip()}
+                    rows = [row for row in rows if requested & {str(value).casefold() for value in row["categories"]}]
+                if operation.operation_id == "deepline.tools.search":
+                    query = str(parameters.get("query", "")).casefold()
+                    rows = [row for row in rows if query in (
+                        row["tool_id"] + " " + row["description"] + " " + " ".join(row["categories"])
+                    ).casefold()]
+                document = {"tools": [deepline_catalog.public_tool_definition(
+                    row, compact=bool(parameters.get("compact", True))) for row in rows],
+                            "total": len(rows)}
+            body = json.dumps(document, separators=(",", ":"), allow_nan=False).encode("utf-8")
+            if len(body) > operation.max_response_bytes:
+                return _error_result("provider_unavailable", summary)
+            summary["catalog_hash"] = catalog["catalog_hash"]
+            return BrokerResult(200, {"content-type": "application/json"}, body, summary)
+        except (ArenaStoreError, deepline_catalog.CatalogError, KeyError, TypeError, ValueError):
+            return _error_result("broker_unavailable", summary)
+
+    def _owns_deepline_async_job(
+        self, context: RunContext, entry: Mapping[str, Any], payload: Mapping[str, Any],
+    ) -> bool:
+        """Authorize a declared read-only poll from this run's durable start receipt."""
+
+        parent = entry.get("async_parent")
+        if not isinstance(parent, str) or context.deepline_catalog is None:
+            return False
+        start = deepline_catalog.tool_entry(context.deepline_catalog, parent)
+        flow = start.get("async_flow")
+        if not isinstance(flow, Mapping) or entry["tool_id"] not in flow.get("poll_actions", ()):
+            return False
+        poll_input = flow.get("poll_input")
+        # Catalog policy must name exactly one required job-ID parameter.
+        # Provider paging URLs cannot be proved owned by a job ID alone.
+        if not isinstance(poll_input, str) or "next" in payload:
+            return False
+        job_id = payload.get(poll_input)
+        if not isinstance(job_id, str) or _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(job_id) is None:
+            return False
+        owned_calls = set()
+        after_entry_id = 0
+        for _ in range(32):
+            rows = self._store.list_ledger(
+                run_id=context.run_id, provider="deepline", operation_id="deepline.execute",
+                limit=1000, after_entry_id=after_entry_id,
+            )
+            if not isinstance(rows, list):
+                return False
+            for row in rows:
+                if (not isinstance(row, Mapping) or row.get("run_id") != context.run_id
+                    or row.get("provider") != "deepline" or row.get("operation_id") != "deepline.execute"
+                    or type(row.get("entry_id")) is not int or row["entry_id"] <= after_entry_id):
+                    return False
+                after_entry_id = row["entry_id"]
+                call_doc = row.get("entry_doc")
+                if not isinstance(call_doc, Mapping):
+                    continue
+                identity = row.get("call_identity")
+                if row.get("entry_kind") == "reservation" and call_doc.get("tool") == parent:
+                    owned_calls.add(identity)
+                if identity not in owned_calls:
+                    continue
+                if isinstance(call_doc.get("call"), Mapping):
+                    call_doc = call_doc["call"]
+                ids = call_doc.get("deepline_async_job_ids")
+                if isinstance(ids, list) and job_id in ids:
+                    return True
+                terminal = row.get("terminal_response")
+                if not isinstance(terminal, Mapping):
+                    continue
+                if job_id in terminal.get("deepline_async_job_ids", []):
+                    return True
+                encoded = terminal.get("body_b64")
+                if not isinstance(encoded, str) or len(encoded) > 3 * 1024 * 1024:
+                    continue
+                try:
+                    document = json.loads(base64.b64decode(encoded, validate=True))
+                except (UnicodeDecodeError, ValueError):
+                    continue
+                if job_id in _deepline_async_job_ids(document, flow):
+                    return True
+            if len(rows) < 1000:
+                break
+        return False
 
     # -- execution ------------------------------------------------------------
 
@@ -3088,6 +3385,10 @@ class Broker:
                 # Observation must not affect provider retry or result behavior.
                 pass
             if result.call.get("provider_fallback_required") is True:
+                return final_result(result)
+            if result.call.get("provider") == "deepline" and result.call.get("outcome") == "uncertain":
+                # An unresolved first charge cannot authorize another paid
+                # attempt under a different execution key or credential.
                 return final_result(result)
             if not (
                 retry_miner_credential
@@ -3211,15 +3512,20 @@ class Broker:
         cancel_requested: Optional[Callable[[], bool]],
         gate_holder: list[OpenRouterGateLease],
     ) -> BrokerResult:
-        operation = operations.OPERATIONS.get(operation_id)
+        operation = (operations.OPERATIONS.get(operation_id)
+                     or getattr(operations, "CATALOG_OPERATIONS", {}).get(operation_id))
         if operation is None:
             return _error_result("invalid_request", {"operation_id": str(operation_id)})
         try:
-            normalized = operations.validate_operation_request(operation_id, parameters)
+            normalized = operations.validate_operation_request(
+                operation_id, parameters, deepline_catalog=context.deepline_catalog,
+            )
         except operations.OperationError:
             return _error_result("invalid_request", {"operation_id": operation_id})
         if isinstance(action_sequence, bool) or not isinstance(action_sequence, int) or action_sequence < 0:
             return _error_result("invalid_request", {"operation_id": operation_id})
+        if operation_id in {"deepline.tools.list", "deepline.tools.get", "deepline.tools.search"}:
+            return self._catalog_discovery(context, operation, normalized, action_sequence)
         funding_source = "host"
         try:
             funding_source = (
@@ -3283,7 +3589,7 @@ class Broker:
             effective_parameters = route.effective_parameters if route else normalized
             effective_operation = operations.OPERATIONS[effective_operation_id]
             effective_normalized = operations.validate_operation_request(
-                effective_operation_id, effective_parameters
+                effective_operation_id, effective_parameters, deepline_catalog=context.deepline_catalog,
             )
             secret = self._credential_for(context, effective_operation.provider) if self._credential_for else self._key_for(effective_operation.provider)
             if not isinstance(secret, str) or not secret:
@@ -3310,18 +3616,29 @@ class Broker:
             if effective_operation.provider == "openrouter" else None
         )
         max_output_tokens = 0
+        deepline_catalog_entry = None
+        if effective_operation.provider == "deepline" and context.deepline_catalog is not None:
+            tool = effective_normalized.get("tool") or effective_operation.deepline_tool
+            deepline_catalog_entry = deepline_catalog.tool_entry(context.deepline_catalog, tool)
+            if deepline_catalog_entry.get("async_parent"):
+                try:
+                    if not self._owns_deepline_async_job(context, deepline_catalog_entry, effective_normalized["payload"]):
+                        return _error_result("invalid_request", {"operation_id": operation_id})
+                except (ArenaStoreError, deepline_catalog.CatalogError, KeyError, TypeError, ValueError):
+                    return _error_result("broker_unavailable", {"operation_id": operation_id})
         reservation_cost: Optional[provider_costs.ProviderCost] = None
         reserve_remaining_budget = False
         openrouter_host_route: Optional[OpenRouterHostRoute] = None
         try:
             if effective_operation.provider == "openrouter":
-                # Reserve the maximum cost allowed by the request and output cap.
+                # Record the request's price bound; current SQL admission uses
+                # confirmed spend and stores a zero-dollar lifecycle record.
                 effective_normalized, max_output_tokens = self._openrouter_parameters(effective_normalized, kind=getattr(context, "kind", "execute"))
                 normalized = effective_normalized
                 # Server-side search can add provider-owned context and model
-                # passes that are absent from the caller body. Reuse the
-                # existing atomic dynamic reservation so admission holds the
-                # ICP's remaining budget until authoritative usage settles.
+                # passes that are absent from the caller body. Keep this
+                # dynamic-price marker for historical reservation policies;
+                # current SQL admission does not hold the remaining budget.
                 reserve_remaining_budget = _openrouter_web_search_enabled(
                     normalized
                 )
@@ -3348,7 +3665,9 @@ class Broker:
                 )
                 amount = reservation_cost.microusd
             elif effective_operation.provider == "deepline":
-                reservation_cost = provider_costs.deepline_reservation_cost(effective_normalized)
+                reservation_cost = provider_costs.deepline_reservation_cost(
+                    effective_normalized, catalog_entry=deepline_catalog_entry,
+                )
                 reserve_remaining_budget = reservation_cost is None
                 amount = 0 if reservation_cost is None else reservation_cost.microusd
             else:
@@ -3410,9 +3729,17 @@ class Broker:
             request_accounting["credential_fingerprint"] = (
                 provider_credential_fingerprint
             )
+            if request_accounting["tool"] not in _DEEPLINE_UNKEYED_TOOLS:
+                request_accounting["deepline_execution_key"] = (
+                    "arena:" + call_identity.removeprefix("sha256:")
+                )
+            if deepline_catalog_entry is not None:
+                request_accounting["deepline_billing_provider"] = deepline_catalog_entry["provider"]
+                request_accounting["deepline_operation_aliases"] = deepline_catalog_entry["operation_aliases"]
         summary.update({
             key: value for key, value in request_accounting.items()
-            if key not in ("deepline_request_id", "credential_fingerprint")
+            if key not in ("deepline_request_id", "credential_fingerprint", "deepline_execution_key",
+                           "deepline_billing_provider", "deepline_operation_aliases")
         })
         contact_finder_binding = {}
         if effective_operation.provider == "deepline":
@@ -3455,6 +3782,7 @@ class Broker:
                 cached_outbound = operations.build_outbound_request(
                     effective_operation_id,
                     effective_normalized,
+                    deepline_catalog=context.deepline_catalog,
                     openrouter_provider_policy=(
                         openrouter_host_route.provider_policy
                         if openrouter_host_route is not None else None
@@ -3930,6 +4258,7 @@ class Broker:
         outbound = operations.build_outbound_request(
             effective_operation_id,
             effective_normalized,
+            deepline_catalog=context.deepline_catalog,
             openrouter_provider_policy=(
                 openrouter_host_route.provider_policy
                 if openrouter_host_route is not None
@@ -3940,9 +4269,10 @@ class Broker:
         deepline_readback_cost: Optional[provider_costs.ProviderCost] = None
         deepline_known_free_cost: Optional[provider_costs.ProviderCost] = None
         deepline_native_cost: Optional[provider_costs.ProviderCost] = None
-        deepline_dispatch_since_at = max(0, int(time.time() * 1000) - 1000)
+        deepline_async_ids: Sequence[str] = ()
         deepline_response_request_id: Optional[str] = None
         deepline_request_id: Optional[str] = request_accounting.get("deepline_request_id")
+        deepline_execution_key: Optional[str] = request_accounting.get("deepline_execution_key")
         deepline_operation: Optional[str] = request_accounting.get("tool")
         openrouter_native_cost: Optional[provider_costs.ProviderCost] = None
         openrouter_readback_cost: Optional[provider_costs.ProviderCost] = None
@@ -3958,6 +4288,8 @@ class Broker:
             url, headers = inject_credential(outbound, secret)
             if deepline_request_id is not None:
                 headers["x-deepline-request-id"] = deepline_request_id
+            if deepline_execution_key is not None:
+                headers["idempotency-key"] = deepline_execution_key
             timeout_seconds = max(0.001, request_deadline - time.monotonic())
             try:
                 response = self._transport.send(
@@ -4102,8 +4434,12 @@ class Broker:
                         raw_document = json.loads(response.body.decode("utf-8"))
                     except (UnicodeDecodeError, ValueError):
                         raw_document = None
+                    if (deepline_catalog_entry and isinstance(deepline_catalog_entry.get("async_flow"), Mapping)
+                        and _provider_call_succeeded("deepline", response, raw_document)):
+                        deepline_async_ids = _deepline_async_job_ids(raw_document, deepline_catalog_entry["async_flow"])
                     deepline_known_free_cost = provider_costs.deepline_free_completed_cost(
-                        effective_normalized, response.status, raw_document
+                        effective_normalized, response.status, raw_document,
+                        catalog_entry=deepline_catalog_entry,
                     )
                     if deepline_known_free_cost is None:
                         deepline_known_free_cost = (
@@ -4112,13 +4448,23 @@ class Broker:
                             )
                         )
                     response_request_id = _deepline_job_request_id(raw_document)
+                    header_request_id = _deepline_response_header_request_id(response.headers)
+                    body_identity_present = isinstance(raw_document, Mapping) and any(
+                        name in raw_document for name in ("job_id", "request_id", "requestId")
+                    )
+                    if response_request_id is None and not body_identity_present:
+                        response_request_id = header_request_id
+                    elif header_request_id is not None and header_request_id != response_request_id:
+                        # Conflicting provider receipts do not identify one
+                        # charge. The saved key remains the recovery authority.
+                        response_request_id = None
                     request_id = response_request_id
                     # Preserve the provider receipt identity for native billing.
                     # The pre-dispatch ID remains on the immutable reservation
                     # and is used if the transport loses that receipt.
                     deepline_response_request_id = response_request_id
 
-                    if response_request_id is not None and (
+                    if response_request_id is not None and isinstance(raw_document, Mapping) and (
                         (
                             response.status == 200
                             and raw_document.get("status") == "completed"
@@ -4126,6 +4472,13 @@ class Broker:
                         or not 200 <= response.status < 300
                     ):
                         deepline_native_cost = provider_costs.deepline_cost(raw_document)
+                        inline_billing = raw_document.get("billing")
+                        if isinstance(inline_billing, Mapping) and (
+                            ("pricing_status" in inline_billing and inline_billing["pricing_status"] != "final")
+                            or (inline_billing.get("billing_mode") == "async_hold"
+                                and deepline_native_cost is not None and deepline_native_cost.units == 0)
+                        ):
+                            deepline_native_cost = None
                     if (
                         deepline_native_cost is None
                         and deepline_known_free_cost is None
@@ -4134,7 +4487,6 @@ class Broker:
                             or response.status in (400, 401, 402, 403, 404, 422, 429)
                             or 500 <= response.status < 600
                         )
-                        and request_id is not None
                     ):
                         deepline_operation = effective_normalized.get("tool") or {
                             "exa.search": "exa_search",
@@ -4142,12 +4494,7 @@ class Broker:
                         }.get(effective_operation_id)
                         if not isinstance(deepline_operation, str):
                             deepline_operation = ""
-                        deepline_readback_cost = _deepline_billing_readback(
-                            transport=self._transport,
-                            secret=secret,
-                            request_id=request_id,
-                            operation=deepline_operation,
-                            reconciliation_deadline=(
+                        exact_deadline = (
                                 min(
                                     time.monotonic()
                                     + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS,
@@ -4156,8 +4503,16 @@ class Broker:
                                 if billing_deadline is not None
                                 else time.monotonic()
                                 + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
-                            ),
                         )
+                        recovered_id, deepline_readback_cost = _deepline_exact_readback(
+                                transport=self._transport, secret=secret,
+                                request_id=request_id, execution_key=deepline_execution_key,
+                                operation=deepline_operation, reconciliation_deadline=exact_deadline,
+                                provider=(deepline_catalog_entry["provider"] if deepline_catalog_entry else None),
+                                operation_aliases=(deepline_catalog_entry["operation_aliases"] if deepline_catalog_entry else ()),
+                        )
+                        if recovered_id is not None:
+                            deepline_response_request_id = recovered_id
             except ProviderTransportError as exc:
                 # A status read from the pinned transport is bounded evidence,
                 # even when the response body never completed.
@@ -4225,17 +4580,21 @@ class Broker:
                         "deepline_operation": deepline_operation,
                         "credential_fingerprint": provider_credential_fingerprint,
                     })
-                    deepline_readback_cost = _deepline_ledger_readback(
-                        transport=self._transport,
-                        secret=secret,
-                        request_id=str(deepline_response_request_id or deepline_request_id),
-                        operation=str(deepline_operation),
-                        since_at=deepline_dispatch_since_at,
-                        reconciliation_deadline=(
-                            time.monotonic()
-                            + DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS
-                        ),
+                    if deepline_execution_key is not None:
+                        uncertain_doc["deepline_execution_key"] = deepline_execution_key
+                    recovered_id, deepline_readback_cost = _deepline_exact_readback(
+                            transport=self._transport, secret=secret,
+                            request_id=deepline_response_request_id,
+                            execution_key=deepline_execution_key,
+                            operation=str(deepline_operation),
+                            provider=(deepline_catalog_entry["provider"] if deepline_catalog_entry else None),
+                            operation_aliases=(deepline_catalog_entry["operation_aliases"] if deepline_catalog_entry else ()),
+                            reconciliation_deadline=(time.monotonic()
+                                + DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS),
                     )
+                    if recovered_id is not None:
+                        deepline_response_request_id = recovered_id
+                        uncertain_doc["deepline_job_id"] = recovered_id
                 uncertain_doc["transport_error_class"] = transport_error_class
                 if exc.observed_status is not None:
                     uncertain_doc["observed_provider_status"] = exc.observed_status
@@ -4439,12 +4798,15 @@ class Broker:
                     call_succeeded=call_succeeded,
                     deepline_request_id=deepline_request_id,
                     deepline_response_request_id=deepline_response_request_id,
+                    deepline_execution_key=deepline_execution_key,
                     deepline_operation=deepline_operation,
                     openrouter_generation_id=openrouter_generation_id,
                     openrouter_model=(effective_normalized.get("model")
                                       if effective_operation.provider == "openrouter" else None),
                     credential_fingerprint=provider_credential_fingerprint,
                 )
+                if deepline_async_ids:
+                    uncertain_doc["deepline_async_job_ids"] = list(deepline_async_ids)
                 if account_failure_evidence is not None:
                     uncertain_doc["account_failure_evidence"] = (
                         account_failure_evidence
@@ -4550,6 +4912,8 @@ class Broker:
                     else None
                 ),
             )
+            if deepline_async_ids:
+                terminal["deepline_async_job_ids"] = list(deepline_async_ids)
             payload = dict(summary, outcome="settled", status=sanitized_status, provider_status=provider_status_for_summary, actual_microusd=actual, response_hash=contracts.hash_bytes(sanitized_body))
             failure_stage = "settlement"
             settlement = dict(
@@ -4582,6 +4946,8 @@ class Broker:
                                 refused.status, refused.headers, refused.body,
                                 call_succeeded=False, provider_cost=cost_record,
                             )
+                            if deepline_async_ids:
+                                compact_terminal["deepline_async_job_ids"] = list(deepline_async_ids)
                             settled = self._store.settle_call(
                                 **dict(settlement, terminal_response=compact_terminal)
                             )
@@ -4666,12 +5032,15 @@ class Broker:
                     response, raw_document, call_succeeded=call_succeeded,
                     deepline_request_id=deepline_request_id,
                     deepline_response_request_id=deepline_response_request_id,
+                    deepline_execution_key=deepline_execution_key,
                     deepline_operation=deepline_operation,
                     openrouter_generation_id=openrouter_generation_id,
                     openrouter_model=(effective_normalized.get("model")
                                       if effective_operation.provider == "openrouter" else None),
                     credential_fingerprint=provider_credential_fingerprint,
                 )
+                if deepline_async_ids:
+                    uncertain_doc["deepline_async_job_ids"] = list(deepline_async_ids)
                 uncertain_doc.update({
                     "failure_stage": failure_stage,
                     "error_class": _safe_exception_class(exc),

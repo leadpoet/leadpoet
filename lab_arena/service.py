@@ -65,7 +65,7 @@ def _telemetry_provider_operation(operation_id: str) -> Tuple[str, str]:
     Deepline while retaining its registered Exa operation name.
     """
 
-    operation = operations.OPERATIONS.get(operation_id)
+    operation = operations.get_operation(operation_id)
     if operation is None or operation.provider not in contracts.PROVIDERS:
         return "unknown", "unknown"
     if _TELEMETRY_OPERATION_RE.fullmatch(operation_id):
@@ -463,6 +463,7 @@ class ServiceConfig:
     # It is deliberately not persisted in a round configuration or schema.
     pinned_round_id: Optional[str] = None
     baseline_source_fetcher: Optional[Callable[[str, int], bytes]] = None
+    deepline_catalog_source: Optional[Callable[..., Mapping[str, Any]]] = None
     reward_signer_factory: Optional[Callable[[], signing.ArenaSigner]] = None
     credential_manager: Optional[credentials_module.CredentialManager] = None
     code_reviewer: Optional[Any] = None
@@ -797,6 +798,11 @@ class ArenaService:
         """
 
         identity = self._store.require_service_role()
+        if getattr(self._config, "deepline_catalog_source", None) is not None:
+            try:
+                self._store.deepline_catalog_schema()
+            except ArenaStoreError as exc:
+                raise ServiceError("deepline_catalog_schema_unavailable", 500) from exc
         try:
             schema = self._store._transport.rpc("lab_arena_schema_version_v1", {})
         except ArenaStoreError as exc:
@@ -1060,6 +1066,19 @@ class ArenaService:
         # in the document for schema compatibility. It never grants authority.
         return eligible, banned
 
+    def _freeze_deepline_catalog(self, configuration: Dict[str, Any]) -> None:
+        source = getattr(self._config, "deepline_catalog_source", None)
+        if source is None or configuration.get("deepline_catalog") is not None:
+            return
+        if configuration.get("sourcing_cost_eligibility_policy") != contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY:
+            return
+        from lab_arena.deepline_catalog import validate_catalog
+        configuration["deepline_catalog"] = validate_catalog(source(
+            allow_people=configuration.get("contact_policy") == "contacts_v1",
+        ))
+        configuration["call_quotas"] = {**configuration["call_quotas"], "deepline": 0}
+        configuration["scoring_call_quotas"] = {**configuration["scoring_call_quotas"], "deepline": 0}
+
     def create_round(self, cutoff: datetime, *, round_id: Optional[str] = None) -> Dict[str, Any]:
         defaults = self._config.defaults
         round_id = round_id or round_id_for_cutoff(cutoff)
@@ -1193,6 +1212,7 @@ class ArenaService:
             supported = capacity.daily_challenger_capacity(document)
             if supported < 1:
                 raise ServiceError("daily_runner_capacity_insufficient", 503)
+        self._freeze_deepline_catalog(document)
         configuration = contracts.validate_round_configuration(document)
         result = self._store.create_round(round_id, configuration)
         if result.get("status") not in ("created", "existing"):
@@ -2164,6 +2184,8 @@ class ArenaService:
         evaluation_date = _parse_iso(
             schedule["submission_cutoff"]
         ).astimezone(timezone.utc).date().isoformat()
+        self._freeze_deepline_catalog(refreshed_configuration)
+        contracts.validate_round_configuration(refreshed_configuration)
         benchmark_ref = "arena/%s/benchmark.json" % round_id
         self._objects.put(benchmark_ref, contracts.canonical_json({"schema_version": "leadpoet.lab_arena.benchmark.v1", "round_id": round_id, "icps": icps}).encode("utf-8"))
         transition = self._store.commit_round_v2(
@@ -2174,6 +2196,8 @@ class ArenaService:
             icp_set_date=icp_set_date,
             scorer_image_digest=scorer_image["scorer_image_digest"],
             scorer_image_reference=scorer_image["scorer_image_reference"],
+            **({"deepline_catalog": refreshed_configuration["deepline_catalog"]}
+               if refreshed_configuration.get("deepline_catalog") is not None else {}),
         )
         return {"status": transition.get("status"), "participants": len(participants)}
 
@@ -4049,6 +4073,8 @@ class ArenaService:
             "scoring_wall_clock_seconds", contracts.SCORING_WALL_CLOCK_SECONDS
         ))
         lease["lease_ttl_seconds"] = int(configuration["lease_ttl_seconds"])
+        if configuration.get("deepline_catalog") is not None:
+            lease["deepline_catalog"] = configuration["deepline_catalog"]
         checkpoint_policy = configuration.get("checkpoint_deadline_policy")
         if checkpoint_policy in contracts.CHECKPOINT_DEADLINE_PROFILES:
             lease["checkpoint_deadline_policy"] = checkpoint_policy
@@ -4164,11 +4190,11 @@ class ArenaService:
             raise ServiceError("run_missing", 404)
         self._require_round_ownership(str(run.get("round_id") or ""))
         judgment_cache_scope = None
+        row = self._hot_round(str(run["round_id"]))
+        if row is None:
+            raise ServiceError("round_missing", 404)
+        configuration = row.get("configuration_doc") or {}
         if run.get("kind") == "score":
-            row = self._hot_round(str(run["round_id"]))
-            if row is None:
-                raise ServiceError("round_missing", 404)
-            configuration = row.get("configuration_doc") or {}
             # Only gateway-owned frozen configuration can select a reusable
             # provider judgment. Run/miner identity is deliberately excluded.
             judgment_cache_scope = {
@@ -4186,6 +4212,7 @@ class ArenaService:
             stage=int(run["stage"]), kind=str(run.get("kind") or "execute"),
             round_id=str(run.get("round_id") or ""),
             judgment_cache_scope=judgment_cache_scope,
+            deepline_catalog=configuration.get("deepline_catalog"),
         )
 
     def handle_quota_snapshot(
@@ -4500,7 +4527,7 @@ class ArenaService:
         run, context = self._run_context(run_id, lease_token)
         broker = self._broker_for(run["round_id"])
         operation_id = str(frame["operation_id"])
-        operation = operations.OPERATIONS.get(operation_id)
+        operation = operations.get_operation(operation_id)
         # The lease hash is derived from the supplied token in _run_context.
         # Only a match to the canonical run row can attach run attribution;
         # broker refusal and host failure still belong to that attempt.

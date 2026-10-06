@@ -65,10 +65,6 @@ def extract_scoring_icp(
 
 
 _MAX_RESPONSE_BYTES = 1024 * 1024
-_LEDGER_SCAN_LIMIT = (
-    2 * max(profile["deepline"] for profile in contracts.EXECUTION_CALL_QUOTA_PROFILES)
-    + 1
-)
 _MAX_COMPANIES = 5
 
 
@@ -211,13 +207,22 @@ def resolve_observations(
             ):
                 submitted.setdefault(source_url, []).append((company_index, company_host))
 
-    ledger_rows = store.list_ledger(
-        run_id=run_id,
-        provider="deepline",
-        limit=_LEDGER_SCAN_LIMIT,
-    )
-    if len(ledger_rows) >= _LEDGER_SCAN_LIMIT:
-        return []
+    # Page the exact research operation. Removing Deepline's call quota must
+    # not silently discard all observations after the former 200-call limit.
+    ledger_rows = []
+    after_entry_id = None
+    while True:
+        page = store.list_ledger(
+            run_id=run_id, provider="deepline", operation_id="deepline.execute",
+            limit=1000, after_entry_id=after_entry_id,
+        )
+        ledger_rows.extend(page)
+        if len(page) < 1000:
+            break
+        cursor = int(page[-1]["entry_id"])
+        if after_entry_id is not None and cursor <= after_entry_id:
+            raise ValueError("provider observation pagination did not advance")
+        after_entry_id = cursor
     candidates: dict[tuple[int, str], list[dict[str, Any]]] = {}
     rows_by_call: dict[str, list[Mapping[str, Any]]] = {}
     for row in ledger_rows:

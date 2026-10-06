@@ -1,0 +1,3017 @@
+{
+  "tools": [
+    {
+      "categories": [
+        "automation",
+        "research"
+      ],
+      "credentialStatus": "managed",
+      "description": "Semantic web search for pages, companies, people, LinkedIn profiles, news, and sources, with date and domain filters. Best for concept-driven discovery and company research; expect noisy recall, and do not combine category-based entity search with includeDo...",
+      "inputSchema": {
+        "description": "Exa raw search input.",
+        "fields": [
+          {
+            "description": "The search query string.",
+            "name": "query",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "Additional queries (used with type=\"deep\" to expand coverage).",
+            "name": "additionalQueries",
+            "required": false,
+            "type": "array"
+          },
+          {
+            "description": "Search type (auto chooses the best strategy).",
+            "name": "type",
+            "required": false,
+            "type": "\"auto\" | \"fast\" | \"deep\" | \"neural\" | \"instant\""
+          },
+          {
+            "description": "Optional result category filter.",
+            "name": "category",
+            "required": false,
+            "type": "\"company\" | \"people\" | \"news\" | \"research paper\" | \"tweet\" | \"personal site\" | \"financial report\""
+          },
+          {
+            "description": "Number of results to return (max 100).",
+            "name": "numResults",
+            "required": false,
+            "type": "number"
+          },
+          {
+            "description": "Only include results from these domains.",
+            "name": "includeDomains",
+            "required": false,
+            "type": "array"
+          },
+          {
+            "description": "Exclude results from these domains.",
+            "name": "excludeDomains",
+            "required": false,
+            "type": "array"
+          },
+          {
+            "description": "Only include links crawled after this ISO date-time.",
+            "name": "startCrawlDate",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "description": "Only include links crawled before this ISO date-time.",
+            "name": "endCrawlDate",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "description": "Only include links published after this ISO date-time.",
+            "name": "startPublishedDate",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "description": "Only include links published before this ISO date-time.",
+            "name": "endPublishedDate",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "description": "Require these text snippets to appear in page content (max 1 string of up to 5 words).",
+            "name": "includeText",
+            "required": false,
+            "type": "array"
+          },
+          {
+            "description": "Exclude pages containing these text snippets (max 1 string of up to 5 words).",
+            "name": "excludeText",
+            "required": false,
+            "type": "array"
+          },
+          {
+            "description": "Two-letter ISO country code, e.g. \"US\".",
+            "name": "userLocation",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "contents",
+            "required": false,
+            "type": "object"
+          },
+          {
+            "name": "context",
+            "required": false,
+            "type": "boolean | object"
+          },
+          {
+            "description": "Enable content moderation (may reduce recall).",
+            "name": "moderation",
+            "required": false,
+            "type": "boolean"
+          }
+        ],
+        "jsonSchema": {
+          "additionalProperties": false,
+          "description": "Exa raw search input.",
+          "properties": {
+            "additionalQueries": {
+              "description": "Additional queries (used with type=\"deep\" to expand coverage).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "category": {
+              "description": "Optional result category filter.",
+              "enum": [
+                "company",
+                "people",
+                "news",
+                "research paper",
+                "tweet",
+                "personal site",
+                "financial report"
+              ],
+              "type": "string"
+            },
+            "contents": {
+              "additionalProperties": false,
+              "properties": {
+                "context": {
+                  "anyOf": [
+                    {
+                      "description": "If true, returns a combined context string from results. Context strings often perform better than highlights for RAG.",
+                      "type": "boolean"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "description": "Context string options. When enabled, combines all result contents into a single string.",
+                      "properties": {
+                        "maxCharacters": {
+                          "description": "Maximum characters for the combined context string. Exa recommends 10,000+ characters for best results.",
+                          "type": "number"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                },
+                "extras": {
+                  "additionalProperties": false,
+                  "description": "Extra content options.",
+                  "properties": {
+                    "imageLinks": {
+                      "description": "Number of image links to return per result.",
+                      "type": "number"
+                    },
+                    "links": {
+                      "description": "Number of links to return per result.",
+                      "type": "number"
+                    }
+                  },
+                  "type": "object"
+                },
+                "highlights": {
+                  "anyOf": [
+                    {
+                      "description": "If true, returns highlight snippets with default settings (short evidence excerpts).",
+                      "type": "boolean"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "description": "Advanced highlight extraction options.",
+                      "properties": {
+                        "highlightsPerUrl": {
+                          "description": "Number of highlight snippets per URL.",
+                          "type": "number"
+                        },
+                        "maxCharacters": {
+                          "description": "Maximum characters returned for highlights.",
+                          "type": "number"
+                        },
+                        "numSentences": {
+                          "description": "Number of sentences per highlight snippet.",
+                          "type": "number"
+                        },
+                        "query": {
+                          "description": "Custom query to guide highlight selection.",
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                },
+                "livecrawl": {
+                  "enum": [
+                    "never",
+                    "fallback",
+                    "preferred",
+                    "always"
+                  ],
+                  "type": "string"
+                },
+                "livecrawlTimeout": {
+                  "description": "Live crawl timeout in milliseconds.",
+                  "type": "number"
+                },
+                "maxAgeHours": {
+                  "description": "Max age (hours) for cached content before live crawl.",
+                  "type": "number"
+                },
+                "subpageTarget": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  ],
+                  "description": "Subpage keyword(s) to target."
+                },
+                "subpages": {
+                  "description": "Number of subpages to crawl from each result.",
+                  "type": "number"
+                },
+                "summary": {
+                  "additionalProperties": false,
+                  "description": "LLM-generated summary of each page (structured output supported).",
+                  "properties": {
+                    "query": {
+                      "description": "Custom query for the summary.",
+                      "type": "string"
+                    },
+                    "schema": {
+                      "additionalProperties": {},
+                      "description": "JSON Schema for structured summary output (validated).",
+                      "type": "object"
+                    }
+                  },
+                  "type": "object"
+                },
+                "text": {
+                  "anyOf": [
+                    {
+                      "description": "If true, returns full page text with default settings. If false, disables text return.",
+                      "type": "boolean"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "description": "Advanced text extraction options.",
+                      "properties": {
+                        "excludeSections": {
+                          "description": "Exclude content from these sections.",
+                          "items": {
+                            "enum": [
+                              "header",
+                              "navigation",
+                              "banner",
+                              "body",
+                              "sidebar",
+                              "footer",
+                              "metadata"
+                            ],
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
+                        "includeHtmlTags": {
+                          "description": "Include HTML tags in the returned text.",
+                          "type": "boolean"
+                        },
+                        "includeSections": {
+                          "description": "Only include content from these sections.",
+                          "items": {
+                            "enum": [
+                              "header",
+                              "navigation",
+                              "banner",
+                              "body",
+                              "sidebar",
+                              "footer",
+                              "metadata"
+                            ],
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
+                        "maxCharacters": {
+                          "description": "Maximum characters for full page text (use to cap response size).",
+                          "type": "number"
+                        },
+                        "verbosity": {
+                          "enum": [
+                            "compact",
+                            "standard",
+                            "full"
+                          ],
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              },
+              "type": "object"
+            },
+            "context": {
+              "anyOf": [
+                {
+                  "description": "If true, returns a combined context string from results. Context strings often perform better than highlights for RAG.",
+                  "type": "boolean"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Context string options. When enabled, combines all result contents into a single string.",
+                  "properties": {
+                    "maxCharacters": {
+                      "description": "Maximum characters for the combined context string. Exa recommends 10,000+ characters for best results.",
+                      "type": "number"
+                    }
+                  },
+                  "type": "object"
+                }
+              ]
+            },
+            "endCrawlDate": {
+              "description": "Only include links crawled before this ISO date-time.",
+              "type": "string"
+            },
+            "endPublishedDate": {
+              "description": "Only include links published before this ISO date-time.",
+              "type": "string"
+            },
+            "excludeDomains": {
+              "description": "Exclude results from these domains.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "excludeText": {
+              "description": "Exclude pages containing these text snippets (max 1 string of up to 5 words).",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 1,
+              "type": "array"
+            },
+            "includeDomains": {
+              "description": "Only include results from these domains.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "includeText": {
+              "description": "Require these text snippets to appear in page content (max 1 string of up to 5 words).",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 1,
+              "type": "array"
+            },
+            "moderation": {
+              "description": "Enable content moderation (may reduce recall).",
+              "type": "boolean"
+            },
+            "numResults": {
+              "description": "Number of results to return (max 100).",
+              "type": "number"
+            },
+            "query": {
+              "description": "The search query string.",
+              "type": "string"
+            },
+            "startCrawlDate": {
+              "description": "Only include links crawled after this ISO date-time.",
+              "type": "string"
+            },
+            "startPublishedDate": {
+              "description": "Only include links published after this ISO date-time.",
+              "type": "string"
+            },
+            "type": {
+              "description": "Search type (auto chooses the best strategy).",
+              "enum": [
+                "auto",
+                "fast",
+                "deep",
+                "neural",
+                "instant"
+              ],
+              "type": "string"
+            },
+            "userLocation": {
+              "description": "Two-letter ISO country code, e.g. \"US\".",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        }
+      },
+      "operationAliases": [
+        "exa_search",
+        "search"
+      ],
+      "outputSchema": {
+        "description": "Exa search result.",
+        "fields": [
+          {
+            "description": "Provider response payload.",
+            "name": "data",
+            "required": true,
+            "type": "object"
+          },
+          {
+            "description": "Additional response metadata (status, paging).",
+            "name": "meta",
+            "required": false,
+            "type": "record"
+          }
+        ],
+        "jsonSchema": {
+          "additionalProperties": false,
+          "description": "Exa search result.",
+          "properties": {
+            "data": {
+              "additionalProperties": false,
+              "description": "Provider response payload.",
+              "properties": {
+                "context": {
+                  "type": "string"
+                },
+                "requestId": {
+                  "type": "string"
+                },
+                "results": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "author": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {}
+                        ]
+                      },
+                      "entities": {
+                        "items": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "id": {
+                              "type": "string"
+                            },
+                            "properties": {
+                              "additionalProperties": {},
+                              "type": "object"
+                            },
+                            "type": {
+                              "enum": [
+                                "company",
+                                "person"
+                              ],
+                              "type": "string"
+                            },
+                            "version": {
+                              "type": "number"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "extras": {
+                        "additionalProperties": {},
+                        "type": "object"
+                      },
+                      "highlightScores": {
+                        "items": {
+                          "type": "number"
+                        },
+                        "type": "array"
+                      },
+                      "highlights": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "id": {
+                        "type": "string"
+                      },
+                      "publishedDate": {
+                        "type": "string"
+                      },
+                      "score": {
+                        "type": "number"
+                      },
+                      "summary": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "additionalProperties": {},
+                            "type": "object"
+                          }
+                        ]
+                      },
+                      "text": {
+                        "type": "string"
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "url": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            },
+            "meta": {
+              "additionalProperties": {},
+              "description": "Additional response metadata (status, paging).",
+              "type": "object"
+            }
+          },
+          "required": [
+            "data"
+          ],
+          "type": "object"
+        }
+      },
+      "pricing": {
+        "creditsPerUnit": null,
+        "currency": "USD",
+        "details": [],
+        "displayText": "Pricing unavailable.",
+        "summary": null,
+        "unit": "result",
+        "usdPerUnit": null
+      },
+      "provider": "exa",
+      "toolId": "exa_search"
+    },
+    {
+      "categories": [
+        "automation",
+        "research"
+      ],
+      "credentialStatus": "managed",
+      "description": "Scrape web pages by URL: get the text content, summaries, and highlights of company websites, articles, and profile pages.",
+      "inputSchema": {
+        "description": "Exa contents input.",
+        "fields": [
+          {
+            "description": "URLs to fetch contents for (alias of ids).",
+            "name": "urls",
+            "required": false,
+            "type": "array"
+          },
+          {
+            "description": "Document IDs (or URLs) to fetch contents for.",
+            "name": "ids",
+            "required": false,
+            "type": "array"
+          },
+          {
+            "name": "text",
+            "required": false,
+            "type": "boolean | object"
+          },
+          {
+            "name": "highlights",
+            "required": false,
+            "type": "boolean | object"
+          },
+          {
+            "description": "LLM-generated summary of each page (structured output supported).",
+            "name": "summary",
+            "required": false,
+            "type": "object"
+          },
+          {
+            "description": "Live crawl behavior (deprecated in Exa docs; prefer maxAgeHours).",
+            "name": "livecrawl",
+            "required": false,
+            "type": "\"never\" | \"fallback\" | \"preferred\" | \"always\""
+          },
+          {
+            "description": "Live crawl timeout in milliseconds.",
+            "name": "livecrawlTimeout",
+            "required": false,
+            "type": "number"
+          },
+          {
+            "description": "Max age (hours) for cached content before live crawl.",
+            "name": "maxAgeHours",
+            "required": false,
+            "type": "number"
+          },
+          {
+            "description": "Number of subpages to crawl from each result.",
+            "name": "subpages",
+            "required": false,
+            "type": "number"
+          },
+          {
+            "description": "Subpage keyword(s) to target.",
+            "name": "subpageTarget",
+            "required": false,
+            "type": "string | array"
+          },
+          {
+            "description": "Extra content options.",
+            "name": "extras",
+            "required": false,
+            "type": "object"
+          },
+          {
+            "description": "Return a combined context string. When true, combines all result contents into one string (10,000+ chars recommended).",
+            "name": "context",
+            "required": false,
+            "type": "boolean | object"
+          }
+        ],
+        "jsonSchema": {
+          "additionalProperties": false,
+          "description": "Exa contents input.",
+          "properties": {
+            "context": {
+              "anyOf": [
+                {
+                  "description": "If true, returns a combined context string from results. Context strings often perform better than highlights for RAG.",
+                  "type": "boolean"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Context string options. When enabled, combines all result contents into a single string.",
+                  "properties": {
+                    "maxCharacters": {
+                      "description": "Maximum characters for the combined context string. Exa recommends 10,000+ characters for best results.",
+                      "type": "number"
+                    }
+                  },
+                  "type": "object"
+                }
+              ],
+              "description": "Return a combined context string. When true, combines all result contents into one string (10,000+ chars recommended)."
+            },
+            "extras": {
+              "additionalProperties": false,
+              "description": "Extra content options.",
+              "properties": {
+                "imageLinks": {
+                  "description": "Number of image links to return per result.",
+                  "type": "number"
+                },
+                "links": {
+                  "description": "Number of links to return per result.",
+                  "type": "number"
+                }
+              },
+              "type": "object"
+            },
+            "highlights": {
+              "anyOf": [
+                {
+                  "description": "If true, returns highlight snippets with default settings (short evidence excerpts).",
+                  "type": "boolean"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Advanced highlight extraction options.",
+                  "properties": {
+                    "highlightsPerUrl": {
+                      "description": "Number of highlight snippets per URL.",
+                      "type": "number"
+                    },
+                    "maxCharacters": {
+                      "description": "Maximum characters returned for highlights.",
+                      "type": "number"
+                    },
+                    "numSentences": {
+                      "description": "Number of sentences per highlight snippet.",
+                      "type": "number"
+                    },
+                    "query": {
+                      "description": "Custom query to guide highlight selection.",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              ]
+            },
+            "ids": {
+              "description": "Document IDs (or URLs) to fetch contents for.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "livecrawl": {
+              "description": "Live crawl behavior (deprecated in Exa docs; prefer maxAgeHours).",
+              "enum": [
+                "never",
+                "fallback",
+                "preferred",
+                "always"
+              ],
+              "type": "string"
+            },
+            "livecrawlTimeout": {
+              "description": "Live crawl timeout in milliseconds.",
+              "type": "number"
+            },
+            "maxAgeHours": {
+              "description": "Max age (hours) for cached content before live crawl.",
+              "type": "number"
+            },
+            "subpageTarget": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              ],
+              "description": "Subpage keyword(s) to target."
+            },
+            "subpages": {
+              "description": "Number of subpages to crawl from each result.",
+              "type": "number"
+            },
+            "summary": {
+              "additionalProperties": false,
+              "description": "LLM-generated summary of each page (structured output supported).",
+              "properties": {
+                "query": {
+                  "description": "Custom query for the summary.",
+                  "type": "string"
+                },
+                "schema": {
+                  "additionalProperties": {},
+                  "description": "JSON Schema for structured summary output (validated).",
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            },
+            "text": {
+              "anyOf": [
+                {
+                  "description": "If true, returns full page text with default settings. If false, disables text return.",
+                  "type": "boolean"
+                },
+                {
+                  "additionalProperties": false,
+                  "description": "Advanced text extraction options.",
+                  "properties": {
+                    "excludeSections": {
+                      "description": "Exclude content from these sections.",
+                      "items": {
+                        "enum": [
+                          "header",
+                          "navigation",
+                          "banner",
+                          "body",
+                          "sidebar",
+                          "footer",
+                          "metadata"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "includeHtmlTags": {
+                      "description": "Include HTML tags in the returned text.",
+                      "type": "boolean"
+                    },
+                    "includeSections": {
+                      "description": "Only include content from these sections.",
+                      "items": {
+                        "enum": [
+                          "header",
+                          "navigation",
+                          "banner",
+                          "body",
+                          "sidebar",
+                          "footer",
+                          "metadata"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "maxCharacters": {
+                      "description": "Maximum characters for full page text (use to cap response size).",
+                      "type": "number"
+                    },
+                    "verbosity": {
+                      "enum": [
+                        "compact",
+                        "standard",
+                        "full"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              ]
+            },
+            "urls": {
+              "description": "URLs to fetch contents for (alias of ids).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [],
+          "type": "object"
+        }
+      },
+      "operationAliases": [
+        "exa_contents",
+        "contents"
+      ],
+      "outputSchema": {
+        "description": "Exa contents result.",
+        "fields": [
+          {
+            "description": "Provider response payload.",
+            "name": "data",
+            "required": true,
+            "type": "object"
+          },
+          {
+            "description": "Additional response metadata (status, paging).",
+            "name": "meta",
+            "required": false,
+            "type": "record"
+          }
+        ],
+        "jsonSchema": {
+          "additionalProperties": false,
+          "description": "Exa contents result.",
+          "properties": {
+            "data": {
+              "additionalProperties": false,
+              "description": "Provider response payload.",
+              "properties": {
+                "context": {
+                  "type": "string"
+                },
+                "requestId": {
+                  "type": "string"
+                },
+                "results": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "author": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {}
+                        ]
+                      },
+                      "entities": {
+                        "items": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "id": {
+                              "type": "string"
+                            },
+                            "properties": {
+                              "additionalProperties": {},
+                              "type": "object"
+                            },
+                            "type": {
+                              "enum": [
+                                "company",
+                                "person"
+                              ],
+                              "type": "string"
+                            },
+                            "version": {
+                              "type": "number"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "extras": {
+                        "additionalProperties": {},
+                        "type": "object"
+                      },
+                      "highlightScores": {
+                        "items": {
+                          "type": "number"
+                        },
+                        "type": "array"
+                      },
+                      "highlights": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "id": {
+                        "type": "string"
+                      },
+                      "publishedDate": {
+                        "type": "string"
+                      },
+                      "score": {
+                        "type": "number"
+                      },
+                      "subpages": {
+                        "items": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "author": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {}
+                              ]
+                            },
+                            "entities": {
+                              "items": {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "id": {
+                                    "type": "string"
+                                  },
+                                  "properties": {
+                                    "additionalProperties": {},
+                                    "type": "object"
+                                  },
+                                  "type": {
+                                    "enum": [
+                                      "company",
+                                      "person"
+                                    ],
+                                    "type": "string"
+                                  },
+                                  "version": {
+                                    "type": "number"
+                                  }
+                                },
+                                "type": "object"
+                              },
+                              "type": "array"
+                            },
+                            "extras": {
+                              "additionalProperties": {},
+                              "type": "object"
+                            },
+                            "highlightScores": {
+                              "items": {
+                                "type": "number"
+                              },
+                              "type": "array"
+                            },
+                            "highlights": {
+                              "items": {
+                                "type": "string"
+                              },
+                              "type": "array"
+                            },
+                            "id": {
+                              "type": "string"
+                            },
+                            "publishedDate": {
+                              "type": "string"
+                            },
+                            "score": {
+                              "type": "number"
+                            },
+                            "summary": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "additionalProperties": {},
+                                  "type": "object"
+                                }
+                              ]
+                            },
+                            "text": {
+                              "type": "string"
+                            },
+                            "title": {
+                              "type": "string"
+                            },
+                            "url": {
+                              "type": "string"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "summary": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "additionalProperties": {},
+                            "type": "object"
+                          }
+                        ]
+                      },
+                      "text": {
+                        "type": "string"
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "url": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            },
+            "meta": {
+              "additionalProperties": {},
+              "description": "Additional response metadata (status, paging).",
+              "type": "object"
+            }
+          },
+          "required": [
+            "data"
+          ],
+          "type": "object"
+        }
+      },
+      "pricing": {
+        "creditsPerUnit": null,
+        "currency": "USD",
+        "details": [],
+        "displayText": "Pricing unavailable.",
+        "summary": null,
+        "unit": "result",
+        "usdPerUnit": null
+      },
+      "provider": "exa",
+      "toolId": "exa_contents"
+    },
+    {
+      "asyncFlow": null,
+      "asyncOperation": null,
+      "billingSource": "managed_by_deepline",
+      "callable": true,
+      "categories": [
+        "company_enrich"
+      ],
+      "credentialStatus": "managed",
+      "description": "Scrape one LinkedIn company page by URL, universal name, or search text: employee count (headcount), industry, and website. | Get the LinkedIn company. Required at least one of the query parameters",
+      "inputSchema": {
+        "description": "Get the LinkedIn company. Required at least one of the query parameters",
+        "fields": [
+          {
+            "description": "URL of the LinkedIn company (optional)",
+            "name": "url",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "description": "Universal name of the LinkedIn company profile, can be found in URL (optional)",
+            "name": "universalName",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "description": "Company name. It will use LinkedIn search and return the most relevant result.",
+            "name": "search",
+            "required": false,
+            "type": "string"
+          }
+        ],
+        "jsonSchema": {
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "anyOf": [
+                {
+                  "required": [
+                    "url"
+                  ]
+                },
+                {
+                  "required": [
+                    "universalName"
+                  ]
+                },
+                {
+                  "required": [
+                    "search"
+                  ]
+                }
+              ]
+            }
+          ],
+          "description": "Get the LinkedIn company. Required at least one of the query parameters",
+          "properties": {
+            "search": {
+              "description": "Company name. It will use LinkedIn search and return the most relevant result.",
+              "minLength": 1,
+              "type": "string"
+            },
+            "universalName": {
+              "description": "Universal name of the LinkedIn company profile, can be found in URL (optional)",
+              "minLength": 1,
+              "type": "string"
+            },
+            "url": {
+              "description": "URL of the LinkedIn company (optional)",
+              "format": "uri",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [],
+          "type": "object"
+        }
+      },
+      "operationAliases": [
+        "harvestapi_get_company",
+        "get_company"
+      ],
+      "outputSchema": {
+        "description": "Provider response payload.",
+        "fields": [
+          {
+            "name": "element",
+            "required": false,
+            "type": "object"
+          },
+          {
+            "name": "error",
+            "required": false,
+            "type": "string|null"
+          },
+          {
+            "name": "status",
+            "required": false,
+            "type": "string|integer"
+          }
+        ],
+        "jsonSchema": {
+          "additionalProperties": false,
+          "description": "Provider response payload.",
+          "properties": {
+            "element": {
+              "additionalProperties": false,
+              "properties": {
+                "active": {
+                  "type": "boolean"
+                },
+                "affiliatedPages": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "description": {
+                        "type": "string"
+                      },
+                      "followerCount": {
+                        "type": "integer"
+                      },
+                      "id": {
+                        "type": "string"
+                      },
+                      "industries": {
+                        "items": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "hierarchy": {
+                              "type": "string"
+                            },
+                            "id": {
+                              "type": "string"
+                            },
+                            "name": {
+                              "type": "string"
+                            },
+                            "title": {
+                              "type": "string"
+                            },
+                            "urn": {
+                              "type": "string"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "linkedinUrl": {
+                        "format": "uri",
+                        "type": "string"
+                      },
+                      "logo": {
+                        "format": "uri",
+                        "type": "string"
+                      },
+                      "logos": {
+                        "items": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "height": {
+                              "type": "integer"
+                            },
+                            "url": {
+                              "format": "uri",
+                              "type": "string"
+                            },
+                            "width": {
+                              "type": "integer"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "paidCompany": {
+                        "type": "boolean"
+                      },
+                      "showcase": {
+                        "type": "boolean"
+                      },
+                      "universalName": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "autoGenerated": {
+                  "type": "boolean"
+                },
+                "backgroundCover": {
+                  "format": "uri",
+                  "type": "string"
+                },
+                "backgroundCovers": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "height": {
+                        "type": "integer"
+                      },
+                      "url": {
+                        "format": "uri",
+                        "type": "string"
+                      },
+                      "width": {
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "callToActionUrl": {
+                  "format": "uri",
+                  "type": "string"
+                },
+                "companyType": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "employeeCount": {
+                  "type": "integer"
+                },
+                "employeeCountRange": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "end": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "start": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "type": "object"
+                },
+                "followerCount": {
+                  "type": "integer"
+                },
+                "foundedOn": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "day": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "month": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "year": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    }
+                  },
+                  "type": "object"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "industries": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "hierarchy": {
+                        "type": "string"
+                      },
+                      "id": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "urn": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "jobSearchUrl": {
+                  "format": "uri",
+                  "type": "string"
+                },
+                "linkedinUrl": {
+                  "format": "uri",
+                  "type": "string"
+                },
+                "locations": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "city": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "country": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "description": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "geographicArea": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "headquarter": {
+                        "type": "boolean"
+                      },
+                      "line1": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "line2": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "parsed": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "city": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "country": {
+                            "type": "string"
+                          },
+                          "countryCode": {
+                            "type": "string"
+                          },
+                          "countryFull": {
+                            "type": "string"
+                          },
+                          "regionCode": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "state": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "text": {
+                            "type": "string"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "postalCode": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "logo": {
+                  "format": "uri",
+                  "type": "string"
+                },
+                "logos": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "height": {
+                        "type": "integer"
+                      },
+                      "url": {
+                        "format": "uri",
+                        "type": "string"
+                      },
+                      "width": {
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "pageType": {
+                  "type": "string"
+                },
+                "pageVerified": {
+                  "type": "boolean"
+                },
+                "paidCompany": {
+                  "type": "boolean"
+                },
+                "showcase": {
+                  "type": "boolean"
+                },
+                "similarOrganizations": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "backgroundCover": {
+                        "format": "uri",
+                        "type": "string"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "employeeCountRange": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "end": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "start": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "followerCount": {
+                        "type": "integer"
+                      },
+                      "id": {
+                        "type": "string"
+                      },
+                      "industries": {
+                        "items": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "hierarchy": {
+                              "type": "string"
+                            },
+                            "id": {
+                              "type": "string"
+                            },
+                            "name": {
+                              "type": "string"
+                            },
+                            "title": {
+                              "type": "string"
+                            },
+                            "urn": {
+                              "type": "string"
+                            }
+                          },
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "linkedinUrl": {
+                        "format": "uri",
+                        "type": "string"
+                      },
+                      "logo": {
+                        "format": "uri",
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "universalName": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "specialities": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "tagline": {
+                  "type": "string"
+                },
+                "universalName": {
+                  "type": "string"
+                },
+                "website": {
+                  "format": "uri",
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "type": [
+                "string",
+                "integer"
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      "pricing": {
+        "creditsPerUnit": 0.03,
+        "currency": "USD",
+        "details": [
+          "Final settlement can differ when the completed request reports a different usage amount.",
+          "Otherwise, Deepline charges the expected rate shown above."
+        ],
+        "displayText": "0.03 Deepline credits / $0.003 per call",
+        "summary": null,
+        "unit": "call",
+        "usdPerUnit": 0.003
+      },
+      "provider": "harvestapi",
+      "toolId": "harvestapi_get_company"
+    },
+    {
+      "categories": [
+        "admin"
+      ],
+      "credentialStatus": "managed",
+      "description": "Call any public API or fetch a URL directly with a custom HTTP method (GET, POST), headers, cookies, query params, and JSON body.",
+      "inputSchema": {
+        "fields": [
+          {
+            "description": "Absolute http/https URL to call. Private and localhost targets are blocked. Auth-like request values require https.",
+            "name": "url",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "HTTP method. Defaults to GET.",
+            "name": "method",
+            "required": false,
+            "type": "\"GET\" | \"POST\" | \"PUT\" | \"PATCH\" | \"DELETE\" | \"HEAD\" | \"OPTIONS\""
+          },
+          {
+            "name": "query",
+            "required": false,
+            "type": "record"
+          },
+          {
+            "description": "Additional request headers. Transport headers like Host are blocked. Auth-like headers require https and reflected values are redacted from results.",
+            "name": "headers",
+            "required": false,
+            "type": "record"
+          },
+          {
+            "description": "Cookie key/value pairs serialized into the Cookie header. Cookies require https and reflected values are redacted from results.",
+            "name": "cookies",
+            "required": false,
+            "type": "record"
+          },
+          {
+            "description": "JSON-serializable request body. Auth-like fields require https and reflected values are redacted from results.",
+            "name": "body_json",
+            "required": false,
+            "type": "unknown"
+          },
+          {
+            "description": "Raw text request body.",
+            "name": "body_text",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "body_form_urlencoded",
+            "required": false,
+            "type": "record"
+          },
+          {
+            "description": "Per-request timeout in milliseconds. Defaults to 30000.",
+            "name": "timeout_ms",
+            "required": false,
+            "type": "integer"
+          },
+          {
+            "description": "Whether to follow redirects. Defaults to true.",
+            "name": "follow_redirects",
+            "required": false,
+            "type": "boolean"
+          }
+        ],
+        "jsonSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "body_form_urlencoded": {
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        }
+                      ]
+                    },
+                    "minItems": 1,
+                    "type": "array"
+                  }
+                ]
+              },
+              "type": "object"
+            },
+            "body_json": {
+              "description": "JSON-serializable request body. Auth-like fields require https and reflected values are redacted from results."
+            },
+            "body_text": {
+              "description": "Raw text request body.",
+              "type": "string"
+            },
+            "cookies": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Cookie key/value pairs serialized into the Cookie header. Cookies require https and reflected values are redacted from results.",
+              "type": "object"
+            },
+            "follow_redirects": {
+              "description": "Whether to follow redirects. Defaults to true.",
+              "type": "boolean"
+            },
+            "headers": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Additional request headers. Transport headers like Host are blocked. Auth-like headers require https and reflected values are redacted from results.",
+              "type": "object"
+            },
+            "method": {
+              "description": "HTTP method. Defaults to GET.",
+              "enum": [
+                "GET",
+                "POST",
+                "PUT",
+                "PATCH",
+                "DELETE",
+                "HEAD",
+                "OPTIONS"
+              ],
+              "type": "string"
+            },
+            "query": {
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        }
+                      ]
+                    },
+                    "minItems": 1,
+                    "type": "array"
+                  }
+                ]
+              },
+              "type": "object"
+            },
+            "timeout_ms": {
+              "description": "Per-request timeout in milliseconds. Defaults to 30000.",
+              "maximum": 120000,
+              "minimum": 100,
+              "type": "integer"
+            },
+            "url": {
+              "description": "Absolute http/https URL to call. Private and localhost targets are blocked. Auth-like request values require https.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "url"
+          ],
+          "type": "object"
+        }
+      },
+      "operationAliases": [
+        "generic_http_request",
+        "request"
+      ],
+      "outputSchema": {
+        "fields": [
+          {
+            "name": "provider",
+            "required": true,
+            "type": "\"generic_http\""
+          },
+          {
+            "name": "operation",
+            "required": true,
+            "type": "\"generic_http_request\""
+          },
+          {
+            "name": "method",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "requested_url",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "final_url",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "status_code",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "name": "ok",
+            "required": true,
+            "type": "boolean"
+          },
+          {
+            "name": "headers",
+            "required": true,
+            "type": "record"
+          },
+          {
+            "name": "data",
+            "required": true,
+            "type": "unknown"
+          }
+        ],
+        "jsonSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "data": {},
+            "final_url": {
+              "type": "string"
+            },
+            "headers": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "method": {
+              "type": "string"
+            },
+            "ok": {
+              "type": "boolean"
+            },
+            "operation": {
+              "const": "generic_http_request",
+              "type": "string"
+            },
+            "provider": {
+              "const": "generic_http",
+              "type": "string"
+            },
+            "requested_url": {
+              "type": "string"
+            },
+            "status_code": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "provider",
+            "operation",
+            "method",
+            "requested_url",
+            "final_url",
+            "status_code",
+            "ok",
+            "headers",
+            "data"
+          ],
+          "type": "object"
+        }
+      },
+      "pricing": {
+        "creditsPerUnit": 0,
+        "currency": "USD",
+        "details": [],
+        "displayText": "Free",
+        "summary": null,
+        "unit": "call",
+        "usdPerUnit": 0
+      },
+      "provider": "generic_http",
+      "toolId": "generic_http_request"
+    },
+    {
+      "asyncFlow": null,
+      "asyncOperation": null,
+      "billingSource": "free",
+      "callable": true,
+      "categories": [
+        "company_search"
+      ],
+      "credentialStatus": "managed",
+      "description": "Free company search over ~35M companies: filter by industry, location, employee count, founding year, name or domain to get company name, domain, industry, location, LinkedIn URL, employee count and founding year. | Run a single read-only SQL statement against the shared Snowflake-backed free company corpus (~35M companies).\nSchema (table: companies):\nnormalized_domain text \u2014 lowercase root domain (e.g. 'openai.com')\ndomain text \u2014 original domain as-is\ncompany_name text \u2014 company name (NOT NULL)\nindustry text \u2014 e.g. 'computer software', 'financial services', 'hospital & health care'\nlocation text \u2014 comma-separated: locality, region, country (e.g. 'san francisco, california, united states')\nlinkedin_url text \u2014 LinkedIn company URL slug\nemployee_count integer \u2014 upper bound of size bucket (10, 50, 200, 500, 1000, 5000, 10000+)\nyear_founded integer \u2014 e.g. 2015\nupdated_at timestamp\nGuidance:\nPrefer exact company resolution with normalized_domain when you have a website/domain.\nExact normalized_domain equality/IN lookups are the fastest path for known domains.\nUse linkedin_url and company_name equality/IN for small lookup batches; very large batches may still hit the query timeout.\nIf an exact lookup misses, use anchored prefix searches such as company_name ILIKE 'acme%' to generate fallback candidates.\nPlain ILIKE '%keyword%' over broad fields is legal SQL on the Snowflake-backed corpus, but it can still scan the 35M-row table.\nUse dedicated company search providers when you need provider-native facets, live web coverage, or strict market sizing totals.\nVerify the returned company before assuming it is the same entity.\nExample queries:\nSELECT * FROM companies WHERE normalized_domain = 'openai.com' LIMIT 5\nSELECT * FROM companies WHERE normalized_domain IN ('openai.com','anthropic.com') LIMIT 10\nSELECT * FROM companies WHERE linkedin_url IN ('linkedin.com/company/openai') LIMIT 5\nSELECT * FROM companies WHERE company_name ILIKE 'nestle%' LIMIT 10\nSELECT * FROM companies WHERE industry = 'computer software' AND employee_count > 50 LIMIT 100\nSELECT industry, count(*) as cnt FROM companies GROUP BY industry ORDER BY cnt DESC LIMIT 25\nSELECT * FROM companies WHERE location ILIKE 'san francisco%' AND year_founded >= 2020 LIMIT 100\nSupports SELECT, aggregates, GROUP BY, WITH CTEs, and EXPLAIN. SQL must include LIMIT <= 100000.\nBest for company retrieval, shortlist building, exact segment counts, and domain-to-company recovery when exact lookups miss.",
+      "inputSchema": {
+        "description": "Run a single read-only SQL statement against the shared Snowflake-backed free company corpus (~35M companies).\nSchema (table: companies):\nnormalized_domain text \u2014 lowercase root domain (e.g. 'openai.com')\ndomain text \u2014 original domain as-is\ncompany_name text \u2014 company name (NOT NULL)\nindustry text \u2014 e.g. 'computer software', 'financial services', 'hospital & health care'\nlocation text \u2014 comma-separated: locality, region, country (e.g. 'san francisco, california, united states')\nlinkedin_url text \u2014 LinkedIn company URL slug\nemployee_count integer \u2014 upper bound of size bucket (10, 50, 200, 500, 1000, 5000, 10000+)\nyear_founded integer \u2014 e.g. 2015\nupdated_at timestamp\nGuidance:\nPrefer exact company resolution with normalized_domain when you have a website/domain.\nExact normalized_domain equality/IN lookups are the fastest path for known domains.\nUse linkedin_url and company_name equality/IN for small lookup batches; very large batches may still hit the query timeout.\nIf an exact lookup misses, use anchored prefix searches such as company_name ILIKE 'acme%' to generate fallback candidates.\nPlain ILIKE '%keyword%' over broad fields is legal SQL on the Snowflake-backed corpus, but it can still scan the 35M-row table.\nUse dedicated company search providers when you need provider-native facets, live web coverage, or strict market sizing totals.\nVerify the returned company before assuming it is the same entity.\nExample queries:\nSELECT * FROM companies WHERE normalized_domain = 'openai.com' LIMIT 5\nSELECT * FROM companies WHERE normalized_domain IN ('openai.com','anthropic.com') LIMIT 10\nSELECT * FROM companies WHERE linkedin_url IN ('linkedin.com/company/openai') LIMIT 5\nSELECT * FROM companies WHERE company_name ILIKE 'nestle%' LIMIT 10\nSELECT * FROM companies WHERE industry = 'computer software' AND employee_count > 50 LIMIT 100\nSELECT industry, count(*) as cnt FROM companies GROUP BY industry ORDER BY cnt DESC LIMIT 25\nSELECT * FROM companies WHERE location ILIKE 'san francisco%' AND year_founded >= 2020 LIMIT 100\nSupports SELECT, aggregates, GROUP BY, WITH CTEs, and EXPLAIN. SQL must include LIMIT <= 100000.\nBest for company retrieval, shortlist building, exact segment counts, and domain-to-company recovery when exact lookups miss.",
+        "fields": [
+          {
+            "description": "Single read-only SQL statement against the Snowflake-backed companies table (~35M rows). Columns: normalized_domain, domain, company_name, industry, location, linkedin_url, employee_count (integer), year_founded (integer), updated_at. Prefer exact normalized_domain equality or IN lookups when you have domains. Use linkedin_url and company_name equality/IN for small lookup batches. For fallback candidates, prefer anchored prefixes like company_name ILIKE 'acme%'. Broad unanchored ILIKE '%keyword%' scans are legal but can scan the full corpus; use dedicated company search providers for broad keyword discovery or strict market sizing. Supports SELECT, aggregates, GROUP BY, CTEs, EXPLAIN. SQL must include LIMIT <= 100000. Example: SELECT * FROM companies WHERE normalized_domain IN ('openai.com','anthropic.com') LIMIT 10",
+            "name": "sql",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "jsonSchema": {
+          "additionalProperties": false,
+          "description": "Run a single read-only SQL statement against the shared Snowflake-backed free company corpus (~35M companies).\nSchema (table: companies):\nnormalized_domain text \u2014 lowercase root domain (e.g. 'openai.com')\ndomain text \u2014 original domain as-is\ncompany_name text \u2014 company name (NOT NULL)\nindustry text \u2014 e.g. 'computer software', 'financial services', 'hospital & health care'\nlocation text \u2014 comma-separated: locality, region, country (e.g. 'san francisco, california, united states')\nlinkedin_url text \u2014 LinkedIn company URL slug\nemployee_count integer \u2014 upper bound of size bucket (10, 50, 200, 500, 1000, 5000, 10000+)\nyear_founded integer \u2014 e.g. 2015\nupdated_at timestamp\nGuidance:\nPrefer exact company resolution with normalized_domain when you have a website/domain.\nExact normalized_domain equality/IN lookups are the fastest path for known domains.\nUse linkedin_url and company_name equality/IN for small lookup batches; very large batches may still hit the query timeout.\nIf an exact lookup misses, use anchored prefix searches such as company_name ILIKE 'acme%' to generate fallback candidates.\nPlain ILIKE '%keyword%' over broad fields is legal SQL on the Snowflake-backed corpus, but it can still scan the 35M-row table.\nUse dedicated company search providers when you need provider-native facets, live web coverage, or strict market sizing totals.\nVerify the returned company before assuming it is the same entity.\nExample queries:\nSELECT * FROM companies WHERE normalized_domain = 'openai.com' LIMIT 5\nSELECT * FROM companies WHERE normalized_domain IN ('openai.com','anthropic.com') LIMIT 10\nSELECT * FROM companies WHERE linkedin_url IN ('linkedin.com/company/openai') LIMIT 5\nSELECT * FROM companies WHERE company_name ILIKE 'nestle%' LIMIT 10\nSELECT * FROM companies WHERE industry = 'computer software' AND employee_count > 50 LIMIT 100\nSELECT industry, count(*) as cnt FROM companies GROUP BY industry ORDER BY cnt DESC LIMIT 25\nSELECT * FROM companies WHERE location ILIKE 'san francisco%' AND year_founded >= 2020 LIMIT 100\nSupports SELECT, aggregates, GROUP BY, WITH CTEs, and EXPLAIN. SQL must include LIMIT <= 100000.\nBest for company retrieval, shortlist building, exact segment counts, and domain-to-company recovery when exact lookups miss.",
+          "properties": {
+            "sql": {
+              "description": "Single read-only SQL statement against the Snowflake-backed companies table (~35M rows). Columns: normalized_domain, domain, company_name, industry, location, linkedin_url, employee_count (integer), year_founded (integer), updated_at. Prefer exact normalized_domain equality or IN lookups when you have domains. Use linkedin_url and company_name equality/IN for small lookup batches. For fallback candidates, prefer anchored prefixes like company_name ILIKE 'acme%'. Broad unanchored ILIKE '%keyword%' scans are legal but can scan the full corpus; use dedicated company search providers for broad keyword discovery or strict market sizing. Supports SELECT, aggregates, GROUP BY, CTEs, EXPLAIN. SQL must include LIMIT <= 100000. Example: SELECT * FROM companies WHERE normalized_domain IN ('openai.com','anthropic.com') LIMIT 10",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "sql"
+          ],
+          "type": "object"
+        }
+      },
+      "operationAliases": [
+        "free_simple_company_search",
+        "deepline_native_free_simple_company_search"
+      ],
+      "outputSchema": {
+        "description": "Free shared company search result payload.",
+        "fields": [
+          {
+            "name": "columns",
+            "required": true,
+            "type": "array"
+          },
+          {
+            "name": "command",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "executed_sql",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "limit",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "name": "row_count",
+            "required": true,
+            "type": "integer|null"
+          },
+          {
+            "name": "row_count_returned",
+            "required": true,
+            "type": "integer"
+          },
+          {
+            "name": "rows",
+            "required": true,
+            "type": "array"
+          },
+          {
+            "name": "schema",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "sql",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "truncated",
+            "required": true,
+            "type": "boolean"
+          }
+        ],
+        "jsonSchema": {
+          "additionalProperties": false,
+          "properties": {
+            "columns": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "data_type_id": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "table_id": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "name",
+                  "table_id",
+                  "data_type_id"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "command": {
+              "type": "string"
+            },
+            "executed_sql": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "integer"
+            },
+            "row_count": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "row_count_returned": {
+              "type": "integer"
+            },
+            "rows": {
+              "items": {
+                "additionalProperties": {},
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "schema": {
+              "type": "string"
+            },
+            "sql": {
+              "type": "string"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "schema",
+            "command",
+            "row_count",
+            "row_count_returned",
+            "truncated",
+            "columns",
+            "sql",
+            "executed_sql",
+            "limit",
+            "rows"
+          ],
+          "type": "object"
+        }
+      },
+      "pricing": {
+        "creditsPerUnit": 0,
+        "currency": "USD",
+        "details": [],
+        "displayText": "Free",
+        "summary": null,
+        "unit": "call",
+        "usdPerUnit": 0
+      },
+      "provider": "deepline_native",
+      "toolId": "free_simple_company_search"
+    },
+    {
+      "asyncFlow": {
+        "finishAction": null,
+        "pollActions": [
+          "firecrawl_get_batch_scrape_status"
+        ],
+        "startAction": "firecrawl_batch_scrape"
+      },
+      "asyncOperation": {
+        "compatibility": {
+          "asyncGetAction": "firecrawl_get_batch_scrape_status"
+        },
+        "job": {
+          "idPaths": [
+            "job_id",
+            "jobId",
+            "task_id",
+            "taskId",
+            "run_id",
+            "runId",
+            "id",
+            "data.id"
+          ]
+        },
+        "lifecycle": {
+          "pollActions": [
+            {
+              "action": "firecrawl_get_batch_scrape_status",
+              "input": {}
+            }
+          ],
+          "startAction": "firecrawl_batch_scrape"
+        },
+        "polling": {
+          "checkTimeoutMs": 1000,
+          "initialDelayMs": 0,
+          "intervalMs": 1000,
+          "timeoutMs": 900000
+        },
+        "result": {
+          "source": "start_result"
+        },
+        "terminal": {
+          "defaultOutcome": "running",
+          "rules": [
+            {
+              "conditions": [
+                {
+                  "exists": true,
+                  "path": "$"
+                }
+              ],
+              "outcome": "running"
+            }
+          ]
+        },
+        "version": 1,
+        "wait": {
+          "kind": "caller_managed"
+        }
+      },
+      "billingSource": "managed_by_deepline",
+      "callable": true,
+      "categories": [
+        "automation"
+      ],
+      "credentialStatus": "managed",
+      "description": "Scrape a known list of page URLs in parallel as one asynchronous job, returning content as Markdown or structured data. | Start a batch scrape job and return its ID for status polling.",
+      "inputSchema": {
+        "description": "Start a batch scrape job and return its ID for status polling.",
+        "fields": [
+          {
+            "description": "URLs to scrape",
+            "name": "urls",
+            "required": true,
+            "type": "array"
+          },
+          {
+            "description": "Scrape options applied to all URLs",
+            "name": "scrapeOptions",
+            "required": false,
+            "type": "object"
+          },
+          {
+            "description": "Webhook for completion notification",
+            "name": "webhook",
+            "required": false,
+            "type": "object"
+          },
+          {
+            "description": "Max concurrent scrapes",
+            "name": "maxConcurrency",
+            "required": false,
+            "type": "integer"
+          },
+          {
+            "description": "Skip invalid URLs instead of failing (default true)",
+            "name": "ignoreInvalidURLs",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "description": "Do not store any data (default false)",
+            "name": "zeroDataRetention",
+            "required": false,
+            "type": "boolean"
+          },
+          {
+            "description": "Deprecated compatibility field. Start actions now return immediately; use the matching status action to poll.",
+            "name": "timeoutMs",
+            "required": false,
+            "type": "integer"
+          },
+          {
+            "description": "Maximum bytes returned for batch page data. Large fields are clipped with an explicit marker; default 6 MiB.",
+            "name": "maxDataBytes",
+            "required": false,
+            "type": "integer"
+          }
+        ],
+        "jsonSchema": {
+          "additionalProperties": false,
+          "description": "Start a batch scrape job and return its ID for status polling.",
+          "properties": {
+            "ignoreInvalidURLs": {
+              "description": "Skip invalid URLs instead of failing (default true)",
+              "type": "boolean"
+            },
+            "maxConcurrency": {
+              "description": "Max concurrent scrapes",
+              "type": "integer"
+            },
+            "maxDataBytes": {
+              "description": "Maximum bytes returned for batch page data. Large fields are clipped with an explicit marker; default 6 MiB.",
+              "maximum": 8388608,
+              "minimum": 65536,
+              "type": "integer"
+            },
+            "scrapeOptions": {
+              "additionalProperties": false,
+              "description": "Scrape options applied to all URLs",
+              "properties": {
+                "actions": {
+                  "description": "Browser actions to execute before scraping",
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "amount": {
+                        "description": "Scroll amount in pixels",
+                        "type": "number"
+                      },
+                      "direction": {
+                        "description": "Scroll direction",
+                        "enum": [
+                          "up",
+                          "down"
+                        ],
+                        "type": "string"
+                      },
+                      "format": {
+                        "description": "PDF page format",
+                        "enum": [
+                          "A0",
+                          "A1",
+                          "A2",
+                          "A3",
+                          "A4",
+                          "A5",
+                          "A6",
+                          "Letter",
+                          "Legal",
+                          "Tabloid",
+                          "Ledger"
+                        ],
+                        "type": "string"
+                      },
+                      "fullPage": {
+                        "description": "Full-page screenshot",
+                        "type": "boolean"
+                      },
+                      "key": {
+                        "description": "Key to press",
+                        "type": "string"
+                      },
+                      "landscape": {
+                        "description": "PDF landscape orientation",
+                        "type": "boolean"
+                      },
+                      "milliseconds": {
+                        "description": "Wait time in milliseconds",
+                        "type": "number"
+                      },
+                      "scale": {
+                        "description": "PDF scale factor (0.1-2)",
+                        "type": "number"
+                      },
+                      "script": {
+                        "description": "JavaScript to execute",
+                        "type": "string"
+                      },
+                      "selector": {
+                        "description": "CSS selector for the element",
+                        "type": "string"
+                      },
+                      "text": {
+                        "description": "Text to write",
+                        "type": "string"
+                      },
+                      "type": {
+                        "description": "Browser action type",
+                        "enum": [
+                          "wait",
+                          "click",
+                          "write",
+                          "press",
+                          "screenshot",
+                          "scroll",
+                          "pdf",
+                          "scrape",
+                          "executeJavascript"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "type"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "blockAds": {
+                  "description": "Block ads during scraping",
+                  "type": "boolean"
+                },
+                "excludeTags": {
+                  "description": "Exclude these HTML tags",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "formats": {
+                  "description": "Output formats (default [{\"type\":\"markdown\"}])",
+                  "items": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "markdown",
+                          "summary",
+                          "html",
+                          "rawHtml",
+                          "links",
+                          "images",
+                          "screenshot",
+                          "json",
+                          "changeTracking",
+                          "branding"
+                        ],
+                        "type": "string"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "type": {
+                            "const": "markdown",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "type": {
+                            "const": "summary",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "type": {
+                            "const": "html",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "type": {
+                            "const": "rawHtml",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "type": {
+                            "const": "links",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "type": {
+                            "const": "images",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "fullPage": {
+                            "description": "Capture full page screenshot",
+                            "type": "boolean"
+                          },
+                          "quality": {
+                            "description": "Screenshot quality 0-100",
+                            "type": "integer"
+                          },
+                          "type": {
+                            "const": "screenshot",
+                            "type": "string"
+                          },
+                          "viewport": {
+                            "additionalProperties": false,
+                            "description": "Custom viewport size",
+                            "properties": {
+                              "height": {
+                                "type": "integer"
+                              },
+                              "width": {
+                                "type": "integer"
+                              }
+                            },
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "prompt": {
+                            "description": "Natural language extraction instructions",
+                            "type": "string"
+                          },
+                          "schema": {
+                            "additionalProperties": {},
+                            "description": "JSON schema for structured output",
+                            "type": "object"
+                          },
+                          "type": {
+                            "const": "json",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "modes": {
+                            "description": "Change tracking modes",
+                            "items": {
+                              "enum": [
+                                "git-diff",
+                                "json"
+                              ],
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          "prompt": {
+                            "description": "Instructions for change tracking",
+                            "type": "string"
+                          },
+                          "schema": {
+                            "additionalProperties": {},
+                            "description": "Schema for tracked changes",
+                            "type": "object"
+                          },
+                          "tag": {
+                            "description": "Tag for this change tracking snapshot",
+                            "type": "string"
+                          },
+                          "type": {
+                            "const": "changeTracking",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "type": {
+                            "const": "branding",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "type": "array"
+                },
+                "headers": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "description": "Custom HTTP headers",
+                  "type": "object"
+                },
+                "includeTags": {
+                  "description": "Only include these HTML tags",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "location": {
+                  "additionalProperties": false,
+                  "description": "Geographic location settings",
+                  "properties": {
+                    "country": {
+                      "description": "Country code (e.g. \"US\")",
+                      "type": "string"
+                    },
+                    "languages": {
+                      "description": "Language codes",
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "type": "object"
+                },
+                "maxAge": {
+                  "description": "Max cache age in ms (default 172800000)",
+                  "type": "integer"
+                },
+                "mobile": {
+                  "description": "Use mobile user agent",
+                  "type": "boolean"
+                },
+                "onlyMainContent": {
+                  "description": "Only return main content, filtering navs/footers",
+                  "type": "boolean"
+                },
+                "parsers": {
+                  "description": "Document parsers (e.g. PDF)",
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "maxPages": {
+                        "description": "Max pages to parse (1-10000)",
+                        "type": "integer"
+                      },
+                      "mode": {
+                        "description": "PDF parsing mode",
+                        "enum": [
+                          "fast",
+                          "auto",
+                          "ocr"
+                        ],
+                        "type": "string"
+                      },
+                      "type": {
+                        "const": "pdf",
+                        "description": "Parser type",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "type"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "proxy": {
+                  "description": "Proxy mode",
+                  "enum": [
+                    "basic",
+                    "enhanced",
+                    "auto"
+                  ],
+                  "type": "string"
+                },
+                "removeBase64Images": {
+                  "description": "Strip base64 images from output",
+                  "type": "boolean"
+                },
+                "skipTlsVerification": {
+                  "description": "Skip TLS certificate verification",
+                  "type": "boolean"
+                },
+                "storeInCache": {
+                  "description": "Store result in cache (default true)",
+                  "type": "boolean"
+                },
+                "timeout": {
+                  "description": "Request timeout in ms (default 30000, max 300000)",
+                  "type": "number"
+                },
+                "waitFor": {
+                  "description": "Wait ms after page load before scraping",
+                  "type": "number"
+                }
+              },
+              "type": "object"
+            },
+            "timeoutMs": {
+              "description": "Deprecated compatibility field. Start actions now return immediately; use the matching status action to poll.",
+              "type": "integer"
+            },
+            "urls": {
+              "description": "URLs to scrape",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "webhook": {
+              "additionalProperties": false,
+              "description": "Webhook for completion notification",
+              "properties": {
+                "events": {
+                  "description": "Events to trigger webhook (default all)",
+                  "items": {
+                    "enum": [
+                      "completed",
+                      "page",
+                      "failed",
+                      "started"
+                    ],
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "headers": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "description": "Custom headers for webhook requests",
+                  "type": "object"
+                },
+                "metadata": {
+                  "additionalProperties": {},
+                  "description": "Metadata to include in webhook payloads",
+                  "type": "object"
+                },
+                "url": {
+                  "description": "Webhook URL for notifications",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "url"
+              ],
+              "type": "object"
+            },
+            "zeroDataRetention": {
+              "description": "Do not store any data (default false)",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "urls"
+          ],
+          "type": "object"
+        }
+      },
+      "operationAliases": [
+        "firecrawl_batch_scrape",
+        "batch_scrape"
+      ],
+      "outputSchema": {
+        "description": "Provider response payload.",
+        "fields": [
+          {
+            "name": "completed",
+            "required": false,
+            "type": "number"
+          },
+          {
+            "name": "data",
+            "required": false,
+            "type": "array"
+          },
+          {
+            "name": "dataTruncated",
+            "required": false,
+            "type": "object"
+          },
+          {
+            "name": "id",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "next",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "status",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "total",
+            "required": false,
+            "type": "number"
+          }
+        ],
+        "jsonSchema": {
+          "additionalProperties": false,
+          "description": "Provider response payload.",
+          "properties": {
+            "completed": {
+              "type": "number"
+            },
+            "data": {
+              "items": {
+                "additionalProperties": {},
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "dataTruncated": {
+              "additionalProperties": false,
+              "properties": {
+                "maxDataBytes": {
+                  "type": "number"
+                },
+                "truncatedFields": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "maxDataBytes",
+                "truncatedFields"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "type": "string"
+            },
+            "next": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "total": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        }
+      },
+      "pricing": {
+        "creditsPerUnit": null,
+        "currency": "USD",
+        "details": [
+          "JSON format and enhanced mode each add about 0.05 Deepline credits per page.",
+          "PDF parsing and Zero Data Retention each add about 0.02 Deepline credits per page or PDF page.",
+          "Final price is calculated from URL count, scrape options, and exact returned usage when available."
+        ],
+        "displayText": "Base batch scrape is 0.02 Deepline credits per URL scraped.",
+        "summary": "Base batch scrape is 0.02 Deepline credits per URL scraped.",
+        "unit": "page",
+        "usdPerUnit": null
+      },
+      "provider": "firecrawl",
+      "toolId": "firecrawl_batch_scrape"
+    },
+    {
+      "categories": [
+        "admin"
+      ],
+      "credentialStatus": "managed",
+      "description": "Checking status of a running batch scrape job",
+      "inputSchema": {
+        "description": "Check or retrieve one bounded result page of a batch scrape job.",
+        "fields": [
+          {
+            "description": "Batch scrape job ID",
+            "name": "id",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "description": "The next URL from a prior response. Retrieves that page without starting another batch.",
+            "name": "next",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "description": "Maximum bytes returned for page data. Large fields are clipped with an explicit marker; default 6 MiB.",
+            "name": "maxDataBytes",
+            "required": false,
+            "type": "integer"
+          }
+        ],
+        "jsonSchema": {
+          "additionalProperties": false,
+          "description": "Check or retrieve one bounded result page of a batch scrape job.",
+          "properties": {
+            "id": {
+              "description": "Batch scrape job ID",
+              "type": "string"
+            },
+            "maxDataBytes": {
+              "description": "Maximum bytes returned for page data. Large fields are clipped with an explicit marker; default 6 MiB.",
+              "maximum": 8388608,
+              "minimum": 65536,
+              "type": "integer"
+            },
+            "next": {
+              "description": "The next URL from a prior response. Retrieves that page without starting another batch.",
+              "format": "uri",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        }
+      },
+      "operationAliases": [
+        "firecrawl_get_batch_scrape_status",
+        "get_batch_scrape_status"
+      ],
+      "outputSchema": {
+        "fields": [
+          {
+            "name": "status",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "result",
+            "required": true,
+            "type": "object"
+          }
+        ],
+        "jsonSchema": {
+          "additionalProperties": true,
+          "properties": {
+            "result": {
+              "additionalProperties": true,
+              "properties": {
+                "data": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "completed": {
+                      "type": "integer"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "total": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "total",
+                    "completed"
+                  ],
+                  "type": "object"
+                },
+                "meta": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "status": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "data",
+                "meta"
+              ],
+              "type": "object"
+            },
+            "status": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "result"
+          ],
+          "type": "object"
+        }
+      },
+      "pricing": {
+        "creditsPerUnit": 0,
+        "currency": "USD",
+        "details": [],
+        "displayText": "Free",
+        "summary": null,
+        "unit": "call",
+        "usdPerUnit": 0
+      },
+      "provider": "firecrawl",
+      "toolId": "firecrawl_get_batch_scrape_status"
+    }
+  ]
+}

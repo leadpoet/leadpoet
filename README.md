@@ -79,7 +79,11 @@ uploaded archive again before it accepts the submission.
 
 Change the harness, model, prompts, and approved API routing. List Python dependencies in `requirements.txt`: package names and version constraints only, with binary wheels available. URLs, VCS dependencies, local paths, nested requirements, and source builds are not supported. Return at most five companies as a JSON list. Use `[]` if there are no valid matches.
 
-Each new ICP execution attempt has a **45-minute wall-clock limit** and quotas of **200 OpenRouter, 30 Deepline, and 30 Scrapingdog calls**. Historical rounds keep the exact quotas frozen in their round configuration. The sandbox blocks direct network access. Keep the baseline's broker transport when changing the harness, or implement the same [broker protocol](lab_arena/shim.py) using the [approved operations](lab_arena/operations.py).
+Each ICP execution attempt uses the time and provider limits frozen in its round configuration. New rounds use **2,000 OpenRouter calls, 200 Scrapingdog calls, and no Deepline call-count cap**. Deepline remains subject to the **$4 confirmed sourcing-spend limit per ICP** and **$0.80 × qualified companies** for final cost eligibility. Pending charges do not reserve money or block work; recovery records them when confirmed. Historical committed rounds retain their original limits.
+
+The gateway freezes Deepline's available public research tools, request schemas, and pricing with the round. Models can discover this approved snapshot through brokered `GET /api/v2/tools?compact=true` and describe a tool through `GET /api/v2/integrations/{tool}/get`. Company-only rounds exclude people/contact sourcing, private account data, outreach, and writes. Async status reads require a job created by the same run. Discovery is local and free. Paid execution uses stable idempotency keys where supported and exact-request billing; uncertain calls are recovered by reads, not repeated blindly.
+
+The sandbox blocks direct network access. Keep the baseline's broker transport when changing the harness, or implement the same [broker protocol](lab_arena/shim.py) using the [approved operations](lab_arena/operations.py).
 
 The output below shows the exact supported fields. It is a format example, not a real company claim. `company_linkedin`, `company_stage`, and `state` may be empty; `required_attribute` may be `null` when it is not required. `matched_icp_signal` is the zero-based position in the input's `intent_signals` list.
 

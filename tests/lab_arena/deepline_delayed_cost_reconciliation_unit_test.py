@@ -118,21 +118,24 @@ class LostFirecrawlResponseTransport:
             assert len(self.request_id) == len("ctx-tool-") + 32
             raise br.ProviderTransportError("ReadTimeout")
         if kwargs["method"] == "GET":
-            entry = _ledger_entry(credits=self.billed_credits)
-            entry["request_id"] = self.request_id
-            entry["metadata"]["requestId"] = self.request_id
-            entry["metadata"]["chargeGroupId"] = self.request_id
-            entry["billing_audit"]["request_id"] = self.request_id
-            entry["billing_audit"]["charge_group_id"] = self.request_id
+            if "/executions/by-key/" in kwargs["url"]:
+                execution_key = self.sent[0]["headers"]["idempotency-key"]
+                return br.ProviderResponse(200, {"x-deepline-idempotency-supported": "true"},
+                    json.dumps({"toolId": "firecrawl_scrape", "requestId": NATIVE_REQUEST_ID,
+                        "executionRecovery": {"idempotencyKey": execution_key, "state": "completed"}}).encode())
+            entry = {"id": "usage-row-1", "request_id": NATIVE_REQUEST_ID,
+                "provider": "firecrawl", "operation": "firecrawl_scrape",
+                "credits": self.billed_credits, "delta": -self.billed_credits,
+                "charge_state": "posted", "charge_finality": "final", "metadata": {}}
             return br.ProviderResponse(
                 200,
                 {"content-type": "application/json"},
-                json.dumps({"entries": [entry], "has_more": False}).encode(),
+                json.dumps({"recent": {"request_id": NATIVE_REQUEST_ID, "entries": [entry]}}).encode(),
             )
         raise AssertionError("unexpected provider request")
 
 
-def test_transport_loss_uses_pre_dispatch_caller_id_and_exact_ledger_cost():
+def test_transport_loss_uses_saved_execution_key_and_exact_request_cost():
     transport = LostFirecrawlResponseTransport(billed_credits=0.02)
     store = FakeLedgerStore(openrouter_capacity=49_945_650)
     broker, store, _ = make_broker(
@@ -152,7 +155,7 @@ def test_transport_loss_uses_pre_dispatch_caller_id_and_exact_ledger_cost():
     outbound = next(item for item in transport.sent if item["method"] == "POST")
     assert json.loads(outbound["body"])["payload"]["timeout"] == 25_000
 
-    assert [request["method"] for request in transport.sent] == ["POST", "GET"]
+    assert [request["method"] for request in transport.sent] == ["POST", "GET", "GET"]
     assert result.status == 502
     assert result.call["outcome"] == "settled"
     assert result.call["reserved_microusd"] == 49_945_650

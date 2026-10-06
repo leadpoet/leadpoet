@@ -11,7 +11,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Dict, List
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 import httpx
 import pytest
@@ -300,6 +300,13 @@ class FakeTransport:
             else:
                 status, payload = selected
                 response_headers = {}
+        if url.startswith(br.DEEPLINE_EXACT_BILLING_URL) and isinstance(payload, dict):
+            payload = dict(payload)
+            if isinstance(payload.get("recent"), dict):
+                payload["recent"] = dict(payload["recent"], request_id=parse_qs(urlparse(url).query)["request_id"][0])
+                payload["recent"]["entries"] = [dict(entry, id=entry.get("id", "usage-fixture"),
+                    charge_finality=entry.get("charge_finality", "final"))
+                    for entry in payload["recent"].get("entries", [])]
         if (
             "code.deepline.com" in url
             and url != br.DEEPLINE_BILLING_HISTORY_URL
@@ -743,7 +750,7 @@ def test_champion_retry_recognizes_durable_uncertain_account_evidence():
     assert replay.call["error_code"] == "miner_credentials_unavailable"
     assert replay.call["provider_status"] == 401
     assert replay.call["outcome"] == "uncertain"
-    assert len(transport.sent) == 1
+    assert len(transport.sent) == 2
 
 
 @pytest.mark.parametrize("provider_status", [401, 402, 403, 429, 503])
@@ -764,7 +771,7 @@ def test_ordinary_deepline_account_failure_retains_bound_evidence_only(
     )
     call = next(iter(store.calls.values()))
     assert call["kind"] == "uncertain"
-    assert len(transport.sent) == 1
+    assert len(transport.sent) == 2
     evidence = call["uncertain_doc"].get("account_failure_evidence")
     if funding_source == "miner_key" and provider_status in (401, 402, 403):
         assert result.call["error_code"] == "miner_credentials_unavailable"
@@ -876,6 +883,19 @@ def test_fallback_race_at_reservation_marks_run_before_returning():
     assert marked[0][1] == "openrouter"
 
 
+@pytest.fixture
+def legacy_no_key_deepline_call(monkeypatch):
+    """Exercise retained pre-key recovery independently of the new dispatch contract."""
+    monkeypatch.setattr(br, "_DEEPLINE_UNKEYED_TOOLS", frozenset(operations.DEEPLINE_TOOLS))
+    def legacy_readback(**arguments):
+        return arguments["request_id"], br._deepline_billing_readback(
+            transport=arguments["transport"], secret=arguments["secret"],
+            request_id=arguments["request_id"], operation=arguments["operation"],
+            reconciliation_deadline=arguments["reconciliation_deadline"],
+        )
+    monkeypatch.setattr(br, "_deepline_exact_readback", legacy_readback)
+
+
 def deepline_history_entry(
     request_id,
     operation,
@@ -895,7 +915,7 @@ def deepline_history_entry(
         "status": "completed",
         "billing_mode": "metered",
         "outcome": "success",
-        "delta": credits,
+        "delta": -credits,
     }
 
 
@@ -987,7 +1007,7 @@ def test_deepline_generic_http_403_is_a_replayable_request_refusal():
     assert result.call["error_code"] == "provider_request_refused"
     assert result.call["provider_status"] == 403
     assert result.call["actual_microusd"] == 0
-    assert result.call["cost_basis"] == "deepline_billing_history_failed_zero"
+    assert result.call["cost_basis"] == "deepline_exact_request_credits_x_0.10_usd"
     assert "champion_credential_attempts" not in result.call
     assert "provider_fallback_required" not in result.call
     assert marked == []
@@ -1789,7 +1809,7 @@ def test_contextdev_search_error_without_billing_stays_uncertain(tool, payload):
     assert result.call["error_code"] == "provider_unavailable"
     assert result.call["outcome"] == "uncertain"
     assert store.log == ["reserve", "dispatch", "uncertain"]
-    assert len(transport.sent) == 1
+    assert len(transport.sent) == 2
 
 
 def test_deepline_per_call_billing_settles_and_person_entities_are_dropped():
@@ -3732,6 +3752,7 @@ def test_non_openrouter_transport_failure_ignores_generation_identity():
         "reason": "transport_failure",
         "credential_fingerprint": br._credential_fingerprint(DL_KEY),
         "deepline_request_id": "ctx-tool-" + result.call["call_identity"][7:39],
+        "deepline_execution_key": "arena:" + result.call["call_identity"][7:],
         "deepline_operation": "exa_search",
         "transport_error_class": "ReadTimeout",
         "call_succeeded": False,
@@ -4016,6 +4037,7 @@ def test_successful_deepline_reply_without_billing_returns_sanitized_execute_res
         "reason": "missing_provider_cost",
         "credential_fingerprint": br._credential_fingerprint(DL_KEY),
         "deepline_request_id": "ctx-tool-" + result.call["call_identity"][7:39],
+        "deepline_execution_key": "arena:" + result.call["call_identity"][7:],
         "call_succeeded": True,
         "provider_status": 200,
         "body_bytes": len(body),
@@ -4136,6 +4158,7 @@ def test_score_completed_reply_without_bill_returns_sanitized_result_once():
         "reason": "missing_provider_cost",
         "credential_fingerprint": br._credential_fingerprint(DL_KEY),
         "deepline_request_id": "ctx-tool-" + result.call["call_identity"][7:39],
+        "deepline_execution_key": "arena:" + result.call["call_identity"][7:],
         "call_succeeded": True,
         "provider_status": 200,
         "body_bytes": len(body),
@@ -4152,7 +4175,7 @@ def test_score_completed_reply_without_bill_returns_sanitized_result_once():
 @pytest.mark.parametrize(
     ("body", "expected_methods"),
     (
-        (b'{"status":"completed","results":[]}', ["POST"]),
+        (b'{"status":"completed","results":[]}', ["POST", "GET"]),
         (
             b'{"job_id":"job-score-failed","status":"failed",'
             b'"error":{"code":"PROVIDER_FAILURE"}}',
@@ -4208,7 +4231,7 @@ def test_deepline_422_recovers_exact_failed_zero_from_billing_history():
     assert result.status == 422 and result.call["outcome"] == "settled"
     assert result.call["actual_microusd"] == 0
     assert store.calls[result.call["call_identity"]]["terminal"]["call_succeeded"] is False
-    assert result.call["cost_basis"] == "deepline_billing_history_failed_zero"
+    assert result.call["cost_basis"] == "deepline_exact_request_credits_x_0.10_usd"
     assert store.log == ["reserve", "dispatch", "settle"]
     assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
 
@@ -4354,9 +4377,9 @@ def test_deepline_5xx_without_exact_final_charge_remains_uncertain(envelope):
 @pytest.mark.parametrize(
     ("tool_error", "top_level_id", "expected_methods"),
     [
-        ({"requestId": "provider-or-deepline", "operation": "exa_search"}, None, ["POST"]),
+        ({"requestId": "provider-or-deepline", "operation": "exa_search"}, None, ["POST", "GET"]),
         ({"requestId": "nested-conflict", "operation": "exa_search"}, "top-level-id", ["POST", "GET"]),
-        ({"requestId": "nested-wrong-operation", "operation": "exa_contents"}, None, ["POST"]),
+        ({"requestId": "nested-wrong-operation", "operation": "exa_contents"}, None, ["POST", "GET"]),
     ],
 )
 def test_deepline_tool_error_request_id_is_not_used_as_billing_identity(
@@ -4408,14 +4431,14 @@ def test_deepline_synthetic_transport_response_keeps_full_liability_and_provenan
     assert_unpriced_uncertain(result)
     diagnostic = store.calls[result.call["call_identity"]]["uncertain_doc"]
     assert diagnostic["response_provenance"] == provenance
-    assert [sent["method"] for sent in transport.sent] == ["POST"]
+    assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
     replay = broker.execute(
         CONTEXT, operation_id="deepline.execute",
         parameters={"tool": "exa_search", "payload": {"query": "x"}},
         action_sequence=0, timeout_ms=1000,
     )
     assert replay.status == 409
-    assert [sent["method"] for sent in transport.sent] == ["POST"]
+    assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
 
 
 def test_deepline_credential_echo_provenance_contains_no_secret():
@@ -4432,7 +4455,7 @@ def test_deepline_credential_echo_provenance_contains_no_secret():
     assert diagnostic["response_provenance"] == "credential_echo"
     assert DL_KEY not in json.dumps(diagnostic)
     assert DL_KEY not in result.body.decode()
-    assert len(transport.sent) == 1
+    assert len(transport.sent) == 2
 
 
 def test_deepline_hunter_no_bill_502_without_job_id_settles_zero_and_returns_provider_error():
@@ -4721,6 +4744,7 @@ def test_real_deepline_free_company_search_malformed_billing_does_not_fall_back(
         "reason": "missing_provider_cost",
         "credential_fingerprint": br._credential_fingerprint(DL_KEY),
         "deepline_request_id": "ctx-tool-" + result.call["call_identity"][7:39],
+        "deepline_execution_key": "arena:" + result.call["call_identity"][7:],
         "call_succeeded": True,
         "provider_status": 200,
         "body_bytes": len(raw),
@@ -4771,7 +4795,7 @@ def test_real_deepline_paid_fixed_tool_recovers_zero_from_billing_history():
     assert result.status == 200 and result.call["outcome"] == "settled"
     assert result.call["reserved_microusd"] == 1_000
     assert result.call["actual_microusd"] == 0
-    assert result.call["cost_basis"] == "deepline_billing_history_credits_x_0.10_usd"
+    assert result.call["cost_basis"] == "deepline_exact_request_credits_x_0.10_usd"
     assert store.calls[result.call["call_identity"]]["actual"] == 0
     assert len(transport.sent) == 2
     assert 0 < transport.sent[1]["timeout"] <= (
@@ -4808,11 +4832,12 @@ def test_deepline_missing_native_billing_recovers_full_positive_history_charge()
     )
     assert result.status == 200 and result.call["outcome"] == "settled"
     assert result.call["actual_microusd"] == 14_000
-    assert result.call["cost_basis"] == "deepline_billing_history_credits_x_0.10_usd"
+    assert result.call["cost_basis"] == "deepline_exact_request_credits_x_0.10_usd"
     assert store.calls[result.call["call_identity"]]["actual"] == 14_000
     assert 0 < transport.sent[1]["timeout"] <= 30.0
 
 
+@pytest.mark.usefixtures("legacy_no_key_deepline_call")
 def test_deepline_large_unrelated_history_group_releases_dynamic_reservation():
     job_id = "iad1::free-history-after-large-group"
     envelope = {
@@ -5036,6 +5061,7 @@ def test_deepline_shared_history_cost_never_settles_one_request():
     assert len(transport.sent) == 2
 
 
+@pytest.mark.usefixtures("legacy_no_key_deepline_call")
 def test_deepline_billing_history_follows_forward_offset_without_poll_delay(monkeypatch):
     monkeypatch.setattr(
         br.time,
@@ -5085,6 +5111,7 @@ def test_deepline_billing_history_follows_forward_offset_without_poll_delay(monk
     assert store.calls[result.call["call_identity"]]["actual"] == 14_000
 
 
+@pytest.mark.usefixtures("legacy_no_key_deepline_call")
 def test_deepline_billing_history_keeps_polling_after_old_four_read_window(monkeypatch):
     elapsed = [0.0]
     monkeypatch.setattr(br.time, "monotonic", lambda: elapsed[0])
@@ -5138,6 +5165,7 @@ def test_deepline_billing_history_keeps_polling_after_old_four_read_window(monke
     assert store.calls[result.call["call_identity"]]["actual"] == 3_000
 
 
+@pytest.mark.usefixtures("legacy_no_key_deepline_call")
 def test_deepline_billing_history_stops_on_equal_nonadvancing_offset():
     job_id = "iad1::missing-after-equal-offset"
     envelope = {"job_id": job_id, "result": {"data": []}, "status": "completed"}
@@ -5160,6 +5188,7 @@ def test_deepline_billing_history_stops_on_equal_nonadvancing_offset():
     assert store.log == ["reserve", "dispatch", "uncertain"]
 
 
+@pytest.mark.usefixtures("legacy_no_key_deepline_call")
 def test_deepline_billing_history_scans_deeper_than_old_offset_limit(monkeypatch):
     sleeps = []
     monkeypatch.setattr(br.time, "sleep", sleeps.append)
@@ -5199,6 +5228,7 @@ def test_deepline_billing_history_scans_deeper_than_old_offset_limit(monkeypatch
     assert sleeps == [2.0, 2.0]
 
 
+@pytest.mark.usefixtures("legacy_no_key_deepline_call")
 def test_deepline_nonterminal_older_match_resets_offset_before_newest_refresh(monkeypatch):
     sleeps = []
     monkeypatch.setattr(br.time, "sleep", sleeps.append)
@@ -5228,6 +5258,7 @@ def test_deepline_nonterminal_older_match_resets_offset_before_newest_refresh(mo
     assert store.log == ["reserve", "dispatch", "settle"]
 
 
+@pytest.mark.usefixtures("legacy_no_key_deepline_call")
 def test_deepline_billing_history_accepts_exact_match_without_exhausting_pages():
     job_id = "iad1::match-on-full-account"
     envelope = {
@@ -5293,6 +5324,7 @@ def test_deepline_history_refresh_keeps_reconciliation_time_bound(monkeypatch, r
     assert all(0 < value <= min(request_seconds, 30.0) for value in transport.timeouts)
 
 
+@pytest.mark.usefixtures("legacy_no_key_deepline_call")
 def test_deepline_reconciles_after_paid_request_uses_full_provider_window(monkeypatch):
     elapsed = [0.0]
     monkeypatch.setattr(br.time, "monotonic", lambda: elapsed[0])
@@ -5349,6 +5381,7 @@ def test_deepline_reconciles_after_paid_request_uses_full_provider_window(monkey
     assert store.log == ["reserve", "dispatch", "settle"]
 
 
+@pytest.mark.usefixtures("legacy_no_key_deepline_call")
 def test_deepline_unresolved_reconciliation_stays_uncertain_after_bounded_extra_window(
     monkeypatch,
 ):
@@ -5523,6 +5556,7 @@ def test_deepline_invalid_or_conflicting_history_fails_closed(entries):
     assert sentinel.encode() not in result.body
 
 
+@pytest.mark.usefixtures("legacy_no_key_deepline_call")
 def test_deepline_pending_history_exhausts_bounded_reads_then_fails_closed(monkeypatch):
     monkeypatch.setattr(br.time, "sleep", lambda seconds: None)
     job_id = "iad1::pending-history"
@@ -5560,6 +5594,7 @@ def test_deepline_pending_history_exhausts_bounded_reads_then_fails_closed(monke
     assert "actual" not in store.calls[result.call["call_identity"]]
 
 
+@pytest.mark.usefixtures("legacy_no_key_deepline_call")
 def test_deepline_billing_history_transport_timeout_polls_then_fails_closed(monkeypatch):
     monkeypatch.setattr(br.time, "sleep", lambda seconds: None)
     job_id = "iad1::history-timeout"
@@ -5624,7 +5659,7 @@ def test_deepline_credential_in_job_id_is_not_persisted():
     assert result.status == 502 and result.call["outcome"] == "uncertain"
     assert "deepline_job_id" not in persisted["uncertain_doc"]
     assert DL_KEY not in json.dumps(persisted)
-    assert len(transport.sent) == 1
+    assert len(transport.sent) == 2
 
 
 def test_deepline_billing_history_credential_echo_is_never_exposed_or_persisted():
@@ -5757,6 +5792,7 @@ def test_dynamic_deepline_budget_busy_stops_at_the_reserve_deadline(monkeypatch)
     assert elapsed[0] == pytest.approx(operations.BUDGET_ADMISSION_MAX_SECONDS)
 
 
+@pytest.mark.usefixtures("legacy_no_key_deepline_call")
 def test_dynamic_deepline_admission_wait_does_not_consume_operation_window(monkeypatch):
     elapsed = [0.0]
     monkeypatch.setattr(br.time, "monotonic", lambda: elapsed[0])

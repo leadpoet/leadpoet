@@ -516,6 +516,31 @@ def build_service_from_environment(mode: str):
             openrouter_shared_gate=openrouter_shared_gate,
         )
 
+    def deepline_catalog_source(*, allow_people: bool = False) -> Mapping[str, Any]:
+        # Discovery is organizer-owned and happens once per frozen round. No
+        # submitted code receives credentials or chooses the upstream URL.
+        from lab_arena.deepline_catalog import fetch_catalog
+        import httpx
+        with httpx.Client(timeout=30.0, follow_redirects=False) as client:
+            def read_json(url: str, headers: Mapping[str, str]) -> Mapping[str, Any]:
+                with client.stream("GET", url, headers={
+                    "Authorization": "Bearer " + provider_keys["deepline"],
+                    **dict(headers),
+                }) as response:
+                    response.raise_for_status()
+                    chunks = []
+                    size = 0
+                    for chunk in response.iter_bytes():
+                        size += len(chunk)
+                        if size > 32 * 1024 * 1024:
+                            raise ServiceError("deepline_catalog_too_large", 503)
+                        chunks.append(chunk)
+                    document = json.loads(b"".join(chunks))
+                    if not isinstance(document, dict):
+                        raise ServiceError("deepline_catalog_invalid", 503)
+                    return document
+            return fetch_catalog(read_json=read_json, allow_people=allow_people)
+
     def daily_icp_source(*, set_id: int, active_at: datetime) -> Mapping[str, Any]:
         del active_at  # the database function uses its own UTC statement time
         return store.current_daily_icp_set(set_id)
@@ -523,6 +548,7 @@ def build_service_from_environment(mode: str):
     config = ServiceConfig(
         mode=mode, store=store, object_store=objects, signer=None, chain=chain_reads, verify_signature=chain_module.verify_hotkey_signature,
         daily_icp_source=daily_icp_source,
+        deepline_catalog_source=deepline_catalog_source,
         banned_hotkeys_source=banned_hotkeys_from_environment, broker_factory=broker_factory, defaults=defaults,
         baseline_source_fetcher=fetch_public_source_archive,
         credential_manager=credential_manager,

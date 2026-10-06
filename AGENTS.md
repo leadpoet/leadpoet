@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: October 6 Deepline integration
+
+The user authorized exact-request Deepline settlement, durable idempotency and
+execution recovery, round-frozen safe public research catalogs and pricing,
+and removing Deepline call-count caps while retaining confirmed-cost budgets.
+Use $overnight-rebenchmark-validation for protected inspection, narrow changes,
+exact committed migrations, tests, push/merge, canonical paired deployment and
+reward-disabled production probes. Preserve frozen rounds, accepted work,
+provider credential isolation, qualification, scoring, rewards and weights.
+Do not add monetary holds or treat unknown billing as confirmed free usage.
+Authority ends after live end-to-end verification.
+
 ## Scoped production authorization: October 6 company-local judge recovery
 
 The user authorized fixing the confirmed judge-error classification defect,

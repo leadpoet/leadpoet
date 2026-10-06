@@ -228,12 +228,14 @@ def validate_quota_snapshot(value: Any) -> dict[str, Any]:
         if (
             any(
                 isinstance(item, bool) or not isinstance(item, int)
-                for item in (limit, used, remaining, inflight)
+                for item in (limit, used, inflight)
             )
-            or limit < 1
             or used < 0
-            or used > limit
-            or remaining != limit - used
+            or not (
+                provider == "deepline" and limit == 0 and remaining is None
+                or limit >= 1 and type(remaining) is int
+                and used <= limit and remaining == limit - used
+            )
             or inflight < 0
             or inflight > used
         ):

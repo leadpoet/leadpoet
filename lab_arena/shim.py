@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+from functools import lru_cache
 import json
 import os
 import re
@@ -66,6 +67,7 @@ SHIM_IMAGE_MODULES = (
     "lab_arena/__init__.py",
     "lab_arena/contracts.py",
     "lab_arena/operations.py",
+    "lab_arena/deepline_catalog.py",
     "lab_arena/shim.py",
 )
 FRAME_ERROR_CODES = frozenset(
@@ -123,6 +125,25 @@ class OperationFrameError(ShimError):
 # ---------------------------------------------------------------------------
 
 
+def _input_deepline_catalog() -> Optional[Mapping[str, Any]]:
+    return _read_input_deepline_catalog(os.environ.get("LAB_ARENA_INPUT_PATH", "/input/icp.json"))
+
+
+@lru_cache(maxsize=4)
+def _read_input_deepline_catalog(path: str) -> Optional[Mapping[str, Any]]:
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(16 * 1024 * 1024 + 1)
+        if len(raw) > 16 * 1024 * 1024:
+            raise ShimRequestError("invalid_request")
+        document = json.loads(raw)
+        return document.get("deepline_catalog") if isinstance(document, dict) else None
+    except FileNotFoundError:
+        return None
+    except (ValueError, OSError):
+        raise ShimRequestError("invalid_request") from None
+
+
 def build_operation_frame(operation_id: str, parameters: Mapping[str, Any], timeout_ms: int) -> bytes:
     """Encode one request frame; ``parameters`` must already be normalized."""
 
@@ -143,7 +164,7 @@ def build_operation_frame(operation_id: str, parameters: Mapping[str, Any], time
     return encoded
 
 
-def validate_operation_frame(frame: Any) -> Tuple[str, Dict[str, Any], int]:
+def validate_operation_frame(frame: Any, *, deepline_catalog: Optional[Mapping[str, Any]] = None) -> Tuple[str, Dict[str, Any], int]:
     """Worker-side frame check: exact keys, known operation, bounded timeout,
     and a full re-validation of the parameters. Extra keys such as
     ``round_id``, ``lease_token`` or ``miner`` are rejected outright."""
@@ -161,18 +182,18 @@ def validate_operation_frame(frame: Any) -> Tuple[str, Dict[str, Any], int]:
         raise OperationFrameError("invalid_frame")
     if not 1 <= timeout_ms <= operation.timeout_seconds * 1000:
         raise OperationFrameError("invalid_frame")
-    parameters = operations.validate_operation_request(operation_id, frame["parameters"])
+    parameters = operations.validate_operation_request(operation_id, frame["parameters"], deepline_catalog=deepline_catalog)
     return operation_id, parameters, timeout_ms
 
 
-def decode_operation_frame(data: bytes) -> Tuple[str, Dict[str, Any], int]:
+def decode_operation_frame(data: bytes, *, deepline_catalog: Optional[Mapping[str, Any]] = None) -> Tuple[str, Dict[str, Any], int]:
     if len(data) > MAX_FRAME_BYTES:
         raise OperationFrameError("frame_too_large")
     try:
         frame = json.loads(bytes(data).decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
         raise OperationFrameError("invalid_frame") from exc
-    return validate_operation_frame(frame)
+    return validate_operation_frame(frame, deepline_catalog=deepline_catalog)
 
 
 def encode_worker_response(status: int, headers: Mapping[str, str], body: bytes) -> bytes:
@@ -340,7 +361,7 @@ def _execute_with_response_url(
     if trusted:
         url, headers = strip_caller_credentials(url, headers)
     try:
-        operation_id, parameters = operations.match_request(method, url, body, headers)
+        operation_id, parameters = operations.match_request(method, url, body, headers, deepline_catalog=_input_deepline_catalog())
     except operations.OperationError as exc:
         page_fetch = _trusted_page_fetch(method, url, body) if trusted and exc.code == "no_matching_operation" else None
         if page_fetch is None:

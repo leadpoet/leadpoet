@@ -2438,7 +2438,7 @@ class WorkerSocketServer:
             return control_response
 
         try:
-            operation_id, parameters, timeout_ms = shim.decode_operation_frame(raw)
+            operation_id, parameters, timeout_ms = shim.decode_operation_frame(raw, deepline_catalog=self._state.lease.get("deepline_catalog"))
         except shim.OperationFrameError as exc:
             return shim.encode_worker_error(str(exc) if str(exc) in shim.FRAME_ERROR_CODES else "invalid_frame")
         except operations.OperationError as exc:
@@ -2470,7 +2470,7 @@ class WorkerSocketServer:
         """The miner contract: a provider's own HTTP request, sent over the socket without a credential."""
 
         try:
-            operation_id, parameters = operations.match_request(method, url, body, headers)
+            operation_id, parameters = operations.match_request(method, url, body, headers, deepline_catalog=self._state.lease.get("deepline_catalog"))
         except operations.OperationError as exc:
             code = getattr(exc, "code", "invalid_request")
             return HTTP_ERROR_STATUS.get(code, 400), {}, _http_error_body(code)
@@ -3087,6 +3087,8 @@ class AssignmentExecutor:
                     )
                 if lease.get("scrapingdog_configured") is True:
                     extra_environment["SCRAPINGDOG_API_KEY"] = operations.SCRAPINGDOG_RUNTIME_HANDLE
+            if lease.get("deepline_catalog") is not None:
+                input_document["deepline_catalog"] = lease["deepline_catalog"]
             (input_dir / runtime.INPUT_FILE_NAME).write_text(json.dumps(input_document, sort_keys=True), encoding="utf-8")
             staged_agent_entrypoint = (
                 None

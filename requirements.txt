@@ -83,3 +83,4 @@ geonamescache>=2.0.0  # 786k+ city name variations (offline, no rate limits)
 trafilatura>=1.6.0
 lxml_html_clean>=0.1.0
 idna>=3.4
+jsonschema==4.25.1

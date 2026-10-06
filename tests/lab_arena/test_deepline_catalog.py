@@ -147,13 +147,13 @@ def test_local_metadata_operations_leave_legacy_table_unchanged():
         operations.match_request("GET", "https://code.deepline.com/api/v2/tools", None, {})
 
 
-@pytest.mark.parametrize("sql", ["SELECT * FROM companies WHERE company_name = 'Update, delete and create' LIMIT 5", "SELECT * FROM companies WHERE company_name = 'O''Reilly' LIMIT 5", "SELECT industry, COUNT(*) FROM companies GROUP BY industry LIMIT 25"])
+@pytest.mark.parametrize("sql", ["SELECT * FROM companies WHERE company_name = 'Update, delete and create' LIMIT 5", "SELECT * FROM companies WHERE company_name = 'O''Reilly' LIMIT 5", "SELECT industry, COUNT(*) FROM companies GROUP BY industry LIMIT 25", "SELECT normalized_domain FROM companies WHERE LOWER(industry) IN ('software','solar') AND COALESCE(employee_count,0)>10 LIMIT 5", "SELECT industry, ROUND(AVG(employee_count),0) FROM companies GROUP BY industry LIMIT 5"])
 def test_public_corpus_sql_allows_literals_and_aggregates(sql):
     company = row(provider="deepline_native", inputSchema={"type": "object", "properties": {"sql": {"type": "string"}}, "required": ["sql"]})
     assert catalog.validate_payload(frozen(company), company["toolId"], {"sql": sql})["sql"] == sql
 
 
-@pytest.mark.parametrize("sql", ["DELETE FROM companies LIMIT 1", "SELECT * FROM private.companies LIMIT 1", "SELECT * FROM contacts LIMIT 1", "SELECT * FROM companies; DELETE FROM companies", "SELECT * FROM companies -- LIMIT 1", "SELECT * FROM companies /* */ LIMIT 1", "SELECT * INTO saved FROM companies LIMIT 1", "SELECT * FROM companies UNION SELECT * FROM contacts LIMIT 1", "SELECT * FROM companies LIMIT 100001"])
+@pytest.mark.parametrize("sql", ["DELETE FROM companies LIMIT 1", "SELECT * FROM private.companies LIMIT 1", "SELECT * FROM contacts LIMIT 1", "SELECT * FROM companies; DELETE FROM companies", "SELECT * FROM companies -- LIMIT 1", "SELECT * FROM companies /* */ LIMIT 1", "SELECT * INTO saved FROM companies LIMIT 1", "SELECT * FROM companies UNION SELECT * FROM contacts LIMIT 1", "SELECT * FROM companies LIMIT 100001", "SELECT pg_read_file('/etc/passwd') FROM companies LIMIT 1", "SELECT read_csv('https://private.example/data') FROM companies LIMIT 1", "SELECT pg_catalog.pg_read_file('/etc/passwd') FROM companies LIMIT 1", "SELECT dblink('private_db','SELECT * FROM contacts') FROM companies LIMIT 1", "SELECT load_extension('unsafe') FROM companies LIMIT 1", "SELECT * FROM companies, contacts LIMIT 1", "SELECT * FROM companies c, contacts p LIMIT 1"])
 def test_public_corpus_sql_blocks_writes_and_private_tables(sql):
     company = row(provider="deepline_native", inputSchema={"type": "object", "properties": {"sql": {"type": "string"}}, "required": ["sql"]})
     with pytest.raises(catalog.CatalogError):
@@ -201,3 +201,27 @@ def test_cache_cannot_hide_mutations_or_leak_mutable_authority():
     snapshot["tools"][0]["pricing"]["usd_per_unit"] = 99
     with pytest.raises(catalog.CatalogError):
         catalog.validate_catalog(snapshot)
+
+
+def test_dynamic_pricing_hints_survive_freeze_discovery_and_invalidate_hash():
+    document = json.loads((Path(__file__).parent / "fixtures/deepline/catalog_research.json").read_text())
+    snapshot = catalog.freeze_catalog(document)
+    source = next(row for row in document["tools"] if row["toolId"] == "firecrawl_batch_scrape")
+    entry = catalog.tool_entry(snapshot, "firecrawl_batch_scrape")
+    assert entry["pricing"]["usd_per_unit"] is None
+    for key in ("displayText", "summary", "details"):
+        assert entry["pricing"][key] == source["pricing"][key]
+    assert snapshot == catalog.validate_catalog(json.loads(json.dumps(snapshot)))
+    assert catalog.public_tool_definition(entry)["pricing"] == source["pricing"]
+    assert catalog.public_tool_definition(entry, compact=True)["pricing"] == source["pricing"]
+    source["pricing"]["details"].append("A new rate applies.")
+    assert catalog.freeze_catalog(document)["catalog_hash"] != snapshot["catalog_hash"]
+
+
+@pytest.mark.parametrize("hints", [{"displayText": {}}, {"summary": 12}, {"details": "Free"}, {"details": [None]}, {"details": ["rate"] * 65}])
+def test_malformed_pricing_hints_rejected(hints):
+    pricing = row()["pricing"]
+    pricing.update(hints)
+    with pytest.raises(catalog.CatalogError):
+        frozen(row(pricing=pricing))
+    assert catalog.allowed_tool_ids(frozen(row("safe_company_search"), row(pricing=pricing))) == ("safe_company_search",)

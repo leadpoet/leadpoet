@@ -29,6 +29,7 @@ _PRIVATE_PROVIDERS = frozenset({"affinity", "attio", "hubspot", "salesforce", "p
 _SECRET_FIELDS = frozenset({"authorization", "auth", "api_key", "apikey", "access_token", "token", "secret", "password", "cookie", "cookies", "credentials", "headers", "proxy", "proxies", "webhook", "callback_url", "script", "code", "command", "workflow", "actions", "tools", "actor_id", "actor_input", "dataset_id"})
 _PERSON_FIELDS = frozenset({"person", "people", "persons", "contact", "contacts", "email", "emails", "phone", "phones", "phone_number", "first_name", "last_name", "full_name", "person_id", "contact_id", "profile", "profiles", "profile_id", "profile_url", "public_identifier", "linkedin_handle", "person_url", "member_id", "mentioning_member", "user_id", "user_ids", "username", "screen_name"})
 _PERSON_FLAGS = frozenset({"find_email", "include_emails", "include_email", "include_phones", "include_phone", "include_contacts", "include_people", "enrich_people", "enrich_contacts"})
+_COMPANY_SQL_FUNCTIONS = frozenset({"COUNT", "SUM", "MIN", "MAX", "AVG", "LOWER", "UPPER", "LENGTH", "CHAR_LENGTH", "TRIM", "LTRIM", "RTRIM", "COALESCE", "NULLIF", "ROUND", "ABS", "CEIL", "CEILING", "FLOOR", "SUBSTRING", "SUBSTR", "REPLACE", "CONCAT", "CAST"})
 
 
 class CatalogError(ValueError):
@@ -110,12 +111,27 @@ def _rate(value: Any) -> Any:
 
 def _pricing(row: Mapping[str, Any]) -> dict[str, Any]:
     pricing = row.get("pricing") if isinstance(row.get("pricing"), dict) else {}
+    # Variable-rate tools describe their rate in text. Freeze these hints too;
+    # they guide research but are never treated as confirmed billing amounts.
+    hints = {}
+    for key in ("displayText", "summary"):
+        if key in pricing:
+            value = pricing[key]
+            if value is not None and (not isinstance(value, str) or len(value) > 16_384):
+                raise CatalogError("invalid_pricing_hint")
+            hints[key] = value
+    if "details" in pricing:
+        details = pricing["details"]
+        if not isinstance(details, list) or len(details) > 64 or any(not isinstance(value, str) or len(value) > 16_384 for value in details):
+            raise CatalogError("invalid_pricing_hint")
+        hints["details"] = _copy(details)
     return {
         "unit": pricing.get("unit") if pricing.get("unit") in {"call", "request", "result", "page", "usage"} else None,
         "usd_per_unit": _rate(pricing.get("usdPerUnit", pricing.get("usd_per_unit", row.get("deeplineUsdPerPricingUnit")))),
         "credits_per_unit": _rate(pricing.get("creditsPerUnit", pricing.get("credits_per_unit", row.get("deeplineCreditsPerPricingUnit")))),
         "currency": pricing.get("currency", "USD"),
         "billing_source": row.get("billingSource", row.get("billing_source")),
+        **hints,
     }
 
 
@@ -172,7 +188,13 @@ def _company_sql(value: Any) -> None:
     if words & {"INSERT", "UPDATE", "DELETE", "MERGE", "DROP", "ALTER", "CREATE", "COPY", "CALL", "EXECUTE", "GRANT", "REVOKE", "INTO", "UNION", "JOIN", "WITH", "EXPLAIN", "INFORMATION_SCHEMA"}:
         raise CatalogError("invalid_public_company_sql")
     tables = re.findall(r"\bFROM\s+([\w.]+)", statement, re.I)
-    if not tables or any(table.lower() != "companies" for table in tables) or re.search(r"\bFROM\s+companies\s*,", statement, re.I):
+    if not tables or any(table.lower() != "companies" for table in tables) or re.search(r"\bFROM\s+companies\b(?!\s*(?:WHERE\b|GROUP\b|HAVING\b|ORDER\b|LIMIT\b|OFFSET\b|\)|$))", statement, re.I):
+        raise CatalogError("invalid_public_company_sql")
+    # SELECT is not itself a read-only boundary: SQL functions can read local
+    # files, reach other databases, or perform writes. Permit only common
+    # scalar/aggregate company filters, with no schema-qualified functions.
+    functions = re.findall(r"\b([A-Za-z_][A-Za-z0-9_.]*)\s*\(", statement)
+    if any(name.upper() not in _COMPANY_SQL_FUNCTIONS | {"IN"} for name in functions):
         raise CatalogError("invalid_public_company_sql")
     limits = re.findall(r"\bLIMIT\s+(\d+)\b", statement, re.I)
     if not limits or any(not 1 <= int(limit) <= 100_000 for limit in limits):
@@ -241,7 +263,10 @@ def freeze_catalog(document: Mapping[str, Any], allow_people: bool = False) -> d
             continue
         if "sql" in schema["properties"] and not (row["provider"] == "deepline_native" and "company_search" in row["categories"]):
             continue
-        pricing = _pricing(row)
+        try:
+            pricing = _pricing(row)
+        except CatalogError:
+            continue
         if pricing["currency"] != "USD":
             continue
         aliases = row.get("operationAliases", [])
@@ -287,7 +312,7 @@ def _validated(encoded: str) -> dict[str, Any]:
     try:
         rows = []
         for row in snapshot.get("tools", []):
-            rows.append({"toolId": row["tool_id"], "provider": row["provider"], "operationAliases": row["operation_aliases"], "categories": row["categories"], "description": row["description"], "inputSchema": row["input_schema"], "pricing": {"unit": row["pricing"]["unit"], "usdPerUnit": row["pricing"]["usd_per_unit"], "creditsPerUnit": row["pricing"]["credits_per_unit"], "currency": row["pricing"]["currency"]}, "billingSource": row["pricing"]["billing_source"]})
+            rows.append({"toolId": row["tool_id"], "provider": row["provider"], "operationAliases": row["operation_aliases"], "categories": row["categories"], "description": row["description"], "inputSchema": row["input_schema"], "pricing": _public_pricing(row["pricing"]), "billingSource": row["pricing"]["billing_source"]})
             if "async_flow" in row:
                 flow = row["async_flow"]
                 rows[-1]["asyncFlow"] = {"startAction": flow["start_action"], "pollActions": flow["poll_actions"], "finishAction": None}
@@ -319,6 +344,10 @@ def allowed_tool_ids(snapshot: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(row["tool_id"] for row in _validated(_encoded(snapshot))["tools"])
 
 
+def _public_pricing(pricing: Mapping[str, Any]) -> dict[str, Any]:
+    return {"unit": pricing["unit"], "usdPerUnit": pricing["usd_per_unit"], "creditsPerUnit": pricing["credits_per_unit"], "currency": pricing["currency"], **{key: _copy(pricing[key]) for key in ("displayText", "summary", "details") if key in pricing}}
+
+
 def public_tool_definition(entry: Mapping[str, Any], *, compact: bool = False) -> dict[str, Any]:
     """Return the official CLI's public discovery shape, from frozen data."""
     entry = _copy(entry)
@@ -327,7 +356,7 @@ def public_tool_definition(entry: Mapping[str, Any], *, compact: bool = False) -
         "description": entry["description"], "categories": entry["categories"],
         "operationAliases": entry["operation_aliases"],
         "inputSchema": {"jsonSchema": entry["input_schema"]},
-        "pricing": {"unit": entry["pricing"]["unit"], "usdPerUnit": entry["pricing"]["usd_per_unit"], "creditsPerUnit": entry["pricing"]["credits_per_unit"], "currency": entry["pricing"]["currency"]},
+        "pricing": _public_pricing(entry["pricing"]),
         "billingSource": entry["pricing"]["billing_source"],
         "callable": True, "connected": True, "credentialStatus": "managed",
     }

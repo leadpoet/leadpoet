@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import threading
 import time
@@ -130,6 +131,12 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_scorer_image_digest", "text"),
         ("p_scorer_image_reference", "text"),
     ),
+    "lab_arena_commit_round_v3": (
+        ("p_round_id", "text"), ("p_participants", "jsonb"),
+        ("p_benchmark_ref", "text"), ("p_evaluation_date", "text"),
+        ("p_icp_set_date", "date"), ("p_scorer_image_digest", "text"),
+        ("p_scorer_image_reference", "text"), ("p_deepline_catalog", "jsonb"),
+    ),
     "lab_arena_create_round": (("p_round_id", "text"), ("p_configuration_doc", "jsonb")),
     "lab_arena_transition_round": (("p_round_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
     "lab_arena_activate_reward": (("p_round_id", "text"), ("p_reward_basis", "jsonb"), ("p_signing_key_doc", "jsonb")),
@@ -214,6 +221,14 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_credential_fingerprint", "text"),
         ("p_actual_microusd", "bigint"),
         ("p_cost_units", "text"),
+    ),
+    "lab_arena_reconcile_deepline_cost_v2": (
+        ("p_round_id", "text"), ("p_run_id", "text"),
+        ("p_call_identity", "text"), ("p_uncertain_entry_id", "bigint"),
+        ("p_request_id", "text"), ("p_operation", "text"),
+        ("p_credential_fingerprint", "text"), ("p_actual_microusd", "bigint"),
+        ("p_cost_units", "text"), ("p_execution_key", "text"),
+        ("p_recovered_request_id", "text"),
     ),
     "lab_arena_complete_attempt": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_result", "jsonb"), ("p_terminal_cause", "text"), ("p_output_ref", "text")),
     "lab_arena_complete_attempt_v2": (
@@ -318,6 +333,7 @@ class StoreTransport:
         limit: Optional[int] = None,
         offset: Optional[int] = None,
         after_run_id: Optional[str] = None,
+        after_entry_id: Optional[int] = None,
         status_in: Optional[Sequence[str]] = None,
         columns: str = "*",
     ) -> List[Dict[str, Any]]:  # pragma: no cover - interface
@@ -461,6 +477,7 @@ class PostgrestTransport(StoreTransport):
         limit=None,
         offset=None,
         after_run_id=None,
+        after_entry_id=None,
         status_in=None,
         columns="*",
     ):
@@ -470,7 +487,13 @@ class PostgrestTransport(StoreTransport):
         for key, value in (filters or {}).items():
             if key not in (ROUND_MODE_FILTER, PROMOTION_OUTCOME_FILTER) and not key.replace("_", "").isalnum():
                 raise ArenaStoreError("invalid filter column")
-            query.append((key, "is.null" if value is None else "eq." + _check_filter_value(value)))
+            if key == "operation_id" and value is not None:
+                operation = str(value)
+                if not re.fullmatch(r"[a-z0-9_.]{1,64}", operation):
+                    raise ArenaStoreError("invalid operation filter")
+                query.append((key, "eq." + operation))
+            else:
+                query.append((key, "is.null" if value is None else "eq." + _check_filter_value(value)))
         if status_in is not None:
             if table != "lab_arena_rounds" or "status" in (filters or {}):
                 raise ArenaStoreError("status inclusion filter is invalid")
@@ -491,6 +514,12 @@ class PostgrestTransport(StoreTransport):
             if table != "lab_arena_runs" or order != "run_id" or "run_id" in (filters or {}):
                 raise ArenaStoreError("run cursor requires ordered Arena runs")
             query.append(("run_id", "gt." + _check_filter_value(after_run_id)))
+        if after_entry_id is not None:
+            if (table != "lab_arena_ledger" or order != "entry_id"
+                    or descending or "entry_id" in (filters or {})
+                    or type(after_entry_id) is not int or after_entry_id < 0):
+                raise ArenaStoreError("ledger cursor requires ordered Arena ledger")
+            query.append(("entry_id", "gt." + str(after_entry_id)))
         # Only SELECT is safe to replay after an ambiguous read failure.
         # RPCs can mutate state and retain their separate retry policy.
         for attempt in range(2):
@@ -633,6 +662,7 @@ class PsycopgTransport(StoreTransport):
         limit=None,
         offset=None,
         after_run_id=None,
+        after_entry_id=None,
         status_in=None,
         columns="*",
     ):
@@ -667,6 +697,13 @@ class PsycopgTransport(StoreTransport):
                 raise ArenaStoreError("run cursor requires ordered Arena runs")
             clauses.append("run_id > %s")
             values.append(_check_filter_value(after_run_id))
+        if after_entry_id is not None:
+            if (table != "lab_arena_ledger" or order != "entry_id"
+                    or descending or "entry_id" in (filters or {})
+                    or type(after_entry_id) is not int or after_entry_id < 0):
+                raise ArenaStoreError("ledger cursor requires ordered Arena ledger")
+            clauses.append("entry_id > %s")
+            values.append(after_entry_id)
         sql = "SELECT row_to_json(t) FROM (SELECT %s FROM public.%s" % (columns, table)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
@@ -780,7 +817,7 @@ class ArenaStore:
             "openrouter",
         }:
             raise ArenaStoreError("run quota snapshot schema mismatch")
-        for counters in providers.values():
+        for provider, counters in providers.items():
             if not isinstance(counters, Mapping) or set(counters) != {
                 "limit",
                 "used",
@@ -792,15 +829,16 @@ class ArenaStore:
             used = counters.get("used")
             remaining = counters.get("remaining")
             inflight = counters.get("inflight")
+            unlimited = provider == "deepline" and limit == 0
             if (
-                any(
-                    isinstance(value, bool) or not isinstance(value, int)
-                    for value in (limit, used, remaining, inflight)
-                )
-                or limit < 1
+                any(isinstance(value, bool) or not isinstance(value, int)
+                    for value in (limit, used, inflight))
+                or (unlimited and remaining is not None)
+                or (not unlimited and (
+                    isinstance(remaining, bool) or not isinstance(remaining, int)
+                    or limit < 1 or used > limit or remaining != limit - used
+                ))
                 or used < 0
-                or used > limit
-                or remaining != limit - used
                 or inflight < 0
                 or inflight > used
             ):
@@ -1108,12 +1146,14 @@ class ArenaStore:
         icp_set_date: str,
         scorer_image_digest: str,
         scorer_image_reference: str,
+        deepline_catalog: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Atomically commit an explicit Day 0 bank date for new-policy rounds."""
 
         return _require_mapping(
             self._transport.rpc(
-                "lab_arena_commit_round_v2",
+                ("lab_arena_commit_round_v3" if deepline_catalog is not None
+                 else "lab_arena_commit_round_v2"),
                 {
                     "p_round_id": round_id,
                     "p_participants": [dict(item) for item in participants],
@@ -1122,6 +1162,8 @@ class ArenaStore:
                     "p_icp_set_date": icp_set_date,
                     "p_scorer_image_digest": scorer_image_digest,
                     "p_scorer_image_reference": scorer_image_reference,
+                    **({"p_deepline_catalog": dict(deepline_catalog)}
+                       if deepline_catalog is not None else {}),
                 },
             ),
             "commit_round_v2",
@@ -1830,10 +1872,15 @@ class ArenaStore:
         credential_fingerprint: str,
         actual_microusd: int,
         cost_units: str,
+        execution_key: Optional[str] = None,
+        recovered_request_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        if (execution_key is None) != (recovered_request_id is None):
+            raise ArenaStoreError("Deepline execution recovery requires key and request ID")
         return _require_mapping(
             self._transport.rpc(
-                "lab_arena_reconcile_deepline_cost_v1",
+                ("lab_arena_reconcile_deepline_cost_v2" if execution_key is not None
+                 else "lab_arena_reconcile_deepline_cost_v1"),
                 {
                     "p_round_id": str(round_id),
                     "p_run_id": str(run_id),
@@ -1844,6 +1891,9 @@ class ArenaStore:
                     "p_credential_fingerprint": str(credential_fingerprint),
                     "p_actual_microusd": int(actual_microusd),
                     "p_cost_units": str(cost_units),
+                    **({"p_execution_key": str(execution_key),
+                        "p_recovered_request_id": str(recovered_request_id)}
+                       if execution_key is not None else {}),
                 },
             ),
             "reconcile_deepline_cost",
@@ -2073,6 +2123,8 @@ class ArenaStore:
         submission_id: Optional[str] = None,
         provider: Optional[str] = None,
         entry_kind: Optional[str] = None,
+        operation_id: Optional[str] = None,
+        after_entry_id: Optional[int] = None,
         limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         filters: Dict[str, Any] = {}
@@ -2086,6 +2138,8 @@ class ArenaStore:
             filters["submission_id"] = submission_id
         if provider:
             filters["provider"] = provider
+        if operation_id:
+            filters["operation_id"] = operation_id
         if entry_kind:
             filters["entry_kind"] = entry_kind
         if limit is not None and (
@@ -2098,6 +2152,10 @@ class ArenaStore:
         }
         if limit is not None:
             arguments["limit"] = limit
+        if after_entry_id is not None:
+            if type(after_entry_id) is not int or after_entry_id < 0:
+                raise ArenaStoreError("ledger cursor must be nonnegative")
+            arguments["after_entry_id"] = after_entry_id
         return self._transport.select("lab_arena_ledger", **arguments)
 
     def submission_costs(self, submission_id: str) -> Dict[str, Any]:

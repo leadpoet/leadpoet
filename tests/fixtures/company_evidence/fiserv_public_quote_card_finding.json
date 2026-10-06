@@ -1,0 +1,26 @@
+{
+  "findings": [
+    {
+      "activity_role": "supplier_operator",
+      "evidence_quote": "Fiserv Announces Transfer of Stock Exchange Listing to Nasdaq - Fiserv, Inc. Skip to content NASDAQ: FISV $45.85",
+      "evidence_url": "https://investors.fiserv.com/news-releases/news-release-details/fiserv-announces-transfer-stock-exchange-listing-nasdaq",
+      "new_domain": "fiserv.com",
+      "new_name": "Fiserv",
+      "observed_country": "United States",
+      "observed_industry": "Payments and financial technology",
+      "observed_state": "Wisconsin",
+      "observed_subindustry": "merchant acquiring and processing",
+      "observed_value": "Public",
+      "old_domain": "fiserv.com",
+      "old_name": "Fiserv",
+      "reason": "The company\u2019s current investor-relations announcement page displays Fiserv, Inc. together with NASDAQ ticker FISV; it also reports the transfer of its common-stock listing to Nasdaq, with trading expected to begin November 11, 2025. The current-stage discovery revealed no completed take-private, delisting, or controlling acquisition.",
+      "shared_linkedin_slug": "fiserv",
+      "status": "VERIFIED",
+      "supporting_evidence_quote_1": "",
+      "supporting_evidence_quote_2": "",
+      "supporting_evidence_url_1": "",
+      "supporting_evidence_url_2": "",
+      "target": "stage"
+    }
+  ]
+}

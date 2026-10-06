@@ -1,5 +1,16 @@
 # Agent Instructions
 
+## Scoped production authorization: October 6 company-local judge recovery
+
+The user authorized fixing the confirmed judge-error classification defect,
+pushing and deploying the narrow fix, then monitoring production. Use the
+$overnight-rebenchmark-validation deployment and protected inspection paths.
+Test captured affected cases and positive/negative controls. Preserve company
+qualification, valid sibling scores, provider-fault retries, frozen policies,
+accepted results, credentials, costs, promotion, weights and operator controls.
+Use reward-disabled saved-output scoring probes; do not rewrite published
+scores or restart a completed round. Authority ends after live verification.
+
 ## Scoped production authorization: PR217 diagnostics and dashboard dates
 
 On 2026-10-06 the user authorized review, narrow fixes, merge and deployment

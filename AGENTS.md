@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: independent October 5/6 continuity audit
+
+The user authorized a separate full-path Arena production audit while another
+chat owns the claim-completion outage. Inspect protected logs, state, provider
+receipts and runtime evidence; fix only additional confirmed bugs with narrow
+changes, focused tests, exact committed migrations, safe push/merge and canonical
+paired deployment through the overnight procedures. Verify ongoing queued work,
+recovery, scoring, publication and weights. Preserve concurrent work, accepted
+outputs, frozen inputs, credentials, accounting, qualification, rewards and
+operator controls. Do not duplicate the other chat's recovery or fabricate runs,
+completions or scores. Authority ends after this audit and its fixes are verified.
+
 ## Scoped production authorization: October 6 idle-work recovery
 
 On 2026-10-05/06 the user authorized tracing the reported eight-hour Arena

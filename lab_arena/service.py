@@ -678,7 +678,7 @@ class ArenaService:
         self._brokers: Dict[str, broker_module.Broker] = {}
         self._openrouter_reconciliation_after: Dict[Tuple[str, str], int] = {}
         self._deepline_reconciliation_after: Dict[Tuple[str, str], int] = {}
-        self._closed_deepline_reconciliation_after = 0
+        self._closed_provider_reconciliation_after = 0
         self._completed_scores_lock = threading.Lock()
         self._completed_scores_cache: Dict[str, Dict[str, Any]] = {}
         self._completed_scores_refresh_slots = threading.BoundedSemaphore(2)
@@ -4436,17 +4436,22 @@ class ArenaService:
     def reconcile_closed_provider_costs(self) -> Dict[str, Any]:
         """Check one closed judge call; missing billing never blocks a round."""
         network_name, netuid = self._chain_scope()
-        candidate = self._store.next_closed_deepline_reconciliation(
+        candidate = self._store.next_closed_provider_reconciliation(
             mode=self._config.mode, network_name=network_name, netuid=netuid,
             round_id=self._pinned_round_id() or "",
-            after_entry_id=self._closed_deepline_reconciliation_after,
+            after_entry_id=self._closed_provider_reconciliation_after,
         )
         if candidate.get("status") == "none":
             return {"status": "none"}
-        if candidate.get("status") != "ok":
+        if candidate.get("status") != "ok" or candidate.get("provider") not in {
+            "deepline", "openrouter",
+        }:
             raise ServiceError("closed_provider_cost_candidate_invalid", 500)
-        self._closed_deepline_reconciliation_after = int(candidate["uncertain_entry_id"])
-        return self._reconcile_deepline_cost(
+        self._closed_provider_reconciliation_after = int(candidate["uncertain_entry_id"])
+        reconcile = (self._reconcile_openrouter_cost
+                     if candidate["provider"] == "openrouter"
+                     else self._reconcile_deepline_cost)
+        return reconcile(
             str(candidate["round_id"]), run_id=str(candidate["run_id"]),
         )
 
@@ -4907,6 +4912,18 @@ class ArenaService:
                     except (TypeError, ValueError):
                         lease_active = False
                     if lease_active:
+                        # Keep this live billing lease open without starving
+                        # unrelated overdue attempts of their normal retry.
+                        # The expiry RPC preserves live cost-bearing leases;
+                        # an operator hold must still stop round mutations.
+                        if (
+                            row["status"] in (
+                                "stage1", "stage2",
+                                "stage1_scoring", "stage2_scoring",
+                            )
+                            and not self._store.operator_hold_active()
+                        ):
+                            self._store.expire_leases(round_id)
                         return {
                             "status": "retry",
                             "round_status": row["status"],

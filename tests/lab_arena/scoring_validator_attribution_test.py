@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -84,8 +85,22 @@ class Store:
         return {"is_king": False}
 
 
+def _install_completed_scores_cache(service):
+    """Give a bare ``ArenaService`` the completed-scores cache its reads need.
+
+    These stubs are built with ``object.__new__``, so nothing ``__init__``
+    installs is present. The published-results path reads the cache, and
+    without it the test fails on a missing attribute rather than on the
+    disclosure behaviour it is actually asserting.
+    """
+    service._completed_scores_lock = threading.Lock()
+    service._completed_scores_cache = {}
+    service._completed_scores_refresh_slots = threading.BoundedSemaphore(2)
+
+
 def _service(rows, *, public_positions, cache_rows=None, status="published"):
     service = object.__new__(ArenaService)
+    _install_completed_scores_cache(service)
     service._store = Store(rows, cache_rows=cache_rows)
     service._objects = SimpleNamespace(
         get_bounded=lambda *_args, **_kwargs: pytest.fail(

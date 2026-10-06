@@ -98,9 +98,11 @@ def test_late_admission_migrations_preserve_current_round_semantics(connect):
     assert "deadline_provider_retry_exhausted" in definitions[signatures[6]]
 
 
-def test_late_admission_migrations_publish_dynamic_ten(connect, tmp_path):
+def test_late_admission_migrations_publish_dynamic_ten(connect, tmp_path, monkeypatch):
+    # Reuses the lifecycle test body directly, so it has to request and forward
+    # every fixture that body takes.
     dynamic_lifecycle.test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_judge_cost(
-        connect, tmp_path, 10
+        connect, tmp_path, 10, monkeypatch
     )
 
 

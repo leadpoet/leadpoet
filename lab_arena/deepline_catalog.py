@@ -32,6 +32,8 @@ _PERSON_FLAGS = frozenset({"find_email", "include_emails", "include_email", "inc
 # Provider categories can label a people roster as company research. Judge the
 # operation target too, including aliases; aggregate headcount remains useful.
 _PEOPLE_TARGET_WORDS = frozenset({"person", "people", "profile", "contact", "contacts", "email", "phone", "employee", "employees", "alumni", "alumnis", "reposter", "reposters", "reactor", "reactors", "follower", "followers", "following", "connection", "connections", "member", "members", "officer", "officers", "director", "directors", "shareholder", "shareholders", "founder", "founders", "user", "users"})
+_DELEGATION_FIELDS = frozenset({"tools", "actions", "workflow", "workflows", "max_tool_calls", "max_steps", "tool_choice", "allowed_tools", "toolset", "agent_tools"})
+_PERSON_RECORD_FIELDS = frozenset({"tahoe_id", "consumer_id", "ssn", "social_security_number", "date_of_birth"})
 _PERSON_INPUT_FIELDS = (_PERSON_FIELDS - {"profile", "profiles", "profile_url", "public_identifier"}) | frozenset({"linkedin_profile_url", "linkedin_profile_id", "linkedin_profile_handle", "sales_navigator_profile_url", "sales_navigator_profile_id"})
 _COMPANY_SQL_FUNCTIONS = frozenset({"COUNT", "SUM", "MIN", "MAX", "AVG", "LOWER", "UPPER", "LENGTH", "CHAR_LENGTH", "TRIM", "LTRIM", "RTRIM", "COALESCE", "NULLIF", "ROUND", "ABS", "CEIL", "CEILING", "FLOOR", "SUBSTRING", "SUBSTR", "REPLACE", "CONCAT", "CAST"})
 
@@ -214,6 +216,36 @@ def _eligible(row: Mapping[str, Any], allow_people: bool, *, owned_poll: bool = 
     return True
 
 
+def _schema_controls_safe(schema: Any, *, allow_people: bool, company_category: bool) -> bool:
+    """A nested provider agent must not bypass this round's tool authority."""
+    if isinstance(schema, list):
+        return all(_schema_controls_safe(child, allow_people=allow_people, company_category=company_category) for child in schema)
+    if not isinstance(schema, dict):
+        return True
+    properties = schema.get("properties", {})
+    if isinstance(properties, dict):
+        required = schema.get("required", [])
+        for field, spec in properties.items():
+            name = _name(field)
+            if not allow_people and not company_category and name in (_PERSON_INPUT_FIELDS | _PERSON_RECORD_FIELDS):
+                return False
+            if name in _DELEGATION_FIELDS:
+                # Optional explicit action lists are safe only when disabled
+                # by omission; the payload policy rejects supplying them.
+                if (name in _SECRET_FIELDS and field not in required
+                    and isinstance(spec, dict) and spec.get("default") in (None, [], {}, "")):
+                    continue
+                # Permit only an explicit zero tool allowance. If optional,
+                # its declared default must also disable tools.
+                if (name != "max_tool_calls" or not isinstance(spec, dict)
+                    or not (type(spec.get("const")) is int and spec["const"] == 0
+                            or spec.get("enum") == [0] and type(spec["enum"][0]) is int
+                            or spec.get("type") == "integer" and type(spec.get("maximum")) is int and spec["maximum"] == 0 and spec.get("minimum", -1) == 0)
+                    or field not in required and (type(spec.get("default")) is not int or spec["default"] != 0)):
+                    return False
+    return all(_schema_controls_safe(child, allow_people=allow_people, company_category=company_category) for child in schema.values())
+
+
 def _requires_person_input(schema: Any) -> bool:
     """Do not advertise tools whose required input identifies a person."""
     if isinstance(schema, list):
@@ -304,6 +336,8 @@ def freeze_catalog(document: Mapping[str, Any], allow_people: bool = False) -> d
         except CatalogError:
             continue
         required = schema.get("required", [])
+        if not _schema_controls_safe(schema, allow_people=allow_people, company_category=bool(set(row["categories"]) & {"company_search", "company_enrich", "smb"})):
+            continue
         if not allow_people and _requires_person_input(schema):
             continue
         if not parent and any(_name(name) in {"job_id", "run_id", "task_id", "request_id"} for name in required):
@@ -481,7 +515,7 @@ def validate_payload(snapshot: Mapping[str, Any], tool_id: str, payload: Mapping
                         raise CatalogError("forbidden_payload_field")
                     _company_sql(child)
                 inactive_flag = child is False or child is None or isinstance(child, str) and child in {"false", "False"}
-                if not snapshot["allow_people"] and (name in _PERSON_FIELDS or name in _PERSON_FLAGS and not inactive_flag):
+                if not snapshot["allow_people"] and (name in _PERSON_FIELDS or name in _PERSON_RECORD_FIELDS or name in _PERSON_FLAGS and not inactive_flag):
                     raise CatalogError("people_payload_forbidden")
                 if name in {"method", "http_method"} and child != "GET":
                     raise CatalogError("write_payload_forbidden")

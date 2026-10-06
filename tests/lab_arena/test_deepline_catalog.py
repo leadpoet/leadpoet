@@ -260,3 +260,43 @@ def test_nested_required_person_identity_is_not_advertised():
 def test_aggregate_name_does_not_hide_person_outputs(output):
     unsafe = row("vendor_company_employees_insights", outputSchema=output)
     assert catalog.allowed_tool_ids(frozen(row("safe_company_search"), unsafe)) == ("safe_company_search",)
+
+
+@pytest.mark.parametrize("field", ["maxToolCalls", "tools", "actions", "workflow", "allowedTools", "maxSteps"])
+def test_delegated_tool_controls_cannot_bypass_frozen_authority(field):
+    schema = {"type": "object", "properties": {"prompt": {"type": "string"}, field: {"type": "integer", "default": 12}}, "required": ["prompt"]}
+    unsafe = row("vendor_research_agent", categories=["research"], inputSchema=schema)
+    assert catalog.allowed_tool_ids(frozen(row("safe_company_search"), unsafe)) == ("safe_company_search",)
+    assert catalog.allowed_tool_ids(frozen(row("safe_company_search"), unsafe, allow_people=True)) == ("safe_company_search",)
+
+
+@pytest.mark.parametrize("required", [True, False])
+def test_explicit_zero_delegated_tools_are_safe(required):
+    schema = {"type": "object", "properties": {"maxToolCalls": {"type": "integer", "const": 0, "default": 0}}, "required": ["maxToolCalls"] if required else []}
+    safe = row("vendor_research_agent", categories=["research"], inputSchema=schema)
+    assert catalog.allowed_tool_ids(frozen(safe)) == ("vendor_research_agent",)
+    assert catalog.validate_payload(frozen(safe), safe["toolId"], {"maxToolCalls": 0}) == {"maxToolCalls": 0}
+    with pytest.raises(catalog.CatalogError):
+        catalog.validate_payload(frozen(safe), safe["toolId"], {"maxToolCalls": 1})
+
+
+@pytest.mark.parametrize("field", ["tahoeId", "consumer_id", "person_id", "contact_id", "date_of_birth"])
+def test_research_only_personal_record_inputs_are_not_advertised(field):
+    schema = {"type": "object", "properties": {"query": {"type": "string"}, field: {"type": "string"}}, "required": ["query"]}
+    unsafe = row("vendor_public_record_lookup", categories=["research"], inputSchema=schema)
+    assert catalog.allowed_tool_ids(frozen(row("safe_company_search"), unsafe)) == ("safe_company_search",)
+    company = row("vendor_business_search", inputSchema=schema)
+    snapshot = frozen(company)
+    assert catalog.validate_payload(snapshot, company["toolId"], {"query": "company"}) == {"query": "company"}
+    with pytest.raises(catalog.CatalogError):
+        catalog.validate_payload(snapshot, company["toolId"], {"query": "company", field: "person"})
+
+
+@pytest.mark.parametrize("field", ["actions", "tools", "workflow"])
+def test_optional_disabled_workflow_fields_remain_blocked_in_payload(field):
+    schema = {"type": "object", "properties": {"url": {"type": "string"}, field: {"type": "array", "items": {"type": "string"}}}, "required": ["url"]}
+    safe = row("vendor_public_page_fetch", categories=["research"], inputSchema=schema)
+    snapshot = frozen(safe)
+    assert catalog.validate_payload(snapshot, safe["toolId"], {"url": "https://example.com"}) == {"url": "https://example.com"}
+    with pytest.raises(catalog.CatalogError):
+        catalog.validate_payload(snapshot, safe["toolId"], {"url": "https://example.com", field: ["send"]})

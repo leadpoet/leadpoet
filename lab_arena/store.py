@@ -72,6 +72,11 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_netuid", "integer"), ("p_round_id", "text"),
         ("p_after_entry_id", "bigint"),
     ),
+    "lab_arena_next_closed_provider_reconciliation_v1": (
+        ("p_mode", "text"), ("p_network_name", "text"),
+        ("p_netuid", "integer"), ("p_round_id", "text"),
+        ("p_after_entry_id", "bigint"),
+    ),
     "lab_arena_freeze_champion_funding": (("p_round_id", "text"),),
     "lab_arena_provider_funding": (("p_run_id", "text"), ("p_provider", "text")),
     "lab_arena_run_quota_snapshot_v1": (
@@ -1770,6 +1775,20 @@ class ArenaStore:
                 },
             ),
             "next_closed_deepline_reconciliation",
+        )
+
+    def next_closed_provider_reconciliation(
+        self, *, mode: str, network_name: str, netuid: int,
+        round_id: str = "", after_entry_id: int = 0,
+    ) -> Dict[str, Any]:
+        return _require_mapping(
+            self._transport.rpc(
+                "lab_arena_next_closed_provider_reconciliation_v1",
+                {"p_mode": str(mode), "p_network_name": str(network_name),
+                 "p_netuid": int(netuid), "p_round_id": str(round_id),
+                 "p_after_entry_id": int(after_entry_id)},
+            ),
+            "next_closed_provider_reconciliation",
         )
 
     def list_deepline_cost_reconciliations(

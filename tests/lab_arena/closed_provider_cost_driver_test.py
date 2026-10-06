@@ -28,35 +28,36 @@ def test_closed_billing_failure_runs_after_live_round_and_rewards():
 
 
 @pytest.mark.parametrize("pinned", [None, "arena-pinned"])
-def test_closed_billing_is_scoped_bounded_and_advances_cursor_on_missing_receipt(pinned):
+@pytest.mark.parametrize("provider", ["deepline", "openrouter"])
+def test_closed_billing_is_scoped_bounded_and_advances_cursor_on_missing_receipt(pinned, provider):
     requests = []
     calls = []
 
     def candidate(**kwargs):
         requests.append(kwargs)
-        return {"status": "ok", "uncertain_entry_id": 321,
+        return {"status": "ok", "provider": provider, "uncertain_entry_id": 321,
                 "round_id": pinned or "arena-closed", "run_id": "failed-score"}
 
     service = ArenaService.__new__(ArenaService)
     service._config = SimpleNamespace(mode="live", network_name="finney", netuid=71,
                                       pinned_round_id=pinned)
-    service._store = SimpleNamespace(next_closed_deepline_reconciliation=candidate)
-    service._closed_deepline_reconciliation_after = 123
-    service._reconcile_deepline_cost = (
+    service._store = SimpleNamespace(next_closed_provider_reconciliation=candidate)
+    service._closed_provider_reconciliation_after = 123
+    service._reconcile_deepline_cost = service._reconcile_openrouter_cost = (
         lambda round_id, **kwargs: calls.append((round_id, kwargs)) or {"status": "pending"}
     )
     assert service.reconcile_closed_provider_costs() == {"status": "pending"}
     assert requests == [{"mode": "live", "network_name": "finney", "netuid": 71,
                          "round_id": pinned or "", "after_entry_id": 123}]
     assert calls == [(pinned or "arena-closed", {"run_id": "failed-score"})]
-    assert service._closed_deepline_reconciliation_after == 321
+    assert service._closed_provider_reconciliation_after == 321
 
 
 def test_no_closed_candidate_performs_no_billing_read():
     service = ArenaService.__new__(ArenaService)
     service._config = SimpleNamespace(mode="live", network_name="finney", netuid=71)
     service._store = SimpleNamespace(
-        next_closed_deepline_reconciliation=lambda **kwargs: {"status": "none"},
+        next_closed_provider_reconciliation=lambda **kwargs: {"status": "none"},
     )
-    service._closed_deepline_reconciliation_after = 0
+    service._closed_provider_reconciliation_after = 0
     assert service.reconcile_closed_provider_costs() == {"status": "none"}

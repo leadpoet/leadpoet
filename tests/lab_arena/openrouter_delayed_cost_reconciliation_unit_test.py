@@ -95,6 +95,9 @@ def test_unavailable_first_candidate_does_not_starve_the_next_candidate():
 
 def test_advance_defers_exhaustion_while_exact_billing_run_lease_is_active():
     service = object.__new__(svc.ArenaService)
+    service._store = SimpleNamespace(
+        operator_hold_active=lambda: False, expire_leases=lambda _round_id: None,
+    )
     service._invalidate_hot_round = lambda: None
     service._round = lambda _round_id: {"status": "stage1_scoring"}
     service._reconcile_deepline_cost = lambda _round_id: {"status": "none"}

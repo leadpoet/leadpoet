@@ -63,6 +63,18 @@ Stages: `driver_tick`, `promote_baselines`, `active_rounds`,
 outside the vocabulary drops the span whole, so no round id, submission id,
 hotkey, source path, prompt, score, or model output can ride out on a label.
 
+One `advance_round` is a sequence of steps, and the parent stage reports only
+that the whole transition failed — not enough to tell a slow billing read from
+a driver blocked behind another thread's service lock from a slow SQL
+function. Each step therefore gets its own stage, all children of the same
+tick: `advance_billing_read`, `advance_admission`, `advance_lock_wait`
+(the service-lock acquisition alone, so queueing is separable from work),
+`advance_expire_leases`, `advance_list_scoring_runs`,
+`advance_commit_benchmark`, `advance_open_stage`, `advance_close_stage`,
+`advance_commit_scoring_plan`, `advance_open_scoring`, `advance_close_scoring`,
+`advance_score_stage`, `advance_publish`. They carry the same five attributes
+and the same fail-closed envelope as every other stage.
+
 **`arena.provider`** — one INTERNAL span per outbound provider call. The
 Arena's cost, latency and failure all originate upstream at OpenRouter,
 Deepline and Scrapingdog, and none of it was visible: a slow round and a

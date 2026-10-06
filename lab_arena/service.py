@@ -4899,8 +4899,10 @@ class ArenaService:
             if row["status"] not in ("open",) + TERMINAL_STATUSES:
                 # One bounded billing read outside service locks. Claims for
                 # other submissions stay available while this charge posts.
-                self._reconcile_deepline_cost(round_id)
-                billing = self._reconcile_openrouter_cost(round_id)
+                with telemetry.stage("advance_billing_read") as observed:
+                    self._reconcile_deepline_cost(round_id)
+                    billing = self._reconcile_openrouter_cost(round_id)
+                    observed.count = 1
                 if (
                     billing["status"] not in ("none", "settled")
                     and billing["run_status"] == "leased"
@@ -4923,7 +4925,8 @@ class ArenaService:
                             )
                             and not self._store.operator_hold_active()
                         ):
-                            self._store.expire_leases(round_id)
+                            with telemetry.stage("advance_expire_leases"):
+                                self._store.expire_leases(round_id)
                         return {
                             "status": "retry",
                             "round_status": row["status"],
@@ -4933,7 +4936,9 @@ class ArenaService:
                 # At cutoff, reject source uploads that were not finalized
                 # before participant freeze.
                 final = self.now() >= _parse_iso(row["configuration_doc"]["schedule"]["submission_cutoff"])
-                admission = self.admit_uploaded_submissions(round_id, final=final)
+                with telemetry.stage("advance_admission") as observed:
+                    admission = self.admit_uploaded_submissions(round_id, final=final)
+                    observed.count = int(admission.get("remaining") or 0)
                 if final and int(admission.get("remaining") or 0) > 0:
                     return {
                         "status": "retry",
@@ -4954,7 +4959,18 @@ class ArenaService:
             self._hot_rounds.clear()
 
     def _advance_round_locked(self, round_id: str) -> Dict[str, Any]:
+        # The wait for the service lock is timed on its own, so a driver
+        # blocked behind another thread's transition is distinguishable from
+        # one doing slow work. The lock itself stays a plain `with`.
+        lock_start_ns = time.time_ns()
+        lock_start = time.monotonic()
         with self._lock:
+            telemetry.record(
+                "advance_lock_wait",
+                "ok",
+                duration_ms=(time.monotonic() - lock_start) * 1000.0,
+                start_ns=lock_start_ns,
+            )
             round_row = self._round(round_id)
             status = round_row["status"]
             schedule = round_row["configuration_doc"]["schedule"]
@@ -4965,47 +4981,60 @@ class ArenaService:
             ):
                 return {"status": "waiting", "round_status": status}
             if status == "open":
-                return self.commit_benchmark(round_id)
+                with telemetry.stage("advance_commit_benchmark"):
+                    return self.commit_benchmark(round_id)
             if status == "committed":
-                return self.open_stage(round_id, 1)
+                with telemetry.stage("advance_open_stage"):
+                    return self.open_stage(round_id, 1)
             if status in ("stage1", "stage2"):
                 stage = int(status[-1])
-                self._store.expire_leases(round_id)
+                with telemetry.stage("advance_expire_leases"):
+                    self._store.expire_leases(round_id)
                 if now >= _parse_iso(schedule["stage_%d_close" % stage]) or self.stage_is_complete(round_id, stage):
-                    return self.close_stage(round_id, stage)
+                    with telemetry.stage("advance_close_stage"):
+                        return self.close_stage(round_id, stage)
                 return {"status": "waiting", "round_status": status}
             if status in ("stage1_closed", "stage2_closed"):
                 stage = int(status[5])
                 if not round_row.get("stage%d_scoring_plan_doc" % stage):
-                    return self.commit_scoring_plan(round_id, stage)
-                return self.open_scoring(round_id, stage)
+                    with telemetry.stage("advance_commit_scoring_plan"):
+                        return self.commit_scoring_plan(round_id, stage)
+                with telemetry.stage("advance_open_scoring"):
+                    return self.open_scoring(round_id, stage)
             if status in ("stage1_scoring", "stage2_scoring"):
                 stage = int(status[5])
-                self._store.expire_leases(round_id)
-                scoring_runs = self._store.list_runs(
-                    round_id, stage=stage, kind="score"
-                )
+                with telemetry.stage("advance_expire_leases"):
+                    self._store.expire_leases(round_id)
+                with telemetry.stage("advance_list_scoring_runs") as observed:
+                    scoring_runs = self._store.list_runs(
+                        round_id, stage=stage, kind="score"
+                    )
+                    observed.count = len(scoring_runs)
                 window = schedule["stage_1_scoring_close" if stage == 1 else "final_scoring_close"]
                 if now >= _parse_iso(window) or all(
                     run["status"] in ("accepted", "failed")
                     for run in scoring_runs
                 ):
-                    return self.close_scoring(round_id, stage)
+                    with telemetry.stage("advance_close_scoring"):
+                        return self.close_scoring(round_id, stage)
                 return {"status": "waiting", "round_status": status}
             if status in ("stage1_judged", "stage2_judged"):
                 stage = int(status[5])
                 window = schedule["stage_1_scoring_close" if stage == 1 else "final_scoring_close"]
                 try:
-                    return self.score_stage(round_id, stage)
+                    with telemetry.stage("advance_score_stage"):
+                        return self.score_stage(round_id, stage)
                 except scoring.ScoringError:
                     if now >= _parse_iso(window) + timedelta(hours=2):
                         return self._store.cancel_round(round_id, CANCEL_REASONS["scoring"])
                     return {"status": "retry", "round_status": status}
             if status == "stage1_scored":
-                return self.open_stage(round_id, 2)
+                with telemetry.stage("advance_open_stage"):
+                    return self.open_stage(round_id, 2)
             if status == "scored":
                 try:
-                    return self.publish(round_id)
+                    with telemetry.stage("advance_publish"):
+                        return self.publish(round_id)
                 except ServiceError as exc:
                     if exc.code == "publication_sanitizer_failed" and now >= _parse_iso(schedule["publication_deadline"]) + timedelta(hours=14):
                         return self._store.cancel_round(round_id, CANCEL_REASONS["publication"])

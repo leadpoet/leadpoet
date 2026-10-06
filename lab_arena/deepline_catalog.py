@@ -29,6 +29,10 @@ _PRIVATE_PROVIDERS = frozenset({"affinity", "attio", "hubspot", "salesforce", "p
 _SECRET_FIELDS = frozenset({"authorization", "auth", "api_key", "apikey", "access_token", "token", "secret", "password", "cookie", "cookies", "credentials", "headers", "proxy", "proxies", "webhook", "callback_url", "script", "code", "command", "workflow", "actions", "tools", "actor_id", "actor_input", "dataset_id"})
 _PERSON_FIELDS = frozenset({"person", "people", "persons", "contact", "contacts", "email", "emails", "phone", "phones", "phone_number", "first_name", "last_name", "full_name", "person_id", "contact_id", "profile", "profiles", "profile_id", "profile_url", "public_identifier", "linkedin_handle", "person_url", "member_id", "mentioning_member", "user_id", "user_ids", "username", "screen_name"})
 _PERSON_FLAGS = frozenset({"find_email", "include_emails", "include_email", "include_phones", "include_phone", "include_contacts", "include_people", "enrich_people", "enrich_contacts"})
+# Provider categories can label a people roster as company research. Judge the
+# operation target too, including aliases; aggregate headcount remains useful.
+_PEOPLE_TARGET_WORDS = frozenset({"person", "people", "profile", "contact", "contacts", "email", "phone", "employee", "employees", "alumni", "alumnis", "reposter", "reposters", "reactor", "reactors", "follower", "followers", "following", "connection", "connections", "member", "members", "officer", "officers", "director", "directors", "shareholder", "shareholders", "founder", "founders", "user", "users"})
+_PERSON_INPUT_FIELDS = (_PERSON_FIELDS - {"profile", "profiles", "profile_url", "public_identifier"}) | frozenset({"linkedin_profile_url", "linkedin_profile_id", "linkedin_profile_handle", "sales_navigator_profile_url", "sales_navigator_profile_id"})
 _COMPANY_SQL_FUNCTIONS = frozenset({"COUNT", "SUM", "MIN", "MAX", "AVG", "LOWER", "UPPER", "LENGTH", "CHAR_LENGTH", "TRIM", "LTRIM", "RTRIM", "COALESCE", "NULLIF", "ROUND", "ABS", "CEIL", "CEILING", "FLOOR", "SUBSTRING", "SUBSTR", "REPLACE", "CONCAT", "CAST"})
 
 
@@ -135,6 +139,27 @@ def _pricing(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _aggregate_company_output(row: Mapping[str, Any]) -> bool:
+    """An aggregate name is insufficient if its result contains people."""
+    try:
+        schema = _schema(row.get("outputSchema", row.get("output_schema")))
+    except CatalogError:
+        return False
+    names = set()
+    def inspect(node: Any) -> None:
+        if isinstance(node, list):
+            for child in node:
+                inspect(child)
+        elif isinstance(node, dict):
+            properties = node.get("properties", {})
+            if isinstance(properties, dict):
+                names.update(_name(name) for name in properties)
+            for child in node.values():
+                inspect(child)
+    inspect(schema)
+    return bool(names & {"count", "employee_count", "headcount"}) and not names & _PERSON_INPUT_FIELDS
+
+
 def _eligible(row: Mapping[str, Any], allow_people: bool, *, owned_poll: bool = False) -> bool:
     categories = row.get("categories")
     tool = row.get("toolId", row.get("id"))
@@ -160,6 +185,9 @@ def _eligible(row: Mapping[str, Any], allow_people: bool, *, owned_poll: bool = 
         if not isinstance(required, list) or any(not isinstance(name, str) for name in required) or "automation" not in category_set or not set(required) & {"url", "urls"} or not _words(tool) & {"scrape", "fetch", "extract", "read", "get", "crawl", "map"}:
             return False
     operation_names = [tool, row.get("operation"), row.get("operationId")]
+    aliases = row.get("operationAliases", [])
+    if isinstance(aliases, list):
+        operation_names.extend(aliases)
     execution = row.get("executionMetadata", row.get("execution_metadata"))
     if isinstance(execution, dict):
         if execution.get("provider", provider) != provider:
@@ -167,13 +195,34 @@ def _eligible(row: Mapping[str, Any], allow_people: bool, *, owned_poll: bool = 
         operation_names.extend([execution.get("sourceOperation"), execution.get("effectiveOperation")])
     if provider in _PRIVATE_PROVIDERS or any(isinstance(name, str) and _words(name) & _WRITE_WORDS for name in operation_names):
         return False
-    if not allow_people and any(isinstance(name, str) and _words(name) & {"person", "people", "profile", "contact", "contacts", "email", "phone"} for name in operation_names):
-        return False
+    if not allow_people:
+        for name in operation_names:
+            if not isinstance(name, str):
+                continue
+            words = _words(name)
+            targets = words & _PEOPLE_TARGET_WORDS
+            aggregate_headcount = (targets <= {"employee", "employees"}
+                                   and "company" in words
+                                   and bool(words & {"count", "counts", "headcount", "insights", "metrics", "statistics", "distribution", "distributions"})
+                                   and _aggregate_company_output(row))
+            if targets and not aggregate_headcount:
+                return False
     if row.get("callable") is False or row.get("connected") is False or row.get("deprecated") is True or row.get("requiresOwnCredential") is True or row.get("credentialStatus") in {"requires_connection", "deprecated"}:
         return False
     if row.get("playReference") or row.get("playExpansion"):
         return False
     return True
+
+
+def _requires_person_input(schema: Any) -> bool:
+    """Do not advertise tools whose required input identifies a person."""
+    if isinstance(schema, list):
+        return any(_requires_person_input(child) for child in schema)
+    if not isinstance(schema, dict):
+        return False
+    required = schema.get("required", [])
+    return (isinstance(required, list) and any(isinstance(name, str) and _name(name) in _PERSON_INPUT_FIELDS for name in required)
+            or any(_requires_person_input(child) for child in schema.values()))
 
 
 def _company_sql(value: Any) -> None:
@@ -255,6 +304,8 @@ def freeze_catalog(document: Mapping[str, Any], allow_people: bool = False) -> d
         except CatalogError:
             continue
         required = schema.get("required", [])
+        if not allow_people and _requires_person_input(schema):
+            continue
         if not parent and any(_name(name) in {"job_id", "run_id", "task_id", "request_id"} for name in required):
             continue
         if not parent and "get" in _words(tool_id) and _words(tool_id) & {"run", "job", "status", "result", "results"}:

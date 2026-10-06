@@ -225,3 +225,38 @@ def test_malformed_pricing_hints_rejected(hints):
     with pytest.raises(catalog.CatalogError):
         frozen(row(pricing=pricing))
     assert catalog.allowed_tool_ids(frozen(row("safe_company_search"), row(pricing=pricing))) == ("safe_company_search",)
+
+
+@pytest.mark.parametrize("target", ["employees", "alumnis", "reposters", "officers", "founders", "users", "followers", "connections"])
+def test_people_rosters_cannot_hide_in_company_research_categories(target):
+    unsafe = row("vendor_search_company_" + target, categories=["company_search", "research"])
+    assert catalog.allowed_tool_ids(frozen(row("safe_company_search"), unsafe)) == ("safe_company_search",)
+    # Alias metadata must not grant a people operation a harmless public name.
+    unsafe = row("vendor_company_lookup", operationAliases=["search_" + target])
+    assert catalog.allowed_tool_ids(frozen(row("safe_company_search"), unsafe)) == ("safe_company_search",)
+    assert catalog.allowed_tool_ids(frozen(unsafe, allow_people=True)) == ("vendor_company_lookup",)
+
+
+@pytest.mark.parametrize("metric", ["count", "insights", "metrics", "distribution"])
+def test_company_employee_aggregates_remain_available(metric):
+    tool = "vendor_company_employees_" + metric
+    output = {"type": "object", "properties": {"employee_count": {"type": "integer"}}}
+    snapshot = frozen(row(tool, categories=["company_enrich"], outputSchema=output))
+    assert catalog.allowed_tool_ids(snapshot) == (tool,)
+    assert snapshot == catalog.validate_catalog(snapshot)
+
+
+def test_nested_required_person_identity_is_not_advertised():
+    unsafe = row("vendor_lookup", categories=["research"], inputSchema={
+        "type": "object", "properties": {"input": {"type": "object", "properties": {
+            "linkedin_profile_url": {"type": "string"}}, "required": ["linkedin_profile_url"]}},
+        "required": ["input"],
+    })
+    assert catalog.allowed_tool_ids(frozen(row("safe_company_search"), unsafe)) == ("safe_company_search",)
+    assert catalog.allowed_tool_ids(frozen(unsafe, allow_people=True)) == ("vendor_lookup",)
+
+
+@pytest.mark.parametrize("output", [None, {"type": "object", "properties": {"count": {"type": "integer"}, "full_name": {"type": "string"}}}])
+def test_aggregate_name_does_not_hide_person_outputs(output):
+    unsafe = row("vendor_company_employees_insights", outputSchema=output)
+    assert catalog.allowed_tool_ids(frozen(row("safe_company_search"), unsafe)) == ("safe_company_search",)

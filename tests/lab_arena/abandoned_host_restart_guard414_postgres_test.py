@@ -11,7 +11,7 @@ from tests.lab_arena import restart_expired_zero_call394_postgres_test as guard
 from tests.lab_arena import score_host_retry398_postgres_test as identity
 
 ROOT = Path(__file__).parents[2]
-SQL = ROOT/'scripts/413-lab-arena-abandoned-host-restart-guard.sql'
+SQL = ROOT/'scripts/414-lab-arena-abandoned-host-restart-guard.sql'
 PREHASH = 'ac1e99fd5bc1b4a458602ce05012d562847bb37d3cf4e69857e45db19077fd00'
 database = recovery.database
 
@@ -175,24 +175,24 @@ def test_capture_and_early_recovery_share_claim_control_lock(database,migrated,w
     finally: owner.close()
 
 
-def test_http_host_recovery_publishes_and_promotes_with413_active(database,migrated,tmp_path,monkeypatch):
+def test_http_host_recovery_publishes_and_promotes_with414_active(database,migrated,tmp_path,monkeypatch):
     from tests.lab_arena import abandoned_host_recovery412_e2e_test as full_http
     full_http.test_host_fault_recovers_via_signed_http_run_then_publishes_and_promotes(
         database,migrated,tmp_path,monkeypatch,
     )
 
 
-def test_guarded_closed_paid_receipts_are_unchanged_with413_active(database,migrated):
+def test_guarded_closed_paid_receipts_are_unchanged_with414_active(database,migrated):
     from tests.lab_arena import restart_closed_ledger404_postgres_test as paid
     paid.test_paid_closed_heads_expire_without_receipt_change(database)
 
 
 @pytest.mark.parametrize('head',['reservation','dispatch'])
-def test_guarded_open_provider_work_stays_leased_with413_active(database,migrated,head):
+def test_guarded_open_provider_work_stays_leased_with414_active(database,migrated,head):
     from tests.lab_arena import restart_closed_ledger404_postgres_test as paid
     paid.test_open_head_stays_leased(database,head)
 
 
-def test_guarded_unidentified_cost_stays_leased_with413_active(database,migrated):
+def test_guarded_unidentified_cost_stays_leased_with414_active(database,migrated):
     from tests.lab_arena import restart_closed_ledger404_postgres_test as paid
     paid.test_unidentified_ledger_cannot_prove_closed(database)

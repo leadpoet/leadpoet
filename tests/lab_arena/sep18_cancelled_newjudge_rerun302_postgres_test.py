@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
+    migrations_before,
+    LAB_ARENA_COST_BACKFILL_RETIREMENT_MIGRATION,
+    LAB_ARENA_SCORE_PAYER_MIGRATION,
     database_with_lab_arena_migration,
 )
 
@@ -20,17 +22,13 @@ MINER = "sep18-miner-score-reset-proof"
 
 @pytest.fixture(scope="module")
 def database():
-    assert CURRENT_SERVICE_MIGRATIONS[-2:] == (
-        "294-lab-arena-retire-open-cost-backfill.sql",
-        "301-lab-arena-score-payer-boundary.sql",
-    )
     yield from database_with_lab_arena_migration(
-        CURRENT_SERVICE_MIGRATIONS[:-2]
+        migrations_before(LAB_ARENA_COST_BACKFILL_RETIREMENT_MIGRATION)
         + (
             "289-lab-arena-per-icp-cost-policy.sql",
             "292-lab-arena-null-final-score-publication.sql",
         )
-        + CURRENT_SERVICE_MIGRATIONS[-2:]
+        + (LAB_ARENA_COST_BACKFILL_RETIREMENT_MIGRATION, LAB_ARENA_SCORE_PAYER_MIGRATION)
     )
 
 

@@ -16,6 +16,10 @@ from tests.lab_arena import sep19_terminal309_newjudge_rerun310_postgres_test as
 from tests.lab_arena import sep20_90m_verifier_baseline_rerun328_postgres_test as rerun328
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import (
+    migrations_before,
+    LAB_ARENA_COST_BACKFILL_RETIREMENT_MIGRATION,
+    LAB_ARENA_SCORE_PAYER_MIGRATION,
+    LAB_ARENA_EXHAUSTED_PROVIDER_ISOLATION_MIGRATION,
     CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
 )
@@ -61,26 +65,21 @@ class IsolatedHarness(lifecycle.Harness):
 
 @pytest.fixture()
 def database():
-    assert CURRENT_SERVICE_MIGRATIONS[-3:] == (
-        "294-lab-arena-retire-open-cost-backfill.sql",
-        "301-lab-arena-score-payer-boundary.sql",
-        "326-lab-arena-exhausted-provider-error-isolation.sql",
-    )
     migrations = (
-        CURRENT_SERVICE_MIGRATIONS[:-3]
+        migrations_before(LAB_ARENA_COST_BACKFILL_RETIREMENT_MIGRATION)
         + (
             "264-lab-arena-codex-cost-reconciliation.sql",
             "289-lab-arena-per-icp-cost-policy.sql",
             "292-lab-arena-null-final-score-publication.sql",
         )
-        + CURRENT_SERVICE_MIGRATIONS[-3:-1]
+        + (LAB_ARENA_COST_BACKFILL_RETIREMENT_MIGRATION, LAB_ARENA_SCORE_PAYER_MIGRATION)
         + (
             "311-lab-arena-per-icp-closed-billing-reconciliation.sql",
             "312-lab-arena-temporary-hold-admission.sql",
             "314-lab-arena-openrouter-web-search-reservation.sql",
             "319-lab-arena-quota-sourcing-cost.sql",
             "321-lab-arena-confirmed-cost-admission.sql",
-            CURRENT_SERVICE_MIGRATIONS[-1],
+            LAB_ARENA_EXHAUSTED_PROVIDER_ISOLATION_MIGRATION,
             "329-lab-arena-explicit-90m-lease.sql",
         )
     )

@@ -23,7 +23,8 @@ from lab_arena.store import hash_lease_token, new_lease_token
 from qualification.scoring.arena_integrity import canonical_company_identity
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
+    migrations_before,
+    LAB_ARENA_COST_BACKFILL_RETIREMENT_MIGRATION,
     database_with_lab_arena_migration,
 )
 from tests.lab_arena.per_icp_cost_admission_postgres_test import (
@@ -53,15 +54,12 @@ HISTORICAL_CALL_IDENTITY = "sha256:" + hashlib.sha256(
 
 @pytest.fixture(scope="module")
 def database():
-    assert CURRENT_SERVICE_MIGRATIONS[-1] == (
-        "294-lab-arena-retire-open-cost-backfill.sql"
-    )
     yield from database_with_lab_arena_migration(
-        CURRENT_SERVICE_MIGRATIONS[:-1]
+        migrations_before(LAB_ARENA_COST_BACKFILL_RETIREMENT_MIGRATION)
         + (
             "289-lab-arena-per-icp-cost-policy.sql",
             "292-lab-arena-null-final-score-publication.sql",
-            CURRENT_SERVICE_MIGRATIONS[-1],
+            LAB_ARENA_COST_BACKFILL_RETIREMENT_MIGRATION,
         )
     )
 

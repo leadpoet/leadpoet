@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: October 7 Tyche miner submission
+
+On 2026-10-06 the user requested replacing the Leadpoet-owned miner candidate
+with the current gzaentz/tyche Arena adapter and completing live submission,
+validator scoring and dashboard verification under the existing overnight
+authority. This scope includes the necessary narrow full-source review-fit
+correction, focused tests, safe push/merge and canonical paired deployment.
+Keep every source file and comparison, fail closed without proof of complete
+uncompressed review, and preserve credentials, accounting, scheduling, frozen
+inputs, accepted results, rewards, weights and concurrent work. Do not change
+the submission cutoff or replacement allowance. Authority ends when this
+submission's end-to-end verification is complete.
+
 ## Scoped production authorization: October 6 company-local judge recovery
 
 The user authorized fixing the confirmed judge-error classification defect,

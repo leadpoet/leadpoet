@@ -190,7 +190,8 @@ class SubmissionCodeReviewer:
                 response = self._transport.send(
                     method="POST", url="https://openrouter.ai/api/v1/chat/completions",
                     headers={"Authorization": "Bearer " + secret,
-                             "Content-Type": "application/json"},
+                             "Content-Type": "application/json",
+                             "X-OpenRouter-Metadata": "enabled"},
                     body=contracts.canonical_json(prepared.parameters).encode("utf-8"),
                     timeout_seconds=300,
                 )

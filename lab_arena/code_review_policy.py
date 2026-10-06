@@ -50,6 +50,7 @@ RESPONSE_ERROR_REASONS = frozenset({
     "verdict", "summary", "coverage", "coverage_order", "findings",
     "verdict_findings", "finding_keys", "finding_classification",
     "finding_evidence", "finding_evidence_mismatch", "finding_explanation",
+    "context_integrity",
 })
 
 ERROR_CODES = frozenset({

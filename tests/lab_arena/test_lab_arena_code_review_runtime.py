@@ -174,6 +174,7 @@ def test_runtime_sends_every_file_and_only_the_submitting_miners_key():
     assert len(transport.sent) == 1
     sent = transport.sent[0]
     assert sent["headers"]["Authorization"] == "Bearer " + MINER_KEY
+    assert sent["headers"]["X-OpenRouter-Metadata"] == "enabled"
     assert ORGANIZER_KEY not in repr(sent)
     parameters = json.loads(sent["body"].decode("utf-8"))
     assert sent["body"] == contracts.canonical_json(parameters).encode("utf-8")
@@ -190,6 +191,41 @@ def test_runtime_sends_every_file_and_only_the_submitting_miners_key():
     assert store.finish_calls[0][3] == "passed"
     assert store.finish_calls[0][5] == 1_234
     assert objects.calls == [(row["source_ref"], 10 * 1024 * 1024)]
+
+
+@pytest.mark.parametrize("case", ["valid", "missing_metadata", "context_error"])
+def test_large_review_preserves_runtime_integrity_and_actual_cost(case):
+    members = _source()
+    members["large.txt"] = b"public source line\n" * 80_000
+
+    def respond(parameters):
+        body = _review_body(parameters)
+        status = 400 if case == "context_error" else 200
+        if case == "valid":
+            body["usage"]["prompt_tokens"] = 400_000
+            body["openrouter_metadata"] = {
+                "requested": parameters["model"], "strategy": "direct", "attempt": 1,
+                "endpoints": {"total": 1, "available": [{
+                    "provider": "Amazon Bedrock", "model": "anthropic/claude-sonnet-5-20260630", "selected": True,
+                }]},
+                "pipeline": [],
+            }
+        if status == 400:
+            body["error"] = {"code": 400, "metadata": {"error_type": "context_length_exceeded"}}
+        return {"status": status, "body": body}
+
+    transport = ReviewTransport(respond)
+    reviewer, row, store, _ = _reviewer(_archive(members), transport)
+    result = reviewer.review(row)
+    assert result["status"] == ("passed" if case == "valid" else "error")
+    assert len(transport.sent) == 1
+    assert store.finish_calls[0][5] == 1_234
+    diagnostic = store.finish_calls[0][4]
+    if case == "missing_metadata":
+        assert diagnostic["error_reason"] == "context_integrity"
+    elif case == "context_error":
+        assert diagnostic["provider_http_status"] == 400
+    assert "openrouter_metadata" not in diagnostic
 
 
 @pytest.mark.parametrize(

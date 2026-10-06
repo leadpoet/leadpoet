@@ -227,7 +227,7 @@ def _schema_controls_safe(schema: Any, *, allow_people: bool, company_category: 
         required = schema.get("required", [])
         for field, spec in properties.items():
             name = _name(field)
-            if not allow_people and not company_category and name in (_PERSON_INPUT_FIELDS | _PERSON_RECORD_FIELDS):
+            if not allow_people and not company_category and name in (_PERSON_RECORD_FIELDS | {"person_id", "contact_id", "profile_id", "member_id", "linkedin_profile_id", "sales_navigator_profile_id"}):
                 return False
             if name in _DELEGATION_FIELDS:
                 # Optional explicit action lists are safe only when disabled

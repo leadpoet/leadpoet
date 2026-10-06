@@ -300,3 +300,12 @@ def test_optional_disabled_workflow_fields_remain_blocked_in_payload(field):
     assert catalog.validate_payload(snapshot, safe["toolId"], {"url": "https://example.com"}) == {"url": "https://example.com"}
     with pytest.raises(catalog.CatalogError):
         catalog.validate_payload(snapshot, safe["toolId"], {"url": "https://example.com", field: ["send"]})
+
+
+
+def test_public_content_search_can_omit_optional_person_attribution_selector():
+    public = row("vendor_search_posts", categories=["research"], inputSchema={"type": "object", "properties": {"query": {"type": "string"}, "mentioning_member": {"type": "string"}}, "required": ["query"]})
+    snapshot = frozen(public)
+    assert catalog.validate_payload(snapshot, public["toolId"], {"query": "company launch"}) == {"query": "company launch"}
+    with pytest.raises(catalog.CatalogError):
+        catalog.validate_payload(snapshot, public["toolId"], {"query": "company launch", "mentioning_member": "person"})

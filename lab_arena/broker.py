@@ -3631,13 +3631,14 @@ class Broker:
         openrouter_host_route: Optional[OpenRouterHostRoute] = None
         try:
             if effective_operation.provider == "openrouter":
-                # Reserve the maximum cost allowed by the request and output cap.
+                # Record the request's price bound; current SQL admission uses
+                # confirmed spend and stores a zero-dollar lifecycle record.
                 effective_normalized, max_output_tokens = self._openrouter_parameters(effective_normalized, kind=getattr(context, "kind", "execute"))
                 normalized = effective_normalized
                 # Server-side search can add provider-owned context and model
-                # passes that are absent from the caller body. Reuse the
-                # existing atomic dynamic reservation so admission holds the
-                # ICP's remaining budget until authoritative usage settles.
+                # passes that are absent from the caller body. Keep this
+                # dynamic-price marker for historical reservation policies;
+                # current SQL admission does not hold the remaining budget.
                 reserve_remaining_budget = _openrouter_web_search_enabled(
                     normalized
                 )

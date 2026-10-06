@@ -54,9 +54,9 @@ _DEEPLINE_COMPLETED_NO_BILL_BASIS = {
 _DEEPLINE_ERROR_NO_BILL_BASIS = {
     "hunter_discover": "deepline_hunter_discover_error_zero",
 }
-# Deepline's tool descriptions, checked 2026-09-10. These are reservations,
-# never final charges. Tools with dynamic prices reserve the remaining budget
-# in the database instead of treating an unknown price as zero.
+# Historical tool price hints, never final charges. New rounds use their frozen
+# catalog. Current SQL admission stores zero-dollar lifecycle records; unknown
+# billing stays unresolved until confirmed, without withholding budget.
 _DEEPLINE_FIXED_CREDITS = {
     "contextdev_get_web_scrape_markdown": Decimal("0"),
     # Authenticated live contracts checked 2026-09-19 report both searches as

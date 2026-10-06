@@ -156,6 +156,14 @@ _JUDGE_FAILURE_CLASSES = frozenset(
 _PICKUP_PHASES = frozenset({"round_discovery", "claim"})
 _PICKUP_FAILURE_REASONS = frozenset({"request_failed", "claim_denied"})
 _IDLE_CLAIM_STATUSES = frozenset({"no_pending", "no_open_round", "stage_closed"})
+_ACTIVE_RESCAN_CLAIM_STATUSES = frozenset({"no_pending", "no_free_slot"})
+_CLAIM_AVAILABILITY_CODES = frozenset(
+    {
+        "arena_store_unavailable",
+        "runner_benchmark_eligibility_unavailable",
+        "runner_validator_authority_unavailable",
+    }
+)
 
 _EXECUTION_DIAGNOSTIC_PREFIX = b"LAB_ARENA_EXECUTION_DIAGNOSTIC "
 _EXECUTION_DIAGNOSTIC_MAX_BYTES = 256
@@ -224,6 +232,17 @@ class RunnerError(RuntimeError):
         super().__init__(message)
         self.http_status = _bounded_http_status(http_status)
         self.denial_code = _known_claim_denial_code(denial_code)
+
+
+def _retryable_claim_availability(exc: RunnerError) -> bool:
+    """Rescan transport and availability failures, preserving contract denials."""
+    if exc.denial_code and exc.denial_code not in _CLAIM_AVAILABILITY_CODES:
+        return False
+    return (
+        exc.http_status is None
+        or exc.http_status in (408, 429)
+        or exc.http_status >= 500
+    )
 
 
 class AgentDependencyError(RunnerError):
@@ -3852,6 +3871,9 @@ class Runner:
                         http_status=exc.http_status,
                         denial_code=exc.denial_code,
                     )
+                    rescan_while_active = rescan_while_active or (
+                        bool(futures) and _retryable_claim_availability(exc)
+                    )
                     break
                 if response.get("status") != "leased":
                     self._slots.release()
@@ -3868,7 +3890,9 @@ class Runner:
                             denial_code=response.get("code"),
                         )
                     rescan_while_active = rescan_while_active or (
-                        response_status == "no_pending" and bool(futures)
+                        isinstance(response_status, str)
+                        and response_status in _ACTIVE_RESCAN_CLAIM_STATUSES
+                        and bool(futures)
                     )
                     break
                 taken += 1

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -455,6 +456,7 @@ def test_pending_candidate_does_not_starve_the_next_deepline_candidate():
 
 def test_pending_deepline_accounting_does_not_stop_other_round_progress():
     service = object.__new__(svc.ArenaService)
+    service._store = SimpleNamespace(operator_hold_active=lambda: False)
     service._invalidate_hot_round = lambda: None
     service._round = lambda _round_id: {"status": "stage1_scoring"}
     service._reconcile_deepline_cost = lambda _round_id: {

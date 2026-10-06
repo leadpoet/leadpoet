@@ -15,7 +15,9 @@ from tests.lab_arena import sep19_baseline_recovery309_postgres_test as recovery
 from tests.lab_arena import sep18_published_rerun295_postgres_test as lifecycle
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
+    migrations_before,
+    LAB_ARENA_COST_BACKFILL_RETIREMENT_MIGRATION,
+    LAB_ARENA_SCORE_PAYER_MIGRATION,
     database_with_lab_arena_migration,
 )
 
@@ -41,17 +43,13 @@ BANK_SHA = "sha256:" + hashlib.sha256(BENCHMARK_BYTES).hexdigest()
 
 
 def _test_migrations() -> tuple[str, ...]:
-    assert CURRENT_SERVICE_MIGRATIONS[-2:] == (
-        "294-lab-arena-retire-open-cost-backfill.sql",
-        "301-lab-arena-score-payer-boundary.sql",
-    )
     return (
-        CURRENT_SERVICE_MIGRATIONS[:-2]
+        migrations_before(LAB_ARENA_COST_BACKFILL_RETIREMENT_MIGRATION)
         + (
             "289-lab-arena-per-icp-cost-policy.sql",
             "292-lab-arena-null-final-score-publication.sql",
         )
-        + CURRENT_SERVICE_MIGRATIONS[-2:]
+        + (LAB_ARENA_COST_BACKFILL_RETIREMENT_MIGRATION, LAB_ARENA_SCORE_PAYER_MIGRATION)
     )
 
 

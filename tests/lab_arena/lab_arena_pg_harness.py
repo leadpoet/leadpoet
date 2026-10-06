@@ -46,6 +46,9 @@ LAB_ARENA_VALIDATOR_SCORING_AUTHORITY_MIGRATION = "208-lab-arena-validator-scori
 LAB_ARENA_UNCERTAIN_COST_ELIGIBILITY_MIGRATION = "209-lab-arena-uncertain-cost-eligibility.sql"
 LAB_ARENA_COST_BACKFILL_RETIREMENT_MIGRATION = "294-lab-arena-retire-open-cost-backfill.sql"
 LAB_ARENA_SCORE_PAYER_MIGRATION = "301-lab-arena-score-payer-boundary.sql"
+LAB_ARENA_EXHAUSTED_PROVIDER_ISOLATION_MIGRATION = (
+    "326-lab-arena-exhausted-provider-error-isolation.sql"
+)
 DEFAULT_MIGRATIONS = (
     LAB_ARENA_MIGRATION,
     LAB_ARENA_DAILY_COMPETITION_MIGRATION,
@@ -110,7 +113,7 @@ CURRENT_SERVICE_MIGRATIONS = POSTGREST_MIGRATIONS + (
     "274-lab-arena-run-quota-snapshot.sql",
     LAB_ARENA_COST_BACKFILL_RETIREMENT_MIGRATION,
     LAB_ARENA_SCORE_PAYER_MIGRATION,
-    "326-lab-arena-exhausted-provider-error-isolation.sql",
+    LAB_ARENA_EXHAUSTED_PROVIDER_ISOLATION_MIGRATION,
     "347-lab-arena-baseline-scored-first.sql",
     "349-lab-arena-scoring-effective-outcome.sql",
     "289-lab-arena-per-icp-cost-policy.sql",
@@ -130,6 +133,20 @@ CURRENT_SERVICE_MIGRATIONS = POSTGREST_MIGRATIONS + (
     "403-lab-arena-credit-failure-retry.sql",
     "405-lab-arena-submission-duplicates.sql",
 )
+
+
+def migrations_before(anchor: str) -> tuple[str, ...]:
+    """Canonical migrations installed ahead of ``anchor``.
+
+    The day-pinned rerun fixtures rebuild the schema as it stood on one
+    historical date: a fixed prefix of the canonical list, then the migrations
+    that round actually ran.  They used to express that prefix as
+    ``CURRENT_SERVICE_MIGRATIONS[:-3]`` and assert the tail was still
+    ``(294, 301, 326)`` -- so every migration appended afterwards moved the
+    anchor and failed the whole family at fixture setup.  Naming the anchor
+    keeps the historical order fixed however far the canonical list grows.
+    """
+    return CURRENT_SERVICE_MIGRATIONS[:CURRENT_SERVICE_MIGRATIONS.index(anchor)]
 
 
 def prepare_historical_confirmation_bank(store, round_id: str, ref: str, digest: str):

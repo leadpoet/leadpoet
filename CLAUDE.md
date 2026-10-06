@@ -1,5 +1,30 @@
 # Agent Instructions
 
+## Scoped production authorization: independent October 5/6 continuity audit
+
+The user authorized a separate full-path Arena production audit while another
+chat owns the claim-completion outage. Inspect protected logs, state, provider
+receipts and runtime evidence; fix only additional confirmed bugs with narrow
+changes, focused tests, exact committed migrations, safe push/merge and canonical
+paired deployment through the overnight procedures. Verify ongoing queued work,
+recovery, scoring, publication and weights. Preserve concurrent work, accepted
+outputs, frozen inputs, credentials, accounting, qualification, rewards and
+operator controls. Do not duplicate the other chat's recovery or fabricate runs,
+completions or scores. Authority ends after this audit and its fixes are verified.
+
+## Scoped production authorization: October 6 idle-work recovery
+
+On 2026-10-05/06 the user authorized tracing the reported eight-hour Arena
+work stoppage and fixing confirmed claim, lease, execution and recovery bugs.
+Use $overnight-rebenchmark-validation for protected inspection, narrow source
+changes, exact committed migrations, focused transition tests, safe push/merge,
+and canonical gateway/normal-validator deployment when needed. Recover only
+confirmed abandoned work; preserve live paid requests, accepted results, frozen
+inputs, daily admission/disclosure, provider accounting, scoring and weights.
+Use isolated reward-disabled failure probes and real queued miner progress for
+validation. Preserve concurrent work and operator controls. This authority ends
+when the confirmed bugs are fixed and continuous eligible work is verified.
+
 ## Scoped production authorization: October 5 delay recovery
 
 On 2026-10-05 the user authorized the simple necessary fixes identified in the

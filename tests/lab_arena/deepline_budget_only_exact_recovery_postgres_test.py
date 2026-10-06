@@ -458,3 +458,99 @@ def test_catalog_readiness_grants_only_service_and_checks_sql_guards(database):
         c.rollback()
     assert store.deepline_catalog_schema()["version"] == 415
     store.close()
+
+
+@pytest.mark.parametrize("reservation_case", ["native", "no_provider", "local_only", "keyed"])
+def test_unkeyed_async_receipt_settles_only_its_immutable_native_id(
+    database, tmp_path, reservation_case
+):
+    h, lease, token, connect = run(database, tmp_path, "10-" + sha(reservation_case)[-8:])
+    label = "unkeyed"
+    identity = contracts.provider_call_identity(
+        attempt=lease["attempt"],
+        assignment_id=lease["assignment_id"],
+        icp_position=lease["icp_position"],
+        action_sequence=0,
+        operation_id="deepline.execute",
+        request_hash=sha(label),
+    )
+    local = "ctx-tool-" + identity[7:39]
+    fingerprint = "sha256:" + "a" * 64
+    native = local if reservation_case == "local_only" else "firecrawl.batch:request-001"
+    reservation_doc = {
+        "deepline_request_id": local,
+        "tool": "firecrawl_batch_scrape",
+        "credential_fingerprint": fingerprint,
+        "deepline_operation_aliases": ["batch_scrape"],
+    }
+    if reservation_case != "no_provider":
+        reservation_doc["deepline_billing_provider"] = "firecrawl"
+    if reservation_case == "keyed":
+        reservation_doc["deepline_execution_key"] = "arena:" + identity[7:]
+    ident, result = reserve(
+        h,
+        lease,
+        token,
+        label,
+        amount=1,
+        doc=reservation_doc,
+    )
+    store = h.service.store
+    assert (
+        store.mark_dispatched(
+            run_id=lease["run_id"],
+            lease_token_hash=hash_lease_token(token),
+            call_identity=ident,
+        )["status"]
+        == "dispatched"
+    )
+    assert (
+        store.mark_uncertain(
+            run_id=lease["run_id"],
+            lease_token_hash=hash_lease_token(token),
+            call_identity=ident,
+            call_doc={
+                "reason": "missing_provider_cost",
+                "call_succeeded": True,
+                "deepline_request_id": local,
+                "deepline_job_id": native,
+                "deepline_operation": "firecrawl_batch_scrape",
+                "credential_fingerprint": fingerprint,
+            },
+        )["status"]
+        == "uncertain"
+    )
+    candidate = store.list_deepline_cost_reconciliations(
+        h.round_id, run_id=lease["run_id"]
+    )[0]
+    assert candidate["request_id"] == native
+    assert candidate["execution_key"] == reservation_doc.get("deepline_execution_key")
+    args = dict(
+        round_id=h.round_id,
+        run_id=lease["run_id"],
+        call_identity=identity,
+        uncertain_entry_id=candidate["uncertain_entry_id"],
+        request_id=native,
+        operation="firecrawl_batch_scrape",
+        credential_fingerprint=fingerprint,
+        actual_microusd=2000,
+        cost_units="0.02",
+        recovered_request_id=native,
+    )
+    assert (
+        store.reconcile_deepline_cost(
+            **{**args, "recovered_request_id": "other-request"}
+        )["status"]
+        == "stale"
+    )
+    if reservation_case != "native":
+        assert store.reconcile_deepline_cost(**args)["status"] == "stale"
+        with connect() as c, c.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM public.lab_arena_ledger WHERE call_identity=%s AND entry_kind='settlement'",
+                (identity,),
+            )
+            assert cur.fetchone()[0] == 0
+        return
+    assert store.reconcile_deepline_cost(**args)["status"] == "settled"
+    assert store.reconcile_deepline_cost(**args)["idempotent"] is True

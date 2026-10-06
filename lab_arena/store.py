@@ -1889,11 +1889,11 @@ class ArenaStore:
         execution_key: Optional[str] = None,
         recovered_request_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        if (execution_key is None) != (recovered_request_id is None):
+        if execution_key is not None and recovered_request_id is None:
             raise ArenaStoreError("Deepline execution recovery requires key and request ID")
         return _require_mapping(
             self._transport.rpc(
-                ("lab_arena_reconcile_deepline_cost_v2" if execution_key is not None
+                ("lab_arena_reconcile_deepline_cost_v2" if recovered_request_id is not None
                  else "lab_arena_reconcile_deepline_cost_v1"),
                 {
                     "p_round_id": str(round_id),
@@ -1905,9 +1905,9 @@ class ArenaStore:
                     "p_credential_fingerprint": str(credential_fingerprint),
                     "p_actual_microusd": int(actual_microusd),
                     "p_cost_units": str(cost_units),
-                    **({"p_execution_key": str(execution_key),
+                    **({"p_execution_key": execution_key,
                         "p_recovered_request_id": str(recovered_request_id)}
-                       if execution_key is not None else {}),
+                       if recovered_request_id is not None else {}),
                 },
             ),
             "reconcile_deepline_cost",

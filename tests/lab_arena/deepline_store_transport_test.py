@@ -1,5 +1,7 @@
 """Same exact-recovery and ledger cursor contract in both service transports."""
 
+import json
+
 import httpx
 import pytest
 
@@ -40,10 +42,15 @@ def test_keyed_reconciliation_uses_v2_and_legacy_uses_v1():
         == "settled"
     )
     assert requests[-1].url.path.endswith("/lab_arena_reconcile_deepline_cost_v2")
-    for extra in ({"execution_key": "key"}, {"recovered_request_id": "id"}):
-        with pytest.raises(ArenaStoreError, match="requires key and request ID"):
-            store.reconcile_deepline_cost(**args, **extra)
-    assert len(requests) == 2
+    assert store.reconcile_deepline_cost(
+        **args, recovered_request_id="native-id"
+    )["status"] == "settled"
+    assert requests[-1].url.path.endswith("/lab_arena_reconcile_deepline_cost_v2")
+    body = json.loads(requests[-1].content)
+    assert body["p_execution_key"] is None and body["p_recovered_request_id"] == "native-id"
+    with pytest.raises(ArenaStoreError, match="requires key and request ID"):
+        store.reconcile_deepline_cost(**args, execution_key="key")
+    assert len(requests) == 3
     store.close()
 
 

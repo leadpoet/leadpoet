@@ -132,8 +132,8 @@ BEGIN
   v_definition := pg_catalog.replace(v_definition, v_old,
     $replace$'^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$'$replace$);
   v_old := $replace$  IF COALESCE(p_round_id, '') = ''$replace$;
-  v_new := $replace$  IF COALESCE(p_execution_key, '') IS DISTINCT FROM
-       'arena:' || pg_catalog.substr(p_call_identity, 8)
+  v_new := $replace$  IF (p_execution_key IS NOT NULL AND p_execution_key IS DISTINCT FROM
+       'arena:' || pg_catalog.substr(p_call_identity, 8))
      OR COALESCE(p_recovered_request_id, '') !~
         '^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$' THEN
     RAISE EXCEPTION 'lab_arena_deepline_execution_recovery_input_invalid'
@@ -154,6 +154,12 @@ BEGIN
      OR v_reservation.round_id IS DISTINCT FROM p_round_id
      OR v_reservation.entry_doc ->> 'deepline_execution_key'
         IS DISTINCT FROM p_execution_key
+     OR (p_execution_key IS NULL AND (
+       p_request_id LIKE 'ctx-tool-%'
+       OR p_request_id IS DISTINCT FROM p_recovered_request_id
+       OR COALESCE(v_reservation.entry_doc ->> 'deepline_billing_provider', '')
+          !~ '^[a-z0-9_-]{1,64}$'
+     ))
      OR (v_head.entry_kind = 'uncertain'
          AND v_head.entry_doc #>> '{call,deepline_job_id}' IS NOT NULL
          AND v_head.entry_doc #>> '{call,deepline_job_id}'
@@ -167,7 +173,7 @@ BEGIN
   v_definition := pg_catalog.replace(v_definition, v_old, v_new);
   v_definition := pg_catalog.replace(v_definition,
     $replace$       AND v_head.amount_microusd = p_actual_microusd$replace$,
-    $replace$       AND v_head.entry_doc ->> 'deepline_execution_key' = p_execution_key
+    $replace$       AND v_head.entry_doc ->> 'deepline_execution_key' IS NOT DISTINCT FROM p_execution_key
        AND v_head.entry_doc ->> 'deepline_recovered_request_id' = p_recovered_request_id
        AND v_head.amount_microusd = p_actual_microusd$replace$);
   v_definition := pg_catalog.replace(v_definition,

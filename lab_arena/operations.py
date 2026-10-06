@@ -1470,7 +1470,7 @@ def _drop_superseded_fields(operation: Operation, parameters: Mapping[str, Any])
     return remaining
 
 
-def validate_operation_request(operation_id: str, parameters: Any) -> Dict[str, Any]:
+def validate_operation_request(operation_id: str, parameters: Any, *, deepline_catalog: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """Validate and normalize ``parameters`` for one operation.
 
     Unknown fields, forbidden names, wrong types, out-of-range values, and
@@ -1490,15 +1490,34 @@ def validate_operation_request(operation_id: str, parameters: Any) -> Dict[str, 
     if len(contracts.canonical_json(parameters).encode("utf-8")) > operation.max_request_bytes:
         raise OperationRequestError("request_too_large")
     parameters = _drop_superseded_fields(operation, parameters)
-    normalized = _validate_object(operation.request_fields, parameters, "$", forbidden=operation.forbidden_names, limits=limits)
+    request_fields = operation.request_fields
+    if operation_id == "deepline.execute" and deepline_catalog is not None:
+        from lab_arena import deepline_catalog as catalog
+        try:
+            request_fields = dict(request_fields, tool=FieldSpec("str", required=True, choices=catalog.allowed_tool_ids(deepline_catalog)))
+        except catalog.CatalogError as exc:
+            raise OperationRequestError("invalid_request") from exc
+    normalized = _validate_object(request_fields, parameters, "$", forbidden=operation.forbidden_names, limits=limits)
     for name, default in operation.defaults.items():
         if name not in normalized:
             normalized[name] = _deep_copy_json(default)
     if operation_id == "openrouter.responses":
         _validate_responses(normalized)
+    if operation.deepline_tool and deepline_catalog is not None:
+        from lab_arena import deepline_catalog as catalog
+        try:
+            catalog.validate_payload(deepline_catalog, operation.deepline_tool, normalized)
+        except catalog.CatalogError as exc:
+            raise OperationRequestError("invalid_field", "$.payload") from exc
     if operation_id == "deepline.execute":
         tool = normalized.get("tool")
         payload = normalized.get("payload")
+        if deepline_catalog is not None:
+            from lab_arena import deepline_catalog as catalog
+            try:
+                normalized["payload"] = catalog.validate_payload(deepline_catalog, tool, payload)
+            except catalog.CatalogError as exc:
+                raise OperationRequestError("invalid_field", "$.payload") from exc
         # These additions are read-only single-record operations. In particular,
         # no caller-controlled webhook URL is needed for synchronous judging.
         contact_fields = {
@@ -1508,7 +1527,7 @@ def validate_operation_request(operation_id: str, parameters: Any) -> Dict[str, 
             "bounceban_get_single_status": {"id"},
             "harvestapi_get_profile": {"url", "publicIdentifier", "profileId", "findEmail", "main", "skipSmtp", "includeAboutProfile"},
         }
-        if tool in contact_fields:
+        if deepline_catalog is None and tool in contact_fields:
             if not isinstance(payload, Mapping) or set(payload) - contact_fields[tool]:
                 raise OperationRequestError("invalid_field", "$.payload")
             if any(not isinstance(value, str) or not value or len(value) > 2048 for value in payload.values()):
@@ -1884,6 +1903,8 @@ def match_request(
     url: str,
     body: Optional[bytes],
     headers: Optional[Mapping[str, Any]],
+    *,
+    deepline_catalog: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """Map one client request to ``(operation_id, normalized_parameters)``.
 
@@ -1936,7 +1957,7 @@ def match_request(
                 continue
             spec = operation.request_fields.get(name)
             parameters[name] = _coerce_query_value(spec, value, "$." + name) if spec is not None else value
-    return operation.operation_id, validate_operation_request(operation.operation_id, parameters)
+    return operation.operation_id, validate_operation_request(operation.operation_id, parameters, deepline_catalog=deepline_catalog)
 
 
 # ---------------------------------------------------------------------------
@@ -1964,11 +1985,11 @@ class OutboundRequest:
     headers: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
 
-def outbound_target(operation_id: str, parameters: Any) -> OutboundTarget:
+def outbound_target(operation_id: str, parameters: Any, *, deepline_catalog: Optional[Mapping[str, Any]] = None) -> OutboundTarget:
     """The constant target of an operation; parameters are validated only."""
 
     operation = _operation(operation_id)
-    normalized = validate_operation_request(operation_id, parameters)
+    normalized = validate_operation_request(operation_id, parameters, deepline_catalog=deepline_catalog)
     return OutboundTarget(operation.method, "https", operation.outbound_host or operation.host, 443, operation.outbound_path or _render_path(operation, normalized))
 
 
@@ -1985,6 +2006,7 @@ def build_outbound_request(
     parameters: Any,
     *,
     openrouter_provider_policy: Optional[Mapping[str, Any]] = None,
+    deepline_catalog: Optional[Mapping[str, Any]] = None,
 ) -> OutboundRequest:
     """Build the credential-free outbound request from validated parameters.
 
@@ -1996,7 +2018,7 @@ def build_outbound_request(
     """
 
     operation = _operation(operation_id)
-    normalized = validate_operation_request(operation_id, parameters)
+    normalized = validate_operation_request(operation_id, parameters, deepline_catalog=deepline_catalog)
     path = operation.outbound_path or _render_path(operation, normalized)
     host = operation.outbound_host or operation.host
     target = OutboundTarget(operation.method, "https", host, 443, path)
@@ -2048,7 +2070,7 @@ def build_outbound_request(
             ):
                 raise OperationRequestError("invalid_request")
             document["provider"] = policy
-        document = _wrap_body(operation, normalized, document)
+        document = _wrap_body(operation, normalized, document, deepline_catalog=deepline_catalog)
         body = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
         return OutboundRequest(target, base_url, MappingProxyType({}), body, "application/json", operation.credential, operation.outbound_headers)
     query: Dict[str, str] = {name: _query_value(value) for name, value in normalized.items()}
@@ -2058,12 +2080,17 @@ def build_outbound_request(
     return OutboundRequest(target, base_url + "?" + urlencode(ordered), ordered, b"", None, operation.credential, operation.outbound_headers)
 
 
-def _wrap_body(operation: Operation, normalized: Mapping[str, Any], document: Dict[str, Any]) -> Dict[str, Any]:
+def _wrap_body(operation: Operation, normalized: Mapping[str, Any], document: Dict[str, Any], *, deepline_catalog: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """Apply the operation's named body transform (table data, never model data)."""
 
     if operation.body_wrapper == "deepline_execute":
         tool = str(normalized["tool"])
-        return {"provider": DEEPLINE_TOOL_PROVIDERS[tool], "operation": tool, "payload": document["payload"]}
+        if deepline_catalog is not None:
+            from lab_arena import deepline_catalog as catalog
+            provider = catalog.tool_entry(deepline_catalog, tool)["provider"]
+        else:
+            provider = DEEPLINE_TOOL_PROVIDERS[tool]
+        return {"provider": provider, "operation": tool, "payload": document["payload"]}
     if operation.body_wrapper == "deepline_exa_compat":
         # The validated Exa request is the Deepline payload as-is: Deepline's
         # Exa tools accept Exa's own field names (``ids`` included).

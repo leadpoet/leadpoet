@@ -2791,6 +2791,228 @@ def _finding(target: str, **overrides):
     return finding
 
 
+def _completed_unproven_investigation(target):
+    return {
+        "gate": "company_evidence_investigation",
+        "completed_submitted_findings": True,
+        "targets": [target],
+        "claims": {target: _finding(
+            target, status="UNPROVEN", observed_value=None,
+            evidence_url="", evidence_quote="",
+            reason="Completed review found no company-bound proof.",
+        )},
+        "failure_reason": "",
+        "usage": {"fetch_outcomes": [{"ok": True}]},
+    }
+
+
+@pytest.mark.parametrize("dimension,target", [
+    ("stage", "stage"), ("employee_size", "headcount"),
+    ("industry", "industry"), ("geography", "geography"),
+])
+def test_completed_unproven_investigation_overrides_stale_broad_fields(
+    dimension, target,
+):
+    verdict = _complete_verdict(
+        observed_company_stage="Series A", stage_matches=False,
+        stage_evidence_url="https://news.example/other-company",
+        stage_evidence_quote="Another same-name company raised Series A.",
+    )
+    receipt = _completed_unproven_investigation(target)
+    assert lead_scorer._has_explicitly_unproven_fit_dimensions(
+        verdict, (dimension,), investigation_receipt=receipt,
+    )
+    assert not lead_scorer._has_explicitly_unproven_fit_dimensions(
+        verdict, (dimension,),
+    )
+
+
+@pytest.mark.parametrize("fault", [
+    "incomplete", "missing_target", "wrong_target", "verified_claim",
+    "cited_claim", "provider_error", "malformed_response",
+    "unexpected_verifier_error", "authentication", "timeout",
+    "target_crawl", "linkedin_retryable",
+])
+def test_completed_unproven_investigation_preserves_infrastructure_faults(fault):
+    receipt = _completed_unproven_investigation("stage")
+    linkedin_outcome = ""
+    if fault == "incomplete":
+        receipt["completed_submitted_findings"] = False
+    elif fault == "missing_target":
+        receipt["targets"] = []
+    elif fault == "wrong_target":
+        receipt["claims"]["stage"]["target"] = "industry"
+    elif fault == "verified_claim":
+        receipt["claims"]["stage"]["status"] = "VERIFIED"
+    elif fault == "cited_claim":
+        receipt["claims"]["stage"]["evidence_url"] = "https://news.example/other"
+    elif fault in {"provider_error", "malformed_response", "unexpected_verifier_error"}:
+        receipt["failure_reason"] = fault
+    elif fault == "linkedin_retryable":
+        linkedin_outcome = "retryable_failure"
+    else:
+        receipt["usage"]["fetch_outcomes"] = [{"ok": False, "error_class": fault}]
+    verdict = _complete_verdict(
+        observed_company_stage="Series A", stage_matches=True,
+        stage_evidence_url="https://news.example/other-company",
+        stage_evidence_quote="Another company raised Series A.",
+    )
+    assert not lead_scorer._has_explicitly_unproven_fit_dimensions(
+        verdict, ("stage",), investigation_receipt=receipt,
+        linkedin_refresh_outcome=linkedin_outcome,
+    )
+
+
+@pytest.mark.parametrize("company_quality", [False, True])
+@pytest.mark.parametrize("malformed", [False, True])
+def test_completed_unproven_stale_stage_keeps_valid_scoring_sibling(
+    monkeypatch, malformed, company_quality,
+):
+    verdict = _complete_verdict(
+        observed_company_name="Acme Commercial Advisors",
+        employee_size_evidence_quote="Acme Commercial Advisors has 11-50 employees.",
+        industry_evidence_quote="Acme Commercial Advisors supplies SaaS software.",
+        geography_evidence_quote="Acme Commercial Advisors is headquartered in California, United States.",
+        observed_company_stage="Series A", stage_matches=None,
+        stage_evidence_url="https://news.example/another-acme",
+        stage_evidence_quote="Today, Acme announced a $22.75 million Series A round led by a venture investor.",
+    )
+    calls = {"broad": 0, "investigator": 0, "good": 0}
+
+    async def prechecks(*_args, **_kwargs):
+        return company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return company_fit_match("homepage verified", details={
+            "identity": {
+                "decision": COMPANY_FIT_MATCH,
+                "evidence_source": "company_homepage",
+                "observed_name": "acmecommercialadvisors", "observed_domain": "acme.example",
+                "observed_linkedin_slug": "acme",
+            },
+            "verified_homepage_transport_domain": "acme.example",
+        })
+
+    async def broad(**_kwargs):
+        calls["broad"] += 1
+        return dict(verdict), ""
+
+    async def preserve_size(value, *_args, **_kwargs):
+        return value
+
+    async def bounded(*, targets, **_kwargs):
+        calls["investigator"] += 1
+        assert targets == ("stage",)
+        receipt = _completed_unproven_investigation("stage")
+        return {
+            "claims": {} if malformed else receipt["claims"],
+            "_completed_submit": not malformed,
+            "failure_reason": "malformed_response" if malformed else "",
+            "usage": receipt["usage"],
+        }
+
+    original_score = lead_scorer.score_company_competition_intent
+
+    async def score_company(**kwargs):
+        if kwargs["company"].company_name == "Acme Commercial Advisors":
+            return await original_score(**kwargs)
+        calls["good"] += 1
+        identity = {
+            "decision": "match", "evidence_source": "company_web_reverification",
+            "submitted_name": "good", "observed_name": "good",
+            "submitted_domain": "good.example", "observed_domain": "good.example",
+            "submitted_linkedin_slug": "good-company", "observed_linkedin_slug": "good-company",
+        }
+        return lead_scorer.LeadScoreBreakdown(
+            icp_fit=0, decision_maker=0, intent_signal_raw=77,
+            time_decay_multiplier=1, intent_signal_final=77,
+            cost_penalty=0, time_penalty=0, final_score=77,
+            intent_signals_detail=[{
+                "matched_icp_signal": 0, "after_decay": 77.0,
+                "judge_verdict": {"decision": "verified"},
+            }],
+            verifier_gate_receipts=[{
+                "gate": "company_fit", "decision": "match",
+                "dimension_evidence": {"identity": {"web_identity_receipt": identity}},
+            }],
+        )
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", broad)
+    monkeypatch.setattr(lead_scorer, "_refresh_linkedin_employee_size_observation", preserve_size)
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", bounded)
+    monkeypatch.setattr(lead_scorer, "score_company_competition_intent", score_company)
+    policy = arena_scoring.build_scorer_policy(
+        scoring_adapter_version="qualification_integrity_v2",
+        company_quality=company_quality,
+    )
+    scorer = arena_scoring.lab_scorer(policy)
+    submitted = {
+        **_competition_company(), "company_stage": "Private Equity",
+        "company_name": "Acme Commercial Advisors",
+    }
+    good = {
+        **submitted, "company_name": "Good Company",
+        "company_website": "https://good.example",
+        "company_linkedin": "https://www.linkedin.com/company/good-company",
+    }
+    kwargs = {
+        "icp": _icp(company_stage="Private Equity", intent_signals=[
+            "Announced a completed funding event",
+        ]).model_dump(mode="json"),
+        "companies": [submitted, good], "scorer": scorer,
+    }
+    new_judgments = []
+
+    def run_score():
+        nonlocal new_judgments
+        if not company_quality:
+            return arena_scoring.score_work_item({"scored_run_id": "unproven-stage"}, **kwargs)
+        from lab_arena import company_judgments
+        document = arena_scoring.build_scoring_input(
+            scored_run_id="unproven-stage", icp=kwargs["icp"],
+            companies=kwargs["companies"], policy=policy, evaluation_date="2026-10-06",
+        )
+        refs = company_judgments.build_company_scopes(
+            scoring_input=document, round_id="arena-2026-10-06",
+            network_name="finney", netuid=71,
+            scorer_image_digest="sha256:" + "a" * 64,
+            scorer_image_reference="registry/scorer@sha256:" + "a" * 64,
+            integrity_policy="arena_integrity_v1", company_quality_policy="company_quality_v1",
+        )
+        lease = {
+            "schema_version": company_judgments.LEASE_SCHEMA_VERSION,
+            "hits": [], "misses": [{
+                "company_index": ref["company_index"], "cache_key": ref["cache_key"],
+                "company_input_hash": ref["company_input_hash"], "authority_slot": 0,
+            } for ref in refs],
+        }
+        rows, new_judgments = arena_scoring.score_quality_work_item(
+            {"scored_run_id": "unproven-stage"}, **kwargs, cache_context=lease,
+        )
+        return rows
+
+    if malformed:
+        with pytest.raises(arena_scoring.ScoringError):
+            run_score()
+        assert calls["investigator"] == arena_scoring.MAX_JUDGE_RETRIES
+        assert calls["good"] == (0 if company_quality else 1)
+    else:
+        rows = run_score()
+        assert [row["final_score"] for row in rows] == [0.0, 77.0], rows
+        if company_quality:
+            receipt = rows[0]["verifier_gate_receipts"][0]
+            assert receipt.get("failure_class") == "insufficient_fit_evidence", receipt
+        assert calls == {"broad": 1, "investigator": 1, "good": 1}
+        if company_quality:
+            from lab_arena import company_judgments
+            assert [row["company_qualified"] for row in rows] == [False, True]
+            assert len(new_judgments) == 2
+            assert all(company_judgments.raw_judgment_is_cacheable(item["raw_judgment"]) for item in new_judgments)
+
+
 def _attribute_finding(
     status: str = "UNPROVEN", *, url: str = "", quote: str = "",
     role: str = "supplier_operator",

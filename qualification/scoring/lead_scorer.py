@@ -5713,7 +5713,7 @@ def _has_explicitly_unproven_fit_dimensions(
         ),
     }
     if not incomplete or any(
-        dimension not in {*fields, "identity", "required_attribute"}
+        dimension not in {*fields, "identity", "required_attribute", "geography"}
         for dimension in incomplete
     ):
         return False
@@ -5734,7 +5734,48 @@ def _has_explicitly_unproven_fit_dimensions(
             for outcome in fetch_outcomes
         )
     )
+    investigation_claims = (
+        investigation_receipt.get("claims")
+        if isinstance(investigation_receipt, Mapping)
+        else None
+    )
+    completed_investigation = bool(
+        isinstance(investigation_receipt, Mapping)
+        and investigation_receipt.get("gate") == "company_evidence_investigation"
+        and investigation_receipt.get("completed_submitted_findings") is True
+        and investigation_receipt.get("failure_reason") == ""
+        and not review_has_transport_fault
+        and linkedin_refresh_outcome != "retryable_failure"
+    )
     for dimension in incomplete:
+        investigation_target = {
+            "employee_size": "headcount",
+            "stage": "stage",
+            "industry": "industry",
+            "geography": "geography",
+        }.get(dimension)
+        finding = (
+            investigation_claims.get(investigation_target)
+            if isinstance(investigation_claims, Mapping) and investigation_target
+            else None
+        )
+        if (
+            completed_investigation
+            and investigation_target in (investigation_receipt.get("targets") or ())
+            and isinstance(finding, Mapping)
+            and finding.get("target") == investigation_target
+            and finding.get("status") == "UNPROVEN"
+            and finding.get("evidence_url") == ""
+            and finding.get("evidence_quote") == ""
+        ):
+            # A validated, completed investigation can reject the earlier
+            # broad observation without clearing its cached fields. Its typed
+            # finding proves exhausted company evidence, not a broken judge.
+            continue
+        if dimension == "geography":
+            # Geography has no legacy empty-observation shortcut. Only the
+            # completed typed investigation above establishes exhaustion.
+            return False
         if dimension == "required_attribute":
             claims = (
                 investigation_receipt.get("claims")

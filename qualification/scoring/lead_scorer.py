@@ -400,7 +400,7 @@ _PUBLIC_STAGE_PROOF_PATTERNS = (
 )
 _PUBLIC_EXCHANGE_TRADING_STAGE_PROOF_PATTERNS = (
     re.compile(
-        r"\b(?:traded|trades)\s+on\s+(?:the\s+)?(?:nasdaq|nyse|new\s+york\s+"
+        r"\b(?:trade|traded|trades)\s+on\s+(?:the\s+)?(?:nasdaq|nyse|new\s+york\s+"
         r"stock\s+exchange|london\s+stock\s+exchange|lse|euronext|tsx|asx|"
         r"hkex|hong\s+kong\s+stock\s+exchange|tokyo\s+stock\s+exchange|"
         r"dubai\s+financial\s+market)\b",
@@ -411,13 +411,13 @@ _PUBLIC_NON_EQUITY_TRADING_CONTEXT_RE = re.compile(
     r"\b(?:bonds?(?:\s+(?:issues?|securit(?:y|ies)))?|"
     r"debt(?:\s+(?:instruments?|issues?|securit(?:y|ies)))?|notes?|funds?|etfs?)\b"
     r"\s+(?:(?:is|are|was|were)\s+)?(?:currently\s+)?"
-    r"(?:traded|trades)\s+on\b",
+    r"(?:trade|traded|trades)\s+on\b",
     re.I,
 )
 _PUBLIC_CONDITIONAL_EXCHANGE_TRADING_CONTEXT_RE = re.compile(
     r"(?:\b(?:if|unless|conditionally)\b|\bsubject\s+to\b)"
-    r"[^.!?;:\n]{0,100}\b(?:traded|trades)\s+on\b|"
-    r"\b(?:traded|trades)\s+on\b[^.!?;:\n]{0,100}"
+    r"[^.!?;:\n]{0,100}\b(?:trade|traded|trades)\s+on\b|"
+    r"\b(?:trade|traded|trades)\s+on\b[^.!?;:\n]{0,100}"
     r"(?:\b(?:if|unless|conditionally)\b|\bsubject\s+to\b)",
     re.I,
 )
@@ -883,7 +883,29 @@ def _stage_evidence_supports_observation(
                 quote,
                 re.I,
             )
-            or any(pattern.search(quote) for pattern in _PUBLIC_STRONG_CURRENT_PATTERNS)
+            or any(
+                (match := pattern.search(quote))
+                and (
+                    pattern not in _PUBLIC_EXCHANGE_TRADING_STAGE_PROOF_PATTERNS
+                    or (
+                        not _PUBLIC_NON_EQUITY_TRADING_CONTEXT_RE.search(quote)
+                        and not _PUBLIC_CONDITIONAL_EXCHANGE_TRADING_CONTEXT_RE.search(quote)
+                        and (
+                            not re.match(r"trade\s+on\b", match.group(0), re.I)
+                            or _public_quote_has_bound_market_locator(quote, identity_names)
+                            or re.search(
+                                r"\b(?:our\s+(?:class\s+[a-z]\s+)?"
+                                r"(?:(?:common|ordinary)\s+)?(?:shares?|stock)|"
+                                r"shares?\s+of\s+our\s+(?:class\s+[a-z]\s+)?"
+                                r"(?:(?:common|ordinary)\s+)?stock)\s*$",
+                                quote[max(0, match.start() - 120):match.start()],
+                                re.I,
+                            )
+                        )
+                    )
+                )
+                for pattern in _PUBLIC_STRONG_CURRENT_PATTERNS
+            )
             or semantic_public_listing
             or current_exchange_profile
         )

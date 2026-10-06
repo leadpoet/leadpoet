@@ -1,7 +1,11 @@
 """Current exchange quote cards can prove Public without weakening history guards."""
 
+from pathlib import Path
+
 import pytest
 
+from qualification.scoring.company_evidence_investigator import _validated_findings
+from qualification.scoring.company_verification import current_exchange_profile_names_issuer
 from qualification.scoring.lead_scorer import _stage_evidence_supports_observation
 
 
@@ -14,6 +18,11 @@ PROLOGIS = (
     "Price Market Line 10m Volume. Today September 25, 2026 4:03 PM ET "
     "Last 133.05 Volume 2.54m"
 )
+GLOBAL_PAYMENTS = (
+    "NYSE / GPN GLOBAL PAYMENTS INC 82.18 Stock price unchanged by "
+    "0.00 dollars, 0.00 percent"
+)
+GLOBAL_PAYMENTS_URL = "https://www.nyse.com/quote/XNYS:GPN"
 
 
 @pytest.mark.parametrize(("quote", "url", "domains", "names"), [
@@ -68,4 +77,64 @@ def test_exchange_profile_rejects_non_exchange_third_party_source():
         "Public", JLL,
         evidence_url="https://example.com/quote/JLL",
         identity_names=("JLL",),
+    )
+
+
+def test_unchanged_quote_is_admitted_from_the_exact_loaded_nyse_page():
+    page = (Path(__file__).parent / "fixtures" / "nyse_gpn_oct06.txt").read_text()
+    finding = _validated_findings(
+        {"findings": [{
+            "target": "stage",
+            "status": "VERIFIED",
+            "observed_value": "Public",
+            "evidence_url": GLOBAL_PAYMENTS_URL,
+            "evidence_quote": GLOBAL_PAYMENTS,
+        }]},
+        targets=("stage",),
+        fetched_pages={GLOBAL_PAYMENTS_URL: page},
+        first_party_domains={"globalpayments.com"},
+        identity_names={"globalpayments"},
+    )["stage"]
+
+    assert finding["status"] == "VERIFIED"
+    assert finding["evidence_quote"] == GLOBAL_PAYMENTS
+
+
+@pytest.mark.parametrize("quote", [
+    GLOBAL_PAYMENTS,
+    GLOBAL_PAYMENTS.replace("unchanged", "increased").replace("0.00", "1.00"),
+    GLOBAL_PAYMENTS.replace("unchanged", "decreased").replace("0.00", "1.00"),
+])
+def test_current_price_change_direction_does_not_change_public_status(quote):
+    assert _stage_evidence_supports_observation(
+        "Public", quote, evidence_url=GLOBAL_PAYMENTS_URL,
+        identity_names=("Global Payments", "Global Payments Inc."),
+    )
+
+
+@pytest.mark.parametrize(("quote", "url", "domains"), [
+    (GLOBAL_PAYMENTS.replace("GLOBAL PAYMENTS", "ACME HOLDINGS"),
+     GLOBAL_PAYMENTS_URL, ()),
+    (GLOBAL_PAYMENTS + " Global Payments was delisted in 2025.",
+     GLOBAL_PAYMENTS_URL, ()),
+    (GLOBAL_PAYMENTS + " Global Payments ceased trading.",
+     GLOBAL_PAYMENTS_URL, ()),
+    (GLOBAL_PAYMENTS.replace("0.00", "pending"), GLOBAL_PAYMENTS_URL, ()),
+    ("NYSE Search results: GPN Global Payments Inc. Stock price unchanged by 0.00 dollars.",
+     "https://www.nyse.com/search", ()),
+    ("NYSE / NYA NYSE COMPOSITE INDEX 82.18 Stock price unchanged by 0.00 dollars.",
+     "https://www.nyse.com/index", ()),
+    (GLOBAL_PAYMENTS, "https://example.com/quote/GPN", ()),
+])
+def test_unchanged_price_does_not_bypass_listing_evidence_guards(quote, url, domains):
+    assert not _stage_evidence_supports_observation(
+        "Public", quote, evidence_url=url, first_party_domains=domains,
+        identity_names=("Global Payments", "Global Payments Inc."),
+    )
+
+
+def test_ticker_mention_in_issuer_announcement_is_not_a_current_quote_card():
+    assert not current_exchange_profile_names_issuer(
+        "Global Payments (NYSE: GPN) announced a new partnership.",
+        ("Global Payments", "Global Payments Inc."),
     )

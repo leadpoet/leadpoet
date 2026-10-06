@@ -295,11 +295,9 @@ def evaluate_company_identity(
         # there is no second stable identifier to bind the alias.
         if submitted["linkedin_slug"]:
             if not parenthetical_names_align:
-                shorter_name = min(
-                    (submitted["name"], observed["name"]),
-                    key=len,
-                )
-                longer_name = max(
+                # Select both names even when their lengths are equal. Separate
+                # min/max calls choose the same first item on a length tie.
+                shorter_name, longer_name = sorted(
                     (submitted["name"], observed["name"]),
                     key=len,
                 )

@@ -217,7 +217,7 @@ def current_exchange_profile_names_issuer(
     ) or not re.search(
         r"\b(?:last|open|prev\.?\s*close|volume|market\s+cap)\s*[:$]?\s*"
         r"\$?\d+(?:[,.]\d+)*(?:\.\d+)?[kmb]?\b|"
-        r"\bstock\s+price\s+(?:increased|decreased)\s+by\s+"
+        r"\bstock\s+price\s+(?:increased|decreased|unchanged)\s+by\s+"
         r"[+-]?\$?\d+(?:\.\d+)?\b",
         quote,
         re.I,

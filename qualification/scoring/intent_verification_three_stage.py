@@ -1276,6 +1276,19 @@ def _looks_like_js_shell(body: str) -> bool:
         return True
     if _SPA_ROOT_RE.search(body):
         return True
+    if _HTML_DOCUMENT_RE.search(body) and any(
+        marker in body for marker in (*_HYDRATION_MARKERS, "self.__next_f.push")
+    ):
+        # Navigation and related cards can make a loading article look long
+        # enough to accept. Its hydration payload is not visible body proof;
+        # use the existing render tiers when the explicit article is empty.
+        document = _parse_html_shell(body)
+        if (
+            document is not None
+            and document.article_seen
+            and not " ".join(" ".join(document.article_parts).split())
+        ):
+            return True
     if any(m in body for m in _HYDRATION_MARKERS):
         text_only = re.sub(r"<[^>]+>", " ", body)
         text_only = re.sub(r"\s+", " ", text_only).strip()
@@ -1303,6 +1316,9 @@ class _HTMLShellParser(HTMLParser):
         self.body_depth = 0
         self.hidden_depth = 0
         self.body_parts: list[str] = []
+        self.article_seen = False
+        self.article_depth = 0
+        self.article_parts: list[str] = []
         self.labels: list[str] = []
         self._label_stack: list[tuple[str, list[str]]] = []
         self._title_seen = False
@@ -1315,6 +1331,9 @@ class _HTMLShellParser(HTMLParser):
             self.body_depth += 1
         if tag in self._HIDDEN:
             self.hidden_depth += 1
+        if tag == "article" and self.body_depth and not self.hidden_depth:
+            self.article_seen = True
+            self.article_depth += 1
         if tag == "h1" or (tag == "title" and not self._title_seen):
             self._title_seen = self._title_seen or tag == "title"
             self._label_stack.append((tag, []))
@@ -1332,6 +1351,8 @@ class _HTMLShellParser(HTMLParser):
                     break
         if tag in self._HIDDEN and self.hidden_depth:
             self.hidden_depth -= 1
+        if tag == "article" and self.article_depth and not self.hidden_depth:
+            self.article_depth -= 1
         if tag == "body" and self.body_depth:
             self.body_depth -= 1
 
@@ -1340,6 +1361,8 @@ class _HTMLShellParser(HTMLParser):
             return
         if self.body_depth:
             self.body_parts.append(data)
+            if self.article_depth:
+                self.article_parts.append(data)
         for _tag, parts in self._label_stack:
             parts.append(data)
 

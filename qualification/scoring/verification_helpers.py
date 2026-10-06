@@ -440,7 +440,11 @@ def extract_article_body(content: str, *, min_body_chars: int = 200) -> str:
                     r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|"
                     r"Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|"
                     r"Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+"
-                    r"\d{1,2},?\s+\d{4})\b",
+                    r"\d{1,2},?\s+\d{4}|"
+                    r"\d{1,2}\s+"
+                    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|"
+                    r"Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|"
+                    r"Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{4})\b",
                     context, re.IGNORECASE,
                 )
                 if context and any(

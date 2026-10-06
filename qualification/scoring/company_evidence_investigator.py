@@ -1316,6 +1316,12 @@ def _priority_headquarters_navigation_source(
     if "geography" not in targets:
         return ""
     for terms in (r"\b(?:contact|headquarters)\b", r"\babout\b"):
+        # A sales CTA can have a "Contact Sales" label while pointing to a
+        # demo form. Prefer an actual contact/HQ path before that fallback so
+        # one generic form does not consume the bounded source-fetch budget.
+        for locator in homepage_navigation_locators:
+            if re.search(terms, urlsplit(locator["url"]).path, re.I):
+                return locator["url"]
         for locator in homepage_navigation_locators:
             if re.search(terms, f"{locator['url']} {locator['label']}", re.I):
                 return locator["url"]
@@ -3851,7 +3857,7 @@ async def investigate_company_evidence(
                         and bound_public_sources
                         and not public_stage_unproven_rereviewed
                         and not correction_turn
-                        and not force_submit
+                        and time.monotonic() - started < ADMISSION_DEADLINE_SECONDS
                         and _turn < MAX_REASONING_TURNS - 1
                     )
                     if (
@@ -4046,6 +4052,12 @@ async def investigate_company_evidence(
                         }
                     elif force_public_stage_rereview:
                         public_stage_unproven_rereviewed = True
+                        scoped_correction_targets = ("stage",)
+                        scoped_correction_preserved = {
+                            target: dict(finding)
+                            for target, finding in claims.items()
+                            if target != "stage"
+                        }
                         forced_next_tool = "submit_findings"
                         tool_result = {
                             "ok": False,
@@ -4067,8 +4079,9 @@ async def investigate_company_evidence(
                                 "Do not infer Public from this correction. "
                                 "Do not search or fetch. VERIFIED or CONTRADICTED still needs "
                                 "one exact continuous quote from its fetched URL and must pass "
-                                "the unchanged deterministic validator. Submit one complete "
-                                "finding for every requested target."
+                                "the unchanged deterministic validator. The server retained "
+                                "unrelated validated findings. Submit one complete finding "
+                                "for stage only."
                             ),
                         }
                     elif unproven_without_search:

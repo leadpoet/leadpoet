@@ -195,7 +195,14 @@ partnership criterion, standalone enrollment in a partner, perks, accelerator,
 or vendor program; a partner tier or certification; and marketplace participation
 do not support that recategorization. Exact evidence must also prove the requested
 bilateral strategic collaboration or concrete joint commitments, such as joint
-go-to-market or co-development work. Apply this distinction only when the actual
+go-to-market or co-development work. These additional program-status requirements
+do not make joint go-to-market or co-development mandatory for every partnership.
+A direct, material bilateral customer-supplier agreement can qualify when exact
+source evidence affirmatively establishes a partnership or comparable
+collaborative commercial arrangement with concrete commitments by both named
+organizations. Do not reject it solely because the parties have customer-supplier
+roles. An ordinary purchase or marketing partnership label alone is insufficient.
+Apply this distinction only when the actual
 ICP criterion requires a strategic partnership; preserve different relationship
 wording and qualifying program activity that has those explicit commitments.
 Require each such factual clause to be semantically supported by supplied
@@ -276,6 +283,13 @@ Read the original paragraph directly: covered is true only when it states that
 specific verified activity, including a supported paraphrase. Return
 covered=false when the activity is absent. Do not copy or rewrite the paragraph
 in your response.
+Company names joined by "and", descriptions of what those companies offer,
+and a reference to "this activity" do not by themselves state a verified event.
+If a clause stops after identifying its actors and never states their action,
+the activity is absent: return covered=false. Do not complete the clause with
+an action from verified_signals, a headline, or the fetched source. A complete
+passive sentence or a complete sentence referring to the company's partnership,
+launch, or other verified activity can cover it; no particular verb is required.
 Generic relevance, product expansion or growth language does not cover a
 distinct office opening, hire, funding or other event. Never treat source
 evidence as if it appeared in the paragraph. Check coverage independently for
@@ -317,7 +331,11 @@ Assess every Boolean
 independently: a factual defect makes facts_supported false, but does not by
 itself make signal coverage, relevance, ICP connection or paragraph structure
 false. Require natural prose, not headings, bullet lists, field labels or
-internal scoring commentary.
+internal scoring commentary. A sentence that stops after naming its actors
+without stating a complete assertion is an incomplete clause: return
+natural_paragraph=false. Do not repair the sentence using the source evidence.
+Assess any facts actually asserted in the fragment independently; a missing
+action does not by itself contradict its supported company facts.
 
 The original paragraph is supplied as ordered intent_details_units. Review
 every unit exactly once and return its unit_id. The units are lossless ordered

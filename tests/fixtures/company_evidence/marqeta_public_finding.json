@@ -1,0 +1,26 @@
+{
+  "findings": [
+    {
+      "activity_role": "unresolved",
+      "evidence_quote": "Shares of our Class A Common Stock trade on the Nasdaq Global Select Market under the trading symbol \u201cMQ\u201d.",
+      "evidence_url": "https://investors.marqeta.com/resources/investor-faqs",
+      "new_domain": "",
+      "new_name": "",
+      "observed_country": "",
+      "observed_industry": "",
+      "observed_state": "",
+      "observed_subindustry": "",
+      "observed_value": "Public",
+      "old_domain": "",
+      "old_name": "",
+      "reason": "Marqeta, Inc.'s current investor FAQ identifies its common shares as trading on Nasdaq under ticker MQ. The current-stage discovery disclosed a 2025 acquisition by Marqeta of TransactPay, not an acquisition of Marqeta, and no completed delisting, take-private, or controlling acquisition of Marqeta.",
+      "shared_linkedin_slug": "",
+      "status": "VERIFIED",
+      "supporting_evidence_quote_1": "",
+      "supporting_evidence_quote_2": "",
+      "supporting_evidence_url_1": "",
+      "supporting_evidence_url_2": "",
+      "target": "stage"
+    }
+  ]
+}

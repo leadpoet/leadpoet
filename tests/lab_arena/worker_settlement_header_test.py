@@ -207,7 +207,7 @@ def test_real_worker_socket_replaces_spoof_and_preserves_three_key_envelope():
     assert api.frames[0]["action_sequence"] == 0
 
 
-def test_plain_http_bridge_strips_reserved_header_without_adding_proof(tmp_path):
+def test_plain_http_bridge_replaces_upstream_spoof_with_bound_proof(tmp_path):
     class Api:
         def provider(self, _run_id, _lease_token, frame):
             return response_document(
@@ -231,10 +231,34 @@ def test_plain_http_bridge_strips_reserved_header_without_adding_proof(tmp_path)
     )
 
     assert status == 200
-    assert runner.SETTLED_MICROUSD_HEADER not in {
-        name.lower() for name in headers
-    }
-    assert runner.CALL_IDENTITY_HEADER not in {
-        name.lower() for name in headers
-    }
+    assert headers[runner.SETTLED_MICROUSD_HEADER] == "0"
+    assert headers[runner.CALL_IDENTITY_HEADER] == IDENTITY
     assert json.loads(body)["results"]
+
+
+def test_shim_preserves_host_settlement_receipt_and_body():
+    document = response_document(headers={
+        runner.SETTLED_MICROUSD_HEADER: "3000", runner.CALL_IDENTITY_HEADER: IDENTITY,
+        "x-provider-secret": "removed",
+    })
+    status, headers, body = shim.parse_worker_response({key: document[key] for key in ("status", "headers", "body_b64")})
+    assert status == 200 and json.loads(body)["results"]
+    assert headers[runner.SETTLED_MICROUSD_HEADER] == "3000"
+    assert headers[runner.CALL_IDENTITY_HEADER] == IDENTITY
+    assert "x-provider-secret" not in headers
+
+
+@pytest.mark.parametrize("headers", [
+    {runner.SETTLED_MICROUSD_HEADER: "3000"},
+    {runner.CALL_IDENTITY_HEADER: "bad-hash"},
+    {runner.CALL_IDENTITY_HEADER: IDENTITY, runner.SETTLED_MICROUSD_HEADER: "-1"},
+    {runner.CALL_IDENTITY_HEADER: IDENTITY, runner.SETTLED_MICROUSD_HEADER: "0.003"},
+    {runner.CALL_IDENTITY_HEADER: IDENTITY, runner.SETTLED_MICROUSD_HEADER: "9223372036854775808"},
+    {runner.CALL_IDENTITY_HEADER: IDENTITY, runner.CALL_IDENTITY_HEADER.upper(): IDENTITY},
+    {runner.CALL_IDENTITY_HEADER: IDENTITY, runner.SETTLED_MICROUSD_HEADER: "0",
+        runner.SETTLED_MICROUSD_HEADER.upper(): "3000"},
+])
+def test_shim_rejects_malformed_or_unbound_host_proof(headers):
+    document = response_document(headers=headers)
+    with pytest.raises(shim.ShimTransportError, match="invalid_response"):
+        shim.parse_worker_response({key: document[key] for key in ("status", "headers", "body_b64")})

@@ -663,7 +663,7 @@ def test_company_verification_routed_failure_stays_explicit_and_bounded(
     # One paid request is followed only by bounded, read-only billing lookups.
     assert [call["method"] for call in transport.sent] == ["POST", "GET", "GET", "GET"]
     assert all(
-        call["url"].startswith(br.DEEPLINE_BILLING_LEDGER_URL + "?")
+        call["url"].startswith(br.DEEPLINE_EXECUTION_BY_KEY_URL)
         and call["body"] == b""
         and 0 < call["timeout"] <= 5.0
         for call in transport.sent[1:]

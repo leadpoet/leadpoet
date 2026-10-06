@@ -61,6 +61,8 @@ FRAME_FIELDS = ("schema_version", "operation_id", "parameters", "timeout_ms")
 RESPONSE_FIELDS = ("status", "headers", "body_b64")
 DEFAULT_TIMEOUT_MS = 30_000
 SOCKET_GRACE_SECONDS = 15.0
+SETTLED_MICROUSD_HEADER = "x-leadpoet-settled-microusd"
+CALL_IDENTITY_HEADER = "x-leadpoet-call-identity"
 ERROR_PREFIX = "lab arena: "
 SITECUSTOMIZE_SOURCE = "import lab_arena.shim as _lab_arena_shim\n_lab_arena_shim.install()\n"
 SHIM_IMAGE_MODULES = (
@@ -239,6 +241,21 @@ def _parse_worker_response_with_url(
             trusted_names.append(name)
         elif normalized_name in ("content-type", "content-length"):
             headers[normalized_name] = value
+        elif normalized_name in (SETTLED_MICROUSD_HEADER, CALL_IDENTITY_HEADER):
+            # The host strips provider copies and adds proofs bound to its
+            # ledger. Preserve those proofs through Python HTTP adapters.
+            if normalized_name in headers:
+                raise ShimTransportError("invalid_response")
+            if normalized_name == CALL_IDENTITY_HEADER:
+                valid = contracts.SHA256_RE.fullmatch(value) is not None
+            else:
+                valid = re.fullmatch(r"0|[1-9][0-9]{0,18}", value) is not None
+                valid = valid and int(value) <= 2**63 - 1
+            if not valid:
+                raise ShimTransportError("invalid_response")
+            headers[normalized_name] = value
+    if SETTLED_MICROUSD_HEADER in headers and CALL_IDENTITY_HEADER not in headers:
+        raise ShimTransportError("invalid_response")
     if len(trusted_names) > 1:
         raise ShimTransportError("invalid_response")
     try:

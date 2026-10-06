@@ -20,6 +20,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 from bittensor_wallet import Keypair
@@ -151,6 +152,7 @@ class FakeProviderTransport:
         self.review_requests = []
         self._deepline_lock = threading.Lock()
         self._deepline_jobs = []
+        self._deepline_executions = {}
 
     def send(
         self,
@@ -165,6 +167,22 @@ class FakeProviderTransport:
         if "-refused" in url or any("-refused" in str(value) for value in headers.values()):
             # The provider rejects a revoked miner key.
             return br.ProviderResponse(401, {"content-type": "application/json"}, b'{"error": "invalid key"}')
+        if method == "GET" and url.startswith(br.DEEPLINE_EXACT_BILLING_URL):
+            assert headers["authorization"] == "Bearer " + CANARY_DEEPLINE_KEY
+            request_id = parse_qs(urlsplit(url).query)["request_id"][0]
+            with self._deepline_lock:
+                entries = [row for row in self._deepline_jobs if row["request_id"] == request_id]
+            return br.ProviderResponse(200, {"content-type": "application/json"}, json.dumps({
+                "recent": {"request_id": request_id, "entries": entries},
+            }).encode())
+        if method == "GET" and url.startswith(br.DEEPLINE_EXECUTION_BY_KEY_URL):
+            assert headers["authorization"] == "Bearer " + CANARY_DEEPLINE_KEY
+            execution_key = unquote(url[len(br.DEEPLINE_EXECUTION_BY_KEY_URL):])
+            with self._deepline_lock:
+                execution = self._deepline_executions.get(execution_key)
+            return br.ProviderResponse(200 if execution else 404, {
+                "content-type": "application/json", "x-deepline-idempotency-supported": "true",
+            }, json.dumps(execution or {}).encode())
         if method == "GET" and url.startswith(br.DEEPLINE_BILLING_HISTORY_URL):
             assert headers["authorization"] == "Bearer " + CANARY_DEEPLINE_KEY
             with self._deepline_lock:
@@ -215,13 +233,24 @@ class FakeProviderTransport:
             job_id = "fake-deepline-job-%d" % (len(self._deepline_jobs) + 1)
             self._deepline_jobs.append(
                 {
+                    "id": "usage-" + job_id,
                     "request_id": job_id,
                     "operation": operation,
-                    "provider": "fake",
+                    "provider": request["provider"],
                     "credits": 0,
+                    "delta": 0,
                     "charge_state": "posted",
+                    "charge_finality": "final",
+                    "billing_mode": "deduct_on_settle",
+                    "metadata": {},
                 }
             )
+            execution_key = headers.get("idempotency-key")
+            if execution_key is not None:
+                self._deepline_executions[execution_key] = {
+                    "requestId": job_id, "toolId": operation,
+                    "executionRecovery": {"idempotencyKey": execution_key, "state": "completed"},
+                }
         payload = json.dumps(
             {
                 "job_id": job_id,

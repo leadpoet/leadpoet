@@ -2489,8 +2489,6 @@ class WorkerSocketServer:
             if str(name).lower()
             not in (
                 operations.TRUSTED_RESPONSE_URL_HEADER,
-                SETTLED_MICROUSD_HEADER,
-                CALL_IDENTITY_HEADER,
             )
         }
         try:

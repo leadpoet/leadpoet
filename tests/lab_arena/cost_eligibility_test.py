@@ -878,6 +878,12 @@ def _startup_service(
             "schema_version": "leadpoet.lab_arena.code_review.v1",
             "version": 207,
         },
+        submission_similarity_schema=lambda: {
+            "schema_version": "leadpoet.lab_arena.submission_duplicate.v1",
+            "version": 405,
+            "digest_format": "sha256:hex",
+            "cross_hotkey_scope": "round",
+        },
         validator_scoring_authority_schema=lambda: {
             "schema_version": "leadpoet.lab_arena.validator_scoring_authority.v1",
             "version": 208,

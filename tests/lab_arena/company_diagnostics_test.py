@@ -2,6 +2,7 @@
 
 import copy
 import json
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -70,6 +71,19 @@ def test_unresolved_intent_is_not_reported_as_factual_mismatch():
     assert result["checks"]["intent"] == "unavailable"
 
 
+def _install_completed_scores_cache(service):
+    """Give a bare ``ArenaService`` the completed-scores cache its reads need.
+
+    These stubs are built with ``object.__new__``, so nothing ``__init__``
+    installs is present. The published-results path reads the cache, and
+    without it the test fails on a missing attribute rather than on the
+    disclosure behaviour it is actually asserting.
+    """
+    service._completed_scores_lock = threading.Lock()
+    service._completed_scores_cache = {}
+    service._completed_scores_refresh_slots = threading.BoundedSemaphore(2)
+
+
 def _service(monkeypatch, *, disclosed=True):
     import lab_arena.service as module
     row = {"status": "published", "configuration_doc": {"contact_policy": "contacts_v1", "scorer_policy": {}},
@@ -80,6 +94,7 @@ def _service(monkeypatch, *, disclosed=True):
         for i in (0, 1)
     ]
     service = object.__new__(ArenaService)
+    _install_completed_scores_cache(service)
     service._round = lambda _: row
     service._public_icp_disclosure = lambda _: {"public_positions": [0]} if disclosed else None
     service._store = SimpleNamespace(list_runs=lambda *a, **k: copy.deepcopy(runs))

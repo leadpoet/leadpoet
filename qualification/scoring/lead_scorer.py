@@ -7839,12 +7839,26 @@ async def _llm_reverify_company(
         await _fetch_structured_linkedin_profile_once(
             profile_identity,
             current_profile_cache,
-            collect_employee_size=False,
+            collect_employee_size=require_company_fit_dimensions,
+        )
+        # The same exact-domain/profile-bound reply can prove company size.
+        # Retain it even when the earlier model cited an unusable profile.
+        structured_employee_size_evidence = (
+            current_profile_cache.get("structured_evidence")
+            if current_profile_cache.get("structured_employee_size_applicable")
+            else None
+        )
+        employee_size_conflict = bool(
+            evidence_investigator
+            and _employee_size_sources_conflict(
+                verdict,
+                structured_employee_size_evidence,
+            )
         )
         structured_public_company_evidence = current_profile_cache.get(
             "structured_public_company_evidence"
         )
-        if structured_public_company_evidence:
+        if structured_public_company_evidence or structured_employee_size_evidence:
             result = _reverify_decision(
                 verdict,
                 icp_attribute,

@@ -4517,7 +4517,8 @@ class Broker:
                         deepline_native_cost = provider_costs.deepline_cost(raw_document)
                         inline_billing = raw_document.get("billing")
                         if isinstance(inline_billing, Mapping) and (
-                            (raw_document.get("status") != "completed"
+                            ((deepline_async_ids or deepline_async_poll_accepted)
+                                and raw_document.get("status") != "completed"
                                 and inline_billing.get("pricing_status") != "final")
                             or ("pricing_status" in inline_billing and inline_billing["pricing_status"] != "final")
                             or (inline_billing.get("billing_mode") == "async_hold"

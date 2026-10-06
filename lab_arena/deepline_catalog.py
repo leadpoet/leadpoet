@@ -9,6 +9,7 @@ import hashlib
 import ipaddress
 import json
 import re
+from functools import lru_cache
 from typing import Any, Callable, Mapping
 from urllib.parse import parse_qsl, urlsplit
 
@@ -21,11 +22,12 @@ _ID = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
 _CATEGORY = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _COMPANY_CATEGORIES = frozenset({"company_search", "company_enrich", "research", "smb"})
 _PEOPLE_CATEGORIES = frozenset({"people_search", "people_enrich", "email_finder", "email_verify", "phone_finder", "phone_verify", "reverse_lookup"})
-_DENIED_CATEGORIES = frozenset({"outbound_tools", "admin", "automation"})
+_DENIED_CATEGORIES = frozenset({"outbound_tools", "admin"})
+_MODIFIER_CATEGORIES = frozenset({"autocomplete", "identity_resolution", "enrichment", "batch", "premium", "free"})
 _WRITE_WORDS = frozenset({"create", "update", "delete", "remove", "send", "publish", "upload", "insert", "upsert", "subscribe", "unsubscribe", "schedule", "deploy", "connect", "disconnect", "invite", "campaign", "sequence", "webhook"})
-_PRIVATE_PROVIDERS = frozenset({"affinity", "attio", "hubspot", "salesforce", "pipedrive", "zoho_crm", "customer_db", "snowflake", "postgres", "bigquery", "clickhouse", "databricks", "redshift", "gong", "fireflies", "grain", "attention", "intercom", "outreach", "slack", "google_workspace", "google_ads_audiences", "linkedin_ads_audiences", "meta_audiences"})
-_SECRET_FIELDS = frozenset({"authorization", "auth", "api_key", "apikey", "access_token", "token", "secret", "password", "cookie", "cookies", "credentials", "headers", "proxy", "proxies", "webhook", "callback_url", "script", "code", "command", "sql", "workflow", "actions", "tools", "actor_id", "actor_input", "dataset_id"})
-_PERSON_FIELDS = frozenset({"person", "people", "persons", "contact", "contacts", "email", "emails", "phone", "phones", "phone_number", "first_name", "last_name", "full_name", "person_id", "contact_id", "profile_id", "public_identifier", "linkedin_handle"})
+_PRIVATE_PROVIDERS = frozenset({"affinity", "attio", "hubspot", "salesforce", "pipedrive", "zoho_crm", "customer_db", "snowflake", "postgres", "bigquery", "clickhouse", "databricks", "redshift", "gong", "fireflies", "grain", "attention", "intercom", "outreach", "slack", "google_workspace", "google_ads_audiences", "linkedin_ads_audiences", "meta_audiences", "lemlist", "instantly", "emailbison", "heyreach", "smartlead", "salesloft", "salesforge", "kernel", "browserbase", "clay", "apify"})
+_SECRET_FIELDS = frozenset({"authorization", "auth", "api_key", "apikey", "access_token", "token", "secret", "password", "cookie", "cookies", "credentials", "headers", "proxy", "proxies", "webhook", "callback_url", "script", "code", "command", "workflow", "actions", "tools", "actor_id", "actor_input", "dataset_id"})
+_PERSON_FIELDS = frozenset({"person", "people", "persons", "contact", "contacts", "email", "emails", "phone", "phones", "phone_number", "first_name", "last_name", "full_name", "person_id", "contact_id", "profile", "profiles", "profile_id", "profile_url", "public_identifier", "linkedin_handle", "person_url", "member_id", "mentioning_member", "user_id", "user_ids", "username", "screen_name"})
 _PERSON_FLAGS = frozenset({"find_email", "include_emails", "include_email", "include_phones", "include_phone", "include_contacts", "include_people", "enrich_people", "enrich_contacts"})
 
 
@@ -33,14 +35,20 @@ class CatalogError(ValueError):
     """Bounded error; provider metadata and request values are never echoed."""
 
 
-def _copy(value: Any) -> Any:
+def _encoded(value: Any) -> str:
     try:
         encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
-        if len(encoded) > 16_777_216:
+        if len(encoded) > 67_108_864:
             raise CatalogError("catalog_too_large")
-        return json.loads(encoded)
+        return encoded
+    except CatalogError:
+        raise
     except (TypeError, ValueError, RecursionError) as exc:
         raise CatalogError("invalid_catalog") from exc
+
+
+def _copy(value: Any) -> Any:
+    return json.loads(_encoded(value))
 
 
 def _name(name: str) -> str:
@@ -111,7 +119,7 @@ def _pricing(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _eligible(row: Mapping[str, Any], allow_people: bool) -> bool:
+def _eligible(row: Mapping[str, Any], allow_people: bool, *, owned_poll: bool = False) -> bool:
     categories = row.get("categories")
     tool = row.get("toolId", row.get("id"))
     provider = row.get("provider")
@@ -120,10 +128,21 @@ def _eligible(row: Mapping[str, Any], allow_people: bool) -> bool:
     if not isinstance(categories, list) or not categories or any(not isinstance(c, str) or not _CATEGORY.fullmatch(c) for c in categories):
         return False
     category_set = set(categories)
-    if category_set & _DENIED_CATEGORIES or not allow_people and category_set & _PEOPLE_CATEGORIES:
+    # A generic HTTP operation is narrowed locally to public HTTPS GET. The
+    # provider's admin label describes its broader native request surface.
+    public_http = provider == "generic_http" and _words(tool) >= {"http", "request"}
+    if category_set - (_COMPANY_CATEGORIES | _PEOPLE_CATEGORIES | _DENIED_CATEGORIES | _MODIFIER_CATEGORIES | {"automation"}):
         return False
-    if not category_set & (_COMPANY_CATEGORIES | (_PEOPLE_CATEGORIES if allow_people else frozenset())):
+    if category_set & _DENIED_CATEGORIES and not public_http and not owned_poll or not allow_people and category_set & _PEOPLE_CATEGORIES:
         return False
+    if not public_http and not owned_poll and not category_set & (_COMPANY_CATEGORIES | (_PEOPLE_CATEGORIES if allow_people else frozenset())):
+        # Automation also describes ordinary public page readers. Their
+        # required URL and read-only operation identify the narrower surface.
+        raw_schema = row.get("inputSchema", {})
+        raw_schema = raw_schema.get("jsonSchema", raw_schema) if isinstance(raw_schema, dict) else {}
+        required = raw_schema.get("required", [])
+        if not isinstance(required, list) or any(not isinstance(name, str) for name in required) or "automation" not in category_set or not set(required) & {"url", "urls"} or not _words(tool) & {"scrape", "fetch", "extract", "read", "get", "crawl", "map"}:
+            return False
     operation_names = [tool, row.get("operation"), row.get("operationId")]
     execution = row.get("executionMetadata", row.get("execution_metadata"))
     if isinstance(execution, dict):
@@ -132,21 +151,71 @@ def _eligible(row: Mapping[str, Any], allow_people: bool) -> bool:
         operation_names.extend([execution.get("sourceOperation"), execution.get("effectiveOperation")])
     if provider in _PRIVATE_PROVIDERS or any(isinstance(name, str) and _words(name) & _WRITE_WORDS for name in operation_names):
         return False
+    if not allow_people and any(isinstance(name, str) and _words(name) & {"person", "people", "profile", "contact", "contacts", "email", "phone"} for name in operation_names):
+        return False
     if row.get("callable") is False or row.get("connected") is False or row.get("deprecated") is True or row.get("requiresOwnCredential") is True or row.get("credentialStatus") in {"requires_connection", "deprecated"}:
         return False
-    if row.get("playReference") or row.get("playExpansion") or row.get("asyncFlow") or row.get("asyncGetAction"):
+    if row.get("playReference") or row.get("playExpansion"):
         return False
     return True
+
+
+def _company_sql(value: Any) -> None:
+    """Restrict public corpus queries to a single SELECT over companies."""
+    if not isinstance(value, str) or len(value) > 32_000 or any(s in value for s in (";", "--", "/*", "*/", "\\", "$")):
+        raise CatalogError("invalid_public_company_sql")
+    # Ignore string literals when checking SQL keywords and relation names.
+    statement = re.sub(r"'(?:[^']|'')*'", "''", value)
+    if "'" in statement.replace("''", "") or '"' in statement or not re.match(r"^\s*SELECT\b", statement, re.I):
+        raise CatalogError("invalid_public_company_sql")
+    words = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", statement.upper()))
+    if words & {"INSERT", "UPDATE", "DELETE", "MERGE", "DROP", "ALTER", "CREATE", "COPY", "CALL", "EXECUTE", "GRANT", "REVOKE", "INTO", "UNION", "JOIN", "WITH", "EXPLAIN", "INFORMATION_SCHEMA"}:
+        raise CatalogError("invalid_public_company_sql")
+    tables = re.findall(r"\bFROM\s+([\w.]+)", statement, re.I)
+    if not tables or any(table.lower() != "companies" for table in tables) or re.search(r"\bFROM\s+companies\s*,", statement, re.I):
+        raise CatalogError("invalid_public_company_sql")
+    limits = re.findall(r"\bLIMIT\s+(\d+)\b", statement, re.I)
+    if not limits or any(not 1 <= int(limit) <= 100_000 for limit in limits):
+        raise CatalogError("invalid_public_company_sql")
 
 
 def freeze_catalog(document: Mapping[str, Any], allow_people: bool = False) -> dict[str, Any]:
     """Freeze all available tools approved by the versioned round policy."""
     document = _copy(document)
+    if not isinstance(document, dict):
+        raise CatalogError("invalid_catalog")
     rows = document.get("tools")
     if not isinstance(rows, list) or not rows or len(rows) > 4096 or type(allow_people) is not bool:
         raise CatalogError("invalid_catalog")
     seen = set()
     tools = []
+    by_id = {row.get("toolId", row.get("id")): row for row in rows if isinstance(row, dict) and isinstance(row.get("toolId", row.get("id")), str)}
+    flows = {}
+    polls = {}
+    for row in rows:
+        if not isinstance(row, dict) or not _eligible(row, allow_people) or not row.get("asyncFlow"):
+            continue
+        flow = row["asyncFlow"]
+        operation = row.get("asyncOperation")
+        parent = row.get("toolId", row.get("id"))
+        if not isinstance(flow, dict) or flow.get("startAction") != parent or flow.get("finishAction") or not isinstance(operation, dict):
+            continue
+        job = operation.get("job")
+        ids = job.get("idPaths") if isinstance(job, dict) else None
+        actions = flow.get("pollActions")
+        if not isinstance(ids, list) or not ids or any(not isinstance(path, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*){0,5}", path) for path in ids) or not isinstance(actions, list) or len(actions) != 1 or not isinstance(actions[0], str) or not _ID.fullmatch(actions[0]):
+            continue
+        poll = by_id.get(actions[0])
+        if not poll or poll.get("provider") != row.get("provider") or not _eligible(poll, allow_people, owned_poll=True) or not _words(actions[0]) & {"get", "status", "result", "results"}:
+            continue
+        try:
+            required = _schema(poll.get("inputSchema", poll.get("input_schema"))).get("required", [])
+        except CatalogError:
+            continue
+        if len(required) != 1 or _name(required[0]) not in {"id", "job_id", "run_id", "task_id", "request_id"} or actions[0] in polls:
+            continue
+        flows[parent] = {"start_action": parent, "poll_actions": actions, "job_id_paths": ids, "poll_input": required[0]}
+        polls[actions[0]] = parent
     for row in rows:
         if not isinstance(row, dict):
             raise CatalogError("invalid_catalog")
@@ -154,14 +223,23 @@ def freeze_catalog(document: Mapping[str, Any], allow_people: bool = False) -> d
         if not isinstance(tool_id, str) or tool_id in seen:
             raise CatalogError("duplicate_catalog_tool")
         seen.add(tool_id)
-        if not _eligible(row, allow_people):
+        parent = polls.get(tool_id)
+        if not _eligible(row, allow_people, owned_poll=parent is not None):
+            continue
+        if (row.get("asyncFlow") or row.get("asyncGetAction")) and tool_id not in flows:
             continue
         try:
             schema = _schema(row.get("inputSchema", row.get("input_schema")))
         except CatalogError:
             continue
         required = schema.get("required", [])
+        if not parent and any(_name(name) in {"job_id", "run_id", "task_id", "request_id"} for name in required):
+            continue
+        if not parent and "get" in _words(tool_id) and _words(tool_id) & {"run", "job", "status", "result", "results"}:
+            continue
         if any(_name(name) in _SECRET_FIELDS or not allow_people and _name(name) in _PERSON_FIELDS for name in required):
+            continue
+        if "sql" in schema["properties"] and not (row["provider"] == "deepline_native" and "company_search" in row["categories"]):
             continue
         pricing = _pricing(row)
         if pricing["currency"] != "USD":
@@ -169,13 +247,23 @@ def freeze_catalog(document: Mapping[str, Any], allow_people: bool = False) -> d
         aliases = row.get("operationAliases", [])
         if not isinstance(aliases, list) or any(not isinstance(a, str) or not _ID.fullmatch(a) for a in aliases):
             continue
+        output = row.get("outputSchema", row.get("output_schema"))
+        try:
+            output = _schema(output) if isinstance(output, dict) else None
+        except CatalogError:
+            output = None
         tools.append({
             "tool_id": tool_id, "provider": row["provider"],
             "operation_aliases": sorted(set(aliases)),
             "categories": sorted(set(row["categories"])),
             "description": str(row.get("description", ""))[:16_384],
             "input_schema": schema, "pricing": pricing,
+            **({"output_schema": output} if output is not None else {}),
+            **({"async_flow": flows[tool_id]} if tool_id in flows else {}),
+            **({"async_parent": parent} if parent is not None else {}),
         })
+    approved_ids = {tool["tool_id"] for tool in tools}
+    tools = [tool for tool in tools if (not tool.get("async_parent") or tool["async_parent"] in approved_ids) and (not tool.get("async_flow") or set(tool["async_flow"]["poll_actions"]) <= approved_ids)]
     snapshot = {"schema_version": SCHEMA_VERSION, "policy_version": POLICY_VERSION, "allow_people": allow_people, "tools": sorted(tools, key=lambda row: row["tool_id"])}
     if not tools:
         raise CatalogError("empty_approved_catalog")
@@ -188,15 +276,24 @@ def _hash(document: Mapping[str, Any]) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode()).hexdigest()
 
 
-def validate_catalog(snapshot: Mapping[str, Any]) -> dict[str, Any]:
-    """Verify hash and rebuild authority; a valid hash cannot grant new policy."""
-    snapshot = _copy(snapshot)
+@lru_cache(maxsize=4)
+def _validated(encoded: str) -> dict[str, Any]:
+    """Cache only exact immutable bytes; never expose the cached object."""
+    snapshot = json.loads(encoded)
+    if not isinstance(snapshot, dict):
+        raise CatalogError("invalid_catalog_snapshot")
     if set(snapshot) != {"schema_version", "policy_version", "allow_people", "tools", "catalog_hash"} or snapshot.get("schema_version") != SCHEMA_VERSION or snapshot.get("policy_version") != POLICY_VERSION or snapshot.get("catalog_hash") != _hash(snapshot):
         raise CatalogError("invalid_catalog_snapshot")
     try:
         rows = []
         for row in snapshot.get("tools", []):
             rows.append({"toolId": row["tool_id"], "provider": row["provider"], "operationAliases": row["operation_aliases"], "categories": row["categories"], "description": row["description"], "inputSchema": row["input_schema"], "pricing": {"unit": row["pricing"]["unit"], "usdPerUnit": row["pricing"]["usd_per_unit"], "creditsPerUnit": row["pricing"]["credits_per_unit"], "currency": row["pricing"]["currency"]}, "billingSource": row["pricing"]["billing_source"]})
+            if "async_flow" in row:
+                flow = row["async_flow"]
+                rows[-1]["asyncFlow"] = {"startAction": flow["start_action"], "pollActions": flow["poll_actions"], "finishAction": None}
+                rows[-1]["asyncOperation"] = {"job": {"idPaths": flow["job_id_paths"]}}
+            if "output_schema" in row:
+                rows[-1]["outputSchema"] = row["output_schema"]
         rebuilt = freeze_catalog({"tools": rows}, snapshot["allow_people"])
     except (CatalogError, KeyError, TypeError) as exc:
         raise CatalogError("invalid_catalog_snapshot") from exc
@@ -205,16 +302,47 @@ def validate_catalog(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     return snapshot
 
 
+def validate_catalog(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Verify hash and authority once per exact snapshot; return a fresh copy."""
+    return _copy(_validated(_encoded(snapshot)))
+
+
 def tool_entry(snapshot: Mapping[str, Any], tool_id: str) -> dict[str, Any]:
-    snapshot = validate_catalog(snapshot)
+    snapshot = _validated(_encoded(snapshot))
     for row in snapshot["tools"]:
         if row["tool_id"] == tool_id:
-            return row
+            return _copy(row)
     raise CatalogError("tool_not_approved")
 
 
 def allowed_tool_ids(snapshot: Mapping[str, Any]) -> tuple[str, ...]:
-    return tuple(row["tool_id"] for row in validate_catalog(snapshot)["tools"])
+    return tuple(row["tool_id"] for row in _validated(_encoded(snapshot))["tools"])
+
+
+def public_tool_definition(entry: Mapping[str, Any], *, compact: bool = False) -> dict[str, Any]:
+    """Return the official CLI's public discovery shape, from frozen data."""
+    entry = _copy(entry)
+    result = {
+        "toolId": entry["tool_id"], "provider": entry["provider"],
+        "description": entry["description"], "categories": entry["categories"],
+        "operationAliases": entry["operation_aliases"],
+        "inputSchema": {"jsonSchema": entry["input_schema"]},
+        "pricing": {"unit": entry["pricing"]["unit"], "usdPerUnit": entry["pricing"]["usd_per_unit"], "creditsPerUnit": entry["pricing"]["credits_per_unit"], "currency": entry["pricing"]["currency"]},
+        "billingSource": entry["pricing"]["billing_source"],
+        "callable": True, "connected": True, "credentialStatus": "managed",
+    }
+    if entry.get("async_flow"):
+        flow = entry["async_flow"]
+        result["asyncFlow"] = {"startAction": flow["start_action"], "pollActions": flow["poll_actions"], "finishAction": None}
+        result["asyncOperation"] = {"job": {"idPaths": flow["job_id_paths"]}}
+    if "output_schema" in entry:
+        result["outputSchema"] = {"jsonSchema": entry["output_schema"]}
+    if compact:
+        result.pop("inputSchema", None)
+        result.pop("outputSchema", None)
+        result["hasInputSchema"] = True
+        result["hasOutputSchema"] = "output_schema" in entry
+    return result
 
 
 def _public_url(value: Any) -> None:
@@ -248,6 +376,8 @@ def validate_payload(snapshot: Mapping[str, Any], tool_id: str, payload: Mapping
     schema = entry["input_schema"]
     if set(payload) - set(schema["properties"]):
         raise CatalogError("unknown_payload_field")
+    if entry.get("async_parent") and "next" in payload:
+        raise CatalogError("async_paging_forbidden")
     try:
         if not Draft202012Validator(schema).is_valid(payload):
             raise CatalogError("invalid_payload_schema")
@@ -264,12 +394,18 @@ def validate_payload(snapshot: Mapping[str, Any], tool_id: str, payload: Mapping
                 name = _name(key)
                 if name in _SECRET_FIELDS or _words(name) & _WRITE_WORDS:
                     raise CatalogError("forbidden_payload_field")
+                if name in {"job_id", "run_id", "task_id", "request_id"} and not entry.get("async_parent"):
+                    raise CatalogError("unowned_job_payload")
+                if name == "sql":
+                    if entry["provider"] != "deepline_native" or "company_search" not in entry["categories"]:
+                        raise CatalogError("forbidden_payload_field")
+                    _company_sql(child)
                 inactive_flag = child is False or child is None or isinstance(child, str) and child in {"false", "False"}
                 if not snapshot["allow_people"] and (name in _PERSON_FIELDS or name in _PERSON_FLAGS and not inactive_flag):
                     raise CatalogError("people_payload_forbidden")
                 if name in {"method", "http_method"} and child != "GET":
                     raise CatalogError("write_payload_forbidden")
-                if name in {"body", "data", "json"} and entry["provider"] == "generic_http":
+                if entry["provider"] == "generic_http" and (name in {"body", "data", "json"} or name.startswith("body_")):
                     raise CatalogError("write_payload_forbidden")
                 if name in {"category", "entity_type", "type", "target_type"} and isinstance(child, str) and _name(child) in {"person", "people", "contact", "contacts", "email", "phone"} and not snapshot["allow_people"]:
                     raise CatalogError("people_payload_forbidden")
@@ -285,18 +421,36 @@ def validate_payload(snapshot: Mapping[str, Any], tool_id: str, payload: Mapping
 def fetch_catalog(*, read_json: Callable[[str, Mapping[str, str]], Mapping[str, Any]], allow_people: bool = False) -> dict[str, Any]:
     """Read only official catalog routes with a caller-owned trusted transport."""
     document = _copy(read_json(CATALOG_URL, {}))
+    if not isinstance(document, dict):
+        raise CatalogError("invalid_catalog")
     rows = document.get("tools")
     if not isinstance(rows, list) or len(rows) > 4096:
         raise CatalogError("invalid_catalog")
-    detailed = []
+    detailed = {}
     for row in rows:
         if not isinstance(row, dict):
             raise CatalogError("invalid_catalog")
-        if _eligible(row, allow_people):
+        schema = row.get("inputSchema", row.get("input_schema"))
+        hint = (str(row.get("toolId", "")).replace("_", " ") + " " + str(schema.get("description", "") if isinstance(schema, dict) else ""))
+        needs_detail = not isinstance(schema, dict) or row.get("asyncFlow") or re.search(r"\b(?:async|asynchronous|batch|crawl|agent|run)\b", hint, re.I)
+        if _eligible(row, allow_people) and needs_detail:
             tool_id = row.get("toolId", row.get("id"))
             detail = _copy(read_json("https://code.deepline.com/api/v2/integrations/%s/get" % tool_id, {"x-deepline-tool-meta-only": "1"}))
-            if detail.get("toolId", detail.get("id")) != tool_id or detail.get("provider") != row.get("provider"):
+            if not isinstance(detail, dict) or detail.get("toolId", detail.get("id")) != tool_id or detail.get("provider") != row.get("provider"):
                 raise CatalogError("catalog_identity_changed")
             row = detail
-        detailed.append(row)
-    return freeze_catalog({"tools": detailed}, allow_people)
+        detailed[row.get("toolId", row.get("id"))] = row
+    # Declared polls are metadata reads too. Their authority is granted only
+    # by the safe parent descriptor, never by their broad admin category.
+    for row in list(detailed.values()):
+        flow = row.get("asyncFlow")
+        if not isinstance(flow, dict) or not isinstance(flow.get("pollActions"), list):
+            continue
+        for tool_id in flow["pollActions"]:
+            if not isinstance(tool_id, str) or not _ID.fullmatch(tool_id):
+                raise CatalogError("invalid_async_descriptor")
+            detail = _copy(read_json("https://code.deepline.com/api/v2/integrations/%s/get" % tool_id, {"x-deepline-tool-meta-only": "1"}))
+            if not isinstance(detail, dict) or detail.get("toolId", detail.get("id")) != tool_id or detail.get("provider") != row.get("provider"):
+                raise CatalogError("catalog_identity_changed")
+            detailed[tool_id] = detail
+    return freeze_catalog({"tools": list(detailed.values())}, allow_people)

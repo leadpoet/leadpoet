@@ -1180,11 +1180,46 @@ for _operation in _OPERATION_LIST:
 del _operation
 
 
+# Frozen metadata is served locally by the broker. Keep these routes outside
+# the legacy operation table so existing round hashes remain unchanged.
+_CATALOG_OPERATION_LIST = (
+    Operation(
+        operation_id="deepline.tools.list",
+        provider="deepline", method="GET", host="code.deepline.com",
+        path="/api/v2/tools", parameter_location="query",
+        request_fields={"compact": FieldSpec("bool"), "categories": FieldSpec("str", max_length=512)},
+        fixed_params={}, defaults={"compact": True}, timeout_seconds=5,
+        max_request_bytes=4096, max_response_bytes=8_388_608,
+        cost_rule=CALL_QUOTA_COST_RULE, response_sanitizer="json",
+        funding_source="host", credential=_DEEPLINE_CREDENTIAL,
+    ),
+    Operation(
+        operation_id="deepline.tools.get",
+        provider="deepline", method="GET", host="code.deepline.com",
+        path="/api/v2/integrations/{tool}/get", parameter_location="query",
+        request_fields={"tool": FieldSpec("str", required=True, choices=DEEPLINE_TOOLS)},
+        fixed_params={}, defaults={}, timeout_seconds=5,
+        max_request_bytes=4096, max_response_bytes=262_144,
+        cost_rule=CALL_QUOTA_COST_RULE, response_sanitizer="json",
+        funding_source="host", credential=_DEEPLINE_CREDENTIAL,
+        path_fields=("tool",),
+    ),
+)
+CATALOG_OPERATIONS: Mapping[str, Operation] = MappingProxyType(
+    {operation.operation_id: operation for operation in _CATALOG_OPERATION_LIST}
+)
+
+
 def _operation(operation_id: Any) -> Operation:
-    operation = OPERATIONS.get(operation_id) if isinstance(operation_id, str) else None
+    operation = (OPERATIONS.get(operation_id) or CATALOG_OPERATIONS.get(operation_id)) if isinstance(operation_id, str) else None
     if operation is None:
         raise OperationRequestError("no_matching_operation")
     return operation
+
+
+def get_operation(operation_id: Any) -> Optional[Operation]:
+    """Resolve fixed provider operations and locally served catalog routes."""
+    return (OPERATIONS.get(operation_id) or CATALOG_OPERATIONS.get(operation_id)) if isinstance(operation_id, str) else None
 
 
 # ---------------------------------------------------------------------------
@@ -1491,7 +1526,9 @@ def validate_operation_request(operation_id: str, parameters: Any, *, deepline_c
         raise OperationRequestError("request_too_large")
     parameters = _drop_superseded_fields(operation, parameters)
     request_fields = operation.request_fields
-    if operation_id == "deepline.execute" and deepline_catalog is not None:
+    if operation_id.startswith("deepline.tools.") and deepline_catalog is None:
+        raise OperationRequestError("no_matching_operation")
+    if operation_id in {"deepline.execute", "deepline.tools.get"} and deepline_catalog is not None:
         from lab_arena import deepline_catalog as catalog
         try:
             request_fields = dict(request_fields, tool=FieldSpec("str", required=True, choices=catalog.allowed_tool_ids(deepline_catalog)))
@@ -1810,7 +1847,7 @@ def _validate_responses(parameters: Mapping[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def check_request_headers(headers: Mapping[str, Any]) -> None:
+def check_request_headers(headers: Mapping[str, Any], *, catalog_metadata: bool = False) -> None:
     """Refuse caller credentials and any header outside the allowlist."""
 
     if headers is None:
@@ -1822,7 +1859,7 @@ def check_request_headers(headers: Mapping[str, Any]) -> None:
         lowered = str(name).strip().lower()
         if lowered in CREDENTIAL_HEADERS:
             raise OperationRequestError("forbidden_header")
-        if lowered not in ALLOWED_REQUEST_HEADERS:
+        if lowered not in ALLOWED_REQUEST_HEADERS and not (catalog_metadata and lowered == "x-deepline-tool-meta-only"):
             raise OperationRequestError("unknown_header")
         if lowered == "content-type":
             content_type = str(headers[name])
@@ -1852,7 +1889,7 @@ def _coerce_query_value(spec: FieldSpec, raw: str, path: str) -> Any:
     return raw
 
 
-def _match_operation(method: str, url: str) -> Tuple[Operation, Dict[str, str]]:
+def _match_operation(method: str, url: str, *, catalog_metadata: bool = False) -> Tuple[Operation, Dict[str, str]]:
     if not isinstance(method, str) or not isinstance(url, str):
         raise OperationRequestError("no_matching_operation")
     method = method.upper()
@@ -1870,7 +1907,7 @@ def _match_operation(method: str, url: str) -> Tuple[Operation, Dict[str, str]]:
     host = parts.hostname
     if not host or not _is_dns_hostname(host):
         raise OperationRequestError("no_matching_operation")
-    for operation in _OPERATION_LIST:
+    for operation in _OPERATION_LIST + (_CATALOG_OPERATION_LIST if catalog_metadata else ()):
         if operation.method != method or operation.host != host:
             continue
         if not operation.path_fields:
@@ -1915,8 +1952,8 @@ def match_request(
     never forwarded.
     """
 
-    operation, path_parameters = _match_operation(method, url)
-    check_request_headers(headers or {})
+    operation, path_parameters = _match_operation(method, url, catalog_metadata=deepline_catalog is not None)
+    check_request_headers(headers or {}, catalog_metadata=operation.operation_id in CATALOG_OPERATIONS)
     parts = urlsplit(url)
     raw = b"" if body is None else bytes(body)
     if operation.parameter_location == "body":
@@ -1957,6 +1994,10 @@ def match_request(
                 continue
             spec = operation.request_fields.get(name)
             parameters[name] = _coerce_query_value(spec, value, "$." + name) if spec is not None else value
+        for name, value in path_parameters.items():
+            if name in parameters:
+                raise OperationRequestError("invalid_query")
+            parameters[name] = value
     return operation.operation_id, validate_operation_request(operation.operation_id, parameters, deepline_catalog=deepline_catalog)
 
 
@@ -2222,6 +2263,8 @@ __all__ = [
     "OPENROUTER_STRICT_PROVIDER_POLICY",
     "OPENROUTER_OUTBOUND_HEADERS",
     "OPERATIONS",
+    "CATALOG_OPERATIONS",
+    "get_operation",
     "OPERATION_LIMITS",
     "RESPONSES_OPERATION_LIMITS",
     "DEEPLINE_TOOLS",

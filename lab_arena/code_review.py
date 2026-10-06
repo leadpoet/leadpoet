@@ -20,6 +20,13 @@ from lab_arena import contracts, source_bundle
 
 
 DEFAULT_REVIEW_MODEL = "anthropic/claude-sonnet-5"
+# Exact public catalog id -> canonical_slug, verified 2026-10-06:
+# https://openrouter.ai/api/v1/models?q=claude-sonnet-5
+# Router endpoint metadata may report this canonical identity rather than the
+# requested id. No other dates, suffixes, or model families are interchangeable.
+_REVIEW_MODEL_CANONICAL_SLUGS = {
+    DEFAULT_REVIEW_MODEL: "anthropic/claude-sonnet-5-20260630",
+}
 DEFAULT_MAX_OUTPUT_TOKENS = 16_384
 DEFAULT_CONTEXT_WINDOW_TOKENS = 1_000_000
 REQUEST_TOKEN_OVERHEAD = 16
@@ -38,6 +45,7 @@ _RESPONSE_INVALID_REASONS = frozenset(
         "verdict", "summary", "coverage", "coverage_order", "findings",
         "verdict_findings", "finding_keys", "finding_classification",
         "finding_evidence", "finding_evidence_mismatch", "finding_explanation",
+        "context_integrity",
     }
 )
 
@@ -79,6 +87,8 @@ class PreparedCodeReview:
     files: Tuple[ReviewFile, ...]
     input_tokens_upper_bound: int
     similarity_contexts: Tuple[Mapping[str, Any], ...] = ()
+    requires_context_integrity: bool = False
+    context_window_tokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS
 
     @property
     def reviewed_files(self) -> Tuple[str, ...]:
@@ -314,15 +324,18 @@ def prepare_request(
         # below remains the strict, fail-closed contract boundary.
         "response_format": {"type": "json_object"},
     }
-    # UTF-8 bytes are a conservative token ceiling even for non-ASCII source.
-    # Count the complete canonical request because JSON escaping and generation
-    # controls also consume context. The reserved completion must fit in the
-    # same window.
+    # UTF-8 bytes are a conservative token ceiling even for non-ASCII source,
+    # not an exact tokenizer count. Exceeding this ceiling cannot prove that
+    # the actual request is too large; require router integrity and actual
+    # input usage in the response before accepting an uncertain fit.
+    # The complete wire request remains a conservative bound for reservation;
+    # it is not the provider token count. Reserve completion in the same window.
     input_bound = REQUEST_TOKEN_OVERHEAD + len(
         contracts.canonical_json(parameters).encode("utf-8")
     )
-    if input_bound + max_output_tokens > context_window_tokens:
+    if max_output_tokens >= context_window_tokens:
         raise CodeReviewError("review_source_exceeds_context")
+    requires_context_integrity = input_bound + max_output_tokens > context_window_tokens
 
     minimum_coverage_response = {
         "verdict": "pass",
@@ -336,7 +349,67 @@ def prepare_request(
         ]
     if len(contracts.canonical_json(minimum_coverage_response).encode("utf-8")) > max_output_tokens:
         raise CodeReviewError("review_output_cannot_report_coverage")
-    return PreparedCodeReview(parameters, files, input_bound, similarity_contexts)
+    return PreparedCodeReview(
+        parameters, files, input_bound, similarity_contexts,
+        requires_context_integrity, context_window_tokens,
+    )
+
+
+def _context_integrity_verified(
+    response: Mapping[str, Any], prepared: PreparedCodeReview,
+) -> bool:
+    """Require fresh router evidence that all input reached the chosen model.
+
+    OpenRouter reports every materially altering plugin in pipeline. A missing
+    pipeline is a documented no-op, but missing metadata (including cache hits)
+    cannot prove integrity. Unknown/nonempty pipelines always fail closed.
+    """
+
+    metadata = response.get("openrouter_metadata")
+    if not isinstance(metadata, Mapping):
+        return False
+    if (
+        metadata.get("requested") != prepared.parameters["model"]
+        or metadata.get("strategy") != "direct"
+        or type(metadata.get("attempt")) is not int
+        or metadata["attempt"] != 1
+        or ("pipeline" in metadata and metadata["pipeline"] != [])
+    ):
+        return False
+    endpoints = metadata.get("endpoints")
+    if not isinstance(endpoints, Mapping):
+        return False
+    available = endpoints.get("available")
+    if not isinstance(available, list) or not available:
+        return False
+    if type(endpoints.get("total")) is not int or endpoints["total"] < len(available):
+        return False
+    if any(
+        not isinstance(endpoint, Mapping)
+        or type(endpoint.get("selected")) is not bool
+        or not isinstance(endpoint.get("model"), str)
+        or not isinstance(endpoint.get("provider"), str)
+        or not endpoint["provider"]
+        for endpoint in available
+    ):
+        return False
+    selected = [endpoint for endpoint in available if endpoint["selected"]]
+    requested_model = prepared.parameters["model"]
+    allowed_endpoint_models = {requested_model}
+    canonical_model = _REVIEW_MODEL_CANONICAL_SLUGS.get(requested_model)
+    if canonical_model is not None:
+        allowed_endpoint_models.add(canonical_model)
+    if len(selected) != 1 or selected[0]["model"] not in allowed_endpoint_models:
+        return False
+    usage = response.get("usage")
+    if not isinstance(usage, Mapping):
+        return False
+    prompt_tokens = usage.get("prompt_tokens")
+    return (
+        type(prompt_tokens) is int
+        and prompt_tokens > 0
+        and prompt_tokens + prepared.parameters["max_tokens"] <= prepared.context_window_tokens
+    )
 
 
 def _json_object_without_duplicates(raw: str) -> Mapping[str, Any]:
@@ -368,6 +441,8 @@ def parse_response(
             invalid("envelope")
         if response_json.get("model") != prepared.parameters["model"]:
             invalid("model_mismatch")
+        if prepared.requires_context_integrity and not _context_integrity_verified(response_json, prepared):
+            invalid("context_integrity")
         choices = response_json.get("choices")
         if not isinstance(choices, list) or len(choices) != 1:
             invalid("choice")

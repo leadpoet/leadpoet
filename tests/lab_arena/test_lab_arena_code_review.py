@@ -162,16 +162,154 @@ def test_prepare_request_rejects_utf8_binary_control_bytes():
     assert failure.value.path == "assets/payload.bin"
 
 
-def test_prepare_request_rejects_instead_of_truncating_for_context():
+def test_prepare_request_preserves_uncertain_fit_instead_of_truncating():
     members = _pydantic_style_source()
     members["prompts/large.txt"] = b"x" * 20_000
+    prepared = code_review.prepare_request(
+        _archive(members), max_output_tokens=1_000, context_window_tokens=5_000,
+    )
+    assert prepared.requires_context_integrity
+    assert prepared.input_tokens_upper_bound > prepared.context_window_tokens
+    submitted = json.loads(prepared.parameters["messages"][1]["content"])
+    assert {item["path"]: item["content"].encode() for item in submitted["submission_files"]} == members
+
+
+def test_prepare_request_rejects_completion_reserve_that_cannot_fit():
     with pytest.raises(code_review.CodeReviewError) as failure:
         code_review.prepare_request(
-            _archive(members),
-            max_output_tokens=1_000,
+            _archive(_pydantic_style_source()),
+            max_output_tokens=5_000,
             context_window_tokens=5_000,
         )
     assert failure.value.code == "review_source_exceeds_context"
+
+
+def _integrity_metadata(prepared):
+    return {
+        "requested": prepared.parameters["model"], "strategy": "direct", "attempt": 1,
+        "endpoints": {"total": 1, "available": [{
+            "provider": "Anthropic", "model": prepared.parameters["model"], "selected": True,
+        }]},
+    }
+
+
+def _large_complete_review(*, similarity_contexts=()):
+    members = {f"source/file{index:02}.txt": b"public source line\n" * 2000 for index in range(44)}
+    members["harness.py"] = b"def run_icp(icp, tools): return []\n"
+    prepared = code_review.prepare_request(_archive(members), similarity_contexts=similarity_contexts)
+    assert prepared.requires_context_integrity
+    assert len(prepared.files) == 45
+    supplied = json.loads(prepared.parameters["messages"][1]["content"])
+    assert {item["path"]: item["content"].encode() for item in supplied["submission_files"]} == members
+    response = _openrouter_response(prepared)
+    if similarity_contexts:
+        document = json.loads(response["choices"][0]["message"]["content"])
+        document["reviewed_comparisons"] = [item["comparison_id"] for item in similarity_contexts]
+        response["choices"][0]["message"]["content"] = json.dumps(document)
+        assert supplied["similarity_contexts"] == list(similarity_contexts)
+    response["openrouter_metadata"] = _integrity_metadata(prepared)
+    response["usage"] = {"prompt_tokens": 400_000}
+    return prepared, response
+
+
+@pytest.mark.parametrize("pipeline", [None, []])
+def test_large_full_source_review_passes_with_fresh_unmodified_router_proof(pipeline):
+    prepared, response = _large_complete_review()
+    if pipeline is not None:
+        response["openrouter_metadata"]["pipeline"] = pipeline
+    assert code_review.parse_response(response, prepared).passed
+
+
+def test_large_review_accepts_verified_catalog_canonical_endpoint():
+    prepared, response = _large_complete_review()
+    selected = response["openrouter_metadata"]["endpoints"]["available"][0]
+    selected.update({"provider": "Amazon Bedrock", "model": "anthropic/claude-sonnet-5-20260630"})
+    assert code_review.parse_response(response, prepared).passed
+
+
+@pytest.mark.parametrize("endpoint_model", [
+    "anthropic/claude-sonnet-5-20260701", "anthropic/claude-sonnet-5.5",
+    "anthropic/claude-sonnet-5-20260630:other",
+])
+def test_large_review_rejects_unverified_endpoint_model_identity(endpoint_model):
+    prepared, response = _large_complete_review()
+    response["openrouter_metadata"]["endpoints"]["available"][0]["model"] = endpoint_model
+    with pytest.raises(code_review.CodeReviewError) as failure:
+        code_review.parse_response(response, prepared)
+    assert failure.value.response_reason == "context_integrity"
+
+
+def test_canonical_endpoint_mapping_cannot_authorize_custom_requested_model():
+    members = _pydantic_style_source()
+    members["large.txt"] = b"public source line\n" * 80_000
+    prepared = code_review.prepare_request(_archive(members), model="custom/review-model")
+    assert prepared.requires_context_integrity
+    response = _openrouter_response(prepared)
+    response["openrouter_metadata"] = _integrity_metadata(prepared)
+    response["openrouter_metadata"]["endpoints"]["available"][0]["model"] = "anthropic/claude-sonnet-5-20260630"
+    response["usage"] = {"prompt_tokens": 400_000}
+    with pytest.raises(code_review.CodeReviewError) as failure:
+        code_review.parse_response(response, prepared)
+    assert failure.value.response_reason == "context_integrity"
+
+
+@pytest.mark.parametrize("damage", [
+    "missing_metadata", "compression", "unknown_stage", "malformed_pipeline",
+    "missing_usage", "invalid_usage", "context_overflow", "wrong_requested",
+    "wrong_endpoint", "no_selected", "fallback", "malformed_endpoints",
+])
+def test_large_review_rejects_unproven_or_modified_context(damage):
+    prepared, response = _large_complete_review()
+    metadata = response["openrouter_metadata"]
+    if damage == "missing_metadata":
+        del response["openrouter_metadata"]
+    elif damage in ("compression", "unknown_stage"):
+        metadata["pipeline"] = [{"type": "context_compression" if damage == "compression" else "future_stage"}]
+    elif damage == "malformed_pipeline":
+        metadata["pipeline"] = None
+    elif damage == "missing_usage":
+        del response["usage"]
+    elif damage == "invalid_usage":
+        response["usage"]["prompt_tokens"] = True
+    elif damage == "context_overflow":
+        response["usage"]["prompt_tokens"] = prepared.context_window_tokens
+    elif damage == "wrong_requested":
+        metadata["requested"] = "other/model"
+    elif damage == "wrong_endpoint":
+        metadata["endpoints"]["available"][0]["model"] = "other/model"
+    elif damage == "no_selected":
+        metadata["endpoints"]["available"][0]["selected"] = False
+    elif damage == "fallback":
+        metadata["attempt"] = 2
+    elif damage == "malformed_endpoints":
+        metadata["endpoints"] = {}
+    with pytest.raises(code_review.CodeReviewError) as failure:
+        code_review.parse_response(response, prepared)
+    assert failure.value.response_reason == "context_integrity"
+
+
+def test_large_verified_review_still_requires_every_file():
+    prepared, response = _large_complete_review()
+    document = json.loads(response["choices"][0]["message"]["content"])
+    document["reviewed_files"].pop()
+    response["choices"][0]["message"]["content"] = json.dumps(document)
+    with pytest.raises(code_review.CodeReviewError) as failure:
+        code_review.parse_response(response, prepared)
+    assert failure.value.response_reason == "coverage"
+
+
+def test_large_verified_review_still_requires_every_comparison():
+    comparisons = ({"comparison_id": "public-prior", "public_reference_files": [{
+        "path": "harness.py", "content": "def run_icp(icp, tools): return []\n",
+    }]},)
+    prepared, response = _large_complete_review(similarity_contexts=comparisons)
+    assert code_review.parse_response(response, prepared).passed
+    document = json.loads(response["choices"][0]["message"]["content"])
+    document["reviewed_comparisons"] = []
+    response["choices"][0]["message"]["content"] = json.dumps(document)
+    with pytest.raises(code_review.CodeReviewError) as failure:
+        code_review.parse_response(response, prepared)
+    assert failure.value.response_reason == "coverage"
 
 
 def test_prepare_request_rejects_when_output_cannot_list_every_file():

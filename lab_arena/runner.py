@@ -763,7 +763,7 @@ class HttpArenaApiClient:
         timeout_seconds = API_TIMEOUT_SECONDS
         operation_id = frame.get("operation_id")
         operation = (
-            operations.OPERATIONS.get(operation_id)
+            operations.get_operation(operation_id)
             if isinstance(operation_id, str)
             else None
         )
@@ -1701,7 +1701,7 @@ def _provider_error_event(
         "error_class": type(exc).__name__[:64],
         "error_code": "broker_unavailable",
     }
-    operation = operations.OPERATIONS.get(operation_id)
+    operation = operations.get_operation(operation_id)
     if operation is not None:
         content["provider"] = operation.provider
     if exc.http_status is not None:
@@ -2474,7 +2474,7 @@ class WorkerSocketServer:
         except operations.OperationError as exc:
             code = getattr(exc, "code", "invalid_request")
             return HTTP_ERROR_STATUS.get(code, 400), {}, _http_error_body(code)
-        operation_timeout_ms = operations.OPERATIONS[operation_id].timeout_seconds * 1000
+        operation_timeout_ms = operations.get_operation(operation_id).timeout_seconds * 1000
         error, document = self._dispatch(
             operation_id,
             parameters,
@@ -3089,6 +3089,10 @@ class AssignmentExecutor:
                     extra_environment["SCRAPINGDOG_API_KEY"] = operations.SCRAPINGDOG_RUNTIME_HANDLE
             if lease.get("deepline_catalog") is not None:
                 input_document["deepline_catalog"] = lease["deepline_catalog"]
+                if not scoring_run:
+                    input_document["provider_operations"] = sorted(
+                        set(operations.OPERATIONS) | set(operations.CATALOG_OPERATIONS)
+                    )
             (input_dir / runtime.INPUT_FILE_NAME).write_text(json.dumps(input_document, sort_keys=True), encoding="utf-8")
             staged_agent_entrypoint = (
                 None

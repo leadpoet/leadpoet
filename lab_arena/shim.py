@@ -147,7 +147,7 @@ def _read_input_deepline_catalog(path: str) -> Optional[Mapping[str, Any]]:
 def build_operation_frame(operation_id: str, parameters: Mapping[str, Any], timeout_ms: int) -> bytes:
     """Encode one request frame; ``parameters`` must already be normalized."""
 
-    operation = operations.OPERATIONS.get(operation_id)
+    operation = operations.get_operation(operation_id)
     if operation is None:
         raise ShimRequestError("no_matching_operation")
     if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms < 1:
@@ -174,7 +174,7 @@ def validate_operation_frame(frame: Any, *, deepline_catalog: Optional[Mapping[s
     if frame["schema_version"] != OPERATION_FRAME_SCHEMA_VERSION:
         raise OperationFrameError("invalid_frame")
     operation_id = frame["operation_id"]
-    operation = operations.OPERATIONS.get(operation_id) if isinstance(operation_id, str) else None
+    operation = operations.get_operation(operation_id) if isinstance(operation_id, str) else None
     if operation is None:
         raise OperationFrameError("no_matching_operation")
     timeout_ms = frame["timeout_ms"]
@@ -297,7 +297,7 @@ def _dispatch_with_response_url(
 
     encoded = build_operation_frame(operation_id, parameters, timeout_ms)
     bounded_timeout_ms = min(
-        timeout_ms, operations.OPERATIONS[operation_id].timeout_seconds * 1000
+        timeout_ms, operations.get_operation(operation_id).timeout_seconds * 1000
     )
     path = worker_socket_path()
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

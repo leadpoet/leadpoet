@@ -65,7 +65,7 @@ def _telemetry_provider_operation(operation_id: str) -> Tuple[str, str]:
     Deepline while retaining its registered Exa operation name.
     """
 
-    operation = operations.OPERATIONS.get(operation_id)
+    operation = operations.get_operation(operation_id)
     if operation is None or operation.provider not in contracts.PROVIDERS:
         return "unknown", "unknown"
     if _TELEMETRY_OPERATION_RE.fullmatch(operation_id):
@@ -1062,7 +1062,7 @@ class ArenaService:
         return eligible, banned
 
     def _freeze_deepline_catalog(self, configuration: Dict[str, Any]) -> None:
-        source = self._config.deepline_catalog_source
+        source = getattr(self._config, "deepline_catalog_source", None)
         if source is None or configuration.get("deepline_catalog") is not None:
             return
         if configuration.get("sourcing_cost_eligibility_policy") != contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY:
@@ -4522,7 +4522,7 @@ class ArenaService:
         run, context = self._run_context(run_id, lease_token)
         broker = self._broker_for(run["round_id"])
         operation_id = str(frame["operation_id"])
-        operation = operations.OPERATIONS.get(operation_id)
+        operation = operations.get_operation(operation_id)
         # The lease hash is derived from the supplied token in _run_context.
         # Only a match to the canonical run row can attach run attribution;
         # broker refusal and host failure still belong to that attempt.

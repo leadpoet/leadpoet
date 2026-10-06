@@ -14,6 +14,10 @@ from tests.lab_arena import sep18_published_rerun295_postgres_test as lifecycle
 from tests.lab_arena import sep19_terminal309_newjudge_rerun310_postgres_test as rerun310
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import (
+    migrations_before,
+    LAB_ARENA_COST_BACKFILL_RETIREMENT_MIGRATION,
+    LAB_ARENA_SCORE_PAYER_MIGRATION,
+    LAB_ARENA_EXHAUSTED_PROVIDER_ISOLATION_MIGRATION,
     CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
 )
@@ -31,18 +35,17 @@ TEMPLATE = (
 
 @pytest.fixture(scope="module")
 def database():
-    assert CURRENT_SERVICE_MIGRATIONS[-3:] == (
-        "294-lab-arena-retire-open-cost-backfill.sql",
-        "301-lab-arena-score-payer-boundary.sql",
-        "326-lab-arena-exhausted-provider-error-isolation.sql",
-    )
     yield from database_with_lab_arena_migration(
-        CURRENT_SERVICE_MIGRATIONS[:-3]
+        migrations_before(LAB_ARENA_COST_BACKFILL_RETIREMENT_MIGRATION)
         + (
             "289-lab-arena-per-icp-cost-policy.sql",
             "292-lab-arena-null-final-score-publication.sql",
         )
-        + CURRENT_SERVICE_MIGRATIONS[-3:]
+        + (
+            LAB_ARENA_COST_BACKFILL_RETIREMENT_MIGRATION,
+            LAB_ARENA_SCORE_PAYER_MIGRATION,
+            LAB_ARENA_EXHAUSTED_PROVIDER_ISOLATION_MIGRATION,
+        )
     )
 
 

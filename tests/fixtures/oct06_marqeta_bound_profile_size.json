@@ -1,0 +1,105 @@
+{
+  "provenance": {
+    "source": "October 6 reward-disabled final verifier probe, company index 2",
+    "provider_action_sequence": 32,
+    "verifier_action_sequence": 30,
+    "notice": "Minimal projection fixture: retained provider and verifier observations are exact. Unused provider fields are omitted. Submitted company and frozen ICP are recovered separately, not original request hash replay."
+  },
+  "submitted_company": {
+    "company_name": "Marqeta",
+    "company_website": "https://marqeta.com/",
+    "company_linkedin": "",
+    "industry": "financial services",
+    "employee_count": "501-1,000",
+    "company_stage": "Public",
+    "country": "United States",
+    "state": "California",
+    "intent_signals": [
+      {
+        "matched_icp_signal": 0,
+        "description": "Marqeta partners with zerohash for stablecoin cards",
+        "date": "2026-08-19",
+        "url": "https://www.marqeta.com/blog/marqeta-partners-with-zerohash-for-stablecoin-cards-heres-what-it-means-for-card-programs"
+      }
+    ],
+    "intent_details": "Marqeta announced a partnership with zerohash, a leading infrastructure platform for crypto, stablecoin, and related services, for stablecoin cards. This partnership may help Marqeta expand its payments platform."
+  },
+  "icp": {
+    "prompt": "Searching for payments companies that expanded, launched, or partnered in the last year \u2014 I need a company-level brief with proof points.",
+    "bonus_intents": [],
+    "excluded_companies": [
+      "toasttab.com"
+    ],
+    "company_stage": "Public",
+    "industry": "Payments",
+    "icp_id": "icp_20261005_010",
+    "geography": "United States",
+    "intent_signals": [
+      "Announced a strategic partnership in the last 12 months, per a press release or company announcement."
+    ],
+    "product_service": "A payments platform that processes card, ACH, wallet, or embedded transactions for merchants or platforms.",
+    "employee_count": [
+      "51-200",
+      "201-500",
+      "501-1,000",
+      "1,001-5,000",
+      "5,001-10,000",
+      "10,001+"
+    ],
+    "sub_industry": "merchant payments and embedded finance",
+    "required_attribute": "Runs a payments platform that processes transactions or supports merchant checkout, billing, or embedded payment flows.",
+    "intent_category": "PARTNERSHIP",
+    "intent_max_age_days": 365,
+    "intent_signal": "Announced a strategic partnership in the last 12 months, per a press release or company announcement.",
+    "country": "United States",
+    "max_companies": 5,
+    "icp_position": 9,
+    "baseline_score": 51.0
+  },
+  "verifier_response": {
+    "observed_company_name": "Marqeta, Inc.",
+    "observed_company_website": "https://www.marqeta.com",
+    "observed_company_linkedin": "https://www.linkedin.com/company/marqeta-inc",
+    "observed_employee_count": "501-1,000",
+    "employee_size_matches": true,
+    "employee_size_evidence_url": "https://www.linkedin.com/company/marqeta-inc",
+    "employee_size_evidence_quote": "501-1000 employees",
+    "observed_industry": "Financial services",
+    "observed_subindustry": "payment card issuing platform",
+    "industry_matches": true,
+    "industry_activity_role": "supplier_operator",
+    "industry_evidence_url": "https://investors.marqeta.com/",
+    "industry_evidence_quote": "Marqeta provides developers advanced infrastructure and tools for building highly configurable payment cards.",
+    "observed_hq_country": "United States",
+    "observed_hq_state": "California",
+    "geography_matches": true,
+    "geography_evidence_url": "https://investors.marqeta.com/",
+    "geography_evidence_quote": "Marqeta is headquartered in Oakland, California.",
+    "observed_company_stage": "Public",
+    "stage_matches": true,
+    "stage_evidence_url": "https://investors.marqeta.com/resources/investor-faqs",
+    "stage_evidence_quote": "Marqeta priced its initial public offering on June 8, 2021, and shares of its Class A Common Stock began trading on the Nasdaq Global Select Market on June 9, 2021.",
+    "attribute_satisfied": true,
+    "required_attribute_evidence_url": "https://www.marqeta.com/careers/7819832",
+    "required_attribute_evidence_quote": "Our card issuing platform provides unprecedented flexibility and control for companies to issue cards, authorize transactions, and manage payment operations in real time.",
+    "reason": "Marqeta is a US-headquartered public company in the 501-1,000 employee band that operates a card-issuing and payment-processing platform supporting transaction flows, so the requested fit criteria are satisfied."
+  },
+  "structured_profile_response": {
+    "result": {
+      "data": {
+        "status": 200,
+        "element": {
+          "name": "Marqeta",
+          "website": "http://www.marqeta.com",
+          "linkedinUrl": "https://www.linkedin.com/company/marqeta/",
+          "employeeCount": 1060,
+          "employeeCountRange": {
+            "start": 501,
+            "end": 1000
+          },
+          "companyType": "Public Company"
+        }
+      }
+    }
+  }
+}

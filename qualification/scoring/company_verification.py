@@ -154,7 +154,7 @@ _CURRENT_EXCHANGE_SLASH_PROFILE_RE = re.compile(
     re.I,
 )
 _CURRENT_EXCHANGE_LABEL_PROFILE_RE = re.compile(
-    r"(?P<issuer>[A-Z][A-Za-z0-9&.'’+ -]{2,100}?)\s+"
+    r"(?P<issuer>[A-Z][A-Za-z0-9&,.'’+ -]{2,100}?)\s+"
     r"(?P<exchange>New\s+York\s+Stock\s+Exchange|NYSE|NASDAQ)\s*:\s*"
     r"(?P<ticker>[A-Z][A-Z0-9.-]{0,9})",
     re.I,
@@ -208,20 +208,32 @@ def current_exchange_profile_names_issuer(
 ) -> bool:
     """Bind a current exchange quote-card layout to its exact issuer identity."""
 
-    if re.search(
-        r"\b(?:delisted|no\s+longer\s+listed)\b|"
-        r"\b(?:ceased|stopped)\s+trading\b|"
-        r"\b(?:taken|went|became)\s+private\b",
-        quote,
-        re.I,
-    ) or not re.search(
+    labeled_price = bool(re.search(
         r"\b(?:last|open|prev\.?\s*close|volume|market\s+cap)\s*[:$]?\s*"
         r"\$?\d+(?:[,.]\d+)*(?:\.\d+)?[kmb]?\b|"
         r"\bstock\s+price\s+(?:increased|decreased|unchanged)\s+by\s+"
         r"[+-]?\$?\d+(?:\.\d+)?\b",
         quote,
         re.I,
-    ):
+    ))
+    currency_priced_ticker_ends = {
+        match.end()
+        for match in _CURRENT_EXCHANGE_PREFIX_PROFILE_RE.finditer(quote)
+        if (price := re.match(r"\s+\$\d+(?:[,.]\d+)*\b", quote[match.end():]))
+        and not re.match(
+            r"\s*\(?\s*(?:hypothetical|planned|proposed|expected|projected|"
+            r"target|ipo|offering)\b",
+            quote[match.end() + price.end():],
+            re.I,
+        )
+    }
+    if re.search(
+        r"\b(?:delisted|no\s+longer\s+listed)\b|"
+        r"\b(?:ceased|stopped)\s+trading\b|"
+        r"\b(?:taken|went|became)\s+private\b",
+        quote,
+        re.I,
+    ) or not (labeled_price or currency_priced_ticker_ends):
         return False
     names = {
         str(value).strip() for value in identity_names
@@ -231,6 +243,13 @@ def current_exchange_profile_names_issuer(
         if slash_form:
             issuer = re.split(r"\s+\d", issuer, maxsplit=1)[0]
         else:
+            navigation = re.search(
+                r"\s+skip\s+to\s+(?:main\s+)?(?:content|navigation)\s*$",
+                issuer,
+                re.I,
+            )
+            if navigation:
+                issuer = issuer[:navigation.start()].rsplit(" - ", 1)[-1]
             issuer = re.sub(
                 r"^(?:quote\s*&\s*chart\s+)?(?:chart\s+)?",
                 "",
@@ -280,12 +299,16 @@ def current_exchange_profile_names_issuer(
 
     labeled_matches = list(_CURRENT_EXCHANGE_LABEL_PROFILE_RE.finditer(quote))
     for match in _CURRENT_EXCHANGE_SLASH_PROFILE_RE.finditer(quote):
-        if issuer_matches(str(match.group("issuer") or ""), slash_form=True):
+        if labeled_price and issuer_matches(str(match.group("issuer") or ""), slash_form=True):
             return True
     for match in labeled_matches:
+        if not labeled_price and match.end() not in currency_priced_ticker_ends:
+            continue
         if issuer_matches(str(match.group("issuer") or ""), slash_form=False):
             return True
     for match in _CURRENT_EXCHANGE_PREFIX_PROFILE_RE.finditer(quote):
+        if not labeled_price and match.end() not in currency_priced_ticker_ends:
+            continue
         ticker_key = _company_name(match.group("ticker"))
         if not any(_company_name(name) == ticker_key for name in names):
             continue

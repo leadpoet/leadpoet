@@ -173,3 +173,38 @@ def test_migration_repeats_preserves_old_selector_and_restricts_rpc(database):
         for role, expected in [('anon', False), ('authenticated', False), ('service_role', False), ('lab_arena_service', True)]:
             cursor.execute("SELECT has_function_privilege(%s, 'public.lab_arena_next_closed_provider_reconciliation_v1(text,text,integer,text,bigint)', 'EXECUTE')", (role,))
             assert cursor.fetchone() == (expected,)
+
+
+def test_closed_settlement_rejects_changed_receipt_without_ledger_mutation(database):
+    store, rid, _, identity, candidate = _call(database, 'receiptcontrol')
+    try:
+        old = store.list_ledger(call_identity=identity)
+        for field, replacement in [('generation_id', 'gen-wrong'),
+                                   ('credential_fingerprint', 'sha256:' + 'f' * 64),
+                                   ('run_id', 'different-run')]:
+            arguments = {k: candidate[k] for k in ('round_id', 'run_id', 'call_identity',
+                'uncertain_entry_id', 'generation_id', 'credential_fingerprint')}
+            arguments[field] = replacement
+            result = store.reconcile_openrouter_cost(**arguments, actual_microusd=13, cost_units='0.0000123')
+            assert result['status'] == 'stale'
+            assert store.list_ledger(call_identity=identity) == old
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('function', [
+    'lab_arena_next_closed_provider_reconciliation_v1(text,text,integer,text,bigint)',
+    'lab_arena_next_closed_deepline_reconciliation_v1(text,text,integer,text,bigint)',
+    'lab_arena_list_openrouter_cost_reconciliations_v1(text,text,bigint,integer)',
+])
+def test_migration_refuses_unexpected_existing_function_configuration(database, function):
+    psycopg2, dsn = database
+    connection = psycopg2.connect(**dsn)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute('ALTER FUNCTION public.' + function + " SET statement_timeout='1s'")
+            with pytest.raises(Exception, match='(security_shape_changed|preimage_changed)'):
+                cursor.execute(MIGRATION.read_text())
+        connection.rollback()
+    finally:
+        connection.close()

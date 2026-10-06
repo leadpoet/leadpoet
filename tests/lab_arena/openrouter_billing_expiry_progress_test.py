@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import threading
+import json
+import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
-from lab_arena import service as svc
-from lab_arena.store import hash_lease_token
+from lab_arena import contracts, service as svc
+from lab_arena.store import ArenaStore, PsycopgTransport, hash_lease_token
+from tests.lab_arena import abandoned_host_recovery412_postgres_test as migration412
 from tests.lab_arena.openrouter_delayed_cost_reconciliation_postgres_test import (
     _uncertain_call,
     database,
@@ -164,3 +167,94 @@ def test_database_billing_wait_preserves_live_run_and_expired_retry(resources, p
         reclaimed, _, _, _ = claim(store, round_id, runners[1])
         assert reclaimed["status"] == "leased"
         assert reclaimed["run_id"] == retry_id
+
+
+@pytest.fixture(scope="module")
+def database412():
+    database_generator = migration412.database.__wrapped__()
+    try:
+        database = next(database_generator)
+        migration412.migrated.__wrapped__(database)
+        yield database
+    finally:
+        database_generator.close()
+
+
+@pytest.mark.parametrize("paused", (False, True))
+@pytest.mark.parametrize("recovery", ("overdue", "host_error"))
+def test_migration412_billing_wait_preserves_paid_work_and_recovers_sibling(
+    database412, paused, recovery,
+):
+    psycopg, dsn = database412
+    connections = []
+    def connect():
+        connection = psycopg.connect(**dsn)
+        connections.append(connection)
+        return connection
+    store = ArenaStore(PsycopgTransport(connect), lease_ttl_seconds=4500)
+    prior = migration412.prior
+    try:
+        with connect() as connection:
+            billed = migration412._seed(connection, kind="execute", event=False)
+            sibling = migration412._claim(connection, prior.RUNNER_A, "b")
+            assert sibling["status"] == "leased"
+            if recovery == "overdue":
+                with connection.cursor() as cursor:
+                    cursor.execute("UPDATE public.lab_arena_runs SET lease_expires_at="
+                                   "clock_timestamp()-interval '1 second' WHERE run_id=%s",
+                                   (sibling["run_id"],))
+                connection.commit()
+            else:
+                events = [{"event_id": str(uuid.uuid4()), "kind": "runtime.error",
+                           "occurred_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                           "content": {"status": "abandoned", "failure_stage": "runtime",
+                                       "error_class": "RuntimeHostError"}}]
+                with connection.cursor() as cursor:
+                    cursor.execute("SET ROLE lab_arena_service")
+                    cursor.execute("SELECT public.lab_arena_append_trajectory_events_v1(%s,%s,%s::jsonb)",
+                                   (sibling["run_id"], "sha256:" + "b" * 64, json.dumps(events)))
+                    assert cursor.fetchone()[0]["status"] == "accepted"
+                    cursor.execute("RESET ROLE")
+                connection.commit()
+        identity = contracts.document_hash({"case": "billing412", "paused": paused,
+                                            "recovery": recovery})
+        arguments = {"run_id": billed["run_id"], "lease_token_hash": "sha256:" + "a" * 64,
+                     "call_identity": identity}
+        assert store.reserve_call(
+            **arguments, operation_id="openrouter.chat", provider="openrouter",
+            funding_source="host", amount_microusd=1000, call_doc={"model": "fixture"},
+        )["status"] == "reserved"
+        assert store.mark_dispatched(**arguments)["status"] == "dispatched"
+        assert store.mark_uncertain(**arguments, call_doc={
+            "reason": "missing_provider_cost", "call_succeeded": True,
+            "provider_status": 200, "openrouter_generation_id": "gen-billing412",
+            "credential_fingerprint": "sha256:" + "a" * 64,
+        })["status"] == "uncertain"
+        before_billed = store.get_run(billed["run_id"])
+        before_ledger = store.list_ledger(call_identity=identity)
+        before_sibling = store.get_run(sibling["run_id"])
+        service = _database_service(store, prior.ROUND, paused=paused)
+        assert service.advance_round(prior.ROUND)["reason"] == "provider_billing_pending"
+        assert store.get_run(billed["run_id"]) == before_billed
+        assert store.list_ledger(call_identity=identity) == before_ledger
+        retry_id = sibling["assignment_id"] + ":2"
+        if paused:
+            assert store.get_run(sibling["run_id"]) == before_sibling
+            assert store.get_run(retry_id) is None
+        else:
+            original = store.get_run(sibling["run_id"])
+            assert original["status"] == "failed"
+            assert original["terminal_cause"] == "lease_expired"
+            if recovery == "host_error":
+                assert original["terminal_doc"]["recovery_reason"] == "authenticated_zero_call_runtime_host_error"
+                assert original["terminal_doc"]["original_lease_expires_at"] == before_sibling["lease_expires_at"]
+            assert store.get_run(retry_id)["status"] == "pending"
+            with connect() as connection:
+                retry = migration412._claim(connection, prior.RUNNER_B, "c")
+                assert retry["status"] == "leased"
+                assert retry["run_id"] == retry_id
+    finally:
+        store.close()
+        for connection in connections:
+            if not connection.closed:
+                connection.close()

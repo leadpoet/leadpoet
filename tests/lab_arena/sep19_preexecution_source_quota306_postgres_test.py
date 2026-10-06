@@ -19,9 +19,13 @@ NEW_QUOTAS=dict(contracts.ALL_PROVIDER_200_CALL_QUOTAS_PER_ICP)
 @pytest.fixture(scope='module')
 def database(): yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
 
+# Migration 306 is a frozen historical artifact: its guard compares the round
+# configuration against literals captured on 2026-09-19. Anything this seed reads
+# from lab_arena.contracts must be a constant pinned to that date -- a live value
+# that moves later fails the guard and takes all 14 sep19 rerun modules with it.
 def config(round_id):
  return {'schema_version':contracts.ROUND_CONFIGURATION_SCHEMA_VERSION,'round_id':round_id,'mode':'live',
-  'call_quotas':copy.deepcopy(OLD_QUOTAS),'scoring_call_quotas':dict(contracts.SCORING_CALL_QUOTAS_PER_WORK_ITEM),
+  'call_quotas':copy.deepcopy(OLD_QUOTAS),'scoring_call_quotas':dict(contracts.LEGACY_SCORING_CALL_QUOTAS_PER_WORK_ITEM),
   'sourcing_cost_eligibility_policy':contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY,
   'execution_icp_cap_microusd':contracts.PER_ICP_EXECUTION_CAP_MICROUSD,
   'cost_per_company_microusd':contracts.PER_ICP_QUALIFIED_PAIR_CAP_MICROUSD}

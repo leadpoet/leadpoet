@@ -18,7 +18,7 @@ def _service(source=None):
         runner_hotkeys=("5" * 48,), baseline_hotkey="5" * 48,
         scorer_image_digest=digest,
         scorer_image_reference="registry.example/scorer@" + digest,
-        per_icp_cost_policy=True,
+        per_icp_cost_policy=True, integrity_from="2000-01-01T00:00:00Z",
     )
     service._config = SimpleNamespace(
         defaults=defaults, mode="live", network_name="finney", netuid=71,
@@ -27,6 +27,7 @@ def _service(source=None):
     service._scorer_policy = scoring.build_scorer_policy()
     service.runner_settings = lambda: (["5" * 48], [])
     service._require_round_ownership = lambda _round_id: None
+    service._require_integrity_schema = lambda: None
     service._store = SimpleNamespace(create_round=lambda *_args: {"status": "created"})
     return service
 

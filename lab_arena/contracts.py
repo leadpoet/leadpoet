@@ -1000,13 +1000,13 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
         raise ArenaContractError("max challengers exceeds the public constant")
     call_quotas = dict(config["call_quotas"])
     if tuple(config["providers"]) != PROVIDERS or not any(
-        call_quotas == dict(profile)
+        call_quotas == dict(profile) or call_quotas == {**profile, "deepline": 0}
         for profile in EXECUTION_CALL_QUOTA_PROFILES
     ):
         raise ArenaContractError("providers and call quotas are fixed public constants")
     scoring_call_quotas = dict(config["scoring_call_quotas"])
     if not any(
-        scoring_call_quotas == dict(profile)
+        scoring_call_quotas == dict(profile) or scoring_call_quotas == {**profile, "deepline": 0}
         for profile in SCORING_CALL_QUOTA_PROFILES
     ):
         raise ArenaContractError("scoring call quotas are fixed public constants")

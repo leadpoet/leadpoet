@@ -798,6 +798,11 @@ class ArenaService:
         """
 
         identity = self._store.require_service_role()
+        if getattr(self._config, "deepline_catalog_source", None) is not None:
+            try:
+                self._store.deepline_catalog_schema()
+            except ArenaStoreError as exc:
+                raise ServiceError("deepline_catalog_schema_unavailable", 500) from exc
         try:
             schema = self._store._transport.rpc("lab_arena_schema_version_v1", {})
         except ArenaStoreError as exc:
@@ -1071,8 +1076,8 @@ class ArenaService:
         configuration["deepline_catalog"] = validate_catalog(source(
             allow_people=configuration.get("contact_policy") == "contacts_v1",
         ))
-        configuration["call_quotas"] = dict(contracts.DEEPLINE_BUDGET_ONLY_CALL_QUOTAS)
-        configuration["scoring_call_quotas"] = dict(contracts.DEEPLINE_BUDGET_ONLY_SCORING_QUOTAS)
+        configuration["call_quotas"] = {**configuration["call_quotas"], "deepline": 0}
+        configuration["scoring_call_quotas"] = {**configuration["scoring_call_quotas"], "deepline": 0}
 
     def create_round(self, cutoff: datetime, *, round_id: Optional[str] = None) -> Dict[str, Any]:
         defaults = self._config.defaults

@@ -1318,3 +1318,16 @@ the narrow Sep22 unstarted-round migration, production sync, and deployment.
 Keep historical 45-minute rounds and their published scores frozen. Keep judge
 time, costs, provider call caps, scoring, and concurrent benchmark-count work
 unchanged. Apply the Sep22 migration only after checking its live preconditions.
+
+## Scoped production authorization: October 6 verifier accuracy audit
+
+On 2026-10-06 the user authorized an independent audit of recent baseline and
+miner verdicts, primary-source research, the smallest general fixes for definite
+scoring/verifier errors, focused positive/negative controls and real production
+scoring validation. Authority includes protected inspection, provider-backed
+saved-output probes, narrow committed source and migrations if needed, safe
+push/merge, scorer-image publication and canonical gateway/normal-validator
+deployment through the overnight procedures. Preserve published results, frozen
+inputs, accepted work, qualification standards, cost rules, rewards, weights and
+concurrent work. Do not rescore historical rounds or fabricate reward-bearing
+results. Authority ends when confirmed fixes are live and verified end to end.

@@ -1855,6 +1855,50 @@ def test_current_exchange_row_keeps_wrong_historical_and_private_controls(quote)
     )
 
 
+@pytest.mark.parametrize(
+    "submitted,observed,expected",
+    [
+        ("Emboline", "BioSpace", COMPANY_FIT_MISMATCH),
+        ("BioSpace", "Emboline", COMPANY_FIT_MISMATCH),
+        ("Alpha Labs", "Omega Labs", COMPANY_FIT_MISMATCH),
+        ("ACME", "BETA", COMPANY_FIT_MISMATCH),
+        ("Example", "Example Technologies", COMPANY_FIT_MATCH),
+        ("Example Technologies", "Example", COMPANY_FIT_MATCH),
+        ("Example Inc.", "Example LLC", COMPANY_FIT_MATCH),
+    ],
+)
+def test_identity_name_alignment_compares_both_names(submitted, observed, expected):
+    receipt = evaluate_company_identity(
+        submitted_name=submitted,
+        submitted_website="https://example.com/",
+        submitted_linkedin="https://www.linkedin.com/company/example",
+        observed_name=observed,
+        observed_website="https://example.com/",
+        observed_linkedin="https://www.linkedin.com/company/example",
+        evidence_source="company_homepage",
+    )
+    assert receipt["decision"] == expected
+
+
+def test_publisher_homepage_does_not_verify_an_equal_length_company_name(monkeypatch):
+    response = _Response(
+        200,
+        b'<title>BioSpace</title>'
+        b'<a href="https://www.linkedin.com/company/biospaceinc">LinkedIn</a>',
+        "https://www.biospace.com/",
+    )
+    monkeypatch.setattr(
+        "qualification.scoring.company_verification.aiohttp.ClientSession",
+        lambda **kwargs: _Session(response),
+    )
+    result = asyncio.run(verify_company_exists(
+        "Emboline", "https://biospace.com/",
+        company_linkedin="https://www.linkedin.com/company/biospaceinc",
+    ))
+    assert result.decision != COMPANY_FIT_MATCH
+    assert not _verified_homepage_identity_anchor(result)
+
+
 def test_iag_parenthetical_alias_rejects_wrong_submitted_linkedin():
     receipt = evaluate_company_identity(
         submitted_name="Insurance Australia Group Limited (IAG)",

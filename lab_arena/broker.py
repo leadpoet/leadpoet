@@ -1316,6 +1316,39 @@ def _deepline_async_job_ids(document: Any, flow: Mapping[str, Any]) -> Sequence[
     return tuple(result[:32])
 
 
+def _deepline_async_response_accepted(response: ProviderResponse, document: Any) -> bool:
+    """Accept an authenticated async API reply, without claiming job completion."""
+    if (response.internal_provenance is not None or not 200 <= response.status < 300
+        or not isinstance(document, Mapping) or _deepline_job_request_id(document) is None):
+        return False
+    status = document.get("status")
+    if not isinstance(status, str) or status not in {"completed", "pending", "queued", "running", "in_progress"}:
+        return False
+    wrapper = document.get("toolResponse")
+    raw = wrapper.get("rawV2") if isinstance(wrapper, Mapping) else None
+    nodes = [document, wrapper, raw, document.get("result")]
+    nodes += [node.get("data") for node in tuple(nodes) if isinstance(node, Mapping)]
+    for node in nodes:
+        if not isinstance(node, Mapping):
+            continue
+        node_status = node.get("status")
+        if (node.get("error") is not None or node.get("tool_error") is not None
+            or ("isError" in node and node["isError"] is not False)
+            or ("success" in node and node["success"] is not True)
+            or (node_status is not None and not isinstance(node_status, str))
+            or node_status in {"failed", "cancelled", "canceled", "error"}):
+            return False
+    return True
+
+
+def _deepline_accepted_async_job_ids(
+    response: ProviderResponse, document: Any, flow: Mapping[str, Any],
+) -> Sequence[str]:
+    if not _deepline_async_response_accepted(response, document):
+        return ()
+    return _deepline_async_job_ids(document, flow)
+
+
 def _deepline_billing_readback(
     *,
     transport: ProviderTransport,
@@ -4270,6 +4303,7 @@ class Broker:
         deepline_known_free_cost: Optional[provider_costs.ProviderCost] = None
         deepline_native_cost: Optional[provider_costs.ProviderCost] = None
         deepline_async_ids: Sequence[str] = ()
+        deepline_async_poll_accepted = False
         deepline_response_request_id: Optional[str] = None
         deepline_request_id: Optional[str] = request_accounting.get("deepline_request_id")
         deepline_execution_key: Optional[str] = request_accounting.get("deepline_execution_key")
@@ -4434,9 +4468,17 @@ class Broker:
                         raw_document = json.loads(response.body.decode("utf-8"))
                     except (UnicodeDecodeError, ValueError):
                         raw_document = None
-                    if (deepline_catalog_entry and isinstance(deepline_catalog_entry.get("async_flow"), Mapping)
-                        and _provider_call_succeeded("deepline", response, raw_document)):
-                        deepline_async_ids = _deepline_async_job_ids(raw_document, deepline_catalog_entry["async_flow"])
+                    if (deepline_catalog_entry
+                        and isinstance(deepline_catalog_entry.get("async_flow"), Mapping)):
+                        deepline_async_ids = _deepline_accepted_async_job_ids(
+                            response, raw_document, deepline_catalog_entry["async_flow"],
+                        )
+                    elif deepline_catalog_entry and deepline_catalog_entry.get("async_parent"):
+                        # The pre-dispatch ownership check already bound this
+                        # status read to a provider job started by this run.
+                        deepline_async_poll_accepted = _deepline_async_response_accepted(
+                            response, raw_document,
+                        )
                     deepline_known_free_cost = provider_costs.deepline_free_completed_cost(
                         effective_normalized, response.status, raw_document,
                         catalog_entry=deepline_catalog_entry,
@@ -4467,14 +4509,18 @@ class Broker:
                     if response_request_id is not None and isinstance(raw_document, Mapping) and (
                         (
                             response.status == 200
-                            and raw_document.get("status") == "completed"
+                            and (raw_document.get("status") == "completed"
+                                 or deepline_async_ids or deepline_async_poll_accepted)
                         )
                         or not 200 <= response.status < 300
                     ):
                         deepline_native_cost = provider_costs.deepline_cost(raw_document)
                         inline_billing = raw_document.get("billing")
                         if isinstance(inline_billing, Mapping) and (
-                            ("pricing_status" in inline_billing and inline_billing["pricing_status"] != "final")
+                            ((deepline_async_ids or deepline_async_poll_accepted)
+                                and raw_document.get("status") != "completed"
+                                and inline_billing.get("pricing_status") != "final")
+                            or ("pricing_status" in inline_billing and inline_billing["pricing_status"] != "final")
                             or (inline_billing.get("billing_mode") == "async_hold"
                                 and deepline_native_cost is not None and deepline_native_cost.units == 0)
                         ):
@@ -4699,6 +4745,10 @@ class Broker:
                 response,
                 raw_document,
             )
+            if deepline_async_ids or deepline_async_poll_accepted:
+                # The provider accepted this async API call. Its eventual charge
+                # still needs exact settlement; accepting a job is not free proof.
+                call_succeeded = True
             request_refused = _provider_request_refused(
                 effective_operation.provider,
                 effective_normalized,

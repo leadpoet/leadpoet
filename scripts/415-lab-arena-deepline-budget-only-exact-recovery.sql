@@ -298,6 +298,40 @@ REVOKE ALL ON FUNCTION public.lab_arena_commit_round_v3(TEXT,JSONB,TEXT,TEXT,DAT
 GRANT EXECUTE ON FUNCTION public.lab_arena_commit_round_v3(TEXT,JSONB,TEXT,TEXT,DATE,TEXT,TEXT,JSONB)
   TO lab_arena_service;
 
+-- Dynamic rollout starts only after its exact RPCs and quota guards exist.
+CREATE OR REPLACE FUNCTION public.lab_arena_deepline_catalog_schema_v1()
+RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $deepline_catalog_schema$
+BEGIN
+  IF pg_catalog.to_regprocedure(
+       'public.lab_arena_commit_round_v3(text,jsonb,text,text,date,text,text,jsonb)'
+     ) IS NULL
+     OR pg_catalog.to_regprocedure(
+       'public.lab_arena_reconcile_deepline_cost_v2(text,text,text,bigint,text,text,text,bigint,text,text,text)'
+     ) IS NULL
+     OR pg_catalog.strpos(pg_catalog.pg_get_functiondef(
+       'public.lab_arena_reserve_call(text,text,text,text,text,text,bigint,jsonb,integer)'::pg_catalog.regprocedure
+     ), 'lab_arena_deepline_budget_only') = 0
+     OR pg_catalog.strpos(pg_catalog.pg_get_functiondef(
+       'public.lab_arena_run_quota_snapshot_v1(text,text)'::pg_catalog.regprocedure
+     ), 'lab_arena_deepline_budget_only') = 0
+     OR pg_catalog.strpos(pg_catalog.pg_get_functiondef(
+       'public.lab_arena_rounds_write_once_v1()'::pg_catalog.regprocedure
+     ), 'lab_arena_deepline_catalog_commit_guard') = 0 THEN
+    RAISE EXCEPTION 'lab_arena_deepline_catalog_schema_incomplete' USING ERRCODE = '55000';
+  END IF;
+  RETURN pg_catalog.jsonb_build_object(
+    'schema_version', 'leadpoet.lab_arena.deepline_catalog_schema.v1', 'version', 415
+  );
+END;
+$deepline_catalog_schema$;
+ALTER FUNCTION public.lab_arena_deepline_catalog_schema_v1() OWNER TO lab_arena_owner;
+REVOKE ALL ON FUNCTION public.lab_arena_deepline_catalog_schema_v1()
+  FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.lab_arena_deepline_catalog_schema_v1()
+  TO lab_arena_service;
+
 REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
 NOTIFY pgrst, 'reload schema';
 COMMIT;

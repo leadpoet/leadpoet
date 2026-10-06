@@ -432,3 +432,29 @@ def test_catalog_freezes_atomically_and_cannot_change_later(database, tmp_path):
             )
     assert store.get_round(rid)["configuration_doc"] == after
     store.close()
+
+
+def test_catalog_readiness_grants_only_service_and_checks_sql_guards(database):
+    from lab_arena.store import ArenaStore, PsycopgTransport
+
+    connect = lambda: database[0].connect(**database[1])
+    store = ArenaStore(PsycopgTransport(connect))
+    assert store.deepline_catalog_schema() == {
+        "schema_version": "leadpoet.lab_arena.deepline_catalog_schema.v1",
+        "version": 415,
+    }
+    with connect() as c, c.cursor() as cur:
+        for role in ("anon", "authenticated", "service_role", "lab_arena_service"):
+            cur.execute(
+                "SELECT has_function_privilege(%s,'public.lab_arena_deepline_catalog_schema_v1()','EXECUTE')",
+                (role,),
+            )
+            assert cur.fetchone()[0] == (role == "lab_arena_service")
+        cur.execute(
+            "ALTER FUNCTION public.lab_arena_commit_round_v3(text,jsonb,text,text,date,text,text,jsonb) RENAME TO temporarily_absent_commit_v3"
+        )
+        with pytest.raises(database[0].Error, match="schema_incomplete"):
+            cur.execute("SELECT public.lab_arena_deepline_catalog_schema_v1()")
+        c.rollback()
+    assert store.deepline_catalog_schema()["version"] == 415
+    store.close()

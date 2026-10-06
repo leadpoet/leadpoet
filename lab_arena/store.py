@@ -68,6 +68,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_events", "jsonb"),
     ),
     "lab_arena_per_icp_cost_schema_v1": (),
+    "lab_arena_deepline_catalog_schema_v1": (),
     "lab_arena_next_closed_deepline_reconciliation_v1": (
         ("p_mode", "text"), ("p_network_name", "text"),
         ("p_netuid", "integer"), ("p_round_id", "text"),
@@ -987,6 +988,19 @@ class ArenaStore:
             or result.get("policy") != "successful_calls_v1"
         ):
             raise ArenaStoreError("successful-call cost schema mismatch")
+        return result
+
+    def deepline_catalog_schema(self) -> Dict[str, Any]:
+        """Require exact recovery and budget-only SQL before dynamic rollout."""
+        result = _require_mapping(
+            self._transport.rpc("lab_arena_deepline_catalog_schema_v1", {}),
+            "deepline_catalog_schema",
+        )
+        if result != {
+            "schema_version": "leadpoet.lab_arena.deepline_catalog_schema.v1",
+            "version": 415,
+        }:
+            raise ArenaStoreError("Deepline catalog schema mismatch")
         return result
 
     def per_icp_cost_schema(self) -> Dict[str, Any]:

@@ -195,7 +195,14 @@ partnership criterion, standalone enrollment in a partner, perks, accelerator,
 or vendor program; a partner tier or certification; and marketplace participation
 do not support that recategorization. Exact evidence must also prove the requested
 bilateral strategic collaboration or concrete joint commitments, such as joint
-go-to-market or co-development work. Apply this distinction only when the actual
+go-to-market or co-development work. These additional program-status requirements
+do not make joint go-to-market or co-development mandatory for every partnership.
+A direct, material bilateral customer-supplier agreement can qualify when exact
+source evidence affirmatively establishes a partnership or comparable
+collaborative commercial arrangement with concrete commitments by both named
+organizations. Do not reject it solely because the parties have customer-supplier
+roles. An ordinary purchase or marketing partnership label alone is insufficient.
+Apply this distinction only when the actual
 ICP criterion requires a strategic partnership; preserve different relationship
 wording and qualifying program activity that has those explicit commitments.
 Require each such factual clause to be semantically supported by supplied

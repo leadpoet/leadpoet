@@ -345,7 +345,15 @@ PARTNERSHIP_BLOCK = """      * Apply this block only to a chosen partnership alt
         certification; and marketplace participation do not prove a strategic
         partnership. They can qualify only when exact evidence also proves the
         requested bilateral strategic collaboration or concrete joint commitments,
-        such as joint go-to-market or co-development work. Apply the exact
+        such as joint go-to-market or co-development work. These additional
+        program-status requirements do not make joint go-to-market or
+        co-development mandatory for every partnership. A direct, material
+        bilateral customer-supplier agreement can qualify when exact source
+        evidence affirmatively establishes a partnership or comparable
+        collaborative commercial arrangement with concrete commitments by both
+        named organizations. Do not reject it solely because the parties have
+        customer-supplier roles. An ordinary purchase or marketing partnership
+        label alone is insufficient. Apply the exact
         relationship wording in the target: do not impose a strategic-partnership
         standard when the chosen ICP alternative asks for a different relationship.
         An acquisition,

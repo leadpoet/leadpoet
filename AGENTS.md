@@ -1,5 +1,15 @@
 # Agent Instructions
 
+## Scoped production authorization: PR217 diagnostics and dashboard dates
+
+On 2026-10-06 the user authorized review, narrow fixes, merge and deployment
+of PR217 and a dashboard change that makes submission and evaluation dates
+clear. Use the overnight deployment procedures, focused tests and live readback.
+Preserve active work, accepted results, frozen inputs, credentials, scoring,
+costs, promotion, weights and operator controls. Do not restart an evaluation
+or change its lifecycle for this presentation and telemetry change. This
+scope ends after the deployed diagnostics and dashboard are verified.
+
 ## Scoped production authorization: independent October 5/6 continuity audit
 
 The user authorized a separate full-path Arena production audit while another

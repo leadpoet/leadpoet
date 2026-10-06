@@ -4925,7 +4925,8 @@ class ArenaService:
                             )
                             and not self._store.operator_hold_active()
                         ):
-                            self._store.expire_leases(round_id)
+                            with telemetry.stage("advance_expire_leases"):
+                                self._store.expire_leases(round_id)
                         return {
                             "status": "retry",
                             "round_status": row["status"],

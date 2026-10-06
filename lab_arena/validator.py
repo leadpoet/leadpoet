@@ -652,9 +652,12 @@ def run_validator_loops(*, orchestrator, runner_factory, epoch_supplier, stop,
     """Start weights first; retry scoring setup and cycles without stopping them."""
     interval = max(5, int(poll_seconds))
     first_weight_cycle = threading.Event()
+    weight_stop = threading.Event()
+    if stop.is_set():
+        weight_stop.set()
 
     def weight_loop() -> None:
-        while not stop.is_set():
+        while not weight_stop.is_set():
             try:
                 epoch = int(epoch_supplier())
                 status = orchestrator.run_once(epoch)
@@ -673,7 +676,12 @@ def run_validator_loops(*, orchestrator, runner_factory, epoch_supplier, stop,
                       file=sys.stderr, flush=True)
             if once:
                 break
-            stop.wait(interval)
+            # The claim stop wakes the first sleep at drain start. Subsequent
+            # sleeps use a separate event so draining cannot create a busy loop.
+            if stop.is_set():
+                weight_stop.wait(interval)
+            else:
+                stop.wait(interval)
 
     weights = threading.Thread(target=weight_loop, name="arena-weight-loop", daemon=False)
     weights.start()
@@ -719,14 +727,17 @@ def run_validator_loops(*, orchestrator, runner_factory, epoch_supplier, stop,
                 stop.wait(interval)
     finally:
         stop.set()
-        if runner is not None:
-            try:
-                runner.close()
-            except Exception as exc:
-                print("Arena validator scoring cleanup failed: type=%s"
-                      % type(exc).__name__, file=sys.stderr, flush=True)
-        # Do not close the chain underneath an in-flight journal/finalization check.
-        weights.join()
+        try:
+            if runner is not None:
+                try:
+                    runner.close()
+                except Exception as exc:
+                    print("Arena validator scoring cleanup failed: type=%s"
+                          % type(exc).__name__, file=sys.stderr, flush=True)
+        finally:
+            weight_stop.set()
+            # Do not close the chain underneath an in-flight journal/finalization check.
+            weights.join()
 
 
 def main(argv=None) -> int:

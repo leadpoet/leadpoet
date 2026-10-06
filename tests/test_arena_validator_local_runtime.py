@@ -1,4 +1,5 @@
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -281,3 +282,177 @@ def test_fixed_proxy_preflight_failure_keeps_weights_running(capsys):
     assert "phase=setup reason=proxy_preflight_failed" in output.err
     assert "weight loop continues" in output.err
     assert orchestrator.runs >= 1
+
+
+@pytest.mark.parametrize("drain_phase", ["run", "close"])
+def test_weight_cycles_continue_until_scoring_drain_finishes(monkeypatch, drain_phase):
+    _check_weight_drain(monkeypatch, drain_phase)
+
+
+@pytest.mark.parametrize("close_failure", [RuntimeError, KeyboardInterrupt])
+def test_scoring_close_failure_still_stops_and_joins_weights(monkeypatch, close_failure):
+    _check_weight_drain(monkeypatch, "close", close_failure=close_failure)
+
+
+def _check_weight_drain(monkeypatch, drain_phase, *, close_failure=None, loop=None):
+    import queue
+
+    loop = loop or validator.run_validator_loops
+    stop = threading.Event()
+    scoring_started = threading.Event()
+    drain_started = threading.Event()
+    release_scoring = threading.Event()
+    weight_condition = threading.Condition()
+    cycles = []
+    scoring_calls = []
+    weight_threads = []
+
+    class DrainWait(threading.Event):
+        def __init__(self):
+            super().__init__()
+            self.waiting = threading.Event()
+            self.ticks = queue.Queue()
+            self.intervals = []
+
+        def wait(self, timeout=None):
+            self.intervals.append(timeout)
+            self.waiting.set()
+            self.ticks.get(timeout=2)
+            self.waiting.clear()
+            return self.is_set()
+
+        def set(self):
+            super().set()
+            self.ticks.put(None)
+
+    drain_wait = DrainWait()
+    events_created = []
+
+    def event_factory():
+        event = threading.Event() if not events_created else drain_wait
+        events_created.append(event)
+        return event
+
+    def thread_factory(**kwargs):
+        thread = threading.Thread(**kwargs)
+        weight_threads.append(thread)
+        return thread
+
+    monkeypatch.setitem(loop.__globals__, "threading", SimpleNamespace(
+        Event=event_factory, Thread=thread_factory,
+    ))
+
+    class Orchestrator:
+        def run_once(self, epoch):
+            with weight_condition:
+                cycles.append(epoch)
+                weight_condition.notify_all()
+            return "included_pending_reveal"
+
+        def poll_prior_outcomes(self, epoch):
+            assert epoch == 1
+
+    class Runner:
+        def run_once(self, *, stop_event):
+            assert stop_event is stop
+            scoring_calls.append(1)
+            scoring_started.set()
+            if drain_phase == "run":
+                drain_started.set()
+                assert release_scoring.wait(2)
+            return 0
+
+        def close(self):
+            if drain_phase == "close":
+                drain_started.set()
+                assert release_scoring.wait(2)
+            if close_failure:
+                raise close_failure("test close failure")
+
+    caller = ThreadPoolExecutor(max_workers=1)
+    try:
+        result = caller.submit(
+            loop, orchestrator=Orchestrator(), runner_factory=Runner,
+            epoch_supplier=lambda: 1, stop=stop, poll_seconds=5,
+        )
+        assert scoring_started.wait(1)
+        with weight_condition:
+            assert weight_condition.wait_for(lambda: len(cycles) >= 1, timeout=1)
+        stop.set()
+        assert drain_started.wait(1)
+        assert drain_wait.waiting.wait(1)
+        for _ in range(2):
+            before = len(cycles)
+            drain_wait.ticks.put(None)
+            with weight_condition:
+                assert weight_condition.wait_for(lambda: len(cycles) > before, timeout=1)
+            assert drain_wait.waiting.wait(1)
+        assert len(cycles) >= 3
+        assert drain_wait.intervals and set(drain_wait.intervals) == {5}
+        assert scoring_calls == [1]
+        assert not result.done()
+        release_scoring.set()
+        if close_failure is KeyboardInterrupt:
+            with pytest.raises(KeyboardInterrupt):
+                result.result(1)
+        else:
+            assert result.result(1) is None
+        assert drain_wait.is_set()
+        assert len(weight_threads) == 1 and not weight_threads[0].is_alive()
+    finally:
+        stop.set()
+        release_scoring.set()
+        drain_wait.set()
+        caller.shutdown(wait=True)
+
+
+def test_once_waits_for_inflight_prior_poll_before_returning():
+    stop = threading.Event()
+    prior_started = threading.Event()
+    release_prior = threading.Event()
+    scoring_closed = threading.Event()
+    calls = []
+
+    class Orchestrator:
+        def run_once(self, epoch):
+            calls.append(("current", epoch))
+            return "broadcast"
+
+        def poll_prior_outcomes(self, epoch):
+            calls.append(("prior", epoch))
+            prior_started.set()
+            assert release_prior.wait(2)
+
+    class Runner:
+        def run_once(self, **kwargs):
+            return 0
+
+        def close(self):
+            scoring_closed.set()
+
+    with ThreadPoolExecutor(max_workers=1) as caller:
+        result = caller.submit(
+            validator.run_validator_loops, orchestrator=Orchestrator(),
+            runner_factory=Runner, epoch_supplier=lambda: 1, stop=stop, once=True,
+        )
+        try:
+            assert prior_started.wait(1)
+            assert scoring_closed.wait(1)
+            assert not result.done()
+        finally:
+            release_prior.set()
+        assert result.result(1) is None
+    assert calls == [("current", 1), ("prior", 1)]
+
+
+def test_preexisting_stop_does_not_start_weights_or_claims():
+    stop = threading.Event()
+    stop.set()
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("stopped validator must not start new work")
+
+    validator.run_validator_loops(
+        orchestrator=SimpleNamespace(run_once=unexpected, poll_prior_outcomes=unexpected),
+        runner_factory=unexpected, epoch_supplier=unexpected, stop=stop,
+    )

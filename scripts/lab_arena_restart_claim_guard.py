@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import stat
 import time
 from typing import Any, Mapping
@@ -371,7 +372,15 @@ def _acquire(args: argparse.Namespace) -> dict[str, Any]:
 def _drain(args: argparse.Namespace) -> dict[str, Any]:
     guard, owner = _identity(args.candidate, args.invocation)
     generation: int | None = None
+    signals = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+    previous_handlers = {item: signal.getsignal(item) for item in signals}
+
+    def interrupted(received: int, _frame: Any) -> None:
+        raise GuardError(f"Arena restart drain interrupted by {signal.Signals(received).name}")
+
     try:
+        for item in signals:
+            signal.signal(item, interrupted)
         state = _acquire(args)
         generation = _require_generation(state["guard_generation"])
         deadline = time.monotonic() + args.timeout_seconds
@@ -411,8 +420,14 @@ def _drain(args: argparse.Namespace) -> dict[str, Any]:
                 raise GuardError("Arena leases did not drain before the restart deadline")
             time.sleep(min(args.poll_seconds, max(0.0, deadline - now)))
     except (GuardError, OSError, http.client.HTTPException):
+        # A second signal must not interrupt the exact-owner abort request.
+        for item in signals:
+            signal.signal(item, signal.SIG_IGN)
         _abort_if_owned_draining(args, guard, owner, generation)
         raise
+    finally:
+        for item, previous in previous_handlers.items():
+            signal.signal(item, previous)
 
 
 def main() -> int:

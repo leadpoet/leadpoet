@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -73,7 +74,9 @@ def test_gateway_arena_drain_timeout_fails_before_recording_guard(
         f"CAPTURE={shlex.quote(str(capture))}\n"
         "GATEWAY_ACTIVE_RELEASE_COMPONENT=all\n"
         "LAB_ARENA_RESTART_GUARD_GENERATION=\n"
+        f"GATEWAY_RESTART_TIMING_FILE={shlex.quote(str(tmp_path / 'gateway-test.jsonl'))}\n"
         "run_lab_arena_restart_guard() {\n"
+        "  if [ \"$1\" = --exec-drain ]; then shift; fi\n"
         "  printf '%s\\n' \"$@\" > \"$CAPTURE\"\n"
         "  return 1\n"
         "}\n"
@@ -93,6 +96,153 @@ def test_gateway_arena_drain_timeout_fails_before_recording_guard(
     assert capture.read_text(encoding="utf-8").splitlines() == [
         "/prepared", "drain", "--scope", "all", "--timeout-seconds", "6600",
     ]
+
+
+def test_gateway_arena_drain_records_generation_and_removes_report(tmp_path: Path) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    drain_function = _shell_function_source(script, "drain_lab_arena_for_restart")
+    harness = tmp_path / "drain-success.sh"
+    harness.write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        f"GATEWAY_RESTART_TIMING_FILE={shlex.quote(str(tmp_path / 'gateway-test.jsonl'))}\n"
+        f"GATEWAY_PYTHON_BIN={shlex.quote(sys.executable)}\n"
+        "GATEWAY_ACTIVE_RELEASE_COMPONENT=all\n"
+        "LAB_ARENA_RESTART_GUARD_GENERATION=\n"
+        "LAB_ARENA_RESTART_DRAIN_PID=\n"
+        "LAB_ARENA_RESTART_DRAIN_REPORT=\n"
+        "LAB_ARENA_RESTART_DRAIN_PRIOR_JOBS=\n"
+        "run_lab_arena_restart_guard() {\n"
+        "  test \"$1\" = --exec-drain\n"
+        "  printf '%s\\n' '{\"guard_generation\":17,\"preserved\":true}'\n"
+        "}\n"
+        + drain_function
+        + "\ndrain_lab_arena_for_restart /prepared\n"
+        + "printf 'generation=%s\\n' \"$LAB_ARENA_RESTART_GUARD_GENERATION\"\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        ["bash", str(harness)], check=False, capture_output=True,
+        text=True, timeout=5,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "generation=17" in completed.stdout
+    assert not list(tmp_path.glob("gateway-test.drain.*"))
+
+
+@pytest.mark.parametrize("stage,destructive", [
+    ("pre_shutdown_checks", "0"), ("lab_arena_claim_drain", "1"),
+])
+def test_gateway_undiscovered_abort_skips_unrelated_phase(
+    tmp_path: Path, stage: str, destructive: str,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    abort_function = _shell_function_source(
+        script, "abort_lab_arena_restart_guard_before_destructive"
+    )
+    capture = tmp_path / "unexpected-abort"
+    harness = tmp_path / "abort-scope.sh"
+    harness.write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        f"CAPTURE={shlex.quote(str(capture))}\n"
+        f"GATEWAY_DEPLOY_STAGE={shlex.quote(stage)}\n"
+        f"GATEWAY_DESTRUCTIVE_PHASE_STARTED={destructive}\n"
+        "PREPARED_GATEWAY_SHA=" + "a" * 40 + "\n"
+        "GATEWAY_PREFLIGHT_TREE=/prepared\n"
+        "LAB_ARENA_RESTART_GUARD_GENERATION=\n"
+        "run_lab_arena_restart_guard() { touch \"$CAPTURE\"; }\n"
+        + abort_function
+        + "\nabort_lab_arena_restart_guard_before_destructive\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        ["bash", str(harness)], check=False, capture_output=True,
+        text=True, timeout=5,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert not capture.exists()
+
+
+@pytest.mark.parametrize("interrupt,whole_group,launch_gap", [
+    (signal.SIGHUP, False, False), (signal.SIGINT, False, False),
+    (signal.SIGTERM, False, False), (signal.SIGHUP, True, False),
+    (signal.SIGTERM, False, True),
+])
+def test_gateway_parent_signal_stops_drain_and_discovers_exact_guard(
+    tmp_path: Path, interrupt: signal.Signals, whole_group: bool,
+    launch_gap: bool,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    drain_function = _shell_function_source(script, "drain_lab_arena_for_restart")
+    if launch_gap:
+        drain_function = drain_function.replace(
+            "  LAB_ARENA_RESTART_DRAIN_PID=$!",
+            '  while [ ! -f "$CHILD" ]; do sleep 0.01; done\n'
+            '  kill -s TERM "$$"\n'
+            '  LAB_ARENA_RESTART_DRAIN_PID=$!',
+        )
+    functions = "\n\n".join(
+        (_shell_function_source(script, "abort_lab_arena_restart_guard_before_destructive"),
+         drain_function, _shell_function_source(script, "on_gateway_restart_signal"))
+    )
+    child = tmp_path / "drain-child"
+    abort = tmp_path / "abort-argv"
+    harness = tmp_path / "interrupt.sh"
+    harness.write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        f"CHILD={shlex.quote(str(child))}\n"
+        "export CHILD\n"
+        f"ABORT={shlex.quote(str(abort))}\n"
+        f"GATEWAY_RESTART_TIMING_FILE={shlex.quote(str(tmp_path / 'gateway-test.jsonl'))}\n"
+        "GATEWAY_ACTIVE_RELEASE_COMPONENT=all\n"
+        "GATEWAY_DEPLOY_STAGE=lab_arena_claim_drain\n"
+        "GATEWAY_DESTRUCTIVE_PHASE_STARTED=0\n"
+        "PREPARED_GATEWAY_SHA=" + "a" * 40 + "\n"
+        "GATEWAY_PREFLIGHT_TREE=/prepared\n"
+        "LAB_ARENA_RESTART_GUARD_GENERATION=\n"
+        "LAB_ARENA_RESTART_DRAIN_PID=\n"
+        "LAB_ARENA_RESTART_DRAIN_REPORT=\n"
+        "LAB_ARENA_RESTART_DRAIN_PRIOR_JOBS=\n"
+        "run_lab_arena_restart_guard() {\n"
+        "  if [ \"$1\" = --exec-drain ]; then shift; fi\n"
+        "  if [ \"$2\" = drain ]; then\n"
+        "    exec sh -c 'printf \"%s\\n\" \"$$\" > \"$CHILD\"; exec sleep 60'\n"
+        "  fi\n"
+        "  printf '%s\\n' \"$@\" > \"$ABORT\"\n"
+        "}\n"
+        + functions
+        + "\ntrap 'abort_lab_arena_restart_guard_before_destructive; "
+          "rm -f -- \"$LAB_ARENA_RESTART_DRAIN_REPORT\"' EXIT\n"
+        + f"trap 'on_gateway_restart_signal {128 + interrupt.value}' {interrupt.name}\n"
+        + "drain_lab_arena_for_restart /prepared\n",
+        encoding="utf-8",
+    )
+    process = subprocess.Popen(
+        ["bash", str(harness)], stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not child.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert child.exists(), process.communicate(timeout=1)
+        if launch_gap:
+            pass
+        elif whole_group:
+            os.killpg(process.pid, interrupt)
+        else:
+            os.kill(process.pid, interrupt)
+        process.communicate(timeout=5)
+        assert process.returncode == 128 + interrupt.value
+        assert abort.read_text(encoding="utf-8").splitlines() == [
+            "/prepared", "abort", "--generation", "0",
+        ]
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(child.read_text().strip()), 0)
+        assert not list(tmp_path.glob("gateway-test.drain.*"))
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
 
 
 @pytest.mark.parametrize("release_status", [0, 1])

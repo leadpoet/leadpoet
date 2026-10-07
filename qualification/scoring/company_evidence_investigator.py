@@ -282,7 +282,14 @@ vendor's own internal console or workflow remain customer_user or
 internal_function, not supplier_operator.
 An explicit monetary platform or workspace plan with monthly or annual fees
 supports a paid subscription model without requiring the literal word
-"subscription." A vendor-owned product offering plus current commercial
+"subscription." Direct company/product-bound paid SaaS subscription purchase
+evidence also proves the subscription model without a published price or
+billing cadence, unless the exact criterion requires those details. Newsletter
+subscriptions, free-account/demo/free-trial signups, a generic SaaS or product
+label, another vendor's subscription, and a pay-once license alone do not prove
+paid product subscriptions. This proves only the subscription clause; every
+other mandatory clause still requires source evidence.
+A vendor-owned product offering plus current commercial
 customers or deployments of that same product supports that the vendor sells
 it; do not require a public price or invoice. Bind the commercial fact to the
 exact investigated company and product. A free plan, research study,

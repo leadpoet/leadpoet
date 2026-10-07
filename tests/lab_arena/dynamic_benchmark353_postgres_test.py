@@ -1,4 +1,4 @@
-"""The dynamic benchmark migration against disposable current PostgreSQL."""
+"""Historical migration replay and current dynamic benchmark PostgreSQL behavior."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from lab_arena import contracts
 from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
+    migrations_before,
 )
 from tests.lab_arena.test_lab_arena_contracts import base_round_configuration
 from tests.lab_arena.test_lab_arena_migration_postgres import hotkey
@@ -24,8 +25,16 @@ def database():
     yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
 
 
-def test_replay_keeps_installed_definitions_and_frozen_documents(database):
-    psycopg2, dsn = database
+@pytest.fixture()
+def migration_database():
+    # Newer migrations deliberately change this migration's guarded functions.
+    yield from database_with_lab_arena_migration(
+        migrations_before(MIGRATION.name) + (MIGRATION.name,)
+    )
+
+
+def test_replay_keeps_installed_definitions_and_frozen_documents(migration_database):
+    psycopg2, dsn = migration_database
     with psycopg2.connect(**dsn) as connection:
         connection.autocommit = True
         with connection.cursor() as cursor:

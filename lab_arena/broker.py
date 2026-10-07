@@ -1433,16 +1433,21 @@ def _deepline_execution_response_readback(
     *, transport: ProviderTransport, secret: str, execution_key: Optional[str],
     operation: str, operation_aliases: Sequence[str], max_response_bytes: int,
     observed_status: Optional[int] = None,
+    resume_request: Optional[Mapping[str, Any]] = None,
 ) -> Optional[ProviderResponse]:
-    """Recover only Deepline's authenticated saved reply; never execute again."""
+    """Read a saved reply, or resume a proved running request with its same key."""
     if execution_key is None or _DEEPLINE_EXECUTION_KEY_RE.fullmatch(execution_key) is None:
         return None
+    recovery_deadline = (time.monotonic() + float(resume_request["timeout_seconds"])
+                         if resume_request is not None else None)
     try:
         lookup = transport.send(
             method="GET", url=DEEPLINE_EXECUTION_BY_KEY_URL + quote(execution_key, safe=""),
             headers={"accept": "application/json", "authorization": "Bearer " + secret,
                      "user-agent": "leadpoet-lab-arena-broker/1"}, body=b"",
-            timeout_seconds=DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS,
+            timeout_seconds=(min(DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS,
+                max(0.001, recovery_deadline - time.monotonic()))
+                if recovery_deadline is not None else DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS),
             max_response_bytes=max_response_bytes + 16_384,
         )
     except ProviderTransportError:
@@ -1459,6 +1464,48 @@ def _deepline_execution_response_readback(
         native_id = document.get("requestId") if isinstance(document, Mapping) else None
         saved = document.get("response") if isinstance(document, Mapping) else None
         status = document.get("responseStatus") if isinstance(document, Mapping) else None
+        if (resume_request is not None and isinstance(recovery, Mapping)
+            and recovery.get("idempotencyKey") == execution_key
+            and recovery.get("state") == "running"
+            and document.get("toolId") in (operation, *operation_aliases)
+            and isinstance(native_id, str)
+            and _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(native_id)
+            and not _DEEPLINE_REQUEST_ID_RE.fullmatch(native_id)):
+            # The observed workspace key already owns this execution. An
+            # identical POST can continue its declared lifecycle, not launch
+            # a new paid request. Unknown/missing keys never reach this branch.
+            if resume_request.get("headers", {}).get("idempotency-key") != execution_key:
+                return None
+            if recovery_deadline is None or time.monotonic() >= recovery_deadline:
+                return None
+            try:
+                resumed = transport.send(**dict(resume_request,
+                    timeout_seconds=max(0.001, recovery_deadline - time.monotonic())))
+            except ProviderTransportError:
+                return None
+            if (resumed.internal_provenance is not None
+                or len(resumed.body) > max_response_bytes
+                or _response_contains_credential(resumed, secret)):
+                return None
+            resumed_document = json.loads(resumed.body.decode("utf-8"))
+            resumed_recovery = (resumed_document.get("executionRecovery")
+                                if isinstance(resumed_document, Mapping) else None)
+            if (_deepline_job_request_id(resumed_document) != native_id
+                or not isinstance(resumed_document, Mapping)
+                or resumed_document.get("status") != "completed"
+                or (resumed_recovery is not None and (
+                    not isinstance(resumed_recovery, Mapping)
+                    or resumed_recovery.get("idempotencyKey") != execution_key
+                    or resumed_recovery.get("state") != "completed"))
+                or (observed_status is not None and resumed.status != observed_status)):
+                return None
+            # Retain the standard execute envelope, but hide the recovery key.
+            if isinstance(resumed_document, Mapping):
+                resumed_document = dict(resumed_document)
+                resumed_document.pop("executionRecovery", None)
+            body = json.dumps(resumed_document, ensure_ascii=False, allow_nan=False,
+                              separators=(",", ":")).encode("utf-8")
+            return ProviderResponse(resumed.status, resumed.headers, body)
         # A Vercel trace hint can differ from the keyed native billing ID.
         # The authenticated saved key/tool/body binding is stronger authority.
         if (not isinstance(recovery, Mapping) or recovery.get("idempotencyKey") != execution_key
@@ -1469,6 +1516,8 @@ def _deepline_execution_response_readback(
             or (observed_status is not None and observed_status != status)
             or not isinstance(saved, Mapping) or _deepline_job_request_id(saved) != native_id):
             return None
+        saved = dict(saved)
+        saved.pop("executionRecovery", None)
         body = json.dumps(saved, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
     except (UnicodeError, ValueError, TypeError, RecursionError):
         return None
@@ -1870,6 +1919,8 @@ class CallStore(Protocol):
     def settle_call(self, **kwargs: Any) -> Dict[str, Any]: ...
 
     def mark_uncertain(self, **kwargs: Any) -> Dict[str, Any]: ...
+
+    def recover_deepline_response(self, **kwargs: Any) -> Dict[str, Any]: ...
 
     def reconcile_openrouter_cost(self, **kwargs: Any) -> Dict[str, Any]: ...
 
@@ -2442,8 +2493,11 @@ def _decode_terminal(
         "judgment_cache_source_call_identity",
         "judgment_cache_source_run_id",
         "deepline_async_job_ids",
+        "deepline_response_missing",
     }
     if not isinstance(document, Mapping) or not required <= set(document) <= allowed:
+        raise BrokerError("broker_unavailable")
+    if "deepline_response_missing" in document and document["deepline_response_missing"] is not True:
         raise BrokerError("broker_unavailable")
     async_ids = document.get("deepline_async_job_ids")
     if async_ids is not None and (
@@ -4152,7 +4206,49 @@ class Broker:
                 "response_hash": contracts.hash_bytes(cached_body),
             })
             return BrokerResult(cached_status, cached_headers, cached_body, summary)
-        if status == "settled":
+        deepline_recovery_response: Optional[ProviderResponse] = None
+        deepline_response_recovery = False
+        terminal_document = reserved.get("terminal_response")
+        if (effective_operation.provider == "deepline"
+            and request_accounting.get("deepline_execution_key")
+            and (status in ("dispatched", "uncertain")
+                 or status == "settled" and (
+                     reserved.get("deepline_response_missing") is True
+                     or isinstance(terminal_document, Mapping)
+                        and terminal_document.get("deepline_response_missing") is True))
+            and reserved.get("account_failure_evidence") is None
+            and not (isinstance(terminal_document, Mapping)
+                     and terminal_document.get("call_succeeded") is True)):
+            if not _reservation_readback_matches(
+                self._store, reservation_arguments, reserved,
+                confirmed_cost_admission=getattr(context, "kind", "execute") in {"execute", "score"},
+            ):
+                return _error_result("broker_unavailable", summary)
+            recovery_outbound = operations.build_outbound_request(
+                effective_operation_id, effective_normalized,
+                deepline_catalog=context.deepline_catalog,
+            )
+            recovery_url, recovery_headers = inject_credential(recovery_outbound, secret)
+            recovery_headers["idempotency-key"] = request_accounting["deepline_execution_key"]
+            recovery_headers["x-deepline-request-id"] = request_accounting["deepline_request_id"]
+            deepline_recovery_response = _deepline_execution_response_readback(
+                transport=self._transport, secret=secret,
+                execution_key=request_accounting["deepline_execution_key"],
+                operation=request_accounting["tool"],
+                operation_aliases=(deepline_catalog_entry["operation_aliases"] if deepline_catalog_entry else ()),
+                max_response_bytes=(_DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES
+                    if route is not None and route.adapter == "firecrawl_raw_html"
+                    else effective_operation.max_response_bytes),
+                resume_request=(dict(method=recovery_outbound.target.method, url=recovery_url,
+                    headers=recovery_headers, body=recovery_outbound.body,
+                    timeout_seconds=operation_timeout_seconds,
+                    max_response_bytes=effective_operation.max_response_bytes)
+                    if deepline_catalog_entry is not None and route is None else None),
+            )
+            if deepline_recovery_response is not None:
+                deepline_response_recovery = True
+                summary["transport_recovery"] = "deepline_execution_lookup"
+        if status == "settled" and not deepline_response_recovery:
             # Repeated request for a settled identity: the stored response, no second dispatch.
             terminal_document = reserved.get("terminal_response")
             try:
@@ -4230,9 +4326,18 @@ class Broker:
                             return _error_result("broker_unavailable", summary)
                         summary["provider_status"] = evidence["provider_status"]
             return BrokerResult(terminal_status, terminal_headers, terminal_body, summary)
-        if status in ("dispatched", "uncertain"):
+        if status in ("dispatched", "uncertain") and not deepline_response_recovery:
             summary["outcome"] = "uncertain"
             terminal_document = reserved.get("terminal_response")
+            if (effective_operation.provider == "deepline"
+                and isinstance(terminal_document, Mapping)
+                and terminal_document.get("call_succeeded") is True):
+                try:
+                    terminal_status, terminal_headers, terminal_body = _decode_terminal(terminal_document, secret=secret)
+                except BrokerError:
+                    return _error_result("broker_unavailable", summary)
+                summary.update(idempotent=True, status=terminal_status)
+                return BrokerResult(terminal_status, terminal_headers, terminal_body, summary)
             if (
                 status == "uncertain"
                 and judgment_cache_key
@@ -4289,7 +4394,7 @@ class Broker:
         if status == "recovered":
             summary["outcome"] = "recovered"
             return _error_result("call_refused", summary)
-        if status != "reserved":
+        if status != "reserved" and not deepline_response_recovery:
             return _error_result("broker_unavailable", summary)
 
         # The database owns admission. Current execute and score calls retain
@@ -4323,11 +4428,12 @@ class Broker:
                 billing_deadline
                 - operations.PROVIDER_BILLING_RECONCILIATION_SECONDS,
             )
-        dispatched = self._store.mark_dispatched(
-            run_id=context.run_id,
-            lease_token_hash=context.lease_token_hash,
-            call_identity=call_identity,
-        )
+        dispatched = ({"status": "dispatched", "idempotent": False}
+            if deepline_response_recovery else self._store.mark_dispatched(
+                run_id=context.run_id,
+                lease_token_hash=context.lease_token_hash,
+                call_identity=call_identity,
+            ))
         if dispatched.get("status") == "stale":
             # The marker did not commit (stage closed or lease lost): the request is not sent.
             return _error_result("lease_stale", summary)
@@ -4377,7 +4483,7 @@ class Broker:
             timeout_seconds = max(0.001, request_deadline - time.monotonic())
             try:
                 try:
-                    response = self._transport.send(
+                    response = deepline_recovery_response or self._transport.send(
                         method=outbound.target.method,
                         url=url,
                         headers=headers,
@@ -4789,7 +4895,8 @@ class Broker:
                 (deepline_response_request_id or deepline_request_id)
                 if effective_operation.provider == "deepline"
                 and (
-                    raw_cost is deepline_native_cost
+                    deepline_response_recovery
+                    or raw_cost is deepline_native_cost
                     or raw_cost is deepline_readback_cost
                 )
                 else openrouter_generation_id
@@ -4950,12 +5057,44 @@ class Broker:
                     call_doc=uncertain_doc,
                     lease_ttl_seconds=self._lease_ttl_seconds,
                 )
+                if (effective_operation.provider == "deepline" and call_succeeded
+                    and isinstance(raw_document, Mapping) and raw_document.get("status") == "completed"
+                    and deepline_execution_key is not None
+                    and deepline_response_request_id is not None
+                    and hasattr(self._store, "recover_deepline_response")):
+                    uncertain_state = self._store.recover_deepline_response(
+                        run_id=context.run_id, lease_token_hash=context.lease_token_hash,
+                        call_identity=call_identity, request_hash=request_hash,
+                        execution_key=deepline_execution_key,
+                        credential_fingerprint=provider_credential_fingerprint,
+                        request_id=deepline_response_request_id, operation=deepline_operation,
+                        actual_microusd=None,
+                        terminal_response=_terminal_response_document(
+                            sanitized_status, sanitized_headers, sanitized_body, call_succeeded=True),
+                        lease_ttl_seconds=self._lease_ttl_seconds,
+                    )
+                    if uncertain_state.get("status") not in ("uncertain", "settled"):
+                        return _error_result("lease_stale" if uncertain_state.get("status") == "stale"
+                                             else "broker_unavailable", summary)
+                    sanitized_status, sanitized_headers, sanitized_body = _decode_terminal(
+                        uncertain_state.get("terminal_response"))
+                    summary["response_hash"] = contracts.hash_bytes(sanitized_body)
                 summary.update(
                     {
                         "outcome": "uncertain",
                         "provider_status": int(response.status),
                     }
                 )
+                if (effective_operation.provider == "deepline" and call_succeeded
+                    and uncertain_state.get("status") == "settled"):
+                    saved_actual = uncertain_state.get("amount_microusd", uncertain_state.get("actual_microusd"))
+                    saved_terminal = uncertain_state.get("terminal_response")
+                    if type(saved_actual) is not int or saved_actual < 0:
+                        return _error_result("broker_unavailable", summary)
+                    saved_status, saved_headers, saved_body = _decode_terminal(saved_terminal)
+                    summary.update(outcome="settled", actual_microusd=saved_actual,
+                                   status=saved_status, response_hash=contracts.hash_bytes(saved_body))
+                    return BrokerResult(saved_status, saved_headers, saved_body, summary)
                 completed_rate_limit_retryable = (
                     openrouter_completed_rate_limit_proven
                     and call_succeeded is False
@@ -5036,6 +5175,9 @@ class Broker:
                     else None
                 ),
             )
+            if (effective_operation.provider == "deepline"
+                and summary.get("transport_error_class") and not call_succeeded):
+                terminal["deepline_response_missing"] = True
             if deepline_async_ids:
                 terminal["deepline_async_job_ids"] = list(deepline_async_ids)
             payload = dict(summary, outcome="settled", status=sanitized_status, provider_status=provider_status_for_summary, actual_microusd=actual, response_hash=contracts.hash_bytes(sanitized_body))
@@ -5047,7 +5189,12 @@ class Broker:
             )
             for attempt in range(_SETTLEMENT_STORE_MAX_ATTEMPTS):
                 try:
-                    settled = self._store.settle_call(**settlement)
+                    settled = (self._store.recover_deepline_response(
+                        **settlement, request_hash=request_hash,
+                        execution_key=deepline_execution_key,
+                        credential_fingerprint=provider_credential_fingerprint,
+                        request_id=deepline_response_request_id, operation=deepline_operation,
+                    ) if deepline_response_recovery else self._store.settle_call(**settlement))
                 except ArenaStoreError as exc:
                     if attempt + 1 == _SETTLEMENT_STORE_MAX_ATTEMPTS:
                         if (
@@ -5237,7 +5384,17 @@ class Broker:
                     summary["retry_after_seconds"] = openrouter_retry_after_seconds
             return _error_result("provider_unavailable", summary)
         if settle_status == "settled":
-            summary.update({"outcome": "settled", "actual_microusd": actual, "status": sanitized_status, "provider_status": provider_status_for_summary, "response_hash": payload["response_hash"]})
+            if deepline_response_recovery:
+                saved_terminal = settled.get("terminal_response")
+                if not isinstance(saved_terminal, Mapping):
+                    return _error_result("broker_unavailable", summary)
+                try:
+                    sanitized_status, sanitized_headers, sanitized_body = _decode_terminal(saved_terminal)
+                except BrokerError:
+                    return _error_result("broker_unavailable", summary)
+                actual = settled.get("actual_microusd", settled.get("amount_microusd"))
+                summary["idempotent"] = settled.get("idempotent") is True
+            summary.update({"outcome": "settled", "actual_microusd": actual, "status": sanitized_status, "provider_status": provider_status_for_summary, "response_hash": contracts.hash_bytes(sanitized_body)})
             if gate_lease is not None and call_succeeded:
                 self._openrouter_shared_gate.observe_success(gate_lease)
             return BrokerResult(sanitized_status, sanitized_headers, sanitized_body, summary)

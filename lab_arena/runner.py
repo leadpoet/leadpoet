@@ -765,9 +765,12 @@ class HttpArenaApiClient:
             timeout_seconds=5.0,
         )
 
-    def provider(self, run_id: str, lease_token: str, frame: Mapping[str, Any]) -> Dict[str, Any]:
+    def provider(
+        self, run_id: str, lease_token: str, frame: Mapping[str, Any],
+        *, timeout_seconds: Optional[float] = None,
+    ) -> Dict[str, Any]:
         requested_timeout = frame.get("timeout_ms")
-        timeout_seconds = API_TIMEOUT_SECONDS
+        api_timeout_seconds = API_TIMEOUT_SECONDS
         operation_id = frame.get("operation_id")
         operation = (
             operations.get_operation(operation_id)
@@ -783,7 +786,7 @@ class HttpArenaApiClient:
                 requested_timeout / 1000.0,
                 float(operation.timeout_seconds),
             )
-            timeout_seconds = max(
+            api_timeout_seconds = max(
                 API_TIMEOUT_SECONDS,
                 min(
                     MAX_PROVIDER_API_TIMEOUT_SECONDS,
@@ -793,11 +796,13 @@ class HttpArenaApiClient:
                     + PROVIDER_API_TIMEOUT_GRACE_SECONDS,
                 ),
             )
+        if timeout_seconds is not None:
+            api_timeout_seconds = min(api_timeout_seconds, max(0.001, timeout_seconds))
         return self._post(
             "/arena/v1/runs/%s/provider" % run_id,
             frame,
             headers={"x-lab-arena-lease": lease_token},
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=api_timeout_seconds,
         )
 
     def quota_usage(
@@ -2105,6 +2110,102 @@ class WorkerSocketServer:
         except Exception:
             return True
 
+    @staticmethod
+    def _deepline_uncertain_identity(
+        document: Mapping[str, Any], operation_id: str, action_sequence: int
+    ) -> Optional[str]:
+        """Accept only a gateway-bound dispatched uncertainty, never a lost reply."""
+
+        if not isinstance(document, Mapping) or set(document) != {
+            "status", "headers", "body_b64", "call"
+        }:
+            return None
+        call = document.get("call")
+        if not (
+            type(document.get("status")) is int
+            and document["status"] in (502, 409)
+            and isinstance(document.get("headers"), Mapping)
+            and isinstance(call, Mapping)
+            and call.get("operation_id") == operation_id
+            and call.get("provider") == "deepline"
+            and type(call.get("action_sequence")) is int
+            and call["action_sequence"] == action_sequence
+            and call.get("outcome") == "uncertain"
+            and call.get("error_code") == (
+                "provider_unavailable" if document["status"] == 502 else "call_uncertain"
+            )
+            and isinstance(call.get("call_identity"), str)
+            and contracts.SHA256_RE.fullmatch(call["call_identity"]) is not None
+        ):
+            return None
+        try:
+            body = json.loads(base64.b64decode(str(document["body_b64"]), validate=True))
+        except (TypeError, ValueError, UnicodeDecodeError):
+            return None
+        if body != {"error": {"code": call["error_code"]}}:
+            return None
+        return call["call_identity"]
+
+    def _recover_deepline_response(
+        self, document: Dict[str, Any], frame: Mapping[str, Any], deadline: float,
+        cancel_requested: Optional[Callable[[], bool]],
+    ) -> Dict[str, Any]:
+        """Make one same-action recovery lookup within the original API window."""
+
+        identity = self._deepline_uncertain_identity(
+            document, frame["operation_id"], frame["action_sequence"]
+        )
+        remaining = deadline - self._monotonic()
+        if identity is None or remaining <= 0 or self._cancelled(cancel_requested):
+            return document
+        # Native timeout is outside the provider body. Compatibility routes
+        # can embed it in their payload, so preserve those frames exactly.
+        # The HTTP request cap below still uses the original remaining window.
+        recovery_frame = dict(frame)
+        if frame["operation_id"] == "deepline.execute":
+            recovery_frame["timeout_ms"] = min(
+                frame["timeout_ms"], max(1, int(remaining * 1000))
+            )
+        try:
+            if isinstance(self._api, HttpArenaApiClient):
+                recovered = self._api.provider(
+                    self._state.lease["run_id"], self._state.lease_token,
+                    recovery_frame, timeout_seconds=remaining,
+                )
+            else:
+                recovered = self._api.provider(
+                    self._state.lease["run_id"], self._state.lease_token, recovery_frame,
+                )
+        except RunnerError:
+            return document
+        if self._monotonic() > deadline:
+            return document
+        if not isinstance(recovered, Mapping) or set(recovered) != {
+            "status", "headers", "body_b64", "call"
+        }:
+            return document
+        call = recovered.get("call")
+        if not (
+            type(recovered.get("status")) is int and recovered["status"] == 200
+            and isinstance(recovered.get("headers"), Mapping)
+            and isinstance(call, Mapping)
+            and call.get("operation_id") == frame["operation_id"]
+            and call.get("provider") == "deepline"
+            and type(call.get("action_sequence")) is int
+            and call["action_sequence"] == frame["action_sequence"]
+            and call.get("call_identity") == identity
+            and call.get("outcome") in ("settled", "uncertain")
+            and call.get("error_code") is None
+        ):
+            return document
+        try:
+            if not isinstance(recovered.get("body_b64"), str):
+                return document
+            base64.b64decode(recovered["body_b64"], validate=True)
+        except (TypeError, ValueError):
+            return document
+        return dict(recovered)
+
     def _dispatch_once(
         self,
         operation_id: str,
@@ -2115,6 +2216,9 @@ class WorkerSocketServer:
     ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
         state = self._state
         operation = operations.get_operation(operation_id)
+        deadline = self._monotonic() + max(1, int(timeout_ms)) / 1000.0 + (
+            MAX_PROVIDER_API_TIMEOUT_SECONDS - MAX_PROVIDER_OPERATION_TIMEOUT_SECONDS
+        )
         # Compatibility routes and the native execute route share the actual
         # Deepline tool's guard. Catalog reads and other providers stay separate.
         tool = (
@@ -2201,6 +2305,9 @@ class WorkerSocketServer:
                 with state.lock:
                     state.calls.append(dict(document["call"]))
                 return "worker_unavailable", None
+        document = self._recover_deepline_response(
+            document, frame, deadline, cancel_requested
+        )
         if not isinstance(document, Mapping) or set(document) != {
             "status",
             "headers",
@@ -2447,11 +2554,9 @@ class WorkerSocketServer:
             return headers
         if not isinstance(body, Mapping):
             return headers
-        billing = body.get("billing")
-        if "billing" in body and not (
-            billing is None or isinstance(billing, Mapping) and not billing
-        ):
-            return headers
+        # Provider billing can remain pending after the gateway settles the
+        # exact charge. The bound ledger proof is independent of those fields;
+        # leave the provider body unchanged and expose the confirmed amount.
         if not (
             call.get("outcome") == "settled"
             and type(call.get("actual_microusd")) is int

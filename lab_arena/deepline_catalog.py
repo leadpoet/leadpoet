@@ -66,6 +66,34 @@ def _words(name: str) -> set[str]:
     return set(_name(name).split("_"))
 
 
+def _normalize_schema_dialect(schema: dict[str, Any]) -> None:
+    """Translate Deepline's unconstrained type only at JSON Schema nodes.
+
+    Removing ``type: any`` means any JSON value, as the provider declares.
+    Other constraints still apply. Defaults, enums and annotations are data,
+    so do not recursively change arbitrary dictionaries or repair other types.
+    """
+    if schema.get("type") == "any":
+        del schema["type"]
+    for keyword in ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas"):
+        children = schema.get(keyword)
+        if isinstance(children, dict):
+            for child in children.values():
+                if isinstance(child, dict):
+                    _normalize_schema_dialect(child)
+    for keyword in ("additionalProperties", "unevaluatedProperties", "propertyNames", "items",
+                    "additionalItems", "contains", "unevaluatedItems", "not", "if", "then", "else", "contentSchema"):
+        child = schema.get(keyword)
+        if isinstance(child, dict):
+            _normalize_schema_dialect(child)
+    for keyword in ("allOf", "anyOf", "oneOf", "prefixItems"):
+        children = schema.get(keyword)
+        if isinstance(children, list):
+            for child in children:
+                if isinstance(child, dict):
+                    _normalize_schema_dialect(child)
+
+
 def _schema(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise CatalogError("missing_schema")
@@ -102,6 +130,7 @@ def _schema(raw: Any) -> dict[str, Any]:
                     raise CatalogError("unsupported_schema_reference")
                 inspect(child)
     inspect(schema)
+    _normalize_schema_dialect(schema)
     try:
         Draft202012Validator.check_schema(schema)
     except Exception as exc:

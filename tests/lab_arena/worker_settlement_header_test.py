@@ -91,13 +91,11 @@ def test_settlement_header_requires_exact_bound_deepline_call(change):
 @pytest.mark.parametrize(
     "body",
     [
-        {"billing": {"cost_usd": 0}, "results": []},
-        {"billing": "unknown", "results": []},
         [],
         b"not-json",
     ],
 )
-def test_settlement_header_does_not_compete_with_billing_or_malformed_body(body):
+def test_settlement_header_requires_json_mapping_body(body):
     document = response_document(
         body=body, headers={
             runner.SETTLED_MICROUSD_HEADER.upper(): "999",
@@ -115,7 +113,8 @@ def test_settlement_header_does_not_compete_with_billing_or_malformed_body(body)
     }
 
 
-def test_non_deepline_response_strips_spoof_without_parsing_body():
+@pytest.mark.parametrize("operation_id", ["openrouter.responses", "exa.search", "exa.contents"])
+def test_other_operations_strip_spoof_without_parsing_body(operation_id):
     document = response_document(
         body=b"not-json",
         headers={
@@ -125,23 +124,52 @@ def test_non_deepline_response_strips_spoof_without_parsing_body():
     )
 
     headers = runner.WorkerSocketServer._socket_response_headers(
-        document, "openrouter.responses", 0
+        document, operation_id, 0
     )
 
     assert headers == {"content-type": "application/json"}
 
 
-@pytest.mark.parametrize("billing", [None, {}])
-def test_settlement_header_allows_null_or_empty_billing_mapping(billing):
+@pytest.mark.parametrize("billing", [
+    None,
+    {},
+    {"pricing_status": "pending", "estimated_cost_usd": 0.002},
+    {"pricing_status": "provisional", "cost_usd": 0.002},
+    {"credits_charged": 0.02, "cost_usd": 0.002},
+    {"pricing_status": "final", "credits_charged": 0, "cost_usd": 0},
+    "unknown",
+])
+@pytest.mark.parametrize("actual_microusd", [0, 2000])
+def test_settlement_header_exposes_ledger_charge_independently_of_provider_billing(
+    billing, actual_microusd
+):
     document = response_document(body={"billing": billing, "results": []})
-    document["call"]["actual_microusd"] = 12_003
+    document["call"]["actual_microusd"] = actual_microusd
+    original_body = document["body_b64"]
 
     headers = runner.WorkerSocketServer._socket_response_headers(
         document, OPERATION, 0
     )
 
-    assert headers[runner.SETTLED_MICROUSD_HEADER] == "12003"
+    assert headers[runner.SETTLED_MICROUSD_HEADER] == str(actual_microusd)
     assert headers[runner.CALL_IDENTITY_HEADER] == IDENTITY
+    assert document["body_b64"] == original_body
+
+
+@pytest.mark.parametrize("outcome", ["uncertain", "reserved", "unknown"])
+def test_pending_ledger_never_exposes_provider_estimate_as_confirmed_cost(outcome):
+    document = response_document(
+        body={"billing": {"pricing_status": "pending", "estimated_cost_usd": 0.002}},
+        headers={runner.SETTLED_MICROUSD_HEADER.upper(): "2000"},
+        call={"outcome": outcome, "actual_microusd": 0},
+    )
+
+    headers = runner.WorkerSocketServer._socket_response_headers(document, OPERATION, 0)
+
+    assert headers == {
+        "content-type": "application/json",
+        runner.CALL_IDENTITY_HEADER: IDENTITY,
+    }
 
 
 def _recv_exact(connection: socket.socket, size: int) -> bytes:
@@ -155,7 +183,10 @@ def _recv_exact(connection: socket.socket, size: int) -> bytes:
 
 def test_real_worker_socket_replaces_spoof_and_preserves_three_key_envelope():
     original_body = contracts.canonical_json(
-        {"results": [{"url": "https://example.com"}]}
+        {
+            "results": [{"url": "https://example.com"}],
+            "billing": {"pricing_status": "pending", "estimated_cost_usd": 0.002},
+        }
     ).encode()
 
     class Api:
@@ -173,7 +204,7 @@ def test_real_worker_socket_replaces_spoof_and_preserves_three_key_envelope():
                 },
                 call={
                     "action_sequence": frame["action_sequence"],
-                    "actual_microusd": 0,
+                    "actual_microusd": 2000,
                 },
             )
 
@@ -200,22 +231,33 @@ def test_real_worker_socket_replaces_spoof_and_preserves_three_key_envelope():
     assert response["headers"] == {
         "content-type": "application/json",
         runner.CALL_IDENTITY_HEADER: IDENTITY,
-        runner.SETTLED_MICROUSD_HEADER: "0",
+        runner.SETTLED_MICROUSD_HEADER: "2000",
     }
     assert base64.b64decode(response["body_b64"], validate=True) == original_body
+    status, headers, body = shim.parse_worker_response(response)
+    assert status == 200
+    assert headers[runner.SETTLED_MICROUSD_HEADER] == "2000"
+    assert headers[runner.CALL_IDENTITY_HEADER] == IDENTITY
+    assert body == original_body
     assert api.frames[0]["operation_id"] == OPERATION
     assert api.frames[0]["action_sequence"] == 0
 
 
 def test_plain_http_bridge_replaces_upstream_spoof_with_bound_proof(tmp_path):
+    original_body = {
+        "billing": {"pricing_status": "pending", "estimated_cost_usd": 0.002},
+        "results": [{"url": "https://example.com"}],
+    }
+
     class Api:
         def provider(self, _run_id, _lease_token, frame):
             return response_document(
+                body=original_body,
                 headers={
                     "X-LeadPoet-Settled-MicroUSD": "999",
                     "X-LeadPoet-Call-Identity": "sha256:" + "f" * 64,
                 },
-                call={"action_sequence": frame["action_sequence"]},
+                call={"action_sequence": frame["action_sequence"], "actual_microusd": 2000},
             )
 
     worker = runner.WorkerSocketServer(
@@ -231,9 +273,9 @@ def test_plain_http_bridge_replaces_upstream_spoof_with_bound_proof(tmp_path):
     )
 
     assert status == 200
-    assert headers[runner.SETTLED_MICROUSD_HEADER] == "0"
+    assert headers[runner.SETTLED_MICROUSD_HEADER] == "2000"
     assert headers[runner.CALL_IDENTITY_HEADER] == IDENTITY
-    assert json.loads(body)["results"]
+    assert json.loads(body) == original_body
 
 
 def test_shim_preserves_host_settlement_receipt_and_body():

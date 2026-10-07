@@ -163,7 +163,8 @@ def test_timeout_recovery_uses_normal_success_billing_and_no_paid_replay(monkeyp
         assert result.call['actual_microusd'] == 2000 and saved['terminal']['call_succeeded'] is True
     before = len(transport.requests)
     execute(broker, context)
-    assert len(transport.requests) == before and sum(r['method'] == 'POST' for r in transport.requests) == 1
+    assert len(transport.requests) == before + (2 if billing == 'pending' else 0)
+    assert sum(r['method'] == 'POST' for r in transport.requests) == 1
 
 
 def test_recovered_provider_error_is_not_fabricated_as_success(monkeypatch):

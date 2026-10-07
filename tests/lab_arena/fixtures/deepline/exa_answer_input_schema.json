@@ -1,0 +1,55 @@
+{
+  "description": "Exa answer input.",
+  "fields": [
+    {
+      "description": "Question to answer using web results.",
+      "name": "query",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "description": "Stream tokens as they are generated.",
+      "name": "stream",
+      "required": false,
+      "type": "boolean"
+    },
+    {
+      "description": "Include full source text in citations.",
+      "name": "text",
+      "required": false,
+      "type": "boolean"
+    },
+    {
+      "description": "JSON Schema to return a structured answer. Supports arbitrary user-defined schema shape.",
+      "name": "outputSchema",
+      "required": false,
+      "type": "any"
+    }
+  ],
+  "jsonSchema": {
+    "additionalProperties": false,
+    "description": "Exa answer input.",
+    "properties": {
+      "outputSchema": {
+        "description": "JSON Schema to return a structured answer. Supports arbitrary user-defined schema shape.",
+        "type": "any"
+      },
+      "query": {
+        "description": "Question to answer using web results.",
+        "type": "string"
+      },
+      "stream": {
+        "description": "Stream tokens as they are generated.",
+        "type": "boolean"
+      },
+      "text": {
+        "description": "Include full source text in citations.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "type": "object"
+  }
+}

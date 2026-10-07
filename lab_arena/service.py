@@ -801,6 +801,7 @@ class ArenaService:
         if getattr(self._config, "deepline_catalog_source", None) is not None:
             try:
                 self._store.deepline_catalog_schema()
+                self._store.deepline_response_schema()
             except ArenaStoreError as exc:
                 raise ServiceError("deepline_catalog_schema_unavailable", 500) from exc
         try:

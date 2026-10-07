@@ -1194,6 +1194,17 @@ _CATALOG_OPERATION_LIST = (
         funding_source="host", credential=_DEEPLINE_CREDENTIAL,
     ),
     Operation(
+        operation_id="deepline.tools.search",
+        provider="deepline", method="GET", host="code.deepline.com",
+        path="/api/v2/tools/search", parameter_location="query",
+        request_fields={"query": FieldSpec("str", required=True, min_length=1, max_length=512),
+                        "compact": FieldSpec("bool"), "categories": FieldSpec("str", max_length=512)},
+        fixed_params={}, defaults={"compact": True}, timeout_seconds=5,
+        max_request_bytes=4096, max_response_bytes=8_388_608,
+        cost_rule=CALL_QUOTA_COST_RULE, response_sanitizer="json",
+        funding_source="host", credential=_DEEPLINE_CREDENTIAL,
+    ),
+    Operation(
         operation_id="deepline.tools.get",
         provider="deepline", method="GET", host="code.deepline.com",
         path="/api/v2/integrations/{tool}/get", parameter_location="query",
@@ -1983,6 +1994,10 @@ def match_request(
         parameters = {}
         seen = set()
         for name, value in pairs:
+            # The public search route uses q; the local broker uses query.
+            # Normalize before duplicate checks so both names cannot conflict.
+            if operation.operation_id == "deepline.tools.search" and name == "q":
+                name = "query"
             if name in seen:
                 raise OperationRequestError("invalid_query")
             seen.add(name)

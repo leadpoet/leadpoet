@@ -155,6 +155,7 @@ def test_new_round_uses_60m_and_historical_profiles_remain_valid():
     digest = "sha256:" + "a" * 64
     defaults = RoundDefaults(
         runner_hotkeys=("5" * 48,), baseline_hotkey="5" * 48,
+        runner_capacity_slots={"5" * 48: 251},
         scorer_image_digest=digest,
         scorer_image_reference="registry.example/scorer@" + digest,
     )

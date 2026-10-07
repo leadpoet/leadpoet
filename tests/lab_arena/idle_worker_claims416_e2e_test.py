@@ -20,6 +20,11 @@ def test_ten_slot_baseline_first_round_publishes_promotes_and_derives_weights(
     def capture(harness):
         harness.service.config.defaults = replace(
             harness.service.config.defaults, runner_slot_ceiling=251,
+            runner_capacity_slots={hotkey: 10 for hotkey in harness.runner_keys},
+            stage_minutes={
+                **harness.service.config.defaults.stage_minutes,
+                "stage_2": 240,
+            },
         )
         observed["harness"] = harness
         return install(harness)

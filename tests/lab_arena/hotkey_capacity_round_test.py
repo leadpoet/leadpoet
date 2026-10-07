@@ -35,13 +35,44 @@ def test_default_admission_includes_all_miner_slots_with_one_planned_runner(conn
     harness.service.config.defaults = replace(harness.service.config.defaults, max_challengers=contracts.DEFAULT_MAX_CHALLENGERS)
     cutoff = datetime.now(timezone.utc) + timedelta(hours=12)
     configuration = harness.service.create_round(cutoff, round_id="arena-2098-01-01-capdefault")
-    assert configuration["max_challengers"] == 256
+    assert configuration["max_challengers"] == 8
     assert capacity.daily_challenger_capacity(configuration) == 8
     assert configuration["runner_slot_ceiling"] == 8
     assert configuration["max_attempts_per_assignment"] == 2
-    monkeypatch.setattr(capacity, "daily_challenger_capacity", lambda _: 0)
+    monkeypatch.setattr(capacity, "daily_challenger_capacity", lambda *_args, **_kwargs: 0)
     with pytest.raises(svc.ServiceError, match="daily_runner_capacity_insufficient"):
         harness.service.create_round(cutoff, round_id="arena-2098-01-02-capzero")
+
+
+def test_new_live_baseline_first_round_freezes_retry_safe_cap(connect, tmp_path):
+    harness = fixtures.Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    harness.service.config.defaults = replace(
+        harness.service.config.defaults,
+        max_challengers=contracts.DEFAULT_MAX_CHALLENGERS,
+        benchmark_icp_count=10,
+        runner_slot_ceiling=251,
+        checkpoint_deadline_enabled=True,
+        execution_sequence_from="2026-01-01T00:00:00Z",
+    )
+    cutoff = datetime.now(timezone.utc) + timedelta(hours=12)
+    with pytest.raises(svc.ServiceError, match="daily_runner_capacity_unavailable"):
+        harness.service.create_round(cutoff, round_id="arena-2098-01-02-capunmeasured")
+    harness.service.config.defaults = replace(
+        harness.service.config.defaults,
+        runner_capacity_slots={harness.runner_keys[0]: 0},
+    )
+    with pytest.raises(svc.ServiceError, match="daily_runner_capacity_insufficient"):
+        harness.service.create_round(cutoff, round_id="arena-2098-01-02-capoffline")
+    harness.service.config.defaults = replace(
+        harness.service.config.defaults,
+        runner_capacity_slots={harness.runner_keys[0]: 251},
+    )
+    configuration = harness.service.create_round(
+        cutoff, round_id="arena-2098-01-02-capbaseline"
+    )
+    assert configuration["icp_wall_clock_seconds"] == 60 * 60
+    assert configuration["max_challengers"] == 25
+    assert capacity.daily_challenger_capacity(configuration) == 25
 
 
 def test_twenty_one_shared_owner_hotkeys_publish_with_intact_source_and_credentials(connect, tmp_path):
@@ -49,7 +80,11 @@ def test_twenty_one_shared_owner_hotkeys_publish_with_intact_source_and_credenti
     flavors = [f"SharedOwner{index:02d}" for index in range(21)]
     harness = ContactHarness(connect, tmp_path, challengers=flavors, runners=["alpha"])
     _install_contact_sandbox(harness)
-    harness.service.config.defaults = replace(harness.service.config.defaults, max_challengers=contracts.DEFAULT_MAX_CHALLENGERS)
+    harness.service.config.defaults = replace(
+        harness.service.config.defaults,
+        max_challengers=contracts.DEFAULT_MAX_CHALLENGERS,
+        runner_slot_ceiling=32,
+    )
     original_metagraph = harness.chain.metagraph
     shared_owner = fixtures.keypair("twenty-one-shared-coldkey").ss58_address
 
@@ -65,7 +100,7 @@ def test_twenty_one_shared_owner_hotkeys_publish_with_intact_source_and_credenti
     harness.clock.now = datetime.now(timezone.utc)
     harness.round_id = "arena-2098-01-03-capfull"
     configuration = harness.service.create_round(harness.clock.now + timedelta(minutes=30), round_id=harness.round_id)
-    assert configuration["max_challengers"] == 256
+    assert configuration["max_challengers"] >= len(flavors)
     assert configuration["integrity_policy"] == "arena_integrity_v1"
     assert configuration["contact_policy"] == "contacts_v1"
     submitted = [harness.submit(flavor, harness.round_id) for flavor in flavors]

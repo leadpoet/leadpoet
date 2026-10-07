@@ -405,6 +405,9 @@ class RoundDefaults:
     per_icp_cost_policy: bool = False
     scoring_cap_microusd: int = 50_000_000
     runner_hotkeys: Tuple[str, ...] = ()
+    # Planned local slots, supplied from validator proxy and memory preflight.
+    # A protocol ceiling of 251 is not evidence that those slots exist.
+    runner_capacity_slots: Optional[Mapping[str, int]] = None
     # The service freezes its public execution ceiling into each new round.
     # RUNNER_SLOT_CEILING is only the public maximum; a runner declaration can
     # never raise this authority cap.
@@ -1206,13 +1209,23 @@ class ArenaService:
             document["benchmark_disclosure_policy"] = (
                 icp_disclosure.CUTOFF_PUBLIC_POLICY
             )
-        # Require enough planned capacity to run a competition. Admission uses
-        # the explicit challenger limit, not the worst-case retry estimate.
-        # Worker, deadline, and spending limits still apply to every job.
+        # Freeze admission against the full retry and scoring workload. This
+        # only changes newly created rounds; a prior day's configuration and
+        # accepted submissions remain immutable.
         if self._config.mode == "live":
-            supported = capacity.daily_challenger_capacity(document)
+            if (
+                defaults.runner_slot_ceiling == contracts.RUNNER_SLOT_CEILING
+                and self._config.network_name == "finney"
+                and self._config.netuid == 71
+                and defaults.runner_capacity_slots is None
+            ):
+                raise ServiceError("daily_runner_capacity_unavailable", 503)
+            supported = capacity.daily_challenger_capacity(
+                document, runner_parallelism=defaults.runner_capacity_slots
+            )
             if supported < 1:
                 raise ServiceError("daily_runner_capacity_insufficient", 503)
+            document["max_challengers"] = min(document["max_challengers"], supported)
         self._freeze_deepline_catalog(document)
         configuration = contracts.validate_round_configuration(document)
         result = self._store.create_round(round_id, configuration)
@@ -1607,6 +1620,46 @@ class ArenaService:
         if not decision.allowed:
             raise ServiceError("submission_rate_limited", 429)
 
+    def _enforce_current_daily_intake_capacity(
+        self, round_row: Mapping[str, Any], hotkey: str,
+    ) -> None:
+        """Stop new hotkeys on an older open round without evicting reservations.
+
+        Newly created rounds have an atomic database admission cap. This
+        read-only presign guard also bounds an already-open 251-slot Finney
+        round whose frozen cap predates measured capacity. It cannot replace
+        the database's serialized admission check for a concurrent new round.
+        """
+
+        configuration = round_row.get("configuration_doc") or {}
+        if (
+            self._config.mode != "live"
+            or configuration.get("network_name") != "finney"
+            or configuration.get("netuid") != 71
+            or configuration.get("runner_slot_ceiling") != contracts.RUNNER_SLOT_CEILING
+        ):
+            return
+        rows = self._store.list_submissions(
+            str(round_row["round_id"]), columns="miner_hotkey,status,is_king",
+        )
+        reserved_hotkeys = {
+            str(row["miner_hotkey"])
+            for row in rows
+            if not row.get("is_king")
+            and row.get("status") in ("uploading", "accepted", "frozen")
+        }
+        if hotkey in reserved_hotkeys:
+            return  # Already admitted or uploading; preserve retries/replacement.
+        measured = self._config.defaults.runner_capacity_slots
+        if measured is None:
+            raise ServiceError("daily_runner_capacity_unavailable", 503)
+        supported = capacity.daily_challenger_capacity(
+            configuration, runner_parallelism=measured,
+        )
+        limit = min(int(configuration["max_challengers"]), supported)
+        if len(reserved_hotkeys) >= limit:
+            raise ServiceError("submission_rejected:capacity.round_full", 409)
+
     def handle_submission_presign(self, envelope: Any) -> Dict[str, Any]:
         """Reserve one private source upload for a signed miner request."""
 
@@ -1633,6 +1686,7 @@ class ArenaService:
             raise ServiceError("baseline_hotkey_reserved", 403)
         body = contracts.validate_submission_presign_body(validated["body"])
         self._enforce_submission_request_limit(validated["hotkey"])
+        self._enforce_current_daily_intake_capacity(round_row, validated["hotkey"])
         # The submission id is the only server-assigned source identity.
         submission_id = "sub-%s" % secrets.token_hex(16)
         source_ref = "arena/%s/sources/%s.tar.gz" % (round_id, submission_id)
@@ -2822,6 +2876,7 @@ class ArenaService:
         if len(baseline_ids) != 1:
             raise ServiceError("baseline_submission_invalid", 500)
         failed_items: Dict[str, str] = {}
+        incomplete_items: Dict[str, str] = {}
         for item in plan["work_items"]:
             scored_run_id = item["scored_run_id"]
             run = chosen.get(scored_run_id)
@@ -2840,6 +2895,9 @@ class ArenaService:
                 return self._store.cancel_round(
                     round_id, CANCEL_REASONS["scoring_incomplete"]
                 )
+            if cause == "stage_closed":
+                incomplete_items[scored_run_id] = cause
+                continue
             # The closed stage has finished its bounded retries or deadline.
             # A failed review cannot qualify this ICP, but must not erase the
             # independently verified results of other ICPs or participants.
@@ -2848,7 +2906,7 @@ class ArenaService:
         judge_executions = 0
         for item in plan["work_items"]:
             scored_run_id = item["scored_run_id"]
-            if scored_run_id in failed_items:
+            if scored_run_id in failed_items or scored_run_id in incomplete_items:
                 continue
             run = chosen.get(scored_run_id)
             icp = icps[int(item["icp_position"])]
@@ -2862,12 +2920,20 @@ class ArenaService:
                     round_id, CANCEL_REASONS["scoring_incomplete"]
                 )
             judge_executions += 1
-        if failed_items:
+        if failed_items or incomplete_items:
             plan = {
                 **plan,
                 "work_items": [
                     item for item in plan["work_items"]
                     if item["scored_run_id"] not in failed_items
+                    and item["scored_run_id"] not in incomplete_items
+                ],
+                "incomplete_rows": list(plan.get("incomplete_rows") or []) + [
+                    {"submission_id": item["submission_id"],
+                     "icp_position": item["icp_position"],
+                     "cause": incomplete_items[item["scored_run_id"]]}
+                    for item in plan["work_items"]
+                    if item["scored_run_id"] in incomplete_items
                 ],
                 "zero_rows": list(plan["zero_rows"]) + [
                     {
@@ -2893,17 +2959,6 @@ class ArenaService:
             # The per-run scores are part of the published result; a write the
             # database refused must stop the stage, never pass silently.
             raise ServiceError("scores_not_recorded:%s" % str(recorded.get("status") or "unknown")[:40], 500)
-        if stage == 2:
-            final_entries = self._score_entries_from_runs(
-                round_row, range(contracts.benchmark_icp_count(round_row.get("configuration_doc"))), "final_score"
-            )
-            baseline_entry = next(
-                (entry for entry in final_entries if entry["is_king"]), None
-            )
-            if baseline_entry is None or baseline_entry["final_score"] is None:
-                return self._store.cancel_round(
-                    round_id, CANCEL_REASONS["scoring_incomplete"]
-                )
         if stage == 1:
             if (
                 (round_row.get("configuration_doc") or {}).get(
@@ -2968,6 +3023,14 @@ class ArenaService:
             submission_id = str(participant["submission_id"])
             rows = [selected.get((submission_id, position)) for position in sorted(wanted)]
             if any(row is None for row in rows):
+                if score_key == "final_score":
+                    entries.append({
+                        "submission_id": submission_id,
+                        "hotkey": str(participant["miner_hotkey"]),
+                        "is_king": bool(participant.get("is_king")),
+                        "final_score": None,
+                        "execution_incomplete": True,
+                    })
                 continue
             values = [float(row["per_icp_score"]) for row in rows if row is not None]
             if (
@@ -3458,24 +3521,24 @@ class ArenaService:
             publication_reads=publication_reads,
         )
         eligibility = {
-            str(entry["submission_id"]): self._submission_cost_eligibility(
+            str(entry["submission_id"]): ({
+                "cost_summary": None,
+                "eligible": False,
+                "eligibility_reason": "execution_incomplete",
+            } if entry.get("execution_incomplete") else self._submission_cost_eligibility(
                 round_row,
                 str(entry["submission_id"]),
                 publication_reads.runs,
                 positions=range(contracts.benchmark_icp_count(round_row.get("configuration_doc"))),
                 publication_reads=publication_reads,
-            )
+            ))
             for entry in final_entries
         }
-        stored_king_entry = next((e for e in final_entries if e["is_king"]), None)
-        if stored_king_entry is None or stored_king_entry["final_score"] is None:
-            return self._store.cancel_round(
-                round_id, CANCEL_REASONS["scoring_incomplete"]
-            )
         effective_final_entries = [dict(entry) for entry in final_entries]
         king_entry = next(entry for entry in effective_final_entries if entry["is_king"])
         if (
-            integrity.enabled(round_row.get("configuration_doc") or {})
+            king_entry["final_score"] is not None
+            and integrity.enabled(round_row.get("configuration_doc") or {})
             and eligibility[str(king_entry["submission_id"])]["eligibility_reason"]
             in ("cost_per_company_exceeded", "execution_cap_exceeded")
         ):

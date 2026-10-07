@@ -323,6 +323,12 @@ Set these values on the Arena service host:
   continue. The finalized chain cache refreshes approximately every 60 seconds.
   A stake-only drop stops new claims after refresh and lets existing leases
   finish under their existing rules. Weight retrieval has no benchmark minimum.
+- `LAB_ARENA_RUNNER_CAPACITY_SLOTS`: for live gateways using the 251-slot
+  protocol ceiling, a JSON object mapping every planned runner hotkey to its
+  verified proxy and memory parallelism. Record `0` for an offline runner.
+  Derive each value from that validator's startup preflight and update it
+  when usable capacity changes. Missing measurements stop only new round
+  creation; existing rounds and weight retrieval continue.
 - `LAB_ARENA_BASELINE_HOTKEY`: the registered hotkey that owns each daily
   public baseline entry
 - `LAB_ARENA_BASELINE_SOURCE_URL`: optional in live mode. The only live daily
@@ -342,10 +348,12 @@ needed only when a live, reward-enabled published round is activated.
 
 The challenger limit excludes the baseline. Each hotkey can have one current
 accepted model per daily round; one source replacement is allowed before the
-replacement freeze. Different hotkeys can share a coldkey. The configured
-admission limit is not reduced by the conservative
-runner workload estimate. Worker concurrency, stage deadlines, and spending
-limits remain enforced; a full round can require more runner capacity.
+replacement freeze. Different hotkeys can share a coldkey. New live rounds
+reduce the configured challenger limit to the conservative runner workload
+estimate. The estimate reserves full retries for execution and scoring. The
+limit is frozen at creation; later capacity changes do not rewrite accepted
+submissions or a round's configuration. Worker concurrency, stage deadlines,
+and spending limits still apply to every assignment.
 
 When deploying the per-miner admission default, remove any explicit
 `LAB_ARENA_MAX_CHALLENGERS=20` override (or set it to `256`). Apply
@@ -381,6 +389,12 @@ python3 scripts/run_lab_arena_service.py --check-only
 Migration 193 adds safe replacement of unfinished uploads and accurate
 `execution_incomplete:stageN:count` / `scoring_incomplete:stageN:count`
 cancellation labels. It preserves historical results and source objects.
+Migrations 422 and 423 supersede whole-round execution cancellation: after
+bounded lease drain, unfinished assignments remain explicitly incomplete.
+Completed ICP results are judged and persisted normally. An incomplete model
+has a null final score and cannot win promotion. An incomplete baseline permits
+publication of the available results but no new champion; the existing reward
+continuity path remains in use. No missing ICP is silently assigned a score.
 Deploy its matching service after applying the migration. Source admission
 still uses the existing upload MD5 and server-assigned submission ID.
 

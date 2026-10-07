@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from lab_arena import capacity, contracts
-from lab_arena.service import ArenaService, DEFAULT_STAGE_MINUTES
+from lab_arena.service import ArenaService, DEFAULT_STAGE_MINUTES, ServiceError
 
 
 def configuration(*, runners=1, minutes=None, slots=8):
@@ -43,6 +43,63 @@ def test_duplicate_runner_does_not_invent_capacity():
     config = configuration()
     config["runner_hotkeys"] *= 2
     assert capacity.daily_challenger_capacity(config) == 8
+
+
+def test_measured_runner_slots_bound_the_frozen_ceiling_and_ignore_offline_runners():
+    config = configuration(runners=3, slots=251)
+    assert capacity.daily_challenger_capacity(config, runner_parallelism={
+        "runner-0": 8, "runner-1": 0,
+    }) == capacity.daily_challenger_capacity(configuration(slots=8))
+    assert capacity.daily_challenger_capacity(config, runner_parallelism={
+        "runner-0": 8, "runner-1": 8, "unregistered": 251,
+    }) == capacity.daily_challenger_capacity(configuration(runners=2, slots=8))
+    assert capacity.daily_challenger_capacity(config, runner_parallelism={
+        "runner-0": 1000,
+    }) == capacity.daily_challenger_capacity(configuration(slots=251))
+    assert capacity.daily_challenger_capacity(config, runner_parallelism={}) == 0
+    with pytest.raises(ValueError, match="parallelism"):
+        capacity.daily_challenger_capacity(config, runner_parallelism={"runner-0": True})
+
+
+def test_baseline_first_60_minute_round_respects_current_proxy_capacity():
+    config = configuration(slots=251)
+    config["stage_1_icp_count"] = config["stage_2_icp_count"] = 5
+    config["execution_sequence_policy"] = contracts.BASELINE_SCORED_FIRST_POLICY
+    config["icp_wall_clock_seconds"] = 60 * 60
+    # The verified proxy inventory has one native slot in addition to its
+    # proxy slots. The stage-two window must carry every miner execution.
+    for proxies, expected in ((9, 1), (19, 2), (29, 3), (250, 25)):
+        assert capacity.daily_challenger_capacity(
+            config, runner_parallelism={"runner-0": proxies + 1}
+        ) == expected
+    assert capacity.daily_challenger_capacity(config) == 25
+
+
+def test_open_legacy_round_stops_new_hotkeys_without_eviction():
+    config = configuration(slots=251)
+    config.update(
+        round_id="arena-legacy-open", mode="live", network_name="finney",
+        netuid=71, max_challengers=256, stage_1_icp_count=5,
+        stage_2_icp_count=5, icp_wall_clock_seconds=3600,
+        execution_sequence_policy=contracts.BASELINE_SCORED_FIRST_POLICY,
+    )
+    rows = [
+        {"miner_hotkey": "accepted-miner", "status": "accepted", "is_king": False},
+        {"miner_hotkey": "uploading-miner", "status": "uploading", "is_king": False},
+        {"miner_hotkey": "baseline", "status": "accepted", "is_king": True},
+    ]
+    service = object.__new__(ArenaService)
+    service._config = SimpleNamespace(
+        mode="live", defaults=SimpleNamespace(runner_capacity_slots={"runner-0": 10}),
+    )
+    service._store = SimpleNamespace(list_submissions=lambda _round_id, **_kwargs: rows)
+    round_row = {"round_id": config["round_id"], "configuration_doc": config}
+    assert service._enforce_current_daily_intake_capacity(round_row, "accepted-miner") is None
+    assert service._enforce_current_daily_intake_capacity(round_row, "uploading-miner") is None
+    with pytest.raises(ServiceError, match="capacity.round_full"):
+        service._enforce_current_daily_intake_capacity(round_row, "new-miner")
+    rows.clear()
+    assert service._enforce_current_daily_intake_capacity(round_row, "new-miner") is None
 
 
 def test_zero_workers_and_overlapping_daily_budget_fail_closed():

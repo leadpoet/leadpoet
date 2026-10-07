@@ -5348,6 +5348,7 @@ class Broker:
             )
             if deepline_lost_response:
                 terminal["deepline_response_missing"] = True
+                terminal["deepline_response_missing_reason"] = "transport_failure"
                 summary["deepline_response_missing"] = True
             if deepline_async_ids:
                 terminal["deepline_async_job_ids"] = list(deepline_async_ids)

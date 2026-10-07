@@ -1202,7 +1202,7 @@ _CATALOG_OPERATION_LIST = (
                         "search_terms": FieldSpec("str", max_length=512),
                         "task": FieldSpec("str", max_length=1024),
                         "limit": FieldSpec("int", minimum=1, maximum=50),
-                        "offset": FieldSpec("int", minimum=0, maximum=4096),
+                        "offset": FieldSpec("int", minimum=0),
                         "search_mode": FieldSpec("str", choices=("v1", "v2")),
                         "include_search_debug": FieldSpec("bool")},
         fixed_params={}, defaults={"compact": True}, timeout_seconds=5,

@@ -32,11 +32,11 @@ def migrated(database, tmp_path_factory):
     with psycopg.connect(**dsn) as conn, conn.cursor() as cur:
         for filename in (
             "417-lab-arena-deepline-response-recovery.sql",
-            "425-lab-arena-deepline-response-missing-guard.sql",
+            "426-lab-arena-deepline-response-missing-guard.sql",
         ):
             cur.execute((Path(__file__).parents[2] / "scripts" / filename).read_text())
     store = ArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
-    assert store.deepline_response_schema()["version"] == 425
+    assert store.deepline_response_schema()["version"] == 426
     return True
 
 

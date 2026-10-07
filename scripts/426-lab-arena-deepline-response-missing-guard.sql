@@ -12,7 +12,8 @@ BEGIN
   SELECT pg_catalog.pg_get_functiondef(
     'public.lab_arena_recover_deepline_response_v1(text,text,text,text,text,text,text,text,bigint,jsonb,integer)'::pg_catalog.regprocedure
   ) INTO v_definition;
-  IF pg_catalog.strpos(v_definition, 'lab_arena_response_recovery_missing_guard_425') = 0 THEN
+  IF pg_catalog.strpos(v_definition, 'lab_arena_response_recovery_missing_guard_425') = 0
+     AND pg_catalog.strpos(v_definition, 'lab_arena_response_recovery_missing_guard_426') = 0 THEN
     v_old := $old$  IF v_response.call_identity IS NOT NULL THEN
     IF v_response.request_id IS DISTINCT FROM p_request_id THEN$old$;
     IF pg_catalog.strpos(v_definition, v_old) = 0 THEN
@@ -29,7 +30,7 @@ BEGIN
     IF pg_catalog.strpos(v_definition, v_old) = 0 THEN
       RAISE EXCEPTION 'Deepline response recovery eligibility preimage differs';
     END IF;
-    v_definition := pg_catalog.replace(v_definition, v_old, $new$  -- lab_arena_response_recovery_missing_guard_425: persisted evidence is
+    v_definition := pg_catalog.replace(v_definition, v_old, $new$  -- lab_arena_response_recovery_missing_guard_426: persisted evidence is
   -- authoritative. A service readback alone cannot declare a response missing.
   IF v_response.call_identity IS NULL AND NOT COALESCE((
     (v_head.entry_kind = 'dispatch' AND v_head.terminal_response IS NULL)
@@ -73,6 +74,33 @@ BEGIN
 END;
 $response_guard$;
 
+-- This also upgrades an earlier installation of the guard whose missing-response
+-- guard accepted the legacy marker without a distinct lost-body provenance.
+DO $response_provenance$
+DECLARE
+  v_definition TEXT;
+  v_old TEXT := $old$v_head.terminal_response -> 'deepline_response_missing' = 'true'::JSONB$old$;
+BEGIN
+  SELECT pg_catalog.pg_get_functiondef(
+    'public.lab_arena_recover_deepline_response_v1(text,text,text,text,text,text,text,text,bigint,jsonb,integer)'::pg_catalog.regprocedure
+  ) INTO v_definition;
+  IF pg_catalog.strpos(v_definition, 'lab_arena_response_recovery_missing_provenance_426') = 0 THEN
+    IF pg_catalog.strpos(v_definition, v_old) = 0 THEN
+      RAISE EXCEPTION 'Deepline response recovery provenance preimage differs';
+    END IF;
+    v_definition := pg_catalog.replace(v_definition, v_old, $new$(
+          -- lab_arena_response_recovery_missing_guard_426
+          -- lab_arena_response_recovery_missing_provenance_426
+          v_head.terminal_response -> 'deepline_response_missing' = 'true'::JSONB
+          AND v_head.terminal_response ->> 'deepline_response_missing_reason' = 'transport_failure'
+          AND v_head.terminal_response ->> 'status' = '502'
+          AND v_head.terminal_response ->> 'body_b64'
+            = 'eyJlcnJvciI6eyJjb2RlIjoicHJvdmlkZXJfdW5hdmFpbGFibGUifX0=')$new$);
+    EXECUTE v_definition;
+  END IF;
+END;
+$response_provenance$;
+
 CREATE OR REPLACE FUNCTION public.lab_arena_deepline_response_schema_v1()
 RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER
 SET search_path = pg_catalog, public
@@ -81,7 +109,9 @@ BEGIN
   IF pg_catalog.to_regprocedure('public.lab_arena_recover_deepline_response_v1(text,text,text,text,text,text,text,text,bigint,jsonb,integer)') IS NULL
      OR pg_catalog.to_regclass('public.lab_arena_deepline_call_responses') IS NULL
      OR pg_catalog.strpos(pg_catalog.pg_get_functiondef(
-       'public.lab_arena_recover_deepline_response_v1(text,text,text,text,text,text,text,text,bigint,jsonb,integer)'::pg_catalog.regprocedure), 'lab_arena_response_recovery_missing_guard_425') = 0
+       'public.lab_arena_recover_deepline_response_v1(text,text,text,text,text,text,text,text,bigint,jsonb,integer)'::pg_catalog.regprocedure), 'lab_arena_response_recovery_missing_guard_426') = 0
+     OR pg_catalog.strpos(pg_catalog.pg_get_functiondef(
+       'public.lab_arena_recover_deepline_response_v1(text,text,text,text,text,text,text,text,bigint,jsonb,integer)'::pg_catalog.regprocedure), 'lab_arena_response_recovery_missing_provenance_426') = 0
      OR pg_catalog.strpos(pg_catalog.pg_get_functiondef(
        'public.lab_arena__call_state_view(public.lab_arena_ledger,public.lab_arena_runs)'::pg_catalog.regprocedure), 'lab_arena_deepline_call_responses') = 0
      OR pg_catalog.strpos(pg_catalog.pg_get_functiondef(
@@ -91,7 +121,7 @@ BEGIN
     RAISE EXCEPTION 'lab_arena_deepline_response_schema_incomplete' USING ERRCODE = '55000';
   END IF;
   RETURN pg_catalog.jsonb_build_object('status','ok', 'schema_version',
-    'leadpoet.lab_arena.deepline_response_schema.v1', 'version',425);
+    'leadpoet.lab_arena.deepline_response_schema.v1', 'version',426);
 END;
 $response_readiness$;
 ALTER FUNCTION public.lab_arena_deepline_response_schema_v1() OWNER TO lab_arena_owner;

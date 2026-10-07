@@ -193,7 +193,16 @@ def test_unbound_submitted_page_never_reaches_paragraph(change):
         fit, None, None, retained,
         paragraph=company.intent_details, company=company,
     ) or []
-    assert not any(item["url"] == ABOUT for item in contexts)
+    if change in {"off_company", "invalid_url", "empty_quote"}:
+        # The submitted hint is rejected. A separately fetched company page
+        # remains admissible through its verified identity, name and overlap.
+        assert not any(item["dimension"] == "first_party_company" for item in contexts)
+        assert any(
+            item["url"] == ABOUT and item["dimension"] == "first_party_context"
+            for item in contexts
+        )
+    else:
+        assert not any(item["url"] == ABOUT for item in contexts)
 
 
 def test_unbound_context_cannot_be_injected_into_paragraph_reviewer():

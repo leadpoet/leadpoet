@@ -422,9 +422,16 @@ def effective_competition_input(
             # for old checkpoints or V1-V4 rows.
             effective.pop("company_stage_evidence", None)
         # The binary Arena fit verifier independently resolves these facts.
-        # These fields are validated above but never read during its judging.
-        for ignored in (("description", "required_attribute") if company_quality else ("state", "description", "required_attribute")):
+        # Submitted prose and self-assessment do not prove a company match.
+        for ignored in (("description",) if company_quality else ("state", "description")):
             effective.pop(ignored, None)
+        attribute = effective.pop("required_attribute", None)
+        if attribute and (attribute["evidence_url"] or attribute["evidence_quote"]):
+            # Research and paragraph review consume these untrusted hints.
+            effective["required_attribute"] = {
+                field: attribute[field]
+                for field in ("evidence_url", "evidence_quote")
+            }
         if company_quality:
             from qualification.company_quality import is_united_states
             if not is_united_states(effective.get("country")):

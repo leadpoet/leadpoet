@@ -88,6 +88,7 @@ def test_contact_activation_changes_only_rounds_opened_at_or_after_boundary(
             broker_factory=lambda *_args: None,
             defaults=RoundDefaults(
                 runner_hotkeys=(runner,),
+                runner_slot_ceiling=20,
                 baseline_hotkey=baseline,
                 scorer_image_digest=fixtures.SCORER_IMAGE_DIGEST,
                 scorer_image_reference=fixtures.SCORER_IMAGE_REFERENCE,

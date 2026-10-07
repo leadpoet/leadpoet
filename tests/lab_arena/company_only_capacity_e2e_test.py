@@ -196,7 +196,14 @@ def test_64_miner_company_only_round_preserves_all_work_and_publishes(
         harness.service.config.defaults,
         benchmark_icp_count=10,
         max_challengers=contracts.DEFAULT_MAX_CHALLENGERS,
-        runner_slot_ceiling=20,
+        # The synthetic 40-slot validators and stage windows can carry all
+        # 64 challengers through full execution and scoring retries.
+        runner_slot_ceiling=40,
+        runner_capacity_slots={hotkey: 40 for hotkey in harness.runner_keys},
+        stage_minutes={
+            "benchmark": 30, "stage_1": 61, "stage_1_scoring": 16,
+            "stage_2": 976, "final_scoring": 260,
+        },
         promotion_margin=0.5,
         rewards_enabled=True,
         per_icp_cost_policy=True,
@@ -216,7 +223,7 @@ def test_64_miner_company_only_round_preserves_all_work_and_publishes(
     configuration = harness.service.create_round(
         harness.clock.now + timedelta(minutes=30), round_id=harness.round_id
     )
-    assert configuration["max_challengers"] == 256
+    assert configuration["max_challengers"] == 64
     assert (configuration["stage_1_icp_count"], configuration["stage_2_icp_count"]) == (5, 5)
     assert configuration["execution_sequence_policy"] == (
         contracts.BASELINE_SCORED_FIRST_POLICY
@@ -266,11 +273,11 @@ def test_64_miner_company_only_round_preserves_all_work_and_publishes(
         assert expired["expired"] == expired["retried"] == 1
         small = _http_runner(
             harness, http, tmp_path / "validator-small",
-            key_label="svc-runner-alpha", local_capacity=10,
+            key_label="svc-runner-alpha", local_capacity=40,
         )
         large = _http_runner(
             harness, http, tmp_path / "validator-large",
-            key_label="svc-runner-beta", local_capacity=20,
+            key_label="svc-runner-beta", local_capacity=40,
         )
         try:
             for _ in range(30):

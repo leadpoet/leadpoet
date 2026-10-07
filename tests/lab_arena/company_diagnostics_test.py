@@ -86,7 +86,7 @@ def _install_completed_scores_cache(service):
 
 def _service(monkeypatch, *, disclosed=True):
     import lab_arena.service as module
-    row = {"status": "published", "configuration_doc": {"contact_policy": "contacts_v1", "scorer_policy": {}},
+    row = {"round_id": "round", "status": "published", "configuration_doc": {"contact_policy": "contacts_v1", "scorer_policy": {}},
            "publication_doc": {"participants": [{"submission_id": "miner"}]}}
     runs = [
         {"run_id": f"run-{i}", "icp_position": i, "stage": 1,

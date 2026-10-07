@@ -212,6 +212,13 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_after_entry_id", "bigint"),
         ("p_limit", "integer"),
     ),
+    "lab_arena_list_deepline_cost_reconciliations_v2": (
+        ("p_round_id", "text"),
+        ("p_run_id", "text"),
+        ("p_after_entry_id", "bigint"),
+        ("p_limit", "integer"),
+        ("p_successful_execute_only", "boolean"),
+    ),
     "lab_arena_reconcile_deepline_cost_v1": (
         ("p_round_id", "text"),
         ("p_run_id", "text"),
@@ -1889,17 +1896,20 @@ class ArenaStore:
         run_id: str = "",
         after_entry_id: int = 0,
         limit: int = 1,
+        successful_execute_only: bool = False,
     ) -> List[Dict[str, Any]]:
+        params = {
+            "p_round_id": str(round_id),
+            "p_run_id": str(run_id),
+            "p_after_entry_id": int(after_entry_id),
+            "p_limit": int(limit),
+        }
+        rpc = "lab_arena_list_deepline_cost_reconciliations_v1"
+        if successful_execute_only:
+            rpc = "lab_arena_list_deepline_cost_reconciliations_v2"
+            params["p_successful_execute_only"] = True
         result = _require_mapping(
-            self._transport.rpc(
-                "lab_arena_list_deepline_cost_reconciliations_v1",
-                {
-                    "p_round_id": str(round_id),
-                    "p_run_id": str(run_id),
-                    "p_after_entry_id": int(after_entry_id),
-                    "p_limit": int(limit),
-                },
-            ),
+            self._transport.rpc(rpc, params),
             "list_deepline_cost_reconciliations",
         )
         if result.get("status") != "ok" or not isinstance(result.get("items"), list):

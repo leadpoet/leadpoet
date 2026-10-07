@@ -27,7 +27,7 @@ def observed_service():
     service._lock = Lock()
     service._round = lambda _: row
     service._invalidate_hot_round = lambda: None
-    service._reconcile_deepline_cost = lambda _: {"status": "none"}
+    service._reconcile_active_deepline_cost = lambda _: {"status": "none"}
     service._reconcile_openrouter_cost = lambda _: {"status": "none"}
     service._store = SimpleNamespace(
         operator_hold_active=lambda: False,

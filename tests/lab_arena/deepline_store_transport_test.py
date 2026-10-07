@@ -94,3 +94,26 @@ def test_ledger_cursor_and_operation_filter_use_parameterized_read():
             transport.select(after_entry_id=10, **options)
     assert len(requests) == 1
     store.close()
+
+
+def test_priority_list_uses_v2_and_ordinary_keeps_v1():
+    requests = []
+    client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: requests.append(request) or httpx.Response(
+            200, json={"status": "ok", "items": []}
+        )
+    ))
+    store = ArenaStore(PostgrestTransport(
+        "https://db.example", service_key="sb_secret_test", http_client=client
+    ))
+    for priority in (False, True):
+        assert store.list_deepline_cost_reconciliations(
+            "round", after_entry_id=100, successful_execute_only=priority
+        ) == []
+    assert requests[0].url.path.endswith('/lab_arena_list_deepline_cost_reconciliations_v1')
+    assert requests[1].url.path.endswith('/lab_arena_list_deepline_cost_reconciliations_v2')
+    ordinary = json.loads(requests[0].content)
+    priority = json.loads(requests[1].content)
+    assert ordinary == dict(p_round_id='round', p_run_id='', p_after_entry_id=100, p_limit=1)
+    assert priority == {**ordinary, 'p_successful_execute_only': True}
+    store.close()

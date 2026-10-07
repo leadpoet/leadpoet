@@ -61,9 +61,18 @@ def test_partial_publication_migration_preserves_guard_identity(database):
         assert acl is not None
         cursor.execute(MIGRATION.read_text())
         cursor.execute("SELECT pg_get_functiondef(%s::regprocedure)", (OUTER,))
-        assert cursor.fetchone()[0].count(
+        definition = cursor.fetchone()[0]
+        assert definition.count(
             "public.lab_arena__publication_execution_incomplete_v1("
         ) == 3
+        # Migration 289's per-ICP guard exits this loop before v_main. The
+        # incomplete branch must execute first, while complete rows still use
+        # that existing strict helper.
+        assert (
+            definition.index("A proven unfinished assignment")
+            < definition.index("PERFORM public.lab_arena__per_icp_publication_valid")
+            < definition.index("v_main := public.lab_arena__integrity_submission_summary")
+        )
 
 
 def test_partial_publication_requires_closed_proof_and_cannot_promote_unknown_baseline(

@@ -5583,6 +5583,141 @@ def test_numbered_venture_rounds_keep_their_canonical_series(observed, quote, ex
     assert _stage_quote_supports_observation(observed, quote) is expected
 
 
+@pytest.mark.parametrize("separator", ["-", " ", "‐", "‑", "‒", "–", "—", "―", "\u00a0"])
+@pytest.mark.parametrize(
+    ("observed", "round_name"),
+    [("series a", "A"), ("series a", "A1"), ("series b", "B2"),
+     ("series c+", "C+"), ("series c+", "D2")],
+)
+def test_pre_series_round_does_not_prove_completed_series(separator, observed, round_name):
+    quote = f"Acme closed a $20 million pre{separator}Series {round_name} round."
+    assert not investigator._quote_names_compatible_venture_stage(observed, quote)
+    assert not _stage_quote_supports_observation(observed, quote)
+
+
+@pytest.mark.parametrize(
+    ("quote", "observed", "expected"),
+    [
+        ("Acme closed a pre-A round.", "series a", False),
+        ("Acme attempted to close a Series A round.", "series a", False),
+        ("Acme plans to raise a Series B round.", "series b", False),
+        ("Acme has not closed a Series A round.", "series a", False),
+        ("Acme closed a Series A round. Acme later closed a pre-Series B round.", "series a", True),
+        ("Acme closed a Series A round. Acme later closed a pre-Series B round.", "series b", False),
+        ("Acme closed a pre-Series A round. Acme later closed a Series B2 round.", "series b", True),
+        ("Acme closed a Series A round. Acme later closed a Series B round.", "series a", False),
+        ("Acme closed a Series A round. Acme later closed a Series B round.", "series b", True),
+    ],
+)
+def test_pre_series_mask_preserves_completed_and_latest_stage_guards(quote, observed, expected):
+    assert _stage_quote_supports_observation(observed, quote) is expected
+
+
+@pytest.mark.parametrize(
+    ("quote", "expected"),
+    [
+        ("Acme closed a Series A round. Acme later closed a pre-Series B round.", True),
+        ("Acme closed a pre-Series A round. Acme later closed a Series B round.", False),
+    ],
+)
+def test_pre_series_mask_preserves_real_stage_in_locator(quote, expected):
+    assert investigator._quote_names_compatible_venture_stage("series a", quote) is expected
+
+
+@pytest.mark.parametrize("include_company_name", [False, True])
+def test_exact_pints_pre_series_quote_cannot_validate_series_a(include_company_name):
+    # Exact issuer span: https://www.pints.ai/blog-pre-series-a.html
+    url = "https://www.pints.ai/blog-pre-series-a.html"
+    quote = "We have closed a US$5.6 million Pre-Series A round"
+    if include_company_name:
+        quote = "Pints AI: " + quote
+    finding = _validated_findings(
+        {"findings": [_finding(
+            "stage", observed_value="Series A", evidence_url=url, evidence_quote=quote,
+        )]},
+        targets=("stage",), fetched_pages={url: quote},
+        first_party_domains={"pints.ai"}, identity_names={"pintsai"},
+        identity_anchor={
+            "submitted_domain": "pints.ai", "observed_domain": "pints.ai",
+            "verified_domain": "pints.ai",
+        },
+    )["stage"]
+    assert finding["status"] == "UNPROVEN"
+    assert finding["reason"] == "source quote did not name the submitted venture stage"
+    assert not _stage_quote_supports_observation("series a", quote)
+
+
+@pytest.mark.parametrize("round_name, expected", [("pre-Series A", "UNPROVEN"), ("Series A", "VERIFIED")])
+def test_pre_series_guard_applies_to_loaded_quote_context(round_name, expected):
+    url = "https://acme.example/news/funding"
+    quote = "Acme today announced $20 million in new equity financing."
+    page = f"Acme closed its {round_name} round. " + quote
+    finding = _validated_findings(
+        {"findings": [_finding(
+            "stage", observed_value="Series A", evidence_url=url, evidence_quote=quote,
+        )]},
+        targets=("stage",), fetched_pages={url: page},
+        first_party_domains={"acme.example"}, identity_names={"acme"},
+    )["stage"]
+    assert finding["status"] == expected
+
+
+@pytest.mark.parametrize(
+    ("quote", "expected_status", "expected_decision"),
+    [
+        ("We have closed a US$5.6 million Pre-Series A round", "UNPROVEN", COMPANY_FIT_UNAVAILABLE),
+        ("We have closed a US$5.6 million Series A round", "VERIFIED", COMPANY_FIT_MATCH),
+    ],
+)
+def test_pre_series_guard_reaches_bounded_investigator_and_stage_decision(
+    monkeypatch, quote, expected_status, expected_decision,
+):
+    url = "https://www.pints.ai/blog-pre-series-a.html"
+    searches = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "stage-finding", "type": "function", "function": {
+                "name": "submit_findings", "arguments": json.dumps({"findings": [_finding(
+                    "stage", observed_value="Series A", evidence_url=url, evidence_quote=quote,
+                )]}),
+            },
+        }]}}]}
+
+    async def fake_search(_session, query, *, key):
+        searches.append(query)
+        return {"results": [{"url": url}]}
+
+    async def unexpected_fetch(_session, url):
+        pytest.fail("The exact source is already loaded; no external fetch is needed")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", unexpected_fetch)
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Pints AI", "website": "https://www.pints.ai/"},
+        targets=("stage",), requested_stage="Series A",
+        prior_observations={
+            "observed_company_name": "Pints AI",
+            "observed_company_website": "https://www.pints.ai/",
+            "submitted_source_urls": [url],
+        },
+        verified_homepage_identity={"registrable_dns_domain": "pints.ai", "normalized_name": "Pints AI"},
+        prefetched_pages={url: {"final_url": url, "text": quote}},
+    ))
+    finding = result["claims"]["stage"]
+    assert finding["status"] == expected_status
+    assert len(searches) == 1  # Mandatory current-stage discovery is unchanged.
+    assert result["usage"]["fetch_calls"] == 0
+    verdict = lead_scorer._project_investigator_stage(_complete_verdict(), finding, icp_stage="series a")
+    assert lead_scorer._decision_from_observed_stage(
+        verdict, "series a", evidence_attributed=True,
+        validated_stage_finding=result.get("_validated_stage_finding"),
+    ) == expected_decision
+
+
 @pytest.mark.parametrize(
     "quote",
     [

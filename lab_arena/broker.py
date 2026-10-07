@@ -1429,6 +1429,56 @@ def _deepline_billing_readback(
     return None
 
 
+def _deepline_execution_response_readback(
+    *, transport: ProviderTransport, secret: str, execution_key: Optional[str],
+    operation: str, operation_aliases: Sequence[str], max_response_bytes: int,
+    observed_status: Optional[int] = None,
+) -> Optional[ProviderResponse]:
+    """Recover only Deepline's authenticated saved reply; never execute again."""
+    if execution_key is None or _DEEPLINE_EXECUTION_KEY_RE.fullmatch(execution_key) is None:
+        return None
+    try:
+        lookup = transport.send(
+            method="GET", url=DEEPLINE_EXECUTION_BY_KEY_URL + quote(execution_key, safe=""),
+            headers={"accept": "application/json", "authorization": "Bearer " + secret,
+                     "user-agent": "leadpoet-lab-arena-broker/1"}, body=b"",
+            timeout_seconds=DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS,
+            max_response_bytes=max_response_bytes + 16_384,
+        )
+    except ProviderTransportError:
+        return None
+    if (lookup.status != 200 or lookup.internal_provenance is not None
+        or len(lookup.body) > max_response_bytes + 16_384
+        or [value for name, value in lookup.headers.items()
+            if name.lower() == "x-deepline-idempotency-supported"] != ["true"]
+        or _response_contains_credential(lookup, secret)):
+        return None
+    try:
+        document = json.loads(lookup.body.decode("utf-8"))
+        recovery = document.get("executionRecovery") if isinstance(document, Mapping) else None
+        native_id = document.get("requestId") if isinstance(document, Mapping) else None
+        saved = document.get("response") if isinstance(document, Mapping) else None
+        status = document.get("responseStatus") if isinstance(document, Mapping) else None
+        # A Vercel trace hint can differ from the keyed native billing ID.
+        # The authenticated saved key/tool/body binding is stronger authority.
+        if (not isinstance(recovery, Mapping) or recovery.get("idempotencyKey") != execution_key
+            or recovery.get("state") != "completed" or document.get("toolId") not in (operation, *operation_aliases)
+            or not isinstance(native_id, str) or _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(native_id) is None
+            or _DEEPLINE_REQUEST_ID_RE.fullmatch(native_id) is not None
+            or type(status) is not int or not 200 <= status <= 599
+            or (observed_status is not None and observed_status != status)
+            or not isinstance(saved, Mapping) or _deepline_job_request_id(saved) != native_id):
+            return None
+        body = json.dumps(saved, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    except (UnicodeError, ValueError, TypeError, RecursionError):
+        return None
+    response = ProviderResponse(status, {"content-type": "application/json", "x-deepline-request-id": native_id}, body)
+    if len(body) > max_response_bytes or _response_contains_credential(response, secret):
+        return None
+    return response
+
+
+
 def _deepline_exact_readback(
     *, transport: ProviderTransport, secret: str,
     request_id: Optional[str], execution_key: Optional[str], operation: str,
@@ -4326,23 +4376,47 @@ class Broker:
                 headers["idempotency-key"] = deepline_execution_key
             timeout_seconds = max(0.001, request_deadline - time.monotonic())
             try:
-                response = self._transport.send(
-                    method=outbound.target.method,
-                    url=url,
-                    headers=headers,
-                    body=outbound.body,
-                    timeout_seconds=timeout_seconds,
-                    **(
-                        {
-                            "max_response_bytes": (
-                                _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES
-                            )
-                        }
-                        if route is not None
-                        and route.adapter == "firecrawl_raw_html"
-                        else {}
-                    ),
-                )
+                try:
+                    response = self._transport.send(
+                        method=outbound.target.method,
+                        url=url,
+                        headers=headers,
+                        body=outbound.body,
+                        timeout_seconds=timeout_seconds,
+                        **(
+                            {
+                                "max_response_bytes": (
+                                    _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES
+                                )
+                            }
+                            if route is not None
+                            and route.adapter == "firecrawl_raw_html"
+                            else {}
+                        ),
+                    )
+                except ProviderTransportError as transport_error:
+                    recovered = (
+                        _deepline_execution_response_readback(
+                            transport=self._transport, secret=secret,
+                            execution_key=deepline_execution_key,
+                            operation=str(deepline_operation),
+                            operation_aliases=(deepline_catalog_entry["operation_aliases"]
+                                               if deepline_catalog_entry else ()),
+                            max_response_bytes=(_DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES
+                                if route is not None and route.adapter == "firecrawl_raw_html"
+                                else effective_operation.max_response_bytes),
+                            observed_status=transport_error.observed_status,
+                        )
+                        if effective_operation.provider == "deepline" else None
+                    )
+                    if recovered is None:
+                        raise
+                    response = recovered
+                    summary["transport_recovery"] = "deepline_execution_lookup"
+                    summary["transport_error_class"] = (
+                        str(transport_error) if str(transport_error) in _TRANSPORT_ERROR_CLASSES
+                        else "ProviderTransportError"
+                    )
                 # A provider must not echo its authorization secret into a
                 # stored response or back to untrusted submitted code.
                 if _response_contains_credential(response, secret):
@@ -4615,7 +4689,7 @@ class Broker:
                     )
                     uncertain_doc["transport_failure"] = True
                 if effective_operation.provider == "deepline":
-                    if exc.deepline_job_id is not None and not _response_contains_credential(
+                    if deepline_execution_key is None and exc.deepline_job_id is not None and not _response_contains_credential(
                         ProviderResponse(0, {"x-deepline-request-id": exc.deepline_job_id}, b""),
                         secret,
                     ):

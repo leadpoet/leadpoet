@@ -1,0 +1,13 @@
+{
+  "executionRecovery": {"idempotencyKey": "arena:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "state": "completed", "replayed": true},
+  "toolId": "parallel_search",
+  "requestId": "public-execute:11111111-2222-4333-8444-555555555555",
+  "response": {
+    "job_id": "public-execute:11111111-2222-4333-8444-555555555555",
+    "status": "completed",
+    "result": {"data": {"search_id": "fixture-search", "results": [{"url": "https://example.com", "title": "Example Domain", "excerpts": ["Public example evidence"]}]}, "meta": {"status": 200}},
+    "billing": {"credits_charged": 0.02, "cost_usd": 0.002, "pricing_status": "final", "settlement_status": "settled"}
+  },
+  "responseStatus": 200,
+  "responseStatusText": "OK"
+}

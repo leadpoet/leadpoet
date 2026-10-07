@@ -660,8 +660,9 @@ def test_company_verification_routed_failure_stays_explicit_and_bounded(
     assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert result.passed is False
     assert result.reason == "website returned HTTP 502"
-    # One paid request is followed only by bounded, read-only billing lookups.
-    assert [call["method"] for call in transport.sent] == ["POST", "GET", "GET", "GET"]
+    # One paid request is followed by one saved-response read, then bounded
+    # billing lookups. Recovery never sends another paid request.
+    assert [call["method"] for call in transport.sent] == ["POST", "GET", "GET", "GET", "GET"]
     assert all(
         call["url"].startswith(br.DEEPLINE_EXECUTION_BY_KEY_URL)
         and call["body"] == b""

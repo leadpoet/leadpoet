@@ -155,7 +155,7 @@ def test_transport_loss_uses_saved_execution_key_and_exact_request_cost():
     outbound = next(item for item in transport.sent if item["method"] == "POST")
     assert json.loads(outbound["body"])["payload"]["timeout"] == 25_000
 
-    assert [request["method"] for request in transport.sent] == ["POST", "GET", "GET"]
+    assert [request["method"] for request in transport.sent] == ["POST", "GET", "GET", "GET"]
     assert result.status == 502
     assert result.call["outcome"] == "settled"
     assert result.call["reserved_microusd"] == 49_945_650
@@ -226,7 +226,7 @@ def test_unresolved_dynamic_firecrawl_cost_retains_full_reservation():
     assert uncertain.call["outcome"] == "uncertain"
     assert uncertain.call["reserved_microusd"] == 49_945_650
     assert store.openrouter_capacity == 0
-    assert [request["method"] for request in transport.sent] == ["POST", "GET"]
+    assert [request["method"] for request in transport.sent] == ["POST", "GET", "GET"]
 
 
 class ReconciliationStore:

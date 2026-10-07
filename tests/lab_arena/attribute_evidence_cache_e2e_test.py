@@ -29,7 +29,7 @@ from leadpoet_canonical import arena_weights
 from qualification.scoring import competition
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.baseline_cost_zero_round_test import _accepted_state
-from tests.lab_arena.idle_worker_claims416_postgres_test import database, migrated
+from tests.lab_arena.attribute_evidence_cache_postgres_test import database, migrated
 
 
 def _install_hints(harness):

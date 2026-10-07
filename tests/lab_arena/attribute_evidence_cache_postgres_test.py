@@ -1,6 +1,7 @@
 """Source hints require new judgments; stored cache plans survive an upgrade."""
 
 import copy
+from pathlib import Path
 from types import SimpleNamespace
 import pytest
 from lab_arena import contracts, judgment_cache, scoring
@@ -21,8 +22,23 @@ from qualification.scoring.company_fit_decision import company_fit_match
 from gateway.qualification.models import CompanyOutput
 
 database = current.database
-migrated = current.migrated
 from tests.lab_arena.attribute_evidence_cache_test import COMPANY, ICP
+
+
+@pytest.fixture(scope="module")
+def migrated(database, tmp_path_factory):
+    current.migrated.__wrapped__(database, tmp_path_factory)
+    psycopg, dsn = database
+    with psycopg.connect(**dsn) as conn, conn.cursor() as cur:
+        cur.execute(
+            (
+                Path(__file__).parents[2]
+                / "scripts/417-lab-arena-deepline-response-recovery.sql"
+            ).read_text()
+        )
+    store = ArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
+    assert store.deepline_response_schema()["version"] == 417
+    return True
 
 
 @pytest.mark.parametrize("field", ["evidence_quote", "evidence_url", "upgrade"])

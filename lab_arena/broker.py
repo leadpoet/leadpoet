@@ -2516,10 +2516,18 @@ def _decode_terminal(
         "judgment_cache_source_run_id",
         "deepline_async_job_ids",
         "deepline_response_missing",
+        "deepline_response_missing_reason",
     }
     if not isinstance(document, Mapping) or not required <= set(document) <= allowed:
         raise BrokerError("broker_unavailable")
     if "deepline_response_missing" in document and document["deepline_response_missing"] is not True:
+        raise BrokerError("broker_unavailable")
+    if "deepline_response_missing_reason" in document and (
+        document["deepline_response_missing_reason"] != "transport_failure"
+        or document.get("deepline_response_missing") is not True
+        or document.get("status") != 502
+        or document.get("call_succeeded") is not False
+    ):
         raise BrokerError("broker_unavailable")
     async_ids = document.get("deepline_async_job_ids")
     if async_ids is not None and (
@@ -4312,7 +4320,8 @@ class Broker:
                  or status == "settled" and (
                      reserved.get("deepline_response_missing") is True
                      or isinstance(terminal_document, Mapping)
-                        and terminal_document.get("deepline_response_missing") is True))
+                        and terminal_document.get("deepline_response_missing") is True
+                        and terminal_document.get("deepline_response_missing_reason") == "transport_failure"))
             and reserved.get("account_failure_evidence") is None
             and not _has_successful_terminal_response(terminal_document)):
             ledger_entries = self._store.list_ledger(call_identity=call_identity, limit=64)

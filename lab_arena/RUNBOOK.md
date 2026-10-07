@@ -323,12 +323,6 @@ Set these values on the Arena service host:
   continue. The finalized chain cache refreshes approximately every 60 seconds.
   A stake-only drop stops new claims after refresh and lets existing leases
   finish under their existing rules. Weight retrieval has no benchmark minimum.
-- `LAB_ARENA_RUNNER_CAPACITY_SLOTS`: for live gateways using the 251-slot
-  protocol ceiling, a JSON object mapping every planned runner hotkey to its
-  verified proxy and memory parallelism. Record `0` for an offline runner.
-  Derive each value from that validator's startup preflight and update it
-  when usable capacity changes. Missing measurements stop only new round
-  creation; existing rounds and weight retrieval continue.
 - `LAB_ARENA_BASELINE_HOTKEY`: the registered hotkey that owns each daily
   public baseline entry
 - `LAB_ARENA_BASELINE_SOURCE_URL`: optional in live mode. The only live daily
@@ -348,12 +342,12 @@ needed only when a live, reward-enabled published round is activated.
 
 The challenger limit excludes the baseline. Each hotkey can have one current
 accepted model per daily round; one source replacement is allowed before the
-replacement freeze. Different hotkeys can share a coldkey. New live rounds
-reduce the configured challenger limit to the conservative runner workload
-estimate. The estimate reserves full retries for execution and scoring. The
-limit is frozen at creation; later capacity changes do not rewrite accepted
-submissions or a round's configuration. Worker concurrency, stage deadlines,
-and spending limits still apply to every assignment.
+replacement freeze. Different hotkeys can share a coldkey. New rounds freeze
+the configured challenger limit (default `256`) without a workload estimate.
+The database applies this limit atomically at signed finalization. New miners
+can submit until the limit is reached or the submission cutoff passes. Later
+worker capacity changes do not change the admission limit. Worker concurrency,
+stage deadlines, and spending limits still apply to every assignment.
 
 When deploying the per-miner admission default, remove any explicit
 `LAB_ARENA_MAX_CHALLENGERS=20` override (or set it to `256`). Apply

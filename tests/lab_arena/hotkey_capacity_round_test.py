@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from lab_arena import capacity, contracts, service as svc
+from lab_arena import capacity, contracts
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.contact_round_test import ContactHarness, _install_contact_sandbox
 from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration
@@ -35,43 +35,34 @@ def test_default_admission_includes_all_miner_slots_with_one_planned_runner(conn
     harness.service.config.defaults = replace(harness.service.config.defaults, max_challengers=contracts.DEFAULT_MAX_CHALLENGERS)
     cutoff = datetime.now(timezone.utc) + timedelta(hours=12)
     configuration = harness.service.create_round(cutoff, round_id="arena-2098-01-01-capdefault")
-    assert configuration["max_challengers"] == 8
+    assert configuration["max_challengers"] == 256
     assert capacity.daily_challenger_capacity(configuration) == 8
     assert configuration["runner_slot_ceiling"] == 8
     assert configuration["max_attempts_per_assignment"] == 2
     monkeypatch.setattr(capacity, "daily_challenger_capacity", lambda *_args, **_kwargs: 0)
-    with pytest.raises(svc.ServiceError, match="daily_runner_capacity_insufficient"):
-        harness.service.create_round(cutoff, round_id="arena-2098-01-02-capzero")
+    assert harness.service.create_round(
+        cutoff, round_id="arena-2098-01-02-capzero"
+    )["max_challengers"] == 256
 
 
-def test_new_live_baseline_first_round_freezes_retry_safe_cap(connect, tmp_path):
+@pytest.mark.parametrize("max_challengers", [7, 256])
+def test_new_live_baseline_first_round_freezes_configured_cap(connect, tmp_path, max_challengers):
     harness = fixtures.Harness(connect, tmp_path, challengers=[], runners=["alpha"])
     harness.service.config.defaults = replace(
         harness.service.config.defaults,
-        max_challengers=contracts.DEFAULT_MAX_CHALLENGERS,
+        max_challengers=max_challengers,
         benchmark_icp_count=10,
         runner_slot_ceiling=251,
         checkpoint_deadline_enabled=True,
         execution_sequence_from="2026-01-01T00:00:00Z",
     )
     cutoff = datetime.now(timezone.utc) + timedelta(hours=12)
-    with pytest.raises(svc.ServiceError, match="daily_runner_capacity_unavailable"):
-        harness.service.create_round(cutoff, round_id="arena-2098-01-02-capunmeasured")
-    harness.service.config.defaults = replace(
-        harness.service.config.defaults,
-        runner_capacity_slots={harness.runner_keys[0]: 0},
-    )
-    with pytest.raises(svc.ServiceError, match="daily_runner_capacity_insufficient"):
-        harness.service.create_round(cutoff, round_id="arena-2098-01-02-capoffline")
-    harness.service.config.defaults = replace(
-        harness.service.config.defaults,
-        runner_capacity_slots={harness.runner_keys[0]: 251},
-    )
     configuration = harness.service.create_round(
-        cutoff, round_id="arena-2098-01-02-capbaseline"
+        cutoff, round_id=f"arena-2098-01-02-capbaseline{max_challengers}"
     )
     assert configuration["icp_wall_clock_seconds"] == 60 * 60
-    assert configuration["max_challengers"] == 25
+    assert configuration["max_challengers"] == max_challengers
+    # The historical throughput estimate is independent of admission.
     assert capacity.daily_challenger_capacity(configuration) == 25
 
 

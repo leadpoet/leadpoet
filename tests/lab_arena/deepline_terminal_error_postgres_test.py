@@ -1,14 +1,17 @@
 """Pending request errors through a real worker socket, gateway and ledger."""
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import tempfile
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
 from lab_arena import runner
+from lab_arena.api import create_app
 from lab_arena.store import hash_lease_token
 from tests.lab_arena.deepline_budget_only_exact_recovery_postgres_test import (
     database as base_database,
@@ -22,7 +25,7 @@ from tests.lab_arena.deepline_terminal_error_test import ErrorTransport, billing
 
 @pytest.mark.parametrize("status,credits,amount,padding", [(404, "0.5", 50_000, 0), (422, "0", 0, 1_048_000)])
 def test_pending_error_reaches_client_and_late_charge_settles_once(
-    database, tmp_path, status, credits, amount, padding,
+    database, tmp_path, request, status, credits, amount, padding,
 ):
     transport = ErrorTransport(status)
     if padding:
@@ -33,13 +36,17 @@ def test_pending_error_reaches_client_and_late_charge_settles_once(
         database, tmp_path, "21" if status == 404 else "22", transport,
     )
 
-    class GatewayApi:
+    http = TestClient(create_app(h.service))
+    request.addfinalizer(http.close)
+
+    class GatewayApi(runner.HttpArenaApiClient):
         def __init__(self):
+            super().__init__("http://127.0.0.1", client=http)
             self.frames = []
 
         def provider(self, run_id, lease_token, document):
             self.frames.append(dict(document))
-            return h.service.handle_provider(run_id, lease_token, document)
+            return super().provider(run_id, lease_token, document)
 
     api = GatewayApi()
     state = runner.RunState(
@@ -52,14 +59,14 @@ def test_pending_error_reaches_client_and_late_charge_settles_once(
         worker.start()
         try:
             with httpx.HTTPTransport(uds=str(path)) as client:
-                request = httpx.Request(
+                provider_request = httpx.Request(
                     "POST",
                     "http://code.deepline.com/api/v2/integrations/parallel_search/execute",
                     json={"payload": frame()["parameters"]["payload"]},
                     extensions={"timeout": {key: 10 for key in ("connect", "read", "write", "pool")}},
                 )
-                response = client.handle_request(request)
-                response.request = request
+                response = client.handle_request(provider_request)
+                response.request = provider_request
                 response.read()
             assert response.status_code == status
             assert response.content == transport.body
@@ -74,7 +81,7 @@ def test_pending_error_reaches_client_and_late_charge_settles_once(
             worker.stop()
 
     before_replay = len(transport.sent)
-    pending = h.service.handle_provider(lease["run_id"], token, api.frames[0])
+    pending = api.provider(lease["run_id"], token, api.frames[0])
     assert pending["status"] == status and base64.b64decode(pending["body_b64"]) == response.content
     assert pending["call"]["idempotent"] is True and pending["call"]["outcome"] == "uncertain"
     assert "actual_microusd" not in pending["call"] and len(transport.sent) == before_replay
@@ -102,8 +109,10 @@ def test_pending_error_reaches_client_and_late_charge_settles_once(
     transport.bill = billing(credits=credits)
     entry = transport.bill["recent"]["entries"][0]
     entry.update(provider="parallel", operation="parallel_search")
-    assert broker.reconcile_deepline_cost(candidates[0])["actual_microusd"] == amount
-    assert broker.reconcile_deepline_cost(candidates[0])["actual_microusd"] == amount
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        reconciled = list(pool.map(lambda _: broker.reconcile_deepline_cost(candidates[0]), range(2)))
+    assert all(result["status"] == "settled" and result["actual_microusd"] == amount
+               for result in reconciled)
     assert store.list_deepline_cost_reconciliations(h.round_id, run_id=lease["run_id"]) == []
     with connect() as connection, connection.cursor() as cur:
         cur.execute(
@@ -128,8 +137,14 @@ def test_pending_error_reaches_client_and_late_charge_settles_once(
     assert [request["method"] for request in transport.sent].count("POST") == 1
 
     before_replay = len(transport.sent)
-    replay = h.service.handle_provider(lease["run_id"], token, api.frames[0])
+    replay = api.provider(lease["run_id"], token, api.frames[0])
     assert replay["status"] == status and base64.b64decode(replay["body_b64"]) == response.content
     assert replay["call"]["idempotent"] is True and replay["call"]["outcome"] == "settled"
     assert replay["call"]["actual_microusd"] == amount
     assert len(transport.sent) == before_replay  # Neither billing reads nor another paid POST.
+
+    # Retained private responses remain protected by the live run lease.
+    denied = api.provider(lease["run_id"], "0" * 64, api.frames[0])
+    assert denied["call"]["error_code"] == "lease_stale"
+    assert base64.b64decode(denied["body_b64"]) != response.content
+    assert len(transport.sent) == before_replay

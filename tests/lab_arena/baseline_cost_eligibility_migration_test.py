@@ -74,7 +74,7 @@ def test_guard_requires_receipt_backed_zero_and_migration_replays_without_histor
     harness.clock.now = datetime.now(timezone.utc)
     round_id = "arena-2026-11-02-costzero"
     configuration = harness.service.create_round(
-        harness.clock.now + timedelta(hours=12), round_id=round_id
+        harness.clock.now + timedelta(minutes=30), round_id=round_id
     )
     assert configuration["integrity_policy"] == integrity.POLICY
     harness.round_id = round_id

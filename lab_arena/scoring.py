@@ -680,7 +680,8 @@ def build_stage_scores(
     incomplete_positions: Dict[str, set] = {}
     for item in validated_plan.get("incomplete_rows") or []:
         incomplete_positions.setdefault(item["submission_id"], set()).add(int(item["icp_position"]))
-    for submission_id, positions in positions_by_submission.items():
+    for submission_id in positions_by_submission.keys() | incomplete_positions.keys():
+        positions = positions_by_submission.get(submission_id, set())
         if positions | incomplete_positions.get(submission_id, set()) != expected_positions:
             raise ScoringError("submission %s does not cover every stage %d ICP" % (submission_id, stage))
 

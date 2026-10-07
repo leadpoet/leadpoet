@@ -64,3 +64,15 @@ def test_incomplete_final_result_is_visible_but_cannot_win():
         {'submission_id':'king','hotkey':'baseline','final_score':None})['outcome']=='no_king'
     cost = {'eligible':False,'eligibility_reason':'execution_incomplete','cost_summary':None}
     assert public_dashboard._cost_projection(cost) == cost
+
+
+def test_incomplete_only_submission_still_requires_every_stage_position():
+    _, plan = partial_plan()
+    plan['work_items'] = []
+    kwargs = dict(plan=plan, policy=scoring.build_scorer_policy(),
+                  icps_by_position=_ICPS, outputs_by_run={}, breakdowns_by_item={})
+    with pytest.raises(scoring.ScoringError, match="every stage"):
+        scoring.build_stage_scores(**kwargs)
+    plan['incomplete_rows'] = [dict(submission_id='partial', icp_position=p, cause='stage_closed') for p in range(10)]
+    result = scoring.build_stage_scores(**kwargs)
+    assert result['rows'] == [] and result['submission_scores'] == {}

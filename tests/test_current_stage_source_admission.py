@@ -579,6 +579,70 @@ def test_tenable_nasdaq_hint_fetches_within_budget_and_exact_quote_admits(monkey
     assert document["investigation_limits"]["remaining_search_calls"] == 1
 
 
+def test_diagnostic_pages_leave_existing_locator_room_to_recover(monkeypatch):
+    bad_urls = (
+        "https://example.com/first",
+        "https://example.com/second",
+    )
+    good_url = TENB_NASDAQ_URL
+    requests = []
+    fetched = []
+    actions = [
+        ("fetch_page", {"url": bad_urls[0]}),
+        ("fetch_page", {"url": bad_urls[1]}),
+        ("fetch_page", {"url": good_url}),
+        ("submit_findings", {"findings": [{
+            "target": "stage", "status": "VERIFIED", "observed_value": "Public",
+            "evidence_url": good_url, "evidence_quote": TENB_QUOTE,
+        }]}),
+    ]
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        name, arguments = actions[len(requests) - 1]
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{len(requests)}", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_bounded(_session, url, **_kwargs):
+        fetched.append(url)
+        body = (
+            "Provider account capacity details redacted."
+            if url in bad_urls else f"<main>{TENB_QUOTE}</main>"
+        )
+        return 200, url, body
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.delenv("SCRAPINGDOG_API_KEY", raising=False)
+    monkeypatch.delenv("QUALIFICATION_SCRAPINGDOG_API_KEY", raising=False)
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_fetch_bounded_html", fake_bounded)
+    monkeypatch.setattr(investigator, "_search_web", AsyncMock(return_value={
+        "results": [{"url": url} for url in (*bad_urls, good_url)],
+    }))
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Tenable", "website": "https://tenable.com"},
+        targets=("stage",), requested_stage="Public",
+    ))
+
+    assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["claims"]["stage"]["evidence_url"] == good_url
+    assert fetched == [*bad_urls, good_url]
+    assert _core_usage(result["usage"]) == {
+        "reasoning_turns": 4, "search_calls": 1, "fetch_calls": 3,
+    }
+    assert result["usage"]["total_loaded_pages"] == 1
+    assert [item["error_class"] for item in result["usage"]["fetch_outcomes"]] == [
+        "provider_diagnostic_body", "provider_diagnostic_body", "",
+    ]
+    assert "Provider account capacity details redacted." not in json.dumps(requests)
+    assert TENB_QUOTE in json.dumps(requests[-1])
+
+
 def test_tenable_hint_cannot_admit_quote_absent_from_fetched_source():
     finding = _validate_stage(
         "Tenable",

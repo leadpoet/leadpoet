@@ -2123,6 +2123,66 @@ def test_investigator_fetch_uses_bounded_transport_and_validates_final_url(
     assert bounded_fetch.await_count == 2
 
 
+@pytest.mark.parametrize("body", [
+    "Provider account capacity details redacted.",
+    "<html><body><p>  PROVIDER account capacity details redacted. </p></body></html>",
+])
+def test_investigator_fetch_rejects_exact_provider_diagnostic_body(monkeypatch, body):
+    url = "https://example.com/evidence"
+    monkeypatch.delenv("SCRAPINGDOG_API_KEY", raising=False)
+    monkeypatch.delenv("QUALIFICATION_SCRAPINGDOG_API_KEY", raising=False)
+    bounded_fetch = AsyncMock(return_value=(200, url, body))
+    monkeypatch.setattr(investigator, "_fetch_bounded_html", bounded_fetch)
+
+    result = asyncio.run(investigator._fetch_page(object(), url))
+
+    assert result == {"ok": False, "error": "provider_diagnostic_body"}
+    assert investigator._fetch_outcome(url, result)["error_class"] == (
+        "provider_diagnostic_body"
+    )
+    bounded_fetch.assert_awaited_once()
+
+
+@pytest.mark.parametrize("body, expected", [
+    ("We build robots.", "We build robots."),
+    ("# Robots", "# Robots"),
+    ("<p>Robots work.</p>", "Robots work."),
+    ("Provider account capacity details redacted. Service is live.",
+     "Provider account capacity details redacted. Service is live."),
+    ("Provider account capacity details are redacted.",
+     "Provider account capacity details are redacted."),
+])
+def test_investigator_fetch_keeps_other_short_page_text(monkeypatch, body, expected):
+    url = "https://example.com/evidence"
+    monkeypatch.delenv("SCRAPINGDOG_API_KEY", raising=False)
+    monkeypatch.delenv("QUALIFICATION_SCRAPINGDOG_API_KEY", raising=False)
+    monkeypatch.setattr(
+        investigator, "_fetch_bounded_html",
+        AsyncMock(return_value=(200, url, body)),
+    )
+
+    result = asyncio.run(investigator._fetch_page(object(), url))
+
+    assert result["ok"] is True
+    assert result["text"] == expected
+
+
+def test_prefetched_provider_diagnostic_cannot_reenter_evidence_context():
+    url = "https://example.com/evidence"
+    good_url = "https://example.com/news"
+    pages, final_urls = investigator._validated_prefetched_pages(
+        {
+            url: {"final_url": url,
+                  "text": " Provider account capacity details redacted. "},
+            good_url: {"final_url": good_url, "text": "A"},
+        },
+        submitted_source_urls=(url, good_url),
+    )
+
+    assert pages == {good_url: "A"}
+    assert final_urls == {good_url: good_url}
+
+
 @pytest.mark.parametrize(
     ("status", "body", "provider_key", "expected_error"),
     [

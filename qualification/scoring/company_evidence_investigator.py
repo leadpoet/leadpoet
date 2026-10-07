@@ -799,6 +799,12 @@ def _is_known_binary_document(value: str) -> bool:
     return prefix.startswith(_KNOWN_BINARY_DOCUMENT_PREFIXES)
 
 
+def _is_known_provider_diagnostic_only(value: str) -> bool:
+    """Reject the exact standalone provider placeholder, not short page text."""
+
+    return _normalized_span(value) == "provider account capacity details redacted."
+
+
 def _plain_text(value: str) -> str:
     if _is_known_binary_document(value):
         return ""
@@ -1006,6 +1012,7 @@ def _validated_prefetched_pages(
             or not text
             or len(text) > MAX_PAGE_CHARACTERS
             or _is_known_binary_document(text)
+            or _is_known_provider_diagnostic_only(text)
         ):
             continue
         try:
@@ -2067,6 +2074,8 @@ async def _fetch_page(
     text = _plain_text(raw)
     if not text:
         return {"ok": False, "error": "empty_page"}
+    if _is_known_provider_diagnostic_only(text):
+        return {"ok": False, "error": "provider_diagnostic_body"}
     return {
         "ok": True,
         "url": canonical_url,
@@ -2094,7 +2103,7 @@ def _fetch_outcome(url: str, result: Mapping[str, Any]) -> dict[str, Any]:
         error_class = "http_error"
     elif raw_error in {
         "invalid_url", "unsupported_binary_content", "empty_page",
-        "provider_request_refused",
+        "provider_request_refused", "provider_diagnostic_body",
     }:
         error_class = raw_error
     else:

@@ -36,6 +36,7 @@ from qualification.employee_buckets import (
     normalize_observed_employee_count_bucket,
 )
 from qualification.scoring.pre_checks import (
+    _CONTINENT_CODES,
     _resolve_country,
     check_country_match,
     run_company_zero_checks,
@@ -1544,7 +1545,10 @@ def _geography_needs_semantic_resolution(icp: ICPPrompt) -> bool:
 
     for requested in (icp.country, icp.geography):
         text = str(requested or "").strip()
-        if not text or _resolve_country(text) or _canonical_us_state(text):
+        if (
+            not text or _resolve_country(text) or _canonical_us_state(text)
+            or text.casefold() in _CONTINENT_CODES or text == "EU"
+        ):
             continue
         states = _requested_us_states(text)
         regions = _requested_us_region_states(text)
@@ -1552,7 +1556,10 @@ def _geography_needs_semantic_resolution(icp: ICPPrompt) -> bool:
             r"\s*(?:[,;|/]|\bor\b|\band\b)\s*", text, flags=re.I
         ):
             part = token.strip()
-            if not part or _resolve_country(part):
+            if (
+                not part or _resolve_country(part)
+                or part.casefold() in _CONTINENT_CODES or part == "EU"
+            ):
                 continue
             state = _canonical_us_state(part)
             if state and state in states:
@@ -1562,6 +1569,19 @@ def _geography_needs_semantic_resolution(icp: ICPPrompt) -> bool:
                 continue
             return True
     return False
+
+
+def _investigator_requested_geography(icp: ICPPrompt) -> str:
+    """Give the existing reviewer both distinct conjunctive location fields."""
+
+    country = str(icp.country or "").strip()
+    geography = str(icp.geography or "").strip()
+    if country and geography and country.casefold() != geography.casefold():
+        return (
+            f"Country requirement: {country}; geography requirement: "
+            f"{geography}. Both requirements must match the headquarters."
+        )
+    return geography or country
 
 
 def _validated_investigator_geography_matches_verdict(
@@ -7067,7 +7087,7 @@ async def _run_targeted_company_evidence_investigation(
         requested_subindustry=str(icp.sub_industry or ""),
         requested_product_service=str(icp.product_service or ""),
         requested_attribute=str(icp.required_attribute or ""),
-        requested_geography=str(icp.geography or icp.country or ""),
+        requested_geography=_investigator_requested_geography(icp),
         positive_semantic_review=review_positive_semantics,
         prior_observations={
             **{

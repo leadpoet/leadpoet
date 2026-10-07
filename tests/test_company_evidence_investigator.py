@@ -4792,6 +4792,91 @@ def test_validated_procurepro_sydney_contradiction_survives_geography_projection
     ) == COMPANY_FIT_UNAVAILABLE
 
 
+def test_distinct_country_and_geography_reach_same_bound_investigator_prompt(
+    monkeypatch,
+):
+    url = "https://procurepro.co/contact"
+    quote = (
+        "Contact Us | ProcurePro Our headquarters APAC Brisbane, Australia "
+        "33 North Street, Spring Hill, Brisbane, Queensland 4000, Australia."
+    )
+    finding = _finding(
+        "geography", status="CONTRADICTED",
+        observed_value="Brisbane, Queensland, Australia",
+        observed_country="Australia", observed_state="Queensland",
+        evidence_url=url, evidence_quote=quote,
+        new_name="ProcurePro", new_domain="procurepro.co",
+        reason="The Australian headquarters is Brisbane, not Sydney.",
+    )
+    company = _company(
+        name="ProcurePro", website="https://procurepro.co",
+        linkedin="https://www.linkedin.com/company/procurepro",
+    ).model_copy(update={
+        "country": "Australia", "state": "Queensland",
+        "fit_evidence_urls": [url],
+    })
+    requests = []
+    actual_investigate = investigator.investigate_company_evidence
+
+    async def investigate(**kwargs):
+        return await actual_investigate(**kwargs)
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "geography-1", "type": "function",
+            "function": {
+                "name": "submit_findings",
+                "arguments": json.dumps({"findings": [finding]}),
+            },
+        }]}}]}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_search_web", AsyncMock())
+    monkeypatch.setattr(investigator, "_fetch_page", AsyncMock())
+    _projected, result, claims, _identity, _stage = asyncio.run(
+        lead_scorer._run_targeted_company_evidence_investigation(
+            company=company,
+            icp=_icp(country="Australia, Sydney", geography="Australia"),
+            verdict=_complete_verdict(
+                observed_company_name="ProcurePro",
+                observed_company_website="https://procurepro.co",
+                observed_company_linkedin=(
+                    "https://www.linkedin.com/company/procurepro"
+                ),
+                observed_hq_country="", observed_hq_state="",
+                geography_matches=None,
+            ),
+            investigation_targets=("geography",),
+            icp_attribute="", icp_stage="",
+            verified_identity={
+                "normalized_name": "procurepro",
+                "registrable_dns_domain": "procurepro.co",
+                "linkedin_company_slug": "procurepro",
+            },
+            verified_transport_domain="procurepro.co",
+            structured_employee_size_evidence=None,
+            structured_public_company_evidence=None,
+            employee_size_conflict=False, company_quality=True,
+            verified_homepage_pages={
+                url: {"final_url": url, "text": quote},
+            },
+            review_positive_semantics=True,
+        )
+    )
+    request = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
+    assert request["requested_geography"] == (
+        "Country requirement: Australia, Sydney; geography requirement: "
+        "Australia. Both requirements must match the headquarters."
+    )
+    assert claims["geography"]["status"] == "CONTRADICTED"
+    assert result.details["dimension_decisions"]["geography"] == COMPANY_FIT_MISMATCH
+
+
 @pytest.mark.parametrize(("city", "status", "expected"), (
     ("Sydney", "VERIFIED", COMPANY_FIT_MATCH),
     ("Melbourne", "CONTRADICTED", COMPANY_FIT_MISMATCH),
@@ -4918,6 +5003,32 @@ def test_locality_finding_cannot_override_country_or_missing_evidence():
         us_projected, us_icp, company=us_company, company_quality=True,
         validated_geography_finding=us_finding,
     ) == COMPANY_FIT_MISMATCH
+
+
+@pytest.mark.parametrize(("country", "geography", "observed", "state", "quote"), (
+    ("UK", "Europe", "United Kingdom", "", "Acme headquarters: London, United Kingdom."),
+    ("US", "North America", "United States", "California", "Acme headquarters: California, United States."),
+))
+def test_fully_resolved_continent_remains_deterministic(
+    country, geography, observed, state, quote,
+):
+    icp = _icp(country=country, geography=geography)
+    company = _company().model_copy(update={"country": observed, "state": state})
+    finding = _finding(
+        "geography", status="CONTRADICTED",
+        observed_country=observed, observed_state=state,
+        observed_value=f"{state}, {observed}",
+        evidence_url="https://acme.example/contact", evidence_quote=quote,
+    )
+    projected = _project_investigator_geography(
+        _complete_verdict(), finding, icp=icp, company=company,
+        company_quality=True,
+    )
+    assert projected["geography_matches"] is True
+    assert lead_scorer._decision_from_observed_geography(
+        projected, icp, company=company, company_quality=True,
+        validated_geography_finding=finding,
+    ) == COMPANY_FIT_MATCH
 
 
 @pytest.mark.parametrize("heading", (

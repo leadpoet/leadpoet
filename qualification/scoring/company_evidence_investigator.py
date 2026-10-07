@@ -34,6 +34,7 @@ from qualification.scoring.company_verification import (
     MAX_HOMEPAGE_NAVIGATION_LABEL_LENGTH,
     MAX_HOMEPAGE_NAVIGATION_LOCATORS,
     MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS,
+    _commercial_terms_navigation_locator,
     _fetch_bounded_html,
     current_exchange_profile_names_issuer,
 )
@@ -1291,9 +1292,9 @@ def _priority_subscription_navigation_source(
     requested_attribute: str,
     homepage_navigation_locators: Sequence[Mapping[str, str]],
 ) -> str:
-    """Prefer an admitted pricing locator for an explicit subscription fit."""
+    """Prefer pricing, then admitted legal terms for an explicit subscription fit."""
 
-    if "industry" not in targets or not re.search(
+    if not {"industry", "required_attribute"}.intersection(targets) or not re.search(
         r"\bsubscription\b",
         f"{requested_product_service} {requested_attribute}",
         flags=re.I,
@@ -1303,6 +1304,18 @@ def _priority_subscription_navigation_source(
         url = locator.get("url", "")
         label = locator.get("label", "")
         if re.search(r"\b(?:pricing|subscription)\b", f"{url} {label}", re.I):
+            if (
+                not _commercial_terms_navigation_locator(url, label)
+                and not re.search(
+                    r"/(?:blogs?|news|newsroom|articles|insights)(?:/|$)",
+                    urlsplit(url).path,
+                    re.I,
+                )
+            ):
+                return url
+    for locator in homepage_navigation_locators:
+        url = locator.get("url", "")
+        if _commercial_terms_navigation_locator(url, locator.get("label", "")):
             return url
     return ""
 

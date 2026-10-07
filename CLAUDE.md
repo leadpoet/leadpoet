@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: October 7 full-round monitoring
+
+The user authorized monitoring the October 7 baseline and all miners through
+execution, provider billing, recovery, verification, publication, promotion and
+weights. Use the overnight skills for protected inspection, narrow fixes for
+confirmed bugs, affected-case and control tests, exact committed migrations if
+needed, safe push/merge and canonical paired deployment. Preserve all frozen
+submissions, ICPs, scorer identities, accepted results, credentials, accounting,
+qualification rules and concurrent work. Validate verifier changes with bounded
+reward-disabled saved-output probes; do not rescore or restart a completed
+baseline. Authority ends when the round and downstream flow are verified.
+
 ## Scoped production authorization: October 6 Deepline integration
 
 The user authorized exact-request Deepline settlement, durable idempotency and

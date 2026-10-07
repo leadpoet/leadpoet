@@ -866,6 +866,27 @@ class _HomepageNavigationParser(HTMLParser):
             self._label_parts.append(data)
 
 
+def _commercial_terms_navigation_locator(url: str, label: str) -> bool:
+    """Recognize a legal-source locator, never infer its commercial contents."""
+
+    path_parts = [part.casefold() for part in urlsplit(url).path.split("/") if part]
+    if not path_parts or any(part in {
+        "blog", "blogs", "news", "newsroom", "articles", "insights",
+    } for part in path_parts):
+        return False
+    source_names = {
+        "terms", "terms-of-use", "terms-of-service", "terms-and-conditions",
+        "terms-conditions", "subscription-agreement", "eula", "license",
+        "license-agreement", "software-license-agreement",
+    }
+    source_path = re.sub(r"\.(?:html?|pdf)$", "", path_parts[-1]).replace("_", "-")
+    source_label = "-".join(re.findall(r"[a-z]+", label.casefold()))
+    return source_path in source_names or (
+        any(part in {"legal", "agreements"} for part in path_parts[:-1])
+        and source_label in source_names
+    )
+
+
 def _homepage_navigation_locators(
     page_text: str,
     *,
@@ -925,10 +946,11 @@ def _homepage_navigation_locators(
             0 if words & {
                 "pricing", "price", "prices", "plan", "plans",
                 "subscription", "subscriptions",
-            }
+            } and not _commercial_terms_navigation_locator(canonical, label)
             else 1 if words & {"contact", "about", "headquarters"}
-            else 2 if words & {"product", "products", "platform", "platforms"}
-            else 3
+            else 2 if _commercial_terms_navigation_locator(canonical, label)
+            else 3 if words & {"product", "products", "platform", "platforms"}
+            else 4
         )
         candidates.append((priority, {"url": canonical, "label": label}))
 

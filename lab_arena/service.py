@@ -4944,7 +4944,18 @@ class ArenaService:
                         )
                     except (TypeError, ValueError):
                         lease_active = False
-                    if lease_active:
+                    if lease_active and not (
+                        row["status"] in ("stage1", "stage2")
+                        and row.get("configuration_doc", {}).get("execution_sequence_policy")
+                            == contracts.BASELINE_SCORED_FIRST_POLICY
+                        and self.now() >= _parse_iso(
+                            row["configuration_doc"]["schedule"][
+                                "stage_%s_close" % row["status"][-1]
+                            ]
+                        )
+                    ):
+                        # At the execution cutoff, normal SQL closure owns the
+                        # fixed drain bound even if billing renews this lease.
                         # Keep this live billing lease open without starving
                         # unrelated overdue attempts of their normal retry.
                         # The expiry RPC preserves live cost-bearing leases;

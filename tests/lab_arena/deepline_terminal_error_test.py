@@ -322,9 +322,15 @@ def test_oversized_error_is_not_retained_for_replay(monkeypatch):
     assert "deepline_terminal_response" not in saved
 
 
+@pytest.mark.parametrize("successful", [False, True])
 @pytest.mark.parametrize("refresh_patch", [None, {"call_identity": "foreign"},
                                          {"amount_microusd": 1}, {"status": "uncertain"}])
-def test_settlement_racing_replay_refreshes_once_and_still_requires_bound_state(refresh_patch):
+def test_settlement_racing_replay_refreshes_once_and_still_requires_bound_state(
+    monkeypatch, refresh_patch, successful,
+):
+    monkeypatch.setattr(br, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
+    saved_body = b'{"results":[{"url":"https://example.com/"}]}'
+
     class ConcurrentSettlementStore(RetainedErrorStore):
         settle_during_read = False
         refreshed = False
@@ -344,20 +350,55 @@ def test_settlement_racing_replay_refreshes_once_and_still_requires_bound_state(
                 self.calls[call_identity].update(
                     kind="settlement", actual=50_000,
                     terminal=br._terminal_response_document(
-                        502, {}, b'{"error":{"code":"provider_unavailable"}}',
-                        call_succeeded=False),
+                        200 if successful else 502, {},
+                        saved_body if successful else br.operations.GENERIC_UNAVAILABLE_BODY,
+                        call_succeeded=successful),
                 )
             return super().list_ledger(call_identity=call_identity, **kwargs)
 
     transport = ErrorTransport()
+    transport.status = 502 if successful else 404
     first, broker, store, context, arguments = execute(transport, store=ConcurrentSettlementStore())
     store.settle_during_read = True
     replay = broker.execute(context, **arguments)
     assert store.reservation_reads == 3  # Initial dispatch, replay, one bounded refresh.
     assert len(transport.sent) == 2
     if refresh_patch is None:
-        assert replay.status == 404 and replay.body == first.body
+        assert replay.status == (200 if successful else 404)
+        assert replay.body == (saved_body if successful else first.body)
         assert replay.call["outcome"] == "settled" and replay.call["actual_microusd"] == 50_000
     else:
         assert replay.status == 503 and replay.call["error_code"] == "broker_unavailable"
         assert "actual_microusd" not in replay.call
+
+
+def test_settlement_placeholder_with_success_flag_still_recovers_completed_response(monkeypatch):
+    from tests.lab_arena.deepline_late_response_recovery_test import setup as recovery_setup
+    from tests.lab_arena.deepline_completed_response_recovery_test import execute as recover, record
+
+    broker, store, transport, context = recovery_setup(monkeypatch)
+    first = recover(broker, context)
+    assert first.status == 502
+    original_list_ledger = store.list_ledger
+
+    def settle_before_history_read(**kwargs):
+        monkeypatch.setattr(store, "list_ledger", original_list_ledger)
+        # Billing-only settlement can preserve an accepted-call success flag
+        # while its terminal body is still the generic unavailable placeholder.
+        store.calls[first.call["call_identity"]].update(
+            kind="settlement", actual=2000,
+            terminal=br._terminal_response_document(
+                502, {"content-type": "application/json"},
+                br.operations.GENERIC_UNAVAILABLE_BODY, call_succeeded=True),
+        )
+        return original_list_ledger(**kwargs)
+
+    monkeypatch.setattr(store, "list_ledger", settle_before_history_read)
+    transport.complete = transport.bill = True
+    before = len(transport.requests)
+    result = recover(broker, context)
+    assert result.status == 200 and result.call["actual_microusd"] == 2000
+    assert json.loads(result.body)["result"] == record()["response"]["result"]
+    assert len(transport.requests) == before + 1
+    assert transport.requests[-1]["method"] == "GET"
+    assert transport.paid == 1 and sum(r["method"] == "POST" for r in transport.requests) == 1

@@ -109,6 +109,7 @@ def test_pending_error_reaches_client_and_late_charge_settles_once(
     transport.bill = billing(credits=credits)
     entry = transport.bill["recent"]["entries"][0]
     entry.update(provider="parallel", operation="parallel_search")
+
     def reconcile():
         with ThreadPoolExecutor(max_workers=2) as pool:
             reconciled = list(pool.map(lambda _: broker.reconcile_deepline_cost(candidates[0]), range(2)))

@@ -36,6 +36,7 @@ from qualification.employee_buckets import (
     normalize_observed_employee_count_bucket,
 )
 from qualification.scoring.pre_checks import (
+    _resolve_country,
     check_country_match,
     run_company_zero_checks,
 )
@@ -1538,12 +1539,62 @@ def _canonical_observed_geography_match(
     return state_matches and country_matches
 
 
+def _geography_needs_semantic_resolution(icp: ICPPrompt) -> bool:
+    """Find requested locality detail left after country/US-region parsing."""
+
+    for requested in (icp.country, icp.geography):
+        text = str(requested or "").strip()
+        if not text or _resolve_country(text) or _canonical_us_state(text):
+            continue
+        states = _requested_us_states(text)
+        regions = _requested_us_region_states(text)
+        for token in re.split(
+            r"\s*(?:[,;|/]|\bor\b|\band\b)\s*", text, flags=re.I
+        ):
+            part = token.strip()
+            if not part or _resolve_country(part):
+                continue
+            state = _canonical_us_state(part)
+            if state and state in states:
+                continue
+            region = re.sub(r"[^a-z0-9]+", " ", part.casefold()).strip()
+            if region in _US_REGION_STATES and regions:
+                continue
+            return True
+    return False
+
+
+def _validated_investigator_geography_matches_verdict(
+    verdict: Mapping[str, Any],
+    finding: Optional[Mapping[str, Any]],
+) -> bool:
+    """Bind an internally validated HQ finding to the projected source facts."""
+
+    value = finding or {}
+    evidence = _dimension_web_evidence(verdict, "geography")
+    finding_url = _valid_web_evidence_url(value.get("evidence_url"))
+    finding_quote = str(value.get("evidence_quote") or "").strip()[:2000]
+    return bool(
+        value.get("target") == "geography"
+        and value.get("status") in {"VERIFIED", "CONTRADICTED"}
+        and str(value.get("observed_country") or "").strip()
+        == str(verdict.get("observed_hq_country") or "").strip()
+        and str(value.get("observed_state") or "").strip()
+        == str(verdict.get("observed_hq_state") or "").strip()
+        and finding_url
+        and finding_url == evidence["url"]
+        and finding_quote
+        and finding_quote == evidence["quote"]
+    )
+
+
 def _decision_from_observed_geography(
     verdict: dict,
     icp: ICPPrompt,
     *,
     company: Optional[CompanyOutput] = None,
     company_quality: bool = False,
+    validated_geography_finding: Optional[Mapping[str, Any]] = None,
 ) -> str:
     observed_value = verdict.get("observed_hq_country")
     observed = observed_value.strip() if isinstance(observed_value, str) else ""
@@ -1605,11 +1656,19 @@ def _decision_from_observed_geography(
             if str(value or "").strip()
         )
     )
-    if requested_region_states:
+    if requested_region_states and not _geography_needs_semantic_resolution(icp):
         # Named regions are a deterministic frozen policy. The independently
         # observed HQ state decides the result; an LLM Boolean cannot erase a
         # regional mismatch or veto a valid state.
         return COMPANY_FIT_MATCH if canonical_match else COMPANY_FIT_MISMATCH
+    if _geography_needs_semantic_resolution(icp) and validated_geography_finding is not None:
+        if not _validated_investigator_geography_matches_verdict(
+            verdict, validated_geography_finding
+        ):
+            return COMPANY_FIT_UNAVAILABLE
+        if not canonical_match or validated_geography_finding["status"] == "CONTRADICTED":
+            return COMPANY_FIT_MISMATCH
+        return COMPANY_FIT_MATCH
     if flag is None or flag is not canonical_match:
         return COMPANY_FIT_UNAVAILABLE
     return COMPANY_FIT_MATCH if canonical_match else COMPANY_FIT_MISMATCH
@@ -5227,6 +5286,7 @@ def _reverify_decision(
     verified_rebrand_identity: Optional[Mapping[str, Any]] = None,
     verified_rebrand_redirect: Optional[Mapping[str, str]] = None,
     validated_stage_finding: Optional[Mapping[str, Any]] = None,
+    validated_geography_finding: Optional[Mapping[str, Any]] = None,
     structured_employee_size_evidence: Optional[Mapping[str, Any]] = None,
     structured_public_company_evidence: Optional[Mapping[str, Any]] = None,
     structured_profile_identity_evidence: Optional[Mapping[str, Any]] = None,
@@ -5414,6 +5474,7 @@ def _reverify_decision(
             icp,
             company=company,
             company_quality=company_quality,
+            validated_geography_finding=validated_geography_finding,
         ),
         "stage": (
             COMPANY_FIT_UNAVAILABLE
@@ -6606,7 +6667,11 @@ def _project_investigator_geography(
     )
     if canonical_match is None:
         return projected
-    candidate["geography_matches"] = canonical_match
+    candidate["geography_matches"] = (
+        canonical_match and value["status"] == "VERIFIED"
+        if _geography_needs_semantic_resolution(icp)
+        else canonical_match
+    )
     return candidate
 
 
@@ -7365,6 +7430,11 @@ async def _run_targeted_company_evidence_investigation(
         verified_rebrand_identity=verified_rebrand_identity,
         verified_rebrand_redirect=verified_rebrand_redirect,
         validated_stage_finding=validated_stage_finding,
+        validated_geography_finding=(
+            claims.get("geography")
+            if isinstance(claims.get("geography"), Mapping)
+            else None
+        ),
         structured_employee_size_evidence=structured_employee_size_evidence,
         structured_public_company_evidence=(
             structured_public_company_evidence
@@ -8346,6 +8416,11 @@ async def _llm_reverify_company(
         verified_homepage_transport_domain=verified_transport_domain,
         verified_rebrand_identity=verified_rebrand_identity,
         validated_stage_finding=validated_stage_finding,
+        validated_geography_finding=(
+            claims.get("geography")
+            if isinstance(claims.get("geography"), Mapping)
+            else None
+        ),
         structured_employee_size_evidence=structured_employee_size_evidence,
         structured_public_company_evidence=structured_public_company_evidence,
         structured_profile_identity_evidence=(

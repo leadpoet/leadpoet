@@ -4691,6 +4691,233 @@ def test_country_hq_heading_reaches_existing_region_gate_without_changing_it():
     assert southern["geography_matches"] is True
     assert western["geography_matches"] is False
     assert southern["observed_hq_state"] == western["observed_hq_state"] == "North Carolina"
+    assert lead_scorer._decision_from_observed_geography(
+        southern, _icp(geography="United States, South"),
+        company=company, company_quality=True,
+        validated_geography_finding=finding,
+    ) == COMPANY_FIT_MATCH
+
+
+def test_validated_procurepro_sydney_contradiction_survives_geography_projection():
+    # Exact first-party HQ span and requested geography from the accepted
+    # October 7 ProcurePro verdict. The source says Brisbane, not Sydney.
+    url = "https://procurepro.co/contact"
+    quote = (
+        "Contact Us | ProcurePro Our headquarters Europe London, UK "
+        "128 City Road, London, EC1V 2NX, UK APAC Brisbane, Australia "
+        "33 North Street, Spring Hill, Brisbane, Queensland 4000, Australia "
+        "Middle East Dubai, UAE"
+    )
+    submitted = _finding(
+        "geography", status="CONTRADICTED",
+        observed_value="Brisbane, Queensland, Australia",
+        observed_country="Australia", observed_state="Queensland",
+        evidence_url=url, evidence_quote=quote,
+        new_name="ProcurePro", new_domain="procurepro.co",
+        reason="The first-party APAC headquarters is Brisbane, not Sydney.",
+    )
+    finding = _validated_findings(
+        {"findings": [submitted]}, targets=("geography",),
+        fetched_pages={url: quote}, first_party_domains={"procurepro.co"},
+        identity_names={"procurepro"},
+        identity_anchor={
+            "submitted_name": "ProcurePro", "observed_name": "ProcurePro",
+            "submitted_domain": "procurepro.co", "observed_domain": "procurepro.co",
+        },
+        priority_headquarters_url=url,
+    )["geography"]
+    assert finding["status"] == "CONTRADICTED"
+    company = _company(
+        name="ProcurePro", website="https://procurepro.co",
+        linkedin="https://www.linkedin.com/company/procurepro",
+    ).model_copy(update={"country": "Australia", "state": "Queensland"})
+    icp = _icp(country="Australia", geography="Australia, Sydney")
+    prior = _complete_verdict(
+        observed_company_name="ProcurePro",
+        observed_company_website="https://procurepro.co",
+        observed_company_linkedin="https://www.linkedin.com/company/procurepro",
+        observed_hq_country="", observed_hq_state="",
+        geography_matches=None, geography_evidence_url="",
+        geography_evidence_quote="",
+    )
+    projected = _project_investigator_geography(
+        prior, finding, icp=icp, company=company, company_quality=True,
+    )
+    assert projected["geography_matches"] is False
+    assert lead_scorer._decision_from_observed_geography(
+        projected, icp, company=company, company_quality=True,
+        validated_geography_finding=finding,
+    ) == COMPANY_FIT_MISMATCH
+    assert _reverify_decision(
+        projected, "", "", icp=icp, company=company, company_quality=True,
+        validated_geography_finding=finding,
+    ).details["dimension_decisions"]["geography"] == COMPANY_FIT_MISMATCH
+    country_detail_icp = _icp(country="Australia, Sydney", geography="Australia")
+    assert lead_scorer._decision_from_observed_geography(
+        _project_investigator_geography(
+            prior, finding, icp=country_detail_icp, company=company,
+            company_quality=True,
+        ),
+        country_detail_icp, company=company, company_quality=True,
+        validated_geography_finding=finding,
+    ) == COMPANY_FIT_MISMATCH
+
+    # The semantic finding must still bind to the exact admitted quote.
+    changed_quote = {**projected, "geography_evidence_quote": quote + " changed"}
+    assert lead_scorer._decision_from_observed_geography(
+        changed_quote, icp, company=company, company_quality=True,
+        validated_geography_finding=finding,
+    ) == COMPANY_FIT_UNAVAILABLE
+    unbound = _validated_findings(
+        {"findings": [submitted]}, targets=("geography",),
+        fetched_pages={url: "Other page text without the submitted quote."},
+        first_party_domains={"procurepro.co"}, identity_names={"procurepro"},
+        identity_anchor={
+            "submitted_name": "ProcurePro", "observed_name": "ProcurePro",
+            "submitted_domain": "procurepro.co", "observed_domain": "procurepro.co",
+        },
+        priority_headquarters_url=url,
+    )["geography"]
+    assert unbound["status"] == "UNPROVEN"
+    assert _project_investigator_geography(
+        prior, unbound, icp=icp, company=company, company_quality=True,
+    ) == prior
+    previously_matched = _project_investigator_geography(
+        prior, finding, icp=icp, company=company, company_quality=True,
+    )
+    previously_matched["geography_matches"] = True
+    assert lead_scorer._decision_from_observed_geography(
+        previously_matched, icp, company=company, company_quality=True,
+        validated_geography_finding=unbound,
+    ) == COMPANY_FIT_UNAVAILABLE
+
+
+@pytest.mark.parametrize(("city", "status", "expected"), (
+    ("Sydney", "VERIFIED", COMPANY_FIT_MATCH),
+    ("Melbourne", "CONTRADICTED", COMPANY_FIT_MISMATCH),
+))
+def test_same_country_city_finding_controls(city, status, expected):
+    icp = _icp(country="Australia", geography="Australia, Sydney")
+    company = _company().model_copy(update={
+        "country": "Australia", "state": "New South Wales" if city == "Sydney" else "Victoria",
+    })
+    quote = f"Acme headquarters: {city}, {company.state}, Australia."
+    finding = _finding(
+        "geography", status=status, observed_country="Australia",
+        observed_state=company.state, observed_value=f"{city}, Australia",
+        evidence_url="https://acme.example/contact", evidence_quote=quote,
+    )
+    validated = _validated_findings(
+        {"findings": [finding]}, targets=("geography",),
+        fetched_pages={finding["evidence_url"]: quote},
+        first_party_domains={"acme.example"}, identity_names={"acme"},
+        identity_anchor={
+            "submitted_domain": "acme.example", "observed_domain": "acme.example",
+        },
+    )["geography"]
+    assert validated["status"] == status
+    projected = _project_investigator_geography(
+        _complete_verdict(observed_hq_country="", geography_matches=None),
+        validated, icp=icp, company=company, company_quality=True,
+    )
+    assert lead_scorer._decision_from_observed_geography(
+        projected, icp, company=company, company_quality=True,
+        validated_geography_finding=validated,
+    ) == expected
+
+
+@pytest.mark.parametrize(("requested", "observed_city", "observed_state", "status", "expected"), (
+    ("United States, California, San Francisco", "Los Angeles", "California", "CONTRADICTED", COMPANY_FIT_MISMATCH),
+    ("United States, California, San Francisco", "San Francisco", "California", "VERIFIED", COMPANY_FIT_MATCH),
+    ("United States, California, San Francisco", "Reno", "Nevada", "VERIFIED", COMPANY_FIT_MISMATCH),
+    ("United States, South, Atlanta", "Raleigh", "North Carolina", "CONTRADICTED", COMPANY_FIT_MISMATCH),
+))
+def test_us_state_or_region_plus_city_uses_bound_locality_finding(
+    requested, observed_city, observed_state, status, expected,
+):
+    icp = _icp(country="United States", geography=requested)
+    company = _company().model_copy(update={"state": observed_state})
+    quote = f"Acme headquarters: {observed_city}, {observed_state}, United States."
+    finding = _finding(
+        "geography", status=status,
+        observed_value=f"{observed_city}, {observed_state}, United States",
+        observed_country="United States", observed_state=observed_state,
+        evidence_url="https://acme.example/contact", evidence_quote=quote,
+    )
+    validated = _validated_findings(
+        {"findings": [finding]}, targets=("geography",),
+        fetched_pages={finding["evidence_url"]: quote},
+        first_party_domains={"acme.example"}, identity_names={"acme"},
+        identity_anchor={
+            "submitted_domain": "acme.example", "observed_domain": "acme.example",
+        },
+    )["geography"]
+    assert validated["status"] == status
+    projected = _project_investigator_geography(
+        _complete_verdict(), validated, icp=icp, company=company,
+        company_quality=True,
+    )
+    assert lead_scorer._decision_from_observed_geography(
+        projected, icp, company=company, company_quality=True,
+        validated_geography_finding=validated,
+    ) == expected
+
+
+def test_locality_finding_cannot_override_country_or_missing_evidence():
+    icp = _icp(country="Australia", geography="Australia, Sydney")
+    company = _company().model_copy(update={"country": "New Zealand", "state": "Auckland"})
+    finding = _finding(
+        "geography", status="VERIFIED", observed_country="New Zealand",
+        observed_state="Auckland", observed_value="Auckland, New Zealand",
+        evidence_url="https://acme.example/contact",
+        evidence_quote="Acme headquarters: Auckland, New Zealand.",
+    )
+    projected = _project_investigator_geography(
+        _complete_verdict(), finding, icp=icp, company=company,
+        company_quality=True,
+    )
+    assert lead_scorer._decision_from_observed_geography(
+        projected, icp, company=company, company_quality=True,
+        validated_geography_finding=finding,
+    ) == COMPANY_FIT_MISMATCH
+    assert lead_scorer._decision_from_observed_geography(
+        _complete_verdict(observed_hq_country="", geography_matches=None),
+        icp, company=company, company_quality=True,
+        validated_geography_finding=_finding(
+            "geography", status="UNPROVEN", evidence_url="", evidence_quote="",
+        ),
+    ) == COMPANY_FIT_UNAVAILABLE
+    stale_positive = _complete_verdict(
+        observed_hq_country="Australia", observed_hq_state="Queensland",
+        geography_matches=True,
+        geography_evidence_quote="Acme headquarters: Brisbane, Queensland, Australia.",
+    )
+    assert lead_scorer._decision_from_observed_geography(
+        stale_positive, icp,
+        company=_company().model_copy(update={
+            "country": "Australia", "state": "Queensland",
+        }),
+        company_quality=True,
+        validated_geography_finding=_finding(
+            "geography", status="UNPROVEN", evidence_url="", evidence_quote="",
+        ),
+    ) == COMPANY_FIT_UNAVAILABLE
+    us_icp = _icp(country="United States", geography="United States, California")
+    us_company = _company().model_copy(update={"state": "Nevada"})
+    us_finding = _finding(
+        "geography", status="VERIFIED", observed_country="United States",
+        observed_state="Nevada", observed_value="Nevada, United States",
+        evidence_url="https://acme.example/contact",
+        evidence_quote="Acme headquarters: Las Vegas, Nevada, United States.",
+    )
+    us_projected = _project_investigator_geography(
+        _complete_verdict(), us_finding, icp=us_icp, company=us_company,
+        company_quality=True,
+    )
+    assert lead_scorer._decision_from_observed_geography(
+        us_projected, us_icp, company=us_company, company_quality=True,
+        validated_geography_finding=us_finding,
+    ) == COMPANY_FIT_MISMATCH
 
 
 @pytest.mark.parametrize("heading", (

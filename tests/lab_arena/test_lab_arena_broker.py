@@ -1047,9 +1047,9 @@ def test_deepline_generic_http_403_without_exact_cost_stays_uncertain():
         timeout_ms=5000,
     )
 
-    assert result.status == 502
-    assert json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
-    assert result.call["error_code"] == "provider_unavailable"
+    assert result.status == 403
+    assert json.loads(result.body) == {"error": {"code": "provider_request_refused"}}
+    assert result.call["error_code"] == "provider_request_refused"
     assert result.call["outcome"] == "uncertain"
     assert store.log == ["reserve", "dispatch", "uncertain"]
     assert transport.sent[0]["method"] == "POST"
@@ -4568,7 +4568,10 @@ def test_deepline_error_without_exact_final_charge_remains_uncertain(envelope):
         parameters={"tool": "exa_search", "payload": {"query": "x"}},
         action_sequence=0, timeout_ms=1000,
     )
-    assert result.status == 502 and result.call["outcome"] == "uncertain"
+    # Ambiguous billing identity cannot settle, but the complete HTTP error
+    # still tells the model that this request failed rather than the provider.
+    assert result.status == 422 and result.call["outcome"] == "uncertain"
+    assert "actual_microusd" not in result.call
     assert store.log == ["reserve", "dispatch", "uncertain"]
 
 

@@ -1,0 +1,210 @@
+"""Terminal request errors must not become outages while their bill is pending."""
+
+from dataclasses import replace
+import json
+
+import pytest
+
+from lab_arena import broker as br
+from lab_arena.service import _provider_telemetry_fields
+from tests.lab_arena.deepline_worker_same_action_recovery_test import Api, worker
+from tests.lab_arena.deepline_delayed_cost_reconciliation_unit_test import _candidate
+from tests.lab_arena.test_deepline_catalog import frozen, row
+from tests.lab_arena.test_lab_arena_broker import (
+    CONTEXT, DL_KEY, ZeroReservationLedgerStore, make_broker,
+)
+
+
+REQUEST_ID = "terminal-error-request"
+PARAMETERS = {"tool": "exa_search", "payload": {"query": "example"}}
+
+
+def billing(*, credits="0", final=True):
+    entry = {
+        "id": "terminal-error-charge", "request_id": REQUEST_ID,
+        "provider": "exa", "operation": "exa_search", "status": "error",
+        "charge_state": "posted", "charge_finality": "final" if final else "pending",
+        "credits": credits, "delta": "-" + credits,
+    }
+    return {"recent": {"request_id": REQUEST_ID, "entries": [entry]}}
+
+
+class ErrorTransport:
+    """Return exact supplied receipts; never add billing/finality to a fixture."""
+
+    def __init__(self, status=404, *, bill=None, body=None):
+        self.status, self.bill = status, bill
+        self.body = body if body is not None else json.dumps({
+            "request_id": REQUEST_ID, "error": {"code": "NOT_FOUND"},
+        }).encode()
+        self.sent = []
+
+    def send(self, **request):
+        self.sent.append(request)
+        if request["method"] == "POST":
+            self.key = request["headers"]["idempotency-key"]
+            return br.ProviderResponse(self.status, {"content-type": "application/json"}, self.body)
+        assert request["method"] == "GET"
+        if "/executions/by-key/" in request["url"]:
+            document = {
+                "requestId": REQUEST_ID, "toolId": "exa_search",
+                "executionRecovery": {"idempotencyKey": self.key, "state": "failed"},
+            }
+            return br.ProviderResponse(200, {"x-deepline-idempotency-supported": "true"},
+                                       json.dumps(document).encode())
+        assert request["url"] == br.DEEPLINE_EXACT_BILLING_URL + REQUEST_ID
+        document = self.bill if self.bill is not None else {
+            "recent": {"request_id": REQUEST_ID, "entries": []},
+        }
+        return br.ProviderResponse(200, {}, json.dumps(document).encode())
+
+
+def execute(transport, *, kind="execute", store=None):
+    broker, store, _ = make_broker(
+        transport=transport, store=store or ZeroReservationLedgerStore(),
+        credential_for=lambda *_: DL_KEY,
+    )
+    arguments = dict(operation_id="deepline.execute", parameters=PARAMETERS,
+                     action_sequence=0, timeout_ms=30_000)
+    context = replace(CONTEXT, kind=kind,
+                      deepline_catalog=frozen(row("exa_search", provider="exa")))
+    return broker.execute(context, **arguments), broker, store, context, arguments
+
+
+@pytest.mark.parametrize("kind", ["execute", "score"])
+@pytest.mark.parametrize("status", [400, 404, 422])
+def test_pending_error_returns_original_status_without_polling_or_worker_retry(
+    monkeypatch, tmp_path, kind, status,
+):
+    monkeypatch.setattr(br.time, "sleep", lambda _: pytest.fail("terminal error must not poll"))
+    transport = ErrorTransport(status)
+    result, broker, store, context, arguments = execute(transport, kind=kind)
+
+    assert result.status == status and result.body == transport.body
+    assert result.call["outcome"] == "uncertain"
+    assert result.call["provider_status"] == status
+    assert "actual_microusd" not in result.call
+    assert "error_code" not in result.call
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+    saved = store.calls[result.call["call_identity"]]
+    assert saved["uncertain_doc"]["reason"] == "missing_provider_cost"
+    assert saved["uncertain_doc"]["call_succeeded"] is False
+    assert saved["uncertain_doc"]["deepline_job_id"] == REQUEST_ID
+    assert [r["method"] for r in transport.sent] == ["POST", "GET"]
+    assert 0 < transport.sent[1]["timeout_seconds"] <= 5
+    telemetry = _provider_telemetry_fields(result.call, result.status, 1)
+    assert telemetry["http_status"] == telemetry["provider_status"] == status
+    assert telemetry["outcome"] == "uncertain"  # Unknown billing remains visible.
+
+    api = Api(result.to_document())
+    host = worker(tmp_path, api)
+    error, returned = host._dispatch_once("deepline.execute", PARAMETERS, 30_000)
+    assert error is None and returned["status"] == status
+    assert len(api.frames) == 1
+
+    # Even an explicit replay cannot create another paid call or free settlement.
+    replay = broker.execute(context, **arguments)
+    assert replay.status == 409
+    assert [r["method"] for r in transport.sent].count("POST") == 1
+    assert store.calls[result.call["call_identity"]]["kind"] == "uncertain"
+
+
+@pytest.mark.parametrize("bill", [billing(final=False), {"recent": "invalid"}])
+def test_unproven_receipts_never_become_zero_cost(bill):
+    result, _, store, _, _ = execute(ErrorTransport(422, bill=bill))
+    assert result.status == 422 and result.call["outcome"] == "uncertain"
+    assert "actual_microusd" not in result.call
+    assert store.calls[result.call["call_identity"]]["kind"] == "uncertain"
+
+
+@pytest.mark.parametrize("credits,amount", [("0", 0), ("0.5", 50_000)])
+def test_immediate_final_error_receipt_settles_exact_charge(credits, amount):
+    transport = ErrorTransport(404, bill=billing(credits=credits))
+    result, _, store, _, _ = execute(transport)
+    assert result.status == 404 and result.call["outcome"] == "settled"
+    assert result.call["actual_microusd"] == amount
+    assert store.calls[result.call["call_identity"]]["terminal"]["call_succeeded"] is False
+    assert [r["method"] for r in transport.sent] == ["POST", "GET"]
+
+
+def test_missing_native_id_gets_one_key_lookup_and_one_exact_bill(monkeypatch):
+    monkeypatch.setattr(br.time, "sleep", lambda _: pytest.fail("terminal error must not poll"))
+    transport = ErrorTransport(body=b'{"error":{"code":"NOT_FOUND"}}')
+    result, _, store, _, _ = execute(transport)
+    assert result.status == 404
+    assert [r["method"] for r in transport.sent] == ["POST", "GET", "GET"]
+    assert all(0 < r["timeout_seconds"] <= 5 for r in transport.sent[1:])
+    assert store.calls[result.call["call_identity"]]["uncertain_doc"]["deepline_job_id"] == REQUEST_ID
+
+
+@pytest.mark.parametrize("state", ["stale", "unavailable"])
+def test_error_response_requires_durable_uncertainty(state):
+    class UnavailableStore(ZeroReservationLedgerStore):
+        def mark_uncertain(self, **kwargs):
+            return {"status": state}
+
+    result, _, _, _, _ = execute(ErrorTransport(), store=UnavailableStore())
+    assert result.status == 502
+    assert result.call["error_code"] == "provider_unavailable"
+
+
+@pytest.mark.parametrize("status", [401, 402, 403, 429, 500, 502, 504])
+def test_account_and_infrastructure_failures_keep_normal_polling(monkeypatch, status):
+    sleeps = []
+    monkeypatch.setattr(br, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(br.time, "sleep", sleeps.append)
+    transport = ErrorTransport(status)
+    result, _, _, _, _ = execute(transport)
+    assert result.status == 502 and result.call["error_code"] == "provider_unavailable"
+    assert [r["method"] for r in transport.sent] == ["POST", "GET", "GET"]
+    assert len(sleeps) == 1
+
+
+@pytest.mark.parametrize("body", [b'not JSON', b'"scalar"',
+                                   json.dumps({"error": DL_KEY}).encode()])
+def test_malformed_or_credential_echo_errors_are_not_exposed(monkeypatch, body):
+    monkeypatch.setattr(br, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
+    result, _, _, _, _ = execute(ErrorTransport(body=body))
+    assert result.status == 502 and result.call["error_code"] == "provider_unavailable"
+    assert DL_KEY not in json.dumps(result.to_document())
+
+
+def test_late_final_charge_uses_retained_identity_without_another_paid_request():
+    class ReconciledStore(ZeroReservationLedgerStore):
+        def reconcile_deepline_cost(self, **kwargs):
+            self.reconciled = kwargs
+            return {"status": "settled", "actual_microusd": kwargs["actual_microusd"]}
+
+    transport = ErrorTransport(422)
+    result, broker, store, _, _ = execute(transport, store=ReconciledStore())
+    identity = result.call["call_identity"]
+    saved = store.calls[identity]["uncertain_doc"]
+    transport.bill = billing(credits="0.5")
+    candidate = _candidate(
+        call_identity=identity, request_id=saved["deepline_job_id"],
+        execution_key=saved["deepline_execution_key"],
+        credential_fingerprint=saved["credential_fingerprint"],
+        operation=saved["deepline_operation"], billing_provider="exa",
+    )
+    assert broker.reconcile_deepline_cost(candidate)["actual_microusd"] == 50_000
+    assert store.reconciled["call_identity"] == identity
+    assert store.reconciled["recovered_request_id"] == REQUEST_ID
+    assert store.reconciled["credential_fingerprint"] == br._credential_fingerprint(DL_KEY)
+    assert [r["method"] for r in transport.sent] == ["POST", "GET", "GET"]
+
+
+def test_key_lookup_cannot_start_a_bill_read_after_the_short_deadline(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(br.time, "monotonic", lambda: now[0])
+
+    class SlowKeyTransport(ErrorTransport):
+        def send(self, **request):
+            response = super().send(**request)
+            if "/executions/by-key/" in request["url"]:
+                now[0] += 5
+            return response
+
+    transport = SlowKeyTransport(body=b'{"error":{"code":"NOT_FOUND"}}')
+    result, _, _, _, _ = execute(transport)
+    assert result.status == 404 and result.call["outcome"] == "uncertain"
+    assert [r["method"] for r in transport.sent] == ["POST", "GET"]

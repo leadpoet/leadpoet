@@ -1533,6 +1533,7 @@ def _deepline_exact_readback(
     request_id: Optional[str], execution_key: Optional[str], operation: str,
     reconciliation_deadline: float, provider: Optional[str] = None,
     operation_aliases: Sequence[str] = (),
+    poll: bool = True,
 ) -> Tuple[Optional[str], Optional[provider_costs.ProviderCost]]:
     """Recover one execution identity and read only its own final charge.
 
@@ -1548,13 +1549,18 @@ def _deepline_exact_readback(
         native_id = None
     if execution_key is not None and _DEEPLINE_EXECUTION_KEY_RE.fullmatch(execution_key) is None:
         return native_id, None
-    deadline = min(reconciliation_deadline,
-                   time.monotonic() + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS)
+    # Completed request errors get one short read, not the success/recovery
+    # polling window. Their unknown bill stays eligible for delayed settlement.
+    timeout = (
+        operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+        if poll else DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS
+    )
+    deadline = min(reconciliation_deadline, time.monotonic() + timeout)
     headers = {
         "accept": "application/json", "authorization": "Bearer " + secret,
         "user-agent": "leadpoet-lab-arena-broker/1",
     }
-    for index in range(_DEEPLINE_BILLING_MAX_ATTEMPTS):
+    for index in range(_DEEPLINE_BILLING_MAX_ATTEMPTS if poll else 1):
         now = time.monotonic()
         if now >= deadline:
             break
@@ -1605,10 +1611,13 @@ def _deepline_exact_readback(
             native_id = recovered_id
             # Key recovery is a read, not a polling interval. Read the charge
             # within this same deadline before the next paced poll.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return native_id, None
             try:
                 response = transport.send(
                     method="GET", url=DEEPLINE_EXACT_BILLING_URL + quote(native_id, safe=""),
-                    headers=headers, body=b"", timeout_seconds=max(0.001, deadline - time.monotonic()),
+                    headers=headers, body=b"", timeout_seconds=remaining,
                 )
             except ProviderTransportError:
                 continue
@@ -4460,6 +4469,7 @@ class Broker:
         deepline_native_cost: Optional[provider_costs.ProviderCost] = None
         deepline_async_ids: Sequence[str] = ()
         deepline_async_poll_accepted = False
+        deepline_request_failed = False
         deepline_response_request_id: Optional[str] = None
         deepline_request_id: Optional[str] = request_accounting.get("deepline_request_id")
         deepline_execution_key: Optional[str] = request_accounting.get("deepline_execution_key")
@@ -4648,6 +4658,19 @@ class Broker:
                         raw_document = json.loads(response.body.decode("utf-8"))
                     except (UnicodeDecodeError, ValueError):
                         raw_document = None
+                    # A complete request-specific error is useful to the model
+                    # independently of billing finality. Account errors, throttles,
+                    # malformed replies and transport failures keep normal recovery.
+                    deepline_request_failed = (
+                        response.internal_provenance is None
+                        and isinstance(raw_document, Mapping)
+                        and (
+                            response.status in (400, 404, 422)
+                            or _provider_request_refused(
+                                "deepline", effective_normalized, response
+                            )
+                        )
+                    )
                     if (deepline_catalog_entry
                         and isinstance(deepline_catalog_entry.get("async_flow"), Mapping)):
                         deepline_async_ids = _deepline_accepted_async_job_ids(
@@ -4734,6 +4757,7 @@ class Broker:
                                 transport=self._transport, secret=secret,
                                 request_id=request_id, execution_key=deepline_execution_key,
                                 operation=deepline_operation, reconciliation_deadline=exact_deadline,
+                                poll=not deepline_request_failed,
                                 provider=(deepline_catalog_entry["provider"] if deepline_catalog_entry else None),
                                 operation_aliases=(deepline_catalog_entry["operation_aliases"] if deepline_catalog_entry else ()),
                         )
@@ -5122,6 +5146,16 @@ class Broker:
                     return _error_result("provider_request_refused", summary)
                 if miner_credential_failure:
                     return _error_result("miner_credentials_unavailable", summary)
+                if deepline_request_failed and uncertain_state.get("status") == "uncertain":
+                    # Persist the original failed call and its unknown cost before
+                    # returning its sanitized error. Never invent a free settlement
+                    # or turn a terminal 4xx into a retryable infrastructure failure.
+                    if request_refused:
+                        return _error_result("provider_request_refused", summary)
+                    summary.update(status=sanitized_status)
+                    return BrokerResult(
+                        sanitized_status, sanitized_headers, sanitized_body, summary
+                    )
                 if (
                     uncertain_state.get("status") == "uncertain"
                     and call_succeeded is True

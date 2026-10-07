@@ -40,7 +40,7 @@ from lab_arena.store import (
 from lab_arena.promotion import GitPromoter
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
+    CURRENT_PROVIDER_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
 )
 
@@ -532,7 +532,7 @@ class FixtureObjectStore(svc.LocalObjectStore):
 
 @pytest.fixture(scope="module")
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from database_with_lab_arena_migration(CURRENT_PROVIDER_SERVICE_MIGRATIONS)
 
 
 @pytest.fixture(scope="module")

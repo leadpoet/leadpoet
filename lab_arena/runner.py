@@ -2127,7 +2127,7 @@ class WorkerSocketServer:
             and call.get("outcome") == "settled"
             and call.get("deepline_response_missing") is True
             and type(call.get("actual_microusd")) is int
-            and call["actual_microusd"] > 0
+            and call["actual_microusd"] >= 0
             and isinstance(call.get("transport_error_class"), str)
             and bool(call["transport_error_class"])
             and call.get("transport_recovery") is None

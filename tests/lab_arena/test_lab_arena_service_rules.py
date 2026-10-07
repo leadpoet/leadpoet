@@ -592,7 +592,7 @@ def test_submission_inside_the_window_registers_normally():
     service._store = Store()
     service._objects = Objects()
     service._clock = lambda: datetime(2026, 9, 2, 0, 30, tzinfo=timezone.utc)
-    service._config = SimpleNamespace(chain=SimpleNamespace(uid_for_hotkey=lambda value: 1 if value == hotkey else None))
+    service._config = SimpleNamespace(mode="shadow", chain=SimpleNamespace(uid_for_hotkey=lambda value: 1 if value == hotkey else None))
     service._request_round = lambda *_args, **_kwargs: (
         {"hotkey": hotkey, "body": {"source_size_bytes": 10, "consent": {"public_rerun": True}}},
         {"round_id": "arena-2026-09-02", "status": "open", "configuration_doc": {"schedule": _schedule(), "baseline_hotkey": "5" + "Z" * 47}},

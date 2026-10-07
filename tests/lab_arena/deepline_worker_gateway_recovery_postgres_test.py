@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 
 import httpx
+import pytest
 
 from lab_arena import broker as br, runner
 from tests.lab_arena.deepline_budget_only_exact_recovery_postgres_test import database as base_database
@@ -54,10 +55,31 @@ def _ledger_state(connect, identity):
     return entries, overlays
 
 
-def test_billed_timeout_recovers_through_socket_with_one_charge(database, tmp_path, monkeypatch):
+class FinalCostTransport(LateTransport):
+    def __init__(self, amount):
+        super().__init__(bill=True)
+        self.amount = amount
+
+    def send(self, **request):
+        response = super().send(**request)
+        payload = json.loads(response.body)
+        credits = self.amount / 100000
+        if "/billing/usage?request_id=" in request["url"]:
+            for entry in payload["recent"]["entries"]:
+                entry.update(credits=credits, delta=-credits)
+        elif request["method"] == "POST":
+            payload["billing"]["credits_charged"] = credits
+        elif isinstance(payload.get("response"), dict):
+            payload["response"]["billing"]["credits_charged"] = credits
+        return br.ProviderResponse(response.status, response.headers,
+                                   json.dumps(payload).encode())
+
+
+@pytest.mark.parametrize("amount", [0, 2000])
+def test_confirmed_timeout_recovers_through_socket_with_one_charge(database, tmp_path, monkeypatch, amount):
     monkeypatch.setattr(br, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
-    transport = LateTransport(bill=True)
-    h, lease, token, connect, _broker = setup(database, tmp_path, "23", transport)
+    transport = FinalCostTransport(amount)
+    h, lease, token, connect, _broker = setup(database, tmp_path, "22" if amount == 0 else "23", transport)
     api = GatewayApi(h.service)
     worker, path = _socket_worker(lease, token, api, deepline_catalog=catalog())
     try:
@@ -70,13 +92,13 @@ def test_billed_timeout_recovers_through_socket_with_one_charge(database, tmp_pa
             response.read()
         assert response.status_code == 200
         assert response.json()["result"]["data"]["results"][0]["url"] == "https://example.com"
-        assert response.headers[runner.SETTLED_MICROUSD_HEADER] == "2000"
+        assert response.headers[runner.SETTLED_MICROUSD_HEADER] == str(amount)
         assert [frame["action_sequence"] for frame in api.frames] == [0, 0]
         assert api.frames[0] == api.frames[1]
         assert worker._state.action_sequence == 1
         assert len(worker._state.calls) == 1
         call = worker._state.calls[0]
-        assert call["outcome"] == "settled" and call["actual_microusd"] == 2000
+        assert call["outcome"] == "settled" and call["actual_microusd"] == amount
         posts = [request for request in transport.requests if request["method"] == "POST"]
         assert len(posts) == 2 and transport.paid == 1
         assert posts[0]["headers"]["idempotency-key"] == posts[1]["headers"]["idempotency-key"]
@@ -84,13 +106,22 @@ def test_billed_timeout_recovers_through_socket_with_one_charge(database, tmp_pa
         entries, overlays = _ledger_state(connect, call["call_identity"])
         assert [entry[0] for entry in entries].count("dispatch") == 1
         settlements = [entry for entry in entries if entry[0] == "settlement"]
-        assert len(settlements) == 1 and settlements[0][1] == 2000
+        assert len(settlements) == 1 and settlements[0][1] == amount
         assert settlements[0][2]["deepline_response_missing"] is True
         assert settlements[0][2]["deepline_response_missing_reason"] == "transport_failure"
         assert len(overlays) == 1 and overlays[0][0]["call_succeeded"] is True
         before = len(transport.requests)
         assert h.service.handle_provider(lease["run_id"], token, api.frames[0])["status"] == 200
         assert len(transport.requests) == before
+        # Replay cannot add a charge or replace the original lost-body proof.
+        after_entries, after_overlays = _ledger_state(connect, call["call_identity"])
+        assert after_entries == entries and after_overlays == overlays
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT public.lab_arena__successful_icp_cost_state(%s,%s,%s)",
+                           (h.round_id, lease["submission_id"], lease["icp_position"]))
+            costs = cursor.fetchone()[0]
+            assert costs["successful_calls"] == 1
+            assert costs["successful_microusd"] == amount
     finally:
         worker.stop()
 

@@ -330,7 +330,8 @@ def test_signed_45_minute_v1_v2_cadence_has_finite_upstream_headroom(
     )
 
 
-def test_two_snapshot_schemas_support_real_200_call_research_and_finalization():
+def test_two_snapshot_schemas_support_full_call_quota_research_and_finalization():
+    call_limit = contracts.CALL_QUOTAS_PER_ICP["openrouter"]
     api = FullQuotaCadenceApi()
     state = runner.RunState(
         lease={"run_id": "run-1", "kind": "execute"},
@@ -338,7 +339,7 @@ def test_two_snapshot_schemas_support_real_200_call_research_and_finalization():
     )
     now = [0.0]
     server = runner.WorkerSocketServer(
-        Path("/tmp/not-opened-200-call-quota-cadence.sock"),
+        Path("/tmp/not-opened-full-call-quota-cadence.sock"),
         api,
         state,
         monotonic=lambda: now[0],
@@ -348,7 +349,7 @@ def test_two_snapshot_schemas_support_real_200_call_research_and_finalization():
     )
     parameters = {"model": "openai/gpt-5.6-luna", "input": "synthetic"}
 
-    for phase_count in (160, 40):
+    for phase_count in (call_limit - 40, 40):
         for _ in range(phase_count):
             used = len(api.provider_frames)
             assert decoded(server.handle_frame(control_frame()))[
@@ -369,9 +370,9 @@ def test_two_snapshot_schemas_support_real_200_call_research_and_finalization():
             assert error is None and result["status"] == 200
             now[0] += runner.QUOTA_SNAPSHOT_CACHE_SECONDS
 
-    assert len(api.provider_frames) == 200
+    assert len(api.provider_frames) == call_limit
     assert [frame["action_sequence"] for frame in api.provider_frames] == list(
-        range(200)
+        range(call_limit)
     )
     assert decoded(server.handle_frame(control_frame()))["providers"][
         "openrouter"
@@ -383,8 +384,8 @@ def test_two_snapshot_schemas_support_real_200_call_research_and_finalization():
             ).encode("utf-8")
         )
     )["providers"]["openrouter"]["remaining"] == 0
-    assert len(api.calls) == state.quota_request_count == 402
-    assert len(state.calls) == state.action_sequence == 200
+    assert len(api.calls) == state.quota_request_count == 2 * (call_limit + 1)
+    assert len(state.calls) == state.action_sequence == call_limit
     assert state.refusals == 0
     assert state.trusted_quota_failure is False
 

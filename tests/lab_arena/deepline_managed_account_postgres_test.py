@@ -103,6 +103,7 @@ def test_managed_error_does_not_block_research_scoring_or_publication(database, 
     h.clock.now = datetime.now(timezone.utc) + timedelta(seconds=1)
     configuration = h.service.create_round(h.clock.now + timedelta(minutes=30), round_id=h.round_id)
     assert configuration['execution_sequence_policy'] == contracts.BASELINE_SCORED_FIRST_POLICY
+    assert configuration['scorer_policy']['scoring_adapter_version'] == 'qualification_integrity_v2'
     assert 'contact_policy' not in configuration
     h.submit('ManagedResearch', h.round_id)
     h.clock.advance_to(h.schedule()['submission_cutoff'])
@@ -115,6 +116,7 @@ def test_managed_error_does_not_block_research_scoring_or_publication(database, 
     h.advance_until("published", runners=1)
     runs = h.service.store.list_runs(h.round_id, kind="execute")
     assert len(runs) == 10 * len(participants)
+    assert len(h.service.store.list_runs(h.round_id, kind="score")) == len(runs)
     assert all(r["status"] == "accepted" for r in h.service.store.list_runs(h.round_id))
     with connect() as connection, connection.cursor() as cursor:
         cursor.execute("SELECT amount_microusd,terminal_response,funding_source FROM public.lab_arena_ledger "

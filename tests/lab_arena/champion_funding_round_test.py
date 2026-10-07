@@ -85,6 +85,7 @@ class ChampionTransport(FakeProviderTransport):
         self.failure_count = 0
         self.sent = []
         self.infrastructure_failure = ""
+        self._deepline_request_authorizations = {}
 
     def arm_account_failure(self, status: int) -> None:
         self.failure_status = int(status)
@@ -101,6 +102,8 @@ class ChampionTransport(FakeProviderTransport):
             request_id = parse_qs(urlsplit(url).query)["request_id"][0]
             with self._deepline_lock:
                 entries = [row for row in self._deepline_jobs if row["request_id"] == request_id]
+                if entries:
+                    assert authorization == self._deepline_request_authorizations[request_id]
             return br.ProviderResponse(200, {"content-type": "application/json"}, json.dumps({
                 "recent": {"request_id": request_id, "entries": entries},
             }).encode())
@@ -108,6 +111,8 @@ class ChampionTransport(FakeProviderTransport):
             execution_key = unquote(url[len(br.DEEPLINE_EXECUTION_BY_KEY_URL):])
             with self._deepline_lock:
                 execution = self._deepline_executions.get(execution_key)
+                if execution:
+                    assert authorization == self._deepline_request_authorizations[execution["requestId"]]
             return br.ProviderResponse(200 if execution else 404, {
                 "content-type": "application/json", "x-deepline-idempotency-supported": "true",
             }, json.dumps(execution or {}).encode())
@@ -153,6 +158,7 @@ class ChampionTransport(FakeProviderTransport):
         operation = request["operation"]
         with self._deepline_lock:
             job_id = "champion-deepline-job-%d" % (len(self._deepline_jobs) + 1)
+            self._deepline_request_authorizations[job_id] = authorization
             self._deepline_jobs.append(
                 {
                     "id": "usage-" + job_id,

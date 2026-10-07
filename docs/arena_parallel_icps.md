@@ -137,7 +137,7 @@ The slot formula is:
 ```text
 local execution slots = min(verified Webshare proxies + 1 native slot,
                             memory-supported slots, frozen round slot ceiling)
-active model limit = max(1, floor(local execution slots / frozen ICP count))
+active model limit = local execution slots
 ```
 
 The native coordinator is slot 0. Webshare routes are slots 1 through N. All
@@ -145,17 +145,19 @@ slots use the same validator hotkey. They are sandbox execution slots, not
 extra Bittensor validators or wallet workers.
 
 With sufficient available memory and a sufficient frozen round ceiling, nine
-proxies give ten slots and one active model in a ten-ICP benchmark. Nineteen
-proxies give twenty slots and two active models; twenty-nine proxies give
-thirty slots and three active models. A larger ICP bank uses additional groups
-under the same slot limit. Hosts with fewer slots than ICPs can still process
-one model over multiple groups.
+proxies give ten slots. A ten-ICP model initially fills those slots. As its
+leases finish, free slots can start the next model while the older model's
+tail continues. Hosts with fewer slots than ICPs can process a model over
+multiple groups. Every active model holds at least one physical slot.
 
 The gateway enforces this limit in its existing atomic assignment claim. It
 counts submissions with live execute leases on that validator, and admits
-another submission when an active submission's leases finish. Initial ICPs of
-a newly admitted model stay with that validator while its leases are active,
-so several validators do not split the same model groups and leave slots idle.
+another submission when a physical slot is free. Migration 416 removes the
+whole-bank reservation introduced by migration 401. In baseline-first stage 2,
+pending execution work follows the frozen participant order, then ICP position.
+This finishes an older model's pending work before starting the next model.
+Initial ICPs of a newly admitted model stay with that validator while its
+leases are active, so validators do not split initial work across hosts.
 Existing shared work and independent retry handoffs remain valid. A smaller local
 capacity does not revoke existing leases. Each ICP keeps its own sandbox,
 output and accounting. Scoring claims retain their existing concurrency and

@@ -7,23 +7,13 @@ import uuid
 from pathlib import Path
 
 import httpx
-import pytest
 
 from lab_arena import broker as br, runner
 from tests.lab_arena.deepline_budget_only_exact_recovery_postgres_test import database as base_database
 from tests.lab_arena.deepline_completed_response_recovery_postgres_test import setup
 from tests.lab_arena.deepline_completed_response_recovery_test import NATIVE, catalog
-from tests.lab_arena.deepline_late_response_recovery_postgres_test import database as response_database
+from tests.lab_arena.deepline_late_response_recovery_postgres_test import database
 from tests.lab_arena.deepline_late_response_recovery_test import LateTransport
-
-
-@pytest.fixture(scope="module")
-def database(response_database):
-    # The service now calls the success-priority listing during round advance.
-    migration = Path(__file__).resolve().parents[2] / "scripts/425-lab-arena-successful-deepline-cost-priority.sql"
-    with response_database[0].connect(**response_database[1]) as connection, connection.cursor() as cursor:
-        cursor.execute(migration.read_text())
-    return response_database
 
 
 class GatewayApi:
@@ -36,7 +26,7 @@ class GatewayApi:
         return self.service.handle_provider(run_id, lease_token, frame)
 
 
-def _socket_worker(h, lease, token, api, *, deepline_catalog=None):
+def _socket_worker(lease, token, api, *, deepline_catalog=None):
     path = Path("/tmp") / ("arena-deepline-recovery-" + uuid.uuid4().hex + ".sock")
     worker_lease = dict(lease)
     if deepline_catalog is not None:
@@ -69,7 +59,7 @@ def test_billed_timeout_recovers_through_socket_with_one_charge(database, tmp_pa
     transport = LateTransport(bill=True)
     h, lease, token, connect, _broker = setup(database, tmp_path, "23", transport)
     api = GatewayApi(h.service)
-    worker, path = _socket_worker(h, lease, token, api, deepline_catalog=catalog())
+    worker, path = _socket_worker(lease, token, api, deepline_catalog=catalog())
     try:
         with httpx.HTTPTransport(uds=str(path)) as http_transport:
             response = http_transport.handle_request(httpx.Request(
@@ -96,6 +86,7 @@ def test_billed_timeout_recovers_through_socket_with_one_charge(database, tmp_pa
         settlements = [entry for entry in entries if entry[0] == "settlement"]
         assert len(settlements) == 1 and settlements[0][1] == 2000
         assert settlements[0][2]["deepline_response_missing"] is True
+        assert settlements[0][2]["deepline_response_missing_reason"] == "transport_failure"
         assert len(overlays) == 1 and overlays[0][0]["call_succeeded"] is True
         before = len(transport.requests)
         assert h.service.handle_provider(lease["run_id"], token, api.frames[0])["status"] == 200
@@ -154,7 +145,7 @@ def test_routed_score_resumes_same_key_and_adapts_html(database, tmp_path, monke
     h.service._hot_rounds.clear()
     assert h.service.store.provider_funding(lease["run_id"], "deepline")["funding_source"] == "miner_key"
     api = GatewayApi(h.service)
-    worker, path = _socket_worker(h, dict(lease, kind="score"), token, api)
+    worker, path = _socket_worker(dict(lease, kind="score"), token, api)
     try:
         with httpx.HTTPTransport(uds=str(path)) as http_transport:
             response = http_transport.handle_request(httpx.Request(

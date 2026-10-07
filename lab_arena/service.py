@@ -2822,6 +2822,7 @@ class ArenaService:
         if len(baseline_ids) != 1:
             raise ServiceError("baseline_submission_invalid", 500)
         failed_items: Dict[str, str] = {}
+        incomplete_items: Dict[str, str] = {}
         for item in plan["work_items"]:
             scored_run_id = item["scored_run_id"]
             run = chosen.get(scored_run_id)
@@ -2840,6 +2841,9 @@ class ArenaService:
                 return self._store.cancel_round(
                     round_id, CANCEL_REASONS["scoring_incomplete"]
                 )
+            if cause == "stage_closed":
+                incomplete_items[scored_run_id] = cause
+                continue
             # The closed stage has finished its bounded retries or deadline.
             # A failed review cannot qualify this ICP, but must not erase the
             # independently verified results of other ICPs or participants.
@@ -2848,7 +2852,7 @@ class ArenaService:
         judge_executions = 0
         for item in plan["work_items"]:
             scored_run_id = item["scored_run_id"]
-            if scored_run_id in failed_items:
+            if scored_run_id in failed_items or scored_run_id in incomplete_items:
                 continue
             run = chosen.get(scored_run_id)
             icp = icps[int(item["icp_position"])]
@@ -2862,12 +2866,20 @@ class ArenaService:
                     round_id, CANCEL_REASONS["scoring_incomplete"]
                 )
             judge_executions += 1
-        if failed_items:
+        if failed_items or incomplete_items:
             plan = {
                 **plan,
                 "work_items": [
                     item for item in plan["work_items"]
                     if item["scored_run_id"] not in failed_items
+                    and item["scored_run_id"] not in incomplete_items
+                ],
+                "incomplete_rows": list(plan.get("incomplete_rows") or []) + [
+                    {"submission_id": item["submission_id"],
+                     "icp_position": item["icp_position"],
+                     "cause": incomplete_items[item["scored_run_id"]]}
+                    for item in plan["work_items"]
+                    if item["scored_run_id"] in incomplete_items
                 ],
                 "zero_rows": list(plan["zero_rows"]) + [
                     {
@@ -2893,17 +2905,6 @@ class ArenaService:
             # The per-run scores are part of the published result; a write the
             # database refused must stop the stage, never pass silently.
             raise ServiceError("scores_not_recorded:%s" % str(recorded.get("status") or "unknown")[:40], 500)
-        if stage == 2:
-            final_entries = self._score_entries_from_runs(
-                round_row, range(contracts.benchmark_icp_count(round_row.get("configuration_doc"))), "final_score"
-            )
-            baseline_entry = next(
-                (entry for entry in final_entries if entry["is_king"]), None
-            )
-            if baseline_entry is None or baseline_entry["final_score"] is None:
-                return self._store.cancel_round(
-                    round_id, CANCEL_REASONS["scoring_incomplete"]
-                )
         if stage == 1:
             if (
                 (round_row.get("configuration_doc") or {}).get(
@@ -2968,6 +2969,14 @@ class ArenaService:
             submission_id = str(participant["submission_id"])
             rows = [selected.get((submission_id, position)) for position in sorted(wanted)]
             if any(row is None for row in rows):
+                if score_key == "final_score":
+                    entries.append({
+                        "submission_id": submission_id,
+                        "hotkey": str(participant["miner_hotkey"]),
+                        "is_king": bool(participant.get("is_king")),
+                        "final_score": None,
+                        "execution_incomplete": True,
+                    })
                 continue
             values = [float(row["per_icp_score"]) for row in rows if row is not None]
             if (
@@ -3458,24 +3467,24 @@ class ArenaService:
             publication_reads=publication_reads,
         )
         eligibility = {
-            str(entry["submission_id"]): self._submission_cost_eligibility(
+            str(entry["submission_id"]): ({
+                "cost_summary": None,
+                "eligible": False,
+                "eligibility_reason": "execution_incomplete",
+            } if entry.get("execution_incomplete") else self._submission_cost_eligibility(
                 round_row,
                 str(entry["submission_id"]),
                 publication_reads.runs,
                 positions=range(contracts.benchmark_icp_count(round_row.get("configuration_doc"))),
                 publication_reads=publication_reads,
-            )
+            ))
             for entry in final_entries
         }
-        stored_king_entry = next((e for e in final_entries if e["is_king"]), None)
-        if stored_king_entry is None or stored_king_entry["final_score"] is None:
-            return self._store.cancel_round(
-                round_id, CANCEL_REASONS["scoring_incomplete"]
-            )
         effective_final_entries = [dict(entry) for entry in final_entries]
         king_entry = next(entry for entry in effective_final_entries if entry["is_king"])
         if (
-            integrity.enabled(round_row.get("configuration_doc") or {})
+            king_entry["final_score"] is not None
+            and integrity.enabled(round_row.get("configuration_doc") or {})
             and eligibility[str(king_entry["submission_id"])]["eligibility_reason"]
             in ("cost_per_company_exceeded", "execution_cap_exceeded")
         ):

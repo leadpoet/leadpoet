@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: October 7 partial-round continuity
+
+The user authorized fixing Deepline terminal-error retry delays, conservative
+capacity admission, and closing rounds without discarding completed work when
+independent assignments remain unfinished. Use $overnight-rebenchmark-validation
+for protected inspection, narrow code changes, exact committed migrations,
+focused transition tests, push/merge, canonical paired deployment and monitoring
+through live publication. Preserve accepted work, frozen inputs, genuine costs,
+qualification and deterministic scores. Mark incomplete submissions explicitly;
+do not invent scores or promote against an incomplete baseline. Preserve current
+operator controls and concurrent work. Authority ends after live verification.
+
 ## Scoped production authorization: validator commit audit metadata
 
 On 2026-10-07 the user authorized adding validator source commit metadata to

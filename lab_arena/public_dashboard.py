@@ -100,6 +100,7 @@ def company_diagnostic(
 _COST_REASONS = frozenset(
     {
         "eligible",
+        "execution_incomplete",
         "historical_round",
         "stored_output_invalid",
         "provider_calls_inflight",
@@ -230,7 +231,7 @@ def _cost_projection(
     summary = ranking.get("cost_summary")
     if summary is None and (
         (reason == "historical_round" and eligible)
-        or (reason == "stored_output_invalid" and not eligible)
+        or (reason in ("stored_output_invalid", "execution_incomplete") and not eligible)
     ):
         return {
             "cost_summary": None,

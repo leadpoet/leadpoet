@@ -76,6 +76,7 @@ from qualification.scoring.company_evidence_investigator import (
     MAX_PAGE_CHARACTERS,
     MAX_SUBMITTED_SOURCE_URLS,
     PRIVATE_FETCHED_PAGES_KEY,
+    _PRE_SERIES_STAGE_TOKEN_RE,
     _VENTURE_SERIES_STAGE_LABELS,
     _complete_verified_first_party_identity,
     _plain_text,
@@ -686,6 +687,10 @@ def _stage_quote_supports_observation(observed: str, quote: str) -> bool:
     if proven_ownership_states:
         return observed == proven_ownership_states[0]
 
+    # Mask only the prefixed token; genuine rounds elsewhere remain evidence.
+    venture_compatible_text = _PRE_SERIES_STAGE_TOKEN_RE.sub(
+        "pre_venture_stage", text
+    )
     seed_compatible_text = _PRE_SEED_STAGE_TOKEN_RE.sub(
         "pre_seed_stage", text
     )
@@ -693,11 +698,11 @@ def _stage_quote_supports_observation(observed: str, quote: str) -> bool:
         stage
         for stage, patterns in _VENTURE_STAGE_PROOF_PATTERNS.items()
         if _has_affirmed_stage_proof(
-            seed_compatible_text if stage == "seed" else text,
+            seed_compatible_text if stage == "seed" else venture_compatible_text,
             patterns,
         )
         or _has_affirmed_stage_proof(
-            seed_compatible_text if stage == "seed" else text,
+            seed_compatible_text if stage == "seed" else venture_compatible_text,
             _VENTURE_STAGE_STATEMENT_PATTERNS.get(stage, ()),
             reject_historical=True,
         )

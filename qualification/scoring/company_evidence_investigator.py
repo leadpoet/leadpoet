@@ -1646,6 +1646,11 @@ _VENTURE_SERIES_STAGE_LABELS = {
     "series b": r"series\s+b(?:[1-9][0-9]*)?",
     "series c+": r"series\s+[c-z](?:[1-9][0-9]*)?",
 }
+_PRE_SERIES_STAGE_TOKEN_RE = re.compile(
+    r"\bpre(?:\s*[-\u2010-\u2015]\s*|\s+)"
+    r"series\s+[a-z](?:[1-9][0-9]*)?\b\+?",
+    re.I,
+)
 
 
 def _quote_names_compatible_venture_stage(
@@ -1665,7 +1670,11 @@ def _quote_names_compatible_venture_stage(
         return bool(re.search(r"\bseed\b", without_pre_seed))
     if normalized_stage in _VENTURE_SERIES_STAGE_LABELS:
         label = _VENTURE_SERIES_STAGE_LABELS[normalized_stage]
-        return bool(re.search(rf"\b{label}\b", normalized_quote))
+        # A pre-Series token does not name a completed Series in that family.
+        without_pre_series = _PRE_SERIES_STAGE_TOKEN_RE.sub(
+            "pre_venture_stage", normalized_quote,
+        )
+        return bool(re.search(rf"\b{label}\b", without_pre_series))
     return True
 
 

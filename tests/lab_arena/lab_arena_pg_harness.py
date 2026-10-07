@@ -132,7 +132,11 @@ CURRENT_SERVICE_MIGRATIONS = POSTGREST_MIGRATIONS + (
     "402-lab-arena-restart-expired-zero-call-execute-drain.sql",
     "403-lab-arena-credit-failure-retry.sql",
     "405-lab-arena-submission-duplicates.sql",
-    # Current service polling uses exact Deepline recovery and its V2 list.
+)
+
+# Full current-service flows need the latest provider RPCs. Historical migration
+# fixtures retain their original base and apply their own ordered upgrade tail.
+CURRENT_PROVIDER_SERVICE_MIGRATIONS = CURRENT_SERVICE_MIGRATIONS + (
     "264-lab-arena-codex-cost-reconciliation.sql",
     "311-lab-arena-per-icp-closed-billing-reconciliation.sql",
     "312-lab-arena-temporary-hold-admission.sql",

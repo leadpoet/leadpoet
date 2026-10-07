@@ -682,6 +682,8 @@ class ArenaService:
         self._brokers: Dict[str, broker_module.Broker] = {}
         self._openrouter_reconciliation_after: Dict[Tuple[str, str], int] = {}
         self._deepline_reconciliation_after: Dict[Tuple[str, str], int] = {}
+        self._deepline_priority_reconciliation_after: Dict[Tuple[str, str], int] = {}
+        self._deepline_priority_next: Dict[str, bool] = {}
         self._closed_provider_reconciliation_after = 0
         self._completed_scores_lock = threading.Lock()
         self._completed_scores_cache: Dict[str, Dict[str, Any]] = {}
@@ -4550,34 +4552,55 @@ class ArenaService:
         )
 
     def _reconcile_deepline_cost(
-        self, round_id: str, *, run_id: str = ""
+        self,
+        round_id: str,
+        *,
+        run_id: str = "",
+        successful_execute_only: bool = False,
     ) -> Dict[str, Any]:
         """Perform one bounded billing check without holding service locks."""
 
         cursor_key = (round_id, run_id)
+        cursors = (
+            self._deepline_priority_reconciliation_after
+            if successful_execute_only
+            else self._deepline_reconciliation_after
+        )
         with self._lock:
-            after_entry_id = self._deepline_reconciliation_after.get(
-                cursor_key, 0
-            )
+            after_entry_id = cursors.get(cursor_key, 0)
+        options = {"successful_execute_only": True} if successful_execute_only else {}
         items = self._store.list_deepline_cost_reconciliations(
             round_id,
             run_id=run_id,
             after_entry_id=after_entry_id,
             limit=1,
+            **options,
         )
         if not items:
             return {"status": "none"}
         candidate = items[0]
         with self._lock:
-            self._deepline_reconciliation_after[cursor_key] = int(
-                candidate.get("uncertain_entry_id") or 0
-            )
+            cursors[cursor_key] = int(candidate.get("uncertain_entry_id") or 0)
         result = self._broker_for(round_id).reconcile_deepline_cost(candidate)
         return {
             "status": str(result.get("status") or "unavailable"),
             "run_status": str(candidate.get("run_status") or ""),
             "lease_expires_at": str(candidate.get("lease_expires_at") or ""),
         }
+
+    def _reconcile_active_deepline_cost(self, round_id: str) -> Dict[str, Any]:
+        """Alternate useful execute receipts and all liabilities, one call per step."""
+
+        with self._lock:
+            priority = self._deepline_priority_next.get(round_id, True)
+            self._deepline_priority_next[round_id] = not priority
+        if priority:
+            result = self._reconcile_deepline_cost(
+                round_id, successful_execute_only=True
+            )
+            if result["status"] != "none":
+                return result
+        return self._reconcile_deepline_cost(round_id)
 
     def handle_provider(
         self,
@@ -4994,7 +5017,7 @@ class ArenaService:
                 # One bounded billing read outside service locks. Claims for
                 # other submissions stay available while this charge posts.
                 with telemetry.stage("advance_billing_read") as observed:
-                    self._reconcile_deepline_cost(round_id)
+                    self._reconcile_active_deepline_cost(round_id)
                     billing = self._reconcile_openrouter_cost(round_id)
                     observed.count = 1
                 if (

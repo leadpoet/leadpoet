@@ -2106,7 +2106,7 @@ def _confirmed_credit_failure_proof(
         ):
             return None
     elif provider == "deepline":
-        if raw_actual != 0:
+        if raw_actual != 0 or _deepline_managed_provider_failure(response):
             return None
     elif provider != "scrapingdog":
         return None
@@ -2920,6 +2920,39 @@ def _provider_request_refused(
     return False
 
 
+def _deepline_managed_provider_failure(response: ProviderResponse) -> bool:
+    """Distinguish an explicitly managed upstream account from the miner's key."""
+
+    if response.internal_provenance is not None or response.status not in (401, 402, 403, 429):
+        return False
+    try:
+        document = json.loads(response.body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(document, Mapping):
+        return False
+    tool_error = document.get("tool_error")
+    return (
+        document.get("credential_owner") == "deepline_managed"
+        and document.get("failure_origin") in ("provider", "provider_account")
+        and document.get("error_category") in ("provider_auth", "provider_account")
+        and type(document.get("upstream_status")) is int
+        and document["upstream_status"] in (401, 402, 403, 429)
+        and isinstance(document.get("provider"), str)
+        and bool(document["provider"].strip())
+        and isinstance(document.get("operation"), str)
+        and bool(document["operation"].strip())
+        and isinstance(document.get("code"), str)
+        and bool(document["code"].strip())
+        and isinstance(tool_error, Mapping)
+        and tool_error.get("code") == document["code"]
+        and tool_error.get("provider") == document["provider"]
+        and tool_error.get("operation") == document["operation"]
+        and type(tool_error.get("statusCode")) is int
+        and tool_error["statusCode"] == response.status
+    )
+
+
 def _miner_credential_failure(
     provider: str,
     response: ProviderResponse,
@@ -2934,6 +2967,8 @@ def _miner_credential_failure(
     403 and 429 responses remain account failures.
     """
 
+    if provider == "deepline" and _deepline_managed_provider_failure(response):
+        return False
     if response.status in (401, 402):
         return True
     if response.status == 403:

@@ -108,3 +108,36 @@ def test_frozen_zero_price_is_only_free_with_explicit_source_and_completed_recei
     entry["pricing"]["billing_source"] = None
     assert costs.deepline_free_completed_cost({"tool": entry["tool_id"]}, 200, response,
         catalog_entry=entry) is None
+
+
+@pytest.mark.parametrize("tool", [
+    "contextdev_get_web_scrape_markdown", "contextdev_post_news_search",
+    "contextdev_post_web_search", "free_simple_company_search",
+    "generic_http_request", "hunter_discover",
+])
+@pytest.mark.parametrize("status", [200, 404, 422])
+def test_legacy_free_hint_cannot_override_frozen_paid_pricing(tool, status):
+    entry = {"tool_id": tool, "pricing": {"unit": "call", "currency": "USD",
+        "usd_per_unit": 0.01, "credits_per_unit": 0.1, "billing_source": "provider"}}
+    response = ({"job_id": REQUEST_ID, "status": "completed", "result": {}}
+                if status == 200 else {"error": {"code": "NOT_FOUND"}})
+    assert costs.deepline_free_completed_cost(
+        {"tool": tool}, status, response, catalog_entry=entry) is None
+
+
+@pytest.mark.parametrize("change", [
+    {"pricing": None},
+    {"pricing": {"unit": "usage", "billing_source": "free",
+                 "usd_per_unit": 0, "credits_per_unit": 0}},
+    {"tool_id": "different_tool"},
+])
+def test_unproven_catalog_does_not_restore_historical_hunter_error_zero(change):
+    entry = {"tool_id": "hunter_discover", "pricing": {"unit": "call",
+        "billing_source": "free", "usd_per_unit": 0, "credits_per_unit": 0}}
+    parameters, response = {"tool": "hunter_discover"}, {"error": {"code": "NOT_FOUND"}}
+    assert costs.deepline_free_completed_cost(parameters, 404, response).microusd == 0
+    assert costs.deepline_free_completed_cost(
+        parameters, 404, response, catalog_entry=entry).microusd == 0
+    entry.update(change)
+    assert costs.deepline_free_completed_cost(
+        parameters, 404, response, catalog_entry=entry) is None

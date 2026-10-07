@@ -241,6 +241,7 @@ def test_startup_requires_the_next_day_bank_date_column():
             raise ArenaStoreError("column icp_set_date does not exist")
 
     service = object.__new__(ArenaService)
+    service._config = SimpleNamespace(deepline_catalog_source=None)
     service._store = SimpleNamespace(
         require_service_role=lambda: {"current_user": "lab_arena_service"},
         _transport=Transport(),

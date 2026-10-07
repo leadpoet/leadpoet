@@ -55,7 +55,7 @@ def database():
 def _proxy_pool(process_capacity: int) -> ProxyWorkerPool:
     """Build N verified proxy exits for the N+1 process-capacity contract."""
 
-    assert process_capacity in (10, 20)
+    assert process_capacity in (10, 20, 40)
     workers = tuple(
         VerifiedProxyWorker(
             slot_index=index + 1,

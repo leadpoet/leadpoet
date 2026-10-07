@@ -13,16 +13,35 @@ from lab_arena import contracts
 ATTEMPT_OVERHEAD_SECONDS = 60
 
 
-def daily_challenger_capacity(configuration: Mapping[str, Any]) -> int:
+def daily_challenger_capacity(
+    configuration: Mapping[str, Any],
+    *,
+    runner_parallelism: Mapping[str, int] | None = None,
+) -> int:
     """Maximum challengers whose baseline plus all configured ICPs fit every phase.
 
-    This bounds configured workload. It cannot promise provider uptime or
-    replace monitoring that the configured runners are actually available.
+    When supplied, runner_parallelism is the operator's verified local claim
+    limit for each planned runner. Missing runners contribute no capacity.
+    The frozen slot ceiling remains an upper bound, not evidence of slots.
     """
 
     schedule = configuration["schedule"]
-    slots = int(configuration["runner_slot_ceiling"]) * len(set(configuration["runner_hotkeys"]))
+    ceiling = int(configuration["runner_slot_ceiling"])
+    runners = set(configuration["runner_hotkeys"])
+    if runner_parallelism is None:
+        # Historical callers calculate the configured maximum. Live admission
+        # must supply measured declarations; a ceiling alone is optimistic.
+        slots = ceiling * len(runners)
+    else:
+        slots = 0
+        for hotkey in runners:
+            declared = runner_parallelism.get(hotkey, 0)
+            if type(declared) is not int or declared < 0:
+                raise ValueError("runner parallelism must be nonnegative integers")
+            slots += min(ceiling, declared)
     attempts = int(configuration["max_attempts_per_assignment"])
+    if runner_parallelism is not None and slots < 1:
+        return 0
     if slots < 1 or attempts < 1:
         raise ValueError("daily competition requires runner capacity")
 

@@ -1313,6 +1313,11 @@ SCORING_PLAN_FIELDS = (
         choices=(BASELINE_SCORED_FIRST_POLICY,),
     ),
     F("work_items", "list[object]", fields=SCORING_WORK_ITEM_FIELDS, minimum=0, maximum=MAX_BENCHMARK_ICP_COUNT * (MAX_CHALLENGERS + 1)),
+    F("incomplete_rows", "list[object]", required=False, fields=(
+        F("submission_id", "str", minimum=1, maximum=64),
+        F("icp_position", "int", minimum=0, maximum=MAX_BENCHMARK_ICP_COUNT - 1),
+        F("cause", "str", choices=TERMINAL_CAUSES),
+    ), minimum=0, maximum=MAX_BENCHMARK_ICP_COUNT * (MAX_CHALLENGERS + 1)),
     F("zero_rows", "list[object]", fields=(
         F("submission_id", "str", minimum=1, maximum=64),
         F("icp_position", "int", minimum=0, maximum=MAX_BENCHMARK_ICP_COUNT - 1),
@@ -1338,7 +1343,7 @@ def validate_scoring_plan(document: Any, configuration: Optional[Mapping[str, An
             raise ArenaContractError("duplicate work item")
         seen_runs.add(item["scored_run_id"])
         seen_positions.add(position_key)
-    for item in plan["zero_rows"]:
+    for item in list(plan["zero_rows"]) + list(plan.get("incomplete_rows") or []):
         position_key = (item["submission_id"], int(item["icp_position"]))
         if int(item["icp_position"]) not in positions or position_key in seen_positions:
             raise ArenaContractError("zero row is duplicate or outside its stage")

@@ -174,8 +174,8 @@ def build_scoring_plan(
     accepted attempt contributes exactly one work item named by its run and
     output reference. A model-caused failure, an exhausted provider error, or
     a provider error before a dispatched final retry reaches the stage deadline
-    contributes a zero row. Other infrastructure causes mean the stage should
-    have cancelled and are refused here.
+    contributes a zero row. Deadline-isolated infrastructure assignments stay
+    explicitly incomplete; they never erase completed work or receive a score.
     """
 
     if stage not in (1, 2):
@@ -194,6 +194,7 @@ def build_scoring_plan(
             latest[key] = run
     items: Dict[str, Dict[str, Any]] = {}
     zero_rows: List[Dict[str, Any]] = []
+    incomplete_rows: List[Dict[str, Any]] = []
     for key in sorted(latest):
         submission_id, position = key
         if position not in positions:
@@ -210,6 +211,14 @@ def build_scoring_plan(
             continue
         latest_run = latest[key]
         cause = str(latest_run.get("terminal_cause") or "")
+        if (
+            latest_run.get("status") == "failed"
+            and isinstance(latest_run.get("terminal_doc"), Mapping)
+            and latest_run["terminal_doc"].get("infrastructure_incomplete") is True
+            and cause in (contracts.INFRASTRUCTURE_TERMINAL_CAUSES | {"stage_closed"})
+        ):
+            incomplete_rows.append({"submission_id": submission_id, "icp_position": position, "cause": cause})
+            continue
         provider_error_exhausted = (
             cause == "provider_error"
             and latest_run.get("status") == "failed"
@@ -267,6 +276,7 @@ def build_scoring_plan(
         "stage": stage,
         "work_items": [dict(item) for _, item in sorted(items.items())],
         "zero_rows": sorted(zero_rows, key=lambda row: (row["submission_id"], row["icp_position"])),
+        **({"incomplete_rows": incomplete_rows} if incomplete_rows else {}),
     }
     if execution_sequence_policy is not None:
         plan["execution_sequence_policy"] = execution_sequence_policy
@@ -667,14 +677,19 @@ def build_stage_scores(
             stage, validated_plan.get("execution_sequence_policy"), configuration
         )
     )
-    for submission_id, positions in positions_by_submission.items():
-        if positions != expected_positions:
+    incomplete_positions: Dict[str, set] = {}
+    for item in validated_plan.get("incomplete_rows") or []:
+        incomplete_positions.setdefault(item["submission_id"], set()).add(int(item["icp_position"]))
+    for submission_id in positions_by_submission.keys() | incomplete_positions.keys():
+        positions = positions_by_submission.get(submission_id, set())
+        if positions | incomplete_positions.get(submission_id, set()) != expected_positions:
             raise ScoringError("submission %s does not cover every stage %d ICP" % (submission_id, stage))
 
     scores: Dict[str, float] = {}
     denominator = len(expected_positions)
     for submission_id, values in by_submission.items():
-        scores[submission_id] = verify.stage_score(values, denominator)
+        if submission_id not in incomplete_positions:
+            scores[submission_id] = verify.stage_score(values, denominator)
     return {
         **({"integrity_policy": "arena_integrity_v1"} if validated_policy["scoring_adapter_version"] in ("qualification_integrity_v2", "qualification_contacts_v3") else {}),
         "stage": stage,

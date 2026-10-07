@@ -320,6 +320,30 @@ def _runner_hotkeys_from_environment() -> tuple[str, ...]:
     return runners
 
 
+def _runner_capacity_slots_from_environment(
+    runners: Sequence[str],
+) -> Optional[dict[str, int]]:
+    """Read the operator's verified per-validator proxy and memory limits."""
+
+    raw = os.environ.get("LAB_ARENA_RUNNER_CAPACITY_SLOTS", "").strip()
+    if not raw:
+        return None
+    try:
+        slots = json.loads(raw)
+    except (TypeError, ValueError):
+        slots = None
+    if (
+        not isinstance(slots, dict)
+        or set(slots) != set(runners)
+        or any(
+            type(value) is not int or not 0 <= value <= contracts.RUNNER_SLOT_CEILING
+            for value in slots.values()
+        )
+    ):
+        raise ServiceError("LAB_ARENA_RUNNER_CAPACITY_SLOTS must map every planned runner to 0..251 slots", 500)
+    return slots
+
+
 def _max_image_bytes_from_environment() -> int:
     """LAB_ARENA_MAX_IMAGE_BYTES: compressed size ceiling of the trusted scorer."""
 
@@ -447,6 +471,10 @@ def build_service_from_environment(mode: str):
     rewards_enabled = _rewards_enabled_from_environment()
     defaults = RoundDefaults(
         runner_hotkeys=runners,
+        runner_capacity_slots=(
+            _runner_capacity_slots_from_environment(runners)
+            if mode == "live" else None
+        ),
         # Each eligible validator derives its declaration from its own proxy
         # inventory. The gateway publishes one common maximum for all of them.
         runner_slot_ceiling=contracts.RUNNER_SLOT_CEILING,

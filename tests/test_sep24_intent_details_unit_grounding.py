@@ -185,7 +185,9 @@ def test_private_response_schema_orders_grounding_before_aggregates():
     assert list(schema["properties"]) == expected
     assert schema["required"] == expected
     assert evidence_schema["maxItems"] == 2
-    assert evidence_schema["items"]["properties"]["quote"]["maxLength"] == 500
+    assert evidence_schema["items"]["properties"]["quote"] == {
+        "type": "string", "minLength": 1,
+    }
     assert "unsupported_factual_clause" not in schema["properties"]
     assert "unsupported_factual_reason" not in schema["properties"]
     repair_schema = intent_details._CITATION_REPAIR_RESPONSE_FORMAT[
@@ -197,7 +199,7 @@ def test_private_response_schema_orders_grounding_before_aggregates():
     assert repair_item["properties"]["evidence"]["maxItems"] == 2
     assert repair_item["properties"]["evidence"]["items"]["properties"][
         "quote"
-    ]["maxLength"] == 500
+    ] == {"type": "string", "minLength": 1}
     semantic_item = intent_details._SEMANTIC_REPAIR_RESPONSE_FORMAT[
         "json_schema"
     ]["schema"]["properties"]["repairs"]["items"]
@@ -934,12 +936,9 @@ def test_source_index_recovery_requires_unique_unchanged_admitted_text(defect):
     )
 
 
-@pytest.mark.parametrize(
-    "length,expected",
-    [(266, "match"), (292, "match"), (500, "match"), (501, "unavailable")],
-)
-def test_exact_evidence_quote_uses_500_character_hard_cap(
-    monkeypatch, length, expected,
+@pytest.mark.parametrize("length", [266, 292, 500, 501, 773])
+def test_exact_evidence_quote_can_exceed_concise_prompt_target(
+    monkeypatch, length,
 ):
     quote = "Q" * length
     inputs = _inputs("Example published a detailed report.", quote, supporting_quote=quote)
@@ -954,9 +953,94 @@ def test_exact_evidence_quote_uses_500_character_hard_cap(
         return _response(document, [unit], facts_supported=True)
 
     receipt = _review(monkeypatch, inputs, response)
-    assert receipt["decision"] == expected
-    if expected == "unavailable":
-        assert receipt["failure_reason_code"] == "malformed_response"
+    assert receipt["decision"] == "match"
+
+
+def _long_source_quote() -> str:
+    head = (
+        "Example published its detailed [market report]"
+        "(https://example.test/reports/market). "
+    )
+    tail = "The report was published on 2026-03-02 and did not announce a product launch."
+    filler = ("The report describes customer operations and research. " * 20)[
+        :773 - len(head) - len(tail)
+    ]
+    quote = head + filler + tail
+    assert len(quote) == 773
+    return quote
+
+
+def test_long_markdown_quote_matches_in_one_bounded_review(monkeypatch):
+    quote = _long_source_quote()
+    inputs = _inputs(
+        "Example published a detailed market report.",
+        quote, supporting_quote=quote,
+    )
+    calls = []
+
+    async def judge(prompt, **kwargs):
+        calls.append(kwargs)
+        document = _prompt_document(prompt)
+        return json.dumps(_response(document, [
+            _verified_unit(document, 0, quote),
+        ], facts_supported=True))
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(*inputs))
+
+    assert receipt["decision"] == "match"
+    assert len(calls) == 1
+    assert calls[0]["max_tokens"] == 800
+
+
+@pytest.mark.parametrize("mutation", ["date", "negation", "stitched", "hidden_markdown"])
+def test_long_quote_still_requires_one_exact_visible_source_span(mutation):
+    source = _long_source_quote()
+    quote = source
+    if mutation == "date":
+        quote = source.replace("2026-03-02", "2026-03-03")
+    elif mutation == "negation":
+        quote = source.replace("did not announce", "did announce")
+    elif mutation == "stitched":
+        quote = source.replace("customer operations and research. ", "", 1)
+    else:
+        quote = source + " ![hidden claim](https://example.test/hidden)"
+        source = quote
+    assert len(quote) > 500
+    document = {
+        "intent_details_units": [{"unit_id": 0, "text": "Example published a report."}],
+        "admitted_evidence": [{"source_index": 0, "admitted_text": [source]}],
+        "verified_signals": [{"matched_icp_signal": 0}],
+    }
+    response = _response(document, [{
+        "unit_id": 0, "contains_factual_claim": True,
+        "status": "VERIFIED",
+        "evidence": [{"source_index": 0, "quote": quote}],
+    }], facts_supported=True)
+    with pytest.raises(intent_details._CitationRepairNeeded) as raised:
+        intent_details._validate_review_response(json.dumps(response), document)
+    assert raised.value.issues[0] == ("nonexact_quote",)
+
+
+def test_long_quote_wrong_source_index_is_not_guessed_when_ambiguous():
+    quote = _long_source_quote()
+    document = {
+        "intent_details_units": [{"unit_id": 0, "text": "Example published a report."}],
+        "admitted_evidence": [
+            {"source_index": 0, "admitted_text": ["Different company source."]},
+            {"source_index": 1, "admitted_text": [quote]},
+            {"source_index": 2, "admitted_text": [quote]},
+        ],
+        "verified_signals": [{"matched_icp_signal": 0}],
+    }
+    response = _response(document, [{
+        "unit_id": 0, "contains_factual_claim": True,
+        "status": "VERIFIED",
+        "evidence": [{"source_index": 0, "quote": quote}],
+    }], facts_supported=True)
+    with pytest.raises(intent_details._CitationRepairNeeded) as raised:
+        intent_details._validate_review_response(json.dumps(response), document)
+    assert raised.value.issues[0] == ("nonexact_quote",)
 
 
 def test_more_than_two_exact_evidence_bindings_is_retryable(monkeypatch):
@@ -994,7 +1078,6 @@ def test_more_than_two_exact_evidence_bindings_is_retryable(monkeypatch):
         ("missing", "missing_evidence"),
         ("empty", "empty_quote"),
         ("duplicate", "duplicate_quote"),
-        ("overcap", "quote_over_cap"),
         ("too_many", "too_many_quotes"),
         ("nonexact", "nonexact_quote"),
     ],
@@ -1007,8 +1090,7 @@ def test_one_local_repair_can_replace_a_citation_only_defect(
         "The financing supports product delivery.",
         "The round was announced this year.",
     ]
-    overcap_quote = "L" * 501
-    source = " ".join([valid_quote, *extra_quotes, overcap_quote])
+    source = " ".join([valid_quote, *extra_quotes])
     inputs = _inputs(
         "Example raised a Series A.", source, supporting_quote=valid_quote,
     )
@@ -1024,7 +1106,7 @@ def test_one_local_repair_can_replace_a_citation_only_defect(
             assert category in kwargs["system_prompt"]
             assert "OLD INVENTED CITATION TOKEN" not in kwargs["system_prompt"]
             assert "OLD INVENTED CITATION TOKEN" not in prompt
-            assert "up to 500 characters" in kwargs["system_prompt"]
+            assert "Aim for no more than 500" in kwargs["system_prompt"]
             assert "Never use ellipses, remove words, or stitch" in kwargs[
                 "system_prompt"
             ]
@@ -1044,8 +1126,6 @@ def test_one_local_repair_can_replace_a_citation_only_defect(
             evidence[0]["quote"] = "   "
         elif defect == "duplicate":
             evidence.append(dict(binding))
-        elif defect == "overcap":
-            evidence = [_binding(document, overcap_quote)]
         elif defect == "too_many":
             evidence = [_binding(document, quote) for quote in [
                 valid_quote, *extra_quotes,

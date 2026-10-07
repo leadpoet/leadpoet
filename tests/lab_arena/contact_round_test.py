@@ -352,7 +352,7 @@ def test_v5_full_contact_round_persists_and_publishes_multi_signal_narrative(
         source_index, values = next(iter(
             intent_details._bound_evidence_sources(document).items()
         ))
-        quote = values[0][:intent_details._MAX_UNIT_EVIDENCE_QUOTE_LENGTH]
+        quote = values[0][:500]
         return json.dumps({
             "unit_grounding": [{
                 "unit_id": unit["unit_id"],

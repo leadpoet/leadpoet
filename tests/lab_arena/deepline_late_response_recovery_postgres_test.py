@@ -168,6 +168,12 @@ def test_legacy_paid_timeout_without_provenance_cannot_attach_response(database,
     monkeypatch.setattr(br, '_DEEPLINE_BILLING_MAX_ATTEMPTS', 1)
     transport = LateTransport(bill=True)
     h, lease, token, connect, broker = setup(database, tmp_path, '19', transport)
+    settle = h.service.store.settle_call
+    def legacy_settle(**arguments):
+        arguments['terminal_response'] = dict(arguments['terminal_response'])
+        arguments['terminal_response'].pop('deepline_response_missing_reason', None)
+        return settle(**arguments)
+    monkeypatch.setattr(h.service.store, 'settle_call', legacy_settle)
     first = deliver(h, lease, token)
     assert first['status'] == 502 and first['call']['outcome'] == 'settled'
     with connect() as connection, connection.cursor() as cur:
@@ -283,11 +289,18 @@ def test_billed_provider_error_still_cannot_be_recovered_as_success(database, tm
 
 
 @pytest.mark.parametrize('status', [422, 502])
-def test_old_broker_false_missing_marker_does_not_replace_terminal_error(database, tmp_path, status):
+def test_old_broker_false_missing_marker_does_not_replace_terminal_error(database, tmp_path, monkeypatch, status):
     saved = record()
     saved['responseStatus'] = status
     transport = RecoveryTransport(saved, lost_error=br.ProviderTransportError('ReadTimeout'))
     h, lease, token, connect, broker = setup(database, tmp_path, '23' if status == 422 else '24', transport)
+    settle = h.service.store.settle_call
+    def legacy_settle(**arguments):
+        arguments['terminal_response'] = dict(arguments['terminal_response'])
+        arguments['terminal_response']['deepline_response_missing'] = True
+        arguments['terminal_response'].pop('deepline_response_missing_reason', None)
+        return settle(**arguments)
+    monkeypatch.setattr(h.service.store, 'settle_call', legacy_settle)
     first = deliver(h, lease, token)
     assert first['status'] == status and first['call']['outcome'] == 'settled'
     arguments = recover_arguments(h, lease, first, broker, connect)

@@ -57,6 +57,7 @@ def uncertain(h, lease, token, label, *, success=False, native=None, reason=None
     assert store.mark_dispatched(**args)['status'] == 'dispatched'
     call = dict(reason=reason or ('missing_provider_cost' if success else 'transport_failure'),
         call_succeeded=success, deepline_request_id=local,
+        deepline_execution_key=key,
         deepline_operation='exa_search', credential_fingerprint=fingerprint)
     if native:
         call['deepline_job_id'] = native

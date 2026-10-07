@@ -48,7 +48,12 @@ BEGIN
     OR (v_head.entry_kind = 'settlement'
       AND v_head.terminal_response -> 'call_succeeded' = 'false'::JSONB
       AND (
-        v_head.terminal_response -> 'deepline_response_missing' = 'true'::JSONB
+        (-- lab_arena_response_recovery_missing_provenance_426
+          v_head.terminal_response -> 'deepline_response_missing' = 'true'::JSONB
+          AND v_head.terminal_response ->> 'deepline_response_missing_reason' = 'transport_failure'
+          AND v_head.terminal_response ->> 'status' = '502'
+          AND v_head.terminal_response ->> 'body_b64'
+            = 'eyJlcnJvciI6eyJjb2RlIjoicHJvdmlkZXJfdW5hdmFpbGFibGUifX0=')
         OR (v_head.entry_doc ->> 'deepline_delayed_reconciliation' = 'true'
           AND EXISTS (SELECT 1 FROM public.lab_arena_ledger AS uncertain
             WHERE uncertain.entry_id = (v_head.entry_doc ->> 'reconciled_uncertainty_entry_id')::BIGINT
@@ -73,33 +78,6 @@ BEGIN
   END IF;
 END;
 $response_guard$;
-
--- This also upgrades an earlier installation of the guard whose missing-response
--- guard accepted the legacy marker without a distinct lost-body provenance.
-DO $response_provenance$
-DECLARE
-  v_definition TEXT;
-  v_old TEXT := $old$v_head.terminal_response -> 'deepline_response_missing' = 'true'::JSONB$old$;
-BEGIN
-  SELECT pg_catalog.pg_get_functiondef(
-    'public.lab_arena_recover_deepline_response_v1(text,text,text,text,text,text,text,text,bigint,jsonb,integer)'::pg_catalog.regprocedure
-  ) INTO v_definition;
-  IF pg_catalog.strpos(v_definition, 'lab_arena_response_recovery_missing_provenance_426') = 0 THEN
-    IF pg_catalog.strpos(v_definition, v_old) = 0 THEN
-      RAISE EXCEPTION 'Deepline response recovery provenance preimage differs';
-    END IF;
-    v_definition := pg_catalog.replace(v_definition, v_old, $new$(
-          -- lab_arena_response_recovery_missing_guard_426
-          -- lab_arena_response_recovery_missing_provenance_426
-          v_head.terminal_response -> 'deepline_response_missing' = 'true'::JSONB
-          AND v_head.terminal_response ->> 'deepline_response_missing_reason' = 'transport_failure'
-          AND v_head.terminal_response ->> 'status' = '502'
-          AND v_head.terminal_response ->> 'body_b64'
-            = 'eyJlcnJvciI6eyJjb2RlIjoicHJvdmlkZXJfdW5hdmFpbGFibGUifX0=')$new$);
-    EXECUTE v_definition;
-  END IF;
-END;
-$response_provenance$;
 
 CREATE OR REPLACE FUNCTION public.lab_arena_deepline_response_schema_v1()
 RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER

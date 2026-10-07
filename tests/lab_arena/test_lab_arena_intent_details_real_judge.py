@@ -229,7 +229,7 @@ def _local_responder(
                 source_index, values = next(iter(
                     intent_details._bound_evidence_sources(review_document).items()
                 ))
-                quote = values[0][:intent_details._MAX_UNIT_EVIDENCE_QUOTE_LENGTH]
+                quote = values[0][:500]
                 unit_grounding = [
                     {
                         "unit_id": unit["unit_id"],

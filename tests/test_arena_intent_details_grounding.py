@@ -49,7 +49,7 @@ def _unit_grounding(document, *, facts_supported=True):
     source_index, values = next(iter(
         intent_details._bound_evidence_sources(document).items()
     ))
-    quote = values[0][:intent_details._MAX_UNIT_EVIDENCE_QUOTE_LENGTH]
+    quote = values[0][:500]
     return [
         {
             "unit_id": unit["unit_id"],
@@ -1091,7 +1091,7 @@ def test_levanta_shaped_contradicted_claim_reaches_factual_review(monkeypatch):
                 "evidence": [{
                     "source_index": source["source_index"],
                     "quote": source["admitted_text"][0][
-                        :intent_details._MAX_UNIT_EVIDENCE_QUOTE_LENGTH
+                        :500
                     ],
                 }],
             }]})
@@ -1117,7 +1117,7 @@ def test_levanta_shaped_contradicted_claim_reaches_factual_review(monkeypatch):
             "evidence": [{
                 "source_index": finding["evidence_source_indexes"][0],
                 "quote": finding_sources[0]["admitted_text"][0][
-                    :intent_details._MAX_UNIT_EVIDENCE_QUOTE_LENGTH
+                    :500
                 ],
             }],
         })

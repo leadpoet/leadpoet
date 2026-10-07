@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from lab_arena import capacity, contracts
-from lab_arena.service import ArenaService, DEFAULT_STAGE_MINUTES, ServiceError
+from lab_arena import capacity, contracts, scoring
+from lab_arena.service import ArenaService, DEFAULT_STAGE_MINUTES, RoundDefaults
 
 
 def configuration(*, runners=1, minutes=None, slots=8):
@@ -75,33 +75,6 @@ def test_baseline_first_60_minute_round_respects_current_proxy_capacity():
     assert capacity.daily_challenger_capacity(config) == 25
 
 
-def test_open_legacy_round_stops_new_hotkeys_without_eviction():
-    config = configuration(slots=251)
-    config.update(
-        round_id="arena-legacy-open", mode="live", network_name="finney",
-        netuid=71, max_challengers=256, stage_1_icp_count=5,
-        stage_2_icp_count=5, icp_wall_clock_seconds=3600,
-        execution_sequence_policy=contracts.BASELINE_SCORED_FIRST_POLICY,
-    )
-    rows = [
-        {"miner_hotkey": "accepted-miner", "status": "accepted", "is_king": False},
-        {"miner_hotkey": "uploading-miner", "status": "uploading", "is_king": False},
-        {"miner_hotkey": "baseline", "status": "accepted", "is_king": True},
-    ]
-    service = object.__new__(ArenaService)
-    service._config = SimpleNamespace(
-        mode="live", defaults=SimpleNamespace(runner_capacity_slots={"runner-0": 10}),
-    )
-    service._store = SimpleNamespace(list_submissions=lambda _round_id, **_kwargs: rows)
-    round_row = {"round_id": config["round_id"], "configuration_doc": config}
-    assert service._enforce_current_daily_intake_capacity(round_row, "accepted-miner") is None
-    assert service._enforce_current_daily_intake_capacity(round_row, "uploading-miner") is None
-    with pytest.raises(ServiceError, match="capacity.round_full"):
-        service._enforce_current_daily_intake_capacity(round_row, "new-miner")
-    rows.clear()
-    assert service._enforce_current_daily_intake_capacity(round_row, "new-miner") is None
-
-
 def test_zero_workers_and_overlapping_daily_budget_fail_closed():
     with pytest.raises(ValueError, match="runner capacity"):
         capacity.daily_challenger_capacity(configuration(runners=0))
@@ -158,3 +131,39 @@ def test_parallel_twenty_preserves_all_execution_and_both_scoring_retry_budgets(
     ):
         shorter = parallel_45_minute_configuration(**{phase: shorter_minutes})
         assert capacity.daily_challenger_capacity(shorter) == 4, phase
+
+
+@pytest.mark.parametrize("max_challengers", [7, 256])
+@pytest.mark.parametrize("slots", [1, 10, 251])
+def test_new_live_round_keeps_configured_admission_limit(max_challengers, slots, monkeypatch):
+    service = object.__new__(ArenaService)
+    digest = "sha256:" + "a" * 64
+    service._config = SimpleNamespace(
+        mode="live", network_name="finney", netuid=71,
+        defaults=RoundDefaults(
+            runner_hotkeys=("5" * 48,), baseline_hotkey="5" * 48,
+            max_challengers=max_challengers, runner_slot_ceiling=slots,
+            execution_sequence_from="2026-01-01T00:00:00Z",
+            scorer_image_digest=digest,
+            scorer_image_reference="registry.example/scorer@" + digest,
+        ),
+    )
+    service._scorer_policy = scoring.build_scorer_policy()
+    service.runner_settings = lambda: (["5" * 48], [])
+    service._require_round_ownership = lambda _round_id: None
+    stored = []
+    service._store = SimpleNamespace(
+        create_round=lambda _id, config: stored.append(config) or {"status": "created"},
+    )
+    monkeypatch.setattr(
+        capacity, "daily_challenger_capacity",
+        lambda *_args, **_kwargs: pytest.fail("admission used a workload estimate"),
+    )
+
+    config = service.create_round(datetime(2026, 10, 8, tzinfo=timezone.utc))
+
+    assert config["max_challengers"] == max_challengers
+    assert stored == [config]
+    assert config["runner_slot_ceiling"] == slots
+    assert config["max_attempts_per_assignment"] == 2
+    assert config["execution_sequence_policy"] == contracts.BASELINE_SCORED_FIRST_POLICY

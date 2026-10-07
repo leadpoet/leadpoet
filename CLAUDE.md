@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: configured submission ceiling
+
+The user authorized removing the redundant worst-case capacity admission guard
+so miners can submit until the configured ceiling or submission cutoff. Use
+$overnight-rebenchmark-validation for protected inspection, narrow source fixes,
+focused high-volume submission-to-publication tests, safe push/merge, canonical
+deployment and live QA including read-only Sentry and OnePatch inspection.
+Preserve atomic admission limits, same-hotkey replacement, duplicate protections,
+private source disclosure, validator eligibility, leases, frozen rounds, accepted
+work, costs, qualification, scoring, promotion, weights and concurrent changes.
+No new scheduler, deadline extension or frozen-round reset is authorized.
+Authority ends after the deployed submission and normal processing path is verified.
+
 ## Scoped production authorization: October 7 partial-round continuity
 
 The user authorized fixing Deepline terminal-error retry delays, conservative

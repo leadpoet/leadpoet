@@ -195,11 +195,10 @@ def test_64_miner_company_only_round_preserves_all_work_and_publishes(
     harness.service.config.defaults = replace(
         harness.service.config.defaults,
         benchmark_icp_count=10,
-        max_challengers=contracts.DEFAULT_MAX_CHALLENGERS,
+        max_challengers=64,
         # The synthetic 40-slot validators and stage windows can carry all
         # 64 challengers through full execution and scoring retries.
         runner_slot_ceiling=40,
-        runner_capacity_slots={hotkey: 40 for hotkey in harness.runner_keys},
         stage_minutes={
             "benchmark": 30, "stage_1": 61, "stage_1_scoring": 16,
             "stage_2": 976, "final_scoring": 260,

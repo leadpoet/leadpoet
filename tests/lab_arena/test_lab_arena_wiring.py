@@ -149,21 +149,6 @@ def test_daily_capacity_defaults_are_bounded(monkeypatch):
     assert wiring._max_challengers_from_environment() == 20
 
 
-def test_runner_capacity_slots_require_one_bounded_value_per_planned_runner(monkeypatch):
-    from lab_arena.service import ServiceError
-
-    monkeypatch.delenv("LAB_ARENA_RUNNER_CAPACITY_SLOTS", raising=False)
-    assert wiring._runner_capacity_slots_from_environment(("alpha",)) is None
-    monkeypatch.setenv("LAB_ARENA_RUNNER_CAPACITY_SLOTS", '{"alpha":10,"beta":0}')
-    assert wiring._runner_capacity_slots_from_environment(("alpha", "beta")) == {
-        "alpha": 10, "beta": 0,
-    }
-    for raw in ('{"alpha":true}', '{"alpha":252}', '{"other":10}', '[]'):
-        monkeypatch.setenv("LAB_ARENA_RUNNER_CAPACITY_SLOTS", raw)
-        with pytest.raises(ServiceError, match="RUNNER_CAPACITY_SLOTS"):
-            wiring._runner_capacity_slots_from_environment(("alpha",))
-
-
 def test_runner_wiring_keeps_proxy_inventory_but_uses_memory_supported_slots(
     monkeypatch, tmp_path
 ):

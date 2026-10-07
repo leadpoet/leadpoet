@@ -563,7 +563,8 @@ def test_submission_requires_the_full_half_open_time_window(moment):
         service.handle_submission_presign({})
 
 
-def test_submission_inside_the_window_registers_normally():
+@pytest.mark.parametrize("mode,max_challengers", [("shadow", 256), ("live", 256), ("live", 7)])
+def test_submission_inside_the_window_registers_normally(mode, max_challengers):
     documents = []
 
     class Store:
@@ -592,10 +593,14 @@ def test_submission_inside_the_window_registers_normally():
     service._store = Store()
     service._objects = Objects()
     service._clock = lambda: datetime(2026, 9, 2, 0, 30, tzinfo=timezone.utc)
-    service._config = SimpleNamespace(mode="shadow", chain=SimpleNamespace(uid_for_hotkey=lambda value: 1 if value == hotkey else None))
+    service._config = SimpleNamespace(mode=mode, chain=SimpleNamespace(uid_for_hotkey=lambda value: 1 if value == hotkey else None))
     service._request_round = lambda *_args, **_kwargs: (
         {"hotkey": hotkey, "body": {"source_size_bytes": 10, "consent": {"public_rerun": True}}},
-        {"round_id": "arena-2026-09-02", "status": "open", "configuration_doc": {"schedule": _schedule(), "baseline_hotkey": "5" + "Z" * 47}},
+        {"round_id": "arena-2026-09-02", "status": "open", "configuration_doc": {
+            "schedule": _schedule(), "baseline_hotkey": "5" + "Z" * 47,
+            "mode": mode, "network_name": "finney", "netuid": 71,
+            "runner_slot_ceiling": 251, "max_challengers": max_challengers,
+        }},
     )
     result = service.handle_submission_presign({})
     assert result["status"] == "upload_ready"

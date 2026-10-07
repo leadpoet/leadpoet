@@ -38,10 +38,11 @@ stake level. Existing signed transactions recover independently of new work.
 An exact signed-request retry can recover its already-issued lease after a
 stake-only drop, without allocating or extending work.
 
-`LAB_ARENA_RUNNER_HOTKEYS` is a conservative capacity plan, not an allowlist.
-New rounds count only eligible planned runners, without assuming all qualifying
-on-chain validators are online. Zero eligible planned capacity stops creation
-of a new round, but not processing existing rounds or publishing weight state.
+`LAB_ARENA_RUNNER_HOTKEYS` names planned validators, not an access allowlist.
+New rounds require at least one eligible planned validator. This check does
+not reduce the configured miner admission limit. Zero eligible planned
+validators stops creation of a new round, but not processing existing rounds
+or publishing weight state.
 Existing round configurations and admitted submissions are not rewritten.
 
 The validator pulls assigned miner source, runs the existing Arena ICP and

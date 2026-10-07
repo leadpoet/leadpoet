@@ -82,7 +82,7 @@ def test_miner_score_managed_firecrawl_enrichment_denial_is_request_refusal():
     assert result.call["error_code"] == "provider_request_refused"
     assert result.call["provider_status"] == 403
     assert result.call["actual_microusd"] == 0
-    assert result.call["cost_basis"] == "deepline_billing_history_failed_zero"
+    assert result.call["cost_basis"] == "deepline_exact_request_credits_x_0.10_usd"
     assert result.call["operation_id"] == "scrapingdog.scrape"
     assert result.call["effective_operation_id"] == "deepline.execute"
     assert marked == []
@@ -110,8 +110,8 @@ def test_miner_score_firecrawl_denial_without_verified_cost_stays_uncertain():
         action_sequence=0,
         timeout_ms=60_000,
     )
-    assert result.status == 502
-    assert result.call["error_code"] == "provider_unavailable"
+    assert result.status == 403
+    assert result.call["error_code"] == "provider_request_refused"
     assert result.call["outcome"] == "uncertain"
     assert "actual_microusd" not in result.call
     assert ledger.log == ["reserve", "dispatch", "uncertain"]
@@ -150,14 +150,20 @@ def test_miner_score_firecrawl_public_page_still_succeeds():
     assert len(transport.sent) == 1
 
 
-@pytest.mark.parametrize("status,owner,upstream_code", [
-    (401, "deepline_managed", "THIRD_PARTY_DATA_ENRICHMENT_NOT_ENABLED"),
-    (402, "deepline_managed", "THIRD_PARTY_DATA_ENRICHMENT_NOT_ENABLED"),
-    (403, "workspace", "THIRD_PARTY_DATA_ENRICHMENT_NOT_ENABLED"),
-    (403, "deepline_managed", "OTHER"),
-])
-def test_miner_score_firecrawl_account_denials_keep_credential_error(
-    status, owner, upstream_code
+@pytest.mark.parametrize(
+    "status,owner,upstream_code,expected_status,expected_error",
+    [
+        (401, "deepline_managed", "THIRD_PARTY_DATA_ENRICHMENT_NOT_ENABLED",
+         402, "miner_credentials_unavailable"),
+        (402, "deepline_managed", "THIRD_PARTY_DATA_ENRICHMENT_NOT_ENABLED",
+         402, "miner_credentials_unavailable"),
+        (403, "workspace", "THIRD_PARTY_DATA_ENRICHMENT_NOT_ENABLED",
+         402, "miner_credentials_unavailable"),
+        (403, "deepline_managed", "OTHER", 502, "provider_unavailable"),
+    ],
+)
+def test_miner_score_firecrawl_account_denials_preserve_account_ownership(
+    status, owner, upstream_code, expected_status, expected_error
 ):
     request_id = "iad1::firecrawl-account-denied"
     denial = firecrawl_enrichment_denial(request_id)
@@ -177,8 +183,8 @@ def test_miner_score_firecrawl_account_denials_keep_credential_error(
         action_sequence=0,
         timeout_ms=60_000,
     )
-    assert result.status == 402
-    assert result.call["error_code"] == "miner_credentials_unavailable"
+    assert result.status == expected_status
+    assert result.call["error_code"] == expected_error
     assert result.call["provider_status"] == status
 
 
@@ -692,7 +698,16 @@ def test_json_escaped_credential_echo_is_blocked_before_storage(operation_id, pa
     assert secret not in repr(call)
     replay = broker.execute(CONTEXT, **args)
     assert replay.status == 409 and json.loads(replay.body) == {"error": {"code": "call_uncertain"}}
-    assert len(transport.sent) == 1
+    if operation_id == "openrouter.chat":
+        assert [sent["method"] for sent in transport.sent] == ["POST"]
+    else:
+        # Recovery may read the existing execution by its safe key, never repost it.
+        assert [sent["method"] for sent in transport.sent] == ["POST", "GET", "GET"]
+        assert transport.sent[1]["url"].startswith(br.DEEPLINE_EXECUTION_BY_KEY_URL)
+        assert transport.sent[2]["url"] == transport.sent[1]["url"]
+    assert all(secret not in sent["url"] and secret.encode() not in sent["body"]
+               for sent in transport.sent)
+    assert secret not in repr(ledger.calls)
 
 
 def test_valid_json_escapes_without_a_credential_keep_the_response():

@@ -132,6 +132,21 @@ CURRENT_SERVICE_MIGRATIONS = POSTGREST_MIGRATIONS + (
     "402-lab-arena-restart-expired-zero-call-execute-drain.sql",
     "403-lab-arena-credit-failure-retry.sql",
     "405-lab-arena-submission-duplicates.sql",
+    # Current service polling uses exact Deepline recovery and its V2 list.
+    "264-lab-arena-codex-cost-reconciliation.sql",
+    "311-lab-arena-per-icp-closed-billing-reconciliation.sql",
+    "312-lab-arena-temporary-hold-admission.sql",
+    "314-lab-arena-openrouter-web-search-reservation.sql",
+    "319-lab-arena-quota-sourcing-cost.sql",
+    "321-lab-arena-confirmed-cost-admission.sql",
+    "407-lab-arena-cost-run-lookup.sql",
+    "408-lab-arena-cost-run-index.sql",
+    "411-lab-arena-settlement-success-json-once.sql",
+    "413-lab-arena-closed-openrouter-judge-billing.sql",
+    "415-lab-arena-deepline-budget-only-exact-recovery.sql",
+    "417-lab-arena-deepline-response-recovery.sql",
+    "425-lab-arena-successful-deepline-cost-priority.sql",
+    "426-lab-arena-deepline-response-missing-guard.sql",
 )
 
 

@@ -95,15 +95,16 @@ def test_only_exact_dispatched_deepline_uncertainty_is_retried(tmp_path, change)
     assert len(api.frames) == 1
 
 
-def test_paid_settled_lost_response_recovers_same_action(tmp_path):
+@pytest.mark.parametrize("amount", [0, 3000])
+def test_confirmed_settled_lost_response_recovers_same_action(tmp_path, amount):
     first = document(operation="scrapingdog.scrape")
     first["call"].update(
-        outcome="settled", actual_microusd=3000,
+        outcome="settled", actual_microusd=amount,
         transport_error_class="ReadTimeout", provider_status=502,
         deepline_response_missing=True,
     )
     recovered = document(200, operation="scrapingdog.scrape", recovered=True)
-    recovered["call"]["actual_microusd"] = 3000
+    recovered["call"]["actual_microusd"] = amount
     api = Api(first, recovered)
     host = worker(tmp_path, api)
 
@@ -119,19 +120,19 @@ def test_paid_settled_lost_response_recovers_same_action(tmp_path):
     assert host._state.calls == [recovered["call"]]
 
 
-@pytest.mark.parametrize("change", [
-    {"actual_microusd": 2000},
-    {"outcome": "uncertain", "actual_microusd": 3000},
-])
-def test_paid_recovery_cannot_change_confirmed_charge(tmp_path, change):
+@pytest.mark.parametrize("amount", [0, 3000])
+@pytest.mark.parametrize("change", ["amount", "uncertain"])
+def test_recovery_cannot_change_confirmed_charge(tmp_path, amount, change):
     first = document()
     first["call"].update(
-        outcome="settled", actual_microusd=3000,
+        outcome="settled", actual_microusd=amount,
         transport_error_class="ReadTimeout", provider_status=502,
         deepline_response_missing=True,
     )
     recovered = document(200)
-    recovered["call"].update(change)
+    recovered["call"]["actual_microusd"] = amount + 1 if change == "amount" else amount
+    if change == "uncertain":
+        recovered["call"]["outcome"] = "uncertain"
     api = Api(first, recovered)
     host = worker(tmp_path, api)
 
@@ -145,11 +146,15 @@ def test_paid_recovery_cannot_change_confirmed_charge(tmp_path, change):
     {"transport_error_class": None},
     {"transport_recovery": "deepline_execution_lookup"},
     {"actual_microusd": None},
-    {"actual_microusd": 0},
+    {"actual_microusd": -1},
+    {"actual_microusd": True},
+    {"actual_microusd": False},
+    {"actual_microusd": 0.0},
+    {"actual_microusd": "0"},
     {"provider_status": 403},
     {"error_code": "miner_credentials_unavailable"},
 ])
-def test_settled_provider_failure_without_paid_timeout_proof_is_terminal(tmp_path, change):
+def test_settled_provider_failure_without_confirmed_timeout_proof_is_terminal(tmp_path, change):
     first = document()
     first["call"].update(
         outcome="settled", actual_microusd=3000,
@@ -327,3 +332,17 @@ def test_native_frame_and_plain_http_clients_receive_recovered_data(tmp_path):
         assert status == 200 and headers[runner.SETTLED_MICROUSD_HEADER] == "2000"
         assert json.loads(body)["results"][0]["url"] == "https://example.com"
         assert len(api.frames) == 2 and host._state.action_sequence == 1
+
+
+@pytest.mark.parametrize("amount", [0, 3000])
+@pytest.mark.parametrize("status", [402, 403, 404, 422, 429, 500, 502])
+def test_confirmed_provider_error_without_transport_loss_is_terminal(tmp_path, amount, status):
+    initial = document(status)
+    initial["call"].update(outcome="settled", actual_microusd=amount,
+                           provider_status=status)
+    api = Api(initial)
+    host = worker(tmp_path, api)
+
+    assert host._dispatch_once("deepline.execute", PARAMETERS, 30_000)[1]["status"] == status
+    assert len(api.frames) == 1
+    assert host._state.calls == [initial["call"]]

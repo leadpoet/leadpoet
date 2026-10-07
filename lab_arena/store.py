@@ -1010,7 +1010,7 @@ class ArenaStore:
         value = _require_mapping(self._transport.rpc(
             "lab_arena_deepline_response_schema_v1", {}), "deepline_response_schema")
         if value != {"status": "ok", "schema_version":
-                     "leadpoet.lab_arena.deepline_response_schema.v1", "version": 417}:
+                     "leadpoet.lab_arena.deepline_response_schema.v1", "version": 426}:
             raise ArenaStoreError("deepline response recovery schema is incomplete")
         return value
 

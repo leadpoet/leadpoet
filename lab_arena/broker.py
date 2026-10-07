@@ -2516,10 +2516,18 @@ def _decode_terminal(
         "judgment_cache_source_run_id",
         "deepline_async_job_ids",
         "deepline_response_missing",
+        "deepline_response_missing_reason",
     }
     if not isinstance(document, Mapping) or not required <= set(document) <= allowed:
         raise BrokerError("broker_unavailable")
     if "deepline_response_missing" in document and document["deepline_response_missing"] is not True:
+        raise BrokerError("broker_unavailable")
+    if "deepline_response_missing_reason" in document and (
+        document["deepline_response_missing_reason"] != "transport_failure"
+        or document.get("deepline_response_missing") is not True
+        or document.get("status") != 502
+        or document.get("call_succeeded") is not False
+    ):
         raise BrokerError("broker_unavailable")
     async_ids = document.get("deepline_async_job_ids")
     if async_ids is not None and (
@@ -3394,13 +3402,54 @@ class Broker:
                     requested = {value.strip().casefold() for value in categories.split(",") if value.strip()}
                     rows = [row for row in rows if requested & {str(value).casefold() for value in row["categories"]}]
                 if operation.operation_id == "deepline.tools.search":
-                    query = str(parameters.get("query", "")).casefold()
-                    rows = [row for row in rows if query in (
-                        row["tool_id"] + " " + row["description"] + " " + " ".join(row["categories"])
-                    ).casefold()]
+                    # Deepline's SDK sends intent text, optional structured
+                    # terms and paging controls. Rank only the approved round
+                    # snapshot; never consult a live catalog or provider here.
+                    def words(value: str) -> set[str]:
+                        tokens = re.findall(r"[a-z0-9]+", value.casefold())
+                        return {token[:-3] + "y" if token.endswith("ies") and len(token) > 4
+                                else token for token in tokens}
+                    terms = words(str(parameters.get("query", "")) + " " +
+                                  str(parameters.get("search_terms", "")))
+                    task_terms = words(str(parameters.get("task", ""))) - {
+                        "and", "for", "from", "have", "need", "the", "this", "with"}
+
+                    def score(row: Mapping[str, Any]) -> int:
+                        fields = (
+                            (8, words(row["tool_id"] + " " + row["provider"])),
+                            (5, words(" ".join(row["categories"]))),
+                            (3, words(row["description"][:2048])),
+                            (1, words(" ".join(row["input_schema"]["properties"]))),
+                        )
+
+                        def weight(term: str) -> int:
+                            return max((value for value, candidates in fields
+                                        if any(term == word or len(term) >= 4 and
+                                               (word.startswith(term) or term.startswith(word))
+                                               for word in candidates)), default=0)
+
+                        relevance = sum(weight(term) for term in terms)
+                        if task_terms:
+                            relevance += sum(weight(term) for term in task_terms)
+                        return relevance
+
+                    ranked = [(score(row), row) for row in rows]
+                    rows = [row for relevance, row in sorted(
+                        ranked, key=lambda item: (-item[0], item[1]["tool_id"]))
+                        if relevance or not terms]
+                    total = len(rows)
+                    offset = int(parameters.get("offset", 0))
+                    limit = int(parameters.get("limit", 20))
+                    rows = rows[offset:offset + limit]
                 document = {"tools": [deepline_catalog.public_tool_definition(
                     row, compact=bool(parameters.get("compact", True))) for row in rows],
-                            "total": len(rows)}
+                            "total": total if operation.operation_id == "deepline.tools.search" else len(rows)}
+                if operation.operation_id == "deepline.tools.search":
+                    document.update({"count": len(rows), "offset": offset, "limit": limit,
+                                     "total_is_exact": True,
+                                     "search_mode": parameters.get("search_mode", "v2")})
+                    if offset + len(rows) < total:
+                        document["next_offset"] = offset + len(rows)
             body = json.dumps(document, separators=(",", ":"), allow_nan=False).encode("utf-8")
             if len(body) > operation.max_response_bytes:
                 return _error_result("provider_unavailable", summary)
@@ -4271,7 +4320,8 @@ class Broker:
                  or status == "settled" and (
                      reserved.get("deepline_response_missing") is True
                      or isinstance(terminal_document, Mapping)
-                        and terminal_document.get("deepline_response_missing") is True))
+                        and terminal_document.get("deepline_response_missing") is True
+                        and terminal_document.get("deepline_response_missing_reason") == "transport_failure"))
             and reserved.get("account_failure_evidence") is None
             and not _has_successful_terminal_response(terminal_document)):
             ledger_entries = self._store.list_ledger(call_identity=call_identity, limit=64)
@@ -4342,7 +4392,7 @@ class Broker:
                             headers=recovery_headers, body=recovery_outbound.body,
                             timeout_seconds=operation_timeout_seconds,
                             max_response_bytes=effective_operation.max_response_bytes)
-                            if deepline_catalog_entry is not None and route is None else None),
+                            if deepline_catalog_entry is not None or route is not None else None),
                     )
                     if deepline_recovery_response is not None:
                         deepline_response_recovery = True
@@ -4560,6 +4610,7 @@ class Broker:
         deepline_async_ids: Sequence[str] = ()
         deepline_async_poll_accepted = False
         deepline_request_failed = False
+        deepline_lost_response = False
         deepline_response_request_id: Optional[str] = None
         deepline_request_id: Optional[str] = request_accounting.get("deepline_request_id")
         deepline_execution_key: Optional[str] = request_accounting.get("deepline_execution_key")
@@ -4951,6 +5002,7 @@ class Broker:
                 if deepline_readback_cost is not None:
                     # A billed request with a lost result is still a failed
                     # provider call. Do not repeat the paid request.
+                    deepline_lost_response = True
                     response = ProviderResponse(
                         502, {"content-type": "application/json"},
                         operations.GENERIC_UNAVAILABLE_BODY,
@@ -5303,9 +5355,10 @@ class Broker:
                     else None
                 ),
             )
-            if (effective_operation.provider == "deepline"
-                and summary.get("transport_error_class") and not call_succeeded):
+            if deepline_lost_response:
                 terminal["deepline_response_missing"] = True
+                terminal["deepline_response_missing_reason"] = "transport_failure"
+                summary["deepline_response_missing"] = True
             if deepline_async_ids:
                 terminal["deepline_async_job_ids"] = list(deepline_async_ids)
             payload = dict(summary, outcome="settled", status=sanitized_status, provider_status=provider_status_for_summary, actual_microusd=actual, response_hash=contracts.hash_bytes(sanitized_body))

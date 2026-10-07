@@ -6,23 +6,25 @@ from pathlib import Path
 
 import pytest
 
-from lab_arena import broker as br
-from lab_arena.store import ArenaStoreError
+from lab_arena import broker as br, contracts, operations
+from lab_arena.store import ArenaStoreError, hash_lease_token
 from tests.lab_arena.deepline_completed_response_recovery_postgres_test import (
     frame, setup,
 )
-from tests.lab_arena.deepline_budget_only_exact_recovery_postgres_test import database as base_database
+from tests.lab_arena.deepline_budget_only_exact_recovery_postgres_test import database as base_database, reserve
 from tests.lab_arena.deepline_late_response_recovery_test import LateTransport
-from tests.lab_arena.deepline_completed_response_recovery_test import NATIVE, catalog
+from tests.lab_arena.deepline_completed_response_recovery_test import NATIVE, RecoveryTransport, catalog, record
+from tests.lab_arena.deepline_terminal_error_test import ErrorTransport, billing
+from tests.lab_arena.test_lab_arena_migration_postgres import sha
 
-MIGRATION = '417-lab-arena-deepline-response-recovery.sql'
+MIGRATION = '426-lab-arena-deepline-response-missing-guard.sql'
 
 
 @pytest.fixture(scope='module')
 def database(base_database):
     with base_database[0].connect(**base_database[1]) as connection, connection.cursor() as cur:
         for filename in ['365-lab-arena-trajectories.sql', '366-lab-arena-trajectory-capacity.sql',
-                         MIGRATION, MIGRATION]:
+                         '417-lab-arena-deepline-response-recovery.sql', MIGRATION, MIGRATION]:
             cur.execute((Path(__file__).parents[2] / 'scripts' / filename).read_text())
     return base_database
 
@@ -92,7 +94,7 @@ def test_matching_running_key_is_resumed_once_by_gateway(database, tmp_path, mon
     result = deliver(h, lease, token)
     assert result['status'] == 200 and transport.paid == 1
     assert sum(r['method'] == 'POST' for r in transport.requests) == 2
-    h.service.store.deepline_response_schema()
+    assert h.service.store.deepline_response_schema()['version'] == 426
     assert h.service.store.deepline_catalog_schema()['version'] == 415
 
 
@@ -140,6 +142,177 @@ def test_concurrent_same_result_rpc_preserves_one_response_and_charge(database, 
         assert cur.fetchone() == (False, False)
         with pytest.raises(Exception):
             cur.execute("UPDATE public.lab_arena_deepline_call_responses SET request_id='rewrite' WHERE call_identity=%s", (first['call']['call_identity'],))
+
+
+def test_response_rpc_cannot_replace_existing_settled_success(database, tmp_path):
+    transport = RecoveryTransport(lost_error=br.ProviderTransportError(
+        'ReadTimeout', observed_status=200,
+        deepline_job_id='iad1::trace-1791330233666-aeb0e7021ee6'))
+    h, lease, token, connect, broker = setup(database, tmp_path, '18', transport)
+    first = deliver(h, lease, token)
+    assert first['status'] == 200 and first['call']['outcome'] == 'settled'
+    arguments = recover_arguments(h, lease, first, broker, connect)
+    with connect() as connection, connection.cursor() as cur:
+        cur.execute("SELECT terminal_response FROM public.lab_arena_ledger WHERE call_identity=%s AND entry_kind='settlement'", (first['call']['call_identity'],))
+        original = cur.fetchone()[0]
+    assert arguments['terminal_response']['body_b64'] != original['body_b64']
+    assert h.service.store.recover_deepline_response(**arguments)['status'] == 'conflict'
+    with connect() as connection, connection.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM public.lab_arena_deepline_call_responses WHERE call_identity=%s", (first['call']['call_identity'],))
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT terminal_response FROM public.lab_arena_ledger WHERE call_identity=%s AND entry_kind='settlement'", (first['call']['call_identity'],))
+        assert cur.fetchone()[0] == original
+
+
+def test_legacy_paid_timeout_without_provenance_cannot_attach_response(database, tmp_path, monkeypatch):
+    monkeypatch.setattr(br, '_DEEPLINE_BILLING_MAX_ATTEMPTS', 1)
+    transport = LateTransport(bill=True)
+    h, lease, token, connect, broker = setup(database, tmp_path, '19', transport)
+    settle = h.service.store.settle_call
+    def legacy_settle(**arguments):
+        arguments['terminal_response'] = dict(arguments['terminal_response'])
+        arguments['terminal_response'].pop('deepline_response_missing_reason', None)
+        return settle(**arguments)
+    monkeypatch.setattr(h.service.store, 'settle_call', legacy_settle)
+    first = deliver(h, lease, token)
+    assert first['status'] == 502 and first['call']['outcome'] == 'settled'
+    with connect() as connection, connection.cursor() as cur:
+        cur.execute("SELECT amount_microusd,terminal_response FROM public.lab_arena_ledger WHERE call_identity=%s AND entry_kind='settlement'", (first['call']['call_identity'],))
+        amount, original = cur.fetchone()
+    assert amount == 2000 and original['deepline_response_missing'] is True
+    assert original['status'] == 502
+    assert base64.b64decode(original['body_b64']) == b'{"error":{"code":"provider_unavailable"}}'
+    assert original['provider_cost']['basis'] == 'deepline_exact_request_credits_x_0.10_usd'
+    arguments = recover_arguments(h, lease, first, broker, connect)
+    assert h.service.store.recover_deepline_response(**arguments)['status'] == 'conflict'
+    assert transport.paid == 1
+    with connect() as connection, connection.cursor() as cur:
+        cur.execute("SELECT amount_microusd,terminal_response FROM public.lab_arena_ledger WHERE call_identity=%s AND entry_kind='settlement'", (first['call']['call_identity'],))
+        assert cur.fetchone() == (amount, original)
+        cur.execute("SELECT COUNT(*) FROM public.lab_arena_deepline_call_responses WHERE call_identity=%s", (first['call']['call_identity'],))
+        assert cur.fetchone()[0] == 0
+
+
+def test_proven_lost_body_settlement_can_recover_once(database, tmp_path):
+    h, lease, token, connect, broker = setup(database, tmp_path, '25', LateTransport())
+    label = 'proven-lost-body'
+    request_hash = sha(label)
+    identity = contracts.provider_call_identity(
+        attempt=lease['attempt'], assignment_id=lease['assignment_id'],
+        icp_position=lease['icp_position'], action_sequence=0,
+        operation_id='deepline.execute', request_hash=request_hash)
+    execution_key = 'arena:' + identity[7:]
+    fingerprint = 'sha256:' + 'a' * 64
+    local_id = 'ctx-tool-' + identity[7:39]
+    saved_identity, reservation = reserve(h, lease, token, label, doc={
+        'deepline_request_id': local_id, 'deepline_execution_key': execution_key,
+        'credential_fingerprint': fingerprint, 'tool': 'parallel_search',
+    })
+    assert saved_identity == identity and reservation['status'] == 'reserved'
+    store = h.service.store
+    lease_hash = hash_lease_token(token)
+    assert store.mark_dispatched(run_id=lease['run_id'], lease_token_hash=lease_hash,
+                                 call_identity=identity)['status'] == 'dispatched'
+    cost = {'basis': 'deepline_exact_request_credits_x_0.10_usd', 'units': '0.02',
+            'unit_name': 'credits', 'operation': 'parallel_search', 'request_id': NATIVE}
+    placeholder = br._terminal_response_document(502, {'content-type': 'application/json'},
+        operations.GENERIC_UNAVAILABLE_BODY, call_succeeded=False, provider_cost=cost)
+    placeholder.update(deepline_response_missing=True,
+                       deepline_response_missing_reason='transport_failure')
+    assert store.settle_call(run_id=lease['run_id'], lease_token_hash=lease_hash,
+        call_identity=identity, actual_microusd=2000,
+        terminal_response=placeholder)['status'] == 'settled'
+    recovered = br._terminal_response_document(200, {'content-type': 'application/json'},
+        b'{"result":"recovered"}', call_succeeded=True, provider_cost=cost)
+    arguments = dict(run_id=lease['run_id'], lease_token_hash=lease_hash,
+        call_identity=identity, request_hash=request_hash, execution_key=execution_key,
+        credential_fingerprint=fingerprint, request_id=NATIVE,
+        operation='parallel_search', actual_microusd=2000,
+        terminal_response=recovered, lease_ttl_seconds=420)
+    assert store.recover_deepline_response(**arguments)['status'] == 'settled'
+    assert store.recover_deepline_response(**arguments)['status'] == 'settled'
+    with connect() as connection, connection.cursor() as cur:
+        cur.execute("SELECT terminal_response FROM public.lab_arena_ledger WHERE call_identity=%s AND entry_kind='settlement'", (identity,))
+        assert cur.fetchone()[0] == placeholder
+        cur.execute("SELECT COUNT(*) FROM public.lab_arena_deepline_call_responses WHERE call_identity=%s", (identity,))
+        assert cur.fetchone()[0] == 1
+
+
+def test_existing_overlay_replay_requires_exact_response(database, tmp_path, monkeypatch):
+    monkeypatch.setattr(br, '_DEEPLINE_BILLING_MAX_ATTEMPTS', 1)
+    h, lease, token, connect, broker = setup(database, tmp_path, '20', LateTransport())
+    first = deliver(h, lease, token)
+    arguments = recover_arguments(h, lease, first, broker, connect)
+    saved = h.service.store.recover_deepline_response(**arguments)
+    assert saved['status'] == 'settled'
+    assert h.service.store.recover_deepline_response(**arguments)['status'] == 'settled'
+    altered = dict(arguments, terminal_response=dict(arguments['terminal_response'], body_b64='e30='))
+    assert h.service.store.recover_deepline_response(**altered)['status'] == 'conflict'
+    with connect() as connection, connection.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM public.lab_arena_deepline_call_responses WHERE call_identity=%s", (first['call']['call_identity'],))
+        assert cur.fetchone()[0] == 1
+        cur.execute("SELECT COUNT(*) FROM public.lab_arena_ledger WHERE call_identity=%s AND entry_kind='settlement'", (first['call']['call_identity'],))
+        assert cur.fetchone()[0] == 1
+
+
+def test_saved_provider_error_cannot_be_recovered_as_success(database, tmp_path, monkeypatch):
+    monkeypatch.setattr(br, '_DEEPLINE_BILLING_MAX_ATTEMPTS', 1)
+    h, lease, token, connect, broker = setup(database, tmp_path, '21', ErrorTransport(422))
+    first = deliver(h, lease, token)
+    assert first['status'] == 422 and first['call']['outcome'] == 'uncertain'
+    arguments = recover_arguments(h, lease, first, broker, connect)
+    assert h.service.store.recover_deepline_response(**arguments)['status'] == 'conflict'
+    with connect() as connection, connection.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM public.lab_arena_deepline_call_responses WHERE call_identity=%s", (first['call']['call_identity'],))
+        assert cur.fetchone()[0] == 0
+
+
+def test_billed_provider_error_still_cannot_be_recovered_as_success(database, tmp_path, monkeypatch):
+    monkeypatch.setattr(br, '_DEEPLINE_BILLING_MAX_ATTEMPTS', 1)
+    transport = ErrorTransport(422)
+    h, lease, token, connect, broker = setup(database, tmp_path, '22', transport)
+    first = deliver(h, lease, token)
+    assert first['status'] == 422 and first['call']['outcome'] == 'uncertain'
+    candidates = h.service.store.list_deepline_cost_reconciliations(h.round_id, run_id=lease['run_id'])
+    transport.bill = billing(credits='0.02')
+    transport.bill['recent']['entries'][0].update(provider='parallel', operation='parallel_search')
+    assert broker.reconcile_deepline_cost(candidates[0])['status'] == 'settled'
+    arguments = recover_arguments(h, lease, first, broker, connect)
+    arguments['request_id'] = candidates[0]['request_id']
+    arguments['terminal_response']['provider_cost']['request_id'] = candidates[0]['request_id']
+    assert h.service.store.recover_deepline_response(**arguments)['status'] == 'conflict'
+    with connect() as connection, connection.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM public.lab_arena_deepline_call_responses WHERE call_identity=%s", (first['call']['call_identity'],))
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT COUNT(*) FROM public.lab_arena_ledger WHERE call_identity=%s AND entry_kind='settlement'", (first['call']['call_identity'],))
+        assert cur.fetchone()[0] == 1
+
+
+@pytest.mark.parametrize('status', [422, 502])
+def test_old_broker_false_missing_marker_does_not_replace_terminal_error(database, tmp_path, monkeypatch, status):
+    saved = record()
+    saved['responseStatus'] = status
+    transport = RecoveryTransport(saved, lost_error=br.ProviderTransportError('ReadTimeout'))
+    h, lease, token, connect, broker = setup(database, tmp_path, '23' if status == 422 else '24', transport)
+    settle = h.service.store.settle_call
+    def legacy_settle(**arguments):
+        arguments['terminal_response'] = dict(arguments['terminal_response'])
+        arguments['terminal_response']['deepline_response_missing'] = True
+        arguments['terminal_response'].pop('deepline_response_missing_reason', None)
+        return settle(**arguments)
+    monkeypatch.setattr(h.service.store, 'settle_call', legacy_settle)
+    first = deliver(h, lease, token)
+    assert first['status'] == status and first['call']['outcome'] == 'settled'
+    arguments = recover_arguments(h, lease, first, broker, connect)
+    with connect() as connection, connection.cursor() as cur:
+        cur.execute("SELECT terminal_response FROM public.lab_arena_ledger WHERE call_identity=%s AND entry_kind='settlement'", (first['call']['call_identity'],))
+        original = cur.fetchone()[0]
+    assert original['deepline_response_missing'] is True  # Old broker carried the transport error into a real reply.
+    assert original['status'] == status
+    assert h.service.store.recover_deepline_response(**arguments)['status'] == 'conflict'
+    with connect() as connection, connection.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM public.lab_arena_deepline_call_responses WHERE call_identity=%s", (first['call']['call_identity'],))
+        assert cur.fetchone()[0] == 0
 
 
 def test_saved_unpriced_success_then_background_bill_has_exact_successful_spend(database, tmp_path, monkeypatch):

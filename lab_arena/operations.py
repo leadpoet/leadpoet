@@ -1197,8 +1197,14 @@ _CATALOG_OPERATION_LIST = (
         operation_id="deepline.tools.search",
         provider="deepline", method="GET", host="code.deepline.com",
         path="/api/v2/tools/search", parameter_location="query",
-        request_fields={"query": FieldSpec("str", required=True, min_length=1, max_length=512),
-                        "compact": FieldSpec("bool"), "categories": FieldSpec("str", max_length=512)},
+        request_fields={"query": FieldSpec("str", max_length=512),
+                        "compact": FieldSpec("bool"), "categories": FieldSpec("str", max_length=512),
+                        "search_terms": FieldSpec("str", max_length=512),
+                        "task": FieldSpec("str", max_length=1024),
+                        "limit": FieldSpec("int", minimum=1, maximum=50),
+                        "offset": FieldSpec("int", minimum=0),
+                        "search_mode": FieldSpec("str", choices=("v1", "v2")),
+                        "include_search_debug": FieldSpec("bool")},
         fixed_params={}, defaults={"compact": True}, timeout_seconds=5,
         max_request_bytes=4096, max_response_bytes=8_388_608,
         cost_rule=CALL_QUOTA_COST_RULE, response_sanitizer="json",
@@ -1549,6 +1555,15 @@ def validate_operation_request(operation_id: str, parameters: Any, *, deepline_c
     for name, default in operation.defaults.items():
         if name not in normalized:
             normalized[name] = _deep_copy_json(default)
+    if operation_id == "deepline.tools.search":
+        # The SDK sends q="" for category/term-only discovery. Keep empty
+        # filters invalid and require at least one useful discovery input.
+        if any(name in normalized and not normalized[name].strip()
+               for name in ("categories", "search_terms", "task")):
+            raise OperationRequestError("invalid_field")
+        if not any(normalized.get(name, "").strip()
+                   for name in ("query", "categories", "search_terms")):
+            raise OperationRequestError("invalid_field")
     if operation_id == "openrouter.responses":
         _validate_responses(normalized)
     if operation.deepline_tool and deepline_catalog is not None:

@@ -79,14 +79,81 @@ def test_timeout_key_is_durable_before_dispatch_and_cost_is_exact_once():
     assert first.call["outcome"] == "settled"
     assert first.status == 502  # A lost result remains a failed call even with a known charge.
     assert first.call["actual_microusd"] == 3_000
+    assert first.call["deepline_response_missing"] is True
     assert [request["method"] for request in transport.sent] == ["POST", "GET", "GET", "GET"]
     call = store.calls[first.call["call_identity"]]
     assert call["terminal"]["provider_cost"]["request_id"] == NATIVE_REQUEST_ID
+    assert call["terminal"]["deepline_response_missing"] is True
     assert transport.execution_key not in json.dumps(first.to_document())
     second = execute(broker)
     assert second.call["idempotent"] is True
     assert len(transport.sent) == 5 and transport.sent[-1]["method"] == "GET"
     assert store.openrouter_capacity == 49_942_650
+
+
+def test_worker_recovers_paid_timeout_from_gateway_under_same_action(tmp_path):
+    from lab_arena import runner, shim
+    from tests.lab_arena.deepline_late_response_recovery_test import ResponseStore
+    from tests.lab_arena.test_lab_arena_runner import lease
+
+    class LateSavedResponse(RecoveryTransport):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.key_reads = 0
+
+        def send(self, **request):
+            response = super().send(**request)
+            if '/executions/by-key/' not in request['url']:
+                return response
+            self.key_reads += 1
+            if self.key_reads < 3:
+                return response
+            saved = json.loads(response.body)
+            saved.update(responseStatus=200, response={
+                'job_id': NATIVE_REQUEST_ID, 'status': 'completed',
+                'billing': {'credits_charged': 0.03},
+                'result': {'data': {
+                    'rawHtml': '<html>Recovered paid page</html>',
+                    'metadata': {'url': 'https://example.com/about',
+                                 'sourceURL': 'https://example.com/about',
+                                 'statusCode': 200},
+                }},
+            })
+            return br.ProviderResponse(response.status, response.headers,
+                                       json.dumps(saved).encode())
+
+    store = ResponseStore()
+    transport = LateSavedResponse(store=store)
+    broker, _, _ = make_broker(
+        store=store, transport=transport,
+        credential_for=lambda _context, _provider: DL_KEY,
+        funding_source_for=lambda _context: 'miner_key',
+    )
+
+    class GatewayApi:
+        def __init__(self):
+            self.frames = []
+
+        def provider(self, _run_id, _lease_token, frame):
+            self.frames.append(dict(frame))
+            return broker.execute(_score_context(), **frame).to_document()
+
+    api = GatewayApi()
+    state = runner.RunState(lease=lease('paid-timeout'), lease_token='token')
+    worker = runner.WorkerSocketServer(tmp_path / 'worker.sock', api, state)
+    payload = shim.build_operation_frame('scrapingdog.scrape',
+        {'url': 'https://example.com/about'}, 30_000)
+    response = json.loads(worker.handle_frame(payload))
+    status, headers, body = shim.parse_worker_response(response)
+
+    assert status == 200 and b'Recovered paid page' in body
+    assert state.calls[0]['actual_microusd'] == 3000
+    assert [frame['action_sequence'] for frame in api.frames] == [0, 0]
+    assert api.frames[0] == api.frames[1]
+    assert len(state.calls) == 1 and state.calls[0]['outcome'] == 'settled'
+    assert transport.key_reads == 3
+    assert sum(item['method'] == 'POST' for item in transport.sent) == 1
+    assert store.log.count('dispatch') == 1
 
 
 def test_completed_response_without_bill_uses_only_its_exact_id():

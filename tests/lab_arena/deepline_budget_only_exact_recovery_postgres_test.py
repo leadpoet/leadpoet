@@ -41,6 +41,9 @@ def database():
             MIGRATION,
             "417-lab-arena-deepline-response-recovery.sql",
             "417-lab-arena-deepline-response-recovery.sql",
+            "425-lab-arena-successful-deepline-cost-priority.sql",
+            "426-lab-arena-deepline-response-missing-guard.sql",
+            "426-lab-arena-deepline-response-missing-guard.sql",
         )
     )
 

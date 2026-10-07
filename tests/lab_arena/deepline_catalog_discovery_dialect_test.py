@@ -140,7 +140,7 @@ def test_search_accepts_current_sdk_query_and_structured_discovery():
     "", "q=", "q=" + "a" * 513, "q=one&q=two", "q=one&query=two",
     "q=company&unknown=true", "q=company&compact=maybe", "q=company&categories",
     "q=company&limit=0", "q=company&limit=51", "q=company&offset=-1",
-    "q=company&offset=4097", "q=company&search_mode=other",
+    "q=company&search_mode=other",
     "q=company&include_search_debug=maybe", "q=&task=Find+companies",
     "q=company&search_terms=", "q=company&limit=1&limit=2",
 ])
@@ -236,3 +236,5 @@ def test_search_ranks_split_intent_and_pages_only_frozen_safe_tools():
     assert search("q=company")["limit"] == 20
     last = search("q=company&offset=3&limit=1")
     assert last["tools"] == [] and last["count"] == 0 and "next_offset" not in last
+    beyond = search("q=company&offset=4097&limit=1")
+    assert beyond["tools"] == [] and beyond["total"] == 3

@@ -462,7 +462,7 @@ def test_pending_deepline_accounting_does_not_stop_other_round_progress():
     service._store = SimpleNamespace(operator_hold_active=lambda: False)
     service._invalidate_hot_round = lambda: None
     service._round = lambda _round_id: {"status": "stage1_scoring"}
-    service._reconcile_deepline_cost = lambda _round_id: {
+    service._reconcile_active_deepline_cost = lambda _round_id: {
         "status": "pending",
         "run_status": "leased",
     }

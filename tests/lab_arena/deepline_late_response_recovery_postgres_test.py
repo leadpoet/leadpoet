@@ -196,7 +196,7 @@ def test_worker_socket_to_gateway_and_real_ledger_recovers_original_action(datab
             self.frames.append(dict(document))
             return h.service.handle_provider(run_id, lease_token, document)
     api = GatewayApi()
-    path = Path('/private/tmp') / ('deepline-worker-' + uuid.uuid4().hex + '.sock')
+    path = Path('/tmp') / ('deepline-worker-' + uuid.uuid4().hex + '.sock')
     state = runner.RunState(lease=dict(lease, deepline_catalog=catalog()), lease_token=token)
     worker = runner.WorkerSocketServer(path, api, state)
     worker.start()

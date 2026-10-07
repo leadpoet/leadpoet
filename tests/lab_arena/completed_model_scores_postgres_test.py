@@ -22,6 +22,8 @@ def database():
 
 def test_completed_scores_and_diagnostics_precede_round_publication(database, tmp_path, monkeypatch):
     psycopg2, dsn = database
+    # This database must not reuse immutable scores from another test round.
+    monkeypatch.setattr(IntegrityHarness, "objects_key", lambda self: "completed-scores-" + self.tmp.name)
     harness = IntegrityHarness(lambda: psycopg2.connect(**dsn), tmp_path,
                                challengers=["Best", "Weak"], runners=["alpha", "beta"])
     harness.service.config.defaults = replace(

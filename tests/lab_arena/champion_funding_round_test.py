@@ -13,6 +13,7 @@ import threading
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 
@@ -84,6 +85,7 @@ class ChampionTransport(FakeProviderTransport):
         self.failure_count = 0
         self.sent = []
         self.infrastructure_failure = ""
+        self._deepline_request_authorizations = {}
 
     def arm_account_failure(self, status: int) -> None:
         self.failure_status = int(status)
@@ -96,6 +98,24 @@ class ChampionTransport(FakeProviderTransport):
     def send(self, *, method, url, headers, body, timeout_seconds, max_response_bytes=None):
         authorization = str(headers.get("authorization") or headers.get("Authorization") or "")
         self.sent.append((method, url, authorization))
+        if method == "GET" and url.startswith(br.DEEPLINE_EXACT_BILLING_URL):
+            request_id = parse_qs(urlsplit(url).query)["request_id"][0]
+            with self._deepline_lock:
+                entries = [row for row in self._deepline_jobs if row["request_id"] == request_id]
+                if entries:
+                    assert authorization == self._deepline_request_authorizations[request_id]
+            return br.ProviderResponse(200, {"content-type": "application/json"}, json.dumps({
+                "recent": {"request_id": request_id, "entries": entries},
+            }).encode())
+        if method == "GET" and url.startswith(br.DEEPLINE_EXECUTION_BY_KEY_URL):
+            execution_key = unquote(url[len(br.DEEPLINE_EXECUTION_BY_KEY_URL):])
+            with self._deepline_lock:
+                execution = self._deepline_executions.get(execution_key)
+                if execution:
+                    assert authorization == self._deepline_request_authorizations[execution["requestId"]]
+            return br.ProviderResponse(200 if execution else 404, {
+                "content-type": "application/json", "x-deepline-idempotency-supported": "true",
+            }, json.dumps(execution or {}).encode())
         if method == "GET" and url.startswith(br.DEEPLINE_BILLING_HISTORY_URL):
             with self._deepline_lock:
                 entries = list(reversed(self._deepline_jobs[-50:]))
@@ -125,6 +145,7 @@ class ChampionTransport(FakeProviderTransport):
                 b'{"error":"synthetic provider failure"}',
             )
         query = json.dumps(request.get("payload") or {}, sort_keys=True)
+        response_status = 200
         if (
             self.failure_status
             and authorization == "Bearer " + self.champion_key
@@ -132,34 +153,41 @@ class ChampionTransport(FakeProviderTransport):
             and self.failure_count < br.CHAMPION_CREDENTIAL_PROVIDER_ATTEMPTS
         ):
             self.failure_count += 1
-            return br.ProviderResponse(
-                self.failure_status,
-                {"content-type": "application/json"},
-                json.dumps({"error": "champion account unavailable"}).encode(),
-            )
+            response_status = self.failure_status
         assert method == "POST"
         operation = request["operation"]
         with self._deepline_lock:
             job_id = "champion-deepline-job-%d" % (len(self._deepline_jobs) + 1)
+            self._deepline_request_authorizations[job_id] = authorization
             self._deepline_jobs.append(
                 {
+                    "id": "usage-" + job_id,
                     "request_id": job_id,
                     "operation": operation,
-                    "provider": "fake",
+                    "provider": request["provider"],
                     "credits": 0,
+                    "delta": 0,
                     "charge_state": "posted",
+                    "charge_finality": "final",
+                    "billing_mode": "deduct_on_settle",
+                    "metadata": {},
                 }
             )
-        return br.ProviderResponse(
-            200,
-            {"content-type": "application/json"},
-            json.dumps(
-                {
-                    "job_id": job_id,
-                    "results": [{"url": "https://co1.example.com", "title": "Co"}],
-                    "status": "completed",
+            execution_key = headers.get("idempotency-key")
+            if execution_key is not None:
+                self._deepline_executions[execution_key] = {
+                    "requestId": job_id, "toolId": operation,
+                    "executionRecovery": {"idempotencyKey": execution_key, "state": "completed"},
                 }
-            ).encode(),
+        document = {"job_id": job_id, "status": "completed"}
+        if response_status == 200:
+            document["results"] = [{"url": "https://co1.example.com", "title": "Co"}]
+        else:
+            document["error"] = "champion account unavailable"
+        return br.ProviderResponse(
+            response_status,
+            {"content-type": "application/json"},
+            json.dumps(document).encode(),
         )
 
 
@@ -414,10 +442,10 @@ def test_champion_funding_survives_rounds_restart_and_source_edits(
     failed_attempt = min(failed, key=lambda run: run["attempt"])
     assert failed_attempt["status"] == "failed"
     assert failed_attempt["champion_restart_required"] is True
-    # Deepline cannot report the exact cost of a refused request. The initial
-    # refusal keeps the full reservation uncertain. The durable latch below
-    # can only follow the bounded initial broker attempt plus three retries.
-    assert harness.provider_transport.failure_count == 1
+    # Each refusal has an exact final zero-charge receipt. Only that proof
+    # allows the bounded initial attempt plus three retries before switching
+    # credentials; an unresolved charge must not authorize another dispatch.
+    assert harness.provider_transport.failure_count == br.CHAMPION_CREDENTIAL_PROVIDER_ATTEMPTS
     connection = champion_connect()
     try:
         with connection.cursor() as cursor:
@@ -431,7 +459,8 @@ def test_champion_funding_survives_rounds_restart_and_source_edits(
             provider_attempts = [row[0] for row in cursor.fetchall()]
     finally:
         connection.close()
-    assert provider_attempts == ["1"]
+    assert provider_attempts == ["1", "2", "3", "4"]
+    # The worker made one action; its four provider attempts are ledger entries.
     assert failed_attempt["result_doc"]["resource_summary"]["provider_call_count"] == 1
     assert harness.service.store.get_round(harness.round_id)["champion_fallback_providers"] == ["deepline"]
 

@@ -14,6 +14,7 @@ from tests.lab_arena.baseline_cost_zero_round_test import _accepted_state
 from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
+    migrations_before,
 )
 from tests.lab_arena.parallel_twenty_icp_execution_postgres_test import (
     _verified_test_pool,
@@ -23,13 +24,29 @@ from tests.lab_arena.test_integrity_round import IntegrityHarness
 
 @pytest.fixture()
 def database():
+    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+
+
+@pytest.fixture()
+def baseline_first_database():
+    migration = "347-lab-arena-baseline-scored-first.sql"
     yield from database_with_lab_arena_migration(
-        CURRENT_SERVICE_MIGRATIONS
-        + (
-            "289-lab-arena-per-icp-cost-policy.sql",
-            "292-lab-arena-null-final-score-publication.sql",
-        )
+        migrations_before(migration) + (migration,)
     )
+
+
+def test_baseline_first_migration_replays_at_its_schema_version(
+    baseline_first_database,
+):
+    # Later migrations intentionally replace the fixed position guards. Replay
+    # belongs at this migration's schema version; the round test uses current SQL.
+    psycopg2, dsn = baseline_first_database
+    migration = Path("scripts/347-lab-arena-baseline-scored-first.sql").read_text()
+    with psycopg2.connect(**dsn) as connection:
+        connection.autocommit = True
+        with connection.cursor() as cursor:
+            cursor.execute(migration)
+            cursor.execute(migration)
 
 
 def _baseline_first_judge(companies, icp, reference):
@@ -84,15 +101,6 @@ def test_baseline_is_fully_scored_before_five_miners_execute_and_publish(
         rewards_enabled=True,
     )
     _enable_verified_proxy_runtime(harness)
-
-    # The runtime migration is safe to replay after it has already patched
-    # the installed integrity, scoring, and transition functions.
-    migration = Path("scripts/347-lab-arena-baseline-scored-first.sql").read_text()
-    with connect() as connection:
-        connection.autocommit = True
-        with connection.cursor() as cursor:
-            cursor.execute(migration)
-            cursor.execute(migration)
 
     monkeypatch.setattr(fixtures, "deterministic_scorer", _baseline_first_judge)
     participants = fixtures._start_round(harness, day=31, epoch=62_031)

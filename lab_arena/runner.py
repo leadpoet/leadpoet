@@ -42,7 +42,7 @@ import httpx
 
 from lab_arena import integrity, contact_policy, intent_details_policy, quality_policy
 from lab_arena import trajectory
-from lab_arena import contracts, images, lab_arena_checkpoint, leased_images, operations, runtime, scoring, shim, source_bundle
+from lab_arena import contracts, images, lab_arena_checkpoint, leased_images, operations, runtime, runtime_version, scoring, shim, source_bundle
 from lab_arena.contracts import ArenaContractError
 from lab_arena.output import (
     OutputInvalid,
@@ -3050,6 +3050,32 @@ def _record_cleanup_failure(
     _record_trajectory(config, lease, lease_token, [event])
 
 
+def _runtime_source_metadata(lease: Mapping[str, Any]) -> Dict[str, str]:
+    """Small informational fields shared by start events and completions."""
+
+    return {
+        **runtime_version.SOURCE_METADATA,
+        "gateway_claim_source_commit": runtime_version.commit_or_unknown(
+            lease.get("gateway_source_commit")
+        ),
+    }
+
+
+def _runtime_started_content(
+    lease: Mapping[str, Any], *, wall_clock_limit_seconds: Optional[int] = None,
+) -> Dict[str, Any]:
+    content: Dict[str, Any] = {
+        "status": "starting",
+        "runtime": "runsc",
+        **_runtime_source_metadata(lease),
+    }
+    if wall_clock_limit_seconds is not None:
+        content["wall_clock_limit_seconds"] = wall_clock_limit_seconds
+    if lease.get("kind") == "score" and isinstance(lease.get("image_reference"), str):
+        content["scorer_image_reference"] = lease["image_reference"]
+    return content
+
+
 class AssignmentExecutor:
     def __init__(self, config: RunnerConfig) -> None:
         self._config = config
@@ -3127,7 +3153,7 @@ class AssignmentExecutor:
             try:
                 _record_trajectory(config, lease, lease_token, [trajectory.event(
                     "runtime.started",
-                    {"status": "starting", "runtime": "runsc"},
+                    _runtime_started_content(lease),
                     occurred_at=started_at,
                 )])
             except Exception as observation_exc:
@@ -3176,8 +3202,9 @@ class AssignmentExecutor:
         evaluation_date = str(lease.get("evaluation_date") or config.evaluation_date)
         try:
             _record_trajectory(config, lease, lease_token, [trajectory.event(
-                "runtime.started", {"status": "starting", "runtime": "runsc",
-                                    "wall_clock_limit_seconds": wall_clock_seconds},
+                "runtime.started", _runtime_started_content(
+                    lease, wall_clock_limit_seconds=wall_clock_seconds,
+                ),
                 occurred_at=started_at,
             )])
             if scoring_run:
@@ -3647,6 +3674,7 @@ class AssignmentExecutor:
                 "stdout_bytes": len(result.stdout) if result else 0,
                 "stderr_bytes": len(result.stderr) if result else 0,
                 "provider_call_count": len(state.calls),
+                **_runtime_source_metadata(lease),
             },
             "started_at": started_at,
             "finished_at": finished_at,

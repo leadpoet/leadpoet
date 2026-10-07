@@ -146,6 +146,16 @@ class FakeApi:
         return self.source_payload
 
 
+class TrajectoryApi(FakeApi):
+    def __init__(self, leases):
+        super().__init__(leases)
+        self.events = []
+
+    def trajectory(self, run_id, lease_token, events):
+        self.events.extend(events)
+        return {"accepted": len(events)}
+
+
 def temporary_hold_document(action_sequence=0):
     body = b'{"error":{"code":"provider_unavailable"}}'
     return {
@@ -267,6 +277,175 @@ def test_accepted_run_bridges_provider_calls_and_returns_a_small_result(tmp_path
     assert not spec.agent_entrypoint_path.exists()
     assert not spec.input_dir.exists()  # run directory cleaned
     assert runner_.abandoned == 0
+
+
+def test_runtime_source_metadata_follows_lease_through_start_and_completion(tmp_path):
+    claimed = lease()
+    claimed["gateway_source_commit"] = "b" * 40
+    api = TrajectoryApi([claimed])
+    (tmp_path / "work").mkdir()
+    runner_ = rn.Runner(make_config(
+        tmp_path, api, BridgingRuntime(output={"companies": [valid_company(1)]}, calls=0),
+    ))
+
+    assert runner_.run_once() == 1
+    expected = {
+        **rn.runtime_version.SOURCE_METADATA,
+        "gateway_claim_source_commit": "b" * 40,
+    }
+    started = next(event for event in api.events if event["kind"] == "runtime.started")
+    assert all(started["content"][key] == value for key, value in expected.items())
+    result = contracts.validate_run_result(api.completions[0]["body"]["result"])
+    assert all(result["resource_summary"][key] == value for key, value in expected.items())
+
+
+@pytest.mark.parametrize("source_commit", ("unknown", "a" * 40))
+def test_runtime_source_commit_mismatch_or_unknown_never_blocks_completion(
+    tmp_path, monkeypatch, source_commit,
+):
+    monkeypatch.setattr(rn.runtime_version, "SOURCE_METADATA", {
+        "validator_source_commit": source_commit,
+        "validator_source_origin": "unknown",
+        "validator_source_dirty": "unknown",
+    })
+    claimed = lease()
+    claimed["gateway_source_commit"] = "b" * 40
+    api = TrajectoryApi([claimed])
+    (tmp_path / "work").mkdir()
+
+    assert rn.Runner(make_config(
+        tmp_path, api, BridgingRuntime(output={"companies": [valid_company(1)]}, calls=0),
+    )).run_once() == 1
+    result = contracts.validate_run_result(api.completions[0]["body"]["result"])
+    assert result["terminal_status"] == "accepted"
+    assert result["resource_summary"]["validator_source_commit"] == source_commit
+    assert result["resource_summary"]["gateway_claim_source_commit"] == "b" * 40
+
+
+def test_runtime_source_metadata_survives_early_setup_failure(tmp_path):
+    claimed = lease()
+    claimed["checkpoint_deadline_policy"] = "invalid"
+    claimed["gateway_source_commit"] = "not-a-sha"
+    api = TrajectoryApi([claimed])
+    (tmp_path / "work").mkdir()
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0))
+
+    with pytest.raises(rn.RunnerError, match="checkpoint deadline policy"):
+        rn.AssignmentExecutor(config).execute(claimed, claimed["lease_token"], claimed["icp"])
+
+    assert api.events[0]["kind"] == "runtime.started"
+    assert api.events[-1]["kind"] == "runtime.error"
+    started = api.events[0]["content"]
+    assert started["gateway_claim_source_commit"] == "unknown"
+    assert started["validator_source_commit"] == rn.runtime_version.SOURCE_METADATA["validator_source_commit"]
+
+
+def test_runtime_release_marker_does_not_claim_clean(tmp_path):
+    package = tmp_path / "lab_arena"
+    package.mkdir()
+    module = package / "runner.py"
+    module.write_text("# installed runner\n")
+    (tmp_path / ".release-commit").write_text("a" * 40 + "\n")
+
+    assert rn.runtime_version.source_metadata(str(module)) == {
+        "validator_source_commit": "a" * 40,
+        "validator_source_origin": "release_marker",
+        "validator_source_dirty": "unknown",
+    }
+
+
+def test_runtime_checkout_identity_comes_from_loaded_module_repo(tmp_path, monkeypatch):
+    root = tmp_path / "checkout"
+    package = root / "lab_arena"
+    package.mkdir(parents=True)
+    module = package / "runner.py"
+    module.write_text("# committed runner\n")
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    git("init", "-q")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+        "add", "lab_arena/runner.py")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+        "commit", "-qm", "runner")
+    commit = git("rev-parse", "HEAD")
+    # Inherited Git routing must not redirect inspection to a different tree.
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "nonexistent-git-dir"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "elsewhere"))
+    assert rn.runtime_version.source_metadata(str(module)) == {
+        "validator_source_commit": commit,
+        "validator_source_origin": "git_checkout",
+        "validator_source_dirty": "clean",
+    }
+    module.write_text("# modified runner\n")
+    assert rn.runtime_version.source_metadata(str(module))["validator_source_dirty"] == "dirty"
+
+
+def test_runtime_unrelated_cwd_and_invalid_marker_are_unknown(tmp_path, monkeypatch):
+    package = tmp_path / "installed" / "lab_arena"
+    package.mkdir(parents=True)
+    module = package / "runner.py"
+    module.write_text("# installed runner\n")
+    monkeypatch.chdir(tmp_path)
+    assert rn.runtime_version.source_metadata(str(module)) == {
+        "validator_source_commit": "unknown",
+        "validator_source_origin": "unknown",
+        "validator_source_dirty": "unknown",
+    }
+    (package.parent / ".release-commit").write_text("not-a-commit\n")
+    assert rn.runtime_version.source_metadata(str(module))["validator_source_commit"] == "unknown"
+    assert rn.runtime_version.commit_or_unknown("a" * 39) == "unknown"
+
+
+@pytest.mark.parametrize("failure", (FileNotFoundError, subprocess.TimeoutExpired))
+def test_runtime_git_failure_is_unknown_without_raising(tmp_path, monkeypatch, failure):
+    package = tmp_path / "lab_arena"
+    package.mkdir()
+    module = package / "runner.py"
+    module.write_text("# installed runner\n")
+
+    def fail_git(*args, **kwargs):
+        if failure is subprocess.TimeoutExpired:
+            raise subprocess.TimeoutExpired(cmd=args[0], timeout=2)
+        raise failure("git missing")
+
+    monkeypatch.setattr(rn.runtime_version.subprocess, "run", fail_git)
+    assert rn.runtime_version.source_metadata(str(module)) == {
+        "validator_source_commit": "unknown",
+        "validator_source_origin": "unknown",
+        "validator_source_dirty": "unknown",
+    }
+
+
+def test_runtime_git_status_timeout_keeps_resolved_commit(tmp_path, monkeypatch):
+    package = tmp_path / "lab_arena"
+    package.mkdir()
+    module = package / "runner.py"
+    module.write_text("# installed runner\n")
+    calls = []
+
+    def git(*args, **kwargs):
+        command = args[0]
+        calls.append(command)
+        if command[-1] == "--show-toplevel":
+            stdout = str(tmp_path) + "\n"
+        elif command[-1] == "HEAD^{commit}":
+            stdout = "c" * 40 + "\n"
+        else:
+            raise subprocess.TimeoutExpired(cmd=command, timeout=2)
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(rn.runtime_version.subprocess, "run", git)
+    assert rn.runtime_version.source_metadata(str(module)) == {
+        "validator_source_commit": "c" * 40,
+        "validator_source_origin": "git_checkout",
+        "validator_source_dirty": "unknown",
+    }
+    assert len(calls) == 3
 
 
 def test_v6_lease_announces_and_accepts_only_company_intent_output(tmp_path):
@@ -1497,7 +1676,10 @@ def test_submitted_dependency_failure_is_a_model_error_not_an_abandoned_lease(
     result = contracts.validate_run_result(api.completions[0]["body"]["result"])
     assert result["terminal_status"] == "model_error"
     assert "failure_diagnostic" not in result
-    assert not any(result["resource_summary"].values())
+    assert all(result["resource_summary"][key] == 0 for key in (
+        "wall_seconds", "cpu_seconds", "max_rss_bytes", "stdout_bytes",
+        "stderr_bytes", "provider_call_count",
+    ))
     assert api.completions[0]["body"]["output"] is None
     assert "test-secret" not in json.dumps(api.completions)
     if stderr_error is None:
@@ -2310,7 +2492,7 @@ def test_scoring_lease_runs_the_judge_image_in_trusted_mode(tmp_path):
 
     breakdowns = [{"final_score": 71.0, "failure_reason": ""}, {"final_score": 44.5, "failure_reason": ""}]
     output = scoring.build_scoring_output("r1", breakdowns)
-    api = FakeApi([scoring_lease()])
+    api = TrajectoryApi([scoring_lease()])
     sandbox = BridgingRuntime(output=output, calls=1)
     (tmp_path / "work").mkdir()
     runner_ = rn.Runner(make_config(tmp_path, api, sandbox))
@@ -2318,6 +2500,7 @@ def test_scoring_lease_runs_the_judge_image_in_trusted_mode(tmp_path):
     envelope = api.completions[0]
     validated = contracts.validate_run_result(envelope["body"]["result"])
     assert validated["terminal_status"] == "accepted"
+    assert next(event for event in api.events if event["kind"] == "runtime.started")["content"]["scorer_image_reference"] == SCORER_IMAGE_REFERENCE
     assert envelope["body"]["output"] == output
     spec = sandbox.specs[0]
     assert spec.entry_command == runtime.SCORER_ENTRY_COMMAND and spec.working_dir == runtime.SCORER_WORKING_DIR

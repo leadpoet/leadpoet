@@ -4,9 +4,10 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import replace
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from lab_arena import broker, deepline_catalog, runtime, scoring, shim
+from lab_arena import broker, deepline_catalog, runtime, runtime_version, scoring, shim
 from tests.lab_arena.deepline_budget_only_exact_recovery_postgres_test import database
 from tests.lab_arena.parallel_twenty_icp_execution_postgres_test import _start_parallel_round, _verified_test_pool
 from tests.lab_arena.test_deepline_catalog import row
@@ -97,6 +98,9 @@ class FrozenResearchSandbox:
 
 def test_dynamic_research_baseline_and_miner_complete_and_publish(database, tmp_path):
     connect = lambda: database[0].connect(**database[1])
+    with connect() as connection, connection.cursor() as cursor:
+        for name in ("365-lab-arena-trajectories.sql", "366-lab-arena-trajectory-capacity.sql"):
+            cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / name).read_text())
     h = Harness(connect, tmp_path, challengers=["DynamicResearch"], runners=["alpha"])
     miner = keypair("svc-miner-DynamicResearch").ss58_address
     h.chain.owned[miner] = [miner]
@@ -117,6 +121,9 @@ def test_dynamic_research_baseline_and_miner_complete_and_publish(database, tmp_
     quota_snapshots = []
 
     class AuditedApi(InProcessApi):
+        def trajectory(self, run_id, lease_token, events):
+            return self.service.handle_trajectory(run_id, lease_token, {"events": events})
+
         def provider(self, run_id, lease_token, frame):
             result = super().provider(run_id, lease_token, frame)
             if frame["operation_id"] == "deepline.execute":
@@ -159,4 +166,32 @@ def test_dynamic_research_baseline_and_miner_complete_and_publish(database, tmp_
     assert all(entry[4]["provider_cost"]["request_id"] in transport.identities.values() for entry in settlements)
     assert len(transport.requests) == 2 * len(runs)
     assert h.service.store.get_round(h.round_id)["status"] == "published"
+    participants_by_id = {p["submission_id"]: p for p in h.service.store.get_round(h.round_id)["participants"]}
+    audited_kinds = set()
+    for run in h.service.store.list_runs(h.round_id):
+        assert run["status"] == "accepted"
+        role = "baseline" if participants_by_id[run["submission_id"]]["is_king"] else "miner"
+        audited_kinds.add((role, run["kind"]))
+        if run["result_doc"].get("schema_version") == "leadpoet.lab_arena.cached_run_result.v1":
+            # A reuse is not a new validator execution. Follow its existing
+            # immutable source pointer instead of inventing an executing SHA.
+            source = h.service.store.get_run(run["result_doc"]["source_score_run_id"])
+            assert source["kind"] == "score" and source["status"] == "accepted"
+            assert source["result_doc"]["resource_summary"]["validator_source_commit"] == runtime_version.SOURCE_METADATA["validator_source_commit"]
+            continue
+        summary = run["result_doc"]["resource_summary"]
+        assert summary["validator_source_commit"] == runtime_version.SOURCE_METADATA["validator_source_commit"]
+        assert summary["gateway_claim_source_commit"] == runtime_version.SOURCE_METADATA["validator_source_commit"]
+        events = h.service.store.list_trajectory_events(run["run_id"])
+        started = [e for e in events if e["event_kind"] == "runtime.started"]
+        assert len(started) == 1
+        assert started[0]["content"]["validator_source_commit"] == summary["validator_source_commit"]
+        assert started[0]["content"]["gateway_claim_source_commit"] == summary["gateway_claim_source_commit"]
+        role = "baseline" if participants_by_id[run["submission_id"]]["is_king"] else "miner"
+        for event in events:
+            for key in ("round_id", "submission_id", "icp_position", "runner_hotkey", "attempt"):
+                assert event[key] == run[key]
+            assert event["model_role"] == role and event["run_kind"] == run["kind"]
+        audited_kinds.add((role, run["kind"]))
+    assert audited_kinds == {(role, kind) for role in ("baseline", "miner") for kind in ("execute", "score")}
     assert_canary_absent(h, connect)

@@ -320,3 +320,44 @@ def test_oversized_error_is_not_retained_for_replay(monkeypatch):
     assert result.status == 502 and result.call["error_code"] == "provider_unavailable"
     saved = store.calls[result.call["call_identity"]]["uncertain_doc"]
     assert "deepline_terminal_response" not in saved
+
+
+@pytest.mark.parametrize("refresh_patch", [None, {"call_identity": "foreign"},
+                                         {"amount_microusd": 1}, {"status": "uncertain"}])
+def test_settlement_racing_replay_refreshes_once_and_still_requires_bound_state(refresh_patch):
+    class ConcurrentSettlementStore(RetainedErrorStore):
+        settle_during_read = False
+        refreshed = False
+        reservation_reads = 0
+
+        def reserve_call(self, **kwargs):
+            self.reservation_reads += 1
+            state = super().reserve_call(**kwargs)
+            if self.refreshed and refresh_patch is not None:
+                state.update(refresh_patch)
+            return state
+
+        def list_ledger(self, *, call_identity=None, **kwargs):
+            if self.settle_during_read:
+                self.settle_during_read = False
+                self.refreshed = True
+                self.calls[call_identity].update(
+                    kind="settlement", actual=50_000,
+                    terminal=br._terminal_response_document(
+                        502, {}, b'{"error":{"code":"provider_unavailable"}}',
+                        call_succeeded=False),
+                )
+            return super().list_ledger(call_identity=call_identity, **kwargs)
+
+    transport = ErrorTransport()
+    first, broker, store, context, arguments = execute(transport, store=ConcurrentSettlementStore())
+    store.settle_during_read = True
+    replay = broker.execute(context, **arguments)
+    assert store.reservation_reads == 3  # Initial dispatch, replay, one bounded refresh.
+    assert len(transport.sent) == 2
+    if refresh_patch is None:
+        assert replay.status == 404 and replay.body == first.body
+        assert replay.call["outcome"] == "settled" and replay.call["actual_microusd"] == 50_000
+    else:
+        assert replay.status == 503 and replay.call["error_code"] == "broker_unavailable"
+        assert "actual_microusd" not in replay.call

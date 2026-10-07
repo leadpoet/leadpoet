@@ -4230,6 +4230,15 @@ class Broker:
             and not (isinstance(terminal_document, Mapping)
                      and terminal_document.get("call_succeeded") is True)):
             ledger_entries = self._store.list_ledger(call_identity=call_identity, limit=64)
+            if (status in ("dispatched", "uncertain")
+                and isinstance(ledger_entries, Sequence) and ledger_entries
+                and isinstance(ledger_entries[-1], Mapping)
+                and ledger_entries[-1].get("entry_kind") == "settlement"):
+                # Billing can settle between the reservation and history reads.
+                # Refresh that same reservation once, then require the full
+                # binding and charge checks against the observed history.
+                reserved = self._store.reserve_call(**reservation_arguments)
+                status = reserved.get("status")
             if not _reservation_readback_matches(
                 self._store, reservation_arguments, reserved,
                 confirmed_cost_admission=getattr(context, "kind", "execute") in {"execute", "score"},

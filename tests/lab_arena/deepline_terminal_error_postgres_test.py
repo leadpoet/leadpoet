@@ -23,18 +23,18 @@ from tests.lab_arena.deepline_completed_response_recovery_test import catalog
 from tests.lab_arena.deepline_terminal_error_test import ErrorTransport, billing
 
 
+@pytest.mark.parametrize("settle_during_replay", [False, True])
 @pytest.mark.parametrize("status,credits,amount,padding", [(404, "0.5", 50_000, 0), (422, "0", 0, 1_048_000)])
 def test_pending_error_reaches_client_and_late_charge_settles_once(
-    database, tmp_path, request, status, credits, amount, padding,
+    database, tmp_path, request, monkeypatch, status, credits, amount, padding, settle_during_replay,
 ):
     transport = ErrorTransport(status)
     if padding:
         body = json.loads(transport.body)
         body["detail"] = "x" * padding
         transport.body = json.dumps(body).encode()
-    h, lease, token, connect, broker = setup(
-        database, tmp_path, "21" if status == 404 else "22", transport,
-    )
+    label = str((21 if status == 404 else 22) + (2 if settle_during_replay else 0))
+    h, lease, token, connect, broker = setup(database, tmp_path, label, transport)
 
     http = TestClient(create_app(h.service))
     request.addfinalizer(http.close)
@@ -109,10 +109,29 @@ def test_pending_error_reaches_client_and_late_charge_settles_once(
     transport.bill = billing(credits=credits)
     entry = transport.bill["recent"]["entries"][0]
     entry.update(provider="parallel", operation="parallel_search")
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        reconciled = list(pool.map(lambda _: broker.reconcile_deepline_cost(candidates[0]), range(2)))
-    assert all(result["status"] == "settled" and result["actual_microusd"] == amount
-               for result in reconciled)
+    def reconcile():
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            reconciled = list(pool.map(lambda _: broker.reconcile_deepline_cost(candidates[0]), range(2)))
+        assert all(result["status"] == "settled" and result["actual_microusd"] == amount
+                   for result in reconciled)
+
+    if settle_during_replay:
+        original_list_ledger = store.list_ledger
+
+        def settle_before_ledger_read(**kwargs):
+            monkeypatch.setattr(store, "list_ledger", original_list_ledger)
+            reconcile()
+            return original_list_ledger(**kwargs)
+
+        # The reservation RPC sees uncertainty; the following history read sees
+        # the concurrent settlement. Both reads are genuine PostgreSQL results.
+        monkeypatch.setattr(store, "list_ledger", settle_before_ledger_read)
+        raced = api.provider(lease["run_id"], token, api.frames[0])
+        assert raced["status"] == status and base64.b64decode(raced["body_b64"]) == response.content
+        assert raced["call"]["outcome"] == "settled"
+        assert raced["call"]["actual_microusd"] == amount
+    else:
+        reconcile()
     assert store.list_deepline_cost_reconciliations(h.round_id, run_id=lease["run_id"]) == []
     with connect() as connection, connection.cursor() as cur:
         cur.execute(

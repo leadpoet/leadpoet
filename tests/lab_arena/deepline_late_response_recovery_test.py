@@ -126,6 +126,60 @@ def test_running_key_resume_uses_original_input_and_key_once(monkeypatch):
     assert sum(r['method'] == 'POST' for r in transport.requests) == 2
 
 
+def test_routed_score_recovers_running_key_with_original_paid_request(monkeypatch):
+    from tests.lab_arena.test_lab_arena_broker import DL_KEY
+
+    class RoutedTransport(LateTransport):
+        def send(self, **request):
+            response = super().send(**request)
+            if request['method'] == 'POST':
+                return br.ProviderResponse(200, {}, json.dumps({
+                    'job_id': NATIVE, 'status': 'completed',
+                    'billing': {'credits_charged': 0.02},
+                    'result': {'data': {
+                        'rawHtml': '<html>Recovered page</html>',
+                        'metadata': {'url': 'https://example.com/',
+                                     'sourceURL': 'https://example.com/',
+                                     'statusCode': 200},
+                    }},
+                }).encode())
+            payload = json.loads(response.body)
+            if '/executions/by-key/' in request['url']:
+                payload['toolId'] = 'firecrawl_scrape'
+            else:
+                payload['recent']['entries'][0].update(
+                    provider='firecrawl', operation='firecrawl_scrape'
+                )
+            return br.ProviderResponse(response.status, response.headers,
+                                       json.dumps(payload).encode())
+
+    monkeypatch.setattr(br, '_DEEPLINE_BILLING_MAX_ATTEMPTS', 1)
+    transport = RoutedTransport()
+    broker, store, _ = make_broker(
+        store=ResponseStore(), transport=transport,
+        credential_for=lambda _context, _provider: DL_KEY,
+        funding_source_for=lambda _context: 'miner_key',
+    )
+    context = replace(CONTEXT, kind='score', round_id='arena-2026-10-06')
+    request = dict(operation_id='scrapingdog.scrape',
+                   parameters={'url': 'https://example.com/'},
+                   action_sequence=0, timeout_ms=60_000)
+
+    first = broker.execute(context, **request)
+    assert first.status == 502 and first.call['outcome'] == 'uncertain'
+    second = broker.execute(context, **request)
+
+    assert second.status == 200 and b'Recovered page' in second.body
+    assert second.call['call_identity'] == first.call['call_identity']
+    assert second.call['actual_microusd'] == 2000
+    assert transport.paid == 1 and store.log.count('dispatch') == 1
+    posts = [item for item in transport.requests if item['method'] == 'POST']
+    assert len(posts) == 2
+    assert posts[0]['headers']['idempotency-key'] == posts[1]['headers']['idempotency-key']
+    assert posts[0]['headers']['authorization'] == posts[1]['headers']['authorization']
+    assert (posts[0]['url'], posts[0]['body']) == (posts[1]['url'], posts[1]['body'])
+
+
 @pytest.mark.parametrize('change', ['unknown', 'unsupported', 'tool', 'key', 'native', 'credential', 'owner', 'refused'])
 def test_unbound_recovery_cannot_dispatch_or_deliver(monkeypatch, change):
     broker, store, transport, context = setup(monkeypatch)

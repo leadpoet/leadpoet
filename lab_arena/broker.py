@@ -4383,7 +4383,7 @@ class Broker:
                             headers=recovery_headers, body=recovery_outbound.body,
                             timeout_seconds=operation_timeout_seconds,
                             max_response_bytes=effective_operation.max_response_bytes)
-                            if deepline_catalog_entry is not None and route is None else None),
+                            if deepline_catalog_entry is not None or route is not None else None),
                     )
                     if deepline_recovery_response is not None:
                         deepline_response_recovery = True
@@ -4601,6 +4601,7 @@ class Broker:
         deepline_async_ids: Sequence[str] = ()
         deepline_async_poll_accepted = False
         deepline_request_failed = False
+        deepline_lost_response = False
         deepline_response_request_id: Optional[str] = None
         deepline_request_id: Optional[str] = request_accounting.get("deepline_request_id")
         deepline_execution_key: Optional[str] = request_accounting.get("deepline_execution_key")
@@ -4992,6 +4993,7 @@ class Broker:
                 if deepline_readback_cost is not None:
                     # A billed request with a lost result is still a failed
                     # provider call. Do not repeat the paid request.
+                    deepline_lost_response = True
                     response = ProviderResponse(
                         502, {"content-type": "application/json"},
                         operations.GENERIC_UNAVAILABLE_BODY,
@@ -5344,9 +5346,9 @@ class Broker:
                     else None
                 ),
             )
-            if (effective_operation.provider == "deepline"
-                and summary.get("transport_error_class") and not call_succeeded):
+            if deepline_lost_response:
                 terminal["deepline_response_missing"] = True
+                summary["deepline_response_missing"] = True
             if deepline_async_ids:
                 terminal["deepline_async_job_ids"] = list(deepline_async_ids)
             payload = dict(summary, outcome="settled", status=sanitized_status, provider_status=provider_status_for_summary, actual_microusd=actual, response_hash=contracts.hash_bytes(sanitized_body))

@@ -175,6 +175,8 @@ def test_recovered_provider_error_is_not_fabricated_as_success(monkeypatch):
     result = execute(broker, replace(CONTEXT, deepline_catalog=catalog()))
     assert result.status == 502 and result.call['actual_microusd'] == 2000
     assert store.calls[result.call['call_identity']]['terminal']['call_succeeded'] is False
+    assert 'deepline_response_missing' not in result.call
+    assert 'deepline_response_missing' not in store.calls[result.call['call_identity']]['terminal']
     assert sum(r['method'] == 'POST' for r in transport.requests) == 1
 
 

@@ -95,6 +95,75 @@ def test_only_exact_dispatched_deepline_uncertainty_is_retried(tmp_path, change)
     assert len(api.frames) == 1
 
 
+def test_paid_settled_lost_response_recovers_same_action(tmp_path):
+    first = document(operation="scrapingdog.scrape")
+    first["call"].update(
+        outcome="settled", actual_microusd=3000,
+        transport_error_class="ReadTimeout", provider_status=502,
+        deepline_response_missing=True,
+    )
+    recovered = document(200, operation="scrapingdog.scrape", recovered=True)
+    recovered["call"]["actual_microusd"] = 3000
+    api = Api(first, recovered)
+    host = worker(tmp_path, api)
+
+    error, result = host._dispatch_once(
+        "scrapingdog.scrape", {"url": "https://example.com"}, 60_000
+    )
+
+    assert error is None and result["status"] == 200
+    assert result["body_b64"] == recovered["body_b64"]
+    assert result["call"] == recovered["call"]
+    assert [frame["action_sequence"] for frame in api.frames] == [0, 0]
+    assert api.frames[0] == api.frames[1]
+    assert host._state.calls == [recovered["call"]]
+
+
+@pytest.mark.parametrize("change", [
+    {"actual_microusd": 2000},
+    {"outcome": "uncertain", "actual_microusd": 3000},
+])
+def test_paid_recovery_cannot_change_confirmed_charge(tmp_path, change):
+    first = document()
+    first["call"].update(
+        outcome="settled", actual_microusd=3000,
+        transport_error_class="ReadTimeout", provider_status=502,
+        deepline_response_missing=True,
+    )
+    recovered = document(200)
+    recovered["call"].update(change)
+    api = Api(first, recovered)
+    host = worker(tmp_path, api)
+
+    assert host._dispatch_once("deepline.execute", PARAMETERS, 30_000)[1]["status"] == 502
+    assert len(api.frames) == 2
+    assert host._state.calls == [first["call"]]
+
+
+@pytest.mark.parametrize("change", [
+    {"deepline_response_missing": None},
+    {"transport_error_class": None},
+    {"transport_recovery": "deepline_execution_lookup"},
+    {"actual_microusd": None},
+    {"actual_microusd": 0},
+    {"provider_status": 403},
+    {"error_code": "miner_credentials_unavailable"},
+])
+def test_settled_provider_failure_without_paid_timeout_proof_is_terminal(tmp_path, change):
+    first = document()
+    first["call"].update(
+        outcome="settled", actual_microusd=3000,
+        transport_error_class="ReadTimeout", provider_status=502,
+        deepline_response_missing=True,
+    )
+    first["call"].update(change)
+    api = Api(first)
+    host = worker(tmp_path, api)
+
+    assert host._dispatch_once("deepline.execute", PARAMETERS, 30_000)[1]["status"] == 502
+    assert len(api.frames) == 1
+
+
 @pytest.mark.parametrize("second", [
     document(409), runner.RunnerError("unknown transport outcome"),
     {**document(200, recovered=True), "call": {**document(200, recovered=True)["call"],

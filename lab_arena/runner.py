@@ -2114,13 +2114,25 @@ class WorkerSocketServer:
     def _deepline_uncertain_identity(
         document: Mapping[str, Any], operation_id: str, action_sequence: int
     ) -> Optional[str]:
-        """Accept only a gateway-bound dispatched uncertainty, never a lost reply."""
+        """Recover only a bound uncertainty or a billed, missing Deepline reply."""
 
         if not isinstance(document, Mapping) or set(document) != {
             "status", "headers", "body_b64", "call"
         }:
             return None
         call = document.get("call")
+        settled_lost_response = (
+            document.get("status") == 502
+            and isinstance(call, Mapping)
+            and call.get("outcome") == "settled"
+            and call.get("deepline_response_missing") is True
+            and type(call.get("actual_microusd")) is int
+            and call["actual_microusd"] > 0
+            and isinstance(call.get("transport_error_class"), str)
+            and bool(call["transport_error_class"])
+            and call.get("transport_recovery") is None
+            and call.get("provider_status") == 502
+        )
         if not (
             type(document.get("status")) is int
             and document["status"] in (502, 409)
@@ -2130,7 +2142,7 @@ class WorkerSocketServer:
             and call.get("provider") == "deepline"
             and type(call.get("action_sequence")) is int
             and call["action_sequence"] == action_sequence
-            and call.get("outcome") == "uncertain"
+            and (call.get("outcome") == "uncertain" or settled_lost_response)
             and call.get("error_code") == (
                 "provider_unavailable" if document["status"] == 502 else "call_uncertain"
             )
@@ -2195,6 +2207,15 @@ class WorkerSocketServer:
             and call["action_sequence"] == frame["action_sequence"]
             and call.get("call_identity") == identity
             and call.get("outcome") in ("settled", "uncertain")
+            and (
+                document["call"].get("outcome") != "settled"
+                or (
+                    call.get("outcome") == "settled"
+                    and type(call.get("actual_microusd")) is int
+                    and call["actual_microusd"]
+                    == document["call"]["actual_microusd"]
+                )
+            )
             and call.get("error_code") is None
         ):
             return document

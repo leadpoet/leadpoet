@@ -103,7 +103,7 @@ def _unit_grounding(document, *, facts_supported):
     source_index, values = next(iter(
         intent_details._bound_evidence_sources(document).items()
     ))
-    quote = values[0][:intent_details._MAX_UNIT_EVIDENCE_QUOTE_LENGTH]
+    quote = values[0][:500]
     return [
         {
             "unit_id": unit["unit_id"],

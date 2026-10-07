@@ -33,7 +33,6 @@ _CHECKS = (
 )
 _MAX_STATEMENT_UNITS = 6
 _MAX_UNIT_EVIDENCE_BINDINGS = 2
-_MAX_UNIT_EVIDENCE_QUOTE_LENGTH = 500
 _MAX_SOURCE_CONTEXT_BYTES = 12_000
 _COMPANY_SOURCE_CONTEXT_RESERVATION_BYTES = 4_000
 _MAX_REVIEW_DOCUMENT_CHARACTERS = 48_000
@@ -43,7 +42,6 @@ _CITATION_REPAIR_CATEGORIES = {
     "invalid_source_index",
     "empty_quote",
     "duplicate_quote",
-    "quote_over_cap",
     "too_many_quotes",
     "nonexact_quote",
 }
@@ -97,7 +95,6 @@ _RESPONSE_FORMAT = {
                                         "source_index": {"type": "integer", "minimum": 0},
                                         "quote": {
                                             "type": "string", "minLength": 1,
-                                            "maxLength": _MAX_UNIT_EVIDENCE_QUOTE_LENGTH,
                                         },
                                     },
                                     "required": ["source_index", "quote"],
@@ -153,7 +150,6 @@ _CITATION_REPAIR_RESPONSE_FORMAT = {
                                         "source_index": {"type": "integer", "minimum": 0},
                                         "quote": {
                                             "type": "string", "minLength": 1,
-                                            "maxLength": _MAX_UNIT_EVIDENCE_QUOTE_LENGTH,
                                         },
                                     },
                                     "required": ["source_index", "quote"],
@@ -379,7 +375,8 @@ evidence list. Each quote must be one continuous exact excerpt from admitted_tex
 an observed date value, or the authoritative basis on a verified signal
 observation at that same index. Context date-basis labels identify date semantics
 but are not standalone evidence quotes. Return the shortest continuous exact
-span that supports all facts claimed by that binding, up to 500 characters.
+span that supports all facts claimed by that binding. Aim for no more than 500
+characters when that is enough; use a longer exact span when the facts require it.
 Never use ellipses, remove words, or stitch separate source spans. Never cite a
 URL, ICP text, submitted claim context, prior verifier notes, or the paragraph
 itself. The paragraph may paraphrase its source; only the returned evidence
@@ -1743,7 +1740,6 @@ def _validate_unit_grounding(
             if (
                 type(source_index) is int
                 and quote.strip()
-                and len(quote) <= _MAX_UNIT_EVIDENCE_QUOTE_LENGTH
                 and not _quote_is_bound(quote, sources.get(source_index, []))
             ):
                 matches = [
@@ -1758,8 +1754,6 @@ def _validate_unit_grounding(
                 issues.add("invalid_source_index")
             if not quote.strip():
                 issues.add("empty_quote")
-            if len(quote) > _MAX_UNIT_EVIDENCE_QUOTE_LENGTH:
-                issues.add("quote_over_cap")
             if binding_key in observed_bindings:
                 issues.add("duplicate_quote")
             observed_bindings.add(binding_key)
@@ -1767,7 +1761,6 @@ def _validate_unit_grounding(
                 type(source_index) is int
                 and source_index in sources
                 and quote.strip()
-                and len(quote) <= _MAX_UNIT_EVIDENCE_QUOTE_LENGTH
                 and not _quote_is_bound(quote, sources[source_index])
             ):
                 issues.add("nonexact_quote")
@@ -2144,7 +2137,8 @@ For other listed units, keep their status and repair citations only. Return no
 unlisted unit, coverage, factual flags, or aggregate checks. VERIFIED and
 CONTRADICTED require exact bound evidence for the facts they assert. Use one or
 two source_index/quote bindings, each a continuous exact admitted excerpt or
-observed date, at most 500 characters. No ellipses or stitched spans. UNPROVEN may
+observed date. Aim for no more than 500 characters when that is enough; use a
+longer exact span when the facts require it. No ellipses or stitched spans. UNPROVEN may
 return evidence:[]. Treat each citation_errors value as a required output
 correction even during a semantic recheck. For too_many_quotes, return at most two
 bindings, never the original oversized list. Choose the strongest complementary

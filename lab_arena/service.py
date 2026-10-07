@@ -6040,7 +6040,12 @@ class ArenaService:
             raise ServiceError("submission_missing", 404)
         disclosure = self._public_icp_disclosure(row)
         public_positions = set(disclosure["public_positions"]) if disclosure else set()
-        source_execution_runs = self._store.list_runs(round_id, kind="execute")
+        # One submission is asked for, so read one submission's runs. Reading the
+        # whole round here grew with the round: every page of the other miners'
+        # runs was fetched and then discarded by the filter below.
+        source_execution_runs = self._store.list_runs(
+            round_id, kind="execute", submission_id=submission_id
+        )
         if completed is not None:
             # Projection only: preserve every stored output and write-once score.
             projected = {run["run_id"]: run for run in completed["execution_runs"]}

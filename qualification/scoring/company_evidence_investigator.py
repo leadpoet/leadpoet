@@ -3057,6 +3057,24 @@ async def investigate_company_evidence(
 
             priority_source_kind = ""
             priority_source_url = ""
+            cached_priority_source = ("", "")
+
+            def defer_cached_priority() -> None:
+                nonlocal priority_source_url, cached_priority_source
+                if priority_source_url in fetched_pages:
+                    # This evidence is already in the model input. Keep its
+                    # marker only if no later fresh candidate can be admitted.
+                    if not cached_priority_source[1]:
+                        cached_priority_source = (
+                            priority_source_kind, priority_source_url,
+                        )
+                    priority_source_url = ""
+                elif (
+                    priority_source_kind == "company"
+                    and len(fetched_pages) >= MAX_FETCH_CALLS
+                ):
+                    priority_source_url = ""
+
             if requested_public_stage and fetch_calls < MAX_FETCH_CALLS:
                 priority_source_kind = "public"
                 priority_source_url = _public_stage_submitted_source_to_prefetch(
@@ -3067,12 +3085,14 @@ async def investigate_company_evidence(
                     identity_names=identity_names,
                     fetched_pages=fetched_pages,
                 )
+            defer_cached_priority()
             if not priority_source_url and "geography" in requested_targets:
                 priority_source_url = _priority_headquarters_navigation_source(
                     requested_targets, bounded_homepage_navigation_locators,
                 )
                 if priority_source_url:
                     priority_source_kind = "company"
+            defer_cached_priority()
             if (
                 not priority_source_url
                 and requested_venture_stage
@@ -3088,6 +3108,7 @@ async def investigate_company_evidence(
                 )
                 if priority_source_url:
                     priority_source_kind = "venture"
+            defer_cached_priority()
             if not priority_source_url and positive_semantic_review:
                 priority_source_kind = "company"
                 priority_source_url = _priority_subscription_navigation_source(
@@ -3108,15 +3129,11 @@ async def investigate_company_evidence(
                     ),
                     first_party_domains=first_party_domains,
                 )
+            defer_cached_priority()
+            if not priority_source_url:
+                priority_source_kind, priority_source_url = cached_priority_source
             if priority_source_url:
                 priority_cache_hit = priority_source_url in fetched_pages
-                if (
-                    priority_source_kind == "company"
-                    and not priority_cache_hit
-                    and len(fetched_pages) >= MAX_FETCH_CALLS
-                ):
-                    priority_source_url = ""
-            if priority_source_url:
                 if priority_cache_hit:
                     source_result = {
                         "ok": True,

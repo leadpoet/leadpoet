@@ -231,6 +231,15 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_cost_units", "text"), ("p_execution_key", "text"),
         ("p_recovered_request_id", "text"),
     ),
+    "lab_arena_deepline_response_schema_v1": (),
+    "lab_arena_recover_deepline_response_v1": (
+        ("p_run_id", "text"), ("p_lease_token_hash", "text"),
+        ("p_call_identity", "text"), ("p_request_hash", "text"),
+        ("p_execution_key", "text"), ("p_credential_fingerprint", "text"),
+        ("p_request_id", "text"), ("p_operation", "text"),
+        ("p_actual_microusd", "bigint"), ("p_terminal_response", "jsonb"),
+        ("p_lease_ttl_seconds", "integer"),
+    ),
     "lab_arena_complete_attempt": (("p_run_id", "text"), ("p_lease_token_hash", "text"), ("p_result", "jsonb"), ("p_terminal_cause", "text"), ("p_output_ref", "text")),
     "lab_arena_complete_attempt_v2": (
         ("p_run_id", "text"),
@@ -990,6 +999,14 @@ class ArenaStore:
             raise ArenaStoreError("successful-call cost schema mismatch")
         return result
 
+    def deepline_response_schema(self) -> Dict[str, Any]:
+        value = _require_mapping(self._transport.rpc(
+            "lab_arena_deepline_response_schema_v1", {}), "deepline_response_schema")
+        if value != {"status": "ok", "schema_version":
+                     "leadpoet.lab_arena.deepline_response_schema.v1", "version": 417}:
+            raise ArenaStoreError("deepline response recovery schema is incomplete")
+        return value
+
     def deepline_catalog_schema(self) -> Dict[str, Any]:
         """Require exact recovery and budget-only SQL before dynamic rollout."""
         result = _require_mapping(
@@ -1745,6 +1762,24 @@ class ArenaStore:
             ),
             "settle_call",
         )
+
+    def recover_deepline_response(
+        self, *, run_id: str, lease_token_hash: str, call_identity: str,
+        request_hash: str, execution_key: str, credential_fingerprint: str,
+        request_id: str, operation: str, actual_microusd: Optional[int],
+        terminal_response: Mapping[str, Any], lease_ttl_seconds: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        return _require_mapping(self._transport.rpc(
+            "lab_arena_recover_deepline_response_v1", {
+                "p_run_id": run_id, "p_lease_token_hash": lease_token_hash,
+                "p_call_identity": call_identity, "p_request_hash": request_hash,
+                "p_execution_key": execution_key,
+                "p_credential_fingerprint": credential_fingerprint,
+                "p_request_id": request_id, "p_operation": operation,
+                "p_actual_microusd": actual_microusd,
+                "p_terminal_response": dict(terminal_response),
+                "p_lease_ttl_seconds": int(lease_ttl_seconds or self._lease_ttl_seconds),
+            }), "recover_deepline_response")
 
     def mark_uncertain(self, *, run_id: str, lease_token_hash: str, call_identity: str, call_doc: Mapping[str, Any], lease_ttl_seconds: Optional[int] = None) -> Dict[str, Any]:
         return _require_mapping(

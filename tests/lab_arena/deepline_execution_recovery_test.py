@@ -85,7 +85,7 @@ def test_timeout_key_is_durable_before_dispatch_and_cost_is_exact_once():
     assert transport.execution_key not in json.dumps(first.to_document())
     second = execute(broker)
     assert second.call["idempotent"] is True
-    assert len(transport.sent) == 4
+    assert len(transport.sent) == 5 and transport.sent[-1]["method"] == "GET"
     assert store.openrouter_capacity == 49_942_650
 
 
@@ -124,7 +124,8 @@ def test_unknown_or_unbound_key_and_bill_do_not_settle_or_retry(options):
     assert uncertain["deepline_execution_key"] == transport.execution_key
     before = len(transport.sent)
     assert execute(broker).call["outcome"] == "uncertain"
-    assert len(transport.sent) == before
+    assert len(transport.sent) == before + 1
+    assert transport.sent[-1]["method"] == "GET"
 
 
 def test_pending_async_zero_is_not_final_charge(monkeypatch):

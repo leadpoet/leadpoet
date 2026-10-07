@@ -660,17 +660,19 @@ def test_company_verification_routed_failure_stays_explicit_and_bounded(
     assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert result.passed is False
     assert result.reason == "website returned HTTP 502"
-    # One paid request is followed by one saved-response read, then bounded
-    # billing lookups. Recovery never sends another paid request.
-    assert [call["method"] for call in transport.sent] == ["POST", "GET", "GET", "GET", "GET"]
+    # One paid request is followed by bounded saved-response reads, including
+    # one same-action worker recovery lookup. No new paid request is sent.
+    assert [call["method"] for call in transport.sent] == ["POST", "GET", "GET", "GET", "GET", "GET"]
     assert all(
         call["url"].startswith(br.DEEPLINE_EXECUTION_BY_KEY_URL)
         and call["body"] == b""
         and 0 < call["timeout"] <= 5.0
         for call in transport.sent[1:]
     )
+    assert len({call["url"] for call in transport.sent[1:]}) == 1
     assert 59.0 <= transport.sent[0]["timeout"] <= 60.0
-    assert ledger.log == ["reserve", "dispatch", "uncertain"]
+    assert ledger.log == ["reserve", "dispatch", "uncertain", "reserve"]
+    assert len(ledger.calls) == 1  # The second reserve reads the original identity.
 
 
 def test_aiohttp_error_status_raise_for_status(worker):

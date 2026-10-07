@@ -1916,7 +1916,8 @@ def test_company_profile_transport_failure_holds_only_fixed_reservation():
     )
     assert replay.status == 409
     assert json.loads(replay.body) == {"error": {"code": "call_uncertain"}}
-    assert len(transport.sent) == sent_before_replay
+    assert len(transport.sent) == sent_before_replay + 1
+    assert transport.sent[-1]["method"] == "GET"
     assert sum(sent["method"] == "POST" for sent in transport.sent) == 1
 
 
@@ -4169,7 +4170,7 @@ def test_score_completed_reply_without_bill_returns_sanitized_result_once():
         "deepline_job_id": "job-score",
         "deepline_operation": "exa_search",
     }
-    assert [request["method"] for request in transport.sent] == ["POST", "GET"]
+    assert [request["method"] for request in transport.sent] == ["POST", "GET", "GET"]
 
 
 @pytest.mark.parametrize(
@@ -4438,7 +4439,7 @@ def test_deepline_synthetic_transport_response_keeps_full_liability_and_provenan
         action_sequence=0, timeout_ms=1000,
     )
     assert replay.status == 409
-    assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
+    assert [sent["method"] for sent in transport.sent] == ["POST", "GET", "GET"]
 
 
 def test_deepline_credential_echo_provenance_contains_no_secret():
@@ -5868,7 +5869,7 @@ def test_fault_injection_points_produce_single_accounting_results():
     store.reserve_call(run_id="r1", lease_token_hash=CONTEXT.lease_token_hash, call_identity=identity, operation_id="deepline.execute", provider="deepline", funding_source="host", amount_microusd=0, call_doc={}, lease_ttl_seconds=420)
     store.mark_dispatched(run_id="r1", lease_token_hash=CONTEXT.lease_token_hash, call_identity=identity)
     result = broker.execute(CONTEXT, **identity_args)
-    assert result.status == 409 and transport.sent == []
+    assert result.status == 503 and transport.sent == []  # Missing immutable identity proof fails closed.
     # After settlement / HTTP response loss: the repeat returns the stored terminal response without a send.
     broker, store, transport = make_broker(transport=FakeTransport([(200, {"results": [1]})]))
     first = broker.execute(CONTEXT, **identity_args)

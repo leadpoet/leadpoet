@@ -33,8 +33,14 @@ def database():
             "314-lab-arena-openrouter-web-search-reservation.sql",
             "319-lab-arena-quota-sourcing-cost.sql",
             "321-lab-arena-confirmed-cost-admission.sql",
+            "407-lab-arena-cost-run-lookup.sql",
+            "408-lab-arena-cost-run-index.sql",
+            "411-lab-arena-settlement-success-json-once.sql",
+            "413-lab-arena-closed-openrouter-judge-billing.sql",
             MIGRATION,
             MIGRATION,
+            "417-lab-arena-deepline-response-recovery.sql",
+            "417-lab-arena-deepline-response-recovery.sql",
         )
     )
 

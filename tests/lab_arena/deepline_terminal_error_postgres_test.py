@@ -1,5 +1,7 @@
 """Pending request errors through a real worker socket, gateway and ledger."""
 
+import base64
+import json
 from pathlib import Path
 import tempfile
 
@@ -18,11 +20,15 @@ from tests.lab_arena.deepline_completed_response_recovery_test import catalog
 from tests.lab_arena.deepline_terminal_error_test import ErrorTransport, billing
 
 
-@pytest.mark.parametrize("status,credits,amount", [(404, "0.5", 50_000), (422, "0", 0)])
+@pytest.mark.parametrize("status,credits,amount,padding", [(404, "0.5", 50_000, 0), (422, "0", 0, 1_048_000)])
 def test_pending_error_reaches_client_and_late_charge_settles_once(
-    database, tmp_path, status, credits, amount,
+    database, tmp_path, status, credits, amount, padding,
 ):
     transport = ErrorTransport(status)
+    if padding:
+        body = json.loads(transport.body)
+        body["detail"] = "x" * padding
+        transport.body = json.dumps(body).encode()
     h, lease, token, connect, broker = setup(
         database, tmp_path, "21" if status == 404 else "22", transport,
     )
@@ -66,6 +72,12 @@ def test_pending_error_reaches_client_and_late_charge_settles_once(
             assert state.calls[0]["outcome"] == "uncertain"
         finally:
             worker.stop()
+
+    before_replay = len(transport.sent)
+    pending = h.service.handle_provider(lease["run_id"], token, api.frames[0])
+    assert pending["status"] == status and base64.b64decode(pending["body_b64"]) == response.content
+    assert pending["call"]["idempotent"] is True and pending["call"]["outcome"] == "uncertain"
+    assert "actual_microusd" not in pending["call"] and len(transport.sent) == before_replay
 
     store = h.service.store
     candidates = store.list_deepline_cost_reconciliations(h.round_id, run_id=lease["run_id"])
@@ -114,3 +126,10 @@ def test_pending_error_reaches_client_and_late_charge_settles_once(
     snapshot = store.run_quota_snapshot(lease["run_id"], hash_lease_token(token))
     assert snapshot["providers"]["deepline"]["used"] == 1
     assert [request["method"] for request in transport.sent].count("POST") == 1
+
+    before_replay = len(transport.sent)
+    replay = h.service.handle_provider(lease["run_id"], token, api.frames[0])
+    assert replay["status"] == status and base64.b64decode(replay["body_b64"]) == response.content
+    assert replay["call"]["idempotent"] is True and replay["call"]["outcome"] == "settled"
+    assert replay["call"]["actual_microusd"] == amount
+    assert len(transport.sent) == before_replay  # Neither billing reads nor another paid POST.

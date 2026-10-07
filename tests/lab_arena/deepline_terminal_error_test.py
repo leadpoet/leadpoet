@@ -11,7 +11,7 @@ from tests.lab_arena.deepline_worker_same_action_recovery_test import Api, worke
 from tests.lab_arena.deepline_delayed_cost_reconciliation_unit_test import _candidate
 from tests.lab_arena.test_deepline_catalog import frozen, row
 from tests.lab_arena.test_lab_arena_broker import (
-    CONTEXT, DL_KEY, ZeroReservationLedgerStore, make_broker,
+    CONTEXT, DL_KEY, ZeroReservationLedgerStore, deepline_generic_http_denial, make_broker,
 )
 
 
@@ -42,7 +42,7 @@ class ErrorTransport:
     def send(self, **request):
         self.sent.append(request)
         if request["method"] == "POST":
-            self.key = request["headers"]["idempotency-key"]
+            self.key = request["headers"].get("idempotency-key")
             return br.ProviderResponse(self.status, {"content-type": "application/json"}, self.body)
         assert request["method"] == "GET"
         if "/executions/by-key/" in request["url"]:
@@ -59,9 +59,33 @@ class ErrorTransport:
         return br.ProviderResponse(200, {}, json.dumps(document).encode())
 
 
+
+class RetainedErrorStore(ZeroReservationLedgerStore):
+    """Expose the same append-only uncertainty history as the real store."""
+
+    def list_ledger(self, *, call_identity=None, **kwargs):
+        rows = super().list_ledger(call_identity=call_identity, **kwargs)
+        call = self.calls.get(call_identity, {})
+        if "uncertain_doc" not in call:
+            return rows
+        reservation = rows[0]
+        history = [reservation, {**reservation, "entry_id": 2, "entry_kind": "dispatch"},
+                   {**reservation, "entry_id": 3, "entry_kind": "uncertain",
+                    "entry_doc": {"reason": "worker_reported", "call": call["uncertain_doc"]}}]
+        if call["kind"] == "settlement":
+            history.append({**rows[-1], "entry_id": 4})
+        return history
+
+    def _view(self, call):
+        state = super()._view(call)
+        if call["kind"] == "settlement" and "uncertain_doc" in call:
+            state["deepline_response_missing"] = True
+        return state
+
+
 def execute(transport, *, kind="execute", store=None):
     broker, store, _ = make_broker(
-        transport=transport, store=store or ZeroReservationLedgerStore(),
+        transport=transport, store=store or RetainedErrorStore(),
         credential_for=lambda *_: DL_KEY,
     )
     arguments = dict(operation_id="deepline.execute", parameters=PARAMETERS,
@@ -104,7 +128,10 @@ def test_pending_error_returns_original_status_without_polling_or_worker_retry(
 
     # Even an explicit replay cannot create another paid call or free settlement.
     replay = broker.execute(context, **arguments)
-    assert replay.status == 409
+    assert replay.status == status and replay.body == result.body
+    assert replay.call["idempotent"] is True
+    assert "actual_microusd" not in replay.call
+    assert len(transport.sent) == 2
     assert [r["method"] for r in transport.sent].count("POST") == 1
     assert store.calls[result.call["call_identity"]]["kind"] == "uncertain"
 
@@ -208,3 +235,88 @@ def test_key_lookup_cannot_start_a_bill_read_after_the_short_deadline(monkeypatc
     result, _, _, _, _ = execute(transport)
     assert result.status == 404 and result.call["outcome"] == "uncertain"
     assert [r["method"] for r in transport.sent] == ["POST", "GET"]
+
+
+@pytest.mark.parametrize("field,value", [("run_id", "foreign"), ("provider", "openrouter"),
+                                         ("operation_id", "exa.contents"), ("amount_microusd", 1)])
+def test_retained_error_requires_bound_ledger_history(field, value):
+    class CorruptStore(RetainedErrorStore):
+        def list_ledger(self, **kwargs):
+            rows = super().list_ledger(**kwargs)
+            rows[0][field] = value
+            return rows
+
+    transport = ErrorTransport()
+    result, broker, _, context, arguments = execute(transport, store=CorruptStore())
+    assert result.status == 404
+    replay = broker.execute(context, **arguments)
+    assert replay.status == 503 and replay.call["error_code"] == "broker_unavailable"
+    assert len(transport.sent) == 2
+
+
+@pytest.mark.parametrize("change", [{"status": 200}, {"call_succeeded": True}, {"body_b64": "invalid!"}])
+def test_malformed_retained_error_fails_closed(change):
+    transport = ErrorTransport()
+    result, broker, store, context, arguments = execute(transport)
+    store.calls[result.call["call_identity"]]["uncertain_doc"]["deepline_terminal_response"].update(change)
+    replay = broker.execute(context, **arguments)
+    assert replay.status == 503 and replay.call["error_code"] == "broker_unavailable"
+    assert len(transport.sent) == 2
+
+
+@pytest.mark.parametrize("amount", [0, 50_000])
+def test_pending_refusal_replays_only_the_generic_sanitized_body(amount):
+    transport = ErrorTransport(403, body=json.dumps(deepline_generic_http_denial(REQUEST_ID)).encode())
+    broker, store, _ = make_broker(transport=transport, store=RetainedErrorStore(),
+                                  credential_for=lambda *_: DL_KEY)
+    arguments = dict(operation_id="deepline.execute", action_sequence=0, timeout_ms=5000,
+                     parameters={"tool": "generic_http_request", "payload": {"url": "https://example.com/"}})
+    result = broker.execute(CONTEXT, **arguments)
+    replay = broker.execute(CONTEXT, **arguments)
+    assert result.status == replay.status == 403
+    assert result.body == replay.body == b'{"error":{"code":"provider_request_refused"}}'
+    assert replay.call["outcome"] == "uncertain" and replay.call["idempotent"] is True
+    assert replay.call["error_code"] == "provider_request_refused"
+    assert "actual_microusd" not in replay.call
+    assert "private" not in repr(store.calls)
+    assert len(transport.sent) == 2
+
+    call = store.calls[result.call["call_identity"]]
+    call.update(kind="settlement", actual=amount, terminal=br._terminal_response_document(
+        502, {"content-type": "application/json"}, b'{"error":{"code":"provider_unavailable"}}',
+        call_succeeded=False))
+    settled = broker.execute(CONTEXT, **arguments)
+    assert settled.status == 403 and settled.body == result.body
+    assert settled.call["outcome"] == "settled" and settled.call["actual_microusd"] == amount
+    assert settled.call["error_code"] == "provider_request_refused" and settled.call["idempotent"] is True
+    assert len(transport.sent) == 2
+
+
+@pytest.mark.parametrize("status", [400, 404, 422])
+def test_unkeyed_batch_error_replays_without_execution_lookup(status):
+    transport = ErrorTransport(status)
+    broker, store, _ = make_broker(transport=transport, store=RetainedErrorStore(),
+                                  credential_for=lambda *_: DL_KEY)
+    context = replace(CONTEXT, deepline_catalog=frozen(row("firecrawl_batch_scrape", provider="firecrawl")))
+    arguments = dict(operation_id="deepline.execute", action_sequence=0, timeout_ms=5000,
+                     parameters={"tool": "firecrawl_batch_scrape", "payload": {"query": "example"}})
+    result = broker.execute(context, **arguments)
+    assert result.status == status and transport.key is None
+    pending = broker.execute(context, **arguments)
+    assert pending.status == status and pending.body == result.body
+    call = store.calls[result.call["call_identity"]]
+    call.update(kind="settlement", actual=50_000, terminal=br._terminal_response_document(
+        502, {}, b'{"error":{"code":"provider_unavailable"}}', call_succeeded=False))
+    settled = broker.execute(context, **arguments)
+    assert settled.status == status and settled.body == result.body
+    assert settled.call["actual_microusd"] == 50_000 and settled.call["idempotent"] is True
+    assert [request["method"] for request in transport.sent] == ["POST", "GET"]
+
+
+def test_oversized_error_is_not_retained_for_replay(monkeypatch):
+    monkeypatch.setattr(br, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
+    body = json.dumps({"request_id": REQUEST_ID, "error": "x" * 1_048_576}).encode()
+    result, _, store, _, _ = execute(ErrorTransport(body=body))
+    assert result.status == 502 and result.call["error_code"] == "provider_unavailable"
+    saved = store.calls[result.call["call_identity"]]["uncertain_doc"]
+    assert "deepline_terminal_response" not in saved

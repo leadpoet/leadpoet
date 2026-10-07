@@ -1946,13 +1946,15 @@ def _reservation_readback_matches(
     state: Mapping[str, Any],
     *,
     confirmed_cost_admission: bool = False,
+    ledger_entries: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> bool:
     """Validate the durable reservation and current state after response loss."""
 
     identity = reservation_arguments.get("call_identity")
     if state.get("call_identity") != identity:
         return False
-    rows = store.list_ledger(call_identity=identity, limit=64)
+    rows = (store.list_ledger(call_identity=identity, limit=64)
+            if ledger_entries is None else ledger_entries)
     if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes, bytearray)):
         return False
     if not rows or any(not isinstance(row, Mapping) for row in rows):
@@ -4219,7 +4221,6 @@ class Broker:
         deepline_response_recovery = False
         terminal_document = reserved.get("terminal_response")
         if (effective_operation.provider == "deepline"
-            and request_accounting.get("deepline_execution_key")
             and (status in ("dispatched", "uncertain")
                  or status == "settled" and (
                      reserved.get("deepline_response_missing") is True
@@ -4228,35 +4229,68 @@ class Broker:
             and reserved.get("account_failure_evidence") is None
             and not (isinstance(terminal_document, Mapping)
                      and terminal_document.get("call_succeeded") is True)):
+            ledger_entries = self._store.list_ledger(call_identity=call_identity, limit=64)
             if not _reservation_readback_matches(
                 self._store, reservation_arguments, reserved,
                 confirmed_cost_admission=getattr(context, "kind", "execute") in {"execute", "score"},
+                ledger_entries=ledger_entries,
             ):
                 return _error_result("broker_unavailable", summary)
-            recovery_outbound = operations.build_outbound_request(
-                effective_operation_id, effective_normalized,
-                deepline_catalog=context.deepline_catalog,
-            )
-            recovery_url, recovery_headers = inject_credential(recovery_outbound, secret)
-            recovery_headers["idempotency-key"] = request_accounting["deepline_execution_key"]
-            recovery_headers["x-deepline-request-id"] = request_accounting["deepline_request_id"]
-            deepline_recovery_response = _deepline_execution_response_readback(
-                transport=self._transport, secret=secret,
-                execution_key=request_accounting["deepline_execution_key"],
-                operation=request_accounting["tool"],
-                operation_aliases=(deepline_catalog_entry["operation_aliases"] if deepline_catalog_entry else ()),
-                max_response_bytes=(_DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES
-                    if route is not None and route.adapter == "firecrawl_raw_html"
-                    else effective_operation.max_response_bytes),
-                resume_request=(dict(method=recovery_outbound.target.method, url=recovery_url,
-                    headers=recovery_headers, body=recovery_outbound.body,
-                    timeout_seconds=operation_timeout_seconds,
-                    max_response_bytes=effective_operation.max_response_bytes)
-                    if deepline_catalog_entry is not None and route is None else None),
-            )
-            if deepline_recovery_response is not None:
-                deepline_response_recovery = True
-                summary["transport_recovery"] = "deepline_execution_lookup"
+            for entry in ledger_entries:
+                if entry.get("entry_kind") != "uncertain":
+                    continue
+                entry_doc = entry.get("entry_doc")
+                saved_call = entry_doc.get("call") if isinstance(entry_doc, Mapping) else None
+                if not isinstance(saved_call, Mapping) or "deepline_terminal_response" not in saved_call:
+                    continue
+                saved_terminal = saved_call["deepline_terminal_response"]
+                try:
+                    saved_status, saved_headers, saved_body = _decode_terminal(saved_terminal, secret=secret)
+                    if (saved_call.get("reason") != "missing_provider_cost"
+                        or saved_call.get("call_succeeded") is not False
+                        or saved_terminal.get("call_succeeded") is not False
+                        or saved_status not in (400, 403, 404, 422)):
+                        raise BrokerError("broker_unavailable")
+                except BrokerError:
+                    return _error_result("broker_unavailable", summary)
+                # Delayed settlement stores billing evidence, not the original
+                # error. Replay the sanitized reply from the same bound history;
+                # the current ledger head still owns the charge and finality.
+                summary.update(
+                    outcome="settled" if status == "settled" else "uncertain",
+                    idempotent=True, status=saved_status, provider_status=saved_status,
+                    response_hash=contracts.hash_bytes(saved_body),
+                )
+                if status == "settled":
+                    summary["actual_microusd"] = reserved["amount_microusd"]
+                if saved_status == 403:
+                    summary["error_code"] = "provider_request_refused"
+                return BrokerResult(saved_status, saved_headers, saved_body, summary)
+            if request_accounting.get("deepline_execution_key"):
+                recovery_outbound = operations.build_outbound_request(
+                    effective_operation_id, effective_normalized,
+                    deepline_catalog=context.deepline_catalog,
+                )
+                recovery_url, recovery_headers = inject_credential(recovery_outbound, secret)
+                recovery_headers["idempotency-key"] = request_accounting["deepline_execution_key"]
+                recovery_headers["x-deepline-request-id"] = request_accounting["deepline_request_id"]
+                deepline_recovery_response = _deepline_execution_response_readback(
+                    transport=self._transport, secret=secret,
+                    execution_key=request_accounting["deepline_execution_key"],
+                    operation=request_accounting["tool"],
+                    operation_aliases=(deepline_catalog_entry["operation_aliases"] if deepline_catalog_entry else ()),
+                    max_response_bytes=(_DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES
+                        if route is not None and route.adapter == "firecrawl_raw_html"
+                        else effective_operation.max_response_bytes),
+                    resume_request=(dict(method=recovery_outbound.target.method, url=recovery_url,
+                        headers=recovery_headers, body=recovery_outbound.body,
+                        timeout_seconds=operation_timeout_seconds,
+                        max_response_bytes=effective_operation.max_response_bytes)
+                        if deepline_catalog_entry is not None and route is None else None),
+                )
+                if deepline_recovery_response is not None:
+                    deepline_response_recovery = True
+                    summary["transport_recovery"] = "deepline_execution_lookup"
         if status == "settled" and not deepline_response_recovery:
             # Repeated request for a settled identity: the stored response, no second dispatch.
             terminal_document = reserved.get("terminal_response")
@@ -5060,6 +5094,10 @@ class Broker:
                                       if effective_operation.provider == "openrouter" else None),
                     credential_fingerprint=provider_credential_fingerprint,
                 )
+                if deepline_request_failed:
+                    uncertain_doc["deepline_terminal_response"] = _terminal_response_document(
+                        sanitized_status, sanitized_headers, sanitized_body, call_succeeded=False,
+                    )
                 if deepline_async_ids:
                     uncertain_doc["deepline_async_job_ids"] = list(deepline_async_ids)
                 if account_failure_evidence is not None:

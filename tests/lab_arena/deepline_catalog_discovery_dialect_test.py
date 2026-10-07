@@ -120,9 +120,29 @@ def test_search_matches_specific_path_and_normalizes_public_query(query):
         None, {}, deepline_catalog=snapshot)[0] == "deepline.tools.get"
 
 
+def test_search_accepts_current_sdk_query_and_structured_discovery():
+    snapshot = frozen()
+    url = ("https://code.deepline.com/api/v2/tools/search?"
+           "q=company&include_search_debug=false&search_mode=v2&limit=10&offset=0"
+           "&search_terms=funding%2Cinvestors&task=Find+public+companies")
+    assert operations.match_request("GET", url, None, {}, deepline_catalog=snapshot) == (
+        "deepline.tools.search", {
+            "query": "company", "compact": True, "include_search_debug": False,
+            "search_mode": "v2", "limit": 10, "offset": 0,
+            "search_terms": "funding,investors", "task": "Find public companies",
+        })
+    assert operations.match_request("GET",
+        "https://code.deepline.com/api/v2/tools/search?q=&categories=company_search&limit=1",
+        None, {}, deepline_catalog=snapshot)[1]["query"] == ""
+
+
 @pytest.mark.parametrize("query", [
     "", "q=", "q=" + "a" * 513, "q=one&q=two", "q=one&query=two",
     "q=company&unknown=true", "q=company&compact=maybe", "q=company&categories",
+    "q=company&limit=0", "q=company&limit=51", "q=company&offset=-1",
+    "q=company&offset=4097", "q=company&search_mode=other",
+    "q=company&include_search_debug=maybe", "q=&task=Find+companies",
+    "q=company&search_terms=", "q=company&limit=1&limit=2",
 ])
 def test_search_query_validation(query):
     with pytest.raises(operations.OperationRequestError):
@@ -169,3 +189,50 @@ def test_search_is_local_free_and_obeys_lease_and_frozen_policy(stale):
         assert document["tools"][0]["toolId"] == "company_search"
         assert "inputSchema" in document["tools"][0]
         assert result.call["catalog_hash"] == snapshot["catalog_hash"]
+
+
+def test_search_ranks_split_intent_and_pages_only_frozen_safe_tools():
+    snapshot = frozen(
+        row("alpha_company_search", description="Research public funding."),
+        row("beta_company_search", description="Research public hiring."),
+        row("gamma_company_search", description="Research public funding."),
+        row("private_company_search", provider="hubspot", description="Research public funding."),
+        row("company_people_search", categories=["people_search"], description="Research public funding."),
+    )
+    context = replace(CONTEXT, deepline_catalog=snapshot)
+    class Store:
+        def run_quota_snapshot(self, *_args):
+            return {"status": "active"}
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Search must stay within the frozen catalog")
+    class Transport:
+        send = forbidden
+    service = broker.Broker(store=Store(), key_for=forbidden, transport=Transport(), price_table=price_table())
+
+    def search(query):
+        operation, params = operations.match_request("GET",
+            "https://code.deepline.com/api/v2/tools/search?" + query,
+            None, {}, deepline_catalog=snapshot)
+        result = service.execute(context, operation_id=operation, parameters=params,
+                                 action_sequence=1, timeout_ms=5000)
+        assert result.status == 200
+        assert result.call["actual_microusd"] == 0
+        assert result.call["catalog_hash"] == snapshot["catalog_hash"]
+        return json.loads(result.body)
+
+    first = search("q=funding+company&limit=1&search_mode=v2&include_search_debug=false")
+    assert [tool["toolId"] for tool in first["tools"]] == ["alpha_company_search"]
+    assert (first["total"], first["count"], first["offset"], first["limit"],
+            first["next_offset"], first["total_is_exact"]) == (3, 1, 0, 1, 1, True)
+    second = search("q=funding+company&limit=1&offset=1")
+    assert [tool["toolId"] for tool in second["tools"]] == ["gamma_company_search"]
+    assert second["next_offset"] == 2
+    terms = search("q=&categories=company_search&search_terms=funding&limit=2")
+    assert [tool["toolId"] for tool in terms["tools"]] == [
+        "alpha_company_search", "gamma_company_search"]
+    assert terms["total"] == 2
+    task_ranked = search("q=company&task=Research+hiring&limit=1")
+    assert [tool["toolId"] for tool in task_ranked["tools"]] == ["beta_company_search"]
+    assert search("q=company")["limit"] == 20
+    last = search("q=company&offset=3&limit=1")
+    assert last["tools"] == [] and last["count"] == 0 and "next_offset" not in last

@@ -3394,13 +3394,54 @@ class Broker:
                     requested = {value.strip().casefold() for value in categories.split(",") if value.strip()}
                     rows = [row for row in rows if requested & {str(value).casefold() for value in row["categories"]}]
                 if operation.operation_id == "deepline.tools.search":
-                    query = str(parameters.get("query", "")).casefold()
-                    rows = [row for row in rows if query in (
-                        row["tool_id"] + " " + row["description"] + " " + " ".join(row["categories"])
-                    ).casefold()]
+                    # Deepline's SDK sends intent text, optional structured
+                    # terms and paging controls. Rank only the approved round
+                    # snapshot; never consult a live catalog or provider here.
+                    def words(value: str) -> set[str]:
+                        tokens = re.findall(r"[a-z0-9]+", value.casefold())
+                        return {token[:-3] + "y" if token.endswith("ies") and len(token) > 4
+                                else token for token in tokens}
+                    terms = words(str(parameters.get("query", "")) + " " +
+                                  str(parameters.get("search_terms", "")))
+                    task_terms = words(str(parameters.get("task", ""))) - {
+                        "and", "for", "from", "have", "need", "the", "this", "with"}
+
+                    def score(row: Mapping[str, Any]) -> int:
+                        fields = (
+                            (8, words(row["tool_id"] + " " + row["provider"])),
+                            (5, words(" ".join(row["categories"]))),
+                            (3, words(row["description"][:2048])),
+                            (1, words(" ".join(row["input_schema"]["properties"]))),
+                        )
+
+                        def weight(term: str) -> int:
+                            return max((value for value, candidates in fields
+                                        if any(term == word or len(term) >= 4 and
+                                               (word.startswith(term) or term.startswith(word))
+                                               for word in candidates)), default=0)
+
+                        relevance = sum(weight(term) for term in terms)
+                        if task_terms:
+                            relevance += sum(weight(term) for term in task_terms)
+                        return relevance
+
+                    ranked = [(score(row), row) for row in rows]
+                    rows = [row for relevance, row in sorted(
+                        ranked, key=lambda item: (-item[0], item[1]["tool_id"]))
+                        if relevance or not terms]
+                    total = len(rows)
+                    offset = int(parameters.get("offset", 0))
+                    limit = int(parameters.get("limit", 20))
+                    rows = rows[offset:offset + limit]
                 document = {"tools": [deepline_catalog.public_tool_definition(
                     row, compact=bool(parameters.get("compact", True))) for row in rows],
-                            "total": len(rows)}
+                            "total": total if operation.operation_id == "deepline.tools.search" else len(rows)}
+                if operation.operation_id == "deepline.tools.search":
+                    document.update({"count": len(rows), "offset": offset, "limit": limit,
+                                     "total_is_exact": True,
+                                     "search_mode": parameters.get("search_mode", "v2")})
+                    if offset + len(rows) < total:
+                        document["next_offset"] = offset + len(rows)
             body = json.dumps(document, separators=(",", ":"), allow_nan=False).encode("utf-8")
             if len(body) > operation.max_response_bytes:
                 return _error_result("provider_unavailable", summary)

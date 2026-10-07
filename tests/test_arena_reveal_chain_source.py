@@ -69,6 +69,11 @@ SPEC472_FIXTURE = (
     / "fixtures"
     / "subtensor_events_spec472_block9198408.json"
 )
+SPEC475_FIXTURE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "subtensor_events_spec475_block9234048.json"
+)
 
 
 def _compact(value: int) -> bytes:
@@ -394,6 +399,7 @@ def test_historical_reveal_succeeds_after_latest_head_passed_deadline(monkeypatc
         (SPEC469_FIXTURE, 469),
         (SPEC470_FIXTURE, 470),
         (SPEC472_FIXTURE, 472),
+        (SPEC475_FIXTURE, 475),
     ],
 )
 def test_exact_parent_runtime_and_transition_events_prove_reveal(
@@ -429,6 +435,7 @@ def test_exact_parent_runtime_and_transition_events_prove_reveal(
     assert result["event_witness"]["uid"] == fixture.validator_uid
     assert ("state_getRuntimeVersion", [parent_hash]) in fixture.calls
     assert ("state_getMetadata", [parent_hash]) in fixture.calls
+    assert ("state_getStorageHash", [module.RUNTIME_CODE_STORAGE_KEY, parent_hash]) in fixture.calls
     assert ("state_getStorage", [system_events_storage_key(), transition_hash]) in fixture.calls
     assert (
         "state_getStorage",
@@ -436,7 +443,70 @@ def test_exact_parent_runtime_and_transition_events_prove_reveal(
     ) in fixture.calls
 
 
-@pytest.mark.parametrize("spec_version", [456, 457, 458, 459, 464, 466, 467, 468, 469, 470, 472])
+@pytest.mark.parametrize("control", ["exact", "wrong_vector", "wrong_owner"])
+def test_spec475_chain_source_binds_published_vector_and_recipient(control):
+    fixture = MeasuredArchiveFixture(SPEC475_FIXTURE, 475)
+    measured = fixture.fixture
+    fixture.accounts = [
+        hashlib.sha256(("spec475-control:%d" % uid).encode()).digest()
+        for uid in range(measured["last_update_count"])
+    ]
+    for uid, account_hex in measured["recipient_account_ids"].items():
+        fixture.accounts[int(uid)] = bytes.fromhex(account_hex)
+    assert fixture.accounts[fixture.validator_uid] == fixture.validator_account
+    fixture.weights = [tuple(pair) for pair in measured["expected_weights"]]
+    source = _measured_source(fixture)
+    original_result = fixture.result
+
+    def exact_last_update(method, params):
+        if method == "state_getStorage" and params[0] == last_update_storage_key(netuid=NETUID):
+            fixture.calls.append((method, list(params)))
+            block = fixture.block_for_hash(params[1])
+            return _last_update_for(
+                measured["last_update_count"], fixture.validator_uid,
+                measured["inclusion_last_update"] if block == fixture.inclusion_block
+                else measured["transition_last_update"],
+            )
+        return original_result(method, params)
+
+    fixture.result = exact_last_update
+    expected_weights = list(fixture.weights)
+    recipients = [dict(value) for value in measured["recipient_uid_hotkeys"]]
+    if control == "wrong_vector":
+        expected_weights[1] = (expected_weights[1][0], expected_weights[1][1] - 1)
+    elif control == "wrong_owner":
+        recipients[1]["hotkey"] = RECIPIENT_B
+
+    def prove():
+        return source.prove_timelocked_reveal_transition(
+            netuid=NETUID,
+            validator_hotkey=ss58_encode_account_id(fixture.validator_account),
+            hotkey_public_key_hex=fixture.validator_account.hex(),
+            subnet_epoch_index=EPOCH,
+            commitment_hex=COMMITMENT.hex(), reveal_round=ROUND,
+            inclusion_block=fixture.inclusion_block,
+            reveal_deadline_block=fixture.reveal_block + 10,
+            expected_weights=expected_weights,
+            expected_recipient_uid_hotkeys=recipients,
+            chain_profile={
+                "genesis_hash": "2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03"
+            },
+        )
+
+    if control != "exact":
+        message = "revealed weights differ" if control == "wrong_vector" else "UID ownership changed"
+        with pytest.raises(ValidatorChainSourceV2Error, match=message):
+            prove()
+        return
+    result = prove()
+    assert result["weights"] == [(0, 65535), (122, 28086)]
+    assert result["reveal_block"] == 9234048
+    assert result["last_update"] == 9234041
+    assert result["event_witness"]["account_id_hex"] == measured["expected"]["account_id_hex"]
+    assert result["event_witness"]["reveal_record_index"] == 72
+
+
+@pytest.mark.parametrize("spec_version", [456, 457, 458, 459, 464, 466, 467, 468, 469, 470, 472, 475])
 def test_historical_reveal_selects_observed_runtime_profile(
     monkeypatch, spec_version
 ):

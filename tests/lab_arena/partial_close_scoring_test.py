@@ -1,5 +1,5 @@
 """Deadline isolation preserves real scores without inventing incomplete totals."""
-from copy import deepcopy
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -21,7 +21,7 @@ def test_partial_work_persists_and_full_results_keep_same_scores(cause):
     assert len(plan['work_items']) == 29
     assert plan['zero_rows'] == []
     assert plan['incomplete_rows'] == [{'submission_id':'partial', 'icp_position':3, 'cause':cause}]
-    assert contracts.validate_scoring_plan(contracts.canonical_json(plan) and deepcopy(plan)) == plan
+    assert contracts.validate_scoring_plan(json.loads(contracts.canonical_json(plan))) == plan
     outputs = {i['scored_run_id']:[company(0)] for i in plan['work_items']}
     breakdowns = {i['scored_run_id']:[breakdown(60.0)] for i in plan['work_items']}
     scores = scoring.build_stage_scores(plan=plan, policy=scoring.build_scorer_policy(),

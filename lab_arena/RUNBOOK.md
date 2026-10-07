@@ -381,6 +381,12 @@ python3 scripts/run_lab_arena_service.py --check-only
 Migration 193 adds safe replacement of unfinished uploads and accurate
 `execution_incomplete:stageN:count` / `scoring_incomplete:stageN:count`
 cancellation labels. It preserves historical results and source objects.
+Migrations 422 and 423 supersede whole-round execution cancellation: after
+bounded lease drain, unfinished assignments remain explicitly incomplete.
+Completed ICP results are judged and persisted normally. An incomplete model
+has a null final score and cannot win promotion. An incomplete baseline permits
+publication of the available results but no new champion; the existing reward
+continuity path remains in use. No missing ICP is silently assigned a score.
 Deploy its matching service after applying the migration. Source admission
 still uses the existing upload MD5 and server-assigned submission ID.
 

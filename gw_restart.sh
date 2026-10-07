@@ -59,6 +59,9 @@ GATEWAY_RESTART_TIMING_FILE="${GATEWAY_RESTART_TIMING_FILE:-$GATEWAY_RESTART_TIM
 GATEWAY_RESTART_TIMING_INITIALIZED="${GATEWAY_RESTART_TIMING_INITIALIZED:-0}"
 PREPARED_GATEWAY_SHA="${PREPARED_GATEWAY_SHA:-}"
 LAB_ARENA_RESTART_GUARD_GENERATION="${LAB_ARENA_RESTART_GUARD_GENERATION:-}"
+LAB_ARENA_RESTART_DRAIN_PID=""
+LAB_ARENA_RESTART_DRAIN_REPORT=""
+LAB_ARENA_RESTART_DRAIN_PRIOR_JOBS=""
 if [ -n "$GATEWAY_RESTART_AUTHORITY_ROOT" ]; then
   if ! [[ "$GATEWAY_RESTART_AUTHORITY_ROOT" =~ ^/tmp/gateway-restart-controller-bootstrap\.[A-Za-z0-9]+/authority$ ]] \
       || ! [[ "$GATEWAY_RESTART_AUTHORITY_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
@@ -293,6 +296,11 @@ start_lab_arena_service() {
 }
 
 run_lab_arena_restart_guard() {
+  local exec_helper=0
+  if [ "${1:-}" = "--exec-drain" ]; then
+    exec_helper=1
+    shift
+  fi
   local source_root="$1"
   shift
   local guard_args=("$@" --environment-file "$GATEWAY_ENV_FILE")
@@ -305,10 +313,16 @@ run_lab_arena_restart_guard() {
     echo "ERROR: exact Lab Arena restart guard helper is unavailable" >&2
     return 1
   fi
-  "${guard_environment[@]}" PYTHONPATH="$source_root" "$GATEWAY_PYTHON_BIN" \
-    "$source_root/scripts/lab_arena_restart_claim_guard.py" "${guard_args[@]}" \
-    --candidate "$PREPARED_GATEWAY_SHA" \
+  local guard_command=(
+    "${guard_environment[@]}" PYTHONPATH="$source_root" "$GATEWAY_PYTHON_BIN"
+    "$source_root/scripts/lab_arena_restart_claim_guard.py" "${guard_args[@]}"
+    --candidate "$PREPARED_GATEWAY_SHA"
     --invocation "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID"
+  )
+  if [ "$exec_helper" = "1" ]; then
+    exec "${guard_command[@]}"
+  fi
+  "${guard_command[@]}"
 }
 
 validate_post_activate_arena_guard_authority() {
@@ -336,14 +350,22 @@ bind_activated_gateway_guard_candidate() {
 }
 
 abort_lab_arena_restart_guard_before_destructive() {
-  local source_root
-  if [ -z "$LAB_ARENA_RESTART_GUARD_GENERATION" ] \
-      || [ "$GATEWAY_DESTRUCTIVE_PHASE_STARTED" = "1" ]; then
+  local source_root generation="$LAB_ARENA_RESTART_GUARD_GENERATION"
+  if [ "$GATEWAY_DESTRUCTIVE_PHASE_STARTED" = "1" ]; then
     return 0
+  fi
+  if [ -z "$generation" ]; then
+    if [ "${GATEWAY_DEPLOY_STAGE:-}" != "lab_arena_claim_drain" ] \
+        || ! [[ "$PREPARED_GATEWAY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+      return 0
+    fi
+    # The drain may have acquired its guard before it could return a generation.
+    # Generation zero makes the helper read and verify exact current ownership.
+    generation=0
   fi
   source_root="${GATEWAY_PREFLIGHT_TREE:-$LEADPOET_REPO_ROOT}"
   run_lab_arena_restart_guard "$source_root" abort \
-    --generation "$LAB_ARENA_RESTART_GUARD_GENERATION" >/dev/null 2>&1 || true
+    --generation "$generation" >/dev/null 2>&1 || true
   LAB_ARENA_RESTART_GUARD_GENERATION=""
 }
 
@@ -351,9 +373,24 @@ drain_lab_arena_for_restart() {
   local source_root="$1" report
   # Cover the longest supported lease (90-minute recovery plus 15 minutes)
   # and five minutes for natural expiry and completion polling.
-  report="$(run_lab_arena_restart_guard "$source_root" drain \
-    --scope "$GATEWAY_ACTIVE_RELEASE_COMPONENT" \
-    --timeout-seconds 6600)" || return 1
+  LAB_ARENA_RESTART_DRAIN_PRIOR_JOBS=" $(jobs -pr | tr '\n' ' ')"
+  LAB_ARENA_RESTART_DRAIN_REPORT="$(mktemp "${GATEWAY_RESTART_TIMING_FILE%.jsonl}.drain.XXXXXX")" || return 1
+  (
+    run_lab_arena_restart_guard --exec-drain "$source_root" drain \
+      --scope "$GATEWAY_ACTIVE_RELEASE_COMPONENT" \
+      --timeout-seconds 6600
+  ) >"$LAB_ARENA_RESTART_DRAIN_REPORT" &
+  LAB_ARENA_RESTART_DRAIN_PID=$!
+  if ! wait "$LAB_ARENA_RESTART_DRAIN_PID"; then
+    LAB_ARENA_RESTART_DRAIN_PID=""
+    rm -f -- "$LAB_ARENA_RESTART_DRAIN_REPORT"
+    LAB_ARENA_RESTART_DRAIN_REPORT=""
+    return 1
+  fi
+  LAB_ARENA_RESTART_DRAIN_PID=""
+  report="$(cat "$LAB_ARENA_RESTART_DRAIN_REPORT")" || return 1
+  rm -f -- "$LAB_ARENA_RESTART_DRAIN_REPORT"
+  LAB_ARENA_RESTART_DRAIN_REPORT=""
   LAB_ARENA_RESTART_GUARD_GENERATION="$(
     "$GATEWAY_PYTHON_BIN" -c \
       'import json,sys; value=json.load(sys.stdin); generation=value.get("guard_generation"); assert type(generation) is int and generation > 0; print(generation)' \
@@ -1045,6 +1082,9 @@ on_gateway_restart_exit() {
   fi
   emit_gateway_restart_sentry_summary "$status"
   cancel_gateway_offline_artifact_prepare
+  if [ -n "$LAB_ARENA_RESTART_DRAIN_REPORT" ]; then
+    rm -f -- "$LAB_ARENA_RESTART_DRAIN_REPORT"
+  fi
   rm -f -- "$GATEWAY_PREPARED_V2_RELEASE_MANIFEST" 2>/dev/null || true
   if [ -n "${GATEWAY_PREFLIGHT_TREE:-}" ]; then
     rm -rf "$GATEWAY_PREFLIGHT_TREE"
@@ -1060,6 +1100,35 @@ on_gateway_restart_exit() {
   fi
 }
 trap on_gateway_restart_exit EXIT
+
+on_gateway_restart_signal() {
+  local status="$1" running_pid drain_pid="$LAB_ARENA_RESTART_DRAIN_PID"
+  trap '' HUP INT TERM
+  if [ -z "$drain_pid" ] && [ -n "$LAB_ARENA_RESTART_DRAIN_REPORT" ]; then
+    # A signal can arrive after launch but before the parent records $!.
+    while read -r running_pid; do
+      case "$LAB_ARENA_RESTART_DRAIN_PRIOR_JOBS" in
+        *" $running_pid "*) ;;
+        *) drain_pid="$running_pid"; break ;;
+      esac
+    done < <(jobs -pr)
+  fi
+  if [ -n "$drain_pid" ]; then
+    # Background commands can inherit ignored SIGINT; TERM reaches Python.
+    while read -r running_pid; do
+      if [ "$running_pid" = "$drain_pid" ]; then
+        kill -s TERM "$drain_pid" 2>/dev/null || true
+        break
+      fi
+    done < <(jobs -pr)
+    wait "$drain_pid" 2>/dev/null || true
+    LAB_ARENA_RESTART_DRAIN_PID=""
+  fi
+  exit "$status"
+}
+trap 'on_gateway_restart_signal 129' HUP
+trap 'on_gateway_restart_signal 130' INT
+trap 'on_gateway_restart_signal 143' TERM
 
 install_gateway_python_dependencies() {
   local dependency_fingerprint legacy_project_metadata pip_scope=() requirements_file

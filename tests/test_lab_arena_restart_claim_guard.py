@@ -7,7 +7,10 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import signal
+import subprocess
 import sys
+import time
 
 import pytest
 
@@ -284,6 +287,83 @@ def test_timeout_aborts_only_owned_pre_destructive_guard(monkeypatch):
     with pytest.raises(guard_cli.GuardError, match="did not drain"):
         guard_cli._drain(_args())
     assert calls[-1] == "lab_arena_abort_restart_guard_v1"
+
+
+@pytest.mark.parametrize("interrupt", [signal.SIGHUP, signal.SIGINT, signal.SIGTERM])
+@pytest.mark.parametrize("later_phase,foreign,should_abort,at_acquire", [
+    ("draining", False, True, False),
+    ("gateway_destructive", False, False, False),
+    ("draining", True, False, False),
+    ("draining", False, True, True),
+])
+def test_drain_signal_aborts_only_current_owned_pre_destructive_guard(
+    tmp_path: Path, interrupt: signal.Signals, later_phase: str,
+    foreign: bool, should_abort: bool, at_acquire: bool,
+) -> None:
+    marker = tmp_path / "drain-entered"
+    abort = tmp_path / "abort-called"
+    initial = tmp_path / "initial.json"
+    later = tmp_path / "later.json"
+    initial.write_text(json.dumps(_guard_state()), encoding="utf-8")
+    later_state = _guard_state(phase=later_phase)
+    if foreign:
+        later_state["owner_commitment"] = "sha256:" + "f" * 64
+    later.write_text(json.dumps(later_state), encoding="utf-8")
+    wrapper = tmp_path / "interrupted_drain.py"
+    wrapper.write_text(
+        "import importlib.util, json, os, sys, time\n"
+        "from pathlib import Path\n"
+        "helper = sys.argv[1]\n"
+        "spec = importlib.util.spec_from_file_location('guard_under_test', helper)\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(module)\n"
+        "marker = Path(os.environ['DRAIN_MARKER'])\n"
+        "abort = Path(os.environ['ABORT_MARKER'])\n"
+        "def request(function, payload):\n"
+        "    if function == 'lab_arena_restart_guard_state_v1':\n"
+        "        name = 'LATER_STATE' if marker.exists() else 'INITIAL_STATE'\n"
+        "        return json.loads(Path(os.environ[name]).read_text())\n"
+        "    if function == 'lab_arena_acquire_restart_guard_v1':\n"
+        "        if os.environ['INTERRUPT_AT_ACQUIRE'] == '1':\n"
+        "            marker.write_text('acquired')\n"
+        "            time.sleep(60)\n"
+        "        return json.loads(Path(os.environ['INITIAL_STATE']).read_text())\n"
+        "    if function == 'lab_arena_restart_quiescence_v1':\n"
+        "        marker.write_text('entered')\n"
+        "        time.sleep(60)\n"
+        "    if function == 'lab_arena_abort_restart_guard_v1':\n"
+        "        abort.write_text(json.dumps(payload))\n"
+        "        return json.loads(Path(os.environ['INITIAL_STATE']).read_text())\n"
+        "    raise AssertionError(function)\n"
+        "module._request = request\n"
+        "sys.argv = [helper, 'drain', '--candidate', '" + CANDIDATE + "', "
+        "'--invocation', '" + INVOCATION + "', '--scope', 'all']\n"
+        "raise SystemExit(module.main())\n",
+        encoding="utf-8",
+    )
+    process = subprocess.Popen(
+        [sys.executable, str(wrapper), str(SCRIPT)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env={**os.environ, "DRAIN_MARKER": str(marker), "ABORT_MARKER": str(abort),
+             "INITIAL_STATE": str(initial), "LATER_STATE": str(later),
+             "INTERRUPT_AT_ACQUIRE": "1" if at_acquire else "0"},
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert marker.exists(), process.communicate(timeout=1)
+        os.kill(process.pid, interrupt)
+        _stdout, stderr = process.communicate(timeout=5)
+        assert process.returncode == 1
+        assert interrupt.name in stderr
+        assert abort.exists() is should_abort
+        if should_abort:
+            assert json.loads(abort.read_text())["p_guard_generation"] == 1
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
 
 
 def test_post_destructive_drain_failure_keeps_guard_for_canonical_retry(monkeypatch):

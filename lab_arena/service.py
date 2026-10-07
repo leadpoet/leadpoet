@@ -18,7 +18,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import telemetry
+from lab_arena import telemetry, runtime_version
 from lab_arena import code_review, code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, trajectory
 from lab_arena import broker as broker_module, capacity, chain as chain_module, contracts, credentials as credentials_module, operations, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, submission_similarity, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
@@ -4067,6 +4067,9 @@ class ArenaService:
         if not contact_policy.enabled(configuration):
             lease_icp.pop("contact_policy", None)
         lease = dict(response, icp=lease_icp, lease_token=token, round_id=round_id, evaluation_date=str(round_row.get("evaluation_date") or ""))
+        # Describes the gateway serving this lease, not the frozen scorer image.
+        # No admission, accounting or completion decision depends on this value.
+        lease["gateway_source_commit"] = runtime_version.SOURCE_METADATA["validator_source_commit"]
         lease["icp_wall_clock_seconds"] = int(configuration.get(
             "icp_wall_clock_seconds", contracts.ICP_WALL_CLOCK_SECONDS
         ))

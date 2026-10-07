@@ -1414,6 +1414,11 @@ RUN_RESULT_FIELDS = (
             F("stdout_bytes", "int", minimum=0),
             F("stderr_bytes", "int", minimum=0),
             F("provider_call_count", "int", minimum=0),
+            # Optional audit metadata, never an identity/admission requirement.
+            F("validator_source_commit", "str", maximum=64, required=False),
+            F("validator_source_origin", "str", maximum=32, required=False),
+            F("validator_source_dirty", "str", maximum=16, required=False),
+            F("gateway_claim_source_commit", "str", maximum=64, required=False),
             F("web_egress", "object", required=False, fields=(
                 F("policy_version", "str", choices=(PROXY_EXECUTION_VERSION,)),
                 F("worker_slot", "int", minimum=0, maximum=250),

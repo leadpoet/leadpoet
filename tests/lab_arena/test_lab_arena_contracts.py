@@ -401,6 +401,16 @@ def test_run_result_reward_basis_and_scoring_plan_contracts():
         "started_at": "2026-09-02T01:00:00Z", "finished_at": "2026-09-02T01:01:00Z", "terminal_status": "accepted",
     }
     assert c.validate_run_result(run_result)["terminal_status"] == "accepted"
+    # Metadata is optional and informational. Old, unknown and differing
+    # validator versions all retain the same completion/score eligibility.
+    for revision in ("a" * 40, "b" * 40, "unknown"):
+        resource_summary = dict(run_result["resource_summary"],
+            validator_source_commit=revision,
+            validator_source_origin="git_checkout",
+            validator_source_dirty="unknown",
+            gateway_claim_source_commit="c" * 40)
+        versioned = dict(run_result, resource_summary=resource_summary)
+        assert c.validate_run_result(json.loads(json.dumps(versioned))) == versioned
     transition = {
         "schema_version": c.CHECKPOINT_TRANSITION_SCHEMA_VERSION,
         "event": "checkpoint_transition",

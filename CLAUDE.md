@@ -1,5 +1,16 @@
 # Agent Instructions
 
+## Scoped production authorization: validator commit audit metadata
+
+On 2026-10-07 the user authorized adding validator source commit metadata to
+Arena execution/scoring results and trajectories for baseline and miner runs.
+Use $overnight-rebenchmark-validation for protected inspection, focused tests,
+safe push/merge, canonical paired deployment and reward-disabled live probes.
+This is observability only: preserve admission, scoring, costs, accepted work,
+frozen inputs, rewards, weights and concurrent changes. Do not add commit
+identity enforcement, attestation, manifests or a separate audit store.
+Authority ends after deployed metadata is persisted and verified end to end.
+
 ## Scoped production authorization: October 7 full-round monitoring
 
 The user authorized monitoring the October 7 baseline and all miners through

@@ -59,7 +59,7 @@ AGENT_ENTRYPOINT_PATH = Path(__file__).with_name("agent_entrypoint.py").resolve(
 CHECKPOINT_MODULE_PATH = Path(__file__).with_name("lab_arena_checkpoint.py").resolve()
 CODEX_MODULE_PATH = Path(__file__).with_name("lab_arena_codex.py").resolve()
 WEB_BRIDGE_PATH = Path(__file__).with_name("web_egress_bridge.py").resolve()
-MAX_REFUSED_FRAMES = 25  # after this many refused calls the worker answers a run's frames locally
+MAX_REFUSED_FRAMES = 25  # bound repeated refusals for the same operation/tool
 MAX_BUFFERED_PROVIDER_ERROR_EVENTS = 32
 MAX_BUFFERED_DECISION_EVENTS = 64
 QUOTA_SNAPSHOT_SCHEMA_VARIANTS = 2
@@ -69,7 +69,14 @@ QUOTA_SNAPSHOT_CACHE_SECONDS = QUOTA_SNAPSHOT_CACHE_MILLISECONDS / 1000.0
 # A request on the worker socket is either a length-prefixed operation frame
 # (first byte 0x00: the judge shim) or an HTTP request (an ASCII method).
 HTTP_FIRST_BYTES = b"GPHDO"
-HTTP_ERROR_STATUS = {"budget_exhausted": 402, "worker_unavailable": 503, "request_too_large": 413}
+HTTP_ERROR_STATUS = {
+    "budget_exhausted": 402, "budget_refused": 402,
+    "miner_credentials_unavailable": 402, "miner_provider_not_configured": 400,
+    "call_refused": 402, "provider_request_refused": 403,
+    "provider_unavailable": 502, "broker_unavailable": 503,
+    "lease_stale": 409, "call_uncertain": 409,
+    "worker_unavailable": 503, "request_too_large": 413,
+}
 IMAGE_DIGEST_RE = __import__("re").compile(r"^(?:[a-z0-9][a-z0-9._/-]{0,200}@)?sha256:[0-9a-f]{64}$")
 REQUIREMENT_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
@@ -1676,6 +1683,9 @@ class RunState:
     )
     action_sequence: int = 0
     refusals: int = 0  # refused calls answered by the Arena for this run
+    operation_refusals: Dict[Tuple[str, str], Tuple[int, str]] = field(
+        default_factory=dict
+    )
     lock: threading.Lock = field(default_factory=threading.Lock)
     quota_request_count: int = 0
     quota_snapshot: Optional[Dict[str, Any]] = None
@@ -2104,14 +2114,33 @@ class WorkerSocketServer:
         cancel_requested: Optional[Callable[[], bool]] = None,
     ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
         state = self._state
+        operation = operations.get_operation(operation_id)
+        # Compatibility routes and the native execute route share the actual
+        # Deepline tool's guard. Catalog reads and other providers stay separate.
+        tool = (
+            operation.deepline_tool
+            if operation is not None and operation.provider == "deepline"
+            else None
+        )
+        if operation_id == "deepline.execute":
+            tool = str(parameters.get("tool") or "")
+        refusal_key = (
+            ("deepline.execute", tool) if tool else (operation_id, "")
+        )
         with state.lock:
             sequence = state.action_sequence
             state.action_sequence += 1
-            refused = state.refusals >= MAX_REFUSED_FRAMES
-        if refused:
-            # The run's quota or key keeps refusing: answer locally instead of
-            # spending an Arena round trip and a ledger row on every request.
-            return "budget_exhausted", None
+            refusal_count, refusal_error = state.operation_refusals.get(
+                refusal_key, (0, "call_refused")
+            )
+        if refusal_count >= MAX_REFUSED_FRAMES:
+            # Refuse only the operation that keeps failing. A failed paid tool
+            # must not disable a healthy provider or a free research tool, and
+            # a credential refusal must not be reported as exhausted budget.
+            return refusal_error, None
+        # Calls admitted before the threshold can still complete concurrently.
+        # Keep their original frames and accounting; do not serialize or cancel
+        # an already dispatched request to enforce an exact cutoff.
         frame = {"operation_id": operation_id, "parameters": dict(parameters), "timeout_ms": int(timeout_ms), "action_sequence": sequence}
         while True:
             if self._cancelled(cancel_requested):
@@ -2210,6 +2239,16 @@ class WorkerSocketServer:
             state.calls.append(call)
             if call.get("error_code") in ("budget_refused", "budget_exhausted", "miner_credentials_unavailable", "miner_provider_not_configured") or call.get("outcome") == "refused":
                 state.refusals += 1
+                count, _previous_error = state.operation_refusals.get(
+                    refusal_key, (0, "call_refused")
+                )
+                error_code = call.get("error_code")
+                state.operation_refusals[refusal_key] = (
+                    count + 1,
+                    error_code
+                    if isinstance(error_code, str) and error_code in HTTP_ERROR_STATUS
+                    else "call_refused",
+                )
         document = {
             **document,
             "headers": self._socket_response_headers(

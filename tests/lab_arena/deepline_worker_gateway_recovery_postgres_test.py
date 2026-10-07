@@ -10,10 +10,20 @@ import httpx
 import pytest
 
 from lab_arena import broker as br, runner
+from tests.lab_arena.deepline_budget_only_exact_recovery_postgres_test import database as base_database
 from tests.lab_arena.deepline_completed_response_recovery_postgres_test import setup
 from tests.lab_arena.deepline_completed_response_recovery_test import NATIVE, catalog
-from tests.lab_arena.deepline_late_response_recovery_postgres_test import database
+from tests.lab_arena.deepline_late_response_recovery_postgres_test import database as response_database
 from tests.lab_arena.deepline_late_response_recovery_test import LateTransport
+
+
+@pytest.fixture(scope="module")
+def database(response_database):
+    # The service now calls the success-priority listing during round advance.
+    migration = Path(__file__).resolve().parents[2] / "scripts/425-lab-arena-successful-deepline-cost-priority.sql"
+    with response_database[0].connect(**response_database[1]) as connection, connection.cursor() as cursor:
+        cursor.execute(migration.read_text())
+    return response_database
 
 
 class GatewayApi:

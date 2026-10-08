@@ -815,6 +815,94 @@ def test_judge_infrastructure_failures_retry_then_raise_never_zero():
         scoring.score_work_item(item, icp=_ICPS[0], companies=[company(1)], scorer=broken)
 
 
+def test_exhausted_fit_logs_only_fixed_receipt_labels_and_keeps_failure_shape():
+    secret = "https://secret.example/path?api_key=private-value"
+    row = breakdown(0.0, "Company fit unavailable: " + secret)
+    row["verifier_gate_receipts"] = [{
+        "gate": "company_fit",
+        "decision": "unavailable",
+        "company_fit_dimensions": {
+            "identity": "match", "employee_size": "unavailable",
+            "stage": "unavailable", secret: "unavailable",
+        },
+        "required_attribute_decision": "unavailable",
+        "failure_class": [secret],
+        "failure_reason_code": "provider_error",
+        "supporting_receipts": [{
+            "gate": "company_evidence_investigation",
+            "completed_submitted_findings": True,
+            "failure_reason": secret,
+            "claims": {"headcount": secret},
+            "usage": {"fetch_outcomes": [
+                {"ok": True, "url": secret},
+                {"ok": False, "error_class": "http_error", "url": secret},
+                {"ok": False, "error_class": "source_not_found", "url": secret},
+                {"ok": False, "error_class": "source_gone", "url": secret},
+                {"ok": False, "error_class": secret},
+            ]},
+        }],
+    }]
+    calls = []
+
+    def scorer(companies, icp, is_reference_model):
+        calls.append(len(companies))
+        return [row]
+
+    with pytest.raises(scoring.ScoringError) as caught:
+        scoring.score_work_item(
+            {"scored_run_id": secret}, icp=_ICPS[0],
+            companies=[scored_company(0)], scorer=scorer, max_retries=2,
+        )
+    detail = str(caught.value)
+    assert calls == [1, 1]
+    assert detail == (
+        "judge_exhausted attempts=2 reason=provider_error "
+        "fit_dims=employee_size,stage,required_attribute fit_class=missing "
+        "fit_reason=provider_error inv_complete=yes inv_reason=none "
+        "fetch=ok:1,http_error:1,source_not_found:1,source_gone:1,other:1"
+    )
+    assert secret not in detail
+    assert len(detail) <= scoring.MAX_FAILURE_DETAIL_CHARS
+    failure = scoring.build_scoring_failure(
+        "run-1", "judge_error", detail, reason=caught.value.failure_reason,
+    )
+    assert scoring.validate_scoring_output_document(failure) == failure
+    assert failure["reason"] == "provider_error"
+
+
+def test_transient_fit_failure_followed_by_success_keeps_original_breakdown():
+    failed = breakdown(0.0, "Company fit unavailable: provider timeout")
+    failed["verifier_gate_receipts"] = [{
+        "gate": "company_fit", "decision": "unavailable",
+        "failure_reason_code": "provider_error",
+    }]
+    accepted = breakdown(53.0)
+    calls = []
+
+    def scorer(companies, icp, is_reference_model):
+        calls.append(len(companies))
+        return [failed] if len(calls) == 1 else [accepted]
+
+    result = scoring.score_work_item(
+        {"scored_run_id": "run-1"}, icp=_ICPS[0],
+        companies=[scored_company(0)], scorer=scorer,
+    )
+    assert calls == [1, 1]
+    assert result == [accepted]
+
+
+def test_private_diagnostic_finds_fit_after_another_retryable_failure():
+    intent = breakdown(0.0, "Intent judge unavailable")
+    fit = breakdown(0.0, "Company fit unavailable")
+    fit["verifier_gate_receipts"] = [{
+        "gate": "company_fit", "decision": "unavailable",
+        "company_fit_dimensions": {"stage": "unavailable"},
+    }]
+    assert scoring._private_retryable_failure_diagnostic([intent, fit]).startswith(
+        "fit_dims=stage "
+    )
+
+
 def test_retry_retains_first_terminal_company_results_and_calls_only_pending():
     companies = [scored_company(index) for index in range(3)]
     calls = []

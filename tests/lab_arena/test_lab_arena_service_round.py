@@ -2041,7 +2041,7 @@ def test_exhausted_company_evidence_continues_remaining_companies_and_round(
     assert_canary_absent(harness, connect)
 
 
-def test_exhausted_judge_failure_zeros_one_icp_and_continues_scoring(
+def test_exhausted_judge_failure_leaves_one_icp_unscored(
     connect, tmp_path
 ):
     harness = Harness(
@@ -2163,9 +2163,9 @@ def test_exhausted_judge_failure_zeros_one_icp_and_continues_scoring(
     assert store.list_runs(harness.round_id, stage=1, status="pending")
 
     harness.run_stage_with_runners(2)
-    harness.advance_until("published", runners=2)
+    harness.advance_until("stage1_scored", runners=2)
     row = store.get_round(harness.round_id)
-    assert row["status"] == "published"
+    assert row["status"] == "stage1_scored"
     assert row["cancel_reason"] is None
     post_close_token = new_lease_token()
     post_close_request_id = contracts.new_request_id()
@@ -2179,7 +2179,7 @@ def test_exhausted_judge_failure_zeros_one_icp_and_continues_scoring(
         request_hash=contracts.document_hash({"request_id": post_close_request_id}),
         lease_token_hash=hash_lease_token(post_close_token),
     )
-    assert post_close == {"status": "stage_closed", "round_status": "published"}
+    assert post_close == {"status": "stage_closed", "round_status": "stage1_scored"}
 
     reopened_store = harness.make_store()
     try:
@@ -2192,7 +2192,6 @@ def test_exhausted_judge_failure_zeros_one_icp_and_continues_scoring(
     accepted_after = store.get_run(accepted["run_id"])
     assert accepted_after["status"] == "accepted"
     assert accepted_after["output_ref"] == accepted_ref
-    assert harness.service.public_results(harness.round_id, accepted["submission_id"])
     assert len(harness.service.public_benchmark(harness.round_id)["icps"]) == 20
     assert harness.service.benchmark_icps(harness.round_id) == expected_icps
     execution_runs = store.list_runs(
@@ -2205,7 +2204,13 @@ def test_exhausted_judge_failure_zeros_one_icp_and_continues_scoring(
         if run["submission_id"] == failing["submission_id"]
         and run["icp_position"] == int(first["icp_position"])
     ]
-    assert len(affected) == 1 and affected[0]["per_icp_score"] == 0
+    assert len(affected) == 1 and affected[0]["per_icp_score"] is None
+    assert store.get_run(accepted["scored_run_id"])["per_icp_score"] is not None
+    assert all(
+        run["per_icp_score"] is not None
+        for run in execution_runs
+        if run["submission_id"] == visible["submission_id"]
+    )
 
 
 @pytest.mark.parametrize(

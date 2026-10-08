@@ -389,6 +389,86 @@ def _retryable_breakdown_failure_reason(breakdown: Mapping[str, Any]) -> str:
     return "unknown"
 
 
+_PRIVATE_FIT_DIMENSIONS = (
+    "identity", "employee_size", "industry", "geography", "stage",
+    "required_attribute",
+)
+_PRIVATE_FIT_CLASSES = frozenset({
+    "insufficient_fit_evidence", "employee_size_verification_failed",
+    "required_attribute_quote_absent", "company_verification_exhausted",
+    "model_contract_incompatible",
+})
+_PRIVATE_FETCH_CLASSES = (
+    "http_error", "source_not_found", "source_gone", "invalid_url", "unsupported_binary_content",
+    "empty_page", "provider_request_refused", "provider_diagnostic_body",
+    "fetch_failed",
+)
+
+
+def _private_retryable_fit_diagnostic(breakdown: Mapping[str, Any]) -> str:
+    """Project one failed fit receipt to fixed labels, never source content."""
+
+    receipts = breakdown.get("verifier_gate_receipts")
+    if not isinstance(receipts, list):
+        return "fit=absent"
+    fit = next((row for row in receipts if isinstance(row, Mapping)
+                and row.get("gate") == "company_fit"
+                and row.get("decision") == "unavailable"), None)
+    if fit is None:
+        return "fit=absent"
+    decisions = fit.get("company_fit_dimensions")
+    decisions = decisions if isinstance(decisions, Mapping) else {}
+    dimensions = [name for name in _PRIVATE_FIT_DIMENSIONS
+                  if (decisions.get(name) == "unavailable" or
+                      (name == "required_attribute" and
+                       fit.get("required_attribute_decision") == "unavailable"))]
+    failure_class = fit.get("failure_class")
+    failure_class = (
+        failure_class if isinstance(failure_class, str)
+        and failure_class in _PRIVATE_FIT_CLASSES else "missing"
+    )
+    reason = _validated_failure_reason(fit.get(FAILURE_REASON_DETAIL_KEY)) or "missing"
+    supporting = fit.get("supporting_receipts")
+    investigation = next((row for row in supporting if isinstance(row, Mapping)
+                          and row.get("gate") == "company_evidence_investigation"), None) if isinstance(supporting, list) else None
+    completed = (
+        "yes" if investigation.get("completed_submitted_findings") is True else "no"
+    ) if investigation is not None else "missing"
+    investigation_reason = (
+        _validated_failure_reason(investigation.get("failure_reason")) or "none"
+    ) if investigation is not None else "missing"
+    usage = investigation.get("usage") if investigation is not None else None
+    outcomes = usage.get("fetch_outcomes") if isinstance(usage, Mapping) else None
+    counts = {name: 0 for name in ("ok", *_PRIVATE_FETCH_CLASSES, "other")}
+    if isinstance(outcomes, list):
+        for outcome in outcomes:
+            if not isinstance(outcome, Mapping):
+                counts["other"] += 1
+            elif outcome.get("ok") is True:
+                counts["ok"] += 1
+            else:
+                error_class = outcome.get("error_class")
+                counts[error_class if error_class in _PRIVATE_FETCH_CLASSES else "other"] += 1
+    fetch = ",".join("%s:%d" % (name, min(count, 99))
+                     for name, count in counts.items() if count) or "none"
+    return (
+        "fit_dims=%s fit_class=%s fit_reason=%s inv_complete=%s "
+        "inv_reason=%s fetch=%s"
+        % (",".join(dimensions) or "none", failure_class, reason,
+           completed, investigation_reason, fetch)
+    )
+
+
+def _private_retryable_failure_diagnostic(
+    failures: Sequence[Mapping[str, Any]],
+) -> str:
+    for failure in failures:
+        diagnostic = _private_retryable_fit_diagnostic(failure)
+        if diagnostic != "fit=absent":
+            return diagnostic
+    return "fit=absent"
+
+
 def _has_unique_scored_company_names(
     companies: Sequence[Mapping[str, Any]], scored_indexes: Sequence[int],
 ) -> bool:
@@ -439,8 +519,8 @@ def score_work_item(
     retain_terminal = integrity_policy or _has_unique_scored_company_names(sliced, scored_indexes)
     retained: List[Optional[Dict[str, Any]]] = [None] * len(scored_indexes)
     unresolved = list(range(len(scored_indexes)))
-    last_error: Optional[BaseException] = None
     last_failure_reason = ""
+    last_private_diagnostic = "origin=exception"
     # This private dictionary is the complete lifetime boundary for source text
     # retained between retries. A later score_work_item call always gets a new
     # scope, even when its caller reuses the same scorer object.
@@ -463,10 +543,10 @@ def score_work_item(
                 retry_evidence_scope=retry_evidence_scope,
             )
         except Exception as exc:  # judge/provider failure: retry unresolved input
-            last_error = exc
             last_failure_reason = _validated_failure_reason(
                 getattr(exc, "failure_reason", "")
             ) or "unknown"
+            last_private_diagnostic = "origin=exception"
             continue
         if len(breakdowns) != len(invoked_positions):
             raise ScoringError(
@@ -500,11 +580,7 @@ def score_work_item(
                 last_failure_reason = _retryable_breakdown_failure_reason(
                     failed[0]
                 )
-                last_error = ScoringError(
-                    "judge reported a retryable verifier failure: %s"
-                    % str(failed[0].get("failure_reason") or "")[:200],
-                    failure_reason=last_failure_reason,
-                )
+                last_private_diagnostic = _private_retryable_failure_diagnostic(failed)
                 continue
             return breakdowns
         for relative_index, (position, breakdown) in enumerate(zip(invoked_positions, breakdowns)):
@@ -572,19 +648,15 @@ def score_work_item(
         if unresolved_failures:
             failure = unresolved_failures[0]
             last_failure_reason = _retryable_breakdown_failure_reason(failure)
-            last_error = ScoringError(
-                "judge reported a retryable verifier failure: %s"
-                % str(failure.get("failure_reason") or "")[:200],
-                failure_reason=last_failure_reason,
+            last_private_diagnostic = _private_retryable_failure_diagnostic(
+                unresolved_failures
             )
             continue
     raise ScoringError(
-        "run %s could not be scored: %s: %s"
-        % (
-            item.get("scored_run_id"),
-            type(last_error).__name__ if last_error else "unknown",
-            str(last_error or "")[:240],
-        ),
+        ("judge_exhausted attempts=%d reason=%s %s"
+         % (attempts, last_failure_reason or "unknown", last_private_diagnostic))[
+             :MAX_FAILURE_DETAIL_CHARS
+         ],
         failure_reason=last_failure_reason,
     )
 

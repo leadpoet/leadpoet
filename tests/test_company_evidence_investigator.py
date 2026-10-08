@@ -2866,6 +2866,59 @@ def _completed_unproven_investigation(target):
     }
 
 
+@pytest.mark.parametrize(
+    ("status", "body", "expected_class", "completed_is_local"),
+    [
+        (404, "missing", "source_not_found", True),
+        (410, "gone", "source_gone", True),
+        (403, '{"error":{"code":"provider_request_refused"}}',
+         "provider_request_refused", True),
+        (401, "unauthorized", "http_error", False),
+        (403, "forbidden", "http_error", False),
+        (429, "limited", "http_error", False),
+        (500, "unavailable", "http_error", False),
+        (502, "unavailable", "http_error", False),
+    ],
+)
+def test_completed_unproven_stage_keeps_only_terminal_source_fetches_local(
+    monkeypatch, status, body, expected_class, completed_is_local,
+):
+    url = "https://acme.example/dead-source"
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", "test-key")
+
+    async def fake_bounded(_session, requested_url, **_kwargs):
+        assert requested_url == "https://api.scrapingdog.com/scrape"
+        return status, requested_url, body
+
+    monkeypatch.setattr(investigator, "_fetch_bounded_html", fake_bounded)
+    fetched = asyncio.run(investigator._fetch_page(object(), url))
+    outcome = investigator._fetch_outcome(url, fetched)
+    assert outcome["error_class"] == expected_class
+    receipt = _completed_unproven_investigation("stage")
+    receipt["usage"]["fetch_outcomes"] = [outcome, {"ok": True}]
+    verdict = _complete_verdict()
+    assert lead_scorer._has_explicitly_unproven_fit_dimensions(
+        verdict, ("stage",), investigation_receipt=receipt,
+    ) is completed_is_local
+    if status in {404, 410}:
+        receipt["usage"]["fetch_outcomes"].append(
+            {"ok": False, "error_class": "http_error"}
+        )
+        assert not lead_scorer._has_explicitly_unproven_fit_dimensions(
+            verdict, ("stage",), investigation_receipt=receipt,
+        )
+        receipt["usage"]["fetch_outcomes"].pop()
+        receipt["claims"]["stage"]["status"] = "VERIFIED"
+        assert not lead_scorer._has_explicitly_unproven_fit_dimensions(
+            verdict, ("stage",), investigation_receipt=receipt,
+        )
+        receipt["claims"]["stage"]["status"] = "UNPROVEN"
+    receipt["completed_submitted_findings"] = False
+    assert not lead_scorer._has_explicitly_unproven_fit_dimensions(
+        verdict, ("stage",), investigation_receipt=receipt,
+    )
+
+
 @pytest.mark.parametrize("dimension,target", [
     ("stage", "stage"), ("employee_size", "headcount"),
     ("industry", "industry"), ("geography", "geography"),
@@ -2925,8 +2978,9 @@ def test_completed_unproven_investigation_preserves_infrastructure_faults(fault)
 
 @pytest.mark.parametrize("company_quality", [False, True])
 @pytest.mark.parametrize("malformed", [False, True])
+@pytest.mark.parametrize("source_http_status", [None, 404, 410, 429, 500])
 def test_completed_unproven_stale_stage_keeps_valid_scoring_sibling(
-    monkeypatch, malformed, company_quality,
+    monkeypatch, malformed, company_quality, source_http_status,
 ):
     verdict = _complete_verdict(
         observed_company_name="Acme Commercial Advisors",
@@ -2964,6 +3018,14 @@ def test_completed_unproven_stale_stage_keeps_valid_scoring_sibling(
         calls["investigator"] += 1
         assert targets == ("stage",)
         receipt = _completed_unproven_investigation("stage")
+        if source_http_status is not None:
+            receipt["usage"]["fetch_outcomes"] = [
+                investigator._fetch_outcome(
+                    "https://acme.example/dead-source",
+                    {"ok": False, "error": f"http_{source_http_status}"},
+                ),
+                {"ok": True},
+            ]
         return {
             "claims": {} if malformed else receipt["claims"],
             "_completed_submit": not malformed,
@@ -3054,7 +3116,7 @@ def test_completed_unproven_stale_stage_keeps_valid_scoring_sibling(
         )
         return rows
 
-    if malformed:
+    if malformed or source_http_status in {429, 500}:
         with pytest.raises(arena_scoring.ScoringError):
             run_score()
         assert calls["investigator"] == arena_scoring.MAX_JUDGE_RETRIES

@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: October 8 monitoring and provider concurrency
+
+The user authorized monitoring the October 8 baseline and miner round through
+execution, scoring, publication, rewards and finalized weights. Use
+$overnight-rebenchmark-validation for protected inspection, narrow fixes for
+confirmed bugs, focused tests, safe push/merge and canonical paired deployment.
+The user explicitly set LAB_ARENA_OPENROUTER_MAX_CONCURRENCY to a code default
+of 200; update its existing bounded configuration path and production override
+accordingly. Preserve provider cooldowns, request identities, confirmed costs,
+ICP deadlines, qualification, scoring, accepted results, frozen inputs and
+concurrent work. Do not reset the round or interrupt healthy paid requests.
+Read-only Sentry and OnePatch checks are authorized. This scope ends after
+live deployment and end-to-end round verification.
+
 ## Scoped production authorization: continuous improvement reward slots
 
 On 2026-10-07/08 the user authorized replacing champion payout allocation with

@@ -87,6 +87,10 @@ python3 scripts/query_sentry_api.py issues --secret-source validator \
   --stats-period 24h --limit 25
 ```
 
+`--query` applies only to `issues`. Event listings use `--stats-period` and
+`--limit`; inspect each event's `date_created` for the deployment window.
+The helper rejects `--query` for other commands instead of silently ignoring it.
+
 Codex may use this workflow for deployment checks, restart monitoring,
 debugging, and post-deploy validation. Sentry results must be correlated with
 gateway/validator logs and durable or on-chain evidence. They are observability

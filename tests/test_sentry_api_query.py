@@ -499,6 +499,52 @@ def test_cli_error_is_sanitized(monkeypatch, capsys):
     assert "code=api_http_error" in captured.err
 
 
+@pytest.mark.parametrize("command", ["events", "auth-check"])
+def test_cli_rejects_unsupported_query_before_credentials(monkeypatch, capsys, command):
+    def unexpected_credentials(*args, **kwargs):
+        pytest.fail("invalid arguments must not read production credentials")
+
+    monkeypatch.setattr(query, "_load_credentials", unexpected_credentials)
+    assert query.main([command, "--query", "timestamp:>2026-10-08T07:40:00Z"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--query is supported only for issues" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [([], "is:unresolved"), (["--query", "lastSeen:>2026-10-08T07:40:00Z"],
+                            "lastSeen:>2026-10-08T07:40:00Z"),
+     (["--query", ""], "")],
+)
+def test_cli_preserves_issue_query_and_default(monkeypatch, capsys, arguments, expected):
+    observed = {}
+
+    def request(path, *, query, **kwargs):
+        observed.update(query)
+        return []
+
+    monkeypatch.setattr(query, "_load_credentials", lambda *args, **kwargs: _credentials())
+    monkeypatch.setattr(query, "_request_json", request)
+    assert query.main(["issues", *arguments]) == 0
+    assert observed["query"] == expected
+    assert json.loads(capsys.readouterr().out)["kind"] == "issues"
+
+
+def test_cli_event_listing_still_uses_its_time_window(monkeypatch, capsys):
+    observed = {}
+
+    def request(path, *, query, **kwargs):
+        observed.update(query)
+        return []
+
+    monkeypatch.setattr(query, "_load_credentials", lambda *args, **kwargs: _credentials())
+    monkeypatch.setattr(query, "_request_json", request)
+    assert query.main(["events", "--stats-period", "1h", "--limit", "10"]) == 0
+    assert observed == {"statsPeriod": "1h", "full": "false", "limit": 10}
+    assert json.loads(capsys.readouterr().out)["kind"] == "events"
+
+
 def test_sentry_user_token_shape_is_redacted_by_shared_scrubber():
     assert FAKE_TOKEN not in str(scrub_text("token=" + FAKE_TOKEN))
 

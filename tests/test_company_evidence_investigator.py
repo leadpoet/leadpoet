@@ -15048,7 +15048,12 @@ def test_only_the_lab_scorer_activates_the_investigator_by_default():
 
 @pytest.mark.parametrize(
     "investigation_failure",
-    [None, PROVIDER_ERROR_FAILURE_REASON, MALFORMED_RESPONSE_FAILURE_REASON],
+    [
+        None,
+        PROVIDER_ERROR_FAILURE_REASON,
+        MALFORMED_RESPONSE_FAILURE_REASON,
+        investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON,
+    ],
 )
 @pytest.mark.parametrize("current_output_contract", [False, True])
 def test_targeted_stage_classification_through_lab_scorer(
@@ -15077,6 +15082,17 @@ def test_targeted_stage_classification_through_lab_scorer(
         assert kwargs["targets"] == ("stage",)
         if investigation_failure:
             diagnostic[VERIFIER_FAILURE_REASON_KEY] = investigation_failure
+            if investigation_failure == (
+                investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+            ):
+                return {
+                    "claims": {"stage": _finding(
+                        "stage", status="UNPROVEN", observed_value="",
+                        evidence_url="", evidence_quote="",
+                    )},
+                    "_completed_submit": False,
+                    "failure_reason": investigation_failure,
+                }
             return {
                 "claims": {},
                 "failure_reason": investigation_failure,
@@ -15125,7 +15141,7 @@ def test_targeted_stage_classification_through_lab_scorer(
     ).model_dump(mode="json")
 
     if investigation_failure:
-        with pytest.raises(arena_scoring.ScoringError):
+        with pytest.raises(arena_scoring.ScoringError) as exc_info:
             arena_scoring.score_work_item(
                 {"scored_run_id": "targeted-investigator-failure"},
                 icp=icp,
@@ -15134,6 +15150,10 @@ def test_targeted_stage_classification_through_lab_scorer(
                 max_retries=3,
             )
         assert calls == {"broad": 3, "investigator": 3}
+        if investigation_failure == (
+            investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+        ):
+            assert exc_info.value.failure_reason == investigation_failure
         return
 
     accepted = arena_scoring.score_work_item(
@@ -15288,6 +15308,133 @@ def test_reviewed_recurring_attribute_controls_arena_score(
     assert rows[0]["company_qualified"] is recurring_proved
     assert rows[0]["final_score"] == (54 if recurring_proved else 0.0)
     assert calls["intent"] == (1 if recurring_proved else 0)
+
+
+def test_time_interrupted_review_recovers_on_second_scoring_attempt(monkeypatch):
+    product_url = "https://acme.example/student-plans"
+    product_quote = "Acme supplies schools with student planning software."
+    calls = {"provider": 0, "investigator": 0, "fetch": 0, "intent": 0}
+
+    async def prechecks(*_args, **_kwargs):
+        return lead_scorer.company_fit_match("prechecks passed")
+
+    async def homepage(*_args, **_kwargs):
+        return lead_scorer.company_fit_match(
+            "homepage identity verified",
+            details={
+                "identity": {
+                    "decision": COMPANY_FIT_MATCH,
+                    "evidence_source": "company_homepage",
+                    "observed_name": "acme",
+                    "observed_domain": "acme.example",
+                    "observed_linkedin_slug": "acme",
+                },
+                "verified_homepage_transport_domain": "acme.example",
+            },
+        )
+
+    async def provider(**_kwargs):
+        calls["provider"] += 1
+        return _complete_verdict(
+            observed_industry="Education",
+            observed_subindustry="school planning software",
+            industry_evidence_url=product_url,
+            industry_evidence_quote=product_quote,
+            attribute_satisfied=True,
+            required_attribute_evidence_url=product_url,
+            required_attribute_evidence_quote=product_quote,
+        ), ""
+
+    async def fetch(_session, url):
+        calls["fetch"] += 1
+        assert url == product_url
+        return 200, product_url, product_quote
+
+    async def investigate(**kwargs):
+        calls["investigator"] += 1
+        assert kwargs["targets"] == ("industry", "required_attribute")
+        if calls["investigator"] == 2:
+            assert kwargs["prefetched_pages"][product_url] == {
+                "final_url": product_url, "text": product_quote,
+            }
+        interrupted = calls["investigator"] == 1
+        return {
+            "claims": {
+                "industry": _finding(
+                    "industry", observed_value="school planning software",
+                    observed_industry="Education",
+                    observed_subindustry="school planning software",
+                    activity_role="supplier_operator",
+                    evidence_url=product_url, evidence_quote=product_quote,
+                ),
+                "required_attribute": _attribute_finding(
+                    "UNPROVEN" if interrupted else "VERIFIED",
+                    url=product_url, quote=product_quote,
+                ),
+            },
+            investigator.PRIVATE_FETCHED_PAGES_KEY: {
+                product_url: {
+                    "final_url": product_url, "text": product_quote,
+                },
+            },
+            "_completed_submit": not interrupted,
+            "failure_reason": (
+                investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+                if interrupted else ""
+            ),
+        }
+
+    async def keep_observation(verdict, *_args, **_kwargs):
+        return verdict
+
+    async def intent_score(*_args, **_kwargs):
+        calls["intent"] += 1
+        return 54, 54, 1.0, 1.0, False, [{
+            "raw": 54, "after_decay": 54, "matched_icp_signal": 0,
+            "judge_verdict": {
+                "decision": "verified", "pipeline_decision": "accept",
+                "verification_trace": {"intent_verdict": {
+                    "signal_evaluations": [{"signal_status": "supported"}],
+                }},
+            },
+        }]
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", fetch)
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
+    monkeypatch.setattr(
+        lead_scorer, "_refresh_linkedin_employee_size_observation",
+        keep_observation,
+    )
+    monkeypatch.setattr(
+        lead_scorer, "score_company_competition_intent_signal", intent_score
+    )
+    scorer = arena_scoring.lab_scorer(
+        arena_scoring.build_scorer_policy(
+            scoring_adapter_version="qualification_integrity_v2",
+            company_quality=True,
+        )
+    )
+    rows = arena_scoring.score_work_item(
+        {"scored_run_id": "interrupted-attribute-recovery"},
+        icp=_icp(
+            industry="Education",
+            sub_industry="school planning software",
+            product_service="student planning software used by schools",
+            required_attribute="Sells student planning software to schools.",
+            intent_signals=["Announced a completed funding event"],
+        ).model_dump(mode="json"),
+        companies=[{**_competition_company(), "industry": "Education"}],
+        scorer=scorer,
+        max_retries=3,
+    )
+    assert calls == {"provider": 2, "investigator": 2, "fetch": 1, "intent": 1}
+    assert len(rows) == 1
+    assert rows[0]["company_qualified"] is True
+    assert rows[0]["final_score"] == 54
 
 
 @pytest.mark.parametrize("cross_domain", [False, True])

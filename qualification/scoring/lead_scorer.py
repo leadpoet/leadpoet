@@ -74,6 +74,7 @@ from qualification.scoring.company_fit_decision import (
     _company_name,
 )
 from qualification.scoring.company_evidence_investigator import (
+    ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON,
     MAX_FETCH_CALLS,
     MAX_PAGE_CHARACTERS,
     MAX_SUBMITTED_SOURCE_URLS,
@@ -169,6 +170,7 @@ INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS = "insufficient_fit_evidence"
 EMPLOYEE_SIZE_VERIFICATION_FAILURE_CLASS = "employee_size_verification_failed"
 VERIFIER_FAILURE_DETAIL_KEY = "failure_reason_code"
 _VERIFIER_FAILURE_REASONS = {
+    ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON,
     SOURCE_BLOCKED_FAILURE_REASON,
     MALFORMED_RESPONSE_FAILURE_REASON,
     PROVIDER_ERROR_FAILURE_REASON,
@@ -7472,6 +7474,9 @@ async def _run_targeted_company_evidence_investigation(
         positive_semantic_resolved
     )
     projected_result.details["investigation_receipt"] = investigation_receipt
+    projected_result = _with_verifier_failure_reason(
+        projected_result, investigation_receipt["failure_reason"]
+    )
     _retain_matched_investigator_source_contexts(
         matched_company_source_sink,
         projected_result,
@@ -8101,6 +8106,14 @@ async def _llm_reverify_company(
         if not claims:
             return result
         if (
+            result.decision == COMPANY_FIT_UNAVAILABLE
+            and result.details.get(VERIFIER_FAILURE_DETAIL_KEY)
+            == ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+        ):
+            # The model submitted valid findings after research was refused
+            # for time. Retry the unresolved company with retained sources.
+            return result
+        if (
             positive_semantic_review
             and not _positive_semantic_finding_resolved(
                 claims.get("industry")
@@ -8541,6 +8554,12 @@ async def _llm_reverify_company(
                 verified_rebrand_redirect=verified_rebrand_redirect,
             )
             if not post_repair_claims:
+                return repaired_result
+            if (
+                repaired_result.decision == COMPANY_FIT_UNAVAILABLE
+                and repaired_result.details.get(VERIFIER_FAILURE_DETAIL_KEY)
+                == ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+            ):
                 return repaired_result
             if (
                 post_repair_positive_semantic_review

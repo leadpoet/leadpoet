@@ -112,6 +112,18 @@ def test_failure_reason_projection_drops_arbitrary_values_without_failing():
         ) == expected
 
 
+def test_admission_budget_interrupted_failure_reason_survives_json_roundtrip():
+    failure = scoring.build_scoring_failure(
+        "run-budget", "judge_error",
+        detail="judge_exhausted attempts=3 reason=admission_budget_interrupted",
+        reason="admission_budget_interrupted",
+    )
+    assert scoring.scoring_output_from_bytes(
+        json.dumps(failure, sort_keys=True).encode("utf-8")
+    ) == failure
+    assert failure["reason"] == "admission_budget_interrupted"
+
+
 def test_successful_scoring_artifact_shape_is_unchanged():
     expected = {
         "schema_version": scoring.SCORING_OUTPUT_SCHEMA_VERSION,

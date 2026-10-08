@@ -78,6 +78,7 @@ SERIALIZATION_REPAIR_GRACE_SECONDS = 30.0
 # over loaded evidence. Provider calls already admitted may settle under the
 # existing broker timeout.
 JUDGMENT_ADMISSION_RESERVE_SECONDS = 30.0
+ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON = "admission_budget_interrupted"
 # OpenRouter chat is broker-bounded at 120 seconds. Add only local framing
 # tolerance. A request admitted before the deadline is allowed to settle.
 BROKER_SETTLEMENT_TIMEOUT_SECONDS = 125.0
@@ -3345,6 +3346,9 @@ async def investigate_company_evidence(
             industry_followup_fetched_urls: set[str] = set()
             quote_repair_targets: set[str] = set()
             public_stage_unproven_rereviewed = False
+            # Only an actual time-refused research tool can make a later
+            # UNPROVEN submission incomplete. A voluntary UNPROVEN remains final.
+            research_denied_for_time = False
             scoped_correction_targets: tuple[str, ...] = ()
             scoped_correction_preserved: dict[str, dict[str, Any]] = {}
             scoped_correction_candidate_targets: tuple[str, ...] = ()
@@ -4211,9 +4215,21 @@ async def investigate_company_evidence(
                                 for target in requested_targets
                             }
                         stage_finding = claims.get("stage") or {}
+                        budget_interrupted = bool(
+                            research_denied_for_time
+                            and any(
+                                finding.get("status") == "UNPROVEN"
+                                for finding in claims.values()
+                            )
+                        )
+                        if budget_interrupted:
+                            _record_failure(
+                                diagnostic,
+                                ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON,
+                            )
                         return {
                             "claims": claims,
-                            "_completed_submit": True,
+                            "_completed_submit": not budget_interrupted,
                             # This receipt is constructed only after fetched-page,
                             # exact-quote, company-attribution, URL, and canonical
                             # stage validation. It is never read from model JSON.
@@ -4223,7 +4239,10 @@ async def investigate_company_evidence(
                                 in {"VERIFIED", "CONTRADICTED"}
                                 else {}
                             ),
-                            "failure_reason": "",
+                            "failure_reason": (
+                                ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+                                if budget_interrupted else ""
+                            ),
                             "usage": {
                                 "reasoning_turns": _turn + 1,
                                 "search_calls": search_calls,
@@ -4266,6 +4285,8 @@ async def investigate_company_evidence(
                         elapsed >= ADMISSION_DEADLINE_SECONDS
                         - JUDGMENT_ADMISSION_RESERVE_SECONDS
                     ):
+                        if search_calls < MAX_SEARCH_CALLS:
+                            research_denied_for_time = True
                         forced_next_tool = "submit_findings"
                         tool_result = {
                             "ok": False,
@@ -4338,6 +4359,8 @@ async def investigate_company_evidence(
                         elapsed >= ADMISSION_DEADLINE_SECONDS
                         - JUDGMENT_ADMISSION_RESERVE_SECONDS
                     ):
+                        if fetch_calls < MAX_FETCH_CALLS:
+                            research_denied_for_time = True
                         forced_next_tool = "submit_findings"
                         tool_result = {
                             "ok": False,

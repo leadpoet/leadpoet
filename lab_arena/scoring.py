@@ -44,6 +44,7 @@ FAILURE_REASON_CODES = frozenset(
         "malformed_response",
         "provider_error",
         "unexpected_verifier_error",
+        "admission_budget_interrupted",
         "unknown",
     }
 )

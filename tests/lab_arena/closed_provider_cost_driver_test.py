@@ -5,6 +5,7 @@ import pytest
 
 from lab_arena.driver import drive_once
 from lab_arena.service import ArenaService
+from lab_arena.store import ArenaStoreUnavailable
 
 
 def test_closed_billing_failure_runs_after_live_round_and_rewards():
@@ -61,3 +62,30 @@ def test_no_closed_candidate_performs_no_billing_read():
     )
     service._closed_provider_reconciliation_after = 0
     assert service.reconcile_closed_provider_costs() == {"status": "none"}
+
+
+def test_failed_closed_candidate_keeps_cursor_and_next_driver_tick_recovers():
+    requests = []
+
+    def candidate(**kwargs):
+        requests.append(kwargs)
+        if len(requests) == 1:
+            raise ArenaStoreUnavailable("synthetic read timeout")
+        return {"status": "ok", "provider": "openrouter", "uncertain_entry_id": 321,
+                "round_id": "arena-closed", "run_id": "failed-score"}
+
+    service = ArenaService.__new__(ArenaService)
+    service._config = SimpleNamespace(mode="live", network_name="finney", netuid=71)
+    service._store = SimpleNamespace(next_closed_provider_reconciliation=candidate)
+    service._closed_provider_reconciliation_after = 123
+    service.promote_pending_baselines = lambda: {"promoted": 0}
+    service.active_rounds = lambda: [{"round_id": "arena-open", "status": "open"}]
+    service.advance_round = lambda _round_id: None
+    service.activate_pending_rewards = lambda: {"activated": 0}
+    service._reconcile_openrouter_cost = lambda _round_id, **_kwargs: {"status": "settled"}
+
+    assert "failed closed_provider_costs: ArenaStoreUnavailable" in drive_once(service)
+    assert service._closed_provider_reconciliation_after == 123
+    assert "reconciled closed provider cost" in drive_once(service)
+    assert service._closed_provider_reconciliation_after == 321
+    assert [request["after_entry_id"] for request in requests] == [123, 123]

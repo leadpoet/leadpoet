@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
+import time
 
 import httpx
 import pytest
 
 from lab_arena.store import ArenaStore, ArenaStoreError, FUNCTION_SIGNATURES, PostgrestTransport, PsycopgTransport, SCORE_BATCH_SIZE, TABLES, create_http1_client
 from lab_arena.store import ArenaStoreUnavailable
+import lab_arena.store as arena_store
 
 
 
@@ -177,6 +181,79 @@ def test_bulk_round_rpc_waits_for_database_without_changing_other_deadlines(bulk
         "connect": 2, "read": 65.0, "write": 3, "pool": 4
     }
     assert all(request.extensions["timeout"] == timeout.as_dict() for request in requests[1:])
+
+
+def test_closed_provider_selector_extends_only_its_read_deadline():
+    requests = []
+    timeout = httpx.Timeout(connect=2, read=8, write=3, pool=4)
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"status": "none"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler), timeout=timeout) as client:
+        transport = PostgrestTransport(
+            "https://project.example", service_key="sb_secret_test", http_client=client
+        )
+        store = ArenaStore(transport)
+        assert store.next_closed_provider_reconciliation(
+            mode="live", network_name="finney", netuid=71
+        ) == {"status": "none"}
+        transport.rpc("lab_arena_cancel_round", {"p_round_id": "arena-closed"})
+        assert client.timeout == timeout
+
+    assert requests[0].extensions["timeout"] == {
+        "connect": 2, "read": 20.0, "write": 3, "pool": 4
+    }
+    assert requests[1].extensions["timeout"] == timeout.as_dict()
+
+
+def test_closed_provider_selector_waits_for_slow_read_and_does_not_replay_timeout(monkeypatch):
+    # Shortened deadlines exercise the real HTTP read clock without a long test.
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            requests.append(self.path)
+            self.rfile.read(int(self.headers["Content-Length"]))
+            time.sleep(0.25)
+            body = b'{"status":"none"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except BrokenPipeError:
+                pass  # The client correctly closed a timed-out read.
+
+        def log_message(self, *_args):
+            pass
+
+    monkeypatch.setattr(arena_store, "CLOSED_PROVIDER_RECONCILIATION_READ_TIMEOUT_SECONDS", 0.6)
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        transport = PostgrestTransport(
+            "http://127.0.0.1:%d" % server.server_port,
+            service_key="sb_secret_test", timeout_seconds=0.1,
+        )
+        try:
+            assert transport.rpc("lab_arena_next_closed_provider_reconciliation_v1", {}) == {"status": "none"}
+            with pytest.raises(ArenaStoreUnavailable) as ordinary:
+                transport.rpc("lab_arena_cancel_round", {})
+            assert isinstance(ordinary.value.__cause__, httpx.ReadTimeout)
+
+            monkeypatch.setattr(arena_store, "CLOSED_PROVIDER_RECONCILIATION_READ_TIMEOUT_SECONDS", 0.1)
+            with pytest.raises(ArenaStoreUnavailable) as closed:
+                transport.rpc("lab_arena_next_closed_provider_reconciliation_v1", {})
+            assert isinstance(closed.value.__cause__, httpx.ReadTimeout)
+        finally:
+            transport.close()
+            server.shutdown()
+            thread.join(timeout=2)
+
+    assert len(requests) == 3
 
 
 @pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError])

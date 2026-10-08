@@ -233,3 +233,26 @@ def test_runtime_reads_use_small_indexed_batches_and_reject_filter_syntax():
         for ids in [[], ['bad,(run)'], ['bad\nrun'], ['x' * 201]]:
             with pytest.raises(ArenaStoreError):
                 transport.select('lab_arena_trajectory_events', run_ids=ids)
+
+
+@pytest.mark.parametrize("identity", [
+    {"runner_hotkey": None, "lease_generation": 0},
+    {"runner_hotkey": "invalid", "lease_generation": 1},
+    {"runner_hotkey": PRIMARY, "lease_generation": 0},
+    {"runner_hotkey": PRIMARY, "lease_generation": None},
+])
+def test_never_started_failed_assignments_do_not_query_trajectory(identity):
+    rows = [run(status="failed", **identity)]
+    reads = []
+    def list_runs(_round_id, **kwargs):
+        reads.append(kwargs)
+        return rows
+    def list_starts(*_args, **_kwargs):
+        pytest.fail("A failed run without a runtime identity cannot use a start receipt")
+    service = SimpleNamespace(now=lambda: NOW,
+        _store=SimpleNamespace(list_runs=list_runs, list_runtime_starts=list_starts))
+    entries = [{"submission_id": "miner", "status": "scoring_failed"}]
+    public_dashboard._attach_evaluations(service, "round", entries)
+    assert len(reads) == 1
+    assert entries[0]["evaluation"]["state"] == "failed"
+    assert entries[0]["evaluation"]["counts"]["failed"] == 1

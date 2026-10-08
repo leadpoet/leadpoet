@@ -187,6 +187,89 @@ def test_expired_cooldown_allows_one_requested_probe_and_success_reopens_tool(tm
     assert w._state.local_refusals == 1
 
 
+@pytest.mark.parametrize('status,error_code', [
+    (400, None), (404, None), (422, None),
+    (403, 'provider_request_refused'),
+])
+def test_definitive_request_error_clears_stale_credential_guard(
+    tmp_path, status, error_code,
+):
+    clock = [100.0]
+    api = OperationApi()
+    w = rn.WorkerSocketServer(tmp_path / 'worker.sock', api,
+        rn.RunState(lease={'run_id': 'r1', 'kind': 'execute'}, lease_token='token'),
+        monotonic=lambda: clock[0])
+    exhaust_exa(w)
+    clock[0] += rn.REFUSAL_PROBE_COOLDOWN_SECONDS
+    api.refusal = None
+    original_provider = api.provider
+
+    def terminal_probe(*args):
+        document = original_provider(*args)
+        if len(api.frames) == rn.MAX_REFUSED_FRAMES + 1:
+            document['status'] = status
+            document['call'].update(
+                provider_status=status, outcome='uncertain',
+                actual_microusd=None,
+            )
+            if error_code:
+                document['call']['error_code'] = error_code
+            document['body_b64'] = base64.b64encode(json.dumps({
+                'error': {'code': error_code or 'request_failed'},
+            }).encode()).decode()
+        return document
+
+    api.provider = terminal_probe
+    assert execute(w)[1]['status'] == status
+    assert w._state.operation_refusals == {}
+    # This is a new model-requested call, not an automatic retry of the probe.
+    assert execute(w)[1]['status'] == 200
+    assert len(api.frames) == len(w._state.calls) == rn.MAX_REFUSED_FRAMES + 2
+    assert w._state.refusals == rn.MAX_REFUSED_FRAMES
+
+
+@pytest.mark.parametrize('status,error_code,outcome', [
+    (401, 'miner_credentials_unavailable', 'uncertain'),
+    (402, 'budget_refused', 'refused'),
+    (403, None, 'uncertain'),
+    (408, None, 'uncertain'),
+    (429, 'provider_unavailable', 'uncertain'),
+    (502, 'provider_unavailable', 'uncertain'),
+    (404, 'broker_unavailable', 'unknown'),
+])
+def test_nondefinitive_probe_keeps_guard_and_does_not_retry(
+    tmp_path, status, error_code, outcome,
+):
+    clock = [100.0]
+    api = OperationApi()
+    w = rn.WorkerSocketServer(tmp_path / 'worker.sock', api,
+        rn.RunState(lease={'run_id': 'r1', 'kind': 'execute'}, lease_token='token'),
+        monotonic=lambda: clock[0])
+    exhaust_exa(w)
+    clock[0] += rn.REFUSAL_PROBE_COOLDOWN_SECONDS
+    api.refusal = None
+    original_provider = api.provider
+
+    def failed_probe(*args):
+        document = original_provider(*args)
+        document['status'] = status
+        document['call'].update(
+            provider_status=status, outcome=outcome, actual_microusd=None,
+        )
+        if error_code:
+            document['call']['error_code'] = error_code
+        document['body_b64'] = base64.b64encode(json.dumps({
+            'error': {'code': error_code or 'request_failed'},
+        }).encode()).decode()
+        return document
+
+    api.provider = failed_probe
+    assert execute(w)[1]['status'] == status
+    assert execute(w) == ('miner_credentials_unavailable' if outcome != 'refused' else 'budget_refused', None)
+    assert len(api.frames) == len(w._state.calls) == rn.MAX_REFUSED_FRAMES + 1
+    assert w._state.operation_refusals
+
+
 def test_failed_probe_rearms_from_completion_and_does_not_replay(tmp_path):
     clock = [100.0]
     api = OperationApi()
@@ -238,7 +321,10 @@ def test_only_one_concurrent_probe_is_dispatched_after_cooldown(tmp_path):
     assert len(api.frames) == len(w._state.calls) == 26
 
 
-def test_older_refusal_cannot_overwrite_later_same_tool_success(tmp_path):
+@pytest.mark.parametrize('recovery_status', [200, 404])
+def test_older_refusal_cannot_overwrite_later_same_tool_recovery(
+    tmp_path, recovery_status,
+):
     api = OperationApi()
     w = worker(tmp_path, api)
     for _ in range(rn.MAX_REFUSED_FRAMES - 1):
@@ -256,14 +342,20 @@ def test_older_refusal_cannot_overwrite_later_same_tool_success(tmp_path):
                 return original_provider(*args)
             finally:
                 api.refusal = previous_refusal
-        return original_provider(*args)
+        document = original_provider(*args)
+        if recovery_status == 404:
+            document['status'] = 404
+            document['call'].update(
+                provider_status=404, outcome='uncertain', actual_microusd=None,
+            )
+        return document
 
     api.provider = out_of_order_provider
     with ThreadPoolExecutor(max_workers=1) as pool:
         old = pool.submit(execute, w)
         assert entered.wait(timeout=5)
         api.refusal = None
-        assert execute(w)[1]['status'] == 200
+        assert execute(w)[1]['status'] == recovery_status
         release.set()
         assert old.result(timeout=5)[1]['status'] == 402
     key = ('deepline.execute', 'exa_search')

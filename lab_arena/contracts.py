@@ -1422,6 +1422,10 @@ RUN_RESULT_FIELDS = (
             F("stdout_bytes", "int", minimum=0),
             F("stderr_bytes", "int", minimum=0),
             F("provider_call_count", "int", minimum=0),
+            # Refusal visibility is diagnostic; these counters do not set scores.
+            F("provider_refusal_count", "int", minimum=0, required=False),
+            F("provider_local_refusal_count", "int", minimum=0, required=False),
+            F("provider_unresolved_failure_count", "int", minimum=0, required=False),
             # Optional audit metadata, never an identity/admission requirement.
             F("validator_source_commit", "str", maximum=64, required=False),
             F("validator_source_origin", "str", maximum=32, required=False),

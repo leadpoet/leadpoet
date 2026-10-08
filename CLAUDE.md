@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: recoverable provider refusal guard
+
+On 2026-10-08 the user authorized investigating MAX_REFUSED_FRAMES, fixing
+permanent tool suppression and misleading empty success after provider failures,
+and testing execution, provider recovery and scoring. Use
+$overnight-rebenchmark-validation for protected read-only inspection, bounded
+reward-disabled production probes, focused tests, safe push/merge and canonical
+paired deployment. Preserve genuine credential errors, confirmed and uncertain
+costs, request identity, valid partial output, scoring, frozen rounds, published
+results and concurrent work. Do not induce failures in live miner runs or repeat
+paid work without a bounded validation need. This authority ends after deployed
+recovery and normal live traffic are verified.
+
 ## Scoped production authorization: October 8 evaluation dashboard
 
 The user authorized exposing live and historical Arena evaluation progress,

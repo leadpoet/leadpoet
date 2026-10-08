@@ -7,6 +7,8 @@ raw database row or document.
 
 from __future__ import annotations
 
+import base64
+import json
 from datetime import datetime, timezone
 import math
 from typing import Any, Dict, Mapping, Optional, Sequence
@@ -715,6 +717,34 @@ def code_review_summary(
     return result
 
 
+def evaluation_progress(runs: Sequence[Mapping[str, Any]], now: datetime) -> dict:
+    """Public activity only: never expose leases, inputs, or unpublished scores."""
+    validators = set()
+    waiting = not runs
+    for run in runs:
+        if run.get("kind") not in ("execute", "score"):
+            continue
+        if run.get("status") == "pending":
+            waiting = True
+        if run.get("status") != "leased":
+            continue
+        expires = _timestamp(run.get("lease_expires_at"))
+        if not expires or datetime.fromisoformat(expires.replace("Z", "+00:00")) <= now:
+            waiting = True
+            continue
+        hotkey = str(run.get("runner_hotkey") or "")
+        try:
+            contracts.require_hotkey(hotkey)
+        except contracts.ArenaContractError:
+            # A malformed assignment cannot identify an active validator.
+            return {"state": "unavailable", "validators": []}
+        validators.add((hotkey, "executing" if run["kind"] == "execute" else "scoring"))
+    return {
+        "state": "evaluating" if validators else "queued" if waiting else "finalizing",
+        "validators": [{"hotkey": hotkey, "phase": phase} for hotkey, phase in sorted(validators)],
+    }
+
+
 def submissions_snapshot(service: Any, round_id: str) -> dict:
     row = service._round(round_id)
     round_status = str(row.get("status") or "")
@@ -813,6 +843,20 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
                 )
             )
         submissions.append(projected)
+    in_progress = {item["submission_id"] for item in submissions if item["status"] == "scoring"}
+    if in_progress:
+        # One compact, paginated round read; no per-submission result fanout.
+        by_submission: Dict[str, list] = {submission_id: [] for submission_id in in_progress}
+        for run in service._store.list_runs(
+            round_id,
+            columns="run_id,submission_id,kind,status,runner_hotkey,lease_expires_at",
+        ):
+            if run.get("submission_id") in by_submission:
+                by_submission[run["submission_id"]].append(run)
+        now = service.now()
+        for item in submissions:
+            if item["submission_id"] in in_progress:
+                item["evaluation"] = evaluation_progress(by_submission[item["submission_id"]], now)
     return {"round_id": round_id, "submissions": submissions}
 
 
@@ -821,3 +865,98 @@ __all__ = [
     "round_summary",
     "submissions_snapshot",
 ]
+
+
+def history_snapshot(service: Any, *, cursor: Optional[str] = None, limit: int = 25,
+                     day: Optional[str] = None, hotkey: str = "") -> dict:
+    """Bounded keyset pagination over immutable, published score records."""
+    from lab_arena.service import ServiceError
+
+    network_name, netuid = service._chain_scope()
+    limit = max(1, min(int(limit), 50))
+    needle = hotkey.strip().lower()
+    entries, summaries = [], {}
+    before = None
+    resume = None
+    if cursor:
+        try:
+            state = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+            if not isinstance(state, list) or len(state) != 5 or not all(isinstance(x, str) for x in state):
+                raise ValueError()
+            created, round_id, after_submission, cursor_day, cursor_hotkey = state
+            if cursor_day != (day or "") or cursor_hotkey != needle:
+                raise ValueError()
+            if not _timestamp(created) or len(round_id) > 128 or len(after_submission) > 128:
+                raise ValueError()
+            # Always resolve the scoped round; never trust a cursor's scope or date.
+            resume = service._round(round_id)
+            if resume.get("status") != "published" or _timestamp(resume.get("created_at")) != created:
+                raise ValueError()
+            before = (str(resume["created_at"]), round_id)
+        except (ValueError, TypeError, KeyError):
+            raise ServiceError("history_cursor_invalid", 400)
+    else:
+        after_submission = ""
+
+    def page(next_row=None, after=""):
+        next_cursor = None
+        if next_row is not None:
+            state = [_timestamp(next_row.get("created_at")), str(next_row["round_id"]), after, day or "", needle]
+            next_cursor = base64.urlsafe_b64encode(json.dumps(state).encode()).decode().rstrip("=")
+        return {"rounds": list(summaries.values()), "submissions": entries, "next_cursor": next_cursor}
+
+    pinned = getattr(service._config, "pinned_round_id", None)
+    # At most four compact round queries, even for a miner with no matches.
+    # A continuation allows the caller to search older history without rescanning.
+    for batch in range(4):
+        if pinned is not None:
+            rows = [service._round(str(pinned))] if batch == 0 and resume is None else []
+        else:
+            rows = service._store.list_rounds(
+                status="published", mode=service._config.mode,
+                network_name=network_name, netuid=netuid, limit=25,
+                columns=_ROUND_COLUMNS, history_order=True,
+                **({"before_round": before} if before else {}),
+                **({"evaluation_date": day} if day else {}),
+            )
+        fetched = len(rows)
+        if resume is not None:
+            rows = [resume] + rows
+            resume = None
+        for row in rows:
+            if row.get("status") != "published" or _is_administrative_archive(row):
+                continue
+            summary = round_summary(row)
+            if day and summary.get("evaluation_date") != day:
+                continue
+            rankings = _rankings(row, "final_ranking")
+            champion_id = _champion_submission_id(row)
+            last_submission = after_submission
+            for participant in sorted(_participants(row), key=lambda item: str(item.get("submission_id") or "")):
+                submission_id = str(participant.get("submission_id") or "")
+                miner_hotkey = str(participant.get("miner_hotkey") or "")
+                if submission_id <= after_submission:
+                    continue
+                if not submission_id or not miner_hotkey or (needle and needle not in miner_hotkey.lower()):
+                    last_submission = submission_id
+                    continue
+                if len(entries) == limit:
+                    return page(row, last_submission)
+                final_score = _score((rankings.get(submission_id) or {}).get("final_score"))
+                baseline = bool(participant.get("is_baseline", participant.get("is_king", False)))
+                champion = not baseline and champion_id == submission_id
+                summaries[summary["round_id"]] = summary
+                entries.append({
+                    "round_id": summary["round_id"], "submission_id": submission_id,
+                    "miner_hotkey": miner_hotkey, "is_baseline": baseline,
+                    "is_champion": champion, "final_score": final_score,
+                    "status": _submission_lifecycle(raw_status="frozen", round_status="published",
+                                                    is_champion=champion, final_score=final_score),
+                })
+                last_submission = submission_id
+            after_submission = ""
+        if fetched < 25 or pinned is not None:
+            return page()
+        last = rows[-1]
+        before = (str(last["created_at"]), str(last["round_id"]))
+    return page(last, max((str(p.get("submission_id") or "") for p in _participants(last)), default=""))

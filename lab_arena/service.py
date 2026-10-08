@@ -5120,6 +5120,10 @@ class ArenaService:
 
     # -- public reads (section 14.1) -------------------------------------------
 
+    def public_history(self, *, cursor: Optional[str] = None, limit: int = 25,
+                       day: Optional[str] = None, hotkey: str = "") -> Dict[str, Any]:
+        return public_dashboard.history_snapshot(self, cursor=cursor, limit=limit, day=day, hotkey=hotkey)
+
     def public_competition(self) -> Dict[str, Any]:
         return public_dashboard.competition_snapshot(self)
 
@@ -5696,6 +5700,7 @@ class ArenaService:
         *,
         round_id: str,
         runs_by_id: Mapping[str, Mapping[str, Any]],
+        source_ids: Optional[set[str]] = None,
     ) -> Dict[str, bool]:
         """Resolve actual judgment authorities for one accepted score row."""
 
@@ -5753,6 +5758,8 @@ class ArenaService:
                         round_id=round_id,
                         runs_by_id=runs_by_id,
                     )
+                    if source_ids is not None:
+                        source_ids.add(score_run_id)
                     attributed[hotkey] = attributed.get(hotkey, False)
                     continue
                 hotkey = self._validated_attribution_source(
@@ -5762,6 +5769,8 @@ class ArenaService:
                     round_id=round_id,
                     runs_by_id=runs_by_id,
                 )
+                if source_ids is not None:
+                    source_ids.add(str(evidence["source_score_run_id"]))
                 reused = str(evidence["source_score_run_id"]) != score_run_id
                 attributed[hotkey] = attributed.get(hotkey, False) or reused
             return attributed
@@ -5802,6 +5811,8 @@ class ArenaService:
                 round_id=round_id,
                 runs_by_id=runs_by_id,
             )
+            if source_ids is not None:
+                source_ids.add(source_score_run_id)
             attributed[hotkey] = source_score_run_id != score_run_id
             return attributed
 
@@ -5812,6 +5823,8 @@ class ArenaService:
             round_id=round_id,
             runs_by_id=runs_by_id,
         )
+        if source_ids is not None:
+            source_ids.add(score_run_id)
         attributed[hotkey] = False
         return attributed
 
@@ -5833,17 +5846,20 @@ class ArenaService:
         }
         by_position: Dict[int, Dict[str, bool]] = {}
         unattributed_positions = set()
+        versions_by_position: Dict[int, set] = {}
         for execution_run in execution_runs:
             score_run = judgments.get(str(execution_run.get("run_id") or ""))
             if score_run is None or score_run.get("status") != "accepted":
                 continue
             position = int(execution_run.get("icp_position") or 0)
             try:
+                source_ids: set[str] = set()
                 authorities = self._score_run_attribution(
                     score_run,
                     execution_run,
                     round_id=round_id,
                     runs_by_id=runs_by_id,
+                    source_ids=source_ids,
                 )
                 if not authorities:
                     raise scoring.ScoringError(
@@ -5862,6 +5878,17 @@ class ArenaService:
                 continue
             if position in unattributed_positions:
                 continue
+            versions = versions_by_position.setdefault(position, set())
+            for source_id in source_ids:
+                source = runs_by_id.get(source_id) or {}
+                document = source.get("result_doc")
+                resource = document.get("resource_summary") if isinstance(document, Mapping) else None
+                resource = resource if isinstance(resource, Mapping) else {}
+                commit = str(resource.get("validator_source_commit") or "")
+                if len(commit) == 40 and all(c in "0123456789abcdef" for c in commit):
+                    dirty = str(resource.get("validator_source_dirty") or "unknown")
+                    versions.add((str(source.get("runner_hotkey") or ""), commit,
+                                  dirty if dirty in ("clean", "dirty") else "unknown"))
             combined = by_position.setdefault(position, {})
             for hotkey, reused in authorities.items():
                 combined[hotkey] = combined.get(hotkey, False) or reused
@@ -5875,7 +5902,17 @@ class ArenaService:
                 counts["icp_count"] += 1
                 counts["reused_icp_count"] += int(reused)
 
+        code_versions: Dict[tuple, list] = {}
+        for position, versions in versions_by_position.items():
+            if position in public_positions and position not in unattributed_positions:
+                for version in versions:
+                    code_versions.setdefault(version, []).append(position)
         return {
+            "code_versions": [
+                {"validator_hotkey": key[0], "commit": key[1], "working_tree": key[2],
+                 "icp_positions": sorted(set(positions))}
+                for key, positions in sorted(code_versions.items())
+            ],
             "validators": [
                 {"hotkey": hotkey, **validator_counts[hotkey]}
                 for hotkey in sorted(validator_counts)

@@ -200,6 +200,7 @@ def test_public_results_attribute_fresh_judges_and_skip_execution_zeros():
             },
         ],
         "unattributed_icp_count": 0,
+        "code_versions": [],
     }
 
 
@@ -247,6 +248,7 @@ def test_cached_follower_attributes_original_judge_with_blank_runner():
             "reused_judgment": True,
         }],
         "unattributed_icp_count": 0,
+        "code_versions": [],
     }
 
 
@@ -398,6 +400,7 @@ def test_broken_cache_source_is_unattributed_without_breaking_results():
             "reused_judgment": False,
         }],
         "unattributed_icp_count": 1,
+        "code_versions": [],
     }
 
 
@@ -485,3 +488,42 @@ def test_company_cache_reports_each_authority_once_per_icp(monkeypatch):
         "validator_hotkeys": [VALIDATOR_A, VALIDATOR_B],
         "reused_judgment": True,
     }]
+
+
+def test_public_code_versions_bind_to_actual_judge_and_disclosed_icps():
+    first, private = _execution("execute-visible", 0), _execution("execute-private", 1)
+    service = _service([first, private,
+        _score("score-visible", first, VALIDATOR_A, result_doc={"resource_summary": {
+            "validator_source_commit": "a" * 40, "validator_source_dirty": "dirty"}}),
+        _score("score-private", private, VALIDATOR_B, result_doc={"resource_summary": {
+            "validator_source_commit": "b" * 40, "validator_source_dirty": "clean"}})],
+        public_positions={0})
+    assert service.public_results(ROUND_ID, SUBMISSION_ID)["scoring_attribution"]["code_versions"] == [{
+        "validator_hotkey": VALIDATOR_A, "commit": "a" * 40,
+        "working_tree": "dirty", "icp_positions": [0]}]
+
+
+def test_cached_code_version_is_original_judge_not_follower_or_current_checkout():
+    original = _execution("execute-original", 0, submission_id="original")
+    original_score = _score("score-original", original, VALIDATOR_A,
+        result_doc={"resource_summary": {"validator_source_commit": "a" * 40}})
+    follower = _execution("execute-follower", 0)
+    cache_key, cache_row = _cache(original_score, original, VALIDATOR_A)
+    cached = _score("score-follower", follower, VALIDATOR_B,
+        judgment_cache_key=cache_key, judgment_cache_source_run_id=original_score["run_id"],
+        result_doc={"schema_version": "leadpoet.lab_arena.cached_run_result.v1", "terminal_status": "accepted",
+                    "cache_key": cache_key, "source_score_run_id": original_score["run_id"],
+                    "resource_summary": {"validator_source_commit": "b" * 40}})
+    service = _service([original, original_score, follower, cached], public_positions={0}, cache_rows={cache_key: cache_row})
+    assert service.public_results(ROUND_ID, SUBMISSION_ID)["scoring_attribution"]["code_versions"] == [{
+        "validator_hotkey": VALIDATOR_A, "commit": "a" * 40,
+        "working_tree": "unknown", "icp_positions": [0]}]
+
+
+@pytest.mark.parametrize("resource", [None, "bad", {}, {"validator_source_commit": "unknown"}, {"validator_source_commit": "https://bad"}])
+def test_missing_or_invalid_code_metadata_does_not_invent_a_revision(resource):
+    execution = _execution("execute-one", 0)
+    score = _score("score-one", execution, VALIDATOR_A, result_doc={"resource_summary": resource})
+    result = _service([execution, score], public_positions={0}).public_results(ROUND_ID, SUBMISSION_ID)
+    assert result["scoring_attribution"]["validators"][0]["hotkey"] == VALIDATOR_A
+    assert result["scoring_attribution"]["code_versions"] == []

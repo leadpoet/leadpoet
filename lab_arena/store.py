@@ -12,6 +12,7 @@ exercises the production function contract.
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime
 import json
 import re
 import secrets
@@ -352,6 +353,7 @@ class StoreTransport:
         offset: Optional[int] = None,
         after_run_id: Optional[str] = None,
         after_entry_id: Optional[int] = None,
+        before_round: Optional[tuple[str, str]] = None,
         status_in: Optional[Sequence[str]] = None,
         columns: str = "*",
     ) -> List[Dict[str, Any]]:  # pragma: no cover - interface
@@ -496,6 +498,7 @@ class PostgrestTransport(StoreTransport):
         offset=None,
         after_run_id=None,
         after_entry_id=None,
+        before_round=None,
         status_in=None,
         columns="*",
     ):
@@ -519,8 +522,24 @@ class PostgrestTransport(StoreTransport):
             if not statuses:
                 raise ArenaStoreError("status inclusion filter is empty")
             query.append(("status", "in.(%s)" % ",".join(statuses)))
-        if order:
+        if order == "history_round":
+            if table != "lab_arena_rounds" or not descending:
+                raise ArenaStoreError("history cursor requires descending rounds")
+            query.append(("order", "created_at.desc,round_id.desc"))
+        elif order:
             query.append(("order", "%s.%s" % (order, "desc" if descending else "asc")))
+        if before_round is not None:
+            if table != "lab_arena_rounds" or order != "history_round":
+                raise ArenaStoreError("history cursor requires descending rounds")
+            created, round_id = str(before_round[0]), _check_filter_value(before_round[1])
+            try:
+                parsed = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                if parsed.tzinfo is None or parsed.utcoffset() is None:
+                    raise ValueError()
+                created = parsed.isoformat()
+            except ValueError:
+                raise ArenaStoreError("history timestamp is invalid")
+            query.append(("or", "(created_at.lt.%s,and(created_at.eq.%s,round_id.lt.%s))" % (created, created, round_id)))
         if limit is not None:
             query.append(("limit", str(int(limit))))
         if offset is not None:
@@ -681,6 +700,7 @@ class PsycopgTransport(StoreTransport):
         offset=None,
         after_run_id=None,
         after_entry_id=None,
+        before_round=None,
         status_in=None,
         columns="*",
     ):
@@ -722,10 +742,19 @@ class PsycopgTransport(StoreTransport):
                 raise ArenaStoreError("ledger cursor requires ordered Arena ledger")
             clauses.append("entry_id > %s")
             values.append(after_entry_id)
+        if before_round is not None:
+            if table != "lab_arena_rounds" or order != "history_round":
+                raise ArenaStoreError("history cursor requires descending rounds")
+            clauses.append("(created_at, round_id) < (%s, %s)")
+            values.extend(before_round)
         sql = "SELECT row_to_json(t) FROM (SELECT %s FROM public.%s" % (columns, table)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        if order:
+        if order == "history_round":
+            if table != "lab_arena_rounds" or not descending:
+                raise ArenaStoreError("history cursor requires descending rounds")
+            sql += " ORDER BY created_at DESC, round_id DESC"
+        elif order:
             if not order.replace("_", "").isalnum():
                 raise ArenaStoreError("invalid order column")
             sql += " ORDER BY %s %s" % (order, "DESC" if descending else "ASC")
@@ -1298,12 +1327,17 @@ class ArenaStore:
         limit: int = 100,
         offset: Optional[int] = None,
         columns: str = "*",
+        evaluation_date: Optional[str] = None,
+        before_round: Optional[tuple[str, str]] = None,
+        history_order: bool = False,
     ) -> List[Dict[str, Any]]:
         if status is not None and statuses is not None:
             raise ArenaStoreError("round status filters are mutually exclusive")
         if (network_name is None) != (netuid is None):
             raise ArenaStoreError("round network filters must be supplied together")
         filters: Dict[str, Any] = {}
+        if evaluation_date is not None:
+            filters["evaluation_date"] = evaluation_date
         if status is not None:
             filters["status"] = status
         if mode is not None:
@@ -1315,11 +1349,12 @@ class ArenaStore:
             "lab_arena_rounds",
             filters=filters or None,
             status_in=statuses,
-            order="created_at",
+            order="history_round" if history_order else "created_at",
             descending=True,
             limit=limit,
             offset=offset,
             columns=columns,
+            **({"before_round": before_round} if before_round is not None else {}),
         )
 
     def latest_published_day(
@@ -2167,7 +2202,7 @@ class ArenaStore:
                 break
         return rows
 
-    def list_runs(self, round_id: str, *, stage: Optional[int] = None, status: Optional[str] = None, submission_id: Optional[str] = None, kind: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_runs(self, round_id: str, *, stage: Optional[int] = None, status: Optional[str] = None, submission_id: Optional[str] = None, kind: Optional[str] = None, columns: str = "*") -> List[Dict[str, Any]]:
         filters: Dict[str, Any] = {"round_id": round_id}
         if stage is not None:
             filters["stage"] = int(stage)
@@ -2186,6 +2221,7 @@ class ArenaStore:
             page = self._transport.select(
                 "lab_arena_runs", filters=filters, order="run_id",
                 limit=page_size, after_run_id=after_run_id,
+                **({"columns": columns} if columns != "*" else {}),
             )
             rows.extend(page)
             if len(page) < page_size:

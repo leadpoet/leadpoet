@@ -6,10 +6,11 @@ document validated by the service; bodies are size-bounded here.
 from __future__ import annotations
 
 import json
+from datetime import date
 from typing import Any, Optional
 
 import anyio
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
@@ -151,6 +152,13 @@ def create_app(service: ArenaService) -> FastAPI:
     @app.get("/arena/v1/competition")
     async def competition() -> Any:
         return await run_in_threadpool(service.public_competition)
+
+    @app.get("/arena/v1/history")
+    async def history(cursor: Optional[str] = Query(None, max_length=1024, pattern=r"^[A-Za-z0-9_-]+$"),
+                      limit: int = Query(25, ge=1, le=50),
+                      day: Optional[date] = Query(None),
+                      hotkey: str = Query("", max_length=128, pattern=r"^[A-Za-z0-9]*$")) -> Any:
+        return await no_store_public_call(service.public_history, cursor=cursor, limit=limit, day=day.isoformat() if day else None, hotkey=hotkey)
 
     @app.get("/arena/v1/signing-key")
     async def signing_key() -> Any:

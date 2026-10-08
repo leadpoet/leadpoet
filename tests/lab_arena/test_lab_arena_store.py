@@ -145,7 +145,10 @@ def test_rpc_other_http_error_stays_base_store_error_without_replay():
     assert len(requests) == 1
 
 
-def test_publication_allows_database_validation_without_changing_other_deadlines():
+@pytest.mark.parametrize("bulk_function", [
+    "lab_arena_open_stage", "lab_arena_open_scoring_v3", "lab_arena_transition_round",
+])
+def test_bulk_round_rpc_waits_for_database_without_changing_other_deadlines(bulk_function):
     requests = []
 
     def handler(request):
@@ -158,8 +161,15 @@ def test_publication_allows_database_validation_without_changing_other_deadlines
             "https://project.example", service_key="sb_secret_test", http_client=client
         )
         store = ArenaStore(transport)
-        store.transition_round("arena-2026-09-30", "scored", "published", {})
+        if bulk_function == "lab_arena_open_stage":
+            store.open_stage("arena-2026-09-30", 2, [], [0, 1])
+        elif bulk_function == "lab_arena_open_scoring_v3":
+            store.open_scoring("arena-2026-09-30", 2, [], company_quality_cache=True)
+        else:
+            store.transition_round("arena-2026-09-30", "scored", "published", {})
         store.transition_round("arena-2026-09-30", "stage2_judged", "scored", {})
+        store.open_scoring("arena-2026-09-30", 2, [])
+        store.open_scoring("arena-2026-09-30", 2, [], integrity_cache=True)
         transport.rpc("lab_arena_cancel_round", {"p_round_id": "arena-2026-09-30"})
         assert transport.select("lab_arena_rounds") == []
         assert client.timeout == timeout
@@ -170,7 +180,10 @@ def test_publication_allows_database_validation_without_changing_other_deadlines
 
 
 @pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError])
-def test_publication_response_loss_is_not_blindly_replayed(error_type):
+@pytest.mark.parametrize("bulk_function", [
+    "lab_arena_open_stage", "lab_arena_open_scoring_v3", "lab_arena_transition_round",
+])
+def test_bulk_round_rpc_response_loss_is_not_blindly_replayed(error_type, bulk_function):
     requests = []
 
     def handler(request):
@@ -181,8 +194,13 @@ def test_publication_response_loss_is_not_blindly_replayed(error_type):
         store = ArenaStore(PostgrestTransport(
             "https://project.example", service_key="sb_secret_test", http_client=client
         ))
-        with pytest.raises(ArenaStoreUnavailable, match="lab_arena_transition_round"):
-            store.transition_round("arena-2026-09-30", "scored", "published", {})
+        with pytest.raises(ArenaStoreUnavailable, match=bulk_function):
+            if bulk_function == "lab_arena_open_stage":
+                store.open_stage("arena-2026-09-30", 2, [], [0, 1])
+            elif bulk_function == "lab_arena_open_scoring_v3":
+                store.open_scoring("arena-2026-09-30", 2, [], company_quality_cache=True)
+            else:
+                store.transition_round("arena-2026-09-30", "scored", "published", {})
     assert len(requests) == 1
     assert requests[0].extensions["timeout"]["read"] == 65.0
 

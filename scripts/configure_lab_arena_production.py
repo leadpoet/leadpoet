@@ -428,7 +428,7 @@ if request["role"] == "openrouter_concurrency_only":
     ):
         fail("openrouter_concurrency_scope_invalid")
     value = updates["LAB_ARENA_OPENROUTER_MAX_CONCURRENCY"]
-    if not isinstance(value, str) or not re.fullmatch(r"(?:[1-9]|10)", value):
+    if not isinstance(value, str) or not re.fullmatch(r"(?:[1-9]|[1-9][0-9]|1[0-9][0-9]|200)", value):
         fail("openrouter_concurrency_invalid")
 if request["role"] == "scorer_image_only":
     if set(updates) != {"LAB_ARENA_SCORER_IMAGE"} or request.get("aliases") or request.get("service_key"):
@@ -708,7 +708,7 @@ def build_parser() -> argparse.ArgumentParser:
     scope.add_argument("--miner-credentials-only", action="store_true", help="inspect or configure only the gateway Arena miner KMS key")
     scope.add_argument("--testnet-proxy", choices=("enabled", "disabled"), default=None, help="configure only the fixed testnet gateway route; does not start a service or change mainnet")
     scope.add_argument("--scorer-image-only", action="store_true", help="configure only the gateway scorer image")
-    scope.add_argument("--openrouter-max-concurrency", type=int, choices=range(1, 11), default=None, help="configure only the gateway OpenRouter shared concurrency; activate with the canonical gateway restart")
+    scope.add_argument("--openrouter-max-concurrency", type=int, choices=range(1, 201), default=None, help="configure only the gateway OpenRouter shared concurrency; activate with the canonical gateway restart")
     scope.add_argument("--validator-credential-kms-guard", action="store_true", help="from a gateway checkout, check or add the exact validator deny for Arena miner credential decrypts")
     scope.add_argument("--benchmark-disclosure-from", default=None, metavar="TIMESTAMP", help="set or clear the future benchmark disclosure timestamp")
     scope.add_argument("--contacts-from", default=None, metavar="TIMESTAMP", help="set or clear the future contact activation timestamp")

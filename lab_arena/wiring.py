@@ -347,7 +347,7 @@ def _openrouter_shared_concurrency_from_environment() -> int:
         ) from None
     if not 1 <= value <= broker_module.OPENROUTER_SHARED_GATE_MAX:
         raise ServiceError(
-            "LAB_ARENA_OPENROUTER_MAX_CONCURRENCY must be from 1 to 10", 500
+            "LAB_ARENA_OPENROUTER_MAX_CONCURRENCY must be from 1 to 200", 500
         )
     return value
 

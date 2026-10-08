@@ -4610,6 +4610,7 @@ class Broker:
         deepline_async_ids: Sequence[str] = ()
         deepline_async_poll_accepted = False
         deepline_request_failed = False
+        deepline_client_rejection = False
         deepline_lost_response = False
         deepline_response_request_id: Optional[str] = None
         deepline_request_id: Optional[str] = request_accounting.get("deepline_request_id")
@@ -4799,32 +4800,29 @@ class Broker:
                         raw_document = json.loads(response.body.decode("utf-8"))
                     except (UnicodeDecodeError, ValueError):
                         raw_document = None
-                    # A request-specific error is useful to the model
-                    # independently of billing finality. Account errors, throttles
-                    # and transport failures keep normal recovery.
-                    #
-                    # 400/404/422 are terminal rejections of the request itself:
-                    # Deepline never dispatched the tool, so polling its billing
-                    # ledger cannot resolve a charge that was never created. The
-                    # status alone settles that, whether or not the provider
-                    # returned a JSON error envelope. Requiring a parseable body
-                    # here made an unparseable rejection poll for the full
-                    # billing window and then answer the worker
-                    # provider_unavailable (HTTP 502), replacing a clean upstream
-                    # status with an arena-side fault. The refusal arm still
-                    # inspects the document, because it is a property of the
-                    # body rather than of the status.
+                    # A complete request-specific error is useful to the model
+                    # independently of billing finality. Account errors, throttles,
+                    # malformed replies and transport failures keep normal recovery.
                     deepline_request_failed = (
                         response.internal_provenance is None
+                        and isinstance(raw_document, Mapping)
                         and (
                             response.status in (400, 404, 422)
-                            or (
-                                isinstance(raw_document, Mapping)
-                                and _provider_request_refused(
-                                    "deepline", effective_normalized, response
-                                )
+                            or _provider_request_refused(
+                                "deepline", effective_normalized, response
                             )
                         )
+                    )
+                    # The same rejection, judged on its status alone. Billing
+                    # recovery still depends on a readable document, so this does
+                    # not relax polling or retention; it only decides what the
+                    # worker is told when the cost stays unresolved. Deepline
+                    # rejected the request, so its own status is the honest
+                    # answer, and provider_unavailable would blame the arena for
+                    # a fault that is not ours.
+                    deepline_client_rejection = (
+                        response.internal_provenance is None
+                        and response.status in (400, 404, 422)
                     )
                     if (deepline_catalog_entry
                         and isinstance(deepline_catalog_entry.get("async_flow"), Mapping)):
@@ -5306,7 +5304,10 @@ class Broker:
                     return _error_result("provider_request_refused", summary)
                 if miner_credential_failure:
                     return _error_result("miner_credentials_unavailable", summary)
-                if deepline_request_failed and uncertain_state.get("status") == "uncertain":
+                if (
+                    (deepline_request_failed or deepline_client_rejection)
+                    and uncertain_state.get("status") == "uncertain"
+                ):
                     # Persist the original failed call and its unknown cost before
                     # returning its sanitized error. Never invent a free settlement
                     # or turn a terminal 4xx into a retryable infrastructure failure.

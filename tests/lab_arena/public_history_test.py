@@ -26,7 +26,9 @@ def fixture(count=30):
                     and (not kwargs.get('before_round') or (row['created_at'], row['round_id']) < kwargs['before_round'])]
         return selected[:kwargs['limit']]
     service = SimpleNamespace(_config=SimpleNamespace(mode='live'), _chain_scope=lambda: ('finney', 71),
-                              _store=SimpleNamespace(list_rounds=list_rounds),
+                              now=lambda: datetime(2026, 10, 8, tzinfo=timezone.utc),
+                              _store=SimpleNamespace(list_rounds=list_rounds, list_runs=lambda *_a, **_k: [],
+                                                     list_runtime_starts=lambda *_a, **_k: []),
                               _round=lambda rid: next(row for row in rows if row['round_id'] == rid))
     return service, calls, rows
 
@@ -129,3 +131,38 @@ def test_cursor_rejects_changed_filters():
         with pytest.raises(ServiceError) as exc:
             history_snapshot(service, cursor=cursor, **filters)
         assert exc.value.code == 'history_cursor_invalid'
+
+
+def test_history_code_versions_use_stored_round_runs_and_only_returned_submission_ids():
+    service, _calls, rows = fixture(2)
+    reads = []
+    hotkey = '5' + 'A' * 47
+    # One published submission failed, while zero remains a real completed score.
+    rows[0]['publication_doc']['final_ranking'][1]['final_score'] = None
+
+    def list_runs(round_id, **kwargs):
+        reads.append(('runs', round_id, kwargs))
+        assert kwargs['submission_ids'] == [f"day{round_id[-1]}-miner1"]
+        return [{'run_id': f'{round_id}-execution', 'assignment_id': 'private-assignment',
+                 'submission_id': kwargs['submission_ids'][0], 'kind': 'execute',
+                 'status': 'accepted', 'runner_hotkey': hotkey, 'attempt': 1,
+                 'source_commit': ('a' if round_id == 'round-2' else 'b') * 40,
+                 'source_dirty': 'clean', 'private_payload': 'must-not-leak'}]
+
+    def list_starts(round_id, **kwargs):
+        reads.append(('starts', round_id, kwargs))
+        raise AssertionError('Known completed source metadata must not read any trajectory')
+
+    service._store.list_runs = list_runs
+    service._store.list_runtime_starts = list_starts
+    page = history_snapshot(service, hotkey='Miner1', limit=2)
+    assert len(page['submissions']) == 2 and len(reads) == 2
+    newer, older = page['submissions']
+    assert newer['status'] == 'scoring_failed'
+    assert newer['evaluation']['state'] == 'failed'
+    assert older['evaluation']['state'] == 'completed'
+    assert newer['evaluation']['code_versions'][0]['commit'] == 'a' * 40
+    assert older['evaluation']['code_versions'][0]['commit'] == 'b' * 40
+    assert all(item['evaluation']['validators'] == [] for item in page['submissions'])
+    for private in ['private-assignment', 'private_payload', 'round-2-execution', 'must-not-leak']:
+        assert private not in str(page)

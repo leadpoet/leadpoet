@@ -717,32 +717,172 @@ def code_review_summary(
     return result
 
 
-def evaluation_progress(runs: Sequence[Mapping[str, Any]], now: datetime) -> dict:
-    """Public activity only: never expose leases, inputs, or unpublished scores."""
-    validators = set()
-    waiting = not runs
-    for run in runs:
+_EVALUATION_COLUMNS = (
+    "run_id,assignment_id,submission_id,kind,status,runner_hotkey,attempt,"
+    "lease_generation,lease_expires_at,"
+    "source_commit:result_doc->resource_summary->>validator_source_commit,"
+    "source_dirty:result_doc->resource_summary->>validator_source_dirty"
+)
+
+
+def _recorded_source(record: Mapping[str, Any]) -> tuple:
+    commit = record.get("source_commit")
+    if not isinstance(commit, str) or len(commit) != 40 or any(c not in "0123456789abcdef" for c in commit):
+        commit = None
+    dirty = record.get("source_dirty")
+    return commit, dirty if dirty in ("clean", "dirty") else "unknown"
+
+
+def _runtime_source(run: Mapping[str, Any], starts: Sequence[Mapping[str, Any]]) -> tuple:
+    # A completion records the source for that specific historical run. An
+    # active lease must use a start receipt with the exact lease generation.
+    if run.get("status") in ("accepted", "failed", "submitted"):
+        source = _recorded_source(run)
+        if source[0] is not None:
+            return source
+    generation = run.get("lease_generation")
+    if type(generation) is not int or generation <= 0:
+        return None, "unknown"
+    sources = set()
+    for event in starts:
+        event_generation = event.get("start_lease_generation")
+        # JSON text projection returns a string; avoid permissive numeric casts.
+        if str(event_generation) != str(generation) or isinstance(event_generation, bool):
+            continue
+        if (event.get("run_id") != run.get("run_id")
+                or event.get("runner_hotkey") != run.get("runner_hotkey")
+                or event.get("assignment_id") != run.get("assignment_id")
+                or event.get("attempt") != run.get("attempt")):
+            continue
+        sources.add(_recorded_source(event))
+    # Conflicting receipts cannot identify one recorded source with certainty.
+    return next(iter(sources)) if len(sources) == 1 else (None, "unknown")
+
+
+def evaluation_progress(
+    runs: Sequence[Mapping[str, Any]], now: datetime, *,
+    runtime_starts: Sequence[Mapping[str, Any]] = (), outcome: Optional[str] = None,
+) -> dict:
+    """Project assignment activity and recorded code, never private run data.
+
+    Code versions describe execution/judge processes. Cached judgment authority
+    continues to use the separately validated scoring_attribution projection.
+    """
+    effective = {}
+    versions = {}
+    starts_by_run: Dict[str, list] = {}
+    for event in runtime_starts:
+        starts_by_run.setdefault(str(event.get("run_id") or ""), []).append(event)
+    for index, run in enumerate(runs):
         if run.get("kind") not in ("execute", "score"):
             continue
-        if run.get("status") == "pending":
-            waiting = True
-        if run.get("status") != "leased":
-            continue
-        expires = _timestamp(run.get("lease_expires_at"))
-        if not expires or datetime.fromisoformat(expires.replace("Z", "+00:00")) <= now:
-            waiting = True
-            continue
+        key = run.get("assignment_id") or run.get("run_id") or ("missing", index)
+        previous = effective.get(key)
+        attempt = run.get("attempt") if type(run.get("attempt")) is int else 0
+        priority = (run.get("status") == "accepted", attempt)
+        if previous is None or priority > previous[0]:
+            effective[key] = (priority, run)
         hotkey = str(run.get("runner_hotkey") or "")
         try:
             contracts.require_hotkey(hotkey)
         except contracts.ArenaContractError:
-            # A malformed assignment cannot identify an active validator.
-            return {"state": "unavailable", "validators": []}
-        validators.add((hotkey, "executing" if run["kind"] == "execute" else "scoring"))
+            continue
+        phase = "executing" if run["kind"] == "execute" else "scoring"
+        source = _runtime_source(run, starts_by_run.get(str(run.get("run_id") or ""), ()))
+        version = (hotkey, phase, *source)
+        versions[version] = versions.get(version, 0) + 1
+    counts = dict.fromkeys(("queued", "active", "completed", "failed", "retrying"), 0)
+    validators = set()
+    invalid_assignment = False
+    submitted = False
+    for _, run in effective.values():
+        status = run.get("status")
+        if status == "accepted":
+            counts["completed"] += 1
+        elif status == "failed":
+            counts["failed"] += 1
+        elif status == "submitted":
+            submitted = True
+        else:
+            expires = _timestamp(run.get("lease_expires_at"))
+            active = status == "leased" and expires and datetime.fromisoformat(expires.replace("Z", "+00:00")) > now
+            if active and outcome is None:
+                counts["active"] += 1
+                hotkey = str(run.get("runner_hotkey") or "")
+                try:
+                    contracts.require_hotkey(hotkey)
+                except contracts.ArenaContractError:
+                    invalid_assignment = True
+                    continue
+                phase = "executing" if run["kind"] == "execute" else "scoring"
+                source = _runtime_source(run, starts_by_run.get(str(run.get("run_id") or ""), ()))
+                validators.add((hotkey, phase, *source))
+            elif outcome is not None:
+                counts["failed"] += 1
+            else:
+                retrying = (
+                    type(run.get("attempt")) is int and run["attempt"] > 1
+                    or type(run.get("lease_generation")) is int and run["lease_generation"] > 1
+                )
+                counts["retrying" if retrying else "queued"] += 1
+    state = outcome or (
+        "unavailable" if invalid_assignment else "evaluating" if counts["active"]
+        else "retrying" if counts["retrying"] else "queued" if counts["queued"] or not effective
+        else "finalizing" if submitted else "failed" if counts["failed"] else "finalizing"
+    )
+    # A malformed active identity makes the active identities unavailable.
+    if invalid_assignment:
+        validators.clear()
     return {
-        "state": "evaluating" if validators else "queued" if waiting else "finalizing",
-        "validators": [{"hotkey": hotkey, "phase": phase} for hotkey, phase in sorted(validators)],
+        "state": state,
+        "validators": [
+            {"hotkey": key[0], "phase": key[1], "commit": key[2], "working_tree": key[3]}
+            for key in sorted(validators, key=lambda key: (key[0], key[1], key[2] or "", key[3]))
+        ],
+        "active_count": counts["active"],
+        "counts": counts,
+        "code_versions": [
+            {"validator_hotkey": key[0], "phase": key[1], "commit": key[2],
+             "working_tree": key[3], "run_count": versions[key]}
+            for key in sorted(versions, key=lambda key: (key[0], key[1], key[2] or "", key[3]))
+        ],
     }
+
+
+def _attach_evaluations(service: Any, round_id: str, entries: Sequence[dict]) -> None:
+    if not entries:
+        return
+    ids = sorted({entry["submission_id"] for entry in entries})
+    runs_by_submission: Dict[str, list] = {sid: [] for sid in ids}
+    # Compact reads are limited to public submissions on this returned page.
+    for run in service._store.list_runs(round_id, columns=_EVALUATION_COLUMNS, submission_ids=ids):
+        if run.get("submission_id") in runs_by_submission:
+            runs_by_submission[run["submission_id"]].append(run)
+    starts_by_submission: Dict[str, list] = {sid: [] for sid in ids}
+    now = service.now()
+    live_ids = {entry["submission_id"] for entry in entries if entry["status"] == "scoring"}
+    fallback_ids = [
+        str(run["run_id"])
+        for runs in runs_by_submission.values() for run in runs
+        if run.get("run_id") and (
+            run.get("status") == "leased" and run.get("submission_id") in live_ids
+            or run.get("status") == "failed" and _recorded_source(run)[0] is None
+        )
+    ]
+    # Accepted historical runs without source metadata remain explicitly
+    # unknown. No scan of their provider trajectories can identify a commit.
+    if fallback_ids:
+        for event in service._store.list_runtime_starts(round_id, run_ids=fallback_ids):
+            if event.get("submission_id") in starts_by_submission:
+                starts_by_submission[event["submission_id"]].append(event)
+    for entry in entries:
+        status = entry["status"]
+        outcome = ("completed" if status in ("scored", "champion")
+                   else "failed" if status in ("scoring_failed", "cancelled", "review_failed", "review_rejected") else None)
+        entry["evaluation"] = evaluation_progress(
+            runs_by_submission[entry["submission_id"]], now,
+            runtime_starts=starts_by_submission[entry["submission_id"]], outcome=outcome,
+        )
 
 
 def submissions_snapshot(service: Any, round_id: str) -> dict:
@@ -843,20 +983,11 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
                 )
             )
         submissions.append(projected)
-    in_progress = {item["submission_id"] for item in submissions if item["status"] == "scoring"}
-    if in_progress:
-        # One compact, paginated round read; no per-submission result fanout.
-        by_submission: Dict[str, list] = {submission_id: [] for submission_id in in_progress}
-        for run in service._store.list_runs(
-            round_id,
-            columns="run_id,submission_id,kind,status,runner_hotkey,lease_expires_at",
-        ):
-            if run.get("submission_id") in by_submission:
-                by_submission[run["submission_id"]].append(run)
-        now = service.now()
+    if round_status != "open":
+        _attach_evaluations(service, round_id, submissions)
+    else:
         for item in submissions:
-            if item["submission_id"] in in_progress:
-                item["evaluation"] = evaluation_progress(by_submission[item["submission_id"]], now)
+            item["evaluation"] = evaluation_progress([], service.now())
     return {"round_id": round_id, "submissions": submissions}
 
 
@@ -903,6 +1034,11 @@ def history_snapshot(service: Any, *, cursor: Optional[str] = None, limit: int =
         if next_row is not None:
             state = [_timestamp(next_row.get("created_at")), str(next_row["round_id"]), after, day or "", needle]
             next_cursor = base64.urlsafe_b64encode(json.dumps(state).encode()).decode().rstrip("=")
+        by_round: Dict[str, list] = {}
+        for entry in entries:
+            by_round.setdefault(entry["round_id"], []).append(entry)
+        for round_id, items in by_round.items():
+            _attach_evaluations(service, round_id, items)
         return {"rounds": list(summaries.values()), "submissions": entries, "next_cursor": next_cursor}
 
     pinned = getattr(service._config, "pinned_round_id", None)

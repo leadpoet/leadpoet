@@ -4813,13 +4813,8 @@ class Broker:
                             )
                         )
                     )
-                    # The same rejection, judged on its status alone. Billing
-                    # recovery still depends on a readable document, so this does
-                    # not relax polling or retention; it only decides what the
-                    # worker is told when the cost stays unresolved. Deepline
-                    # rejected the request, so its own status is the honest
-                    # answer, and provider_unavailable would blame the arena for
-                    # a fault that is not ours.
+                    # A complete upstream rejection keeps its status even if
+                    # its body is not JSON. Billing still needs its own proof.
                     deepline_client_rejection = (
                         response.internal_provenance is None
                         and response.status in (400, 404, 422)
@@ -5170,13 +5165,24 @@ class Broker:
                     else (response.status, response.headers, response.body, "")
                 )
                 failure_stage = "response_sanitization"
-                sanitized_status, sanitized_headers, sanitized_body = operations.sanitize_response(
-                    operation_id,
-                    adapted_status,
-                    adapted_headers,
-                    adapted_body,
-                    parameters=normalized,
-                )
+                try:
+                    sanitized_status, sanitized_headers, sanitized_body = operations.sanitize_response(
+                        operation_id,
+                        adapted_status,
+                        adapted_headers,
+                        adapted_body,
+                        parameters=normalized,
+                    )
+                except operations.OperationResponseError as exc:
+                    if not deepline_client_rejection or exc.code != "invalid_response":
+                        raise
+                    # Keep the authenticated status without exposing an
+                    # unstructured error body. Size and credential guards remain.
+                    sanitized_status, sanitized_headers, sanitized_body = operations.sanitize_response(
+                        operation_id, adapted_status, {},
+                        b'{"error":{"code":"provider_request_rejected"}}',
+                        parameters=normalized,
+                    )
                 if adapted_response_url:
                     sanitized_headers[operations.TRUSTED_RESPONSE_URL_HEADER] = (
                         _validated_response_url(adapted_response_url)
@@ -5214,7 +5220,7 @@ class Broker:
                                       if effective_operation.provider == "openrouter" else None),
                     credential_fingerprint=provider_credential_fingerprint,
                 )
-                if deepline_request_failed:
+                if deepline_request_failed or deepline_client_rejection:
                     uncertain_doc["deepline_terminal_response"] = _terminal_response_document(
                         sanitized_status, sanitized_headers, sanitized_body, call_succeeded=False,
                     )

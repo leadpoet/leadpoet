@@ -529,9 +529,9 @@ def test_scoring_reward_normal_validators_restart_and_chain_readback(
     basis = activated["reward_basis_doc"]
     assert basis["schema_version"] == "leadpoet.lab_arena.reward_basis.v2"
     assert basis["slot_policy"] == rewards.reward_slot_policy_document()
-    assert basis["reward_slots"][1:] == [None, None]
     achievement = basis["reward_slots"][0]
     assert achievement is not None
+    assert basis["reward_slots"] == [achievement] * 3
     assert achievement["winner_score"] - achievement["baseline_score"] >= 10
     source_round = harness.service.store.get_round(achievement["round_id"])
     assert source_round["baseline_promoted_at"] is not None
@@ -737,10 +737,10 @@ def test_scoring_reward_normal_validators_restart_and_chain_readback(
             if state["reward_basis"]["king_hotkey"]:
                 hotkeys.append(state["reward_basis"]["king_hotkey"])
             derived = arena_weights.derive_arena_weights(state, hotkeys)
-            assert derived["champion_share_ppb"] == 500_000_000
-            assert derived["burned_residual_ppb"] == 500_000_000
+            assert derived["champion_share_ppb"] == 300_000_000
+            assert derived["burned_residual_ppb"] == 700_000_000
             assert derived["sparse_uids"] == [0, 1]
-            assert derived["sparse_weights_u16"] == [65535, 65535]
+            assert derived["sparse_weights_u16"] == [65535, 28086]
             source = _ExternalSource(
                 hotkeys,
                 key.public_key.hex(),
@@ -902,10 +902,10 @@ def test_v2_multiple_payees_preserves_pending_v1_signed_recovery(tmp_path):
     assert restarted.run_once(new_epoch) == "broadcast"
     new_bytes = paths.signed(new_epoch).read_bytes()
     new_signed = json.loads(new_bytes)
-    # Empty burn allocation disappears; the three independent registered
-    # owners receive exactly 50%, 30%, and 20% through normal serialization.
-    assert new_signed["sparse_uids"] == [1, 2, 3]
-    assert new_signed["sparse_weights_u16"] == [65535, 39321, 26214]
+    # The three registered owners split the 30% pot as 15%, 9%, and 6%
+    # of total emissions; the remaining 70% stays at the burn destination.
+    assert new_signed["sparse_uids"] == [0, 1, 2, 3]
+    assert new_signed["sparse_weights_u16"] == [65535, 14043, 8426, 5617]
     for state, epoch, signed in (
         (old_state, old_epoch, old_signed), (new_state, new_epoch, new_signed),
     ):

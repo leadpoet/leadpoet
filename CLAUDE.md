@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: cumulative slots within the existing miner pot
+
+On 2026-10-07 the user replaced the prior highest-only/total-allocation policy:
+keep the miner pot at 30% of total emissions; assign all qualifying +10/+5/+1
+slots with 50%/30%/20% shares of that pot. Reuse the existing signed reward and
+weight path. Authority includes protected inspection, narrow code and committed
+migrations, tests, safe push/merge, canonical paired restarts and live finalized
+weight verification. Preserve original published winner/baseline scores,
+champion selection, promotion, cost eligibility, funding, round timing,
+execution, signed history and concurrent work. Do not rerun scoring or rewrite
+accepted epochs. This authority ends after deployment and live verification.
+
 ## Scoped production authorization: October 8 monitoring and provider concurrency
 
 The user authorized monitoring the October 8 baseline and miner round through

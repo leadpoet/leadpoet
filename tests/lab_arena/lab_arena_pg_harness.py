@@ -159,6 +159,7 @@ CURRENT_REWARD_SERVICE_MIGRATIONS = CURRENT_PROVIDER_SERVICE_MIGRATIONS + (
     "342-lab-arena-reward-predecessor-barrier.sql",
     "377-lab-arena-monotonic-day-authority.sql",
     "428-lab-arena-reward-slots.sql",
+    "429-lab-arena-cumulative-reward-pot.sql",
 )
 
 

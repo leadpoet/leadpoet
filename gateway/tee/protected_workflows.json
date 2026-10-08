@@ -517,7 +517,7 @@
       "symbol": "verify_roles"
     },
     {
-      "ast_sha256": "sha256:ad85e35d3b6f1ccd1ad7e22f0f81f9a4b1ec11bc58dae2f48bb2386006a5885f",
+      "ast_sha256": "sha256:5983447cf8b02516ae1aa8861ffe13b3541c7eea3732d268b9deac82c10cbb61",
       "path": "lab_arena/rewards.py",
       "symbol": "REWARD_SLOT_POLICY"
     },
@@ -697,7 +697,7 @@
       "symbol": "signing_key_hash_from_environment"
     },
     {
-      "ast_sha256": "sha256:2f6d2ff8eab8802cc8fc5e9ee3028f2b4995459f1185af575d367294a18ff6a4",
+      "ast_sha256": "sha256:dc6d390587496946f395ffeed333c82a6f7253254e3d0bfb8a6c33e4c018f8f8",
       "path": "leadpoet_canonical/lab_arena_rewards.py",
       "symbol": "slot_allocations"
     },
@@ -717,7 +717,7 @@
       "symbol": "validate_reward_slots"
     },
     {
-      "ast_sha256": "sha256:30672d7c70c3ebf58070cd2d8af878ec4eed1b2b68d12c820d101e72a091b55e",
+      "ast_sha256": "sha256:8f6f6212e6d170d899097ea5d7d079426b18a4ce49190f5c7d1a82f000546e27",
       "path": "leadpoet_canonical/lab_arena_rewards.py",
       "symbol": "validate_slot_policy"
     },
@@ -847,7 +847,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:14203ac50ae98fd9265cc652e5c4b52f3cb3ec6a9a75c20ab6c90ff6a167f652",
-  "protected_source_commit": "1b5d196af",
+  "manifest_hash": "sha256:20831a5e14c61fad81aac72c31511024307db1a8e3d65abbc2bba0ba6b141d24",
+  "protected_source_commit": "75951bfbcf748484fae78f0a330fb480bdcefe0a",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

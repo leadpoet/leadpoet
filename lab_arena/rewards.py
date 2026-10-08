@@ -44,12 +44,12 @@ from leadpoet_canonical.lab_arena_rewards import (  # noqa: F401  (re-exported: 
 
 MAX_REWARD_WEEK_INDEX = len(KING_POOL_SHARE_PERCENT_BY_WEEK) - 1
 
-# The complete new payout policy. Change assignment_mode to "all_qualifying"
-# to let one achievement replace every tier it clears. Percentages are of
-# total allocation, not of the legacy champion pool. Each activated basis
-# signs a copy; changing this policy never changes an existing signed basis.
+# The complete slot payout policy. The 30% miner pot is a share of total
+# emissions; tier percentages divide that pot. Each activated basis signs a
+# copy, so changes never alter an existing signed basis.
 REWARD_SLOT_POLICY = {
-    "assignment_mode": "highest_only",
+    "assignment_mode": "all_qualifying",
+    "pool_percent": 30,
     "tiers": [
         {"minimum_improvement": 10, "allocation_percent": 50},
         {"minimum_improvement": 5, "allocation_percent": 30},

@@ -1288,6 +1288,44 @@ def _deepline_job_request_id(document: Any) -> Optional[str]:
     return present[0]
 
 
+def _deepline_insufficient_credit_response(response: ProviderResponse, document: Any) -> bool:
+    """Identify an authenticated payment refusal, without proving its charge."""
+
+    if (response.internal_provenance is not None or response.status != 402
+        or not isinstance(document, Mapping)
+        or document.get("code") != "INSUFFICIENT_CREDITS"
+        or not isinstance(document.get("error"), str) or not document["error"].strip()):
+        return False
+    billing = document.get("billing")
+    if not isinstance(billing, Mapping) or billing.get("kind") != "insufficient_credits":
+        return False
+    # Typed balance fields identify this envelope. Their arithmetic remains
+    # solely the strict cost parser's responsibility; inconsistency is not free.
+    for name in ("required_credits", "balance_credits", "needed_credits"):
+        value = billing.get(name)
+        if type(value) not in (str, int, float):
+            return False
+        text = str(value)
+        if len(text) > 100 or _DECIMAL_RE.fullmatch(text) is None:
+            return False
+        try:
+            amount = Decimal(text)
+        except ArithmeticError:
+            return False
+        if not amount.is_finite() or (name != "balance_credits" and amount < 0):
+            return False
+    body_id = _deepline_job_request_id(document)
+    if any(name in document for name in ("job_id", "request_id", "requestId")) and (
+        body_id is None or _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(body_id) is None
+        or _DEEPLINE_REQUEST_ID_RE.fullmatch(body_id) is not None
+    ):
+        return False
+    header_id = _deepline_response_header_request_id(response.headers)
+    if "x-deepline-request-id" in response.headers and header_id is None:
+        return False
+    return body_id is None or header_id is None or body_id == header_id
+
+
 def _deepline_async_job_ids(document: Any, flow: Mapping[str, Any]) -> Sequence[str]:
     """Read only declared provider-job paths, excluding the billing envelope ID."""
 
@@ -4394,10 +4432,19 @@ class Broker:
                     saved_terminal = saved_call["deepline_terminal_response"]
                     try:
                         saved_status, saved_headers, saved_body = _decode_terminal(saved_terminal, secret=secret)
+                        host_payment_refusal = (
+                            saved_status == 402
+                            and getattr(context, "kind", "execute") == "score"
+                            and funding_source == "host"
+                            and saved_call.get("deepline_host_payment_refusal") is True
+                            and saved_call.get("provider_status") == 402
+                            and saved_body == operations.GENERIC_UNAVAILABLE_BODY
+                        )
                         if (saved_call.get("reason") != "missing_provider_cost"
                             or saved_call.get("call_succeeded") is not False
                             or saved_terminal.get("call_succeeded") is not False
-                            or saved_status not in (400, 403, 404, 422)):
+                            or (saved_status not in (400, 403, 404, 422)
+                                and not host_payment_refusal)):
                             raise BrokerError("broker_unavailable")
                     except BrokerError:
                         return _error_result("broker_unavailable", summary)
@@ -4413,6 +4460,8 @@ class Broker:
                         summary["actual_microusd"] = reserved["amount_microusd"]
                     if saved_status == 403:
                         summary["error_code"] = "provider_request_refused"
+                    elif host_payment_refusal:
+                        summary["error_code"] = "provider_unavailable"
                     return BrokerResult(saved_status, saved_headers, saved_body, summary)
                 if request_accounting.get("deepline_execution_key"):
                     recovery_outbound = operations.build_outbound_request(
@@ -4495,6 +4544,12 @@ class Broker:
                 ):
                     summary["error_code"] = "provider_request_refused"
                     summary["provider_status"] = 403
+            if (terminal_status == 402 and funding_source == "host"
+                and getattr(context, "kind", "execute") == "score"
+                and effective_operation.provider == "deepline"
+                and terminal_document.get("call_succeeded") is False
+                and terminal_body == operations.GENERIC_UNAVAILABLE_BODY):
+                summary.update(error_code="provider_unavailable", provider_status=402)
             if funding_source == "miner_key" and terminal_status == 402:
                 try:
                     error = json.loads(terminal_body).get("error")
@@ -4649,6 +4704,7 @@ class Broker:
         deepline_readback_cost: Optional[provider_costs.ProviderCost] = None
         deepline_known_free_cost: Optional[provider_costs.ProviderCost] = None
         deepline_native_cost: Optional[provider_costs.ProviderCost] = None
+        deepline_host_payment_refusal = False
         deepline_async_ids: Sequence[str] = ()
         deepline_async_poll_accepted = False
         deepline_request_failed = False
@@ -4867,6 +4923,11 @@ class Broker:
                     deepline_payment_error = (
                         response.internal_provenance is None
                         and response.status == 402
+                    )
+                    deepline_host_payment_refusal = (
+                        getattr(context, "kind", "execute") == "score"
+                        and funding_source == "host"
+                        and _deepline_insufficient_credit_response(response, raw_document)
                     )
                     if (deepline_catalog_entry
                         and isinstance(deepline_catalog_entry.get("async_flow"), Mapping)):
@@ -5224,6 +5285,13 @@ class Broker:
                 failure_stage = "response_sanitization"
                 refused = _error_result("miner_credentials_unavailable", summary)
                 sanitized_status, sanitized_headers, sanitized_body = refused.status, refused.headers, refused.body
+            elif deepline_host_payment_refusal:
+                # Preserve the known HTTP refusal for the judge's retry rules.
+                # Its safe body and classification still denote host failure.
+                unavailable = _error_result("provider_unavailable", summary)
+                sanitized_status, sanitized_headers, sanitized_body = (
+                    402, unavailable.headers, unavailable.body,
+                )
             else:
                 failure_stage = "response_adaptation"
                 adapted_status, adapted_headers, adapted_body, adapted_response_url = (
@@ -5292,10 +5360,12 @@ class Broker:
                                       if effective_operation.provider == "openrouter" else None),
                     credential_fingerprint=provider_credential_fingerprint,
                 )
-                if deepline_request_failed or deepline_client_rejection:
+                if deepline_request_failed or deepline_client_rejection or deepline_host_payment_refusal:
                     uncertain_doc["deepline_terminal_response"] = _terminal_response_document(
                         sanitized_status, sanitized_headers, sanitized_body, call_succeeded=False,
                     )
+                if deepline_host_payment_refusal:
+                    uncertain_doc["deepline_host_payment_refusal"] = True
                 if deepline_async_ids:
                     uncertain_doc["deepline_async_job_ids"] = list(deepline_async_ids)
                 if account_failure_evidence is not None:
@@ -5382,6 +5452,15 @@ class Broker:
                     return _error_result("provider_request_refused", summary)
                 if miner_credential_failure:
                     return _error_result("miner_credentials_unavailable", summary)
+                if (deepline_host_payment_refusal
+                    and uncertain_state.get("status") in ("uncertain", "settled")):
+                    if uncertain_state.get("status") == "settled":
+                        saved_actual = uncertain_state.get("amount_microusd", uncertain_state.get("actual_microusd"))
+                        if type(saved_actual) is not int or saved_actual < 0:
+                            return _error_result("broker_unavailable", summary)
+                        summary.update(outcome="settled", actual_microusd=saved_actual)
+                    summary.update(status=402, error_code="provider_unavailable")
+                    return BrokerResult(402, sanitized_headers, sanitized_body, summary)
                 if (
                     (deepline_request_failed or deepline_client_rejection)
                     and uncertain_state.get("status") in ("uncertain", "settled")
@@ -5649,6 +5728,10 @@ class Broker:
         if settle_status == "settled" and miner_credential_failure:
             summary.update({"outcome": "settled", "actual_microusd": actual, "provider_status": provider_status_for_summary})
             return _error_result("miner_credentials_unavailable", summary)
+        if settle_status == "settled" and deepline_host_payment_refusal:
+            summary.update(outcome="settled", actual_microusd=actual, status=402,
+                           provider_status=402, error_code="provider_unavailable")
+            return BrokerResult(402, sanitized_headers, sanitized_body, summary)
         if settle_status == "settled" and operations.provider_status_is_infrastructure(response.status):
             # An organizer account failure or upstream outage is infrastructure.
             summary.update({"outcome": "settled", "actual_microusd": actual, "status": sanitized_status, "provider_status": provider_status_for_summary, "response_hash": payload["response_hash"]})

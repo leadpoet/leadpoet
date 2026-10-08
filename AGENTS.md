@@ -8,7 +8,9 @@ $overnight-rebenchmark-validation for protected inspection, narrow fixes for
 confirmed bugs, focused tests, safe push/merge and canonical paired deployment.
 The user explicitly set LAB_ARENA_OPENROUTER_MAX_CONCURRENCY to a code default
 of 200; update its existing bounded configuration path and production override
-accordingly. Preserve provider cooldowns, request identities, confirmed costs,
+accordingly. The user also authorized fixing false rejection of valid grouped
+company-search SQL, while preserving the existing read-only table and function
+restrictions. Preserve provider cooldowns, request identities, confirmed costs,
 ICP deadlines, qualification, scoring, accepted results, frozen inputs and
 concurrent work. Do not reset the round or interrupt healthy paid requests.
 Read-only Sentry and OnePatch checks are authorized. This scope ends after

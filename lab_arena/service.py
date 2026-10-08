@@ -682,6 +682,38 @@ class _PublicationReads:
         return self.costs_by_position[key]
 
 
+class _LazyRunLookup(Mapping):
+    """Run rows by id, fetching a miss from the store once and remembering it.
+
+    Scoring attribution resolves cached judgments by run id, and the source run
+    may belong to another submission. Loading every run in the round to satisfy
+    those few lookups made the public results page scale with round size.
+    """
+
+    def __init__(self, seeded: Mapping[str, Any], fetch: Callable[[str], Optional[Mapping[str, Any]]]) -> None:
+        self._rows = dict(seeded)
+        self._fetch = fetch
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        run_id = str(key)
+        if run_id not in self._rows:
+            self._rows[run_id] = self._fetch(run_id)
+        row = self._rows[run_id]
+        return default if row is None else row
+
+    def __getitem__(self, key: Any) -> Any:
+        row = self.get(key)
+        if row is None:
+            raise KeyError(key)
+        return row
+
+    def __iter__(self):
+        return iter(self._rows)
+
+    def __len__(self) -> int:
+        return len(self._rows)
+
+
 class ArenaService:
     def __init__(self, config: ServiceConfig) -> None:
         self._config = config
@@ -5922,11 +5954,18 @@ class ArenaService:
 
         score_runs = self._store.list_runs(round_id, kind="score")
         judgments = self._select_scoring_outputs(score_runs)
-        runs_by_id = {
-            str(run["run_id"]): run
-            for run in list(source_execution_runs) + list(score_runs)
-            if run.get("run_id")
-        }
+        # Cached judgments point at a source run that can belong to any
+        # submission in the round, so this lookup must be able to reach runs
+        # the caller did not load. Seed it with what is already in hand and
+        # fetch the rest one row at a time instead of paging the whole round.
+        runs_by_id = _LazyRunLookup(
+            {
+                str(run["run_id"]): run
+                for run in list(source_execution_runs) + list(score_runs)
+                if run.get("run_id")
+            },
+            self._store.get_run,
+        )
         by_position: Dict[int, Dict[str, bool]] = {}
         unattributed_positions = set()
         versions_by_position: Dict[int, set] = {}

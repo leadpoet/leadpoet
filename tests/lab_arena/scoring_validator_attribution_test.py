@@ -353,7 +353,10 @@ def test_live_shape_uses_two_bulk_run_reads_for_98_judgments():
         "scoring_attribution"
     ]
 
-    assert calls == [{"kind": "execute"}, {"kind": "score"}]
+    assert calls == [
+        {"kind": "execute", "submission_id": SUBMISSION_ID},
+        {"kind": "score"},
+    ]
     assert attribution["validators"] == [{
         "hotkey": VALIDATOR_A,
         "icp_count": 20,

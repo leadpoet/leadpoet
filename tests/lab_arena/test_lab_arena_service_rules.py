@@ -2131,7 +2131,10 @@ def test_public_results_take_valid_identity_from_the_round_publication():
     class Store:
         @staticmethod
         def list_runs(_round_id, **filters):
-            assert filters in ({"kind": "execute"}, {"kind": "score"})
+            assert filters in (
+                {"kind": "execute", "submission_id": "sub-published"},
+                {"kind": "score"},
+            )
             return []
 
         @staticmethod

@@ -306,7 +306,13 @@ def _company_sql(value: Any) -> None:
     # scalar/aggregate company filters, with no schema-qualified functions.
     # These SQL keywords can also precede a parenthesized expression. Keep
     # scanning across whitespace so a spaced, unapproved function still fails.
-    paren_heads = re.finditer(r"\b([A-Za-z_][A-Za-z0-9_.]*)\s*\(", statement)
+    # A qualified function can have whitespace around its dot. Keep the full
+    # head together so the allowlist cannot mistake its final name for a local
+    # unqualified function.
+    paren_heads = re.finditer(
+        r"\b([A-Za-z_][A-Za-z0-9_]*(?:\s*\.\s*[A-Za-z_][A-Za-z0-9_]*)*)\s*\(",
+        statement,
+    )
     for match in paren_heads:
         name = match.group(1).upper()
         # BY is also a callable identifier. Accept it only in the exact

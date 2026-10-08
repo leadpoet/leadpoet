@@ -179,6 +179,9 @@ def public_company_catalog():
     "SELECT industry FROM companies GROUP BY (industry) HAVING (COUNT (*) > 1) LIMIT 5",
     "SELECT industry FROM companies ORDER BY (industry) LIMIT 5",
     "SELECT COUNT (*) FROM companies WHERE (industry = 'solar') LIMIT 5",
+    "SELECT lower (name) FROM companies GROUP BY (lower (name)) ORDER BY (lower (name)) LIMIT 5",
+    "SELECT * FROM companies WHERE (name = 'public . lower(name)') LIMIT 5",
+    "SELECT * FROM companies WHERE (name = 'public\n.\nlower(name)') LIMIT 5",
 ])
 def test_frozen_public_company_search_normalizes_grouped_readonly_sql(public_company_catalog, sql):
     parameters = {"tool": "free_simple_company_search", "payload": {"sql": sql}}
@@ -198,6 +201,12 @@ def test_frozen_public_company_search_normalizes_grouped_readonly_sql(public_com
     "SELECT industry FROM companies ORDER BY by('x') LIMIT 10",
     "SELECT * FROM companies WHERE (pg_read_file ('/etc/passwd') IS NOT NULL) LIMIT 5",
     "SELECT pg_catalog.COUNT (*) FROM companies LIMIT 5",
+    "SELECT public . lower(name) FROM companies LIMIT 5",
+    "SELECT public. lower(name) FROM companies LIMIT 5",
+    "SELECT public .lower(name) FROM companies LIMIT 5",
+    "SELECT public\n.\nlower (name) FROM companies LIMIT 5",
+    "SELECT pg_catalog\t. COUNT (*) FROM companies LIMIT 5",
+    "SELECT public . pg_read_file ('/etc/passwd') FROM companies LIMIT 5",
     'SELECT "industry" FROM companies LIMIT 5',
     "SELECT * FROM companies WHERE (industry = 'solar') -- comment\n LIMIT 5",
     "SELECT * FROM companies WHERE (industry = 'solar'); DELETE FROM companies LIMIT 5",

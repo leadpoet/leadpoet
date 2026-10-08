@@ -1700,7 +1700,7 @@ class RunState:
     operation_latest_calls: Dict[Tuple[str, str], Dict[str, Any]] = field(
         default_factory=dict
     )
-    operation_success_sequence: Dict[Tuple[str, str], int] = field(
+    operation_recovery_sequence: Dict[Tuple[str, str], int] = field(
         default_factory=dict
     )
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -2489,10 +2489,10 @@ class WorkerSocketServer:
             )
             if refused:
                 state.refusals += 1
-            newer_success = sequence < state.operation_success_sequence.get(
+            newer_recovery = sequence < state.operation_recovery_sequence.get(
                 refusal_key, -1
             )
-            if refused and not newer_success:
+            if refused and not newer_recovery:
                 count, _previous_error = state.operation_refusals.get(
                     refusal_key, (0, "call_refused")
                 )
@@ -2510,11 +2510,26 @@ class WorkerSocketServer:
                         self._monotonic() + REFUSAL_PROBE_COOLDOWN_SECONDS
                     )
             elif latest and (
-                type(document["status"]) is int
-                and 200 <= document["status"] < 300
-                and call.get("error_code") is None
+                (
+                    type(document["status"]) is int
+                    and 200 <= document["status"] < 300
+                    and call.get("error_code") is None
+                )
+                or (
+                    call.get("provider_status") == document["status"]
+                    and (
+                        document["status"] in (400, 404, 422)
+                        and call.get("error_code") not in (
+                            "broker_unavailable", "provider_unavailable"
+                        )
+                        or document["status"] == 403
+                        and call.get("error_code") == "provider_request_refused"
+                    )
+                )
             ):
-                state.operation_success_sequence[refusal_key] = sequence
+                # A complete request-specific error also proves the old
+                # credential refusal is stale. Billing may remain uncertain.
+                state.operation_recovery_sequence[refusal_key] = sequence
                 state.operation_refusals.pop(refusal_key, None)
                 state.operation_refusal_until.pop(refusal_key, None)
             elif latest and probe:

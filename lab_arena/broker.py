@@ -5312,11 +5312,17 @@ class Broker:
                     return _error_result("miner_credentials_unavailable", summary)
                 if (
                     (deepline_request_failed or deepline_client_rejection)
-                    and uncertain_state.get("status") == "uncertain"
+                    and uncertain_state.get("status") in ("uncertain", "settled")
                 ):
-                    # Persist the original failed call and its unknown cost before
-                    # returning its sanitized error. Never invent a free settlement
-                    # or turn a terminal 4xx into a retryable infrastructure failure.
+                    # Billing may settle during the uncertainty write. Its saved
+                    # placeholder is not the provider's rejection response.
+                    if uncertain_state.get("status") == "settled":
+                        saved_actual = uncertain_state.get(
+                            "amount_microusd", uncertain_state.get("actual_microusd")
+                        )
+                        if type(saved_actual) is not int or saved_actual < 0:
+                            return _error_result("broker_unavailable", summary)
+                        summary.update(outcome="settled", actual_microusd=saved_actual)
                     if request_refused:
                         return _error_result("provider_request_refused", summary)
                     summary.update(status=sanitized_status)

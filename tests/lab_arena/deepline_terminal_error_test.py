@@ -92,10 +92,15 @@ class RetainedErrorStore(ZeroReservationLedgerStore):
         return state
 
 
-def execute(transport, *, kind="execute", store=None):
+def execute(transport, *, kind="execute", store=None, funding_source=None):
+    funding_options = (
+        {"provider_funding_source_for": lambda _context, _provider: funding_source}
+        if funding_source is not None else {}
+    )
     broker, store, _ = make_broker(
         transport=transport, store=store or RetainedErrorStore(),
         credential_for=lambda *_: DL_KEY,
+        **funding_options,
     )
     arguments = dict(operation_id="deepline.execute", parameters=PARAMETERS,
                      action_sequence=0, timeout_ms=30_000)
@@ -199,7 +204,53 @@ def test_error_response_requires_durable_uncertainty(state):
     assert result.call["error_code"] == "provider_unavailable"
 
 
-@pytest.mark.parametrize("status", [401, 402, 403, 429, 500, 502, 504])
+@pytest.mark.parametrize("funding_source", ["host", "miner_key"])
+def test_unproven_402_returns_after_one_short_read_without_paid_replay(
+    monkeypatch, funding_source,
+):
+    monkeypatch.setattr(br.time, "sleep", lambda _: pytest.fail("402 must not poll"))
+    transport = ErrorTransport(402)
+    result, broker, store, context, arguments = execute(
+        transport, funding_source=funding_source,
+    )
+    assert result.status == (402 if funding_source == "miner_key" else 502)
+    assert result.call["error_code"] == (
+        "miner_credentials_unavailable" if funding_source == "miner_key"
+        else "provider_unavailable"
+    )
+    assert result.call["provider_status"] == 402
+    assert result.call["outcome"] == "uncertain"
+    assert "actual_microusd" not in result.call
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+    saved = store.calls[result.call["call_identity"]]["uncertain_doc"]
+    assert saved["call_succeeded"] is False
+    assert saved["deepline_job_id"] == REQUEST_ID
+    assert saved["deepline_execution_key"]
+    assert saved["credential_fingerprint"]
+    assert [request["method"] for request in transport.sent] == ["POST", "GET"]
+    assert 0 < transport.sent[1]["timeout_seconds"] <= 5
+
+    replay = broker.execute(context, **arguments)
+    assert replay.status == 409
+    assert replay.call["error_code"] == "call_uncertain"
+    assert replay.call["outcome"] == "uncertain"
+    assert "actual_microusd" not in replay.call
+    assert [request["method"] for request in transport.sent].count("POST") == 1
+
+
+def test_402_short_read_settles_only_exact_final_charge(monkeypatch):
+    monkeypatch.setattr(br.time, "sleep", lambda _: pytest.fail("402 must not poll"))
+    transport = ErrorTransport(402, bill=billing(credits="0.5"))
+    result, _, store, _, _ = execute(transport)
+    assert result.status == 502
+    assert result.call["outcome"] == "settled"
+    assert result.call["actual_microusd"] == 50_000
+    assert store.log == ["reserve", "dispatch", "settle"]
+    assert [request["method"] for request in transport.sent] == ["POST", "GET"]
+    assert 0 < transport.sent[1]["timeout_seconds"] <= 5
+
+
+@pytest.mark.parametrize("status", [401, 403, 429, 500, 502, 504])
 def test_account_and_infrastructure_failures_keep_normal_polling(monkeypatch, status):
     sleeps = []
     monkeypatch.setattr(br, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 2)
@@ -341,14 +392,16 @@ def test_unreadable_non_request_failure_stays_unavailable(monkeypatch, status):
     assert result.call["outcome"] == "uncertain" and "actual_microusd" not in result.call
 
 
-def test_late_final_charge_uses_retained_identity_without_another_paid_request():
+@pytest.mark.parametrize("status", [402, 422])
+def test_late_final_charge_uses_retained_identity_without_another_paid_request(status):
     class ReconciledStore(ZeroReservationLedgerStore):
         def reconcile_deepline_cost(self, **kwargs):
             self.reconciled = kwargs
             return {"status": "settled", "actual_microusd": kwargs["actual_microusd"]}
 
-    transport = ErrorTransport(422)
+    transport = ErrorTransport(status)
     result, broker, store, _, _ = execute(transport, store=ReconciledStore())
+    assert result.status == (502 if status == 402 else 422)
     identity = result.call["call_identity"]
     saved = store.calls[identity]["uncertain_doc"]
     transport.bill = billing(credits="0.5")

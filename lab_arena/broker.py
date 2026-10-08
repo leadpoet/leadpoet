@@ -4844,6 +4844,12 @@ class Broker:
                         response.internal_provenance is None
                         and response.status in (400, 404, 422)
                     )
+                    # A complete payment error can reach the model before its
+                    # exact charge is final. Keep unknown cost in the ledger.
+                    deepline_payment_error = (
+                        response.internal_provenance is None
+                        and response.status == 402
+                    )
                     if (deepline_catalog_entry
                         and isinstance(deepline_catalog_entry.get("async_flow"), Mapping)):
                         deepline_async_ids = _deepline_accepted_async_job_ids(
@@ -4930,7 +4936,7 @@ class Broker:
                                 transport=self._transport, secret=secret,
                                 request_id=request_id, execution_key=deepline_execution_key,
                                 operation=deepline_operation, reconciliation_deadline=exact_deadline,
-                                poll=not deepline_request_failed,
+                                poll=not (deepline_request_failed or deepline_payment_error),
                                 provider=(deepline_catalog_entry["provider"] if deepline_catalog_entry else None),
                                 operation_aliases=(deepline_catalog_entry["operation_aliases"] if deepline_catalog_entry else ()),
                         )

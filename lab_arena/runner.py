@@ -3090,6 +3090,11 @@ def _runtime_started_content(
         "runtime": "runsc",
         **_runtime_source_metadata(lease),
     }
+    # Bind this recorded source identity to the exact lease, including a
+    # reclaimed run with the same hotkey and attempt.
+    generation = lease.get("lease_generation")
+    if type(generation) is int and generation > 0:
+        content["lease_generation"] = generation
     if wall_clock_limit_seconds is not None:
         content["wall_clock_limit_seconds"] = wall_clock_limit_seconds
     if lease.get("kind") == "score" and isinstance(lease.get("image_reference"), str):

@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from lab_arena import broker, wiring
 from tests.lab_arena.test_lab_arena_broker import (
     CONTEXT, FakeLedgerStore, FakeTransport, HOST_KEYS, price_table,
@@ -138,3 +140,39 @@ def test_gateway_paid_calls_keep_frozen_45m_round_lease(monkeypatch):
     assert historical.status == 200
     assert store.renewals[-2:] == [("reserve", 1200), ("settle", 1200)]
     assert store.lease_expires_at == store.paid_at + timedelta(minutes=20)
+
+
+def test_shadow_replay_route_refuses_unbound_frozen_round_before_paid_call(monkeypatch):
+    service, store, provider = _wired_factory(monkeypatch)
+    round_id = "arena-2026-10-08-judgeprobea"
+    archive_hash = "sha256:" + "a" * 64
+    source_url = (
+        wiring.scoring_provider_compat.SHADOW_REPLAY_ROUTE_PREFIX
+        + "arena-2026-10-07/"
+        + archive_hash.removeprefix("sha256:") + ".tar.gz"
+    )
+    service.config.pinned_round_id = round_id
+    service.config.defaults.baseline_source_url = source_url
+    service._saved_output_replay = {
+        "source_round": "arena-2026-10-07",
+        "archive_hash": archive_hash,
+        "score_provider_route": wiring.scoring_provider_compat.COMPATIBILITY_VERSION,
+    }
+    row = {
+        "round_id": round_id,
+        "configuration_doc": {
+            "mode": "shadow", "rewards_enabled": False,
+            "baseline_source_url": source_url, "lease_ttl_seconds": 3600,
+        },
+    }
+    selected = service.config.broker_factory(service, row)
+    assert selected._host_shadow_score_compat_round_id == round_id
+    assert selected._host_shadow_score_compat_source_round_id == "arena-2026-10-07"
+    for changed in (
+        {**row, "configuration_doc": {**row["configuration_doc"], "rewards_enabled": True}},
+        {**row, "configuration_doc": {**row["configuration_doc"], "mode": "live"}},
+        {**row, "round_id": "arena-2026-10-08-other"},
+    ):
+        with pytest.raises(broker.BrokerError, match="broker_unavailable"):
+            service.config.broker_factory(service, changed)
+    assert not store.calls and not provider.sent

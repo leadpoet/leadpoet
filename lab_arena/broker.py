@@ -3073,6 +3073,8 @@ class Broker:
             Callable[[RunContext, str], bool]
         ] = None,
         openrouter_shared_gate: Optional[OpenRouterSharedGate] = None,
+        host_shadow_score_compat_round_id: Optional[str] = None,
+        host_shadow_score_compat_source_round_id: Optional[str] = None,
     ) -> None:
         self._store = store
         # Host-only callers retain key_for. Production supplies the scoped
@@ -3086,6 +3088,10 @@ class Broker:
         self._mark_provider_fallback = mark_provider_fallback
         self._provider_restart_required_for = provider_restart_required_for
         self._openrouter_shared_gate = openrouter_shared_gate
+        self._host_shadow_score_compat_round_id = host_shadow_score_compat_round_id
+        self._host_shadow_score_compat_source_round_id = (
+            host_shadow_score_compat_source_round_id
+        )
         self._price_table = validate_price_table(price_table)
         # Judge models are what scoring runs may call; they are pinned by the
         # scorer policy and priced from the same table.
@@ -3781,6 +3787,13 @@ class Broker:
             if funding_source not in ("host", "miner_key"):
                 raise BrokerError("broker_unavailable")
             if (
+                self._host_shadow_score_compat_round_id
+                and funding_source == "host"
+                and getattr(context, "kind", "execute") == "score"
+                and context.round_id != self._host_shadow_score_compat_round_id
+            ):
+                raise BrokerError("broker_unavailable")
+            if (
                 champion_credential_retry
                 and funding_source == "miner_key"
                 and self._provider_restart_required_for is not None
@@ -3818,15 +3831,27 @@ class Broker:
                         "provider_fallback_marked": True,
                     },
                 )
+            host_shadow_score_compat = (
+                funding_source == "host"
+                and getattr(context, "kind", "execute") == "score"
+                and bool(self._host_shadow_score_compat_round_id)
+                and context.round_id == self._host_shadow_score_compat_round_id
+            )
+            route_round_id = getattr(context, "round_id", "")
+            if host_shadow_score_compat:
+                route_round_id = (
+                    self._host_shadow_score_compat_source_round_id or route_round_id
+                )
             route = scoring_provider_compat.route_for(
                 kind=getattr(context, "kind", "execute"),
                 funding_source=funding_source,
-                round_id=getattr(context, "round_id", ""),
+                round_id=route_round_id,
                 operation_id=operation_id,
                 parameters=normalized,
                 timeout_ms=min(
                     max(1, int(timeout_ms)), operation.timeout_seconds * 1000
                 ),
+                allow_host_shadow_score=host_shadow_score_compat,
             )
             effective_operation_id = route.effective_operation_id if route else operation_id
             effective_parameters = route.effective_parameters if route else normalized

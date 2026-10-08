@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
-from lab_arena import broker as broker_module, chain as chain_module, contracts, images, runtime, scorer_image_access, signing
+from lab_arena import broker as broker_module, chain as chain_module, contracts, images, runtime, scorer_image_access, scoring_provider_compat, signing
 from lab_arena.api import create_app
 from lab_arena.credentials import CredentialManager
 from lab_arena.service import (
@@ -389,6 +389,43 @@ def registry_client_from_environment() -> images.RegistryClient:
     return images.RegistryClient(credentials=credentials_for)
 
 
+def _shadow_replay_score_compat_round_id(
+    service: ArenaService, round_row: Mapping[str, Any],
+) -> Optional[str]:
+    """Bind host-funded compatibility routing to one frozen replay source."""
+
+    configuration = round_row.get("configuration_doc") or {}
+    replay = getattr(service, "_saved_output_replay", None)
+    if not isinstance(configuration, Mapping) or not isinstance(replay, Mapping):
+        return None
+    round_id = round_row.get("round_id")
+    archive_hash = replay.get("archive_hash")
+    if (
+        not isinstance(round_id, str)
+        or service.config.mode != "shadow"
+        or service.config.pinned_round_id != round_id
+        or service.config.defaults.rewards_enabled is not False
+        or service.config.defaults.baseline_source_url
+        != configuration.get("baseline_source_url")
+        or configuration.get("mode") != "shadow"
+        or configuration.get("rewards_enabled") is not False
+        or replay.get("score_provider_route")
+        != scoring_provider_compat.COMPATIBILITY_VERSION
+        or not isinstance(replay.get("source_round"), str)
+        or contracts.ROUND_ID_RE.fullmatch(replay["source_round"]) is None
+        or not isinstance(archive_hash, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", archive_hash) is None
+        or configuration.get("baseline_source_url")
+        != (
+            scoring_provider_compat.SHADOW_REPLAY_ROUTE_PREFIX
+            + replay["source_round"] + "/"
+            + archive_hash.removeprefix("sha256:") + ".tar.gz"
+        )
+    ):
+        return None
+    return round_id
+
+
 def build_service_from_environment(mode: str):
     """Construct the production service and its FastAPI app from the environment."""
 
@@ -496,6 +533,24 @@ def build_service_from_environment(mode: str):
         return secret
 
     def broker_factory(service: ArenaService, round_row: Mapping[str, Any]) -> broker_module.Broker:
+        host_shadow_route_round_id = _shadow_replay_score_compat_round_id(
+            service, round_row,
+        )
+        configuration = round_row.get("configuration_doc") or {}
+        replay = getattr(service, "_saved_output_replay", None)
+        route_requested = (
+            isinstance(replay, Mapping)
+            and replay.get("score_provider_route")
+            == scoring_provider_compat.COMPATIBILITY_VERSION
+        )
+        frozen_route_marker = (
+            isinstance(configuration, Mapping)
+            and str(configuration.get("baseline_source_url") or "").startswith(
+                scoring_provider_compat.SHADOW_REPLAY_ROUTE_PREFIX
+            )
+        )
+        if (route_requested or frozen_route_marker) and host_shadow_route_round_id is None:
+            raise broker_module.BrokerError("broker_unavailable")
         judge_models = sorted({str(model) for model in (service.scorer_policy.get("judge_models") or {}).values() if model})
         return broker_module.Broker(
             store=store, key_for=key_for, judge_models=judge_models,
@@ -514,6 +569,10 @@ def build_service_from_environment(mode: str):
                 submission_keys.provider_restart_required_for
             ),
             openrouter_shared_gate=openrouter_shared_gate,
+            host_shadow_score_compat_round_id=host_shadow_route_round_id,
+            host_shadow_score_compat_source_round_id=(
+                replay["source_round"] if host_shadow_route_round_id else None
+            ),
         )
 
     def deepline_catalog_source(*, allow_people: bool = False) -> Mapping[str, Any]:

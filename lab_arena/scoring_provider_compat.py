@@ -24,6 +24,9 @@ from lab_arena import operations
 
 COMPATIBILITY_VERSION = "miner-score-deepline-compat:v1"
 EFFECTIVE_OPERATION_ID = "deepline.execute"
+SHADOW_REPLAY_ROUTE_PREFIX = (
+    "https://arena.invalid/saved-output-replay/miner-score-route/"
+)
 
 FIRECRAWL_TOOL = "firecrawl_scrape"
 GENERIC_HTTP_TOOL = "generic_http_request"
@@ -153,10 +156,14 @@ def route_for(
     operation_id: str,
     parameters: Mapping[str, Any],
     timeout_ms: Optional[int] = None,
+    allow_host_shadow_score: bool = False,
 ) -> Optional[MinerScoreRoute]:
     """Return one exact Deepline route for an eligible scoring request."""
 
-    if kind != "score" or funding_source != "miner_key":
+    if kind != "score" or not (
+        funding_source == "miner_key"
+        or (funding_source == "host" and allow_host_shadow_score is True)
+    ):
         return None
     # The upstream must finish before the broker stops reading its response.
     # Otherwise a normal provider timeout loses the billing receipt as well.

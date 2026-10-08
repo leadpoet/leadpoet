@@ -7,7 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from lab_arena import contracts, icp_disclosure, intent_details_policy, scoring
+from lab_arena import (
+    contracts, icp_disclosure, intent_details_policy, scoring,
+    scoring_provider_compat,
+)
 from lab_arena.service import DEFAULT_BASELINE_SOURCE_URL
 from scripts import verify_arena_parallel_round as verification
 
@@ -282,6 +285,59 @@ def test_replay_assignment_requires_published_source_and_parser_preserves_select
         verification._build_pinned_service(
             REPLAY_TARGET_ROUND_ID, replay_assignments=args.replay_assignment,
         )
+
+
+def test_miner_score_route_requires_saved_replay_and_binds_frozen_source(monkeypatch):
+    args = verification.build_parser().parse_args([
+        "serve", "--round-id", REPLAY_TARGET_ROUND_ID,
+        "--environment-file", "/tmp/gateway.env",
+        "--replay-published-round", REPLAY_SOURCE_ROUND_ID,
+        "--replay-miner-score-route",
+    ])
+    assert args.replay_miner_score_route is True
+    with pytest.raises(verification.VerificationError, match="requires a published source round"):
+        verification._build_pinned_service(
+            REPLAY_TARGET_ROUND_ID, replay_miner_score_route=True,
+        )
+
+    built, _runs, _documents = _replay_source_fixture(monkeypatch)
+    direct = verification._saved_output_replay(
+        built, REPLAY_SOURCE_ROUND_ID, REPLAY_TARGET_ROUND_ID,
+    )
+    routed = verification._saved_output_replay(
+        built, REPLAY_SOURCE_ROUND_ID, REPLAY_TARGET_ROUND_ID,
+        miner_score_route=True,
+    )
+    assert routed["archive"] == direct["archive"]
+    assert routed["evidence"]["archive_hash"] == direct["evidence"]["archive_hash"]
+    assert routed["source_url"] == (
+        scoring_provider_compat.SHADOW_REPLAY_ROUTE_PREFIX
+        + REPLAY_SOURCE_ROUND_ID + "/"
+        + routed["evidence"]["archive_hash"].removeprefix("sha256:")
+        + ".tar.gz"
+    )
+    assert routed["source_url"] != direct["source_url"]
+    assert routed["evidence"]["score_provider_route"] == (
+        scoring_provider_compat.COMPATIBILITY_VERSION
+    )
+
+    target = _replay_target_service()
+    target_route_url = (
+        scoring_provider_compat.SHADOW_REPLAY_ROUTE_PREFIX
+        + REPLAY_SOURCE_ROUND_ID + "/"
+        + target._saved_output_replay["archive_hash"].removeprefix("sha256:")
+        + ".tar.gz"
+    )
+    original_source_url = target.config.defaults.baseline_source_url
+    target.config.defaults.baseline_source_url = target_route_url
+    target.store.row["configuration_doc"]["baseline_source_url"] = target_route_url
+    target._saved_output_replay["score_provider_route"] = (
+        scoring_provider_compat.COMPATIBILITY_VERSION
+    )
+    verification._validate_frozen_round(target, target.store.row)
+    target.config.defaults.baseline_source_url = original_source_url
+    with pytest.raises(verification.VerificationError, match="baseline_source_url"):
+        verification._validate_frozen_round(target, target.store.row)
 
 
 def test_historical_replay_is_explicit_and_rejects_malformed_or_future_source(monkeypatch):

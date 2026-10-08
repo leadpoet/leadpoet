@@ -86,6 +86,10 @@ def build_parser() -> argparse.ArgumentParser:
             help="allow a published historical source while retaining its frozen evaluation date",
         )
         command.add_argument(
+            "--replay-miner-score-route", action="store_true",
+            help="use the miner score compatibility provider route with host-funded shadow calls",
+        )
+        command.add_argument(
             "--status-file",
             type=Path,
             help="atomic JSON evidence path; defaults to /tmp/<round-id>.json",
@@ -124,10 +128,13 @@ def _validate_round_id(round_id: str) -> str:
 def _saved_output_replay(
     built: Any, source_round_id: str, round_id: str,
     *, assignments: list[str] | None = None, historical: bool = False,
+    miner_score_route: bool = False,
 ) -> dict[str, Any]:
     """Read immutable accepted inputs for a new, explicitly labelled shadow run."""
 
-    from lab_arena import contact_policy, contracts, integrity, source_bundle
+    from lab_arena import (
+        contact_policy, contracts, integrity, scoring_provider_compat, source_bundle,
+    )
     from lab_arena.output import MAX_OUTPUT_BYTES, validate_output_document
 
     if contracts.ROUND_ID_RE.fullmatch(str(source_round_id or "")) is None:
@@ -345,8 +352,12 @@ def _saved_output_replay(
         source_bundle.validate_source_archive(payload)
     archive_hash = contracts.hash_bytes(payload)
     source_url = (
-        "https://arena.invalid/saved-output-replay/"
-        f"{archive_hash.removeprefix('sha256:')}.tar.gz"
+        (
+            scoring_provider_compat.SHADOW_REPLAY_ROUTE_PREFIX
+            + source_round_id + "/"
+            if miner_score_route else "https://arena.invalid/saved-output-replay/"
+        )
+        + f"{archive_hash.removeprefix('sha256:')}.tar.gz"
     )
     return {
         "icps": icps, "archive": payload, "source_url": source_url,
@@ -355,6 +366,8 @@ def _saved_output_replay(
             "source_round": source_round_id,
             "input_hash": input_hash,
             "archive_hash": archive_hash,
+            **({"score_provider_route": scoring_provider_compat.COMPATIBILITY_VERSION}
+               if miner_score_route else {}),
             "archive_size_bytes": len(payload),
             "evaluation_date": source["evaluation_date"],
             "output_schema_version": source_schema,
@@ -429,6 +442,7 @@ def _build_pinned_service(
     round_id: str, *, replay_published_round: str | None = None,
     replay_assignments: list[str] | None = None,
     replay_historical: bool = False,
+    replay_miner_score_route: bool = False,
 ):
     """Use production dependencies with a process-local shadow ownership gate."""
 
@@ -436,6 +450,8 @@ def _build_pinned_service(
         raise VerificationError("replay assignments require a published source round")
     if replay_historical and not replay_published_round:
         raise VerificationError("historical replay requires a published source round")
+    if replay_miner_score_route and not replay_published_round:
+        raise VerificationError("miner score route requires a published source round")
     source_mode = os.environ.get("LAB_ARENA_MODE", "").strip().lower()
     if source_mode != "live":
         raise VerificationError("the source environment must be the live gateway environment")
@@ -448,6 +464,7 @@ def _build_pinned_service(
         _saved_output_replay(
             built, replay_published_round, round_id,
             assignments=replay_assignments, historical=replay_historical,
+            miner_score_route=replay_miner_score_route,
         )
         if replay_published_round else None
     )
@@ -921,6 +938,50 @@ def _ledger_funding(service: Any, runs: list[Mapping[str, Any]]) -> dict[str, An
     }
 
 
+def _replay_score_route_ledger(
+    service: Any, runs: list[Mapping[str, Any]],
+) -> dict[str, int]:
+    """Prove the effective route from immutable score reservations only."""
+
+    from lab_arena import scoring_provider_compat
+
+    compatible_operations = {
+        "scrapingdog.scrape", "scrapingdog.x_post",
+        "scrapingdog.linkedinjobs", "scrapingdog.profile_post",
+    }
+    eligible = routed = mismatched = 0
+    for run in runs:
+        if run.get("kind") != "score":
+            continue
+        for row in service.store.list_ledger(run_id=str(run["run_id"])):
+            if (
+                row.get("entry_kind") != "reservation"
+                or row.get("operation_id") not in compatible_operations
+            ):
+                continue
+            eligible += 1
+            doc = row.get("entry_doc")
+            if (
+                row.get("provider") == "deepline"
+                and row.get("funding_source") == "host"
+                and isinstance(doc, Mapping)
+                and doc.get("compatibility_version")
+                == scoring_provider_compat.COMPATIBILITY_VERSION
+                and doc.get("effective_operation_id")
+                == scoring_provider_compat.EFFECTIVE_OPERATION_ID
+                and isinstance(doc.get("adapter"), str)
+                and bool(doc["adapter"])
+            ):
+                routed += 1
+            else:
+                mismatched += 1
+    return {
+        "eligible_reservations": eligible,
+        "host_compat_reservations": routed,
+        "mismatched_reservations": mismatched,
+    }
+
+
 def _durable_output_counts(
     service: Any, row: Mapping[str, Any], runs: list[Mapping[str, Any]]
 ) -> dict[str, dict[str, int]]:
@@ -1083,6 +1144,12 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
         if row.get("status") in TERMINAL_STATUSES
         else {"entry_count": None, "sources": [], "all_host": None}
     )
+    replay_score_route_ledger = (
+        _replay_score_route_ledger(service, runs)
+        if replay and replay.get("score_provider_route")
+        and row.get("status") in TERMINAL_STATUSES
+        else None
+    )
     if row.get("status") == "published" and len(participants) == 1:
         public = service.public_results(round_id, participants[0]["submission_id"])
         public_outputs = {
@@ -1172,6 +1239,11 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
             errors.append("final_aggregate")
         if ledger_funding["all_host"] is not True:
             errors.append("ledger_funding_source")
+        if replay_score_route_ledger is not None and (
+            replay_score_route_ledger["eligible_reservations"] < 1
+            or replay_score_route_ledger["mismatched_reservations"]
+        ):
+            errors.append("replay_score_provider_route")
         if int(ledger_funding["entry_count"] or 0) < 1:
             errors.append("paid_ledger_empty")
         if disclosure_metadata is None:
@@ -1366,6 +1438,8 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
         "disclosure": disclosure_evidence,
         "ledger": costs,
         "ledger_funding": ledger_funding,
+        **({"replay_score_route_ledger": replay_score_route_ledger}
+           if replay and replay.get("score_provider_route") else {}),
         "final_ranking": final_results,
         "public_result": public_outputs,
         "proof": {
@@ -1535,6 +1609,7 @@ def main(argv: list[str] | None = None) -> int:
             args.round_id, replay_published_round=args.replay_published_round,
             replay_assignments=args.replay_assignment,
             replay_historical=args.replay_historical,
+            replay_miner_score_route=args.replay_miner_score_route,
         )
         checks = service.startup_checks()
         print(

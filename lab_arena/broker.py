@@ -4610,6 +4610,7 @@ class Broker:
         deepline_async_ids: Sequence[str] = ()
         deepline_async_poll_accepted = False
         deepline_request_failed = False
+        deepline_client_rejection = False
         deepline_lost_response = False
         deepline_response_request_id: Optional[str] = None
         deepline_request_id: Optional[str] = request_accounting.get("deepline_request_id")
@@ -4811,6 +4812,12 @@ class Broker:
                                 "deepline", effective_normalized, response
                             )
                         )
+                    )
+                    # A complete upstream rejection keeps its status even if
+                    # its body is not JSON. Billing still needs its own proof.
+                    deepline_client_rejection = (
+                        response.internal_provenance is None
+                        and response.status in (400, 404, 422)
                     )
                     if (deepline_catalog_entry
                         and isinstance(deepline_catalog_entry.get("async_flow"), Mapping)):
@@ -5158,13 +5165,24 @@ class Broker:
                     else (response.status, response.headers, response.body, "")
                 )
                 failure_stage = "response_sanitization"
-                sanitized_status, sanitized_headers, sanitized_body = operations.sanitize_response(
-                    operation_id,
-                    adapted_status,
-                    adapted_headers,
-                    adapted_body,
-                    parameters=normalized,
-                )
+                try:
+                    sanitized_status, sanitized_headers, sanitized_body = operations.sanitize_response(
+                        operation_id,
+                        adapted_status,
+                        adapted_headers,
+                        adapted_body,
+                        parameters=normalized,
+                    )
+                except operations.OperationResponseError as exc:
+                    if not deepline_client_rejection or exc.code != "invalid_response":
+                        raise
+                    # Keep the authenticated status without exposing an
+                    # unstructured error body. Size and credential guards remain.
+                    sanitized_status, sanitized_headers, sanitized_body = operations.sanitize_response(
+                        operation_id, adapted_status, {},
+                        b'{"error":{"code":"provider_request_rejected"}}',
+                        parameters=normalized,
+                    )
                 if adapted_response_url:
                     sanitized_headers[operations.TRUSTED_RESPONSE_URL_HEADER] = (
                         _validated_response_url(adapted_response_url)
@@ -5202,7 +5220,7 @@ class Broker:
                                       if effective_operation.provider == "openrouter" else None),
                     credential_fingerprint=provider_credential_fingerprint,
                 )
-                if deepline_request_failed:
+                if deepline_request_failed or deepline_client_rejection:
                     uncertain_doc["deepline_terminal_response"] = _terminal_response_document(
                         sanitized_status, sanitized_headers, sanitized_body, call_succeeded=False,
                     )
@@ -5292,7 +5310,10 @@ class Broker:
                     return _error_result("provider_request_refused", summary)
                 if miner_credential_failure:
                     return _error_result("miner_credentials_unavailable", summary)
-                if deepline_request_failed and uncertain_state.get("status") == "uncertain":
+                if (
+                    (deepline_request_failed or deepline_client_rejection)
+                    and uncertain_state.get("status") == "uncertain"
+                ):
                     # Persist the original failed call and its unknown cost before
                     # returning its sanitized error. Never invent a free settlement
                     # or turn a terminal 4xx into a retryable infrastructure failure.

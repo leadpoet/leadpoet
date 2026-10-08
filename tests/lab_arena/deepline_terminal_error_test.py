@@ -17,6 +17,15 @@ from tests.lab_arena.test_lab_arena_broker import (
 
 REQUEST_ID = "terminal-error-request"
 PARAMETERS = {"tool": "exa_search", "payload": {"query": "example"}}
+UNREADABLE_ERROR_BODIES = [
+    pytest.param(b"not JSON", id="plain"),
+    pytest.param(b"<html>Not Found</html>", id="html"),
+    pytest.param(b"", id="empty"),
+    pytest.param(b'"scalar"', id="scalar"),
+    pytest.param(b"17", id="numeric"),
+    pytest.param(b'{"error":', id="malformed-json"),
+    pytest.param(b"\xff", id="invalid-utf8"),
+]
 
 
 def billing(*, credits="0", final=True):
@@ -136,6 +145,21 @@ def test_pending_error_returns_original_status_without_polling_or_worker_retry(
     assert store.calls[result.call["call_identity"]]["kind"] == "uncertain"
 
 
+@pytest.mark.parametrize("status", [400, 404, 422])
+def test_list_client_rejection_preserves_body_and_safe_replay(monkeypatch, status):
+    monkeypatch.setattr(br, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
+    transport = ErrorTransport(status, body=b'[{"error":"Invalid tool"}]')
+    result, broker, store, context, arguments = execute(transport)
+    assert result.status == status and result.body == transport.body
+    assert result.call["outcome"] == "uncertain" and "actual_microusd" not in result.call
+    before = len(transport.sent)
+    replay = broker.execute(context, **arguments)
+    assert replay.status == status and replay.body == result.body
+    assert replay.call["idempotent"] is True and replay.call["outcome"] == "uncertain"
+    assert "actual_microusd" not in replay.call and len(transport.sent) == before
+    assert store.calls[result.call["call_identity"]]["kind"] == "uncertain"
+
+
 @pytest.mark.parametrize("bill", [billing(final=False), {"recent": "invalid"}])
 def test_unproven_receipts_never_become_zero_cost(bill):
     result, _, store, _, _ = execute(ErrorTransport(422, bill=bill))
@@ -187,13 +211,91 @@ def test_account_and_infrastructure_failures_keep_normal_polling(monkeypatch, st
     assert len(sleeps) == 1
 
 
-@pytest.mark.parametrize("body", [b'not JSON', b'"scalar"',
-                                   json.dumps({"error": DL_KEY}).encode()])
-def test_malformed_or_credential_echo_errors_are_not_exposed(monkeypatch, body):
+def test_credential_echo_error_is_not_exposed(monkeypatch):
     monkeypatch.setattr(br, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
-    result, _, _, _, _ = execute(ErrorTransport(body=body))
+    result, _, _, _, _ = execute(ErrorTransport(body=json.dumps({"error": DL_KEY}).encode()))
     assert result.status == 502 and result.call["error_code"] == "provider_unavailable"
     assert DL_KEY not in json.dumps(result.to_document())
+
+
+@pytest.mark.parametrize("status", [400, 404, 422])
+@pytest.mark.parametrize("body", UNREADABLE_ERROR_BODIES)
+def test_unreadable_client_rejection_keeps_status_and_safe_replay(monkeypatch, status, body):
+    monkeypatch.setattr(br, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
+    transport = ErrorTransport(status, body=body)
+    result, broker, store, context, arguments = execute(transport)
+    assert result.status == status
+    assert isinstance(json.loads(result.body).get("error"), dict)
+    assert result.body != body
+    assert result.headers["content-type"] == "application/json"
+    assert result.call["outcome"] == "uncertain"
+    assert result.call["provider_status"] == status
+    assert "actual_microusd" not in result.call
+    saved = store.calls[result.call["call_identity"]]["uncertain_doc"]
+    terminal = saved["deepline_terminal_response"]
+    assert terminal["status"] == status and terminal["call_succeeded"] is False
+    before = len(transport.sent)
+    replay = broker.execute(context, **arguments)
+    assert replay.status == status and replay.body == result.body
+    assert replay.call["idempotent"] is True and replay.call["outcome"] == "uncertain"
+    assert "actual_microusd" not in replay.call
+    assert len(transport.sent) == before
+    assert [r["method"] for r in transport.sent].count("POST") == 1
+
+
+@pytest.mark.parametrize("status", [400, 404, 422])
+@pytest.mark.parametrize("credits,amount", [("0", 0), ("0.5", 50_000)])
+def test_unreadable_rejection_with_exact_bill_keeps_status_and_real_charge(
+    monkeypatch, status, credits, amount,
+):
+    monkeypatch.setattr(br.time, "sleep", lambda _: pytest.fail("final exact receipt must not poll"))
+    transport = ErrorTransport(status, body=b"<html>Invalid request</html>", bill=billing(credits=credits))
+    result, broker, store, context, arguments = execute(transport)
+    assert result.status == status and isinstance(json.loads(result.body).get("error"), dict)
+    assert result.call["outcome"] == "settled" and result.call["actual_microusd"] == amount
+    terminal = store.calls[result.call["call_identity"]]["terminal"]
+    assert terminal["status"] == status and terminal["call_succeeded"] is False
+    assert [r["method"] for r in transport.sent] == ["POST", "GET", "GET"]
+    replay = broker.execute(context, **arguments)
+    assert replay.status == status and replay.body == result.body
+    assert replay.call["actual_microusd"] == amount and replay.call["idempotent"] is True
+    assert len(transport.sent) == 3
+
+
+@pytest.mark.parametrize("credits,amount", [("0", 0), ("0.5", 50_000)])
+def test_unreadable_rejection_still_polls_until_exact_final_charge(monkeypatch, credits, amount):
+    sleeps = []
+    monkeypatch.setattr(br, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(br.time, "sleep", sleeps.append)
+
+    class DelayedBillTransport(ErrorTransport):
+        bill_reads = 0
+
+        def send(self, **request):
+            if "/billing/usage?request_id=" in request["url"]:
+                self.bill_reads += 1
+                self.bill = billing(credits=credits, final=self.bill_reads == 3)
+            return super().send(**request)
+
+    transport = DelayedBillTransport(422, body=b"Invalid request")
+    result, broker, store, context, arguments = execute(transport)
+    assert result.status == 422 and isinstance(json.loads(result.body).get("error"), dict)
+    assert result.call["outcome"] == "settled" and result.call["actual_microusd"] == amount
+    assert store.calls[result.call["call_identity"]]["terminal"]["call_succeeded"] is False
+    assert transport.bill_reads == 3 and len(sleeps) == 2
+    before = len(transport.sent)
+    replay = broker.execute(context, **arguments)
+    assert replay.status == 422 and replay.body == result.body
+    assert replay.call["actual_microusd"] == amount and replay.call["idempotent"] is True
+    assert len(transport.sent) == before
+
+
+@pytest.mark.parametrize("status", [401, 402, 403, 429, 500, 502, 504])
+def test_unreadable_non_request_failure_stays_unavailable(monkeypatch, status):
+    monkeypatch.setattr(br, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
+    result, _, _, _, _ = execute(ErrorTransport(status, body=b"<html>provider failure</html>"))
+    assert result.status == 502 and result.call["error_code"] == "provider_unavailable"
+    assert result.call["outcome"] == "uncertain" and "actual_microusd" not in result.call
 
 
 def test_late_final_charge_uses_retained_identity_without_another_paid_request():

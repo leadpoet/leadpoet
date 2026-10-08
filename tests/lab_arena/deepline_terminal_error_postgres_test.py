@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from lab_arena import runner
+from lab_arena import broker as br
 from lab_arena.api import create_app
 from lab_arena.store import hash_lease_token
 from tests.lab_arena.deepline_budget_only_exact_recovery_postgres_test import (
@@ -23,17 +24,39 @@ from tests.lab_arena.deepline_completed_response_recovery_test import catalog
 from tests.lab_arena.deepline_terminal_error_test import ErrorTransport, billing
 
 
+class ParallelErrorTransport(ErrorTransport):
+    def send(self, **request):
+        response = super().send(**request)
+        if "/executions/by-key/" in request["url"]:
+            document = json.loads(response.body)
+            document["toolId"] = "parallel_search"
+            return br.ProviderResponse(response.status, response.headers, json.dumps(document).encode())
+        return response
+
+
 @pytest.mark.parametrize("settle_during_replay", [False, True])
-@pytest.mark.parametrize("status,credits,amount,padding", [(404, "0.5", 50_000, 0), (422, "0", 0, 1_048_000)])
+@pytest.mark.parametrize("status,credits,amount,padding,body_kind,body", [
+    (404, "0.5", 50_000, 0, "json", None),
+    (422, "0", 0, 1_048_000, "large-json", None),
+    (400, "0", 0, 0, "plain", b"Invalid tool"),
+    (404, "0.5", 50_000, 0, "html", b"<html>Not Found</html>"),
+    (422, "0", 0, 0, "empty", b""),
+    (400, "0.5", 50_000, 0, "scalar", b'"invalid"'),
+    (404, "0", 0, 0, "malformed", b'{"error":'),
+    (422, "0.5", 50_000, 0, "invalid-utf8", b"\xff"),
+])
 def test_pending_error_reaches_client_and_late_charge_settles_once(
-    database, tmp_path, request, monkeypatch, status, credits, amount, padding, settle_during_replay,
+    database, tmp_path, request, monkeypatch, status, credits, amount, padding,
+    body_kind, body, settle_during_replay,
 ):
-    transport = ErrorTransport(status)
+    monkeypatch.setattr(br, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
+    transport = ParallelErrorTransport(status, body=body)
     if padding:
-        body = json.loads(transport.body)
-        body["detail"] = "x" * padding
-        transport.body = json.dumps(body).encode()
-    label = str((21 if status == 404 else 22) + (2 if settle_during_replay else 0))
+        document = json.loads(transport.body)
+        document["detail"] = "x" * padding
+        transport.body = json.dumps(document).encode()
+    body_index = ["json", "large-json", "plain", "html", "empty", "scalar", "malformed", "invalid-utf8"].index(body_kind)
+    label = str(10 + body_index * 2 + int(settle_during_replay))
     h, lease, token, connect, broker = setup(database, tmp_path, label, transport)
 
     http = TestClient(create_app(h.service))
@@ -69,7 +92,12 @@ def test_pending_error_reaches_client_and_late_charge_settles_once(
                 response.request = provider_request
                 response.read()
             assert response.status_code == status
-            assert response.content == transport.body
+            if body is None:
+                assert response.content == transport.body
+            else:
+                assert isinstance(response.json().get("error"), dict)
+                assert response.content != transport.body
+                assert response.headers["content-type"] == "application/json"
             with pytest.raises(httpx.HTTPStatusError):
                 response.raise_for_status()
             assert runner.SETTLED_MICROUSD_HEADER not in response.headers

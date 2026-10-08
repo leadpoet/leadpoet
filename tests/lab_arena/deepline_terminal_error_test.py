@@ -250,6 +250,40 @@ def test_402_short_read_settles_only_exact_final_charge(monkeypatch):
     assert 0 < transport.sent[1]["timeout_seconds"] <= 5
 
 
+def test_complete_non_json_402_still_uses_short_read(monkeypatch):
+    monkeypatch.setattr(br.time, "sleep", lambda _: pytest.fail("402 must not poll"))
+    transport = ErrorTransport(402, body=b"<html>Payment Required</html>")
+    result, _, store, _, _ = execute(transport, funding_source="miner_key")
+    assert result.status == 402
+    assert result.call["error_code"] == "miner_credentials_unavailable"
+    assert result.call["outcome"] == "uncertain"
+    assert "actual_microusd" not in result.call
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+    assert [request["method"] for request in transport.sent] == ["POST", "GET", "GET"]
+    assert all(0 < request["timeout_seconds"] <= 5 for request in transport.sent[1:])
+
+
+def test_synthetic_402_keeps_normal_billing_poll(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(br, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(br.time, "sleep", sleeps.append)
+
+    class SyntheticTransport(ErrorTransport):
+        def send(self, **request):
+            response = super().send(**request)
+            if request["method"] == "POST":
+                return replace(response, internal_provenance="response_too_large")
+            return response
+
+    transport = SyntheticTransport(402)
+    result, _, store, _, _ = execute(transport)
+    assert result.status == 502
+    assert result.call["outcome"] == "uncertain"
+    assert store.log == ["reserve", "dispatch", "uncertain"]
+    assert [request["method"] for request in transport.sent] == ["POST", "GET", "GET"]
+    assert len(sleeps) == 1
+
+
 @pytest.mark.parametrize("status", [401, 403, 429, 500, 502, 504])
 def test_account_and_infrastructure_failures_keep_normal_polling(monkeypatch, status):
     sleeps = []

@@ -4825,9 +4825,10 @@ class Broker:
                         raw_document = json.loads(response.body.decode("utf-8"))
                     except (UnicodeDecodeError, ValueError):
                         raw_document = None
-                    # A complete request-specific error is useful to the model
-                    # independently of billing finality. Account errors, throttles,
-                    # malformed replies and transport failures keep normal recovery.
+                    # A parsed request-specific error can reach the model
+                    # before billing is final. Other account errors, throttles,
+                    # and transport failures keep normal recovery; a complete
+                    # HTTP 402 gets a short billing read separately below.
                     deepline_request_failed = (
                         response.internal_provenance is None
                         and isinstance(raw_document, Mapping)

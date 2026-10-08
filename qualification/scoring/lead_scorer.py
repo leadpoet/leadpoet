@@ -5838,7 +5838,9 @@ def _has_explicitly_unproven_fit_dimensions(
         and any(
             isinstance(outcome, Mapping)
             and outcome.get("ok") is False
-            and outcome.get("error_class") != "provider_request_refused"
+            and outcome.get("error_class") not in {
+                "provider_request_refused", "source_not_found", "source_gone",
+            }
             for outcome in fetch_outcomes
         )
     )

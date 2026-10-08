@@ -75,7 +75,7 @@ def test_public_constants_are_the_plan_values():
         "deepline": 2000,
         "openrouter": 2000,
     }
-    assert (c.ICP_WALL_CLOCK_SECONDS, c.SCORING_WALL_CLOCK_SECONDS, c.LEASE_TTL_SECONDS) == (300, 900, 1200)
+    assert (c.ICP_WALL_CLOCK_SECONDS, c.SCORING_WALL_CLOCK_SECONDS, c.LEASE_TTL_SECONDS) == (300, 1200, 1500)
     from leadpoet_canonical.chain_source_v2 import CHAIN_FINALIZATION_EPOCH_BLOCKS
 
     assert CHAIN_FINALIZATION_EPOCH_BLOCKS * 12 * c.EPOCHS_PER_REWARD_WEEK == 7 * 24 * 3600

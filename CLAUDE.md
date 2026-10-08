@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: October 7 judge reliability
+
+The user authorized tracing judge_error, judge_timeout and credential_error
+from the October 7 round, making narrow fixes, and testing exact failed cases
+and successful controls through scoring, recovery, persistence and publication.
+Use $overnight-rebenchmark-validation for protected inspection, focused tests,
+exact committed migrations if needed, safe push/merge, canonical paired
+deployment and bounded reward-disabled saved-output production probes. Preserve
+verifier standards, accepted results, frozen inputs, provider accounting,
+credentials, rewards, weights and concurrent work. Do not manufacture scores,
+rewrite published scores, or repeat paid work without a bounded validation need.
+Authority ends after live reliability and downstream verification.
+
 ## Scoped production authorization: cumulative slots within the existing miner pot
 
 On 2026-10-07 the user replaced the prior highest-only/total-allocation policy:

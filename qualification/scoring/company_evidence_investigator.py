@@ -2099,6 +2099,10 @@ def _fetch_outcome(url: str, result: Mapping[str, Any]) -> dict[str, Any]:
     raw_error = str(result.get("error") or "")
     if not raw_error:
         error_class = ""
+    elif raw_error == "http_404":
+        error_class = "source_not_found"
+    elif raw_error == "http_410":
+        error_class = "source_gone"
     elif raw_error.startswith("http_"):
         error_class = "http_error"
     elif raw_error in {

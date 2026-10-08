@@ -2487,12 +2487,14 @@ def scoring_lease(run_id="r9", position=3):
     return base
 
 
-def test_scoring_lease_runs_the_judge_image_in_trusted_mode(tmp_path):
+@pytest.mark.parametrize("frozen_wall_seconds", [900, 1200])
+def test_scoring_lease_runs_the_judge_image_in_trusted_mode(tmp_path, frozen_wall_seconds):
     from lab_arena import scoring
 
     breakdowns = [{"final_score": 71.0, "failure_reason": ""}, {"final_score": 44.5, "failure_reason": ""}]
     output = scoring.build_scoring_output("r1", breakdowns)
-    api = TrajectoryApi([scoring_lease()])
+    frozen_lease = dict(scoring_lease(), scoring_wall_clock_seconds=frozen_wall_seconds)
+    api = TrajectoryApi([frozen_lease])
     sandbox = BridgingRuntime(output=output, calls=1)
     (tmp_path / "work").mkdir()
     runner_ = rn.Runner(make_config(tmp_path, api, sandbox))
@@ -2503,6 +2505,7 @@ def test_scoring_lease_runs_the_judge_image_in_trusted_mode(tmp_path):
     assert next(event for event in api.events if event["kind"] == "runtime.started")["content"]["scorer_image_reference"] == SCORER_IMAGE_REFERENCE
     assert envelope["body"]["output"] == output
     spec = sandbox.specs[0]
+    assert spec.wall_clock_seconds == frozen_wall_seconds
     assert spec.entry_command == runtime.SCORER_ENTRY_COMMAND and spec.working_dir == runtime.SCORER_WORKING_DIR
     assert spec.extra_environment[shim.TRUSTED_SCORER_ENV] == "1"
     assert spec.rootfs_path == tmp_path / "images" / SCORER_IMAGE.replace(":", "-") / "rootfs"

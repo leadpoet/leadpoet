@@ -44,6 +44,17 @@ Accepted judgments carry original company indexes, canonical identity keys,
 duplicate flags, and qualification flags. The persisted qualification receipt
 is immutable with its per-ICP score.
 
+An exhausted judge error or timeout leaves the affected ICP unscored. The
+submission has no comparable final score and cannot win on a smaller set of
+ICPs. Accepted sibling scores remain intact. Publication requires proof that
+the judge attempts are exhausted or the frozen deadline has passed, with no
+accepted result or active recovery left. A completed investigation that cannot
+prove a company qualifies still produces a valid zero, including when optional
+source pages are missing (404/410). Provider outages remain retryable.
+
+New rounds allow up to 20 minutes per judge job. Frozen rounds retain their
+original limits. Evidence standards, retry counts, and cost caps do not change.
+
 For rounds using `successful_calls_per_icp_v1`, baseline and miner models use
 the same $4 sourcing admission limit for each ICP. The existing provider ledger
 combines all providers and execution attempts for that ICP. Retries do not reset

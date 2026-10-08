@@ -24,25 +24,25 @@ def configuration(*, runners=1, minutes=None, slots=8):
     }
 
 
-def test_one_real_eight_slot_runner_supports_eight_challengers_with_retries():
+def test_one_eight_slot_runner_estimates_six_challengers_with_full_judge_retries():
     config = configuration()
-    assert capacity.daily_challenger_capacity(config) == 8
+    assert capacity.daily_challenger_capacity(config) == 6
     assert config["schedule"]["final_scoring_close"] == "2026-09-10T20:30:02Z"
 
 
-def test_second_configured_runner_can_support_requested_sixteen():
-    assert capacity.daily_challenger_capacity(configuration(runners=2)) >= 16
+def test_second_configured_runner_estimates_thirteen_with_full_judge_retries():
+    assert capacity.daily_challenger_capacity(configuration(runners=2)) == 13
 
 
 def test_old_schedule_cannot_support_sixteen_even_before_shared_failures():
     old = {**DEFAULT_STAGE_MINUTES, "stage_1_scoring": 360, "final_scoring": 240}
-    assert capacity.daily_challenger_capacity(configuration(minutes=old)) == 5
+    assert capacity.daily_challenger_capacity(configuration(minutes=old)) == 3
 
 
 def test_duplicate_runner_does_not_invent_capacity():
     config = configuration()
     config["runner_hotkeys"] *= 2
-    assert capacity.daily_challenger_capacity(config) == 8
+    assert capacity.daily_challenger_capacity(config) == 6
 
 
 def test_measured_runner_slots_bound_the_frozen_ceiling_and_ignore_offline_runners():
@@ -89,9 +89,9 @@ def test_rounding_counts_full_retry_waves_and_baseline():
     config = configuration()
     allowed = capacity.daily_challenger_capacity(config)
     waves = math.ceil((allowed + 1) * 10 * 2 / 8)
-    assert waves * (900 + capacity.ATTEMPT_OVERHEAD_SECONDS) <= 390 * 60
+    assert waves * (config["scoring_wall_clock_seconds"] + capacity.ATTEMPT_OVERHEAD_SECONDS) <= 390 * 60
     too_many_waves = math.ceil((allowed + 2) * 10 * 2 / 8)
-    assert too_many_waves * (900 + capacity.ATTEMPT_OVERHEAD_SECONDS) > 390 * 60
+    assert too_many_waves * (config["scoring_wall_clock_seconds"] + capacity.ATTEMPT_OVERHEAD_SECONDS) > 390 * 60
 
 
 def parallel_45_minute_configuration(**minute_overrides):
@@ -108,6 +108,8 @@ def parallel_45_minute_configuration(**minute_overrides):
     config = configuration(minutes=minutes, slots=11)
     config["parallel_twenty_icp_execution"] = True
     config["icp_wall_clock_seconds"] = 2700
+    # This historical round retains its original 15-minute judge limit.
+    config["scoring_wall_clock_seconds"] = 900
     return config
 
 

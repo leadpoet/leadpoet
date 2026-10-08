@@ -7,7 +7,7 @@ the standard library alone.
 
 Every value the arithmetic needs comes from the signed basis itself. Legacy
 v1 bases retain their pool, weekly decay and eligibility rules. Version 2 signs
-ordered achievement slots and shares of total emissions, with basis freshness
+ordered achievement slots and their pool share, with basis freshness
 but no holder expiry or decay. The signed funding factor applies to the v1
 champion or only the current king's v2 slots. Historical bases that omit the
 factor retain the full share. This module bounds the policy; it does not choose
@@ -164,7 +164,11 @@ def validate_reward_constants(constants: Any) -> Dict[str, Any]:
 def validate_slot_policy(policy: Any) -> Dict[str, Any]:
     """Validate signed slot rules without choosing their economic values."""
 
-    if not isinstance(policy, Mapping) or set(policy) != {"assignment_mode", "tiers"}:
+    if (
+        not isinstance(policy, Mapping)
+        or not {"assignment_mode", "tiers"} <= set(policy)
+        or set(policy) - {"assignment_mode", "tiers", "pool_percent"}
+    ):
         raise LabArenaRewardError("slot_policy fields are invalid")
     mode = policy["assignment_mode"]
     if mode not in ("highest_only", "all_qualifying"):
@@ -185,7 +189,10 @@ def validate_slot_policy(policy: Any) -> Dict[str, Any]:
         raise LabArenaRewardError("slot_policy thresholds must be strictly descending")
     if sum(tier["allocation_percent"] for tier in normalized) != 100:
         raise LabArenaRewardError("slot_policy allocation percents must sum to 100")
-    return {"assignment_mode": mode, "tiers": normalized}
+    result = {"assignment_mode": mode, "tiers": normalized}
+    if "pool_percent" in policy:
+        result["pool_percent"] = _require_int(policy["pool_percent"], "pool_percent", 0, 100)
+    return result
 
 
 def _achievement_score(value: Any, name: str) -> float:
@@ -572,7 +579,9 @@ def champion_values(basis: Any, epoch_id: int, metagraph_hotkeys: Sequence[str])
 def slot_allocations(basis: Any, epoch_id: int, metagraph_hotkeys: Sequence[str]) -> Dict[str, Fraction]:
     """Exact registered slot allocations, with no holder age or weekly decay.
 
-    Missing owners leave their allocation for burn. The existing funding
+    Missing owners leave their allocation for burn. A signed pool_percent
+    scales new slot shares; older signed policies without it keep their
+    original total-emissions arithmetic. The existing funding
     factor applies only to slots held by the current funding-responsible king.
     The accepted-state weight kernel routes every remaining share to burn.
     """
@@ -588,11 +597,12 @@ def slot_allocations(basis: Any, epoch_id: int, metagraph_hotkeys: Sequence[str]
     registered = set(hotkeys)
     allocations = {}  # type: Dict[str, Fraction]
     factor = _basis_fields(document)["champion_reward_factor_ppm"]
+    pool = Fraction(document["slot_policy"].get("pool_percent", 100), 100)
     for tier, achievement in zip(document["slot_policy"]["tiers"], document["reward_slots"]):
         if achievement is None or achievement["miner_hotkey"] not in registered:
             continue
         hotkey = achievement["miner_hotkey"]
-        share = Fraction(tier["allocation_percent"], 100)
+        share = pool * Fraction(tier["allocation_percent"], 100)
         if hotkey == document["king_hotkey"]:
             share *= Fraction(factor, FULL_CHAMPION_REWARD_FACTOR_PPM)
         allocations[hotkey] = allocations.get(hotkey, Fraction(0)) + share

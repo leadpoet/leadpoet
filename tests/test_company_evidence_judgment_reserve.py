@@ -93,8 +93,9 @@ def _run_industry(monkeypatch, post_json, clock: _Clock, **kwargs):
 
 
 @pytest.mark.parametrize("late_tool", ["search_web", "fetch_page"])
+@pytest.mark.parametrize("positive_semantic_review", [False, True])
 def test_late_tool_is_not_dispatched_and_loaded_evidence_is_judged(
-    monkeypatch, late_tool,
+    monkeypatch, late_tool, positive_semantic_review,
 ):
     clock = _Clock()
     requests = []
@@ -128,7 +129,10 @@ def test_late_tool_is_not_dispatched_and_loaded_evidence_is_judged(
 
     monkeypatch.setattr(investigator, "_search_web", fail_search)
     monkeypatch.setattr(investigator, "_fetch_page", fail_fetch)
-    result = _run_industry(monkeypatch, fake_post, clock)
+    result = _run_industry(
+        monkeypatch, fake_post, clock,
+        positive_semantic_review=positive_semantic_review,
+    )
 
     assert provider_calls == []
     assert len(requests) == 2
@@ -136,6 +140,10 @@ def test_late_tool_is_not_dispatched_and_loaded_evidence_is_judged(
         "type": "function",
         "function": {"name": "submit_findings"},
     }
+    assert "reasoning" not in requests[0]
+    assert requests[1].get("reasoning") == (
+        {"effort": "low"} if positive_semantic_review else None
+    )
     feedback = json.loads(requests[1]["messages"][-1]["content"])
     assert feedback["error"] == "judgment_time_reserved"
     assert result["claims"]["industry"]["status"] == "VERIFIED"
@@ -209,7 +217,10 @@ def test_freshly_fetched_evidence_is_judged_after_late_search_is_withheld(
     assert result["usage"]["search_calls"] == 0
 
 
-def test_reserved_judgment_cannot_turn_missing_evidence_positive(monkeypatch):
+@pytest.mark.parametrize("positive_semantic_review", [False, True])
+def test_reserved_judgment_cannot_turn_missing_evidence_positive(
+    monkeypatch, positive_semantic_review,
+):
     clock = _Clock()
     requests = []
     fabricated_quote = "Acme sells a product that the loaded page never states."
@@ -241,9 +252,16 @@ def test_reserved_judgment_cannot_turn_missing_evidence_positive(monkeypatch):
         raise AssertionError("late fetch must not be dispatched")
 
     monkeypatch.setattr(investigator, "_fetch_page", fail_fetch)
-    result = _run_industry(monkeypatch, fake_post, clock)
+    result = _run_industry(
+        monkeypatch, fake_post, clock,
+        positive_semantic_review=positive_semantic_review,
+    )
 
     assert len(requests) == 3
+    assert "reasoning" not in requests[0]
+    assert requests[1].get("reasoning") == (
+        {"effort": "low"} if positive_semantic_review else None
+    )
     correction = json.loads(requests[2]["messages"][-1]["content"])
     assert correction["error"] == "deterministic_evidence_validation_failed"
     assert result["claims"]["industry"]["status"] == "UNPROVEN"

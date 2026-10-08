@@ -64,6 +64,22 @@ def _tool_response(
     return response
 
 
+def _reasoning_exhausted_without_tool_call():
+    # Only the structural metadata retained from the failed provider response.
+    return {
+        "choices": [{
+            "finish_reason": "length",
+            "message": {"role": "assistant", "content": None},
+        }],
+        "usage": {
+            "completion_tokens": investigator.REASONING_MAX_TOKENS,
+            "completion_tokens_details": {
+                "reasoning_tokens": investigator.REASONING_MAX_TOKENS,
+            },
+        },
+    }
+
+
 def _run(monkeypatch, post_json, *, positive_semantic_review: bool = True):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
@@ -115,6 +131,53 @@ def test_normal_reasoning_request_keeps_existing_provider_default(
     assert "reasoning" not in payload
     assert "reasoning" not in normalized
     assert "reasoning" not in outbound
+
+
+@pytest.mark.parametrize("response_exhausted", [False, True])
+def test_forced_positive_submit_uses_low_reasoning_before_provider_response(
+    monkeypatch, response_exhausted,
+):
+    monkeypatch.setattr(
+        investigator, "JUDGMENT_ADMISSION_RESERVE_SECONDS",
+        investigator.ADMISSION_DEADLINE_SECONDS,
+    )
+    requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        normalized = arena_operations.validate_operation_request(
+            "openrouter.chat", payload
+        )
+        outbound = json.loads(arena_operations.build_outbound_request(
+            "openrouter.chat", payload
+        ).body)
+        requests.append((payload, normalized, outbound))
+        if response_exhausted:
+            return 200, _reasoning_exhausted_without_tool_call()
+        return 200, _tool_response(
+            "submit_findings", json.dumps({"findings": [_finding()]})
+        )
+
+    result = _run(monkeypatch, fake_post_json)
+
+    assert len(requests) == 1
+    payload, normalized, outbound = requests[0]
+    assert payload["model"] == investigator.POSITIVE_SEMANTIC_REVIEW_MODEL
+    assert payload["tool_choice"] == {
+        "type": "function", "function": {"name": "submit_findings"},
+    }
+    assert payload["max_tokens"] == normalized["max_tokens"] == 3000
+    assert payload["reasoning"] == normalized["reasoning"] == (
+        outbound["reasoning"]
+    ) == {"effort": "low"}
+    if response_exhausted:
+        # Low effort is a prevention measure, not a fabricated verifier pass.
+        assert result["claims"] == {}
+        assert result["failure_reason"] == MALFORMED_RESPONSE_FAILURE_REASON
+    else:
+        assert result["claims"]["industry"]["status"] == "VERIFIED"
+        assert result["usage"]["search_calls"] == 0
+        assert result["usage"]["fetch_calls"] == 0
 
 
 @pytest.mark.parametrize(

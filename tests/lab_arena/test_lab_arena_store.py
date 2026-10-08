@@ -216,6 +216,7 @@ def test_closed_provider_selector_extends_only_its_read_deadline():
     ("lab_arena_open_scoring", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS"),
     ("lab_arena_open_scoring_v2", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS"),
     ("lab_arena_open_scoring_v3", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS"),
+    ("lab_arena_record_run_scores", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS"),
 ])
 def test_scoped_rpc_waits_for_slow_read_and_does_not_replay_timeout(monkeypatch, function, timeout_setting):
     # Shortened deadlines exercise the real HTTP read clock without a long test.
@@ -346,6 +347,45 @@ def test_scores_are_written_in_bounded_idempotent_batches():
     assert all(function == "lab_arena_record_run_scores" and params["p_stage"] == 1 for function, params in transport.calls)
     # Order is preserved across batches so a partial write is resumable.
     assert transport.calls[0][1]["p_scores"][0]["run_id"] == "run-00000" and transport.calls[-1][1]["p_scores"][-1]["run_id"] == "run-12849"
+
+
+def test_ambiguous_first_score_batch_commit_recovers_without_blind_post_replay():
+    stored = {}
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        assert request.url.path.endswith("/lab_arena_record_run_scores")
+        items = json.loads(request.content)["p_scores"]
+        assert len(items) <= SCORE_BATCH_SIZE
+        recorded = existing = 0
+        for item in items:
+            run_id, score = item["run_id"], item["per_icp_score"]
+            if run_id in stored:
+                assert stored[run_id] == score  # A retry must not change a score.
+                existing += 1
+            else:
+                stored[run_id] = score
+                recorded += 1
+        if len(requests) == 1:
+            raise httpx.ReadTimeout("response lost after commit", request=request)
+        return httpx.Response(200, json={
+            "status": "ok", "recorded": recorded, "existing": existing,
+        })
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        store = ArenaStore(PostgrestTransport(
+            "https://project.example", service_key="sb_secret_test", http_client=client,
+        ))
+        items = scores(676)
+        with pytest.raises(ArenaStoreUnavailable):
+            store.record_run_scores("arena-2026-10-08", 2, items)
+        assert len(requests) == 1 and len(stored) == SCORE_BATCH_SIZE
+        result = store.record_run_scores("arena-2026-10-08", 2, items)
+
+    assert result == {"status": "ok", "recorded": 176, "existing": 500, "batches": 2}
+    assert [len(json.loads(request.content)["p_scores"]) for request in requests] == [500, 500, 176]
+    assert len(stored) == 676 and all(score == 50.0 for score in stored.values())
 
 
 def test_an_empty_stage_still_makes_one_status_checked_call():

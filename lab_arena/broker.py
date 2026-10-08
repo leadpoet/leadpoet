@@ -4825,9 +4825,10 @@ class Broker:
                         raw_document = json.loads(response.body.decode("utf-8"))
                     except (UnicodeDecodeError, ValueError):
                         raw_document = None
-                    # A complete request-specific error is useful to the model
-                    # independently of billing finality. Account errors, throttles,
-                    # malformed replies and transport failures keep normal recovery.
+                    # A parsed request-specific error can reach the model
+                    # before billing is final. Other account errors, throttles,
+                    # and transport failures keep normal recovery; a complete
+                    # HTTP 402 gets a short billing read separately below.
                     deepline_request_failed = (
                         response.internal_provenance is None
                         and isinstance(raw_document, Mapping)
@@ -4843,6 +4844,12 @@ class Broker:
                     deepline_client_rejection = (
                         response.internal_provenance is None
                         and response.status in (400, 404, 422)
+                    )
+                    # A complete payment error can reach the model before its
+                    # exact charge is final. Keep unknown cost in the ledger.
+                    deepline_payment_error = (
+                        response.internal_provenance is None
+                        and response.status == 402
                     )
                     if (deepline_catalog_entry
                         and isinstance(deepline_catalog_entry.get("async_flow"), Mapping)):
@@ -4930,7 +4937,7 @@ class Broker:
                                 transport=self._transport, secret=secret,
                                 request_id=request_id, execution_key=deepline_execution_key,
                                 operation=deepline_operation, reconciliation_deadline=exact_deadline,
-                                poll=not deepline_request_failed,
+                                poll=not (deepline_request_failed or deepline_payment_error),
                                 provider=(deepline_catalog_entry["provider"] if deepline_catalog_entry else None),
                                 operation_aliases=(deepline_catalog_entry["operation_aliases"] if deepline_catalog_entry else ()),
                         )

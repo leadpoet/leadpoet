@@ -71,6 +71,9 @@ REJECTED_QUOTE_CONTEXT_AFTER_CHARACTERS = 500
 ALTERNATIVE_PUBLIC_STAGE_CONTEXT_CHARACTERS = 1_500
 MAX_ALTERNATIVE_PUBLIC_STAGE_CONTEXTS = 2
 ADMISSION_DEADLINE_SECONDS = 110.0
+# One bounded submit-only repair may follow an admitted positive judgment.
+# Research and ordinary judgment keep the 110-second admission deadline.
+SERIALIZATION_REPAIR_GRACE_SECONDS = 30.0
 # Reserve the final 30 seconds of the unchanged admission window for judgment
 # over loaded evidence. Provider calls already admitted may settle under the
 # existing broker timeout.
@@ -3354,10 +3357,19 @@ async def investigate_company_evidence(
                     else requested_targets
                 )
                 # Do not cancel a paid request after admission. Stop admitting
-                # the next request when the shared per-company deadline passed;
-                # an admitted request settles under the broker's own bound.
+                # the next request when the shared per-company deadline passed,
+                # except one pending serialization repair; an admitted request
+                # settles under the broker's own bound.
                 elapsed = time.monotonic() - started
-                if elapsed >= ADMISSION_DEADLINE_SECONDS:
+                late_serialization_retry_pending = bool(
+                    positive_semantic_review
+                    and incomplete_submit_retry_pending
+                    and forced_next_tool == "submit_findings"
+                )
+                if (
+                    elapsed >= ADMISSION_DEADLINE_SECONDS
+                    and not late_serialization_retry_pending
+                ):
                     timeout_scoped_targets = active_submit_targets
                     timeout_preserved = scoped_correction_preserved
                     if (
@@ -3405,6 +3417,14 @@ async def investigate_company_evidence(
                             "fetch_outcomes": list(fetch_outcomes),
                         },
                     }
+                if (
+                    late_serialization_retry_pending
+                    and elapsed >= (
+                        ADMISSION_DEADLINE_SECONDS
+                        + SERIALIZATION_REPAIR_GRACE_SECONDS
+                    )
+                ):
+                    raise ValueError("reasoning_tool_arguments_malformed")
                 required_tool = forced_next_tool
                 if scoped_correction_active:
                     required_tool = "submit_findings"
@@ -3480,6 +3500,15 @@ async def investigate_company_evidence(
                     and required_tool == "submit_findings"
                 )
                 incomplete_submit_retry_pending = False
+                if (
+                    serialization_retry_request
+                    and positive_semantic_review
+                    and time.monotonic() - started >= (
+                        ADMISSION_DEADLINE_SECONDS
+                        + SERIALIZATION_REPAIR_GRACE_SECONDS
+                    )
+                ):
+                    raise ValueError("reasoning_tool_arguments_malformed")
                 status, body = await _post_openrouter_json(
                     session,
                     "https://openrouter.ai/api/v1/chat/completions",
@@ -3606,8 +3635,13 @@ async def investigate_company_evidence(
                         and ordinary_turn_remains
                         and incomplete_submit_retries
                         < MAX_INCOMPLETE_SUBMIT_RETRIES
-                        and time.monotonic() - started
-                        < ADMISSION_DEADLINE_SECONDS
+                        and time.monotonic() - started < (
+                            ADMISSION_DEADLINE_SECONDS
+                            + (
+                                SERIALIZATION_REPAIR_GRACE_SECONDS
+                                if positive_semantic_review else 0.0
+                            )
+                        )
                         and _response_exhausted_output_budget(
                             body, max_tokens=REASONING_MAX_TOKENS
                         )

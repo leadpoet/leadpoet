@@ -101,6 +101,14 @@ def _run(monkeypatch, post_json, *, positive_semantic_review: bool = True):
     ))
 
 
+class _Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+
 @pytest.mark.parametrize("positive_semantic_review", [False, True])
 def test_normal_reasoning_request_keeps_existing_provider_default(
     monkeypatch, positive_semantic_review,
@@ -343,26 +351,209 @@ def test_incomplete_submit_does_not_use_ninth_or_second_retry(monkeypatch):
     assert diagnostic[VERIFIER_FAILURE_REASON_KEY] == MALFORMED_RESPONSE_FAILURE_REASON
 
 
-def test_incomplete_submit_retry_requires_remaining_admission_time(monkeypatch):
+@pytest.mark.parametrize(
+    ("positive_semantic_review", "response_time"),
+    [(True, 140.0), (False, 110.0), (False, 113.557)],
+)
+def test_incomplete_submit_retry_requires_remaining_admission_time(
+    monkeypatch, positive_semantic_review, response_time,
+):
+    requests = []
+    clock = _Clock()
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        clock.now = response_time
+        return 200, _tool_response(
+            "submit_findings", '{"findings":[', finish_reason="length"
+        )
+
+    monkeypatch.setattr(
+        investigator,
+        "time",
+        SimpleNamespace(monotonic=clock.monotonic),
+    )
+    result = _run(
+        monkeypatch, fake_post_json,
+        positive_semantic_review=positive_semantic_review,
+    )
+
+    assert len(requests) == 1
+    assert result["failure_reason"] == MALFORMED_RESPONSE_FAILURE_REASON
+
+
+@pytest.mark.parametrize("response_time", [113.557, 139.9])
+def test_late_positive_submit_reuses_one_forced_low_reasoning_repair(
+    monkeypatch, response_time,
+):
+    clock = _Clock()
+    monkeypatch.setattr(
+        investigator, "time", SimpleNamespace(monotonic=clock.monotonic)
+    )
+    requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        arena_operations.validate_operation_request("openrouter.chat", payload)
+        requests.append(payload)
+        clock.now = response_time
+        if len(requests) == 1:
+            response = _tool_response(
+                "submit_findings", '{"findings":[{"target":"industry"',
+                completion_tokens=investigator.REASONING_MAX_TOKENS,
+            )
+            response["usage"]["completion_tokens_details"] = {
+                "reasoning_tokens": 2863,
+            }
+            return 200, response
+        return 200, _tool_response(
+            "submit_findings", json.dumps({"findings": [_finding()]})
+        )
+
+    result = _run(monkeypatch, fake_post_json)
+
+    assert len(requests) == 2
+    assert requests[0]["tool_choice"] == "required"
+    assert "reasoning" not in requests[0]
+    assert requests[1]["tool_choice"] == {
+        "type": "function", "function": {"name": "submit_findings"},
+    }
+    assert requests[1]["reasoning"] == {"effort": "low"}
+    assert all(request["max_tokens"] == 3000 for request in requests)
+    assert result["claims"]["industry"]["status"] == "VERIFIED"
+    assert result["claims"]["industry"]["evidence_quote"] == QUOTE
+    assert result["usage"]["reasoning_turns"] == 2
+    assert result["usage"]["search_calls"] == 0
+    assert result["usage"]["fetch_calls"] == 0
+
+
+def test_late_submit_repair_does_not_repeat_or_bypass_turn_limit(monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(
+        investigator, "time", SimpleNamespace(monotonic=clock.monotonic)
+    )
     requests = []
 
     async def fake_post_json(_session, _url, *, headers, payload):
         del headers
         requests.append(payload)
+        clock.now = 113.557
         return 200, _tool_response(
-            "submit_findings", '{"findings":[', finish_reason="length"
+            "submit_findings", '{"findings":[',
+            completion_tokens=investigator.REASONING_MAX_TOKENS,
         )
 
-    monotonic_values = iter((0.0, 0.0, investigator.ADMISSION_DEADLINE_SECONDS))
-    monkeypatch.setattr(
-        investigator,
-        "time",
-        SimpleNamespace(monotonic=lambda: next(monotonic_values)),
-    )
     result = _run(monkeypatch, fake_post_json)
+    assert len(requests) == 2
+    assert result["failure_reason"] == MALFORMED_RESPONSE_FAILURE_REASON
 
+    requests.clear()
+    clock.now = 0.0
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 1)
+    result = _run(monkeypatch, fake_post_json)
     assert len(requests) == 1
     assert result["failure_reason"] == MALFORMED_RESPONSE_FAILURE_REASON
+
+
+@pytest.mark.parametrize("expire_before_dispatch", [False, True])
+def test_expired_pending_repair_fails_malformed_without_paid_dispatch(
+    monkeypatch, expire_before_dispatch,
+):
+    requests = []
+    calls_after_response = 0
+    response_seen = False
+
+    def monotonic():
+        nonlocal calls_after_response
+        if not response_seen:
+            return 0.0
+        calls_after_response += 1
+        if expire_before_dispatch:
+            return 139.9 if calls_after_response <= 2 else 140.0
+        return 139.9 if calls_after_response == 1 else 140.0
+
+    monkeypatch.setattr(investigator, "time", SimpleNamespace(monotonic=monotonic))
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        nonlocal response_seen
+        del headers
+        requests.append(payload)
+        response_seen = True
+        return 200, _tool_response(
+            "submit_findings", '{"findings":[',
+            completion_tokens=investigator.REASONING_MAX_TOKENS,
+        )
+
+    result = _run(monkeypatch, fake_post_json)
+    assert len(requests) == 1
+    assert calls_after_response == (3 if expire_before_dispatch else 2)
+    assert result["claims"] == {}
+    assert result["failure_reason"] == MALFORMED_RESPONSE_FAILURE_REASON
+
+
+def test_late_repair_still_rejects_fabricated_quote(monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(
+        investigator, "time", SimpleNamespace(monotonic=clock.monotonic)
+    )
+    requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        clock.now = 113.557
+        if len(requests) == 1:
+            return 200, _tool_response(
+                "submit_findings", '{"findings":[',
+                completion_tokens=investigator.REASONING_MAX_TOKENS,
+            )
+        return 200, _tool_response(
+            "submit_findings",
+            json.dumps({"findings": [_finding(
+                evidence_quote="This unsupported text is not on the page."
+            )]}),
+        )
+
+    result = _run(monkeypatch, fake_post_json)
+    assert len(requests) == 2
+    assert result["claims"]["industry"]["status"] != "VERIFIED"
+
+
+@pytest.mark.parametrize("case", ["other_tool", "semantic_correction", "transient"])
+def test_late_grace_does_not_admit_other_work(monkeypatch, case):
+    clock = _Clock()
+    monkeypatch.setattr(
+        investigator, "time", SimpleNamespace(monotonic=clock.monotonic)
+    )
+    requests = []
+
+    async def forbid_late_research(*_args, **_kwargs):
+        raise AssertionError("late research must not be admitted")
+
+    monkeypatch.setattr(investigator, "_search_web", forbid_late_research)
+    monkeypatch.setattr(investigator, "_fetch_page", forbid_late_research)
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        clock.now = 113.557
+        if case == "other_tool":
+            return 200, _tool_response(
+                "search_web", '{"query":"example"}',
+            )
+        if case == "transient":
+            return 429, {"error": "rate_limited"}
+        return 200, _tool_response(
+            "submit_findings",
+            json.dumps({"findings": [_finding(
+                evidence_quote="This unsupported text is not on the page."
+            )]}),
+        )
+
+    result = _run(monkeypatch, fake_post_json)
+    assert len(requests) == 1
+    assert result["claims"].get("industry", {}).get("status") != "VERIFIED"
 
 
 def test_arbitrary_malformed_submit_is_not_retried(monkeypatch):

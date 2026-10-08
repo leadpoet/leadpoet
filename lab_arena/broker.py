@@ -177,6 +177,8 @@ _CREDENTIAL_FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 # Broker-internal only: the observed Firecrawl envelope was 5,271,155 bytes.
 # The requested Scrapingdog-compatible response keeps its existing 2 MiB cap.
 _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES = 16 * 1024 * 1024
+# Completed key lookups include the original Firecrawl response envelope.
+_DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES = _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES + 16_384
 # Documented post-mortem billing identity:
 # https://openrouter.ai/docs/guides/features/router-metadata#error-responses
 _OPENROUTER_GENERATION_HEADER = "x-generation-id"
@@ -1534,6 +1536,7 @@ def _deepline_exact_readback(
     reconciliation_deadline: float, provider: Optional[str] = None,
     operation_aliases: Sequence[str] = (),
     poll: bool = True,
+    lookup_max_response_bytes: Optional[int] = None,
 ) -> Tuple[Optional[str], Optional[provider_costs.ProviderCost]]:
     """Recover one execution identity and read only its own final charge.
 
@@ -1548,6 +1551,11 @@ def _deepline_exact_readback(
     ):
         native_id = None
     if execution_key is not None and _DEEPLINE_EXECUTION_KEY_RE.fullmatch(execution_key) is None:
+        return native_id, None
+    if lookup_max_response_bytes is not None and (
+        type(lookup_max_response_bytes) is not int
+        or lookup_max_response_bytes != _DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES
+    ):
         return native_id, None
     # Completed request errors get one short read, not the success/recovery
     # polling window. Their unknown bill stays eligible for delayed settlement.
@@ -1576,8 +1584,12 @@ def _deepline_exact_readback(
         else:
             url = DEEPLINE_EXACT_BILLING_URL + quote(native_id, safe="")
         try:
-            response = transport.send(method="GET", url=url, headers=headers, body=b"",
-                                      timeout_seconds=max(0.001, deadline - now))
+            response = transport.send(
+                method="GET", url=url, headers=headers, body=b"",
+                timeout_seconds=max(0.001, deadline - now),
+                **({"max_response_bytes": lookup_max_response_bytes}
+                   if native_id is None and lookup_max_response_bytes is not None else {}),
+            )
         except ProviderTransportError:
             continue
         if _response_contains_credential(response, secret):
@@ -3345,6 +3357,11 @@ class Broker:
                     request_id=request_id, execution_key=execution_key,
                     operation=operation,
                     provider=billing_provider, operation_aliases=operation_aliases,
+                    lookup_max_response_bytes=(
+                        _DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES
+                        if operation == "firecrawl_scrape" and billing_provider == "firecrawl"
+                        else None
+                    ),
                     reconciliation_deadline=time.monotonic() + timeout,
                 )
             else:
@@ -4940,6 +4957,11 @@ class Broker:
                                 poll=not (deepline_request_failed or deepline_payment_error),
                                 provider=(deepline_catalog_entry["provider"] if deepline_catalog_entry else None),
                                 operation_aliases=(deepline_catalog_entry["operation_aliases"] if deepline_catalog_entry else ()),
+                                lookup_max_response_bytes=(
+                                    _DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES
+                                    if route is not None and route.adapter == "firecrawl_raw_html"
+                                    else None
+                                ),
                         )
                         if recovered_id is not None:
                             deepline_response_request_id = recovered_id
@@ -5019,6 +5041,11 @@ class Broker:
                             operation=str(deepline_operation),
                             provider=(deepline_catalog_entry["provider"] if deepline_catalog_entry else None),
                             operation_aliases=(deepline_catalog_entry["operation_aliases"] if deepline_catalog_entry else ()),
+                            lookup_max_response_bytes=(
+                                _DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES
+                                if route is not None and route.adapter == "firecrawl_raw_html"
+                                else None
+                            ),
                             reconciliation_deadline=(time.monotonic()
                                 + DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS),
                     )

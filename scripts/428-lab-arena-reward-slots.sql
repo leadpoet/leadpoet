@@ -5,6 +5,20 @@ BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 
+CREATE TEMP TABLE lab_arena_428_schema_acl ON COMMIT DROP AS
+SELECT namespace.nspacl AS acl,
+       pg_catalog.has_schema_privilege('lab_arena_owner', 'public', 'CREATE')
+         AS had_create
+FROM pg_catalog.pg_namespace AS namespace
+WHERE namespace.nspname = 'public';
+DO $temporary_create$
+BEGIN
+  IF NOT (SELECT had_create FROM pg_temp.lab_arena_428_schema_acl) THEN
+    GRANT CREATE ON SCHEMA public TO lab_arena_owner;
+  END IF;
+END;
+$temporary_create$;
+
 CREATE OR REPLACE FUNCTION public.lab_arena_reward_slot_snapshot(
   p_round_id TEXT, p_slot_policy JSONB
 )
@@ -186,15 +200,9 @@ BEGIN
 END;
 $reward_slot_snapshot$;
 ALTER FUNCTION public.lab_arena_reward_slot_snapshot(TEXT, JSONB) OWNER TO lab_arena_owner;
-REVOKE ALL ON FUNCTION public.lab_arena_reward_slot_snapshot(TEXT, JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.lab_arena_reward_slot_snapshot(TEXT, JSONB)
+  FROM PUBLIC, anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.lab_arena_reward_slot_snapshot(TEXT, JSONB) TO lab_arena_service;
-DO $reward_slots_acl$
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'service_role') THEN
-    GRANT EXECUTE ON FUNCTION public.lab_arena_reward_slot_snapshot(TEXT, JSONB) TO service_role;
-  END IF;
-END;
-$reward_slots_acl$;
 
 -- Preserve every existing activation guard. Only admit v2 and verify its slots
 -- under the same transaction advisory lock before writing its signed basis.
@@ -249,6 +257,18 @@ BEGIN
   EXECUTE v_definition;
 END;
 $reward_slots_activation$;
+
+DO $restore_create$
+BEGIN
+  IF NOT (SELECT had_create FROM pg_temp.lab_arena_428_schema_acl) THEN
+    REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
+  END IF;
+  IF (SELECT nspacl FROM pg_catalog.pg_namespace WHERE nspname = 'public')
+       IS DISTINCT FROM (SELECT acl FROM pg_temp.lab_arena_428_schema_acl) THEN
+    RAISE EXCEPTION 'lab_arena_reward_slots_schema_acl_changed';
+  END IF;
+END;
+$restore_create$;
 
 NOTIFY pgrst, 'reload schema';
 COMMIT;

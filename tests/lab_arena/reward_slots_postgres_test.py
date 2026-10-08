@@ -397,10 +397,10 @@ def test_rpc_acl_is_service_only_and_read_only(state):
     target = _insert(control,chain,"acl",activated=False,delta=5)
     before = store.get_round(target)
     with control.cursor() as cursor:
-        for role in ("anon","authenticated"):
+        for role in ("anon","authenticated","service_role"):
             cursor.execute("SELECT has_function_privilege(%s,'public.lab_arena_reward_slot_snapshot(text,jsonb)','EXECUTE')",(role,))
             assert cursor.fetchone()[0] is False
-        for role in ("lab_arena_service","service_role"):
+        for role in ("lab_arena_service",):
             cursor.execute("SELECT has_function_privilege(%s,'public.lab_arena_reward_slot_snapshot(text,jsonb)','EXECUTE')",(role,))
             assert cursor.fetchone()[0] is True
         cursor.execute("SET ROLE lab_arena_service")
@@ -426,3 +426,52 @@ def test_new_v2_crown_waits_for_actual_promotion_when_legacy_flag_is_false(state
     legacy, key = _basis(target,[],version="v1")
     assert store.activate_reward(target,legacy,key)["status"] == "activated"
     assert store.activate_reward(target,legacy,key)["status"] == "existing"
+
+
+def test_non_superuser_apply_and_replay_restore_exact_production_schema_acl():
+    # Production's migration role can CREATE in public and hand functions to
+    # lab_arena_owner, but that target owner deliberately cannot CREATE.
+    database = database_with_lab_arena_migration(MIGRATIONS[:-1])
+    psycopg, dsn = next(database)
+    control = psycopg.connect(**dsn)
+    control.autocommit = True
+    try:
+        with control.cursor() as cursor:
+            cursor.execute("CREATE ROLE arena_reward_migrator NOLOGIN NOSUPERUSER INHERIT")
+            cursor.execute("GRANT lab_arena_owner TO arena_reward_migrator")
+            cursor.execute("GRANT USAGE, CREATE ON SCHEMA public TO arena_reward_migrator WITH GRANT OPTION")
+            cursor.execute("REVOKE CREATE ON SCHEMA public FROM lab_arena_owner")
+            cursor.execute("SELECT nspacl FROM pg_catalog.pg_namespace WHERE nspname='public'")
+            original_acl = cursor.fetchone()[0]
+            cursor.execute("SELECT proacl FROM pg_catalog.pg_proc WHERE oid='public.lab_arena_activate_reward(text,jsonb,jsonb)'::regprocedure")
+            activation_acl = cursor.fetchone()[0]
+            cursor.execute("SET ROLE arena_reward_migrator")
+            cursor.execute("SELECT rolsuper, has_schema_privilege(current_user,'public','CREATE'), has_schema_privilege('lab_arena_owner','public','CREATE') FROM pg_catalog.pg_roles WHERE rolname=current_user")
+            assert cursor.fetchone() == (False,True,False)
+            # Prove the target-owner precondition reproduces the production
+            # error independently before the fixed migration is applied.
+            cursor.execute("BEGIN")
+            cursor.execute("CREATE FUNCTION public.arena_reward_permission_probe() RETURNS integer LANGUAGE sql AS 'SELECT 1'")
+            with pytest.raises(psycopg.Error) as denied:
+                cursor.execute("ALTER FUNCTION public.arena_reward_permission_probe() OWNER TO lab_arena_owner")
+            assert denied.value.pgcode == "42501"
+            cursor.execute("ROLLBACK")
+            for _ in range(2):
+                cursor.execute(MIGRATION.read_text())
+                cursor.execute("SELECT nspacl FROM pg_catalog.pg_namespace WHERE nspname='public'")
+                assert cursor.fetchone()[0] == original_acl
+                cursor.execute("SELECT has_schema_privilege('lab_arena_owner','public','CREATE'), has_schema_privilege('lab_arena_service','public','CREATE')")
+                assert cursor.fetchone() == (False,False)
+                cursor.execute("SELECT pg_catalog.pg_get_userbyid(proowner),prosecdef FROM pg_catalog.pg_proc WHERE oid='public.lab_arena_reward_slot_snapshot(text,jsonb)'::regprocedure")
+                assert cursor.fetchone() == ("lab_arena_owner",True)
+                cursor.execute("SELECT proacl FROM pg_catalog.pg_proc WHERE oid='public.lab_arena_activate_reward(text,jsonb,jsonb)'::regprocedure")
+                assert cursor.fetchone()[0] == activation_acl
+                for role in ("anon","authenticated","service_role"):
+                    cursor.execute("SELECT has_function_privilege(%s,'public.lab_arena_reward_slot_snapshot(text,jsonb)','EXECUTE')",(role,))
+                    assert cursor.fetchone()[0] is False
+                cursor.execute("SELECT has_function_privilege('lab_arena_service','public.lab_arena_reward_slot_snapshot(text,jsonb)','EXECUTE')")
+                assert cursor.fetchone()[0] is True
+            cursor.execute("RESET ROLE")
+    finally:
+        control.close()
+        database.close()

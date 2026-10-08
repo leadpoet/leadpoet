@@ -562,6 +562,7 @@ def test_open_submissions_disclose_only_accepted_intake_as_queued():
     assert result["submissions"] == [
         {
             "submission_id": "sub-queued",
+            "evaluation": public_dashboard.evaluation_progress([], _now()),
             "miner_hotkey": MINER_HOTKEY,
             "is_baseline": False,
             "status": "queued",
@@ -620,12 +621,19 @@ def test_published_submissions_expose_judged_stage1_and_final_scores():
 
     class Store:
         @staticmethod
+        def list_runtime_starts(*_args, **_kwargs):
+            return []
+
+        @staticmethod
         def list_submissions(_round_id, **_kwargs):
             return records
 
         @staticmethod
         def list_runs(_round_id, **filters):
-            assert filters == {"stage": 1, "kind": "execute"}
+            assert filters == {"stage": 1, "kind": "execute"} or filters == {
+                "columns": public_dashboard._EVALUATION_COLUMNS,
+                "submission_ids": ["baseline-1", "sub-miner"],
+            }
             return runs
 
     service = SimpleNamespace(
@@ -776,6 +784,10 @@ def test_per_icp_submissions_snapshot_changes_only_stage1_projection():
 
     class Store:
         @staticmethod
+        def list_runtime_starts(*_args, **_kwargs):
+            return []
+
+        @staticmethod
         def list_runs(*_args, **_kwargs):
             return _stage1_runs()
 
@@ -890,7 +902,8 @@ def test_cancelled_round_never_fabricates_aggregate_scores():
     ]
     service = SimpleNamespace(
         _round=lambda _round_id: row,
-        _store=SimpleNamespace(list_submissions=lambda *_args, **_kwargs: records),
+        _store=SimpleNamespace(list_submissions=lambda *_args, **_kwargs: records,
+                               list_runs=lambda *_a, **_k: [], list_runtime_starts=lambda *_a, **_k: []),
         now=_now,
     )
 
@@ -985,7 +998,7 @@ def test_previously_admitted_review_exclusion_remains_visible_without_scores(rou
     }
     service = SimpleNamespace(_round=lambda _: row, now=_now,
         _store=SimpleNamespace(list_submissions=lambda *_a, **_k: [submission],
-                             list_runs=lambda *_a, **_k: []))
+                             list_runs=lambda *_a, **_k: [], list_runtime_starts=lambda *_a, **_k: []))
     result = public_dashboard.submissions_snapshot(service, row["round_id"])
     assert len(result["submissions"]) == 1
     view = result["submissions"][0]
@@ -1012,7 +1025,7 @@ def test_review_visibility_does_not_disclose_unadmitted_or_superseded_sources(ch
         "accepted_at": "2026-09-08T17:50:08Z", **change}
     service = SimpleNamespace(_round=lambda _: row, now=_now,
         _store=SimpleNamespace(list_submissions=lambda *_a, **_k: [submission],
-                             list_runs=lambda *_a, **_k: []))
+                             list_runs=lambda *_a, **_k: [], list_runtime_starts=lambda *_a, **_k: []))
     assert public_dashboard.submissions_snapshot(service, row["round_id"])["submissions"] == []
 
 

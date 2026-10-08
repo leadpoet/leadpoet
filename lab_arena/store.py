@@ -294,6 +294,14 @@ TABLES = (
 )
 ROUND_MODE_FILTER = "configuration_doc->>mode"
 PROMOTION_OUTCOME_FILTER = "publication_doc->king_decision->>outcome"
+# Fixed public audit projections. Never fetch source or provider documents.
+_RUNTIME_JSON_COLUMNS = {
+    "source_commit:result_doc->resource_summary->>validator_source_commit": "result_doc #>> '{resource_summary,validator_source_commit}' AS source_commit",
+    "source_dirty:result_doc->resource_summary->>validator_source_dirty": "result_doc #>> '{resource_summary,validator_source_dirty}' AS source_dirty",
+    "source_commit:content->>validator_source_commit": "content ->> 'validator_source_commit' AS source_commit",
+    "source_dirty:content->>validator_source_dirty": "content ->> 'validator_source_dirty' AS source_dirty",
+    "start_lease_generation:content->>lease_generation": "content ->> 'lease_generation' AS start_lease_generation",
+}
 ROUND_NETWORK_COLUMN = "arena_network_name"
 ROUND_NETUID_COLUMN = "arena_netuid"
 
@@ -358,6 +366,8 @@ class StoreTransport:
         after_entry_id: Optional[int] = None,
         before_round: Optional[tuple[str, str]] = None,
         status_in: Optional[Sequence[str]] = None,
+        submission_ids: Optional[Sequence[str]] = None,
+        run_ids: Optional[Sequence[str]] = None,
         columns: str = "*",
     ) -> List[Dict[str, Any]]:  # pragma: no cover - interface
         raise NotImplementedError
@@ -513,6 +523,8 @@ class PostgrestTransport(StoreTransport):
         after_entry_id=None,
         before_round=None,
         status_in=None,
+        submission_ids=None,
+        run_ids=None,
         columns="*",
     ):
         if table not in TABLES:
@@ -521,7 +533,9 @@ class PostgrestTransport(StoreTransport):
         for key, value in (filters or {}).items():
             if key not in (ROUND_MODE_FILTER, PROMOTION_OUTCOME_FILTER) and not key.replace("_", "").isalnum():
                 raise ArenaStoreError("invalid filter column")
-            if key == "operation_id" and value is not None:
+            if key == "event_kind" and value == "runtime.started" and table == "lab_arena_trajectory_events":
+                query.append((key, "eq.runtime.started"))
+            elif key == "operation_id" and value is not None:
                 operation = str(value)
                 if not re.fullmatch(r"[a-z0-9_.]{1,64}", operation):
                     raise ArenaStoreError("invalid operation filter")
@@ -535,6 +549,20 @@ class PostgrestTransport(StoreTransport):
             if not statuses:
                 raise ArenaStoreError("status inclusion filter is empty")
             query.append(("status", "in.(%s)" % ",".join(statuses)))
+        if submission_ids is not None:
+            if table not in ("lab_arena_runs", "lab_arena_trajectory_events") or "submission_id" in (filters or {}):
+                raise ArenaStoreError("submission inclusion filter is invalid")
+            ids = tuple(_check_filter_value(value) for value in submission_ids)
+            if not ids:
+                raise ArenaStoreError("submission inclusion filter is empty")
+            query.append(("submission_id", "in.(%s)" % ",".join(ids)))
+        if run_ids is not None:
+            if table != "lab_arena_trajectory_events" or "run_id" in (filters or {}):
+                raise ArenaStoreError("run inclusion filter is invalid")
+            ids = tuple(str(value) for value in run_ids)
+            if not ids or any(not re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", value) for value in ids):
+                raise ArenaStoreError("run inclusion ids are invalid")
+            query.append(("run_id", "in.(%s)" % ",".join(ids)))
         if order == "history_round":
             if table != "lab_arena_rounds" or not descending:
                 raise ArenaStoreError("history cursor requires descending rounds")
@@ -715,6 +743,8 @@ class PsycopgTransport(StoreTransport):
         after_entry_id=None,
         before_round=None,
         status_in=None,
+        submission_ids=None,
+        run_ids=None,
         columns="*",
     ):
         if table not in TABLES:
@@ -760,7 +790,24 @@ class PsycopgTransport(StoreTransport):
                 raise ArenaStoreError("history cursor requires descending rounds")
             clauses.append("(created_at, round_id) < (%s, %s)")
             values.extend(before_round)
-        sql = "SELECT row_to_json(t) FROM (SELECT %s FROM public.%s" % (columns, table)
+        if submission_ids is not None:
+            if table not in ("lab_arena_runs", "lab_arena_trajectory_events") or "submission_id" in (filters or {}):
+                raise ArenaStoreError("submission inclusion filter is invalid")
+            ids = tuple(_check_filter_value(value) for value in submission_ids)
+            if not ids:
+                raise ArenaStoreError("submission inclusion filter is empty")
+            clauses.append("submission_id = ANY(%s)")
+            values.append(list(ids))
+        if run_ids is not None:
+            if table != "lab_arena_trajectory_events" or "run_id" in (filters or {}):
+                raise ArenaStoreError("run inclusion filter is invalid")
+            ids = tuple(str(value) for value in run_ids)
+            if not ids or any(not re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", value) for value in ids):
+                raise ArenaStoreError("run inclusion ids are invalid")
+            clauses.append("run_id = ANY(%s)")
+            values.append(list(ids))
+        projected_columns = ",".join(_RUNTIME_JSON_COLUMNS.get(column, column) for column in columns.split(","))
+        sql = "SELECT row_to_json(t) FROM (SELECT %s FROM public.%s" % (projected_columns, table)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         if order == "history_round":
@@ -2215,7 +2262,33 @@ class ArenaStore:
                 break
         return rows
 
-    def list_runs(self, round_id: str, *, stage: Optional[int] = None, status: Optional[str] = None, submission_id: Optional[str] = None, kind: Optional[str] = None, columns: str = "*") -> List[Dict[str, Any]]:
+    def list_runtime_starts(self, round_id: str, *, run_ids: Sequence[str]) -> List[Dict[str, Any]]:
+        """Read indexed start receipts only for runs missing source metadata.
+
+        Small batches keep PostgREST URLs bounded, including maximum-length IDs.
+        The run index avoids scanning a round's many provider trajectory events.
+        """
+        rows: List[Dict[str, Any]] = []
+        ids = sorted(set(run_ids))
+        for first in range(0, len(ids), 25):
+            offset = 0
+            while True:
+                page = self._transport.select(
+                    "lab_arena_trajectory_events",
+                    filters={"round_id": round_id, "event_kind": "runtime.started"},
+                    run_ids=ids[first:first + 25], order="trajectory_id", limit=500, offset=offset,
+                    columns=("trajectory_id,run_id,submission_id,runner_hotkey,assignment_id,attempt,"
+                             "source_commit:content->>validator_source_commit,"
+                             "source_dirty:content->>validator_source_dirty,"
+                             "start_lease_generation:content->>lease_generation"),
+                )
+                rows.extend(page)
+                if len(page) < 500:
+                    break
+                offset += 500
+        return rows
+
+    def list_runs(self, round_id: str, *, stage: Optional[int] = None, status: Optional[str] = None, submission_id: Optional[str] = None, kind: Optional[str] = None, columns: str = "*", submission_ids: Optional[Sequence[str]] = None) -> List[Dict[str, Any]]:
         filters: Dict[str, Any] = {"round_id": round_id}
         if stage is not None:
             filters["stage"] = int(stage)
@@ -2235,6 +2308,7 @@ class ArenaStore:
                 "lab_arena_runs", filters=filters, order="run_id",
                 limit=page_size, after_run_id=after_run_id,
                 **({"columns": columns} if columns != "*" else {}),
+                **({"submission_ids": submission_ids} if submission_ids is not None else {}),
             )
             rows.extend(page)
             if len(page) < page_size:

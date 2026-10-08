@@ -1,5 +1,33 @@
 # Agent Instructions
 
+## Scoped production authorization: October 8 evaluation dashboard
+
+The user authorized exposing live and historical Arena evaluation progress,
+validator hotkeys and recorded validator source commits on subnet_dashboard.
+Use existing claims, runs, results and trajectories; add only narrow public
+projections and metadata persistence if needed. Authority includes protected
+read-only production inspection, focused tests, exact committed migrations,
+safe push/merge, canonical deployment, and read-only Sentry and OnePatch checks.
+Preserve scoring, assignments, round lifecycle, champion selection, private
+model-code and ICP disclosure, accepted data and concurrent work. No new
+tracking system, fabricated runs, forced failure or paid rerun is authorized
+solely to demonstrate dashboard states. Authority ends after live and historical
+rendered verification.
+
+## Scoped production authorization: weekly reward-slot decay
+
+On 2026-10-08 the user authorized per-slot weekly reward decay: halve after
+one, two, three and four reward weeks, then keep the one-sixteenth floor.
+Preserve the current cumulative slots and 30% miner pot. Use the overnight
+weight-recovery procedures for protected inspection, narrow code and exact
+committed migrations, tests, safe push/merge, canonical paired restarts and
+live automatic weight verification. Start each clock from its source winning
+round's original effective reward epoch; replacement resets only the affected
+slots. Reuse the existing burn destination for removed allocation. Preserve
+scoring, verification, promotion, champion selection, model execution, funding,
+round timing, historical signed states, accepted work and concurrent changes.
+This authority ends after deployment and verification.
+
 ## Scoped production authorization: October 7 judge reliability
 
 The user authorized tracing judge_error, judge_timeout and credential_error

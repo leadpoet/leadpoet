@@ -3047,6 +3047,12 @@ async def investigate_company_evidence(
     }
 
     started = time.monotonic()
+    def retained_fetched_pages() -> dict[str, dict[str, str]]:
+        return {
+            url: {"final_url": fetched_final_urls[url], "text": text}
+            for url, text in fetched_pages.items()
+        }
+
     timeout = aiohttp.ClientTimeout(total=BROKER_SETTLEMENT_TIMEOUT_SECONDS)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -3346,8 +3352,8 @@ async def investigate_company_evidence(
             industry_followup_fetched_urls: set[str] = set()
             quote_repair_targets: set[str] = set()
             public_stage_unproven_rereviewed = False
-            # Only an actual time-refused research tool can make a later
-            # UNPROVEN submission incomplete. A voluntary UNPROVEN remains final.
+            # Time must remove an available research step before a later
+            # UNPROVEN submission is incomplete. Voluntary UNPROVEN is final.
             research_denied_for_time = False
             scoped_correction_targets: tuple[str, ...] = ()
             scoped_correction_preserved: dict[str, dict[str, Any]] = {}
@@ -3355,6 +3361,53 @@ async def investigate_company_evidence(
             scoped_correction_candidate_preserved: dict[
                 str, dict[str, Any]
             ] = {}
+            def interrupted_result(reasoning_turns: int) -> dict[str, Any]:
+                timeout_targets = active_submit_targets
+                preserved = scoped_correction_preserved
+                if (
+                    not scoped_correction_active
+                    and scoped_correction_candidate_targets
+                ):
+                    timeout_targets = scoped_correction_candidate_targets
+                    preserved = scoped_correction_candidate_preserved
+                claims = _unproven_findings(
+                    timeout_targets,
+                    "investigation admission budget exhausted",
+                )
+                if preserved:
+                    claims = {
+                        target: dict(claims.get(target) or preserved[target])
+                        for target in requested_targets
+                    }
+                preserved_stage = preserved.get("stage") or {}
+                _record_failure(
+                    diagnostic, ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON,
+                )
+                return {
+                    "claims": claims,
+                    "_completed_submit": False,
+                    # Only a previously validated stage can carry this
+                    # server-only receipt across an interrupted correction.
+                    "_validated_stage_finding": (
+                        dict(preserved_stage)
+                        if preserved_stage.get("status")
+                        in {"VERIFIED", "CONTRADICTED"}
+                        else {}
+                    ),
+                    "failure_reason": (
+                        ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+                    ),
+                    "usage": {
+                        "reasoning_turns": reasoning_turns,
+                        "search_calls": search_calls,
+                        "fetch_calls": fetch_calls,
+                        "prefetched_pages": prefetched_count,
+                        "total_loaded_pages": len(fetched_pages),
+                        "fetch_outcomes": list(fetch_outcomes),
+                    },
+                    PRIVATE_FETCHED_PAGES_KEY: retained_fetched_pages(),
+                }
+
             for _turn in range(MAX_REASONING_TURNS + 1):
                 correction_turn = _turn == MAX_REASONING_TURNS
                 if correction_turn and not final_correction_pending:
@@ -3379,53 +3432,7 @@ async def investigate_company_evidence(
                     elapsed >= ADMISSION_DEADLINE_SECONDS
                     and not late_serialization_retry_pending
                 ):
-                    timeout_scoped_targets = active_submit_targets
-                    timeout_preserved = scoped_correction_preserved
-                    if (
-                        not scoped_correction_active
-                        and scoped_correction_candidate_targets
-                    ):
-                        timeout_scoped_targets = (
-                            scoped_correction_candidate_targets
-                        )
-                        timeout_preserved = (
-                            scoped_correction_candidate_preserved
-                        )
-                    timeout_claims = _unproven_findings(
-                        timeout_scoped_targets,
-                        "investigation admission budget exhausted",
-                    )
-                    if timeout_preserved:
-                        timeout_claims = {
-                            target: dict(
-                                timeout_claims.get(target)
-                                or timeout_preserved[target]
-                            )
-                            for target in requested_targets
-                        }
-                    preserved_stage = timeout_preserved.get("stage") or {}
-                    return {
-                        "claims": timeout_claims,
-                        # Preserve the server-only validation receipt together
-                        # with the exact stage finding it already validated.
-                        # Generated timeout findings and unresolved correction
-                        # targets never receive this metadata.
-                        "_validated_stage_finding": (
-                            dict(preserved_stage)
-                            if preserved_stage.get("status")
-                            in {"VERIFIED", "CONTRADICTED"}
-                            else {}
-                        ),
-                        "failure_reason": "",
-                        "usage": {
-                            "reasoning_turns": _turn,
-                            "search_calls": search_calls,
-                            "fetch_calls": fetch_calls,
-                            "prefetched_pages": prefetched_count,
-                            "total_loaded_pages": len(fetched_pages),
-                            "fetch_outcomes": list(fetch_outcomes),
-                        },
-                    }
+                    return interrupted_result(_turn)
                 if (
                     late_serialization_retry_pending
                     and elapsed >= (
@@ -3441,19 +3448,13 @@ async def investigate_company_evidence(
                     elapsed >= ADMISSION_DEADLINE_SECONDS
                     - JUDGMENT_ADMISSION_RESERVE_SECONDS
                 )
-                if judgment_reserve_active:
-                    # Use the already loaded evidence for one final judgment.
-                    # Any required proof that is still missing remains
-                    # UNPROVEN under the unchanged deterministic validators.
-                    required_tool = "submit_findings"
                 stage_search_reserve = bool(
                     "stage" in requested_targets
                     and normalized_requested_stage
                     and search_calls == 0
                 )
-                force_submit = bool(
-                    judgment_reserve_active
-                    or correction_turn
+                turn_forced_submit = bool(
+                    correction_turn
                     or (
                         not required_tool
                         and _turn >= (
@@ -3462,6 +3463,26 @@ async def investigate_company_evidence(
                             else MAX_REASONING_TURNS - 1
                         )
                     )
+                )
+                if judgment_reserve_active:
+                    # Use the already loaded evidence for one final judgment.
+                    # Any required proof that is still missing remains
+                    # UNPROVEN under the unchanged deterministic validators.
+                    if (
+                        not turn_forced_submit
+                        and required_tool != "submit_findings"
+                        and (
+                            search_calls < MAX_SEARCH_CALLS
+                            or fetch_calls < MAX_FETCH_CALLS
+                        )
+                    ):
+                        # Time, rather than a completed research budget or a
+                        # pending submit repair, removed an available step.
+                        research_denied_for_time = True
+                    required_tool = "submit_findings"
+                force_submit = bool(
+                    judgment_reserve_active
+                    or turn_forced_submit
                 )
                 if (
                     scoped_correction_candidate_targets
@@ -4255,32 +4276,12 @@ async def investigate_company_evidence(
                             # pages fetched by this loop. The caller may reuse
                             # it as bounded source text, but never publishes it
                             # in an investigation receipt.
-                            PRIVATE_FETCHED_PAGES_KEY: {
-                                url: {
-                                    "final_url": fetched_final_urls[url],
-                                    "text": text,
-                                }
-                                for url, text in fetched_pages.items()
-                            },
+                            PRIVATE_FETCHED_PAGES_KEY: retained_fetched_pages(),
                         }
                 elif name == "search_web":
                     elapsed = time.monotonic() - started
                     if elapsed >= ADMISSION_DEADLINE_SECONDS:
-                        return {
-                            "claims": _unproven_findings(
-                                requested_targets,
-                                "investigation admission budget exhausted",
-                            ),
-                            "failure_reason": "",
-                            "usage": {
-                                "reasoning_turns": _turn + 1,
-                                "search_calls": search_calls,
-                                "fetch_calls": fetch_calls,
-                                "prefetched_pages": prefetched_count,
-                                "total_loaded_pages": len(fetched_pages),
-                                "fetch_outcomes": list(fetch_outcomes),
-                            },
-                        }
+                        return interrupted_result(_turn + 1)
                     if (
                         elapsed >= ADMISSION_DEADLINE_SECONDS
                         - JUDGMENT_ADMISSION_RESERVE_SECONDS
@@ -4326,21 +4327,7 @@ async def investigate_company_evidence(
                 elif name == "fetch_page":
                     elapsed = time.monotonic() - started
                     if elapsed >= ADMISSION_DEADLINE_SECONDS:
-                        return {
-                            "claims": _unproven_findings(
-                                requested_targets,
-                                "investigation admission budget exhausted",
-                            ),
-                            "failure_reason": "",
-                            "usage": {
-                                "reasoning_turns": _turn + 1,
-                                "search_calls": search_calls,
-                                "fetch_calls": fetch_calls,
-                                "prefetched_pages": prefetched_count,
-                                "total_loaded_pages": len(fetched_pages),
-                                "fetch_outcomes": list(fetch_outcomes),
-                            },
-                        }
+                        return interrupted_result(_turn + 1)
                     safe_url = _safe_https_url(
                         arguments.get("url")
                         if isinstance(arguments, Mapping)

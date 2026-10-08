@@ -182,8 +182,8 @@ _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES = 16 * 1024 * 1024
 _OPENROUTER_GENERATION_HEADER = "x-generation-id"
 _RETRY_AFTER_ABSENT = object()
 _MAX_RETRY_AFTER_SECONDS = 3600
-OPENROUTER_SHARED_GATE_DEFAULT_MAX = 2
-OPENROUTER_SHARED_GATE_MAX = 10
+OPENROUTER_SHARED_GATE_DEFAULT_MAX = 200
+OPENROUTER_SHARED_GATE_MAX = 200
 OPENROUTER_SHARED_GATE_MIN_PROVIDER_SECONDS = 30.0
 OPENROUTER_SHARED_GATE_IDLE_SECONDS = 300.0
 OPENROUTER_SHARED_GATE_MAX_IDLE_STATES = 256
@@ -244,7 +244,7 @@ class OpenRouterSharedGate:
             or not isinstance(max_concurrency, int)
             or not 1 <= max_concurrency <= OPENROUTER_SHARED_GATE_MAX
         ):
-            raise ValueError("OpenRouter shared concurrency must be an integer from 1 to 10")
+            raise ValueError("OpenRouter shared concurrency must be an integer from 1 to 200")
         if (
             idle_seconds < 0
             or max_idle_states < 1

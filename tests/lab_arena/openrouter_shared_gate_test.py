@@ -247,6 +247,89 @@ def test_four_slots_serve_ten_icps_without_reserving_queued_calls():
     assert queued(gate, fingerprint()) == 0
 
 
+def test_default_gate_dispatches_twenty_same_credential_responses_concurrently():
+    gate = br.OpenRouterSharedGate()
+    assert gate.max_concurrency == 200
+    release = threading.Event()
+    lock = threading.Lock()
+
+    class BlockingTransport:
+        active = 0
+        maximum = 0
+        calls = 0
+
+        def send(self, **_kwargs):
+            with lock:
+                self.active += 1
+                self.calls += 1
+                number = self.calls
+                self.maximum = max(self.maximum, self.active)
+            try:
+                assert release.wait(10)
+                return br.ProviderResponse(
+                    200, {"content-type": "application/json"},
+                    json.dumps(response(id="gen-default-%d" % number)).encode(),
+                )
+            finally:
+                with lock:
+                    self.active -= 1
+
+    transport = BlockingTransport()
+    brokers = [make_broker(
+        store=FakeLedgerStore(), transport=transport, openrouter_shared_gate=gate,
+    ) for _ in range(20)]
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        futures = [pool.submit(
+            broker.execute, context(index + 100),
+            operation_id="openrouter.responses", parameters=PARAMETERS,
+            action_sequence=1, timeout_ms=120_000,
+        ) for index, (broker, _, _) in enumerate(brokers)]
+        try:
+            wait_for(lambda: transport.active == 20, timeout=5)
+            assert queued(gate, fingerprint()) == 0
+            assert all(store.log == ["reserve", "dispatch"] for _, store, _ in brokers)
+        finally:
+            release.set()
+        results = [future.result(timeout=5) for future in futures]
+
+    assert transport.maximum == 20 and transport.calls == 20 and transport.active == 0
+    assert all(result.status == 200 and result.call["actual_microusd"] == 12
+               for result in results)
+    assert all(store.log == ["reserve", "dispatch", "settle"]
+               for _, store, _ in brokers)
+    with gate._condition:
+        assert gate._states[fingerprint()].active == 0
+
+
+def test_two_hundredth_gate_slot_admits_and_next_waits_for_release():
+    gate = br.OpenRouterSharedGate()
+    key = fingerprint()
+    leases = [gate.acquire(key, deadline=time.monotonic() + 2) for _ in range(200)]
+    assert all(lease is not None for lease in leases)
+    with gate._condition:
+        assert gate._states[key].active == 200
+
+    assert gate.acquire(key, deadline=time.monotonic() + 0.01) is None
+    acquired = []
+    waiter = threading.Thread(target=lambda: acquired.append(
+        gate.acquire(key, deadline=time.monotonic() + 2)
+    ))
+    waiter.start()
+    try:
+        wait_for(lambda: queued(gate, key) == 1)
+        leases[0].release()
+        waiter.join(2)
+        assert not waiter.is_alive() and acquired[0] is not None
+    finally:
+        for lease in leases:
+            lease.release()
+        waiter.join(2)
+        if acquired and acquired[0] is not None:
+            acquired[0].release()
+    with gate._condition:
+        assert gate._states[key].active == 0
+
+
 def test_queued_cancellation_removes_waiter_without_ledger_or_provider_call():
     gate = br.OpenRouterSharedGate(max_concurrency=1)
     held = gate.acquire(fingerprint(), deadline=time.monotonic() + 2)
@@ -369,6 +452,27 @@ def test_cooldown_uses_strict_settled_zero_429_and_stale_success_cannot_reset_it
     assert invalid is not None
     assert not gate.observe_throttle(invalid, None)
     invalid.release()
+
+
+def test_default_gate_cooldown_isolates_credential():
+    gate = br.OpenRouterSharedGate(fallback_seconds=(0.05, 0.1))
+    throttled_key = fingerprint("sk-or-v1-" + "a" * 40)
+    other_key = fingerprint("sk-or-v1-" + "b" * 40)
+    throttled = gate.acquire(throttled_key, deadline=time.monotonic() + 1)
+    assert throttled is not None
+    assert gate.observe_throttle(throttled, br._RETRY_AFTER_ABSENT)
+    throttled.release()
+    with gate._condition:
+        remaining = gate._states[throttled_key].cooldown_until - time.monotonic()
+
+    other = gate.acquire(other_key, deadline=time.monotonic() + 1)
+    assert other is not None
+    other.release()
+    started = time.monotonic()
+    same_key = gate.acquire(throttled_key, deadline=time.monotonic() + 1)
+    assert same_key is not None
+    assert time.monotonic() - started >= max(0.0, remaining - 0.02)
+    same_key.release()
 
 
 def test_strict_openrouter_429_cools_other_round_but_invalid_hint_does_not():
@@ -579,6 +683,37 @@ def test_known_canonical_failure_charge_is_settled_without_resend():
     assert call["terminal"]["call_succeeded"] is False
     assert store.log == ["reserve", "dispatch", "settle"]
     assert len(transport.sent) == 1
+
+
+def test_failure_releases_small_override_slot_without_changing_cost():
+    gate = br.OpenRouterSharedGate(max_concurrency=1)
+    failed = {
+        "id": "resp-slot-failure", "status": "failed",
+        "error": {"code": "server_error", "message": "provider unavailable"},
+        "error_type": "provider_unavailable", "usage": {"cost": "0.000123"},
+    }
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, failed), (200, response(id="gen-after-failure"))]),
+        openrouter_shared_gate=gate,
+    )
+
+    first = broker.execute(
+        context(70), operation_id="openrouter.responses", parameters=PARAMETERS,
+        action_sequence=1, timeout_ms=120_000,
+    )
+    with gate._condition:
+        assert gate._states[fingerprint()].active == 0
+    second = broker.execute(
+        context(71), operation_id="openrouter.responses", parameters=PARAMETERS,
+        action_sequence=1, timeout_ms=120_000,
+    )
+
+    assert first.status == 502 and first.call["actual_microusd"] == 123
+    assert second.status == 200 and second.call["actual_microusd"] == 12
+    assert store.log == ["reserve", "dispatch", "settle"] * 2
+    assert len(transport.sent) == 2
+    with gate._condition:
+        assert gate._states[fingerprint()].active == 0
 
 
 def test_canonical_refusal_keeps_policy_classification_with_unknown_cost(
@@ -1055,7 +1190,7 @@ def test_full_185_second_budget_sets_90_second_queue_boundary(monkeypatch):
 
 
 def test_expired_api_deadline_rejects_even_when_gate_is_idle(monkeypatch):
-    clock = iter((100.0, 286.0))
+    clock = iter((100.0, 100.0, 286.0))
     monkeypatch.setattr(br.time, "monotonic", lambda: next(clock))
     gate = br.OpenRouterSharedGate(1)
     broker, store, transport = make_broker(openrouter_shared_gate=gate)
@@ -1154,7 +1289,7 @@ def test_one_worker_exhausts_free_429_retries_while_other_nine_complete(
         assert stores[index].log == ["reserve", "dispatch", "settle"]
 
 
-@pytest.mark.parametrize("value", ["0", "11", "x", "1.5"])
+@pytest.mark.parametrize("value", ["0", "201", "x", "1.5"])
 def test_shared_concurrency_environment_is_strict(monkeypatch, value):
     monkeypatch.setenv("LAB_ARENA_OPENROUTER_MAX_CONCURRENCY", value)
     with pytest.raises(ServiceError):
@@ -1163,6 +1298,8 @@ def test_shared_concurrency_environment_is_strict(monkeypatch, value):
 
 def test_shared_concurrency_default_needs_no_environment_update(monkeypatch):
     monkeypatch.delenv("LAB_ARENA_OPENROUTER_MAX_CONCURRENCY", raising=False)
-    assert _openrouter_shared_concurrency_from_environment() == 2
-    monkeypatch.setenv("LAB_ARENA_OPENROUTER_MAX_CONCURRENCY", "10")
-    assert _openrouter_shared_concurrency_from_environment() == 10
+    assert _openrouter_shared_concurrency_from_environment() == 200
+    monkeypatch.setenv("LAB_ARENA_OPENROUTER_MAX_CONCURRENCY", "4")
+    assert _openrouter_shared_concurrency_from_environment() == 4
+    monkeypatch.setenv("LAB_ARENA_OPENROUTER_MAX_CONCURRENCY", "200")
+    assert _openrouter_shared_concurrency_from_environment() == 200

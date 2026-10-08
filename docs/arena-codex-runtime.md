@@ -168,11 +168,11 @@ and the allowance per qualified company. Qualification is known
 only after judging. Models own their stopping decisions; this read changes
 neither admission nor scoring. Default version 1 responses remain unchanged.
 
-The gateway shares a conservative Responses reliability gate across rounds by
-OpenRouter credential. It admits two concurrent requests per credential by
-default; this is a local protection, not a claimed upstream account limit. A
+The gateway shares a Responses reliability gate across rounds by OpenRouter
+credential. It admits 200 concurrent requests per credential by default; this
+is a local protection, not a claimed upstream account limit. A
 gateway service can set `LAB_ARENA_OPENROUTER_MAX_CONCURRENCY` to an integer
-from 1 through 10. The default needs no secret or environment update. Other
+from 1 through 200. The default needs no secret or environment update. Other
 provider operations and different OpenRouter credentials remain independent.
 For a 120-second provider operation, queueing can use about 90 seconds while
 retaining 20 seconds for database admission, at least 30 seconds for provider

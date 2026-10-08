@@ -690,14 +690,16 @@ class _LazyRunLookup(Mapping):
     those few lookups made the public results page scale with round size.
     """
 
-    def __init__(self, seeded: Mapping[str, Any], fetch: Callable[[str], Optional[Mapping[str, Any]]]) -> None:
+    def __init__(self, seeded: Mapping[str, Any], store: Any) -> None:
         self._rows = dict(seeded)
-        self._fetch = fetch
+        self._store = store
 
     def get(self, key: Any, default: Any = None) -> Any:
         run_id = str(key)
         if run_id not in self._rows:
-            self._rows[run_id] = self._fetch(run_id)
+            # Resolved here rather than at construction: a lookup that never
+            # misses never reaches the store.
+            self._rows[run_id] = self._store.get_run(run_id)
         row = self._rows[run_id]
         return default if row is None else row
 
@@ -5964,7 +5966,7 @@ class ArenaService:
                 for run in list(source_execution_runs) + list(score_runs)
                 if run.get("run_id")
             },
-            self._store.get_run,
+            self._store,
         )
         by_position: Dict[int, Dict[str, bool]] = {}
         unattributed_positions = set()

@@ -109,6 +109,141 @@ class _Clock:
         return self.now
 
 
+@pytest.mark.parametrize("search_limit", [1, 2])
+def test_time_forced_unproven_with_unused_research_is_incomplete(
+    monkeypatch, search_limit,
+):
+    clock = _Clock()
+    monkeypatch.setattr(investigator, "MAX_SEARCH_CALLS", search_limit)
+    monkeypatch.setattr(
+        investigator, "time", SimpleNamespace(monotonic=clock.monotonic)
+    )
+    requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        if len(requests) == 1:
+            return 200, _tool_response(
+                "search_web", json.dumps({"query": "Acme enrollment proof"})
+            )
+        if len(requests) == 2:
+            clock.now = (
+                investigator.ADMISSION_DEADLINE_SECONDS
+                - investigator.JUDGMENT_ADMISSION_RESERVE_SECONDS + 1
+            )
+            return 200, _tool_response(
+                "fetch_page", json.dumps({"url": "https://acme.example/news"})
+            )
+        return 200, _tool_response(
+            "submit_findings", json.dumps({"findings": [_finding(
+                status="UNPROVEN", observed_value="", observed_industry="",
+                observed_subindustry="", activity_role="unresolved",
+                evidence_url="", evidence_quote="", reason="No proof loaded.",
+            )]})
+        )
+
+    async def fake_search(_session, _query, *, key):
+        del key
+        clock.now = 50.0
+        return {"results": []}
+
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    result = _run(monkeypatch, fake_post_json)
+
+    assert len(requests) == 3
+    assert requests[2]["tool_choice"] == {
+        "type": "function", "function": {"name": "submit_findings"},
+    }
+    assert json.loads(requests[2]["messages"][-1]["content"])["error"] == (
+        "judgment_time_reserved"
+    )
+    assert result["usage"]["search_calls"] == 1
+    assert result["usage"]["fetch_calls"] == 0
+    assert result["claims"]["industry"]["status"] == "UNPROVEN"
+    assert result.get("_completed_submit") is not True
+    assert result["failure_reason"] == (
+        investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+    )
+    assert result[investigator.PRIVATE_FETCHED_PAGES_KEY][URL]["text"] == QUOTE
+
+
+@pytest.mark.parametrize("reserve_denied", [False, True])
+def test_grounded_finding_stays_complete_with_or_without_reserve_denial(
+    monkeypatch, reserve_denied,
+):
+    clock = _Clock()
+    monkeypatch.setattr(
+        investigator, "time", SimpleNamespace(monotonic=clock.monotonic)
+    )
+    requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        if len(requests) == 1:
+            return 200, _tool_response(
+                "search_web", json.dumps({"query": "Acme enrollment proof"})
+            )
+        if reserve_denied and len(requests) == 2:
+            clock.now = 81.0
+            return 200, _tool_response(
+                "fetch_page", json.dumps({"url": "https://acme.example/news"})
+            )
+        return 200, _tool_response(
+            "submit_findings", json.dumps({"findings": [_finding()]})
+        )
+
+    async def fake_search(_session, _query, *, key):
+        del key
+        clock.now = 50.0
+        return {"results": []}
+
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    result = _run(monkeypatch, fake_post_json)
+
+    assert len(requests) == (3 if reserve_denied else 2)
+    assert result["claims"]["industry"]["status"] == "VERIFIED"
+    assert result["_completed_submit"] is True
+    assert result["failure_reason"] == ""
+
+
+def test_voluntary_unproven_after_search_stays_complete(monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(
+        investigator, "time", SimpleNamespace(monotonic=clock.monotonic)
+    )
+    requests = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        if len(requests) == 1:
+            return 200, _tool_response(
+                "search_web", json.dumps({"query": "Acme enrollment proof"})
+            )
+        return 200, _tool_response(
+            "submit_findings", json.dumps({"findings": [_finding(
+                status="UNPROVEN", observed_value="", observed_industry="",
+                observed_subindustry="", activity_role="unresolved",
+                evidence_url="", evidence_quote="", reason="No proof found.",
+            )]})
+        )
+
+    async def fake_search(_session, _query, *, key):
+        del key
+        clock.now = 50.0
+        return {"results": []}
+
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    result = _run(monkeypatch, fake_post_json)
+
+    assert len(requests) == 2
+    assert result["claims"]["industry"]["status"] == "UNPROVEN"
+    assert result["_completed_submit"] is True
+    assert result["failure_reason"] == ""
+
+
 @pytest.mark.parametrize("positive_semantic_review", [False, True])
 def test_normal_reasoning_request_keeps_existing_provider_default(
     monkeypatch, positive_semantic_review,

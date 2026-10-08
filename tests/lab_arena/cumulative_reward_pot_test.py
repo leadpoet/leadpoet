@@ -21,6 +21,7 @@ def _win(hotkey, delta, day, name):
         "baseline_submission_id": "baseline-%02d" % day,
         "baseline_score": 40,
         "winner_score": 40 + delta,
+        "start_epoch": 100,
     }
 
 
@@ -56,6 +57,7 @@ def test_policy_centralizes_cumulative_30_percent_pot():
     assert rewards.reward_slot_policy_document() == {
         "assignment_mode": "all_qualifying",
         "pool_percent": 30,
+        "decay": {"epochs_per_halving": 140, "max_halvings": 4},
         "tiers": [
             {"minimum_improvement": 10, "allocation_percent": 50},
             {"minimum_improvement": 5, "allocation_percent": 30},
@@ -140,7 +142,9 @@ def test_invalid_signed_pool_percent_fails_closed(bad):
 def test_legacy_signed_v2_without_pool_retains_exact_hash_and_arithmetic():
     policy = deepcopy(rewards.REWARD_SLOT_POLICY)
     policy.pop("pool_percent")
+    policy.pop("decay")
     winner = _win(ALICE, 11, 1, "old")
+    winner.pop("start_epoch")
     winner.update(round_id="arena-2026-10-01", baseline_submission_id="base",
                   baseline_score=40, winner_score=51)
     basis = rewards.reward_basis_document(

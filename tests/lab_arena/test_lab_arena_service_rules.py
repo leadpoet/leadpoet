@@ -2147,6 +2147,7 @@ def test_public_results_take_valid_identity_from_the_round_publication():
         "score_status": "published",
         "submission_scores": {"stage_1": None, "final": None},
         "scoring_attribution": {
+            "code_versions": [],
             "validators": [],
             "icps": [],
             "unattributed_icp_count": 0,

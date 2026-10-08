@@ -8,7 +8,7 @@ the standard library alone.
 Every value the arithmetic needs comes from the signed basis itself. Legacy
 v1 bases retain their pool, weekly decay and eligibility rules. Version 2 signs
 ordered achievement slots and their pool share, with basis freshness
-but no holder expiry or decay. The signed funding factor applies to the v1
+and optional signed per-slot decay. The signed funding factor applies to the v1
 champion or only the current king's v2 slots. Historical bases that omit the
 factor retain the full share. This module bounds the policy; it does not choose
 the slot thresholds or allocation percentages.
@@ -167,7 +167,7 @@ def validate_slot_policy(policy: Any) -> Dict[str, Any]:
     if (
         not isinstance(policy, Mapping)
         or not {"assignment_mode", "tiers"} <= set(policy)
-        or set(policy) - {"assignment_mode", "tiers", "pool_percent"}
+        or set(policy) - {"assignment_mode", "tiers", "pool_percent", "decay"}
     ):
         raise LabArenaRewardError("slot_policy fields are invalid")
     mode = policy["assignment_mode"]
@@ -192,6 +192,14 @@ def validate_slot_policy(policy: Any) -> Dict[str, Any]:
     result = {"assignment_mode": mode, "tiers": normalized}
     if "pool_percent" in policy:
         result["pool_percent"] = _require_int(policy["pool_percent"], "pool_percent", 0, 100)
+    if "decay" in policy:
+        decay = policy["decay"]
+        if not isinstance(decay, Mapping) or set(decay) != {"epochs_per_halving", "max_halvings"}:
+            raise LabArenaRewardError("slot_policy decay fields are invalid")
+        result["decay"] = {
+            "epochs_per_halving": _require_int(decay["epochs_per_halving"], "epochs_per_halving", 1, 1_000_000),
+            "max_halvings": _require_int(decay["max_halvings"], "max_halvings", 0, MAX_WEEK_SHARES),
+        }
     return result
 
 
@@ -207,10 +215,18 @@ def _achievement_score(value: Any, name: str) -> float:
     return score
 
 
-def validate_reward_slots(slots: Any, policy: Any) -> List[Optional[Dict[str, Any]]]:
+def validate_reward_slots(
+    slots: Any, policy: Any, *, basis_round_id: Optional[str] = None,
+    effective_reward_epoch: Optional[int] = None,
+) -> List[Optional[Dict[str, Any]]]:
     """Validate ordered source achievements against the signed slot policy."""
 
     fields = validate_slot_policy(policy)
+    achievement_fields = set(_ACHIEVEMENT_FIELDS)
+    if "decay" in fields:
+        achievement_fields.add("start_epoch")
+    if effective_reward_epoch is not None:
+        effective_reward_epoch = _require_epoch(effective_reward_epoch, "effective_reward_epoch")
     if not isinstance(slots, list) or len(slots) != len(fields["tiers"]):
         raise LabArenaRewardError("reward_slots must contain three ordered entries")
     validated = []  # type: List[Optional[Dict[str, Any]]]
@@ -218,11 +234,29 @@ def validate_reward_slots(slots: Any, policy: Any) -> List[Optional[Dict[str, An
         if achievement is None:
             validated.append(None)
             continue
-        if not isinstance(achievement, Mapping) or set(achievement) != set(_ACHIEVEMENT_FIELDS):
+        if not isinstance(achievement, Mapping) or set(achievement) != achievement_fields:
             raise LabArenaRewardError("reward slot achievement fields are invalid")
         for name in _ACHIEVEMENT_FIELDS[:4]:
             if not isinstance(achievement[name], str) or not achievement[name]:
                 raise LabArenaRewardError("reward slot %s must be a non-empty string" % name)
+        if "decay" in fields:
+            start = achievement["start_epoch"]
+            if start is None:
+                # The current round has no reward basis until this document is
+                # activated. Keep its SQL snapshot intact and bind its age to
+                # this signed basis's effective epoch in slot_allocations.
+                if basis_round_id is None or achievement["round_id"] != basis_round_id:
+                    raise LabArenaRewardError("reward slot start_epoch may be null only for its basis round")
+            else:
+                start = _require_epoch(start, "reward slot start_epoch")
+                if effective_reward_epoch is not None and start > effective_reward_epoch:
+                    raise LabArenaRewardError("reward slot start_epoch cannot follow effective_reward_epoch")
+                if (
+                    effective_reward_epoch is not None
+                    and achievement["round_id"] == basis_round_id
+                    and start != effective_reward_epoch
+                ):
+                    raise LabArenaRewardError("reward slot start_epoch must equal effective_reward_epoch for its basis round")
         if achievement["submission_id"] == achievement["baseline_submission_id"]:
             raise LabArenaRewardError("reward slot winner cannot be its baseline")
         hotkey = achievement["miner_hotkey"]
@@ -314,7 +348,11 @@ def validate_reward_basis(document: Any) -> Dict[str, Any]:
             raise LabArenaRewardError("%s must be a non-empty string" % name)
     _basis_fields(document)
     if schema == REWARD_BASIS_V2_SCHEMA_VERSION:
-        validate_reward_slots(document["reward_slots"], document["slot_policy"])
+        validate_reward_slots(
+            document["reward_slots"], document["slot_policy"],
+            basis_round_id=document["round_id"],
+            effective_reward_epoch=document["effective_reward_epoch"],
+        )
     body = {
         key: document[key]
         for key in required_fields + _OPTIONAL_BASIS_BODY_FIELDS
@@ -475,7 +513,11 @@ def epoch_eligible(basis: Any, epoch_id: int) -> bool:
     fields = _basis_fields(basis)
     slots = None  # type: Optional[List[Optional[Dict[str, Any]]]]
     if basis.get("schema_version") == REWARD_BASIS_V2_SCHEMA_VERSION:
-        slots = validate_reward_slots(basis.get("reward_slots"), basis.get("slot_policy"))
+        slots = validate_reward_slots(
+            basis.get("reward_slots"), basis.get("slot_policy"),
+            basis_round_id=basis.get("round_id"),
+            effective_reward_epoch=fields["effective_reward_epoch"],
+        )
     epoch_id = _require_epoch(epoch_id, "epoch_id")
     effective = fields["effective_reward_epoch"]
     if epoch_id < effective:
@@ -577,7 +619,7 @@ def champion_values(basis: Any, epoch_id: int, metagraph_hotkeys: Sequence[str])
 
 
 def slot_allocations(basis: Any, epoch_id: int, metagraph_hotkeys: Sequence[str]) -> Dict[str, Fraction]:
-    """Exact registered slot allocations, with no holder age or weekly decay.
+    """Exact registered slot allocations, with optional signed per-slot decay.
 
     Missing owners leave their allocation for burn. A signed pool_percent
     scales new slot shares; older signed policies without it keep their
@@ -598,11 +640,18 @@ def slot_allocations(basis: Any, epoch_id: int, metagraph_hotkeys: Sequence[str]
     allocations = {}  # type: Dict[str, Fraction]
     factor = _basis_fields(document)["champion_reward_factor_ppm"]
     pool = Fraction(document["slot_policy"].get("pool_percent", 100), 100)
+    decay = document["slot_policy"].get("decay")
     for tier, achievement in zip(document["slot_policy"]["tiers"], document["reward_slots"]):
         if achievement is None or achievement["miner_hotkey"] not in registered:
             continue
         hotkey = achievement["miner_hotkey"]
         share = pool * Fraction(tier["allocation_percent"], 100)
+        if decay is not None:
+            start = achievement["start_epoch"]
+            if start is None:
+                start = document["effective_reward_epoch"]
+            halvings = min((epoch_id - start) // decay["epochs_per_halving"], decay["max_halvings"])
+            share *= Fraction(1, 2 ** halvings)
         if hotkey == document["king_hotkey"]:
             share *= Fraction(factor, FULL_CHAMPION_REWARD_FACTOR_PPM)
         allocations[hotkey] = allocations.get(hotkey, Fraction(0)) + share

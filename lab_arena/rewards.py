@@ -50,6 +50,7 @@ MAX_REWARD_WEEK_INDEX = len(KING_POOL_SHARE_PERCENT_BY_WEEK) - 1
 REWARD_SLOT_POLICY = {
     "assignment_mode": "all_qualifying",
     "pool_percent": 30,
+    "decay": {"epochs_per_halving": EPOCHS_PER_REWARD_WEEK, "max_halvings": 4},
     "tiers": [
         {"minimum_improvement": 10, "allocation_percent": 50},
         {"minimum_improvement": 5, "allocation_percent": 30},
@@ -205,6 +206,7 @@ def reward_basis_document(
         document["schema_version"] = _kernel.REWARD_BASIS_V2_SCHEMA_VERSION
         document["slot_policy"] = _kernel.validate_slot_policy(slot_policy)
         document["reward_slots"] = _kernel.validate_reward_slots(
-            reward_slots, document["slot_policy"]
+            reward_slots, document["slot_policy"],
+            basis_round_id=document["round_id"], effective_reward_epoch=effective,
         )
     return finalize_reward_basis(document)

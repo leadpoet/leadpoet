@@ -21,7 +21,7 @@ from tests.lab_arena.deepline_completed_response_recovery_postgres_test import (
     database, frame, setup,
 )
 from tests.lab_arena.deepline_completed_response_recovery_test import catalog
-from tests.lab_arena.deepline_terminal_error_test import ErrorTransport, billing
+from tests.lab_arena.deepline_terminal_error_test import ErrorTransport, REQUEST_ID, billing
 
 
 class ParallelErrorTransport(ErrorTransport):
@@ -30,6 +30,18 @@ class ParallelErrorTransport(ErrorTransport):
         if "/executions/by-key/" in request["url"]:
             document = json.loads(response.body)
             document["toolId"] = "parallel_search"
+            return br.ProviderResponse(response.status, response.headers, json.dumps(document).encode())
+        return response
+
+
+class RecoverableErrorTransport(ParallelErrorTransport):
+    def send(self, **request):
+        response = super().send(**request)
+        if "/executions/by-key/" in request["url"]:
+            document = json.loads(response.body)
+            document["executionRecovery"]["state"] = "completed"
+            document["responseStatus"] = self.status
+            document["response"] = json.loads(self.body)
             return br.ProviderResponse(response.status, response.headers, json.dumps(document).encode())
         return response
 
@@ -196,3 +208,66 @@ def test_pending_error_reaches_client_and_late_charge_settles_once(
     assert denied["call"]["error_code"] == "lease_stale"
     assert base64.b64decode(denied["body_b64"]) != response.content
     assert len(transport.sent) == before_replay
+
+
+@pytest.mark.parametrize("status", [400, 404, 422])
+@pytest.mark.parametrize("credits,amount", [("0", 0), ("0.5", 50_000)])
+def test_settlement_before_mark_uncertain_returns_original_error_and_final_cost(
+    database, tmp_path, monkeypatch, status, credits, amount,
+):
+    monkeypatch.setattr(br, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
+    body = json.dumps({"request_id": REQUEST_ID, "error": {"code": "NOT_FOUND"}}, separators=(",", ":")).encode()
+    transport = RecoverableErrorTransport(status, body=body)
+    label = str(26 + [400, 404, 422].index(status) * 2 + int(amount > 0))
+    h, lease, token, connect, broker = setup(database, tmp_path, label, transport)
+    store = h.service.store
+    original_mark = store.mark_uncertain
+    observed = {}
+
+    def settle_before_original_mark(**kwargs):
+        monkeypatch.setattr(store, "mark_uncertain", original_mark)
+        recovered = h.service.handle_provider(lease["run_id"], token, frame())
+        assert recovered["status"] == status
+        assert base64.b64decode(recovered["body_b64"]) == body
+        assert recovered["call"]["outcome"] == "uncertain"
+        candidates = store.list_deepline_cost_reconciliations(h.round_id, run_id=lease["run_id"])
+        assert len(candidates) == 1
+        transport.bill = billing(credits=credits)
+        transport.bill["recent"]["entries"][0].update(provider="parallel", operation="parallel_search")
+        settled = broker.reconcile_deepline_cost(candidates[0])
+        assert settled["status"] == "settled" and settled["actual_microusd"] == amount
+        state = original_mark(**kwargs)
+        observed.update(state)
+        return state
+
+    # A same-action recovery finishes while the original request is still
+    # returning. Each state change below uses the actual PostgreSQL RPC.
+    monkeypatch.setattr(store, "mark_uncertain", settle_before_original_mark)
+    result = h.service.handle_provider(lease["run_id"], token, frame())
+    assert observed["status"] == "settled" and observed["amount_microusd"] == amount
+    assert observed["terminal_response"]["status"] == 502  # Billing has no original response body.
+    assert result["status"] == status and base64.b64decode(result["body_b64"]) == body
+    assert result["call"]["outcome"] == "settled" and result["call"]["actual_microusd"] == amount
+    assert "error_code" not in result["call"]
+    identity = result["call"]["call_identity"]
+    before = len(transport.sent)
+    replay = h.service.handle_provider(lease["run_id"], token, frame())
+    assert replay["status"] == status and base64.b64decode(replay["body_b64"]) == body
+    assert replay["call"]["outcome"] == "settled" and replay["call"]["actual_microusd"] == amount
+    assert replay["call"]["idempotent"] is True and len(transport.sent) == before
+    assert sum(r["method"] == "POST" for r in transport.sent) == 1
+    assert store.list_deepline_cost_reconciliations(h.round_id, run_id=lease["run_id"]) == []
+    with connect() as connection, connection.cursor() as cur:
+        cur.execute(
+            "SELECT entry_kind,amount_microusd,terminal_response FROM public.lab_arena_ledger "
+            "WHERE call_identity=%s ORDER BY entry_id", (identity,),
+        )
+        entries = cur.fetchall()
+        assert [row[0] for row in entries] == ["reservation", "dispatch", "uncertain", "settlement"]
+        assert entries[-1][1] == amount and entries[-1][2]["call_succeeded"] is False
+        cur.execute("SELECT public.lab_arena__successful_icp_cost_state(%s,%s,%s)",
+                    (h.round_id, lease["submission_id"], lease["icp_position"]))
+        cost = cur.fetchone()[0]
+        assert cost["settled_microusd"] == amount
+        assert cost["successful_microusd"] == cost["successful_calls"] == 0
+        assert cost["uncertain_calls"] == cost["success_unresolved_calls"] == 0

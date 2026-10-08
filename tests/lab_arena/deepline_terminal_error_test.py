@@ -290,6 +290,49 @@ def test_unreadable_rejection_still_polls_until_exact_final_charge(monkeypatch, 
     assert len(transport.sent) == before
 
 
+class SettlementBeforeUncertainReturnStore(RetainedErrorStore):
+    settled_amount = 0
+
+    def mark_uncertain(self, **kwargs):
+        super().mark_uncertain(**kwargs)
+        call = self.calls[kwargs["call_identity"]]
+        call.update(
+            kind="settlement", actual=self.settled_amount,
+            terminal=br._terminal_response_document(
+                502, {"content-type": "application/json"},
+                br.operations.GENERIC_UNAVAILABLE_BODY, call_succeeded=False),
+        )
+        return self._view(call)
+
+
+@pytest.mark.parametrize("status", [400, 404, 422])
+@pytest.mark.parametrize("amount", [0, 50_000])
+def test_raw_rejection_settled_before_uncertain_return_keeps_body_and_charge(monkeypatch, status, amount):
+    monkeypatch.setattr(br, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
+    store = SettlementBeforeUncertainReturnStore()
+    store.settled_amount = amount
+    transport = ErrorTransport(status, body=b"Invalid request")
+    result, broker, _, context, arguments = execute(transport, store=store)
+    assert result.status == status and isinstance(json.loads(result.body).get("error"), dict)
+    assert result.call["outcome"] == "settled" and result.call["actual_microusd"] == amount
+    before = len(transport.sent)
+    replay = broker.execute(context, **arguments)
+    assert replay.status == status and replay.body == result.body
+    assert replay.call["outcome"] == "settled" and replay.call["actual_microusd"] == amount
+    assert replay.call["idempotent"] is True and len(transport.sent) == before
+    assert sum(r["method"] == "POST" for r in transport.sent) == 1
+
+
+@pytest.mark.parametrize("amount", [None, -1, True, "0", 0.5])
+def test_rejection_settled_before_uncertain_return_rejects_invalid_cost(monkeypatch, amount):
+    monkeypatch.setattr(br, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
+    store = SettlementBeforeUncertainReturnStore()
+    store.settled_amount = amount
+    result, _, _, _, _ = execute(ErrorTransport(404), store=store)
+    assert result.status == 503 and result.call["error_code"] == "broker_unavailable"
+    assert "actual_microusd" not in result.call
+
+
 @pytest.mark.parametrize("status", [401, 402, 403, 429, 500, 502, 504])
 def test_unreadable_non_request_failure_stays_unavailable(monkeypatch, status):
     monkeypatch.setattr(br, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)

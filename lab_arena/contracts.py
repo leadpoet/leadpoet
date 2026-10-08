@@ -227,6 +227,7 @@ RUN_RESULT_SCHEMA_VERSION = "leadpoet.lab_arena.run_result.v1"
 CHECKPOINT_TRANSITION_SCHEMA_VERSION = 1
 PUBLICATION_SCHEMA_VERSION = "leadpoet.lab_arena.publication.v1"
 REWARD_BASIS_SCHEMA_VERSION = "leadpoet.lab_arena.reward_basis.v1"
+REWARD_BASIS_V2_SCHEMA_VERSION = "leadpoet.lab_arena.reward_basis.v2"
 OUTPUT_DOCUMENT_SCHEMA_VERSION = "leadpoet.lab_arena.output.v1"
 CONTACT_OUTPUT_DOCUMENT_SCHEMA_VERSION = "leadpoet.lab_arena.output.v2"
 SUBMISSION_SCHEMA_VERSION = "leadpoet.lab_arena.submission.v1"
@@ -1536,14 +1537,32 @@ REWARD_BASIS_FIELDS = (
     F("signature", "object", required=False),
 )
 
+REWARD_BASIS_V2_FIELDS = (
+    F("schema_version", "str", choices=(REWARD_BASIS_V2_SCHEMA_VERSION,)),
+) + REWARD_BASIS_FIELDS[1:] + (
+    F("slot_policy", "object"),
+    F("reward_slots", "any"),
+)
+
 
 def validate_reward_basis(document: Any) -> Dict[str, Any]:
-    basis = validate_document(document, REWARD_BASIS_FIELDS)
+    is_v2 = isinstance(document, Mapping) and document.get("schema_version") == REWARD_BASIS_V2_SCHEMA_VERSION
+    basis = validate_document(document, REWARD_BASIS_V2_FIELDS if is_v2 else REWARD_BASIS_FIELDS)
     if basis["king_outcome"] == "no_king":
         if basis["king_hotkey"] != "":
             raise ArenaContractError("no_king outcome cannot name a king")
     else:
         require_hotkey(basis["king_hotkey"], "king_hotkey")
+    if is_v2:
+        # One slot validator serves the gateway, host validator and signer.
+        from leadpoet_canonical.lab_arena_rewards import (
+            LabArenaRewardError,
+            validate_reward_basis as validate_canonical_reward_basis,
+        )
+        try:
+            validate_canonical_reward_basis(basis)
+        except LabArenaRewardError as exc:
+            raise ArenaContractError(str(exc)) from exc
     if "reward_basis_hash" in basis:
         verify_hashed_document(basis, "reward_basis_hash")
     return basis

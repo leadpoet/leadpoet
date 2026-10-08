@@ -3829,8 +3829,7 @@ class ArenaService:
         publication = row.get("publication_doc") or {}
         decision = publication.get("king_decision") or {}
         if (
-            row.get("promotion_required")
-            and decision.get("outcome") == "crowned"
+            decision.get("outcome") == "crowned"
             and not row.get("baseline_promoted_at")
         ):
             return {"status": "waiting_for_promotion"}
@@ -3904,6 +3903,8 @@ class ArenaService:
                 champion_reward_factor_ppm = (
                     rewards.FULL_CHAMPION_REWARD_FACTOR_PPM
                 )
+        slot_policy = rewards.reward_slot_policy_document()
+        reward_slots = self._store.reward_slot_snapshot(round_id, slot_policy)
         basis = self._sign(
             rewards.reward_basis_document(
                 round_id=round_id,
@@ -3914,6 +3915,8 @@ class ArenaService:
                 previous_king_start_epoch=previous_start,
                 reward_constants=configuration["reward_constants"],
                 champion_reward_factor_ppm=champion_reward_factor_ppm,
+                slot_policy=slot_policy,
+                reward_slots=reward_slots,
             ),
             "reward_basis_hash",
         )
@@ -5367,7 +5370,7 @@ class ArenaService:
                 eligibility = False
             else:
                 eligibility = rewards.epoch_eligible(governing, epoch)
-                if eligibility:
+                if eligibility and "slot_policy" not in governing:
                     week = rewards.reward_week_index(epoch, int(governing["king_start_epoch"]))
         elif self._config.mode == "live":
             network_name, netuid = self._chain_scope()
@@ -5389,6 +5392,8 @@ class ArenaService:
             "king": {"hotkey": governing.get("king_hotkey"), "outcome": governing.get("king_outcome"), "round_id": governing.get("round_id"), "king_start_epoch": governing.get("king_start_epoch")} if governing else None,
             "reward_week_index": week,
             "epoch_eligible": eligibility,
+            "reward_slot_policy": governing.get("slot_policy") if governing else None,
+            "reward_slots": governing.get("reward_slots") if governing else None,
             "current_epoch": epoch,
         }
 

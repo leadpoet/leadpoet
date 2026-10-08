@@ -94,6 +94,11 @@ from finalized UID ownership and signs the time-locked commitment with its own
 local hotkey. The existing runtime, nonce, mortal transaction, and exact
 transaction checks still apply.
 
+Reward-basis v2 uses the [improvement reward slots](arena_reward_slots.md).
+The gateway and validator use the same canonical slot allocation code. Keep
+validators updated before a v2 basis becomes effective; historical v1 signed
+states and pending transaction recovery retain their original arithmetic.
+
 The gateway publishes
 each epoch's state from the governing reward basis, even when no new model has
 been scored. A missing, invalid, conflicting, or expired accepted state stops that

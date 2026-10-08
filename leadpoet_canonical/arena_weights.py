@@ -18,7 +18,9 @@ from typing import Any, Dict, List, Mapping, Sequence
 from leadpoet_canonical.lab_arena_rewards import (
     LabArenaRewardError,
     SIGNING_ALGORITHM,
+    REWARD_BASIS_V2_SCHEMA_VERSION,
     champion_values,
+    slot_allocations,
     public_key_hash,
     sha256_json,
     validate_reward_basis,
@@ -179,14 +181,18 @@ def derive_arena_weights(value: Any, metagraph_hotkeys: Sequence[str]) -> Dict[s
     registered_hotkeys = set(hotkeys)
     burn_hotkey = str(state["burn_hotkey"])
     _require(burn_hotkey in registered_hotkeys, "burn_hotkey is not registered at finalized state")
-    champion = champion_values(state["reward_basis"], int(state["epoch"]), hotkeys)
-    champion_share = Fraction(str(champion["champion_share"]))
-    _require(champion_share <= 1, "Arena allocation exceeds total emissions")
-    if champion["champion_uid"] is not None and champion_share:
-        champion_hotkey = hotkeys[int(champion["champion_uid"])]
-        by_hotkey[champion_hotkey] = by_hotkey.get(champion_hotkey, Fraction(0)) + champion_share
+    if state["reward_basis"]["schema_version"] == REWARD_BASIS_V2_SCHEMA_VERSION:
+        by_hotkey = slot_allocations(state["reward_basis"], int(state["epoch"]), hotkeys)
+        champion_share = sum(by_hotkey.values(), Fraction(0))
     else:
-        champion_share = Fraction(0)
+        champion = champion_values(state["reward_basis"], int(state["epoch"]), hotkeys)
+        champion_share = Fraction(str(champion["champion_share"]))
+        if champion["champion_uid"] is not None and champion_share:
+            champion_hotkey = hotkeys[int(champion["champion_uid"])]
+            by_hotkey[champion_hotkey] = by_hotkey.get(champion_hotkey, Fraction(0)) + champion_share
+        else:
+            champion_share = Fraction(0)
+    _require(champion_share <= 1, "Arena allocation exceeds total emissions")
     unused = Fraction(1) - champion_share
     if unused:
         by_hotkey[burn_hotkey] = by_hotkey.get(burn_hotkey, Fraction(0)) + unused

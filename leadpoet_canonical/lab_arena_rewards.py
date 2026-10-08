@@ -1,16 +1,17 @@
-"""Lab Arena reward kernel: the champion triple from a signed reward basis.
+"""Lab Arena reward kernel for signed legacy champion and achievement slots.
 
 The normal validator and protected signer use this same reward arithmetic.
 It is pure: no I/O, no environment, no chain state. ``verify_reward_basis_signature`` is the only function that touches a
 dependency (``cryptography``), imported lazily, so importing this module needs
 the standard library alone.
 
-Every value the arithmetic needs comes from the signed basis itself: the pool
-percent of total emissions, weekly king shares, epochs per reward week,
-eligibility window, and the per-round champion reward factor. Historical
-bases omit the factor and retain the original full share. The Arena fixes the
-values per round and signs them, so a change reaches validators through the
-next published basis; this module only bounds them.
+Every value the arithmetic needs comes from the signed basis itself. Legacy
+v1 bases retain their pool, weekly decay and eligibility rules. Version 2 signs
+ordered achievement slots and shares of total emissions, with basis freshness
+but no holder expiry or decay. The signed funding factor applies to the v1
+champion or only the current king's v2 slots. Historical bases that omit the
+factor retain the full share. This module bounds the policy; it does not choose
+the slot thresholds or allocation percentages.
 
 Written in Python 3.7 syntax (``typing`` generics, ``# type:`` comments, no
 walrus, no PEP 604 unions) because the validator enclave image copies it.
@@ -26,6 +27,7 @@ from fractions import Fraction
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 REWARD_BASIS_SCHEMA_VERSION = "leadpoet.lab_arena.reward_basis.v1"
+REWARD_BASIS_V2_SCHEMA_VERSION = "leadpoet.lab_arena.reward_basis.v2"
 SIGNING_KEY_DOCUMENT_SCHEMA_VERSION = "leadpoet.lab_arena.signing_key.v1"
 SIGNING_ALGORITHM = "ECDSA_SHA_256"
 SIGNING_KEY_SPEC = "ECC_NIST_P256"
@@ -57,6 +59,11 @@ _BASIS_BODY_FIELDS = (
     "reward_constants",
 )
 _OPTIONAL_BASIS_BODY_FIELDS = ("champion_reward_factor_ppm",)
+_SLOT_BASIS_BODY_FIELDS = ("slot_policy", "reward_slots")
+_ACHIEVEMENT_FIELDS = (
+    "round_id", "submission_id", "miner_hotkey", "baseline_submission_id",
+    "baseline_score", "winner_score",
+)
 _CONSTANT_FIELDS = (
     "pool_percent",
     "pool_basis",
@@ -154,6 +161,82 @@ def validate_reward_constants(constants: Any) -> Dict[str, Any]:
     }
 
 
+def validate_slot_policy(policy: Any) -> Dict[str, Any]:
+    """Validate signed slot rules without choosing their economic values."""
+
+    if not isinstance(policy, Mapping) or set(policy) != {"assignment_mode", "tiers"}:
+        raise LabArenaRewardError("slot_policy fields are invalid")
+    mode = policy["assignment_mode"]
+    if mode not in ("highest_only", "all_qualifying"):
+        raise LabArenaRewardError("slot_policy assignment_mode is invalid")
+    tiers = policy["tiers"]
+    if not isinstance(tiers, list) or len(tiers) != 3:
+        raise LabArenaRewardError("slot_policy must contain three tiers")
+    normalized = []  # type: List[Dict[str, int]]
+    for tier in tiers:
+        if not isinstance(tier, Mapping) or set(tier) != {"minimum_improvement", "allocation_percent"}:
+            raise LabArenaRewardError("slot_policy tier fields are invalid")
+        normalized.append({
+            "minimum_improvement": _require_int(tier["minimum_improvement"], "minimum_improvement", 1, 100),
+            "allocation_percent": _require_int(tier["allocation_percent"], "allocation_percent", 1, 100),
+        })
+    thresholds = [tier["minimum_improvement"] for tier in normalized]
+    if any(left <= right for left, right in zip(thresholds, thresholds[1:])):
+        raise LabArenaRewardError("slot_policy thresholds must be strictly descending")
+    if sum(tier["allocation_percent"] for tier in normalized) != 100:
+        raise LabArenaRewardError("slot_policy allocation percents must sum to 100")
+    return {"assignment_mode": mode, "tiers": normalized}
+
+
+def _achievement_score(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise LabArenaRewardError("%s must be a real score" % name)
+    try:
+        score = float(value)
+    except OverflowError as exc:
+        raise LabArenaRewardError("%s must be a finite score" % name) from exc
+    if not math.isfinite(score) or not 0 <= score <= 100:
+        raise LabArenaRewardError("%s must be a finite score in 0..100" % name)
+    return score
+
+
+def validate_reward_slots(slots: Any, policy: Any) -> List[Optional[Dict[str, Any]]]:
+    """Validate ordered source achievements against the signed slot policy."""
+
+    fields = validate_slot_policy(policy)
+    if not isinstance(slots, list) or len(slots) != len(fields["tiers"]):
+        raise LabArenaRewardError("reward_slots must contain three ordered entries")
+    validated = []  # type: List[Optional[Dict[str, Any]]]
+    for index, achievement in enumerate(slots):
+        if achievement is None:
+            validated.append(None)
+            continue
+        if not isinstance(achievement, Mapping) or set(achievement) != set(_ACHIEVEMENT_FIELDS):
+            raise LabArenaRewardError("reward slot achievement fields are invalid")
+        for name in _ACHIEVEMENT_FIELDS[:4]:
+            if not isinstance(achievement[name], str) or not achievement[name]:
+                raise LabArenaRewardError("reward slot %s must be a non-empty string" % name)
+        if achievement["submission_id"] == achievement["baseline_submission_id"]:
+            raise LabArenaRewardError("reward slot winner cannot be its baseline")
+        hotkey = achievement["miner_hotkey"]
+        alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+        if not 40 <= len(hotkey) <= 64 or any(char not in alphabet for char in hotkey):
+            raise LabArenaRewardError("reward slot miner_hotkey is invalid")
+        baseline = _achievement_score(achievement["baseline_score"], "baseline_score")
+        winner = _achievement_score(achievement["winner_score"], "winner_score")
+        improvement = Fraction(repr(winner)) - Fraction(repr(baseline))
+        if improvement < fields["tiers"][index]["minimum_improvement"]:
+            raise LabArenaRewardError("reward slot achievement does not meet its threshold")
+        if (
+            fields["assignment_mode"] == "highest_only"
+            and index > 0
+            and improvement >= fields["tiers"][index - 1]["minimum_improvement"]
+        ):
+            raise LabArenaRewardError("reward slot achievement qualifies for a higher slot")
+        validated.append(dict(achievement))
+    return validated
+
+
 def _basis_fields(basis: Any) -> Dict[str, Any]:
     """Read the reward-basis fields the kernel needs, failing closed on shape."""
 
@@ -206,22 +289,28 @@ def validate_reward_basis(document: Any) -> Dict[str, Any]:
 
     if not isinstance(document, Mapping):
         raise LabArenaRewardError("reward basis must be an object")
+    schema = document.get("schema_version")
+    if schema not in (REWARD_BASIS_SCHEMA_VERSION, REWARD_BASIS_V2_SCHEMA_VERSION):
+        raise LabArenaRewardError("unsupported reward basis schema")
+    required_fields = _BASIS_BODY_FIELDS
+    if schema == REWARD_BASIS_V2_SCHEMA_VERSION:
+        required_fields += _SLOT_BASIS_BODY_FIELDS
     allowed = (
-        set(_BASIS_BODY_FIELDS)
+        set(required_fields)
         | set(_OPTIONAL_BASIS_BODY_FIELDS)
         | {"reward_basis_hash", "signature"}
     )
-    if set(document) - allowed or not set(_BASIS_BODY_FIELDS) <= set(document):
+    if set(document) - allowed or not set(required_fields) <= set(document):
         raise LabArenaRewardError("reward basis fields are invalid")
-    if document["schema_version"] != REWARD_BASIS_SCHEMA_VERSION:
-        raise LabArenaRewardError("unsupported reward basis schema")
     for name in ("round_id", "published_at"):
         if not isinstance(document[name], str) or not document[name]:
             raise LabArenaRewardError("%s must be a non-empty string" % name)
     _basis_fields(document)
+    if schema == REWARD_BASIS_V2_SCHEMA_VERSION:
+        validate_reward_slots(document["reward_slots"], document["slot_policy"])
     body = {
         key: document[key]
-        for key in _BASIS_BODY_FIELDS + _OPTIONAL_BASIS_BODY_FIELDS
+        for key in required_fields + _OPTIONAL_BASIS_BODY_FIELDS
         if key in document
     }
     if "reward_basis_hash" in document and document["reward_basis_hash"] != sha256_json(body):
@@ -377,12 +466,17 @@ def epoch_eligible(basis: Any, epoch_id: int) -> bool:
     """
 
     fields = _basis_fields(basis)
+    slots = None  # type: Optional[List[Optional[Dict[str, Any]]]]
+    if basis.get("schema_version") == REWARD_BASIS_V2_SCHEMA_VERSION:
+        slots = validate_reward_slots(basis.get("reward_slots"), basis.get("slot_policy"))
     epoch_id = _require_epoch(epoch_id, "epoch_id")
     effective = fields["effective_reward_epoch"]
     if epoch_id < effective:
         raise LabArenaRewardError("reward basis is not effective at epoch %d" % epoch_id)
     if epoch_id - effective > fields["reward_constants"]["eligibility_max_epochs"]:
         return False
+    if slots is not None:
+        return any(slot is not None for slot in slots)
     return fields["king_outcome"] in PAYING_KING_OUTCOMES
 
 
@@ -440,6 +534,8 @@ def champion_values(basis: Any, epoch_id: int, metagraph_hotkeys: Sequence[str])
     ineligible epoch; it is ``None`` for ``no_king``.
     """
 
+    if isinstance(basis, Mapping) and basis.get("schema_version") == REWARD_BASIS_V2_SCHEMA_VERSION:
+        raise LabArenaRewardError("v2 reward bases require slot_allocations")
     fields = _basis_fields(basis)
     epoch_id = _require_epoch(epoch_id, "epoch_id")
     hotkeys = _require_hotkeys(metagraph_hotkeys)
@@ -471,3 +567,33 @@ def champion_values(basis: Any, epoch_id: int, metagraph_hotkeys: Sequence[str])
         "reward_week_index": week_index,
         "eligible": eligible,
     }
+
+
+def slot_allocations(basis: Any, epoch_id: int, metagraph_hotkeys: Sequence[str]) -> Dict[str, Fraction]:
+    """Exact registered slot allocations, with no holder age or weekly decay.
+
+    Missing owners leave their allocation for burn. The existing funding
+    factor applies only to slots held by the current funding-responsible king.
+    The accepted-state weight kernel routes every remaining share to burn.
+    """
+
+    document = validate_reward_basis(basis)
+    if document["schema_version"] != REWARD_BASIS_V2_SCHEMA_VERSION:
+        raise LabArenaRewardError("slot_allocations requires a v2 reward basis")
+    hotkeys = _require_hotkeys(metagraph_hotkeys)
+    if len(set(hotkeys)) != len(hotkeys):
+        raise LabArenaRewardError("metagraph contains duplicate hotkeys")
+    if not epoch_eligible(document, epoch_id):
+        return {}
+    registered = set(hotkeys)
+    allocations = {}  # type: Dict[str, Fraction]
+    factor = _basis_fields(document)["champion_reward_factor_ppm"]
+    for tier, achievement in zip(document["slot_policy"]["tiers"], document["reward_slots"]):
+        if achievement is None or achievement["miner_hotkey"] not in registered:
+            continue
+        hotkey = achievement["miner_hotkey"]
+        share = Fraction(tier["allocation_percent"], 100)
+        if hotkey == document["king_hotkey"]:
+            share *= Fraction(factor, FULL_CHAMPION_REWARD_FACTOR_PPM)
+        allocations[hotkey] = allocations.get(hotkey, Fraction(0)) + share
+    return allocations

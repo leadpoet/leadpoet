@@ -1405,6 +1405,11 @@ def test_reward_activation_carries_latest_miner_winner_and_honors_nonpaying_barr
                 return [run for run in run_rows if kind is None or run["kind"] == kind]
 
             @staticmethod
+            def reward_slot_snapshot(_round_id, policy):
+                assert policy == rewards.reward_slot_policy_document()
+                return [None, None, None]
+
+            @staticmethod
             def activate_reward(_round_id, basis, key):
                 captured.update(basis=basis, key=key)
                 return {"status": "activated"}
@@ -1425,6 +1430,7 @@ def test_reward_activation_carries_latest_miner_winner_and_honors_nonpaying_barr
             "evaluation_date": "2026-09-02",
             "status": "published",
             "reward_activated_at": None,
+            "baseline_promoted_at": "2026-09-02T00:00:01Z" if daily_hotkey else None,
             "champion_funding_frozen": True,
             "champion_hotkey": champion_hotkey or None,
             "champion_fallback_providers": list(fallback_providers),

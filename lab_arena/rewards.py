@@ -44,6 +44,23 @@ from leadpoet_canonical.lab_arena_rewards import (  # noqa: F401  (re-exported: 
 
 MAX_REWARD_WEEK_INDEX = len(KING_POOL_SHARE_PERCENT_BY_WEEK) - 1
 
+# The complete new payout policy. Change assignment_mode to "all_qualifying"
+# to let one achievement replace every tier it clears. Percentages are of
+# total allocation, not of the legacy champion pool. Each activated basis
+# signs a copy; changing this policy never changes an existing signed basis.
+REWARD_SLOT_POLICY = {
+    "assignment_mode": "highest_only",
+    "tiers": [
+        {"minimum_improvement": 10, "allocation_percent": 50},
+        {"minimum_improvement": 5, "allocation_percent": 30},
+        {"minimum_improvement": 1, "allocation_percent": 20},
+    ],
+}
+
+
+def reward_slot_policy_document() -> Dict[str, Any]:
+    return _kernel.validate_slot_policy(REWARD_SLOT_POLICY)
+
 
 def _require_epoch(value: Any, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
@@ -135,6 +152,8 @@ def reward_basis_document(
     previous_king_start_epoch: Optional[int] = None,
     reward_constants: Optional[Mapping[str, Any]] = None,
     champion_reward_factor_ppm: int = FULL_CHAMPION_REWARD_FACTOR_PPM,
+    slot_policy: Optional[Mapping[str, Any]] = None,
+    reward_slots: Optional[Sequence[Any]] = None,
 ) -> Dict[str, Any]:
     """Build and hash (but do not sign) the immutable reward-basis document.
 
@@ -180,4 +199,12 @@ def reward_basis_document(
         "reward_constants": constants,
         "champion_reward_factor_ppm": champion_reward_factor_ppm,
     }
+    if slot_policy is not None or reward_slots is not None:
+        if slot_policy is None or reward_slots is None:
+            raise ValueError("slot policy and reward slots must be provided together")
+        document["schema_version"] = _kernel.REWARD_BASIS_V2_SCHEMA_VERSION
+        document["slot_policy"] = _kernel.validate_slot_policy(slot_policy)
+        document["reward_slots"] = _kernel.validate_reward_slots(
+            reward_slots, document["slot_policy"]
+        )
     return finalize_reward_basis(document)

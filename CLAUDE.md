@@ -1,5 +1,20 @@
 # Agent Instructions
 
+## Scoped production authorization: continuous improvement reward slots
+
+On 2026-10-07/08 the user authorized replacing champion payout allocation with
+three continuously contestable improvement slots: +10 receives 50%, +5 receives
+30%, and +1 receives 20% of total incentive allocation. Default to the highest
+qualifying slot only, with one central setting for all qualifying tiers. Use
+the overnight weight-recovery procedures for protected inspection, narrow
+code and committed migrations, tests, safe push/merge, canonical paired
+deployment and automatic finalized on-chain verification. Preserve scoring,
+qualification, cost eligibility, promotion, champion selection, execution,
+baseline funding, round timing, accepted states and signed recovery journals.
+Use original same-round published scores from eligible promoted winners;
+never invent achievements or rewrite old scores, rewards or chain history.
+Preserve concurrent work. Authority ends after deployment and verification.
+
 ## Scoped production authorization: configured submission ceiling
 
 The user authorized removing the redundant worst-case capacity admission guard

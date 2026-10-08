@@ -129,10 +129,12 @@ BASELINE_SCORED_FIRST_POLICY = "baseline_scored_first_v1"
 # A judge run reads pages and calls several models per company against live
 # providers; it gets its own wall clock, longer than a model's, under the same
 # lease; provider calls refresh the lease while the judge is working.
-SCORING_WALL_CLOCK_SECONDS = 900
+# Five-company verification can exceed 15 minutes with healthy providers.
+# New rounds allow 20 minutes without changing evidence, retry, or cost caps.
+SCORING_WALL_CLOCK_SECONDS = 1200
 # One lease covers the longest sandbox run, first-use source setup, and the
 # small completion retry window. Provider calls renew it while work continues.
-LEASE_TTL_SECONDS = 1200
+LEASE_TTL_SECONDS = 1500
 
 
 def benchmark_icp_count(configuration: Optional[Mapping[str, Any]] = None) -> int:

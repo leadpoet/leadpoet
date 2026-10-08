@@ -2836,12 +2836,11 @@ class ArenaService:
                 return self._store.cancel_round(
                     round_id, CANCEL_REASONS["scoring_incomplete"]
                 )
-            if cause == "stage_closed":
+            if cause in ("stage_closed", "judge_error", "judge_timeout"):
                 incomplete_items[scored_run_id] = cause
                 continue
-            # The closed stage has finished its bounded retries or deadline.
-            # A failed review cannot qualify this ICP, but must not erase the
-            # independently verified results of other ICPs or participants.
+            # Miner-account failures retain the frozen zero rule. A judge
+            # infrastructure failure has no measured score for this ICP.
             failed_items[scored_run_id] = cause
         breakdowns_by_item: Dict[str, List[Dict[str, Any]]] = {}
         judge_executions = 0

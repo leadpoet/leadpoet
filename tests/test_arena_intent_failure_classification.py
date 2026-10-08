@@ -888,8 +888,8 @@ def test_linkedin_refresh_timeout_keeps_arena_retry(monkeypatch):
     with pytest.raises(
         arena_scoring.ScoringError,
         match=(
-            "retryable verifier failure:.*"
-            "independent employee-size verification failed"
+            "judge_exhausted attempts=2 reason=unknown.*"
+            "fit_class=employee_size_verification_failed"
         ),
     ):
         arena_scoring.score_work_item(

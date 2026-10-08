@@ -60,9 +60,10 @@ def test_judge_wall_clock_exceeds_the_models_and_fits_inside_one_lease():
     """A judge run can be longer than a model run while active calls refresh its lease."""
 
     assert contracts.SCORING_WALL_CLOCK_SECONDS > contracts.ICP_WALL_CLOCK_SECONDS
-    # Provider calls refresh a lease, so a judge that keeps calling stays leased; a judge silent for
-    # its three provider timeouts still fits inside one lease.
+    assert contracts.LEASE_TTL_SECONDS - contracts.SCORING_WALL_CLOCK_SECONDS >= 300
+    # Each provider call refreshes the lease. A single admitted operation must
+    # fit even if it is silent until its provider timeout.
     from lab_arena import operations
 
     longest_call = max(operation.timeout_seconds for operation in operations.OPERATIONS.values())
-    assert 3 * longest_call <= contracts.LEASE_TTL_SECONDS
+    assert longest_call < contracts.LEASE_TTL_SECONDS

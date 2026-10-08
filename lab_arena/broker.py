@@ -4799,16 +4799,30 @@ class Broker:
                         raw_document = json.loads(response.body.decode("utf-8"))
                     except (UnicodeDecodeError, ValueError):
                         raw_document = None
-                    # A complete request-specific error is useful to the model
-                    # independently of billing finality. Account errors, throttles,
-                    # malformed replies and transport failures keep normal recovery.
+                    # A request-specific error is useful to the model
+                    # independently of billing finality. Account errors, throttles
+                    # and transport failures keep normal recovery.
+                    #
+                    # 400/404/422 are terminal rejections of the request itself:
+                    # Deepline never dispatched the tool, so polling its billing
+                    # ledger cannot resolve a charge that was never created. The
+                    # status alone settles that, whether or not the provider
+                    # returned a JSON error envelope. Requiring a parseable body
+                    # here made an unparseable rejection poll for the full
+                    # billing window and then answer the worker
+                    # provider_unavailable (HTTP 502), replacing a clean upstream
+                    # status with an arena-side fault. The refusal arm still
+                    # inspects the document, because it is a property of the
+                    # body rather than of the status.
                     deepline_request_failed = (
                         response.internal_provenance is None
-                        and isinstance(raw_document, Mapping)
                         and (
                             response.status in (400, 404, 422)
-                            or _provider_request_refused(
-                                "deepline", effective_normalized, response
+                            or (
+                                isinstance(raw_document, Mapping)
+                                and _provider_request_refused(
+                                    "deepline", effective_normalized, response
+                                )
                             )
                         )
                     )

@@ -160,6 +160,54 @@ def test_public_corpus_sql_blocks_writes_and_private_tables(sql):
         catalog.validate_payload(frozen(company), company["toolId"], {"sql": sql})
 
 
+@pytest.fixture(scope="module")
+def public_company_catalog():
+    document = json.loads((Path(__file__).parent / "fixtures/deepline/catalog_research.json").read_text())
+    return catalog.freeze_catalog(document)
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT * FROM companies WHERE (industry = 'software') LIMIT 5",
+    "SELECT * FROM companies WHERE industry = 'software' AND (employee_count > 10) LIMIT 5",
+    "SELECT * FROM companies WHERE industry = 'software' OR (industry = 'solar') LIMIT 5",
+    "SELECT * FROM companies WHERE NOT (industry = 'finance') LIMIT 5",
+    "SELECT * FROM companies WHERE (industry = 'software' OR industry = 'solar') AND (NOT (employee_count < 10)) LIMIT 5",
+    "SELECT (industry) FROM companies LIMIT 5",
+    "SELECT DISTINCT (industry) FROM companies LIMIT 5",
+    "SELECT DISTINCT ON (industry) industry FROM companies LIMIT 5",
+    "SELECT CASE (industry) WHEN ('solar') THEN (1) ELSE (0) END FROM companies LIMIT 5",
+    "SELECT industry FROM companies GROUP BY (industry) HAVING (COUNT (*) > 1) LIMIT 5",
+    "SELECT COUNT (*) FROM companies WHERE (industry = 'solar') LIMIT 5",
+])
+def test_frozen_public_company_search_normalizes_grouped_readonly_sql(public_company_catalog, sql):
+    parameters = {"tool": "free_simple_company_search", "payload": {"sql": sql}}
+    normalized = operations.validate_operation_request(
+        "deepline.execute", parameters, deepline_catalog=public_company_catalog,
+    )
+    assert normalized == parameters
+    outbound = operations.build_outbound_request(
+        "deepline.execute", normalized, deepline_catalog=public_company_catalog,
+    )
+    assert json.loads(outbound.body)["payload"]["sql"] == sql
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT pg_read_file ('/etc/passwd') FROM companies LIMIT 5",
+    "SELECT pg_catalog.COUNT (*) FROM companies LIMIT 5",
+    'SELECT "industry" FROM companies LIMIT 5',
+    "SELECT * FROM companies WHERE (industry = 'solar') -- comment\n LIMIT 5",
+    "SELECT * FROM companies WHERE (industry = 'solar'); DELETE FROM companies LIMIT 5",
+    "SELECT * FROM private.companies WHERE (industry = 'solar') LIMIT 5",
+    "SELECT * FROM companies, contacts WHERE (industry = 'solar') LIMIT 5",
+])
+def test_frozen_public_company_search_keeps_sql_boundary(public_company_catalog, sql):
+    parameters = {"tool": "free_simple_company_search", "payload": {"sql": sql}}
+    with pytest.raises(operations.OperationRequestError):
+        operations.validate_operation_request(
+            "deepline.execute", parameters, deepline_catalog=public_company_catalog,
+        )
+
+
 def test_async_poll_requires_declared_parent_and_forbids_paging():
     start = row("vendor_batch_scrape", categories=["automation"], inputSchema={"type": "object", "properties": {"urls": {"type": "array", "items": {"type": "string"}}}, "required": ["urls"]}, asyncFlow={"startAction": "vendor_batch_scrape", "pollActions": ["vendor_get_status"], "finishAction": None}, asyncOperation={"job": {"idPaths": ["id", "data.id"]}})
     poll = row("vendor_get_status", categories=["admin"], inputSchema={"type": "object", "properties": {"id": {"type": "string"}, "next": {"type": "string"}}, "required": ["id"]})

@@ -36,6 +36,7 @@ _DELEGATION_FIELDS = frozenset({"tools", "actions", "workflow", "workflows", "ma
 _PERSON_RECORD_FIELDS = frozenset({"tahoe_id", "consumer_id", "ssn", "social_security_number", "date_of_birth"})
 _PERSON_INPUT_FIELDS = (_PERSON_FIELDS - {"profile", "profiles", "profile_url", "public_identifier"}) | frozenset({"linkedin_profile_url", "linkedin_profile_id", "linkedin_profile_handle", "sales_navigator_profile_url", "sales_navigator_profile_id"})
 _COMPANY_SQL_FUNCTIONS = frozenset({"COUNT", "SUM", "MIN", "MAX", "AVG", "LOWER", "UPPER", "LENGTH", "CHAR_LENGTH", "TRIM", "LTRIM", "RTRIM", "COALESCE", "NULLIF", "ROUND", "ABS", "CEIL", "CEILING", "FLOOR", "SUBSTRING", "SUBSTR", "REPLACE", "CONCAT", "CAST"})
+_COMPANY_SQL_PAREN_KEYWORDS = frozenset({"SELECT", "DISTINCT", "ON", "CASE", "WHEN", "THEN", "ELSE", "WHERE", "AND", "OR", "NOT", "IN", "EXISTS", "BY", "HAVING"})
 
 
 class CatalogError(ValueError):
@@ -303,8 +304,10 @@ def _company_sql(value: Any) -> None:
     # SELECT is not itself a read-only boundary: SQL functions can read local
     # files, reach other databases, or perform writes. Permit only common
     # scalar/aggregate company filters, with no schema-qualified functions.
-    functions = re.findall(r"\b([A-Za-z_][A-Za-z0-9_.]*)\s*\(", statement)
-    if any(name.upper() not in _COMPANY_SQL_FUNCTIONS | {"IN"} for name in functions):
+    # These SQL keywords can also precede a parenthesized expression. Keep
+    # scanning across whitespace so a spaced, unapproved function still fails.
+    paren_heads = re.findall(r"\b([A-Za-z_][A-Za-z0-9_.]*)\s*\(", statement)
+    if any(name.upper() not in _COMPANY_SQL_FUNCTIONS | _COMPANY_SQL_PAREN_KEYWORDS for name in paren_heads):
         raise CatalogError("invalid_public_company_sql")
     limits = re.findall(r"\bLIMIT\s+(\d+)\b", statement, re.I)
     if not limits or any(not 1 <= int(limit) <= 100_000 for limit in limits):

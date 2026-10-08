@@ -465,6 +465,10 @@ def test_scoped_candidate_preserves_valid_finding_on_admission_timeout(
     assert result["claims"]["industry"]["status"] == "VERIFIED"
     assert result["claims"]["industry"]["evidence_quote"] == PRODUCT_QUOTE
     assert result["_validated_stage_finding"] == {}
+    assert result["_completed_submit"] is False
+    assert result["failure_reason"] == (
+        investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+    )
 
 
 def test_timeout_preserves_only_server_validated_stage_metadata(monkeypatch):
@@ -542,6 +546,10 @@ def test_timeout_preserves_only_server_validated_stage_metadata(monkeypatch):
         "investigation admission budget exhausted"
     )
     assert result["_validated_stage_finding"] == result["claims"]["stage"]
+    assert result["_completed_submit"] is False
+    assert result["failure_reason"] == (
+        investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+    )
 
 
 def test_scoped_correction_rejects_unrelated_extra_target(monkeypatch):

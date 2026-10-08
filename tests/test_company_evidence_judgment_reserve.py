@@ -519,3 +519,145 @@ def test_inner_deadline_exit_retains_usage(monkeypatch, late_tool):
         "total_loaded_pages": 1,
         "fetch_outcomes": [],
     }
+    assert result["_completed_submit"] is False
+    assert result["failure_reason"] == (
+        investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+    )
+    assert result[investigator.PRIVATE_FETCHED_PAGES_KEY][URL] == {
+        "final_url": URL, "text": QUOTE,
+    }
+
+
+def test_outer_deadline_retains_fresh_page_and_marks_interruption(monkeypatch):
+    clock = _Clock()
+    fresh_url = "https://acme.example/unrelated"
+    calls = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers, payload
+        calls.append("model")
+        return 200, _response("fetch_page", {"url": fresh_url})
+
+    async def fake_fetch(_session, url, *, stealth_mode=False):
+        del stealth_mode
+        assert url == fresh_url
+        calls.append("fetch")
+        clock.now = investigator.ADMISSION_DEADLINE_SECONDS
+        return {"ok": True, "url": url, "final_url": url,
+                "text": "This page has no relevant proof."}
+
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    result = _run_industry(monkeypatch, fake_post, clock)
+
+    assert calls == ["model", "fetch"]
+    assert result["claims"]["industry"]["status"] == "UNPROVEN"
+    assert result["_completed_submit"] is False
+    assert result["failure_reason"] == (
+        investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+    )
+    assert result[investigator.PRIVATE_FETCHED_PAGES_KEY][fresh_url] == {
+        "final_url": fresh_url,
+        "text": "This page has no relevant proof.",
+    }
+
+
+@pytest.mark.parametrize(
+    ("reserve_time", "finding_status", "reasoning_turn_cap", "research_exhausted", "expected_interrupted"),
+    [
+        (True, "UNPROVEN", False, False, True),
+        (False, "UNPROVEN", False, False, False),
+        (True, "VERIFIED", False, False, False),
+        (True, "UNPROVEN", True, False, False),
+        (True, "UNPROVEN", False, True, False),
+    ],
+)
+def test_reserve_forced_submit_only_interrupts_unresolved_available_research(
+    monkeypatch, reserve_time, finding_status, reasoning_turn_cap,
+    research_exhausted,
+    expected_interrupted,
+):
+    clock = _Clock()
+    requests = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        if len(requests) == 1:
+            return 200, _response(
+                "search_web", {"query": "Acme enrollment software"}, call=1,
+            )
+        return 200, _response(
+            "submit_findings",
+            {"findings": [_finding(status=finding_status)]},
+            call=2,
+        )
+
+    async def fake_search(_session, query, *, key):
+        del query, key
+        if reserve_time:
+            clock.now = (
+                investigator.ADMISSION_DEADLINE_SECONDS
+                - investigator.JUDGMENT_ADMISSION_RESERVE_SECONDS
+            )
+        return {"results": [], "notice": "discovery_only_not_evidence"}
+
+    if reasoning_turn_cap:
+        monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 2)
+    if research_exhausted:
+        monkeypatch.setattr(investigator, "MAX_SEARCH_CALLS", 1)
+        monkeypatch.setattr(investigator, "MAX_FETCH_CALLS", 0)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    result = _run_industry(monkeypatch, fake_post, clock)
+
+    assert len(requests) == 2
+    assert result["claims"]["industry"]["status"] == finding_status
+    assert result["_completed_submit"] is (not expected_interrupted)
+    assert result["failure_reason"] == (
+        investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+        if expected_interrupted else ""
+    )
+    assert result["usage"]["search_calls"] == 1
+
+
+def test_stage_turn_reserve_does_not_mark_time_interruption(monkeypatch):
+    calls = 0
+
+    def monotonic():
+        nonlocal calls
+        calls += 1
+        return 0.0 if calls == 1 else (
+            investigator.ADMISSION_DEADLINE_SECONDS
+            - investigator.JUDGMENT_ADMISSION_RESERVE_SECONDS
+        )
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        assert payload["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "submit_findings"},
+        }
+        finding = _finding(status="UNPROVEN")
+        finding["target"] = "stage"
+        return 200, _response("submit_findings", {"findings": [finding]})
+
+    async def fail_search(*_args, **_kwargs):
+        raise AssertionError("search cap is exhausted")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 4)
+    monkeypatch.setattr(investigator, "MAX_SEARCH_CALLS", 0)
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_search_web", fail_search)
+    monkeypatch.setattr(
+        investigator, "time", SimpleNamespace(monotonic=monotonic),
+    )
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("stage",), requested_stage="Public",
+    ))
+
+    assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["_completed_submit"] is True
+    assert result["failure_reason"] == ""
+    assert result["usage"]["search_calls"] == 0

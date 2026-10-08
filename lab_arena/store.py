@@ -300,9 +300,9 @@ ROUND_NETUID_COLUMN = "arena_netuid"
 
 DEADLOCK_SQLSTATE = "40P01"
 DEADLOCK_RETRIES = 3
-# Stage creation and publication process the complete round atomically.
-# Let their bounded 60-second database deadlines return a result before giving
-# up on the response.
+# Stage creation, scoring queue creation, and publication process the complete
+# round atomically. Let their bounded database work return a result before
+# giving up on the response.
 BULK_ROUND_RPC_READ_TIMEOUT_SECONDS = 65.0
 # Closed-round billing scans historical ledger entries; one slow read must not
 # use the short timeout shared with ordinary RPCs.
@@ -437,7 +437,12 @@ class PostgrestTransport(StoreTransport):
         content = canonical_json(dict(params)).encode("utf-8")
         request_options = {}
         read_timeout = None
-        if function in {"lab_arena_open_stage", "lab_arena_open_scoring_v3"} or (
+        if function in {
+            "lab_arena_open_stage",
+            "lab_arena_open_scoring",
+            "lab_arena_open_scoring_v2",
+            "lab_arena_open_scoring_v3",
+        } or (
             function == "lab_arena_transition_round"
             and params.get("p_expected_status") == "scored"
             and params.get("p_next_status") == "published"

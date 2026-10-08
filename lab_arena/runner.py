@@ -35,7 +35,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Protocol, Sequence, Tuple
+from typing import Any, Callable, Collection, Dict, Iterator, List, Mapping, Optional, Protocol, Sequence, Tuple
 from urllib.parse import urlsplit
 
 import httpx
@@ -60,6 +60,7 @@ CHECKPOINT_MODULE_PATH = Path(__file__).with_name("lab_arena_checkpoint.py").res
 CODEX_MODULE_PATH = Path(__file__).with_name("lab_arena_codex.py").resolve()
 WEB_BRIDGE_PATH = Path(__file__).with_name("web_egress_bridge.py").resolve()
 MAX_REFUSED_FRAMES = 25  # bound repeated refusals for the same operation/tool
+REFUSAL_PROBE_COOLDOWN_SECONDS = 30.0
 MAX_BUFFERED_PROVIDER_ERROR_EVENTS = 32
 MAX_BUFFERED_DECISION_EVENTS = 64
 QUOTA_SNAPSHOT_SCHEMA_VARIANTS = 2
@@ -1688,7 +1689,18 @@ class RunState:
     )
     action_sequence: int = 0
     refusals: int = 0  # refused calls answered by the Arena for this run
+    local_refusals: int = 0  # refused locally during an operation cooldown
     operation_refusals: Dict[Tuple[str, str], Tuple[int, str]] = field(
+        default_factory=dict
+    )
+    operation_refusal_until: Dict[Tuple[str, str], float] = field(
+        default_factory=dict
+    )
+    operation_probe_inflight: set[Tuple[str, str]] = field(default_factory=set)
+    operation_latest_calls: Dict[Tuple[str, str], Dict[str, Any]] = field(
+        default_factory=dict
+    )
+    operation_success_sequence: Dict[Tuple[str, str], int] = field(
         default_factory=dict
     )
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -1704,6 +1716,46 @@ class RunState:
     quota_condition: threading.Condition = field(
         default_factory=threading.Condition, repr=False
     )
+
+
+def _unresolved_operation_failures(
+    latest_calls: Sequence[Mapping[str, Any]],
+    recovered_identities: Collection[str],
+) -> Tuple[int, int]:
+    """Count each tool's latest actual credential or provider failure."""
+
+    credentials = providers = 0
+    for call in latest_calls:
+        if call.get("call_identity") in recovered_identities:
+            continue
+        error_code = call.get("error_code")
+        miner_account_status = (
+            call.get("funding_source") == "miner_key"
+            and call.get("provider_status") in (401, 402, 403)
+        )
+        if call.get("funding_source") == "miner_key" and error_code in (
+            "miner_credentials_unavailable", "miner_provider_not_configured"
+        ):
+            credentials += 1
+        elif error_code in ("broker_unavailable", "provider_unavailable") or (
+            operations.provider_status_is_infrastructure(call.get("provider_status"))
+            and error_code != "provider_request_refused"
+            and not miner_account_status
+        ):
+            providers += 1
+    return credentials, providers
+
+
+def _record_latest_operation_call_locked(
+    state: RunState, key: Tuple[str, str], call: Dict[str, Any], sequence: int,
+) -> bool:
+    """Order attempts by the worker's issued sequence, not optional call metadata."""
+
+    previous = state.operation_latest_calls.get(key)
+    if previous is not None and sequence < previous["action_sequence"]:
+        return False
+    state.operation_latest_calls[key] = {**call, "action_sequence": sequence}
+    return True
 
 
 def _provider_error_event(
@@ -2258,14 +2310,53 @@ class WorkerSocketServer:
             refusal_count, refusal_error = state.operation_refusals.get(
                 refusal_key, (0, "call_refused")
             )
-        if refusal_count >= MAX_REFUSED_FRAMES:
-            # Refuse only the operation that keeps failing. A failed paid tool
-            # must not disable a healthy provider or a free research tool, and
-            # a credential refusal must not be reported as exhausted budget.
-            return refusal_error, None
+            probe = refusal_count >= MAX_REFUSED_FRAMES
+            if probe:
+                if (
+                    refusal_key in state.operation_probe_inflight
+                    or self._monotonic() < state.operation_refusal_until.get(
+                        refusal_key, 0.0
+                    )
+                ):
+                    # Refuse only this operation. Keep its original error and
+                    # never start an automatic paid retry.
+                    state.local_refusals += 1
+                    return refusal_error, None
+                # Reserve one model-requested probe until its actual result.
+                state.operation_probe_inflight.add(refusal_key)
         # Calls admitted before the threshold can still complete concurrently.
         # Keep their original frames and accounting; do not serialize or cancel
         # an already dispatched request to enforce an exact cutoff.
+        try:
+            return self._dispatch_admitted(
+                operation_id, parameters, timeout_ms, state, sequence,
+                refusal_key, probe, deadline, cancel_requested,
+            )
+        finally:
+            if probe:
+                with state.lock:
+                    state.operation_probe_inflight.discard(refusal_key)
+                    if (
+                        refusal_key in state.operation_refusals
+                        and state.operation_refusal_until.get(refusal_key, 0.0)
+                        <= self._monotonic()
+                    ):
+                        state.operation_refusal_until[refusal_key] = (
+                            self._monotonic() + REFUSAL_PROBE_COOLDOWN_SECONDS
+                        )
+
+    def _dispatch_admitted(
+        self,
+        operation_id: str,
+        parameters: Mapping[str, Any],
+        timeout_ms: int,
+        state: RunState,
+        sequence: int,
+        refusal_key: Tuple[str, str],
+        probe: bool,
+        deadline: float,
+        cancel_requested: Optional[Callable[[], bool]],
+    ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
         frame = {"operation_id": operation_id, "parameters": dict(parameters), "timeout_ms": int(timeout_ms), "action_sequence": sequence}
         while True:
             if self._cancelled(cancel_requested):
@@ -2286,13 +2377,15 @@ class WorkerSocketServer:
                 except Exception as observation_exc:
                     observation_error = type(observation_exc).__name__
                 with state.lock:
-                    state.calls.append(
-                        {
-                            "operation_id": operation_id,
-                            "action_sequence": sequence,
-                            "outcome": "unknown",
-                            "error_code": "broker_unavailable",
-                        }
+                    failed_call = {
+                        "operation_id": operation_id,
+                        "action_sequence": sequence,
+                        "outcome": "unknown",
+                        "error_code": "broker_unavailable",
+                    }
+                    state.calls.append(failed_call)
+                    _record_latest_operation_call_locked(
+                        state, refusal_key, failed_call, sequence
                     )
                     if provider_event is not None:
                         try:
@@ -2324,21 +2417,41 @@ class WorkerSocketServer:
                 # the caller's remaining window. Intermediate polls are not
                 # provider calls and stay out of the run summary.
                 with state.lock:
-                    state.calls.append(dict(document["call"]))
+                    held_call = dict(document["call"])
+                    state.calls.append(held_call)
+                    _record_latest_operation_call_locked(
+                        state, refusal_key, held_call, sequence
+                    )
                 return "worker_unavailable", None
         document = self._recover_deepline_response(
             document, frame, deadline, cancel_requested
         )
+        def invalid_broker_response() -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+            with state.lock:
+                failed_call = {
+                    "operation_id": operation_id,
+                    "action_sequence": sequence,
+                    "outcome": "unknown",
+                    "error_code": "broker_unavailable",
+                }
+                state.calls.append(failed_call)
+                _record_latest_operation_call_locked(
+                    state, refusal_key, failed_call, sequence
+                )
+            return "worker_unavailable", None
+
         if not isinstance(document, Mapping) or set(document) != {
             "status",
             "headers",
             "body_b64",
             "call",
         }:
-            return "worker_unavailable", None
+            return invalid_broker_response()
         response_headers = document.get("headers")
-        if not isinstance(response_headers, Mapping):
-            return "worker_unavailable", None
+        if not isinstance(response_headers, Mapping) or not isinstance(
+            document.get("call"), Mapping
+        ):
+            return invalid_broker_response()
         trusted_names = [
             name
             for name in response_headers
@@ -2346,10 +2459,10 @@ class WorkerSocketServer:
             and name.lower() == operations.TRUSTED_RESPONSE_URL_HEADER
         ]
         if len(trusted_names) > 1:
-            return "worker_unavailable", None
+            return invalid_broker_response()
         if trusted_names:
             if operation_id != shim.PAGE_FETCH_OPERATION:
-                return "worker_unavailable", None
+                return invalid_broker_response()
             try:
                 response_url = operations.validate_https_url(
                     response_headers[trusted_names[0]],
@@ -2357,7 +2470,7 @@ class WorkerSocketServer:
                     field="response_url",
                 )
             except operations.OperationError:
-                return "worker_unavailable", None
+                return invalid_broker_response()
             response_headers = dict(response_headers)
             response_headers.pop(trusted_names[0])
             response_headers[operations.TRUSTED_RESPONSE_URL_HEADER] = response_url
@@ -2365,17 +2478,48 @@ class WorkerSocketServer:
         call = dict(document["call"])
         with state.lock:
             state.calls.append(call)
-            if call.get("error_code") in ("budget_refused", "budget_exhausted", "miner_credentials_unavailable", "miner_provider_not_configured") or call.get("outcome") == "refused":
+            latest = _record_latest_operation_call_locked(
+                state, refusal_key, call, sequence
+            )
+            refused = (
+                call.get("error_code") in (
+                    "budget_refused", "budget_exhausted",
+                    "miner_credentials_unavailable", "miner_provider_not_configured",
+                ) or call.get("outcome") == "refused"
+            )
+            if refused:
                 state.refusals += 1
+            newer_success = sequence < state.operation_success_sequence.get(
+                refusal_key, -1
+            )
+            if refused and not newer_success:
                 count, _previous_error = state.operation_refusals.get(
                     refusal_key, (0, "call_refused")
                 )
                 error_code = call.get("error_code")
                 state.operation_refusals[refusal_key] = (
-                    count + 1,
-                    error_code
-                    if isinstance(error_code, str) and error_code in HTTP_ERROR_STATUS
-                    else "call_refused",
+                    max(count + 1, MAX_REFUSED_FRAMES) if probe else count + 1,
+                    (
+                        error_code
+                        if isinstance(error_code, str) and error_code in HTTP_ERROR_STATUS
+                        else "call_refused"
+                    ) if latest else _previous_error,
+                )
+                if state.operation_refusals[refusal_key][0] >= MAX_REFUSED_FRAMES:
+                    state.operation_refusal_until[refusal_key] = (
+                        self._monotonic() + REFUSAL_PROBE_COOLDOWN_SECONDS
+                    )
+            elif latest and (
+                type(document["status"]) is int
+                and 200 <= document["status"] < 300
+                and call.get("error_code") is None
+            ):
+                state.operation_success_sequence[refusal_key] = sequence
+                state.operation_refusals.pop(refusal_key, None)
+                state.operation_refusal_until.pop(refusal_key, None)
+            elif latest and probe:
+                state.operation_refusal_until[refusal_key] = (
+                    self._monotonic() + REFUSAL_PROBE_COOLDOWN_SECONDS
                 )
         document = {
             **document,
@@ -3478,6 +3622,14 @@ class AssignmentExecutor:
                 recovered_responses_retries = frozenset(
                     state.recovered_responses_retry_call_identities
                 )
+                latest_operation_calls = tuple(
+                    state.operation_latest_calls.values()
+                )
+            unresolved_credentials, unresolved_providers = (
+                _unresolved_operation_failures(
+                    latest_operation_calls, recovered_responses_retries
+                )
+            )
             miner_credentials_failed = any(
                 call.get("funding_source") == "miner_key"
                 and call.get("error_code") == "miner_credentials_unavailable"
@@ -3556,6 +3708,22 @@ class AssignmentExecutor:
                         "reason": "provider_error",
                     }
                     failure_detail = ""
+            if (
+                not scoring_run
+                and terminal == "accepted"
+                and output_document is not None
+                and not output_document["companies"]
+            ):
+                # An empty document cannot be a completed research result if
+                # the latest actual attempt on a requested tool still failed.
+                # Successful later calls on that same tool clear this signal;
+                # unrelated healthy tools do not.
+                if unresolved_credentials:
+                    terminal = "credential_error"
+                    output_document = None
+                elif unresolved_providers and not per_icp_budget_stop_ended_attempt:
+                    terminal = "provider_error"
+                    output_document = None
             if not scoring_run:
                 if (
                     terminal == "accepted"
@@ -3691,6 +3859,18 @@ class AssignmentExecutor:
                     pass
         finished_at = _timestamp(config.clock)
         round_id = str(lease.get("round_id") or config.round_id or "")
+        with state.lock:
+            refusal_count = state.refusals
+            local_refusal_count = state.local_refusals
+            latest_operation_calls = tuple(state.operation_latest_calls.values())
+            recovered_responses_retries = frozenset(
+                state.recovered_responses_retry_call_identities
+            )
+        unresolved_credentials, unresolved_providers = (
+            _unresolved_operation_failures(
+                latest_operation_calls, recovered_responses_retries
+            )
+        )
         run_result = {
             "schema_version": contracts.RUN_RESULT_SCHEMA_VERSION,
             "resource_summary": {
@@ -3700,6 +3880,11 @@ class AssignmentExecutor:
                 "stdout_bytes": len(result.stdout) if result else 0,
                 "stderr_bytes": len(result.stderr) if result else 0,
                 "provider_call_count": len(state.calls),
+                "provider_refusal_count": refusal_count,
+                "provider_local_refusal_count": local_refusal_count,
+                "provider_unresolved_failure_count": (
+                    unresolved_credentials + unresolved_providers
+                ),
                 **_runtime_source_metadata(lease),
             },
             "started_at": started_at,

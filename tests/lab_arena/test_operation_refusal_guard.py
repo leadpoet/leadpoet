@@ -167,3 +167,127 @@ def test_inflight_calls_keep_their_original_accounting_at_the_guard_boundary(tmp
     assert w._state.operation_refusals[('deepline.execute', 'exa_search')][0] == 32
     assert execute(w) == ('miner_credentials_unavailable', None)
     assert len(api.frames) == len(w._state.calls) == 32
+
+
+def test_expired_cooldown_allows_one_requested_probe_and_success_reopens_tool(tmp_path):
+    clock = [100.0]
+    api = OperationApi()
+    w = rn.WorkerSocketServer(tmp_path / 'worker.sock', api,
+        rn.RunState(lease={'run_id': 'r1', 'kind': 'execute'}, lease_token='token'),
+        monotonic=lambda: clock[0])
+    exhaust_exa(w)
+    assert execute(w) == ('miner_credentials_unavailable', None)
+    assert len(api.frames) == 25
+    clock[0] += rn.REFUSAL_PROBE_COOLDOWN_SECONDS
+    api.refusal = None
+    assert execute(w)[1]['status'] == 200
+    assert execute(w)[1]['status'] == 200
+    assert len(api.frames) == len(w._state.calls) == 27
+    assert w._state.operation_refusals == {}
+    assert w._state.local_refusals == 1
+
+
+def test_failed_probe_rearms_from_completion_and_does_not_replay(tmp_path):
+    clock = [100.0]
+    api = OperationApi()
+    w = rn.WorkerSocketServer(tmp_path / 'worker.sock', api,
+        rn.RunState(lease={'run_id': 'r1', 'kind': 'execute'}, lease_token='token'),
+        monotonic=lambda: clock[0])
+    exhaust_exa(w)
+    clock[0] += rn.REFUSAL_PROBE_COOLDOWN_SECONDS
+    original_provider = api.provider
+
+    def delayed_provider(*args):
+        clock[0] += 5.0
+        return original_provider(*args)
+
+    api.provider = delayed_provider
+    assert execute(w)[1]['status'] == 402
+    assert w._state.operation_refusal_until[('deepline.execute', 'exa_search')] == 165.0
+    assert execute(w) == ('miner_credentials_unavailable', None)
+    assert len(api.frames) == 26
+    clock[0] = 165.0
+    assert execute(w)[1]['status'] == 402
+    assert len(api.frames) == len(w._state.calls) == 27
+
+
+def test_only_one_concurrent_probe_is_dispatched_after_cooldown(tmp_path):
+    clock = [100.0]
+    api = OperationApi()
+    w = rn.WorkerSocketServer(tmp_path / 'worker.sock', api,
+        rn.RunState(lease={'run_id': 'r1', 'kind': 'execute'}, lease_token='token'),
+        monotonic=lambda: clock[0])
+    exhaust_exa(w)
+    clock[0] += rn.REFUSAL_PROBE_COOLDOWN_SECONDS
+    entered, release = threading.Event(), threading.Event()
+    original_provider = api.provider
+
+    def blocked_provider(*args):
+        entered.set()
+        assert release.wait(timeout=5)
+        return original_provider(*args)
+
+    api.provider = blocked_provider
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(execute, w)
+        assert entered.wait(timeout=5)
+        assert execute(w) == ('miner_credentials_unavailable', None)
+        assert len(api.frames) == 25
+        release.set()
+        assert first.result(timeout=5)[1]['status'] == 402
+    assert len(api.frames) == len(w._state.calls) == 26
+
+
+def test_older_refusal_cannot_overwrite_later_same_tool_success(tmp_path):
+    api = OperationApi()
+    w = worker(tmp_path, api)
+    for _ in range(rn.MAX_REFUSED_FRAMES - 1):
+        assert execute(w)[1]['status'] == 402
+    entered, release = threading.Event(), threading.Event()
+    original_provider = api.provider
+
+    def out_of_order_provider(*args):
+        if args[2]['action_sequence'] == rn.MAX_REFUSED_FRAMES - 1:
+            entered.set()
+            assert release.wait(timeout=5)
+            previous_refusal = api.refusal
+            try:
+                api.refusal = 'miner_credentials_unavailable'
+                return original_provider(*args)
+            finally:
+                api.refusal = previous_refusal
+        return original_provider(*args)
+
+    api.provider = out_of_order_provider
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        old = pool.submit(execute, w)
+        assert entered.wait(timeout=5)
+        api.refusal = None
+        assert execute(w)[1]['status'] == 200
+        release.set()
+        assert old.result(timeout=5)[1]['status'] == 402
+    key = ('deepline.execute', 'exa_search')
+    assert w._state.operation_latest_calls[key]['action_sequence'] == rn.MAX_REFUSED_FRAMES
+    assert w._state.operation_refusals == {}
+    assert len(api.frames) == len(w._state.calls) == rn.MAX_REFUSED_FRAMES + 1
+
+
+def test_malformed_probe_releases_slot_and_records_unknown_broker_failure(tmp_path):
+    clock = [100.0]
+    api = OperationApi()
+    w = rn.WorkerSocketServer(tmp_path / 'worker.sock', api,
+        rn.RunState(lease={'run_id': 'r1', 'kind': 'execute'}, lease_token='token'),
+        monotonic=lambda: clock[0])
+    exhaust_exa(w)
+    clock[0] += rn.REFUSAL_PROBE_COOLDOWN_SECONDS
+    api.provider = lambda *_args: {}
+    assert execute(w) == ('worker_unavailable', None)
+    key = ('deepline.execute', 'exa_search')
+    assert not w._state.operation_probe_inflight
+    assert w._state.operation_latest_calls[key]['error_code'] == 'broker_unavailable'
+    assert w._state.calls[-1]['outcome'] == 'unknown'
+    assert len(w._state.calls) == rn.MAX_REFUSED_FRAMES + 1
+    assert execute(w) == ('miner_credentials_unavailable', None)
+    clock[0] += rn.REFUSAL_PROBE_COOLDOWN_SECONDS
+    assert execute(w) == ('worker_unavailable', None)
+    assert len(w._state.calls) == rn.MAX_REFUSED_FRAMES + 2

@@ -42,7 +42,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
 )
 from tests.lab_arena.test_lab_arena_service_round import (
     Harness, _run_stage_one_to_scoring, _start_round, promotion_repository,
-    assert_canary_absent, CANARY_KEYS, FakeProviderTransport, price_table,
+    assert_canary_absent, CANARY_KEYS, FakeProviderTransport, price_table, daily_icps,
 )
 from tests.postgres_migration_harness import SCRIPTS
 from lab_arena.weight_signer import ArenaWeightSigner
@@ -942,6 +942,9 @@ def test_slot_decay_persists_through_daily_publication_and_normal_validator_reco
     harness.service.config.defaults = replace(
         harness.service.config.defaults, rewards_enabled=True, benchmark_icp_count=2,
     )
+    harness.service.config.daily_icp_source = lambda **kwargs: {
+        "status": "ready", "set_id": int(kwargs["set_id"]), "icps": daily_icps()[:2],
+    }
     repository_root = tmp_path / "decay-promotion"
     repository_root.mkdir()
     remote = promotion_repository(repository_root)

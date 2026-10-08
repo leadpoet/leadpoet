@@ -5,7 +5,65 @@ import json
 import httpx
 import pytest
 
-from lab_arena.store import ArenaStore, ArenaStoreError, PostgrestTransport
+from lab_arena.store import (
+    ArenaStore, ArenaStoreError, ArenaStoreUnavailable,
+    BULK_ROUND_RPC_READ_TIMEOUT_SECONDS, PostgrestTransport,
+)
+
+
+@pytest.mark.parametrize(
+    ("function", "params", "expected_read"),
+    [
+        ("lab_arena_open_stage", {}, BULK_ROUND_RPC_READ_TIMEOUT_SECONDS),
+        ("lab_arena_open_scoring", {}, BULK_ROUND_RPC_READ_TIMEOUT_SECONDS),
+        ("lab_arena_open_scoring_v2", {}, BULK_ROUND_RPC_READ_TIMEOUT_SECONDS),
+        ("lab_arena_open_scoring_v3", {}, BULK_ROUND_RPC_READ_TIMEOUT_SECONDS),
+        ("lab_arena_transition_round", {"p_expected_status": "scored", "p_next_status": "published"}, BULK_ROUND_RPC_READ_TIMEOUT_SECONDS),
+        ("lab_arena_whoami", {}, 8.0),
+        ("lab_arena_transition_round", {"p_expected_status": "stage2", "p_next_status": "scoring"}, 8.0),
+    ],
+)
+def test_round_rpc_read_timeout_preserves_other_timeouts(function, params, expected_read):
+    observed = []
+
+    def handle(request):
+        observed.append(request.extensions["timeout"])
+        return httpx.Response(200, json={"status": "ok"})
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(handle),
+        timeout=httpx.Timeout(connect=1.5, read=8.0, write=2.5, pool=3.5),
+    )
+    store = PostgrestTransport(
+        "https://db.example", service_key="sb_secret_test", http_client=client,
+    )
+    assert store.rpc(function, params) == {"status": "ok"}
+    assert observed == [{"connect": 1.5, "read": expected_read, "write": 2.5, "pool": 3.5}]
+    store.close()
+
+
+@pytest.mark.parametrize("function", [
+    "lab_arena_open_scoring", "lab_arena_open_scoring_v2", "lab_arena_open_scoring_v3",
+])
+@pytest.mark.parametrize("failure", ["read_timeout", "http_503"])
+def test_scoring_rpc_response_failure_never_replays_post(function, failure):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        if failure == "read_timeout":
+            raise httpx.ReadTimeout("response lost")
+        return httpx.Response(503, json={"message": "unavailable"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handle))
+    store = PostgrestTransport(
+        "https://db.example", service_key="sb_secret_test", http_client=client,
+    )
+    error = ArenaStoreUnavailable if failure == "read_timeout" else ArenaStoreError
+    with pytest.raises(error):
+        store.rpc(function, {})
+    assert len(requests) == 1
+    store.close()
 
 
 def test_keyed_reconciliation_uses_v2_and_legacy_uses_v1():

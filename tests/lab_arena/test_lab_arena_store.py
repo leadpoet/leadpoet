@@ -150,7 +150,8 @@ def test_rpc_other_http_error_stays_base_store_error_without_replay():
 
 
 @pytest.mark.parametrize("bulk_function", [
-    "lab_arena_open_stage", "lab_arena_open_scoring_v3", "lab_arena_transition_round",
+    "lab_arena_open_stage", "lab_arena_open_scoring", "lab_arena_open_scoring_v2",
+    "lab_arena_open_scoring_v3", "lab_arena_transition_round",
 ])
 def test_bulk_round_rpc_waits_for_database_without_changing_other_deadlines(bulk_function):
     requests = []
@@ -167,13 +168,15 @@ def test_bulk_round_rpc_waits_for_database_without_changing_other_deadlines(bulk
         store = ArenaStore(transport)
         if bulk_function == "lab_arena_open_stage":
             store.open_stage("arena-2026-09-30", 2, [], [0, 1])
-        elif bulk_function == "lab_arena_open_scoring_v3":
-            store.open_scoring("arena-2026-09-30", 2, [], company_quality_cache=True)
+        elif bulk_function.startswith("lab_arena_open_scoring"):
+            store.open_scoring(
+                "arena-2026-09-30", 2, [],
+                integrity_cache=bulk_function == "lab_arena_open_scoring_v2",
+                company_quality_cache=bulk_function == "lab_arena_open_scoring_v3",
+            )
         else:
             store.transition_round("arena-2026-09-30", "scored", "published", {})
         store.transition_round("arena-2026-09-30", "stage2_judged", "scored", {})
-        store.open_scoring("arena-2026-09-30", 2, [])
-        store.open_scoring("arena-2026-09-30", 2, [], integrity_cache=True)
         transport.rpc("lab_arena_cancel_round", {"p_round_id": "arena-2026-09-30"})
         assert transport.select("lab_arena_rounds") == []
         assert client.timeout == timeout
@@ -208,7 +211,13 @@ def test_closed_provider_selector_extends_only_its_read_deadline():
     assert requests[1].extensions["timeout"] == timeout.as_dict()
 
 
-def test_closed_provider_selector_waits_for_slow_read_and_does_not_replay_timeout(monkeypatch):
+@pytest.mark.parametrize(("function", "timeout_setting"), [
+    ("lab_arena_next_closed_provider_reconciliation_v1", "CLOSED_PROVIDER_RECONCILIATION_READ_TIMEOUT_SECONDS"),
+    ("lab_arena_open_scoring", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS"),
+    ("lab_arena_open_scoring_v2", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS"),
+    ("lab_arena_open_scoring_v3", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS"),
+])
+def test_scoped_rpc_waits_for_slow_read_and_does_not_replay_timeout(monkeypatch, function, timeout_setting):
     # Shortened deadlines exercise the real HTTP read clock without a long test.
     requests = []
 
@@ -230,7 +239,7 @@ def test_closed_provider_selector_waits_for_slow_read_and_does_not_replay_timeou
         def log_message(self, *_args):
             pass
 
-    monkeypatch.setattr(arena_store, "CLOSED_PROVIDER_RECONCILIATION_READ_TIMEOUT_SECONDS", 0.6)
+    monkeypatch.setattr(arena_store, timeout_setting, 0.6)
     with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -239,14 +248,14 @@ def test_closed_provider_selector_waits_for_slow_read_and_does_not_replay_timeou
             service_key="sb_secret_test", timeout_seconds=0.1,
         )
         try:
-            assert transport.rpc("lab_arena_next_closed_provider_reconciliation_v1", {}) == {"status": "none"}
+            assert transport.rpc(function, {}) == {"status": "none"}
             with pytest.raises(ArenaStoreUnavailable) as ordinary:
                 transport.rpc("lab_arena_cancel_round", {})
             assert isinstance(ordinary.value.__cause__, httpx.ReadTimeout)
 
-            monkeypatch.setattr(arena_store, "CLOSED_PROVIDER_RECONCILIATION_READ_TIMEOUT_SECONDS", 0.1)
+            monkeypatch.setattr(arena_store, timeout_setting, 0.1)
             with pytest.raises(ArenaStoreUnavailable) as closed:
-                transport.rpc("lab_arena_next_closed_provider_reconciliation_v1", {})
+                transport.rpc(function, {})
             assert isinstance(closed.value.__cause__, httpx.ReadTimeout)
         finally:
             transport.close()
@@ -258,7 +267,8 @@ def test_closed_provider_selector_waits_for_slow_read_and_does_not_replay_timeou
 
 @pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError])
 @pytest.mark.parametrize("bulk_function", [
-    "lab_arena_open_stage", "lab_arena_open_scoring_v3", "lab_arena_transition_round",
+    "lab_arena_open_stage", "lab_arena_open_scoring", "lab_arena_open_scoring_v2",
+    "lab_arena_open_scoring_v3", "lab_arena_transition_round",
 ])
 def test_bulk_round_rpc_response_loss_is_not_blindly_replayed(error_type, bulk_function):
     requests = []
@@ -274,8 +284,12 @@ def test_bulk_round_rpc_response_loss_is_not_blindly_replayed(error_type, bulk_f
         with pytest.raises(ArenaStoreUnavailable, match=bulk_function):
             if bulk_function == "lab_arena_open_stage":
                 store.open_stage("arena-2026-09-30", 2, [], [0, 1])
-            elif bulk_function == "lab_arena_open_scoring_v3":
-                store.open_scoring("arena-2026-09-30", 2, [], company_quality_cache=True)
+            elif bulk_function.startswith("lab_arena_open_scoring"):
+                store.open_scoring(
+                    "arena-2026-09-30", 2, [],
+                    integrity_cache=bulk_function == "lab_arena_open_scoring_v2",
+                    company_quality_cache=bulk_function == "lab_arena_open_scoring_v3",
+                )
             else:
                 store.transition_round("arena-2026-09-30", "scored", "published", {})
     assert len(requests) == 1

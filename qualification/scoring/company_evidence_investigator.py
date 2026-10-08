@@ -3533,7 +3533,11 @@ async def investigate_company_evidence(
                             {"reasoning": {"effort": "low"}}
                             if (
                                 positive_semantic_review
-                                and serialization_retry_request
+                                and (
+                                    serialization_retry_request
+                                    or force_submit
+                                    or required_tool == "submit_findings"
+                                )
                             )
                             else {}
                         ),

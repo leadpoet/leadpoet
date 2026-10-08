@@ -445,7 +445,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path(os.getenv(SSH_KEY_ENV) or DEFAULT_SSH_KEY),
     )
     parser.add_argument("--limit", type=int, default=25)
-    parser.add_argument("--query", default="is:unresolved")
+    parser.add_argument(
+        "--query", default=None,
+        help="issue search only (default for issues: is:unresolved)",
+    )
     parser.add_argument("--stats-period", default="24h")
     parser.add_argument("--timeout-seconds", type=float, default=15.0)
     return parser
@@ -455,6 +458,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.query is not None and args.command != "issues":
+            raise SentryQueryError(
+                "argument_invalid", "--query is supported only for issues"
+            )
         limit = _bounded_limit(args.limit)
         timeout = _bounded_timeout(args.timeout_seconds)
         credentials = _load_credentials(
@@ -480,7 +487,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif args.command == "issues":
             items = query_issues(
                 credentials,
-                query=args.query,
+                query=args.query if args.query is not None else "is:unresolved",
                 stats_period=args.stats_period,
                 limit=limit,
                 timeout=timeout,

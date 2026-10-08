@@ -2180,7 +2180,12 @@ def _validated_findings(
             "old_domain": _registrable_domain(raw.get("old_domain")),
             "new_domain": _registrable_domain(raw.get("new_domain")),
             "shared_linkedin_slug": str(raw.get("shared_linkedin_slug") or "")[:200],
-            "reason": str(raw.get("reason") or "")[:300],
+            # Model prose can contain C0/DEL controls that the host rejects in
+            # a receipt. Keep allowed whitespace and bound the normalized text.
+            "reason": re.sub(
+                r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ",
+                str(raw.get("reason") or ""),
+            )[:300],
         }
         if status == "UNPROVEN":
             finding.update(

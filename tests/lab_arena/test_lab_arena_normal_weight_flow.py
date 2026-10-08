@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import urllib.error
@@ -16,7 +17,8 @@ import pytest
 from bittensor_wallet import Keypair
 from fastapi.testclient import TestClient
 
-from lab_arena import contracts, signing
+from lab_arena import broker, contracts, rewards, scoring, signing, submission_runtime
+from leadpoet_canonical import arena_weights
 from lab_arena.api import create_app
 from lab_arena.service import ServiceError
 from lab_arena.local_weight_signer import (
@@ -34,12 +36,12 @@ from tests.lab_arena.lab_arena_pg_harness import (
     DEFAULT_MIGRATIONS,
     LAB_ARENA_OPTIONAL_SCRAPINGDOG_CREDENTIAL_MIGRATION,
     LAB_ARENA_RETIRED_INCENTIVE_BRIDGE_MIGRATION,
-    CURRENT_PROVIDER_SERVICE_MIGRATIONS,
+    CURRENT_REWARD_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
 )
 from tests.lab_arena.test_lab_arena_service_round import (
     Harness, _run_stage_one_to_scoring, _start_round, promotion_repository,
-    assert_canary_absent,
+    assert_canary_absent, CANARY_KEYS, FakeProviderTransport, price_table,
 )
 from tests.postgres_migration_harness import SCRIPTS
 from lab_arena.weight_signer import ArenaWeightSigner
@@ -213,7 +215,7 @@ def integrated_database():
                 LAB_ARENA_RETIRED_INCENTIVE_BRIDGE_MIGRATION,
                 LAB_ARENA_OPTIONAL_SCRAPINGDOG_CREDENTIAL_MIGRATION,
             )
-            for migration in CURRENT_PROVIDER_SERVICE_MIGRATIONS:
+            for migration in CURRENT_REWARD_SERVICE_MIGRATIONS:
                 if migration not in applied_migrations:
                     cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
             cursor.execute(
@@ -447,6 +449,33 @@ def _public_api(key, clock):
     )
 
 
+class _NormalWeightHarness(Harness):
+    """Use the normal per-provider payer path after the first real crown."""
+
+    def build_service(self):
+        service = super().build_service()
+        payer = submission_runtime.SubmissionProviderKeys(
+            store=service.store, credentials=service.config.credential_manager,
+            organizer_keys=CANARY_KEYS,
+        )
+
+        def broker_factory(_service, _round_row):
+            return broker.Broker(
+                store=service.store, key_for=lambda provider: CANARY_KEYS[provider],
+                credential_for=payer.credential_for,
+                funding_source_for=payer.funding_source_for,
+                provider_funding_source_for=payer.provider_funding_source_for,
+                retry_miner_credential_for=payer.retry_miner_credential_for,
+                mark_provider_fallback=payer.mark_provider_fallback,
+                provider_restart_required_for=payer.provider_restart_required_for,
+                price_table=price_table(), judge_models=tuple(scoring.DEFAULT_JUDGE_MODELS.values()),
+                transport=FakeProviderTransport(), clock=self.clock,
+            )
+
+        service.config.broker_factory = broker_factory
+        return service
+
+
 @pytest.mark.parametrize(
     ("round_day", "round_epoch", "reward_epoch", "uses_prior_basis"),
     ((30, 32000, 32001, False), (31, 32002, 32004, True)),
@@ -463,7 +492,9 @@ def test_scoring_reward_normal_validators_restart_and_chain_readback(
         core_schema, weight_schema = cursor.fetchone()
     assert core_schema == {"schema_version": "leadpoet.lab_arena.schema_version.v1", "version": 197}
     assert weight_schema == {"schema_version": "leadpoet.lab_arena.weight_state_schema.v1", "version": 202}
-    harness = Harness(connect, tmp_path, challengers=["NormalWinner"], runners=["alpha", "beta"])
+    # These actual judge fixtures score 83.6 against the public baseline's
+    # 69.8. No published score is replaced to manufacture an achievement.
+    harness = _NormalWeightHarness(connect, tmp_path, challengers=["NormalSlotWinner71"], runners=["alpha", "beta"])
     harness.service.config.defaults = replace(harness.service.config.defaults, rewards_enabled=True)
     # Beta is a valid but unplanned worker: runner configuration cannot gate it.
     harness.service.config.defaults.runner_hotkeys = (harness.runner_keys[0],)
@@ -493,6 +524,24 @@ def test_scoring_reward_normal_validators_restart_and_chain_readback(
     harness.service.config.baseline_promoter_factory = lambda: GitPromoter(str(remote), tmp_path / "promotion-cache")
     assert harness.service.promote_pending_baselines()["status"] == "ok"
     assert harness.service.activate_reward(harness.round_id)["status"] == "activated"
+
+    activated = harness.service.store.get_round(harness.round_id)
+    basis = activated["reward_basis_doc"]
+    assert basis["schema_version"] == "leadpoet.lab_arena.reward_basis.v2"
+    assert basis["slot_policy"] == rewards.reward_slot_policy_document()
+    assert basis["reward_slots"][1:] == [None, None]
+    achievement = basis["reward_slots"][0]
+    assert achievement is not None
+    assert achievement["winner_score"] - achievement["baseline_score"] >= 10
+    source_round = harness.service.store.get_round(achievement["round_id"])
+    assert source_round["baseline_promoted_at"] is not None
+    ranking = source_round["publication_doc"]["final_ranking"]
+    for field, submission_field in (
+        ("winner_score", "submission_id"),
+        ("baseline_score", "baseline_submission_id"),
+    ):
+        published = next(row for row in ranking if row["submission_id"] == achievement[submission_field])
+        assert achievement[field] == published["final_score"]
 
     burn = Keypair.create_from_uri("//ArenaFlowBurn").ss58_address
     harness.service.config.accepted_burn_hotkey = burn
@@ -687,6 +736,11 @@ def test_scoring_reward_normal_validators_restart_and_chain_readback(
             hotkeys = [burn]
             if state["reward_basis"]["king_hotkey"]:
                 hotkeys.append(state["reward_basis"]["king_hotkey"])
+            derived = arena_weights.derive_arena_weights(state, hotkeys)
+            assert derived["champion_share_ppb"] == 500_000_000
+            assert derived["burned_residual_ppb"] == 500_000_000
+            assert derived["sparse_uids"] == [0, 1]
+            assert derived["sparse_weights_u16"] == [65535, 65535]
             source = _ExternalSource(
                 hotkeys,
                 key.public_key.hex(),
@@ -712,6 +766,9 @@ def test_scoring_reward_normal_validators_restart_and_chain_readback(
             outcome_path = paths.outcome(reward_epoch)
             signed_bytes = signed_path.read_bytes()
             signed = json.loads(signed_bytes)
+            assert signed["accepted_state"]["reward_basis"] == basis
+            assert signed["sparse_uids"] == derived["sparse_uids"]
+            assert signed["sparse_weights_u16"] == derived["sparse_weights_u16"]
             vectors.append((signed["sparse_uids"], signed["sparse_weights_u16"]))
             source.expected_weights = list(zip(signed["sparse_uids"], signed["sparse_weights_u16"]))
             # A new in-process signer has no memory of the first attempt.  It must
@@ -762,3 +819,107 @@ def test_scoring_reward_normal_validators_restart_and_chain_readback(
     assert_canary_absent(harness, connect)
     with pytest.raises(Exception, match="not_current"):
         harness.service.public_weight_state(reward_epoch + 1)
+
+
+def test_v2_multiple_payees_preserves_pending_v1_signed_recovery(tmp_path):
+    """New slot signing must not change an older journal's signed authority."""
+    arena_signer = signing.LocalSigner.generate()
+    key = Keypair.create_from_uri("//ArenaSlotRecoveryValidator")
+    burn = Keypair.create_from_uri("//ArenaSlotRecoveryBurn").ss58_address
+    owners = [Keypair.create_from_uri("//ArenaSlotRecoveryOwner%d" % i).ss58_address for i in range(3)]
+    profile = load_public_chain_signing_profile(
+        "finney", path=Path("lab_arena/chain_signing_profile_v2.json"),
+    )
+    old_epoch, new_epoch = 33000, 33001
+
+    def signed_state(epoch, *, slots=None):
+        basis = rewards.reward_basis_document(
+            round_id="recovery-%d" % epoch, published_at="2026-10-08T00:00:00Z",
+            finalized_epoch=epoch - 1, king_outcome="crowned", king_hotkey=owners[0],
+            slot_policy=rewards.reward_slot_policy_document() if slots is not None else None,
+            reward_slots=slots,
+        )
+        basis = signing.sign_document(arena_signer, basis, hash_field="reward_basis_hash")
+        body = {
+            "schema_version": arena_weights.ACCEPTED_WEIGHT_STATE_SCHEMA_VERSION,
+            "network": "finney", "genesis_hash": profile["genesis_hash"], "netuid": 71,
+            "epoch": epoch, "valid_from_block": 100, "valid_until_block": 459,
+            "reward_basis": basis, "burn_hotkey": burn, "issued_at": "2026-10-08T00:00:00Z",
+        }
+        body["state_hash"] = contracts.document_hash(body)
+        body["signature"] = {
+            "algorithm": arena_signer.algorithm,
+            "public_key_hash": arena_signer.public_key_hash,
+            "signature_b64": base64.b64encode(arena_signer.sign(
+                (arena_weights.WEIGHT_STATE_SIGNATURE_PREFIX + body["state_hash"]).encode()
+            )).decode(),
+        }
+        return body
+
+    slots = [
+        {
+            "round_id": "achievement-%d" % i, "submission_id": "winner-%d" % i,
+            "miner_hotkey": owner, "baseline_submission_id": "baseline-%d" % i,
+            "baseline_score": 60, "winner_score": score,
+        }
+        for i, (owner, score) in enumerate(zip(owners, (70, 65, 61)))
+    ]
+    old_state = signed_state(old_epoch)
+    new_state = signed_state(new_epoch, slots=slots)
+    source = _ExternalSource([burn] + owners, key.public_key.hex(), profile["genesis_hash"], epoch=old_epoch)
+    host = _HostChain(source, key.ss58_address)
+    paths = ArenaWeightPaths(tmp_path)
+    lookups, reports = [], []
+    active_state = [old_state]
+
+    def lookup(epoch):
+        lookups.append(epoch)
+        assert epoch == active_state[0]["epoch"]
+        return active_state[0]
+
+    api = SimpleNamespace(
+        signing_key=lambda: signing.signing_key_document(arena_signer.public_key_der),
+        accepted_weight_state=lookup,
+        submit_chain_outcome=lambda document: reports.append(document) or {"status": "recorded"},
+    )
+
+    def orchestrator():
+        return ArenaWeightOrchestrator(
+            api=api, chain=host,
+            signer=_local_signer_client(key=key, source=source, profile=profile, arena_signer=arena_signer, burn=burn),
+            validator_hotkey=key.ss58_address, expected_signing_key_hash=arena_signer.public_key_hash,
+            paths=paths, extrinsic_period=int(profile["extrinsic_period"]),
+        )
+
+    assert orchestrator().run_once(old_epoch) == "broadcast"
+    old_bytes = paths.signed(old_epoch).read_bytes()
+    old_signed = json.loads(old_bytes)
+    assert old_signed["accepted_state"]["reward_basis"]["schema_version"] == "leadpoet.lab_arena.reward_basis.v1"
+    assert old_signed["sparse_weights_u16"] == [65535, 28086]
+    source.epoch = new_epoch
+    active_state[0] = new_state
+    restarted = orchestrator()
+    assert restarted.run_once(new_epoch) == "broadcast"
+    new_bytes = paths.signed(new_epoch).read_bytes()
+    new_signed = json.loads(new_bytes)
+    # Empty burn allocation disappears; the three independent registered
+    # owners receive exactly 50%, 30%, and 20% through normal serialization.
+    assert new_signed["sparse_uids"] == [1, 2, 3]
+    assert new_signed["sparse_weights_u16"] == [65535, 39321, 26214]
+    for state, epoch, signed in (
+        (old_state, old_epoch, old_signed), (new_state, new_epoch, new_signed),
+    ):
+        source.expected_weights = list(zip(signed["sparse_uids"], signed["sparse_weights_u16"]))
+        source.included = source.revealed = True
+        if epoch == old_epoch:
+            restarted.poll_prior_outcomes(new_epoch)
+            assert paths.outcome(old_epoch).exists()
+        else:
+            assert restarted.run_once(epoch) == "finalized"
+        outcome = json.loads(paths.outcome(epoch).read_bytes())
+        assert outcome["outcome"]["revealed_weights"] == [list(item) for item in source.expected_weights]
+        assert outcome["report_document"]["state_hash"] == state["state_hash"]
+    assert lookups == [old_epoch, new_epoch]
+    assert [report["epoch"] for report in reports] == [old_epoch, new_epoch]
+    assert paths.signed(old_epoch).read_bytes() == old_bytes
+    assert paths.signed(new_epoch).read_bytes() == new_bytes

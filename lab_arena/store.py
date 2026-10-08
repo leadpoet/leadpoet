@@ -141,6 +141,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_create_round": (("p_round_id", "text"), ("p_configuration_doc", "jsonb")),
     "lab_arena_transition_round": (("p_round_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
     "lab_arena_activate_reward": (("p_round_id", "text"), ("p_reward_basis", "jsonb"), ("p_signing_key_doc", "jsonb")),
+    "lab_arena_reward_slot_snapshot": (("p_round_id", "text"), ("p_slot_policy", "jsonb")),
     "lab_arena_prepare_promotion": (("p_round_id", "text"), ("p_plan", "jsonb")),
     "lab_arena_complete_promotion": (("p_round_id", "text"), ("p_plan", "jsonb")),
     "lab_arena_register_submission": (("p_round_id", "text"), ("p_submission_id", "text"), ("p_miner_hotkey", "text"), ("p_doc", "jsonb")),
@@ -1206,6 +1207,24 @@ class ArenaStore:
             ),
             "commit_round_v2",
         )
+
+    def reward_slot_snapshot(
+        self, round_id: str, slot_policy: Mapping[str, Any]
+    ) -> List[Optional[Dict[str, Any]]]:
+        result = _require_mapping(
+            self._transport.rpc(
+                "lab_arena_reward_slot_snapshot",
+                {"p_round_id": round_id, "p_slot_policy": dict(slot_policy)},
+            ),
+            "reward_slot_snapshot",
+        )
+        slots = result.get("reward_slots")
+        if not isinstance(slots, list) or len(slots) != 3:
+            raise ArenaStoreError("reward_slot_snapshot returned invalid reward_slots")
+        return [
+            None if slot is None else _require_mapping(slot, "reward_slot_snapshot")
+            for slot in slots
+        ]
 
     def activate_reward(self, round_id: str, reward_basis: Mapping[str, Any], signing_key_doc: Mapping[str, Any]) -> Dict[str, Any]:
         return _require_mapping(

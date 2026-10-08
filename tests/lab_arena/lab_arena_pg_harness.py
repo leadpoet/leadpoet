@@ -153,6 +153,14 @@ CURRENT_PROVIDER_SERVICE_MIGRATIONS = CURRENT_SERVICE_MIGRATIONS + (
     "426-lab-arena-deepline-response-missing-guard.sql",
 )
 
+# Reward activation depends on the exact predecessor and day-authority seams.
+# Keep this tail explicit so historical provider fixtures retain their schema.
+CURRENT_REWARD_SERVICE_MIGRATIONS = CURRENT_PROVIDER_SERVICE_MIGRATIONS + (
+    "342-lab-arena-reward-predecessor-barrier.sql",
+    "377-lab-arena-monotonic-day-authority.sql",
+    "428-lab-arena-reward-slots.sql",
+)
+
 
 def migrations_before(anchor: str) -> tuple[str, ...]:
     """Canonical migrations installed ahead of ``anchor``.

@@ -298,10 +298,10 @@ ROUND_NETUID_COLUMN = "arena_netuid"
 
 DEADLOCK_SQLSTATE = "40P01"
 DEADLOCK_RETRIES = 3
-# Publication validates the complete round in one atomic database transaction.
-# Let its bounded 60-second database deadline return a result before giving up
-# on the response. Other RPCs keep the normal short transport deadline.
-PUBLICATION_RPC_READ_TIMEOUT_SECONDS = 65.0
+# Stage creation and publication process the complete round atomically.
+# Let their bounded 60-second database deadlines return a result before giving
+# up on the response. Other RPCs keep the normal short transport deadline.
+BULK_ROUND_RPC_READ_TIMEOUT_SECONDS = 65.0
 
 
 class ArenaStoreError(RuntimeError):
@@ -430,7 +430,7 @@ class PostgrestTransport(StoreTransport):
             raise ArenaStoreError("unknown Arena function")
         content = canonical_json(dict(params)).encode("utf-8")
         request_options = {}
-        if (
+        if function in {"lab_arena_open_stage", "lab_arena_open_scoring_v3"} or (
             function == "lab_arena_transition_round"
             and params.get("p_expected_status") == "scored"
             and params.get("p_next_status") == "published"
@@ -438,7 +438,7 @@ class PostgrestTransport(StoreTransport):
             timeout = self._client.timeout
             request_options["timeout"] = httpx.Timeout(
                 connect=timeout.connect,
-                read=PUBLICATION_RPC_READ_TIMEOUT_SECONDS,
+                read=BULK_ROUND_RPC_READ_TIMEOUT_SECONDS,
                 write=timeout.write,
                 pool=timeout.pool,
             )

@@ -177,6 +177,7 @@ def public_company_catalog():
     "SELECT DISTINCT ON (industry) industry FROM companies LIMIT 5",
     "SELECT CASE (industry) WHEN ('solar') THEN (1) ELSE (0) END FROM companies LIMIT 5",
     "SELECT industry FROM companies GROUP BY (industry) HAVING (COUNT (*) > 1) LIMIT 5",
+    "SELECT industry FROM companies ORDER BY (industry) LIMIT 5",
     "SELECT COUNT (*) FROM companies WHERE (industry = 'solar') LIMIT 5",
 ])
 def test_frozen_public_company_search_normalizes_grouped_readonly_sql(public_company_catalog, sql):
@@ -193,6 +194,9 @@ def test_frozen_public_company_search_normalizes_grouped_readonly_sql(public_com
 
 @pytest.mark.parametrize("sql", [
     "SELECT pg_read_file ('/etc/passwd') FROM companies LIMIT 5",
+    "SELECT by ('x') FROM companies LIMIT 10",
+    "SELECT industry FROM companies ORDER BY by('x') LIMIT 10",
+    "SELECT * FROM companies WHERE (pg_read_file ('/etc/passwd') IS NOT NULL) LIMIT 5",
     "SELECT pg_catalog.COUNT (*) FROM companies LIMIT 5",
     'SELECT "industry" FROM companies LIMIT 5',
     "SELECT * FROM companies WHERE (industry = 'solar') -- comment\n LIMIT 5",

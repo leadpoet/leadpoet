@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from lab_arena import rewards
 from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport
 from tests.lab_arena.lab_arena_pg_harness import database_with_lab_arena_migration
 from tests.lab_arena.reward_slots_postgres_test import (
@@ -19,6 +18,11 @@ MIGRATION = Path(__file__).parents[2] / "scripts/429-lab-arena-cumulative-reward
 MIGRATIONS = SLOT_MIGRATIONS + (MIGRATION.name,)
 CHAIN_IDS = itertools.count(1500)
 ALICE, BOB, CAROL = ["5" + letter * 47 for letter in "BCD"]
+
+
+def _legacy_cumulative_policy():
+    # This fixture deliberately stops at migration 429, before optional decay.
+    return dict(deepcopy(OLD_POLICY), assignment_mode="all_qualifying", pool_percent=30)
 
 
 @pytest.fixture(scope="module")
@@ -59,7 +63,7 @@ def test_cumulative_slots_follow_each_published_win_across_days(state):
                 hotkey=BOB, baseline_score=60)
     c = _winner(control, chain, "c", day="2026-10-07", delta=2,
                 hotkey=CAROL, baseline_score=80)
-    policy = rewards.reward_slot_policy_document()
+    policy = _legacy_cumulative_policy()
     assert [x["round_id"] for x in store.reward_slot_snapshot(a, policy)] == [a, a, a]
     assert [x["round_id"] for x in store.reward_slot_snapshot(b, policy)] == [a, b, b]
     slots = store.reward_slot_snapshot(c, policy)
@@ -83,7 +87,7 @@ def test_exact_boundaries_and_below_threshold_have_no_new_holder(state, delta, e
     store, control, chain, _, _ = state
     target = _winner(control, chain, "boundary", day="2026-10-07",
                      delta=delta, hotkey=ALICE, activated=False)
-    slots = store.reward_slot_snapshot(target, rewards.reward_slot_policy_document())
+    slots = store.reward_slot_snapshot(target, _legacy_cumulative_policy())
     assert [slot is not None for slot in slots] == expected
 
 
@@ -95,7 +99,7 @@ def test_tie_and_ineligible_newer_winner_do_not_displace_holders(state):
     tied = _winner(control, chain, "tie", day="2026-10-07", delta=0,
                    hotkey=CAROL, activated=False)
     assert [slot["round_id"] for slot in
-            store.reward_slot_snapshot(tied, rewards.reward_slot_policy_document())] == [a, a, a]
+            store.reward_slot_snapshot(tied, _legacy_cumulative_policy())] == [a, a, a]
 
 
 def test_activation_persists_signed_policy_and_slots_across_store_reopen(state):
@@ -104,7 +108,7 @@ def test_activation_persists_signed_policy_and_slots_across_store_reopen(state):
     b = _winner(control, chain, "b", day="2026-10-06", delta=6, hotkey=BOB)
     c = _winner(control, chain, "c", day="2026-10-07", delta=2,
                 hotkey=CAROL, activated=False)
-    policy = rewards.reward_slot_policy_document()
+    policy = _legacy_cumulative_policy()
     slots = store.reward_slot_snapshot(c, policy)
     assert [slot["round_id"] for slot in slots] == [a, b, c]
     basis, signing_key = _basis(c, slots, policy=policy, hotkey=CAROL)
@@ -137,7 +141,7 @@ def test_invalid_optional_pool_fails_database_validation(state, bad):
     store, control, chain, _, _ = state
     target = _winner(control, chain, "invalid", day="2026-10-07", delta=11,
                      hotkey=ALICE, activated=False)
-    policy = deepcopy(rewards.reward_slot_policy_document())
+    policy = deepcopy(_legacy_cumulative_policy())
     policy["pool_percent"] = bad
     with pytest.raises(ArenaStoreError, match="slot_policy_invalid"):
         store.reward_slot_snapshot(target, policy)
@@ -147,12 +151,12 @@ def test_unknown_policy_key_fails_and_zero_and_hundred_are_accepted(state):
     store, control, chain, _, _ = state
     target = _winner(control, chain, "policy", day="2026-10-07", delta=11,
                      hotkey=ALICE, activated=False)
-    policy = deepcopy(rewards.reward_slot_policy_document())
+    policy = deepcopy(_legacy_cumulative_policy())
     policy["extra"] = 1
     with pytest.raises(ArenaStoreError, match="slot_policy_invalid"):
         store.reward_slot_snapshot(target, policy)
     for pool in (0, 100):
-        policy = deepcopy(rewards.reward_slot_policy_document())
+        policy = deepcopy(_legacy_cumulative_policy())
         policy["pool_percent"] = pool
         assert [slot is not None for slot in store.reward_slot_snapshot(target, policy)] == [True] * 3
 

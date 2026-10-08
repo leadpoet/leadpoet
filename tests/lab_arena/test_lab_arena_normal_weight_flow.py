@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import subprocess
 import urllib.error
 import urllib.request
 from dataclasses import replace
@@ -831,12 +832,14 @@ def test_v2_multiple_payees_preserves_pending_v1_signed_recovery(tmp_path):
         "finney", path=Path("lab_arena/chain_signing_profile_v2.json"),
     )
     old_epoch, new_epoch = 33000, 33001
+    legacy_slot_policy = rewards.reward_slot_policy_document()
+    legacy_slot_policy.pop("decay", None)
 
     def signed_state(epoch, *, slots=None):
         basis = rewards.reward_basis_document(
             round_id="recovery-%d" % epoch, published_at="2026-10-08T00:00:00Z",
             finalized_epoch=epoch - 1, king_outcome="crowned", king_hotkey=owners[0],
-            slot_policy=rewards.reward_slot_policy_document() if slots is not None else None,
+            slot_policy=legacy_slot_policy if slots is not None else None,
             reward_slots=slots,
         )
         basis = signing.sign_document(arena_signer, basis, hash_field="reward_basis_hash")
@@ -923,3 +926,164 @@ def test_v2_multiple_payees_preserves_pending_v1_signed_recovery(tmp_path):
     assert [report["epoch"] for report in reports] == [old_epoch, new_epoch]
     assert paths.signed(old_epoch).read_bytes() == old_bytes
     assert paths.signed(new_epoch).read_bytes() == new_bytes
+
+
+def test_slot_decay_persists_through_daily_publication_and_normal_validator_recovery(
+    integrated_database, tmp_path, monkeypatch,
+):
+    """Published source epochs age each slot, including after policy upgrades."""
+    psycopg2, dsn = integrated_database
+    connect = lambda: psycopg2.connect(**dsn)
+    harness = _NormalWeightHarness(
+        connect, tmp_path, challengers=["NormalSlotWinner71"], runners=["alpha", "beta"],
+    )
+    # One ICP in each stage exercises the same configured competition path.
+    # These fixtures return the same five companies and scores for every ICP.
+    harness.service.config.defaults = replace(
+        harness.service.config.defaults, rewards_enabled=True, benchmark_icp_count=2,
+    )
+    repository_root = tmp_path / "decay-promotion"
+    repository_root.mkdir()
+    remote = promotion_repository(repository_root)
+    harness.service.config.baseline_promoter_factory = lambda: GitPromoter(
+        str(remote), tmp_path / "decay-promotion-cache",
+    )
+
+    def promoted_baseline(_url, _limit):
+        return subprocess.run(
+            ("git", "--git-dir", str(remote), "archive", "--format=tar.gz", "lab"),
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ).stdout
+
+    def publish(day, epoch, challengers, *, baseline_flavor="PublicBaseline", legacy=False):
+        harness.challengers = challengers
+        participants = _start_round(harness, day=day, epoch=epoch)
+        round_row = harness.service.store.get_round(harness.round_id)
+        for participant in round_row["participants"]:
+            if participant["is_king"]:
+                harness.flavors[participant["submission_id"]] = baseline_flavor
+        harness.clock.advance_to(harness.schedule()["stage_1_start"])
+        assert harness.service.advance_round(harness.round_id)["assignments"] == participants
+        harness.advance_until("published", runners=2)
+        assert harness.service.promote_pending_baselines()["status"] == "ok"
+        with monkeypatch.context() as patcher:
+            if legacy:
+                old_policy = rewards.reward_slot_policy_document()
+                old_policy.pop("decay")
+                patcher.setattr(rewards, "reward_slot_policy_document", lambda: old_policy)
+            assert harness.service.activate_reward(harness.round_id)["status"] == "activated"
+        return harness.service.store.get_round(harness.round_id)["reward_basis_doc"]
+
+    # Genuine published fixtures produce 83.6 versus 69.8. This legacy v2
+    # activation has no decay fields; its original epoch still starts the clock
+    # when a later daily basis first enables decay.
+    original = publish(40, 34000, ["NormalSlotWinner71"], legacy=True)
+    assert original["effective_reward_epoch"] == 34001
+    assert "decay" not in original["slot_policy"]
+    assert all("start_epoch" not in slot for slot in original["reward_slots"])
+    original_bytes = json.dumps(original, sort_keys=True)
+    owner = original["reward_slots"][0]["miner_hotkey"]
+    assert original["reward_slots"][0]["winner_score"] == pytest.approx(83.6)
+    assert original["reward_slots"][0]["baseline_score"] == pytest.approx(69.8)
+    harness.service.config.baseline_source_fetcher = promoted_baseline
+
+    burn = Keypair.create_from_uri("//ArenaDecayFlowBurn").ss58_address
+    harness.service.config.accepted_burn_hotkey = burn
+    profile = load_public_chain_signing_profile(
+        "finney", path=Path("lab_arena/chain_signing_profile_v2.json"),
+    )
+    keys = [Keypair.create_from_uri("//ArenaDecayFlowValidator%d" % i) for i in range(2)]
+    for key in keys:
+        harness.chain.runners.append(key.ss58_address)
+        harness.chain.stakes[key.ss58_address] = 1
+    paths = [ArenaWeightPaths(tmp_path / ("decay-validator-%d" % i)) for i in range(2)]
+
+    def verify_normal_flow(basis, epoch, expected_share_ppb, *, replacement_owner=None):
+        harness.chain.epoch = epoch
+        harness.chain.accepted_weight_epoch_scope = lambda: {
+            "genesis_hash": profile["genesis_hash"], "epoch": epoch,
+            "valid_from_block": 100, "valid_until_block": 459,
+        }
+        harness.clock.now = datetime.now(timezone.utc)
+        restarted_gateway = harness.build_service()
+        restarted_gateway.config.accepted_burn_hotkey = burn
+        metagraph = [burn, owner] + ([replacement_owner] if replacement_owner else [])
+        vectors = []
+        with TestClient(create_app(restarted_gateway)) as http, monkeypatch.context() as patcher:
+            patcher.setattr(urllib.request, "urlopen", _test_client_urlopen(http))
+            for index, key in enumerate(keys):
+                api = _public_api(key, harness.clock)
+                state = api.accepted_weight_state(epoch)
+                assert state is not None and state["reward_basis"] == basis
+                derived = arena_weights.derive_arena_weights(state, metagraph)
+                assert derived["champion_share_ppb"] == expected_share_ppb
+                assert derived["burned_residual_ppb"] == 1_000_000_000 - expected_share_ppb
+                source = _ExternalSource(metagraph, key.public_key.hex(), profile["genesis_hash"], epoch=epoch)
+                host = _HostChain(source, key.ss58_address)
+
+                def orchestrator():
+                    return ArenaWeightOrchestrator(
+                        api=api, chain=host,
+                        signer=_local_signer_client(
+                            key=key, source=source, profile=profile,
+                            arena_signer=harness.signer, burn=burn,
+                        ),
+                        validator_hotkey=key.ss58_address,
+                        expected_signing_key_hash=harness.signer.public_key_hash,
+                        paths=paths[index], extrinsic_period=int(profile["extrinsic_period"]),
+                    )
+
+                assert orchestrator().run_once(epoch) == "broadcast"
+                signed_bytes = paths[index].signed(epoch).read_bytes()
+                signed = json.loads(signed_bytes)
+                vectors.append((signed["sparse_uids"], signed["sparse_weights_u16"]))
+                assert vectors[-1] == (derived["sparse_uids"], derived["sparse_weights_u16"])
+                source.expected_weights = list(zip(*vectors[-1]))
+                restarted = orchestrator()
+                assert restarted.run_once(epoch) == "rebroadcast"
+                source.included = True
+                assert restarted.run_once(epoch) == "included_pending_reveal"
+                source.revealed = True
+                assert restarted.run_once(epoch) == "finalized"
+                assert paths[index].signed(epoch).read_bytes() == signed_bytes
+                outcome = json.loads(paths[index].outcome(epoch).read_bytes())
+                assert outcome["outcome"]["revealed_weights"] == [list(item) for item in source.expected_weights]
+                assert outcome["report_document"]["state_hash"] == state["state_hash"]
+        assert vectors[0] == vectors[1]
+        assert len(harness.service.public_chain_outcomes(epoch)["outcomes"]) == 2
+        return vectors[0]
+
+    first_carry = publish(41, 34139, [], baseline_flavor="NormalSlotWinner71")
+    assert first_carry["slot_policy"]["decay"] == {"epochs_per_halving": 140, "max_halvings": 4}
+    assert [slot["start_epoch"] for slot in first_carry["reward_slots"]] == [34001] * 3
+    before = verify_normal_flow(first_carry, 34140, 300_000_000)
+    after = verify_normal_flow(first_carry, 34141, 150_000_000)
+    assert before != after
+
+    # The promoted archive is now the next round's genuine 83.6 baseline.
+    # The 86.2 fixture qualifies only for +1 and cannot reset either older slot.
+    replacement = publish(42, 34279, ["SlotDecayReplacement22768"], baseline_flavor="NormalSlotWinner71")
+    assert [slot["start_epoch"] for slot in replacement["reward_slots"]] == [34001, 34001, None]
+    assert [slot["round_id"] for slot in replacement["reward_slots"]] == [original["round_id"], original["round_id"], replacement["round_id"]]
+    replaced = replacement["reward_slots"][2]
+    assert replaced["winner_score"] == pytest.approx(86.2)
+    assert replaced["baseline_score"] == pytest.approx(83.6)
+    replacement_owner = replaced["miner_hotkey"]
+    assert replacement_owner != owner
+    verify_normal_flow(replacement, 34280, 180_000_000, replacement_owner=replacement_owner)
+    verify_normal_flow(replacement, 34281, 120_000_000, replacement_owner=replacement_owner)
+
+    # Daily publication refreshes basis eligibility, while each slot keeps its
+    # own source clock. Explicit expected totals also prove residuals burn.
+    for day, finalized_epoch, before_share, after_share in (
+        (43, 34419, 90_000_000, 60_000_000),
+        (44, 34559, 45_000_000, 30_000_000),
+        (45, 34699, 22_500_000, 22_500_000),
+    ):
+        carried = publish(day, finalized_epoch, [], baseline_flavor="SlotDecayReplacement22768")
+        assert [slot["start_epoch"] for slot in carried["reward_slots"]] == [34001, 34001, 34280]
+        assert [slot["round_id"] for slot in carried["reward_slots"]] == [original["round_id"], original["round_id"], replacement["round_id"]]
+        verify_normal_flow(carried, finalized_epoch + 1, before_share, replacement_owner=replacement_owner)
+        verify_normal_flow(carried, finalized_epoch + 2, after_share, replacement_owner=replacement_owner)
+    assert json.dumps(harness.service.store.get_round(original["round_id"])["reward_basis_doc"], sort_keys=True) == original_bytes
+    assert_canary_absent(harness, connect)

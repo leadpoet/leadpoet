@@ -1557,8 +1557,8 @@ def _deepline_exact_readback(
         or lookup_max_response_bytes != _DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES
     ):
         return native_id, None
-    # Completed request errors get one short read, not the success/recovery
-    # polling window. Their unknown bill stays eligible for delayed settlement.
+    # Response-first callers get one short read. Their unknown bill stays
+    # eligible for delayed settlement without replaying the paid request.
     timeout = (
         operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
         if poll else DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS
@@ -4940,6 +4940,18 @@ class Broker:
                         }.get(effective_operation_id)
                         if not isinstance(deepline_operation, str):
                             deepline_operation = ""
+                        # Completed judge evidence can return before its exact
+                        # bill is final. Keep normal polling for async calls,
+                        # incomplete/error replies, and unusable result data.
+                        deepline_completed_score = (
+                            getattr(context, "kind", "execute") == "score"
+                            and response.status == 200
+                            and _provider_call_succeeded("deepline", response, raw_document)
+                            and not deepline_async_ids
+                            and not deepline_async_poll_accepted
+                            and isinstance(raw_document.get("result"), Mapping)
+                            and isinstance(raw_document["result"].get("data"), (Mapping, list))
+                        )
                         exact_deadline = (
                                 min(
                                     time.monotonic()
@@ -4954,7 +4966,8 @@ class Broker:
                                 transport=self._transport, secret=secret,
                                 request_id=request_id, execution_key=deepline_execution_key,
                                 operation=deepline_operation, reconciliation_deadline=exact_deadline,
-                                poll=not (deepline_request_failed or deepline_payment_error),
+                                poll=not (deepline_request_failed or deepline_payment_error
+                                          or deepline_completed_score),
                                 provider=(deepline_catalog_entry["provider"] if deepline_catalog_entry else None),
                                 operation_aliases=(deepline_catalog_entry["operation_aliases"] if deepline_catalog_entry else ()),
                                 lookup_max_response_bytes=(

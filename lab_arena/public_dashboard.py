@@ -733,6 +733,17 @@ def _recorded_source(record: Mapping[str, Any]) -> tuple:
     return commit, dirty if dirty in ("clean", "dirty") else "unknown"
 
 
+def _has_runtime_identity(run: Mapping[str, Any]) -> bool:
+    generation = run.get("lease_generation")
+    if type(generation) is not int or generation <= 0:
+        return False
+    try:
+        contracts.require_hotkey(str(run.get("runner_hotkey") or ""))
+    except contracts.ArenaContractError:
+        return False
+    return True
+
+
 def _runtime_source(run: Mapping[str, Any], starts: Sequence[Mapping[str, Any]]) -> tuple:
     # A completion records the source for that specific historical run. An
     # active lease must use a start receipt with the exact lease generation.
@@ -740,9 +751,9 @@ def _runtime_source(run: Mapping[str, Any], starts: Sequence[Mapping[str, Any]])
         source = _recorded_source(run)
         if source[0] is not None:
             return source
-    generation = run.get("lease_generation")
-    if type(generation) is not int or generation <= 0:
+    if not _has_runtime_identity(run):
         return None, "unknown"
+    generation = run["lease_generation"]
     sources = set()
     for event in starts:
         event_generation = event.get("start_lease_generation")
@@ -864,7 +875,7 @@ def _attach_evaluations(service: Any, round_id: str, entries: Sequence[dict]) ->
     fallback_ids = [
         str(run["run_id"])
         for runs in runs_by_submission.values() for run in runs
-        if run.get("run_id") and (
+        if run.get("run_id") and _has_runtime_identity(run) and (
             run.get("status") == "leased" and run.get("submission_id") in live_ids
             or run.get("status") == "failed" and _recorded_source(run)[0] is None
         )

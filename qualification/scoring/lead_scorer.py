@@ -3810,7 +3810,14 @@ def _web_identity_receipt(
     if (
         verified_anchor_receipt.get("decision") == COMPANY_FIT_MATCH
         and isinstance(verified_homepage_identity, Mapping)
-        and not str(observed_values["linkedin"] or "").strip()
+        and (
+            not observed_values["linkedin"].strip()
+            or (
+                receipt.get("decision") == COMPANY_FIT_UNAVAILABLE
+                and receipt.get("reason_code") == "identity_not_proven"
+                and receipt.get("observed_linkedin_slug") == ""
+            )
+        )
     ):
         anchor_slug = str(
             verified_homepage_identity.get("linkedin_company_slug") or ""

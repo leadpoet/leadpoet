@@ -73,6 +73,27 @@ def _telemetry_provider_operation(operation_id: str) -> Tuple[str, str]:
     return operation.provider, "unknown"
 
 
+def _telemetry_tool(operation_id: str, parameters: Mapping[str, Any]) -> str:
+    """Name the Deepline tool behind one provider call, or nothing.
+
+    Every Deepline call leaves as ``deepline.execute``, so the operation id
+    alone cannot say which upstream tool answered. This mirrors the runner's
+    refusal-guard resolution: a compatibility route carries its pinned tool,
+    the native execute route names its tool in the admitted frame. The result
+    is checked against the frozen tool table, so a frame that names something
+    outside it degrades to "no tool" rather than exporting free text.
+    """
+
+    operation = operations.get_operation(operation_id)
+    if operation is None or operation.provider != "deepline":
+        return telemetry.NO_TOOL
+    if operation_id == "deepline.execute":
+        tool = str(parameters.get("tool") or "")
+    else:
+        tool = str(operation.deepline_tool or "")
+    return tool if tool in operations.DEEPLINE_TOOLS else telemetry.NO_TOOL
+
+
 def _provider_telemetry_fields(
     call: Mapping[str, Any], http_status: Any, attempts: int
 ) -> Dict[str, Any]:
@@ -4638,6 +4659,7 @@ class ArenaService:
                 raised_operation,
                 "failed",
                 error_type=type(exc).__name__,
+                tool=_telemetry_tool(operation_id, frame["parameters"]),
                 duration_ms=(time.monotonic() - started) * 1000.0,
                 run_identity=run_identity,
             )
@@ -4645,7 +4667,15 @@ class ArenaService:
         document = result.to_document()
         call = result.call if isinstance(result.call, Mapping) else {}
         if call.get("cached") is not True and call.get("idempotent") is not True:
+            # The call summary, not the frame, owns the provider half of this
+            # span. Resolving the tool from the same operation id keeps the
+            # two consistent, so a degraded operation can never pair a
+            # Deepline tool with an "unknown" provider and lose the span.
             telemetry.record_provider(
+                tool=_telemetry_tool(
+                    call.get("operation_id") if isinstance(call.get("operation_id"), str) else "",
+                    frame["parameters"],
+                ),
                 duration_ms=(time.monotonic() - started) * 1000.0,
                 run_identity=run_identity,
                 **_provider_telemetry_fields(

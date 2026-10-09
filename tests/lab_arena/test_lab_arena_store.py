@@ -181,7 +181,9 @@ def test_bulk_round_rpc_waits_for_database_without_changing_other_deadlines(bulk
         assert transport.select("lab_arena_rounds") == []
         assert client.timeout == timeout
     assert requests[0].extensions["timeout"] == {
-        "connect": 2, "read": 65.0, "write": 3, "pool": 4
+        "connect": 2,
+        "read": 605.0 if bulk_function == "lab_arena_transition_round" else 65.0,
+        "write": 3, "pool": 4
     }
     assert all(request.extensions["timeout"] == timeout.as_dict() for request in requests[1:])
 
@@ -294,7 +296,9 @@ def test_bulk_round_rpc_response_loss_is_not_blindly_replayed(error_type, bulk_f
             else:
                 store.transition_round("arena-2026-09-30", "scored", "published", {})
     assert len(requests) == 1
-    assert requests[0].extensions["timeout"]["read"] == 65.0
+    assert requests[0].extensions["timeout"]["read"] == (
+        605.0 if bulk_function == "lab_arena_transition_round" else 65.0
+    )
 
 
 @pytest.mark.parametrize("response", [

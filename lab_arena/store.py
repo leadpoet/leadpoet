@@ -314,10 +314,12 @@ ROUND_NETUID_COLUMN = "arena_netuid"
 
 DEADLOCK_SQLSTATE = "40P01"
 DEADLOCK_RETRIES = 3
-# Stage creation, scoring queue creation, score batches, and publication can
+# Stage creation, scoring queue creation, and score batches can
 # take longer than an ordinary RPC. Let their bounded database work return a
 # result before giving up on the response.
 BULK_ROUND_RPC_READ_TIMEOUT_SECONDS = 65.0
+# Publication validates the complete frozen ranking in one database statement.
+PUBLICATION_RPC_READ_TIMEOUT_SECONDS = 605.0
 # Closed-round billing scans historical ledger entries; one slow read must not
 # use the short timeout shared with ordinary RPCs.
 CLOSED_PROVIDER_RECONCILIATION_READ_TIMEOUT_SECONDS = 20.0
@@ -459,12 +461,14 @@ class PostgrestTransport(StoreTransport):
             "lab_arena_open_scoring_v2",
             "lab_arena_open_scoring_v3",
             "lab_arena_record_run_scores",
-        } or (
+        }:
+            read_timeout = BULK_ROUND_RPC_READ_TIMEOUT_SECONDS
+        elif (
             function == "lab_arena_transition_round"
             and params.get("p_expected_status") == "scored"
             and params.get("p_next_status") == "published"
         ):
-            read_timeout = BULK_ROUND_RPC_READ_TIMEOUT_SECONDS
+            read_timeout = PUBLICATION_RPC_READ_TIMEOUT_SECONDS
         elif function == "lab_arena_next_closed_provider_reconciliation_v1":
             read_timeout = CLOSED_PROVIDER_RECONCILIATION_READ_TIMEOUT_SECONDS
         if read_timeout is not None:

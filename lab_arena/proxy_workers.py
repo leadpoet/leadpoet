@@ -10,11 +10,13 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import ssl
 import threading
 import time
 from typing import Callable, Mapping
 from urllib.parse import urlsplit
+from urllib.error import HTTPError, URLError
 from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
 
 from leadpoet_canonical.proxy_transport import (
@@ -44,6 +46,42 @@ class ProxyWorkerConfigurationError(ValueError):
 
 class ProxyWorkerPreflightError(RuntimeError):
     """The configured inventory did not pass startup network verification."""
+
+    def __init__(self, message: str, *, operation: str | None = None,
+                 failure_kind: str = "failed", http_status: int | None = None):
+        super().__init__(message)
+        self.operation = operation if operation and re.fullmatch(
+            r"native_exit_ip|proxy_worker_[1-9][0-9]{0,2}_(?:connect|exit_ip|distinct_exit)", operation
+        ) else None
+        self.failure_kind = failure_kind if failure_kind in {
+            "failed", "timeout", "dns", "tls", "http_error", "invalid_response", "duplicate_exit"
+        } else "failed"
+        self.http_status = http_status if type(http_status) is int and 100 <= http_status <= 599 else None
+
+
+def _preflight_failure(exc: BaseException) -> dict:
+    """Read bounded typed causes only; never copy exception text or URLs."""
+    for _ in range(8):
+        if isinstance(exc, ProxyWorkerPreflightError):
+            return {"failure_kind": exc.failure_kind, "http_status": exc.http_status}
+        status = exc.code if isinstance(exc, HTTPError) else (
+            exc.http_status if isinstance(exc, ProxyTransportError) else None
+        )
+        if type(status) is int and 100 <= status <= 599:
+            return {"failure_kind": "http_error", "http_status": status}
+        if isinstance(exc, TimeoutError):
+            return {"failure_kind": "timeout"}
+        if isinstance(exc, socket.gaierror):
+            return {"failure_kind": "dns"}
+        if isinstance(exc, ssl.SSLError):
+            return {"failure_kind": "tls"}
+        if isinstance(exc, (ValueError, UnicodeError)):
+            return {"failure_kind": "invalid_response"}
+        nested = exc.reason if isinstance(exc, URLError) else exc.__cause__
+        if not isinstance(nested, BaseException) or nested is exc:
+            break
+        exc = nested
+    return {"failure_kind": "failed"}
 
 
 class ProxyWorkerPoolError(RuntimeError):
@@ -221,11 +259,11 @@ def _validated_exit_ip(value: object) -> str:
         parsed = ipaddress.ip_address(str(value).strip())
     except ValueError as exc:
         raise ProxyWorkerPreflightError(
-            "exit IP probe returned an invalid address"
+            "exit IP probe returned an invalid address", failure_kind="invalid_response"
         ) from exc
     if not parsed.is_global:
         raise ProxyWorkerPreflightError(
-            "exit IP probe returned a non-public address"
+            "exit IP probe returned a non-public address", failure_kind="invalid_response"
         )
     return parsed.compressed
 
@@ -273,24 +311,26 @@ def probe_https_exit_ip(
         },
         method="GET",
     )
-    probe_failed = False
+    failure = None
     try:
         with opener.open(request, timeout=timeout) as response:
             payload = response.read(_MAX_EXIT_IP_RESPONSE_BYTES + 1)
         if len(payload) > _MAX_EXIT_IP_RESPONSE_BYTES:
-            raise ProxyWorkerPreflightError("exit IP probe response is too large")
+            raise ProxyWorkerPreflightError("exit IP probe response is too large", failure_kind="invalid_response")
         decoded = json.loads(payload.decode("utf-8"))
         if not isinstance(decoded, Mapping):
-            raise ProxyWorkerPreflightError("exit IP probe response is invalid")
+            raise ProxyWorkerPreflightError("exit IP probe response is invalid", failure_kind="invalid_response")
         return _validated_exit_ip(decoded.get("ip"))
     except ProxyWorkerPreflightError:
         raise
-    except Exception:
+    except Exception as exc:
         # A urllib exception can include proxy credentials. Raise after leaving
         # the handler so it is not retained as an implicit exception context.
-        probe_failed = True
-    if probe_failed:
-        raise ProxyWorkerPreflightError("HTTPS exit IP probe failed")
+        failure = _preflight_failure(exc)
+        if isinstance(exc, HTTPError):
+            exc.close()
+    if failure is not None:
+        raise ProxyWorkerPreflightError("HTTPS exit IP probe failed", **failure)
 
 
 def _probe_native_exit_ip(*, timeout_seconds: float) -> str:
@@ -320,17 +360,20 @@ def preflight_proxy_workers(
     if not 0 < timeout <= 30 or not 1 <= concurrency <= 32:
         raise ProxyWorkerPreflightError("proxy preflight bounds are invalid")
 
+    native_failure = None
     try:
         native_exit_ip = _validated_exit_ip(
             native_ip_probe(timeout_seconds=timeout)
         )
-    except ProxyWorkerPreflightError:
-        raise
-    except Exception:
-        raise ProxyWorkerPreflightError("native HTTPS exit IP probe failed") from None
+    except Exception as exc:
+        native_failure = _preflight_failure(exc)
+    if native_failure is not None:
+        raise ProxyWorkerPreflightError("native HTTPS exit IP probe failed",
+                                        operation="native_exit_ip", **native_failure)
 
     def verify(worker: ProxyWorker) -> VerifiedProxyWorker:
-        verification_failed = False
+        failure = None
+        stage = "connect"
         try:
             transport_probe(
                 worker.proxy_url,
@@ -338,16 +381,18 @@ def preflight_proxy_workers(
                 destination_port=destination_port,
                 timeout_seconds=timeout,
             )
+            stage = "exit_ip"
             exit_ip = _validated_exit_ip(
                 exit_ip_probe(worker.proxy_url, timeout_seconds=timeout)
             )
-        except Exception:
+        except Exception as exc:
             # The injected transport can retain its proxy URL in the exception.
             # Raise outside the handler so no implicit context holds that URL.
-            verification_failed = True
-        if verification_failed:
+            failure = _preflight_failure(exc)
+        if failure is not None:
             raise ProxyWorkerPreflightError(
-                "proxy worker %d failed startup verification" % worker.slot_index
+                "proxy worker %d failed startup verification" % worker.slot_index,
+                operation="proxy_worker_%d_%s" % (worker.slot_index, stage), **failure,
             )
         return VerifiedProxyWorker(
             slot_index=worker.slot_index,
@@ -360,7 +405,7 @@ def preflight_proxy_workers(
 
     verified_by_slot: dict[int, VerifiedProxyWorker] = {}
     worker_count = min(concurrency, len(inventory.workers))
-    failed_slots = []
+    failures = {}
     with ThreadPoolExecutor(
         max_workers=worker_count,
         thread_name_prefix="arena-proxy-preflight",
@@ -373,11 +418,12 @@ def preflight_proxy_workers(
             slot_index = futures[future]
             try:
                 verified_by_slot[slot_index] = future.result()
-            except ProxyWorkerPreflightError:
-                failed_slots.append(slot_index)
-    if failed_slots:
+            except ProxyWorkerPreflightError as exc:
+                failures[slot_index] = {"operation": exc.operation, **_preflight_failure(exc)}
+    if failures:
         raise ProxyWorkerPreflightError(
-            "proxy worker %d failed startup verification" % min(failed_slots)
+            "proxy worker %d failed startup verification" % min(failures),
+            **failures[min(failures)],
         )
 
     verified = tuple(
@@ -393,7 +439,9 @@ def preflight_proxy_workers(
             else:
                 detail = "matches proxy worker %d" % previous
             raise ProxyWorkerPreflightError(
-                "proxy worker %d exit IP %s" % (worker.slot_index, detail)
+                "proxy worker %d exit IP %s" % (worker.slot_index, detail),
+                operation="proxy_worker_%d_distinct_exit" % worker.slot_index,
+                failure_kind="duplicate_exit",
             )
         exits[worker.exit_ip] = worker.slot_index
 

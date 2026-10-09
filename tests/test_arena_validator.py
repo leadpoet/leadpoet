@@ -130,13 +130,14 @@ class _Signer:
         return {"signature": "ab" * 64, "request_id": document["request_id"]}
 
 
-def _orchestrator(tmp_path, signer, broadcasts):
+def _orchestrator(tmp_path, signer, broadcasts, *, operational_logger=None):
     value = ArenaWeightOrchestrator(
         api=object(), chain=_Chain(broadcasts), signer=signer,
         validator_hotkey="5" + "V" * 47,
         expected_signing_key_hash="sha256:" + "3" * 64,
         paths=ArenaWeightPaths(tmp_path),
         extrinsic_period=32,
+        operational_logger=operational_logger,
     )
     state = {
         "state_hash": "sha256:" + "4" * 64, "epoch": 9,
@@ -271,6 +272,136 @@ def test_broken_prior_epoch_does_not_block_current_epoch(tmp_path):
     orchestrator.poll_prior_outcomes(9)
     assert orchestrator.run_once(9) == "broadcast"
     assert broadcasts == ["0xdeadbeef"]
+
+
+def test_prior_recovery_telemetry_stays_failed_across_rotation_until_repaired(tmp_path):
+    import threading
+
+    from lab_arena.validator import _atomic_json, run_validator_loops
+    from lab_arena.validator_logging import ValidatorOperationalLogger
+    from leadpoet_canonical.subtensor_events_v2 import SubtensorEventsV2Error
+
+    log = ValidatorOperationalLogger(
+        "https://gateway.invalid", network="finney", netuid=71,
+        keypair=SimpleNamespace(ss58_address="5" + "V" * 47),
+    )
+    orchestrator = _orchestrator(
+        tmp_path, _Signer(_protected(), []), [], operational_logger=log,
+    )
+    for epoch in (7, 8):
+        body = {"epoch": epoch}
+        _atomic_json(orchestrator.paths.signed(epoch), {
+            **body, "record_hash": contracts.document_hash(body),
+        })
+    operations = []
+    failed = {7}
+
+    def current(epoch):
+        operations.append(("current", epoch))
+        return "included_pending_reveal"
+
+    def confirm(signed):
+        epoch = signed["epoch"]
+        operations.append(("prior", epoch))
+        if epoch in failed:
+            raise SubtensorEventsV2Error("password=DO-NOT-LOG https://secret.invalid")
+
+    orchestrator.run_once = current
+    orchestrator._recover_protected_state = lambda signed: None
+    orchestrator._confirm = confirm
+    runner = SimpleNamespace(run_once=lambda **kwargs: False, close=lambda: None)
+
+    def cycle():
+        run_validator_loops(
+            orchestrator=orchestrator, runner_factory=lambda: runner,
+            epoch_supplier=lambda: 9, stop=threading.Event(), once=True,
+            operational_logger=log,
+        )
+
+    for _ in range(4):
+        cycle()
+    recovery_events = [
+        value for value in log._queue
+        if value["content"].get("phase") == "weight_recovery"
+    ]
+    assert [value["kind"] for value in recovery_events] == ["validator.error"]
+    assert recovery_events[0]["content"]["reason"] == "prior_epoch_7"
+    assert recovery_events[0]["content"]["error_class"] == "SubtensorEventsV2Error"
+    assert "DO-NOT-LOG" not in str(recovery_events)
+    assert "secret.invalid" not in str(recovery_events)
+    assert operations == [("current", 9), ("prior", 7), ("current", 9), ("prior", 8)] * 2
+
+    failed.clear()
+    cycle()
+    cycle()
+    recovery_events = [
+        value for value in log._queue
+        if value["content"].get("phase") == "weight_recovery"
+    ]
+    assert [value["kind"] for value in recovery_events] == [
+        "validator.error", "validator.recovered",
+    ]
+    assert not orchestrator._prior_recovery_failures
+
+
+def test_corrupt_prior_outcome_emits_error_and_cannot_clear_during_other_recovery(tmp_path):
+    from lab_arena.validator import _atomic_json
+
+    errors = []
+    log = SimpleNamespace(error=lambda phase, exc, **context: errors.append(
+        (phase, type(exc).__name__, context)
+    ))
+    orchestrator = _orchestrator(
+        tmp_path, _Signer(_protected(), []), [], operational_logger=log,
+    )
+    for epoch in (7, 8):
+        body = {"epoch": epoch}
+        _atomic_json(orchestrator.paths.signed(epoch), {
+            **body, "record_hash": contracts.document_hash(body),
+        })
+    orchestrator.paths.outcome(7).write_text("invalid-json\n", encoding="utf-8")
+    polled = []
+    orchestrator._recover_protected_state = lambda signed: polled.append(signed["epoch"])
+    orchestrator._confirm = lambda signed: None
+
+    assert orchestrator.poll_prior_outcomes(9) is False
+    assert errors == [("weight_recovery", "ArenaValidatorError", {"reason": "prior_epoch_7"})]
+    assert polled == [8]
+    body = {"reported": True}
+    _atomic_json(orchestrator.paths.outcome(7), {
+        **body, "record_hash": contracts.document_hash(body),
+    })
+    assert orchestrator.poll_prior_outcomes(9) is True
+    assert not orchestrator._prior_recovery_failures
+
+
+def test_successful_prior_outcome_report_clears_failed_epoch(tmp_path):
+    from lab_arena.validator import _atomic_json
+
+    orchestrator = _orchestrator(tmp_path, _Signer(_protected(), []), [])
+    for path, body in (
+        (orchestrator.paths.signed(7), {"epoch": 7}),
+        (orchestrator.paths.outcome(7), {
+            "epoch": 7, "reported": False, "report_document": {"epoch": 7},
+        }),
+    ):
+        _atomic_json(path, {**body, "record_hash": contracts.document_hash(body)})
+    reports = []
+
+    def unavailable(document):
+        reports.append(document)
+        raise OSError("private upstream response")
+
+    orchestrator.api.submit_chain_outcome = unavailable
+    assert orchestrator.poll_prior_outcomes(9) is False
+    assert _read_hashed_json(orchestrator.paths.outcome(7))["reported"] is False
+
+    orchestrator.api.submit_chain_outcome = lambda document: reports.append(document)
+    assert orchestrator.poll_prior_outcomes(9) is True
+    assert _read_hashed_json(orchestrator.paths.outcome(7))["reported"] is True
+    assert not orchestrator._prior_recovery_failures
+    assert orchestrator.poll_prior_outcomes(9) is True
+    assert len(reports) == 2
 
 
 @pytest.mark.parametrize(

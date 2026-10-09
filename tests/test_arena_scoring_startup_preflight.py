@@ -143,3 +143,41 @@ def test_proxy_file_and_preflight_errors_are_redacted(args, monkeypatch):
     assert private_value not in scoring_startup.scoring_startup_diagnostic(
         proxy_failure.value
     )
+
+
+def test_preflight_details_reach_host_and_operational_events(args, monkeypatch):
+    from lab_arena.validator_logging import ValidatorOperationalLogger
+    original = proxy_workers.preflight_proxy_workers
+
+    def denied(*_args, **_kwargs):
+        raise proxy_workers.ProxyTransportError("private credential", http_status=407)
+
+    monkeypatch.setattr(proxy_workers, "preflight_proxy_workers", lambda inventory: original(
+        inventory, transport_probe=denied, native_ip_probe=lambda **kw: "1.1.1.1",
+    ))
+    with pytest.raises(scoring_startup.ScoringStartupError) as raised:
+        scoring_startup.prepare_validator_scoring(
+            args, environment={"LAB_ARENA_WEBSHARE_PROXY_1": "http://user:secret@proxy.example:80"},
+            prepare_host=lambda *_args: None,
+        )
+    error = raised.value
+    assert error.reason == "proxy_preflight_failed"
+    assert error.operation == "proxy_worker_1_connect_http_error"
+    assert error.http_status == 407
+    message = scoring_startup.scoring_startup_diagnostic(error)
+    assert "operation=proxy_worker_1_connect_http_error http_status=407" in message
+    log = ValidatorOperationalLogger("https://gateway.invalid", keypair=None, network="finney", netuid=71)
+    log.error("scoring_setup", error)
+    assert len(log._queue) == 1
+    content = log._queue[0]["content"]
+    assert content["operation"] == error.operation
+    assert content["http_status"] == 407
+    assert all(secret not in message + str(content) for secret in ("private", "credential", "secret", "proxy.example"))
+
+
+def test_untrusted_preflight_detail_is_never_rendered():
+    error = scoring_startup.ScoringStartupError(
+        reason="proxy_preflight_failed", operation="private credential", http_status="private credential",
+    )
+    assert error.operation is None and error.http_status is None
+    assert "private" not in scoring_startup.scoring_startup_diagnostic(error)

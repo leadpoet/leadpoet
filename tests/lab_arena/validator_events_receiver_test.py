@@ -164,9 +164,12 @@ def test_migration_replay_privileges_and_sql_bounds(setup):
     assert not rows(connect)
 
 
-def test_real_sender_persists_scoring_setup_failure_while_weights_continue(setup):
+@pytest.mark.parametrize("key", (PRIMARY, EXTERNAL), ids=("primary", "external"))
+@pytest.mark.parametrize("failure_kind", ("runtime", "proxy"))
+def test_real_sender_persists_scoring_setup_failure_while_weights_continue(setup, key, failure_kind):
     from lab_arena import validator, runtime_version
     from lab_arena.runtime_host import RuntimeHostError
+    from lab_arena.scoring_startup import ScoringStartupError
     from lab_arena.validator_logging import ValidatorOperationalLogger
 
     http, _, _, connect, _ = setup
@@ -182,7 +185,7 @@ def test_real_sender_persists_scoring_setup_failure_while_weights_continue(setup
             delivered.set()
 
     log = ValidatorOperationalLogger(
-        'https://public-gateway.invalid', keypair=EXTERNAL, network='finney',
+        'https://public-gateway.invalid', keypair=key, network='finney',
         netuid=71, transport=transport,
     )
 
@@ -195,6 +198,9 @@ def test_real_sender_persists_scoring_setup_failure_while_weights_continue(setup
             pass
 
     def broken_runner():
+        if failure_kind == 'proxy':
+            raise ScoringStartupError(reason='proxy_preflight_failed',
+                                      operation='proxy_worker_2_connect_http_error', http_status=407)
         raise RuntimeHostError('password=must-not-persist', reason='runsc_missing')
 
     log.emit('validator.startup', {'phase': 'startup'})
@@ -213,11 +219,17 @@ def test_real_sender_persists_scoring_setup_failure_while_weights_continue(setup
     assert weights == [1]
     saved = rows(connect)
     error = next(row for row in saved if row[1] == 'validator.error')
-    assert error[0] == EXTERNAL.ss58_address
+    assert error[0] == key.ss58_address
     assert error[2:6] == (None, None, None, None)
     assert error[6]['phase'] == 'scoring_setup'
-    assert error[6]['reason'] == 'runsc_missing'
-    assert error[6]['error_class'] == 'RuntimeHostError'
+    if failure_kind == 'proxy':
+        assert error[6]['reason'] == 'proxy_preflight_failed'
+        assert error[6]['operation'] == 'proxy_worker_2_connect_http_error'
+        assert error[6]['http_status'] == 407
+        assert error[6]['error_class'] == 'ScoringStartupError'
+    else:
+        assert error[6]['reason'] == 'runsc_missing'
+        assert error[6]['error_class'] == 'RuntimeHostError'
     assert error[6]['validator_source_commit'] == runtime_version.SOURCE_METADATA['validator_source_commit']
     assert error[6]['session_id'] == log.session_id
     assert any(row[1] == 'validator.state' and row[6]['weights_state'] == 'state_unavailable' for row in saved)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from io import BytesIO
 
 import pytest
 
@@ -225,13 +226,15 @@ def test_preflight_rejects_duplicate_actual_exits(worker_exits, message):
         for offset, worker in enumerate(inventory.workers)
     }
 
-    with pytest.raises(ProxyWorkerPreflightError, match=message):
+    with pytest.raises(ProxyWorkerPreflightError, match=message) as raised:
         preflight_proxy_workers(
             inventory,
             transport_probe=lambda *_args, **_kwargs: None,
             exit_ip_probe=lambda proxy_url, **_kwargs: exit_ips[proxy_url],
             native_ip_probe=lambda **_kwargs: "1.1.1.1",
         )
+    assert raised.value.operation.endswith("_distinct_exit")
+    assert raised.value.failure_kind == "duplicate_exit"
 
 
 def test_preflight_failure_does_not_expose_proxy_secret():
@@ -252,6 +255,60 @@ def test_preflight_failure_does_not_expose_proxy_secret():
     assert secret_url not in str(raised.value)
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is None
+
+
+@pytest.mark.parametrize("stage", ("connect", "exit_ip", "native_exit_ip"))
+@pytest.mark.parametrize("failure,kind,status", (
+    (TimeoutError("private timeout"), "timeout", None),
+    (module.socket.gaierror("private DNS"), "dns", None),
+    (module.ssl.SSLError("private TLS"), "tls", None),
+    (module.URLError(TimeoutError("private wrapped timeout")), "timeout", None),
+    (module.HTTPError("https://user:secret@private", 407, "private", {}, BytesIO()), "http_error", 407),
+    (RuntimeError("private URL"), "failed", None),
+))
+def test_preflight_preserves_safe_failure_stage_without_exception_text(stage, failure, kind, status):
+    inventory = proxy_workers_from_environment(_environment(2))
+
+    def fail(*_args, **_kwargs):
+        raise failure
+
+    with pytest.raises(ProxyWorkerPreflightError) as raised:
+        preflight_proxy_workers(
+            inventory,
+            transport_probe=fail if stage == "connect" else lambda *a, **kw: None,
+            exit_ip_probe=fail if stage == "exit_ip" else lambda *a, **kw: "8.8.8.8",
+            native_ip_probe=fail if stage == "native_exit_ip" else lambda **kw: "1.1.1.1",
+        )
+    error = raised.value
+    assert error.operation == (stage if stage == "native_exit_ip" else "proxy_worker_1_" + stage)
+    assert error.failure_kind == kind
+    assert error.http_status == status
+    assert error.__context__ is None and error.__cause__ is None
+    assert "private" not in str(vars(error)) + str(error)
+
+
+def test_wrapped_connect_status_remains_structured_and_safe():
+    cause = proxy_transport.ProxyTransportError("private", http_status=407)
+    outer = proxy_transport.ProxyTransportError("private wrapper")
+    outer.__cause__ = cause
+    assert module._preflight_failure(outer) == {"failure_kind": "http_error", "http_status": 407}
+    cause.__cause__ = outer
+    cause.http_status = None
+    assert module._preflight_failure(outer) == {"failure_kind": "failed"}
+
+
+def test_exit_probe_preserves_http_status_without_body_or_url(monkeypatch):
+    from types import SimpleNamespace
+    error = module.HTTPError("https://user:secret@private", 429, "private", {}, BytesIO())
+    def fail(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(module, "build_opener", lambda *handlers: SimpleNamespace(open=fail))
+    with pytest.raises(ProxyWorkerPreflightError) as raised:
+        probe_https_exit_ip(_proxy(1))
+    assert raised.value.failure_kind == "http_error"
+    assert raised.value.http_status == 429
+    assert raised.value.__context__ is None
+    assert "private" not in str(vars(raised.value))
 
 
 def test_https_exit_probe_uses_explicit_proxy_policy_and_bounded_json(monkeypatch):
@@ -342,6 +399,24 @@ def test_shared_connect_tunnel_accepts_pinned_global_ip_and_adds_proxy_auth():
     request = stream.sent[0]
     assert request.startswith(b"CONNECT 8.8.8.8:443 HTTP/1.1\r\n")
     assert b"Proxy-Authorization: Basic " in request
+
+
+def test_connect_preflight_preserves_status_and_closes_rejected_stream():
+    from types import SimpleNamespace
+    closed = []
+    stream = SimpleNamespace(
+        settimeout=lambda timeout: None, sendall=lambda value: None,
+        recv=lambda size: b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n",
+        shutdown=lambda how: None, close=lambda: closed.append(True),
+    )
+    with pytest.raises(proxy_transport.ProxyTransportError) as raised:
+        proxy_transport.verify_tls_proxy_connect(
+            "http://worker:secret@proxy.example.com:6162", destination_host="openrouter.ai",
+            connector=lambda *args: stream, attempts=1,
+        )
+    assert closed == [True]
+    assert module._preflight_failure(raised.value) == {"failure_kind": "http_error", "http_status": 407}
+    assert "secret" not in str(raised.value)
 
 
 def test_pool_holds_stable_exclusive_slots_for_live_attempt_retries():

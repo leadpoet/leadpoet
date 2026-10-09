@@ -245,6 +245,7 @@ class ArenaWeightOrchestrator:
         expected_signing_key_hash: str,
         paths: ArenaWeightPaths,
         extrinsic_period: int,
+        operational_logger: Any = None,
     ) -> None:
         self.api = api
         self.chain = chain
@@ -255,6 +256,10 @@ class ArenaWeightOrchestrator:
         self.extrinsic_period = int(extrinsic_period)
         self._last_confirmation = None
         self._prior_poll_cursor = -1
+        self._operational_logger = operational_logger
+        # Keep a failed epoch active when the cursor advances to another journal.
+        # This set can contain only epochs from the existing journal inventory.
+        self._prior_recovery_failures: set[int] = set()
         if self.extrinsic_period <= 0:
             raise ArenaValidatorError("protected Arena extrinsic period is invalid")
 
@@ -541,10 +546,11 @@ class ArenaWeightOrchestrator:
         self._broadcast(str(record["extrinsic_hex"]))
         return "broadcast"
 
-    def poll_prior_outcomes(self, current_epoch: int) -> None:
+    def poll_prior_outcomes(self, current_epoch: int) -> bool:
         """Advance one old journal per cycle, rotating past slow or failed work."""
 
         candidates = []
+        prior_epochs = set()
         for path in self.paths.root.glob("epoch-*-signed.json"):
             if _ARENA_ARCHIVED_ATTEMPT_RE.fullmatch(path.name):
                 continue
@@ -554,17 +560,26 @@ class ArenaWeightOrchestrator:
                 print("Arena validator ignored an invalid journal filename", file=sys.stderr, flush=True)
                 continue
             if epoch < int(current_epoch):
+                prior_epochs.add(epoch)
                 try:
                     outcome = _read_hashed_json(self.paths.outcome(epoch))
                     if outcome is None or outcome.get("reported") is not True:
                         candidates.append(epoch)
+                    else:
+                        self._prior_recovery_failures.discard(epoch)
                 except Exception as exc:
+                    self._prior_recovery_failures.add(epoch)
+                    if self._operational_logger is not None:
+                        self._operational_logger.error(
+                            "weight_recovery", exc, reason="prior_epoch_%d" % epoch,
+                        )
                     print(
                         "Arena validator prior outcome failed: epoch=%d type=%s"
                         % (epoch, type(exc).__name__), file=sys.stderr, flush=True,
                     )
+        self._prior_recovery_failures.intersection_update(prior_epochs)
         if not candidates:
-            return
+            return not self._prior_recovery_failures
         # Do not let one unavailable archive or report monopolize recovery.
         # The cursor is only scheduling state; journals remain authoritative.
         following = [epoch for epoch in candidates if epoch > self._prior_poll_cursor]
@@ -577,14 +592,21 @@ class ArenaWeightOrchestrator:
             else:
                 signed = _read_hashed_json(self.paths.signed(epoch))
                 if signed is None:
-                    return
+                    return not self._prior_recovery_failures
                 self._recover_protected_state(signed)
                 self._confirm(signed)
+            self._prior_recovery_failures.discard(epoch)
         except Exception as exc:
+            self._prior_recovery_failures.add(epoch)
+            if self._operational_logger is not None:
+                self._operational_logger.error(
+                    "weight_recovery", exc, reason="prior_epoch_%d" % epoch,
+                )
             print(
                 "Arena validator prior recovery failed: epoch=%d type=%s"
                 % (epoch, type(exc).__name__), file=sys.stderr, flush=True,
             )
+        return not self._prior_recovery_failures
 
 
 def _default_runsc_path(environment: Mapping[str, str], *, path_exists=os.path.exists) -> str:
@@ -684,8 +706,8 @@ def run_validator_loops(*, orchestrator, runner_factory, epoch_supplier, stop,
             try:
                 # Refresh after the current operation; neither recovery nor
                 # its failures may prevent attempting the current epoch first.
-                orchestrator.poll_prior_outcomes(int(epoch_supplier()))
-                if log is not None:
+                recovery_ok = orchestrator.poll_prior_outcomes(int(epoch_supplier()))
+                if log is not None and recovery_ok is True:
                     log.recovered("weight_recovery")
             except Exception as exc:
                 if log is not None:
@@ -911,6 +933,7 @@ def main(argv=None) -> int:
             paths=ArenaWeightPaths(Path(os.environ.get(
                 "LAB_ARENA_VALIDATOR_STATE_DIR", "/var/lib/leadpoet/arena-validator"))),
             extrinsic_period=signer.extrinsic_period,
+            operational_logger=log,
         )
         stop = threading.Event()
         for signum in (signal.SIGINT, signal.SIGTERM):

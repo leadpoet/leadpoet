@@ -987,6 +987,7 @@ def run_sandbox(
             if not checkpoint_execution else None
         )
         timed_out = False
+        startup_timed_out = False
         while process.poll() is None:
             if checkpoint_execution and execution_started is None:
                 if pid_file.is_file():
@@ -999,9 +1000,8 @@ def run_sandbox(
                     )
                     deadline = execution_started + float(spec.wall_clock_seconds)
                 elif clock() >= launcher_started + SANDBOX_STARTUP_TIMEOUT_SECONDS:
-                    raise RuntimeHostError(
-                        reason="sandbox_launch_failed", runsc_path=config.runsc_path,
-                    )
+                    startup_timed_out = True
+                    break
                 else:
                     last_pid_absence_at = clock()
             if deadline is None:
@@ -1027,7 +1027,7 @@ def run_sandbox(
             elif deadline is not None:
                 # A normal exit can write its final output between poll ticks.
                 observe_checkpoint(deadline)
-        if timed_out:
+        if timed_out or startup_timed_out:
             try:
                 _run_command(process_runner, runsc_kill_command(config, runsc_root, spec.sandbox_id), timeout=config.cleanup_timeout_seconds)
             except ArenaRuntimeError as exc:
@@ -1051,18 +1051,26 @@ def run_sandbox(
             raise ArenaRuntimeError("sandbox pipes did not close")
         if stdout_capture.failed or stderr_capture.failed:
             raise ArenaRuntimeError("sandbox pipe read failed")
+        def launch_failure(reason: str) -> RuntimeHostError:
+            return RuntimeHostError(
+                reason=reason, runsc_path=config.runsc_path,
+                launch_exit_code=process.returncode,
+                launch_timed_out=timed_out or startup_timed_out,
+                launch_stderr=stderr_capture.value(),
+                launch_stderr_truncated=stderr_capture.truncated,
+                diagnostic_secrets=tuple(spec.extra_environment.values()),
+            )
+
+        if startup_timed_out:
+            raise launch_failure("sandbox_startup_timeout")
         # runsc writes --pid-file only after container creation completes.
         # Without it, the model process never reached the sandbox boundary.
         try:
             pid_file_mode = os.lstat(pid_file).st_mode
         except OSError as exc:
-            raise RuntimeHostError(
-                reason="sandbox_launch_failed", runsc_path=config.runsc_path,
-            ) from exc
+            raise launch_failure("sandbox_launch_failed") from exc
         if not stat.S_ISREG(pid_file_mode):
-            raise RuntimeHostError(
-                reason="sandbox_launch_failed", runsc_path=config.runsc_path,
-            )
+            raise launch_failure("sandbox_launch_failed")
         cpu_seconds, max_rss = _completed_process_rusage(
             process,
             injected_rusage=rusage,

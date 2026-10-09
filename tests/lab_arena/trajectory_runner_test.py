@@ -461,3 +461,63 @@ def test_external_client_upload_uses_only_existing_gateway_lease(monkeypatch):
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         api = runner.HttpArenaApiClient("https://gateway.example", client=client)
         assert api.trajectory("run-123", "existing-lease", [event]) == {"accepted": 1}
+
+
+@pytest.mark.parametrize("job_lease", [lease, scoring_lease])
+@pytest.mark.parametrize("reason", ["sandbox_launch_failed", "sandbox_startup_timeout"])
+def test_host_launch_failure_retains_private_diagnostic_and_no_completion(
+    tmp_path, capsys, job_lease, reason,
+):
+    request = job_lease()
+    token = request["lease_token"]
+
+    class BrokenHost:
+        def run_icp(self, _spec, **_kwargs):
+            raise runtime.RuntimeHostError(
+                "untrusted exception secret-text", reason=reason,
+                launch_exit_code=128, launch_timed_out=reason.endswith("timeout"),
+                launch_stderr=("mount namespace: operation not permitted\nlease=" + token).encode(),
+            )
+
+    api = LoggingApi()
+    api.leases = [request]
+    worker = run_model(tmp_path, api, BrokenHost())
+    assert worker.abandoned == 1
+    assert api.completions == []
+    assert api.provider_frames == []
+    errors = [event for batch in api.batches for event in batch["events"]
+              if event["kind"] == "runtime.error"]
+    assert len(errors) == 1
+    content = errors[0]["content"]
+    assert content["status"] == "abandoned"
+    assert content["failure_stage"] == "runtime"
+    assert content["error_class"] == "RuntimeHostError"
+    assert content["runtime_host_reason"] == reason
+    assert content["launch_exit_code"] == 128
+    assert content["launch_timed_out"] == reason.endswith("timeout")
+    assert "operation not permitted" in content["launch_stderr"]
+    logs = capsys.readouterr().err
+    assert "operation not permitted" in logs
+    for private in (token, "untrusted exception secret-text"):
+        assert private not in json.dumps(errors)
+        assert private not in logs
+    assert "operation not permitted" not in worker.completed[0]["detail"]
+
+
+def test_installed_probe_reports_private_launch_failure_without_traceback(monkeypatch, capsys):
+    from scripts import _lab_arena_runsc_probe_ci as probe
+
+    def fail(**_kwargs):
+        raise runtime.RuntimeHostError(
+            "private exception text", reason="sandbox_launch_failed", launch_exit_code=128,
+            launch_stderr=b"mount failed: permission denied\napi_key=secret-value",
+        )
+
+    monkeypatch.setattr(probe, "run_probe", fail)
+    assert probe.main(["--runsc-path", "/usr/bin/runsc"]) == 1
+    logs = capsys.readouterr().err
+    assert "LAB_ARENA_RUNSC_PROBE_FAILED" in logs
+    assert "permission denied" in logs
+    assert "launch_exit_code=128" in logs
+    assert "secret-value" not in logs
+    assert "private exception text" not in logs

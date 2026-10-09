@@ -70,6 +70,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lab_arena import contracts, runtime, shim  # noqa: E402
+from lab_arena.runtime_host import RuntimeHostError, runtime_host_private_diagnostic  # noqa: E402
 from lab_arena.runner import RunState, WorkerSocketServer, _stage_agent_entrypoint  # noqa: E402
 
 MODEL_OK = r'''
@@ -290,7 +291,11 @@ def main(argv=None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--runsc-path", type=Path, help="probe this installed runtime and its companion binaries")
     args = parser.parse_args(argv)
-    return run_probe(dry_run=bool(args.dry_run), runsc_path=args.runsc_path)
+    try:
+        return run_probe(dry_run=bool(args.dry_run), runsc_path=args.runsc_path)
+    except RuntimeHostError as exc:
+        print("LAB_ARENA_RUNSC_PROBE_FAILED " + runtime_host_private_diagnostic(exc), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

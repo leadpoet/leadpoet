@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: external validator startup diagnosis
+
+On 2026-10-09 the user authorized correlating Rizzo's supplied host logs with
+protected gateway, lease, runtime and recovery evidence, and comparing Yuma's
+separate inactivity. Use the overnight validation procedures for the smallest
+shared-code fixes, focused tests, safe push/merge, canonical paired deployment
+and bounded reward-disabled runtime probes. Preserve sandbox isolation,
+provider accounting, host-failure quarantine, accepted results, scoring,
+weights and concurrent work. Do not induce failures in live miner jobs or
+claim external-host recovery without evidence from that host. Authority ends
+after the identified shared-code fixes and live verification are complete.
+
 ## Scoped production authorization: recoverable provider refusal guard
 
 On 2026-10-08 the user authorized investigating MAX_REFUSED_FRAMES, fixing

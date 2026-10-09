@@ -50,7 +50,10 @@ from lab_arena.output import (
     output_document_from_bytes,
     output_invalid_reason,
 )
-from lab_arena.runtime_host import DEFAULT_RUNNER_SOCKET_ROOT, RuntimeHostError, runtime_host_diagnostic
+from lab_arena.runtime_host import (
+    DEFAULT_RUNNER_SOCKET_ROOT, RuntimeHostError, runtime_host_diagnostic,
+    runtime_host_private_diagnostic,
+)
 
 DEFAULT_MAX_PARALLEL_RUNS = 8  # compatibility for direct test/embedded configurations
 MAX_PARALLEL_ENV = "LAB_ARENA_MAX_PARALLEL_RUNS"
@@ -163,7 +166,9 @@ _JUDGE_FAILURE_CLASSES = frozenset(
 )
 _PICKUP_PHASES = frozenset({"round_discovery", "claim"})
 _PICKUP_FAILURE_REASONS = frozenset({"request_failed", "claim_denied"})
-_IDLE_CLAIM_STATUSES = frozenset({"no_pending", "no_open_round", "stage_closed"})
+_IDLE_CLAIM_STATUSES = frozenset({
+    "no_pending", "no_open_round", "stage_closed", "paused", "no_free_slot", "cache_busy",
+})
 _ACTIVE_RESCAN_CLAIM_STATUSES = frozenset({"no_pending", "no_free_slot"})
 _CLAIM_AVAILABILITY_CODES = frozenset(
     {
@@ -3158,6 +3163,17 @@ def _record_runtime_failure(
             "failure_stage": failure_stage,
             "error_class": type(exc).__name__[:64],
         }
+        if isinstance(exc, RuntimeHostError):
+            error_content["runtime_host_reason"] = exc.reason
+            if exc.reason in ("sandbox_launch_failed", "sandbox_startup_timeout"):
+                error_content.update({
+                    "launch_exit_code": exc.launch_exit_code,
+                    "launch_timed_out": exc.launch_timed_out,
+                    "launch_stderr_truncated": exc.launch_stderr_truncated,
+                    "launch_stderr": trajectory.redact_text(
+                        exc.launch_stderr, secrets=(lease_token,),
+                    ),
+                })
         if result is not None:
             error_content.update({
                 "resource_summary": {
@@ -4122,7 +4138,12 @@ class Runner:
             else:
                 detail = type(exc).__name__
             print(
-                "Lab Arena run abandoned: %s" % detail,
+                "Lab Arena run abandoned: %s" % (
+                    trajectory.redact_text(
+                        runtime_host_private_diagnostic(exc),
+                        secrets=(str(lease.get("lease_token") or ""),),
+                    ) if isinstance(exc, RuntimeHostError) else detail
+                ),
                 file=sys.stderr,
                 flush=True,
             )

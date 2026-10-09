@@ -13,6 +13,9 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+from typing import Sequence, Tuple
+
+from lab_arena.trajectory import redact_text
 
 RUNSC_CHECK_TIMEOUT_SECONDS = 5
 RUNSC_CHECK_CLEANUP_SECONDS = 2
@@ -38,10 +41,43 @@ _REASONS = {
     "unsafe_work_directory": "runner directories must be real directories at a dedicated path",
     "work_directory_unwritable": "check runner directory ownership, permissions and available storage",
     "sandbox_launch_failed": "runsc exited before sandbox creation completed",
+    "sandbox_startup_timeout": "runsc did not complete sandbox creation before the startup deadline",
     "parallel_memory_insufficient": "configured proxy slots exceed available memory; provide 2 GiB per sandbox plus host reserve",
     "parallel_memory_unavailable": "the host memory limit could not be verified",
 }
 _LOG_PATH = re.compile(r"/[A-Za-z0-9_./ -]{0,511}\Z")
+MAX_LAUNCH_DIAGNOSTIC_CHARS = 2048
+MAX_LAUNCH_DIAGNOSTIC_BYTES = 64 * 1024
+_DIAGNOSTIC_URL_QUERY_RE = re.compile(r"(https?://[^\s?#]+)[?#][^\s]*", re.IGNORECASE)
+_DIAGNOSTIC_URL_AUTHORITY_RE = re.compile(r"(https?://)[^\s/@]+(?::[^\s/@]*)?@", re.IGNORECASE)
+_DIAGNOSTIC_HEADER_RE = re.compile(r"(?im)(\b(?:cookie|set-cookie|authorization)\s*:\s*)[^\r\n]*")
+_DIAGNOSTIC_CREDENTIAL_RE = re.compile(
+    r"(?i)(\b(?:[a-z0-9_]*(?:api[_-]?key|token|secret|password|passwd)|"
+    r"authorization|cookie|set-cookie)\b[\"']?\s*[:=]\s*)"
+    r"(?:\"[^\"]*\"|'[^']*'|(?:(?:bearer|basic)\s+)?[^\s,;]+)"
+)
+
+
+def _safe_launch_stderr(
+    value: bytes, *, truncated: bool, secrets: Sequence[str]
+) -> Tuple[str, bool]:
+    # Capture is a bounded prefix. Drop a cut final line before redaction so
+    # a partial credential value cannot outlive its label.
+    truncated = truncated or len(value) > MAX_LAUNCH_DIAGNOSTIC_BYTES
+    data = bytes(value[:MAX_LAUNCH_DIAGNOSTIC_BYTES])
+    if truncated:
+        data = data.rpartition(b"\n")[0]
+    text = data.decode("utf-8", errors="replace")
+    # Remove quoted values and full credential headers before the common
+    # redactor, which can replace only the first word of a quoted value.
+    text = _DIAGNOSTIC_HEADER_RE.sub(r"\1[redacted]", text)
+    text = _DIAGNOSTIC_CREDENTIAL_RE.sub(r"\1[redacted]", text)
+    text = redact_text(text, secrets=secrets)
+    text = _DIAGNOSTIC_URL_QUERY_RE.sub(r"\1?[redacted]", text)
+    text = _DIAGNOSTIC_URL_AUTHORITY_RE.sub(r"\1[redacted]@", text)
+    text = re.sub(r"[\x00-\x1f\x7f-\x9f]+", " ", text)
+    text = " ".join(text.split())
+    return text[:MAX_LAUNCH_DIAGNOSTIC_CHARS], truncated or len(text) > MAX_LAUNCH_DIAGNOSTIC_CHARS
 
 
 class ArenaRuntimeError(RuntimeError):
@@ -52,7 +88,9 @@ class RuntimeHostError(ArenaRuntimeError):
     """A host failure with a closed, credential-free public diagnostic."""
 
     def __init__(
-        self, message="", *, reason="runtime_host_error", runsc_path=None, work_dir=None
+        self, message="", *, reason="runtime_host_error", runsc_path=None, work_dir=None,
+        launch_exit_code=None, launch_timed_out=False, launch_stderr=b"",
+        launch_stderr_truncated=False, diagnostic_secrets: Sequence[str] = (),
     ):
         # Preserve existing callers' exception text, but never log that text.
         super().__init__(
@@ -61,6 +99,16 @@ class RuntimeHostError(ArenaRuntimeError):
         self.reason = reason if reason in _REASONS else "runtime_host_error"
         self.runsc_path = runsc_path
         self.work_dir = work_dir
+        self.launch_exit_code = (
+            launch_exit_code if isinstance(launch_exit_code, int)
+            and not isinstance(launch_exit_code, bool) and -255 <= launch_exit_code <= 255
+            else None
+        )
+        self.launch_timed_out = bool(launch_timed_out)
+        self.launch_stderr, self.launch_stderr_truncated = _safe_launch_stderr(
+            launch_stderr, truncated=bool(launch_stderr_truncated),
+            secrets=diagnostic_secrets,
+        )
 
 
 def scoring_host_details(*, runsc_path=None, work_dir=None) -> str:
@@ -81,6 +129,17 @@ def runtime_host_diagnostic(error: RuntimeHostError) -> str:
         reason,
         " " + details if details else "",
         json.dumps(_REASONS[reason]),
+    )
+
+
+def runtime_host_private_diagnostic(error: RuntimeHostError) -> str:
+    """Include bounded redacted launcher detail only in private host logs."""
+    diagnostic = runtime_host_diagnostic(error)
+    if error.reason not in ("sandbox_launch_failed", "sandbox_startup_timeout"):
+        return diagnostic
+    return "%s launch_exit_code=%s launch_timed_out=%s launch_stderr_truncated=%s launch_stderr=%s" % (
+        diagnostic, error.launch_exit_code, str(error.launch_timed_out).lower(),
+        str(error.launch_stderr_truncated).lower(), json.dumps(error.launch_stderr),
     )
 
 

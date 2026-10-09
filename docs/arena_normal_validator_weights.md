@@ -361,7 +361,8 @@ but no paid provider requests. Missing or invalid proxies fail this check.
 | `root_required` | The process is not root and existing non-interactive sudo permission was unavailable. Scoring cannot start; weights continue. |
 | `unsafe_work_directory` | Inspect the reported path; preserve its contents and correct the configuration. |
 | `work_directory_unwritable` | Check ownership, permissions, read-only mounts, and available storage. |
-| `sandbox_launch_failed` | Run the installed-runtime probe and investigate sandbox capabilities. |
+| `sandbox_launch_failed` | Inspect the private launch diagnostic and run the installed-runtime probe. |
+| `sandbox_startup_timeout` | Sandbox creation exceeded its startup deadline; inspect the private launch diagnostic. |
 | `proxy_environment_invalid` | Check the private proxy file path, owner, mode 0600, and syntax. |
 | `proxy_inventory_invalid` | Configure at least one unique indexed proxy URL. |
 | `proxy_preflight_failed` | Check proxy credentials, CONNECT access, and distinct public exit IPs. |
@@ -386,6 +387,16 @@ For networking it checks the `--network=none` command and a failed outbound
 connection smoke test. An unreachable destination can also make that connection
 fail, so this test alone does not independently prove network isolation.
 The probe uses local provider fixtures and no production leases or credentials.
+On a launch failure it prints `LAB_ARENA_RUNSC_PROBE_FAILED` with the bounded,
+redacted launcher exit code and stderr. The same diagnostic is retained in
+private validator logs and `runtime.error` trajectory events for real jobs.
+A successful `runsc --version` check alone does not prove sandbox creation.
+
+Expected claim states such as `paused` during a gateway restart are idle, not
+claim failures. Repeated authenticated zero-call host failures can exclude a
+validator from new assignments for the rest of that round. A local restart does
+not clear that guard; use the installed-runtime probe to check a repair without
+consuming another miner job.
 
 Then verify a real eligible Arena job reaches an accepted completion, and
 independently verify finalized weight reveal for that validator. An empty queue

@@ -56,7 +56,7 @@ def _service(rows: list[dict]) -> ArenaService:
         chain=SimpleNamespace(current_settlement_epoch=lambda: 100),
     )
     service._round = lambda round_id: by_id[round_id] if round_id in by_id else _missing_round()
-    service.latest_published_round = lambda: None
+    service.latest_published_round = lambda *, public_only=False: None
     return service
 
 

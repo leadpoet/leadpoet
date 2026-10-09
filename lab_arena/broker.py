@@ -2985,6 +2985,41 @@ def _deepline_firecrawl_enrichment_refusal(
     )
 
 
+def _deepline_firecrawl_unsupported_linkedin_refusal(
+    parameters: Mapping[str, Any], response: ProviderResponse
+) -> bool:
+    """Recognize the observed unsupported source, never a general HTTP 422."""
+
+    if response.status != 422 or parameters.get("tool") != "firecrawl_scrape":
+        return False
+    payload = parameters.get("payload")
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("url"), str):
+        return False
+    try:
+        target = urlsplit(payload["url"])
+        if (
+            target.scheme != "https"
+            or (target.hostname or "").casefold() not in {"linkedin.com", "www.linkedin.com"}
+            or target.username is not None
+            or target.password is not None
+            or target.port not in (None, 443)
+        ):
+            return False
+        document = json.loads(response.body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(document, Mapping):
+        return False
+    unsupported = (
+        "Firecrawl does not support scraping LinkedIn URLs. Use a native "
+        "HarvestAPI LinkedIn operation when it covers the requested shape."
+    )
+    return (
+        document.get("code") == "UPSTREAM_BAD_INPUT"
+        and all(document.get(field) == unsupported for field in ("error", "detail", "message"))
+    )
+
+
 def _provider_request_refused(
     provider: str,
     parameters: Mapping[str, Any],
@@ -2996,6 +3031,7 @@ def _provider_request_refused(
         return (
             _deepline_generic_http_request_refusal(parameters, response)
             or _deepline_firecrawl_enrichment_refusal(parameters, response)
+            or _deepline_firecrawl_unsupported_linkedin_refusal(parameters, response)
         )
     return False
 

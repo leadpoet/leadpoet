@@ -185,6 +185,7 @@ def test_compact_runtime_projection_has_matching_postgrest_and_bound_sql():
         store.list_runtime_starts('round', run_ids=['run:1'])
     assert requests[0].url.params['submission_id'] == 'in.(miner)'
     assert requests[0].url.params['select'] == public_dashboard._EVALUATION_COLUMNS
+    assert 'terminal_cause' in requests[0].url.params['select'].split(',')
     assert requests[1].url.params['event_kind'] == 'eq.runtime.started'
     queries = []
     class Cursor:
@@ -198,6 +199,7 @@ def test_compact_runtime_projection_has_matching_postgrest_and_bound_sql():
     ArenaStore(transport).list_runs('round', columns=public_dashboard._EVALUATION_COLUMNS, submission_ids=['miner'])
     ArenaStore(transport).list_runtime_starts('round', run_ids=['run:1'])
     assert "result_doc #>> '{resource_summary,validator_source_commit}' AS source_commit" in queries[0][0]
+    assert 'terminal_cause' in queries[0][0] and 'terminal_doc' not in queries[0][0]
     assert "content ->> 'lease_generation' AS start_lease_generation" in queries[1][0]
     assert 'submission_id = ANY(%s)' in queries[0][0]
     assert queries[0][1] == ['round', ['miner']]
@@ -256,3 +258,62 @@ def test_never_started_failed_assignments_do_not_query_trajectory(identity):
     assert len(reads) == 1
     assert entries[0]["evaluation"]["state"] == "failed"
     assert entries[0]["evaluation"]["counts"]["failed"] == 1
+
+
+def test_unclaimed_stage_closed_assignments_explain_all_49_incomplete_models():
+    reads = []
+    entries = [{"submission_id": f"miner-{index}", "status": "scoring"} for index in range(49)]
+    rows = [run(
+        run_id=f"run:{index}:{icp}", assignment_id=f"assignment:{index}:{icp}",
+        submission_id=f"miner-{index}", kind="execute", status="failed",
+        terminal_cause="stage_closed", runner_hotkey=None, lease_generation=0,
+        result_doc=None, terminal_doc={"error": "private-host-error"},
+    ) for index in range(49) for icp in range(10)]
+    def list_runs(_round_id, **kwargs):
+        reads.append(kwargs)
+        return rows
+    service = SimpleNamespace(now=lambda: NOW, _store=SimpleNamespace(
+        list_runs=list_runs,
+        list_runtime_starts=lambda *_a, **_k: pytest.fail("Unclaimed runs have no start receipt"),
+    ))
+    public_dashboard._attach_evaluations(service, "round", entries)
+    assert len(reads) == 1 and "terminal_cause" in reads[0]["columns"].split(",")
+    for entry in entries:
+        evaluation = entry["evaluation"]
+        assert evaluation["state"] == "failed"
+        assert evaluation["failure_reasons"] == ["execution_window"]
+        assert evaluation["counts"] == {"queued": 0, "active": 0, "completed": 0, "failed": 10, "retrying": 0}
+        assert not evaluation["validators"] and not evaluation["code_versions"]
+    assert "private-host-error" not in json.dumps(entries)
+
+
+@pytest.mark.parametrize("cause,reason", [
+    ("credential_error", "provider_credentials"), ("stage_closed", "execution_window"),
+    ("judge_error", "review"), ("judge_timeout", "review"), ("provider_error", "provider"),
+    ("model_timeout", "execution"), ("invalid_output", "execution"),
+    ("budget_exhausted", "execution"), ("model_error", "execution"),
+    ("lease_expired", "unknown"), ("worker_lost", "unknown"), ("result_rejected", "unknown"),
+    (None, "unknown"), ("private-unrecognized-error", "unknown"), ({"error": "private"}, "unknown"),
+])
+def test_failure_reasons_publish_only_fixed_categories(cause, reason):
+    projected = public_dashboard.evaluation_progress([
+        run(status="failed", terminal_cause=cause, terminal_doc={"error": "private-detail"}),
+    ], NOW)
+    assert projected["failure_reasons"] == [reason]
+    assert "private" not in json.dumps(projected)
+
+
+def test_failure_reasons_follow_effective_assignments_and_do_not_change_retry_or_scores():
+    failed = run(status="failed", terminal_cause="credential_error")
+    for successor in [run(attempt=2, status="pending", runner_hotkey=None),
+                      run(attempt=2, status="accepted"),
+                      run(attempt=0, status="accepted")]:
+        projected = public_dashboard.evaluation_progress([failed, successor], NOW)
+        assert "failure_reasons" not in projected
+        assert projected["counts"]["failed"] == 0
+    latest = run(attempt=2, status="failed", terminal_cause="judge_timeout")
+    assert public_dashboard.evaluation_progress([failed, latest], NOW)["failure_reasons"] == ["review"]
+    mixed = [failed, run(assignment_id="other", status="failed", terminal_cause="stage_closed")]
+    projected = public_dashboard.evaluation_progress(mixed, NOW)
+    assert projected["failure_reasons"] == ["execution_window", "provider_credentials"]
+    assert "failure_reasons" not in public_dashboard.evaluation_progress(mixed, NOW, outcome="completed")

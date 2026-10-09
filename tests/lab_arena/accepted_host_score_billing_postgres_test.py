@@ -22,7 +22,7 @@ from tests.lab_arena.test_lab_arena_migration_postgres import complete
 SCRIPTS = Path(__file__).parents[2] / "scripts"
 MIGRATION_432 = SCRIPTS / "432-lab-arena-closed-host-score-billing.sql"
 MIGRATION_436_QUERY = SCRIPTS / "436-lab-arena-closed-provider-candidate-query.sql"
-MIGRATION_437 = SCRIPTS / "437-lab-arena-accepted-host-score-billing.sql"
+MIGRATION_438 = SCRIPTS / "438-lab-arena-accepted-host-score-billing.sql"
 HELPER = "public.lab_arena__closed_host_score_success_uncertainty_v1"
 HELPER_SIGNATURE = HELPER + "(bigint)"
 SELECTOR_SIGNATURE = (
@@ -121,9 +121,9 @@ def test_accepted_host_score_exact_bill_without_publication_or_admission_rewrite
             "WHERE round_id=%s", (h.round_id,),
         )
         published_hash = cursor.fetchone()[0]
-        cursor.execute(MIGRATION_437.read_text())
+        cursor.execute(MIGRATION_438.read_text())
         first = _function_definitions(cursor)
-        cursor.execute(MIGRATION_437.read_text())
+        cursor.execute(MIGRATION_438.read_text())
         assert _function_definitions(cursor) == first
         assert before[HELPER_SIGNATURE] != first[HELPER_SIGNATURE]
         assert before[SELECTOR_SIGNATURE] != first[SELECTOR_SIGNATURE]

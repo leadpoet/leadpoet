@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -32,8 +33,14 @@ _REASONS = {
 class ScoringStartupError(RuntimeError):
     """A scoring preflight failure with a fixed, credential-free reason."""
 
-    def __init__(self, *, reason: str):
+    def __init__(self, *, reason: str, operation: str | None = None,
+                 http_status: int | None = None):
         self.reason = reason if reason in _REASONS else "proxy_environment_invalid"
+        self.operation = operation if operation and re.fullmatch(
+            r"(?:native_exit_ip|proxy_worker_[1-9][0-9]{0,2}_(?:connect|exit_ip|distinct_exit))"
+            r"_(?:failed|timeout|dns|tls|http_error|invalid_response|duplicate_exit)", operation
+        ) else None
+        self.http_status = http_status if type(http_status) is int and 100 <= http_status <= 599 else None
         super().__init__(_REASONS[self.reason])
 
 
@@ -41,7 +48,12 @@ def scoring_startup_diagnostic(error: ScoringStartupError) -> str:
     """Render only allowlisted diagnostics, never underlying exception text."""
 
     reason = error.reason if error.reason in _REASONS else "proxy_environment_invalid"
-    return "reason=%s hint=%r" % (reason, _REASONS[reason])
+    details = ""
+    if error.operation:
+        details += " operation=%s" % error.operation
+    if error.http_status is not None:
+        details += " http_status=%d" % error.http_status
+    return "reason=%s%s hint=%r" % (reason, details, _REASONS[reason])
 
 
 @dataclass(frozen=True)
@@ -94,8 +106,12 @@ def prepare_validator_scoring(
         raise ScoringStartupError(reason="proxy_inventory_invalid") from None
     try:
         verified_proxies = preflight_proxy_workers(inventory)
-    except ProxyWorkerPreflightError:
-        raise ScoringStartupError(reason="proxy_preflight_failed") from None
+    except ProxyWorkerPreflightError as exc:
+        raise ScoringStartupError(
+            reason="proxy_preflight_failed",
+            operation=(exc.operation + "_" + exc.failure_kind) if exc.operation else None,
+            http_status=exc.http_status,
+        ) from None
     proxy_parallelism = min(
         verified_proxies.total_process_capacity, contracts.RUNNER_SLOT_CEILING
     )

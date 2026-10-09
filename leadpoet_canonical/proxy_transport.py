@@ -42,6 +42,10 @@ _HOST_RE = re.compile(
 class ProxyTransportError(RuntimeError):
     """A proxy endpoint or public network operation is invalid."""
 
+    def __init__(self, message: str, *, http_status: int | None = None):
+        super().__init__(message)
+        self.http_status = http_status if type(http_status) is int and 100 <= http_status <= 599 else None
+
 
 class ProxyTransportCleanupError(ProxyTransportError):
     """A failed operation still owns transport resources."""
@@ -388,7 +392,8 @@ def open_http_connect_tunnel(
         status = int(parts[1])
         if status < 200 or status >= 300:
             raise ProxyTransportError(
-                "upstream proxy CONNECT failed with HTTP status %d" % status
+                "upstream proxy CONNECT failed with HTTP status %d" % status,
+                http_status=status,
             )
         if remainder:
             raise ProxyTransportError(

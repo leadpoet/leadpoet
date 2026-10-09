@@ -113,6 +113,11 @@ class ValidatorOperationalLogger:
             fields["http_status"] = http_status
         if denial_code:
             fields["denial_code"] = denial_code
+        if isinstance(exc, ScoringStartupError):
+            if exc.operation:
+                fields["operation"] = exc.operation
+            if exc.http_status is not None:
+                fields["http_status"] = exc.http_status
         if isinstance(exc, RuntimeHostError):
             fields.update({"launch_timed_out": exc.launch_timed_out,
                            "launch_stderr_truncated": exc.launch_stderr_truncated})
@@ -122,7 +127,8 @@ class ValidatorOperationalLogger:
                 encoded = exc.launch_stderr.encode("utf-8")
                 fields["launch_stderr"] = encoded[:2048].decode("utf-8", errors="ignore")
                 fields["launch_stderr_truncated"] = exc.launch_stderr_truncated or len(encoded) > 2048
-        key = (phase, fields.get("reason"), fields["error_class"])
+        key = (phase, fields.get("reason"), fields["error_class"],
+               fields.get("operation"), fields.get("http_status"))
         with self._lock:
             previous = self._errors.get(key)
             current = self._monotonic()

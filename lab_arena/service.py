@@ -1411,7 +1411,10 @@ class ArenaService:
         rows = self._store.list_rounds(
             status="published", mode=self._config.mode,
             network_name=network_name, netuid=netuid,
-            limit=200
+            # The store applies mode/network filters and newest-first ordering.
+            # Current-round polling needs one summary, not every large result.
+            limit=1,
+            columns="round_id,status,published_at,configuration_doc",
         )
         return next(
             (row for row in rows if (row.get("configuration_doc") or {}).get("mode") == self._config.mode),

@@ -1,5 +1,15 @@
 # Agent Instructions
 
+## Scoped production authorization: October 9 dashboard failure audit
+
+The user authorized minimal live dashboard cleanup followed by investigation
+and narrow fixes for incorrect evaluation failures. Use the overnight validation
+procedures for protected read-only inspection, focused tests, safe push/merge,
+canonical deployment and live UI, Sentry, OnePatch and trajectory checks.
+Preserve completed work, scores, disclosure, provider accounting, assignments,
+round timing, rewards and concurrent changes. Correct public projections without
+rewriting published results. Authority ends after production verification.
+
 ## Scoped production authorization: centralized validator operational logs
 
 On 2026-10-09 the user authorized bounded validator startup, execution-loop,

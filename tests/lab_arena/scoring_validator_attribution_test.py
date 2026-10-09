@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from lab_arena import company_judgments, contact_policy, contracts, integrity, judgment_cache, scoring
 from lab_arena.api import create_app
 from lab_arena.service import ArenaService, ServiceError
-from lab_arena.store import ArenaStore, ArenaStoreError
+from lab_arena.store import ArenaStore, ArenaStoreError, ArenaStoreUnavailable
 from tests.lab_arena.judgment_cache_test import _icp
 
 
@@ -359,6 +359,29 @@ def test_public_results_bulk_authorities_match_single_reads_and_hide_private_icp
             response = http.get(f"/arena/v1/rounds/{ROUND_ID}/results/{SUBMISSION_ID}")
         assert response.status_code == 503
         assert response.json()["code"] == "public_result_unavailable"
+
+    for failure in ("cache", "run_first", "run_second"):
+        unavailable = setup()
+        unavailable._store.get_run = lambda _id: pytest.fail("bulk timeout used single run read")
+        unavailable._store.get_judgment_cache = lambda _key: pytest.fail("bulk timeout used single cache read")
+        if failure == "cache":
+            unavailable._store.get_judgment_caches = lambda _keys: (
+                _ for _ in ()
+            ).throw(ArenaStoreUnavailable("bulk cache timeout"))
+        else:
+            unavailable._store.get_judgment_caches = lambda _keys: {key: cache_row}
+            requests = []
+            def unavailable_run_batch(ids):
+                requests.append(ids)
+                if failure == "run_first" or len(requests) == 2:
+                    raise ArenaStoreUnavailable("bulk run timeout")
+                return {run_id: unavailable._store.rows[run_id] for run_id in ids}
+            unavailable._store.get_runs = unavailable_run_batch
+        with TestClient(create_app(unavailable)) as http:
+            response = http.get(f"/arena/v1/rounds/{ROUND_ID}/results/{SUBMISSION_ID}")
+        assert response.status_code == 503
+        assert response.json()["code"] == "arena_store_unavailable"
+        assert response.headers["retry-after"] == "1"
 
 
 def test_active_completed_public_results_bulk_response_matches_single_reads():

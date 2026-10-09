@@ -6015,6 +6015,8 @@ class ArenaService:
         cache_reader = getattr(self._store, "get_judgment_caches", None)
         try:
             caches = cache_reader(sorted(keys)) if keys and cache_reader is not None else {}
+        except ArenaStoreUnavailable:
+            raise
         except ArenaStoreError as exc:
             raise ServiceError("public_result_unavailable", 503) from exc
         cached_rows = {key: caches.get(key) for key in keys} if cache_reader is not None else {}
@@ -6046,6 +6048,8 @@ class ArenaService:
         missing_scores = source_ids - local_rows.keys()
         try:
             fetched_scores = run_reader(sorted(missing_scores)) if missing_scores else {}
+        except ArenaStoreUnavailable:
+            raise
         except ArenaStoreError as exc:
             raise ServiceError("public_result_unavailable", 503) from exc
         source_rows = {run_id: fetched_scores.get(run_id) for run_id in missing_scores}
@@ -6059,6 +6063,8 @@ class ArenaService:
         missing_executions = source_execution_ids - source_rows.keys()
         try:
             fetched_executions = run_reader(sorted(missing_executions)) if missing_executions else {}
+        except ArenaStoreUnavailable:
+            raise
         except ArenaStoreError as exc:
             raise ServiceError("public_result_unavailable", 503) from exc
         source_rows.update({run_id: fetched_executions.get(run_id) for run_id in missing_executions})

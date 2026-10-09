@@ -1414,7 +1414,10 @@ class ArenaService:
             # The store applies mode/network filters and newest-first ordering.
             # Current-round polling needs one summary, not every large result.
             limit=1,
-            columns="round_id,status,published_at,configuration_doc",
+            columns=(
+                "round_id,status,published_at,configuration_doc,king_outcome,"
+                "king_hotkey,effective_reward_epoch,reward_basis_hash"
+            ),
         )
         return next(
             (row for row in rows if (row.get("configuration_doc") or {}).get("mode") == self._config.mode),

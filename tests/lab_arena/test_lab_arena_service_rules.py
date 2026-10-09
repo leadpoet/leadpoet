@@ -1915,7 +1915,10 @@ def test_public_current_discovers_latest_published_round_without_rewards():
         def list_rounds(*, status=None, **_kwargs):
             if status == "published":
                 assert _kwargs["limit"] == 1
-                assert _kwargs["columns"] == "round_id,status,published_at,configuration_doc"
+                assert _kwargs["columns"] == (
+                    "round_id,status,published_at,configuration_doc,king_outcome,"
+                    "king_hotkey,effective_reward_epoch,reward_basis_hash"
+                )
                 assert _kwargs["mode"] == "live"
                 assert _kwargs["network_name"] == "finney"
                 assert _kwargs["netuid"] == 71

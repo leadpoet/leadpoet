@@ -756,6 +756,49 @@ def test_psycopg_parameterizes_round_mode_and_status_before_limit():
     transport.close()
 
 
+def test_exact_run_and_cache_inclusion_filters_bind_in_both_transports():
+    requests = []
+    with httpx.Client(transport=httpx.MockTransport(
+        lambda request: requests.append(request) or httpx.Response(200, json=[])
+    )) as client:
+        remote = PostgrestTransport(
+            "https://project.example", service_key="sb_secret_test", http_client=client
+        )
+        remote.select("lab_arena_runs", run_ids=["run:one", "run:two"], limit=50)
+        remote.select("lab_arena_judgment_cache", cache_keys=["sha256:abc"], limit=50)
+    assert requests[0].url.params["run_id"] == "in.(run:one,run:two)"
+    assert requests[1].url.params["cache_key"] == "in.(sha256:abc)"
+
+    queries = []
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def execute(self, sql, values): queries.append((sql, values))
+        def fetchall(self): return []
+    direct = object.__new__(PsycopgTransport)
+    direct._acquire = lambda: type("Connection", (), {"cursor": lambda self: Cursor()})()
+    direct._release = lambda _connection: None
+    direct.select("lab_arena_runs", run_ids=["run:one", "run:two"], limit=50)
+    direct.select("lab_arena_judgment_cache", cache_keys=["sha256:abc"], limit=50)
+    assert "run_id = ANY(%s)" in queries[0][0]
+    assert queries[0][1] == [["run:one", "run:two"]]
+    assert "cache_key = ANY(%s)" in queries[1][0]
+    assert queries[1][1] == [["sha256:abc"]]
+
+    with httpx.Client(transport=httpx.MockTransport(
+        lambda _request: pytest.fail("invalid inclusion filter reached HTTP")
+    )) as client:
+        remote = PostgrestTransport(
+            "https://project.example", service_key="sb_secret_test", http_client=client
+        )
+        for kwargs in ({"run_ids": ["bad,run"]}, {"cache_keys": ["bad)key"]}):
+            with pytest.raises(ArenaStoreError):
+                remote.select(
+                    "lab_arena_runs" if "run_ids" in kwargs else "lab_arena_judgment_cache",
+                    **kwargs,
+                )
+
+
 def test_round_store_pushes_mode_and_scope_filters_into_activated_basis_read():
     calls = []
 

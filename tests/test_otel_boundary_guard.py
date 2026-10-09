@@ -379,6 +379,20 @@ def test_bootstrap_vocabularies_match_the_arena_source_of_truth() -> None:
     )
 
 
+def test_bootstrap_deepline_tool_vocabulary_matches_the_operation_table() -> None:
+    """The exported tool names must track ``operations.DEEPLINE_TOOLS``.
+
+    A tool added to the table but not to the bootstrap copy would make the
+    exporter drop every span for that tool — the exact calls an operator is
+    most likely to be looking for.
+    """
+    from lab_arena import operations
+
+    assert set(
+        _frozen_literal(_read(BOOTSTRAP), "ARENA_DEEPLINE_TOOLS")
+    ) == set(operations.DEEPLINE_TOOLS)
+
+
 def test_arena_error_code_vocabulary_covers_the_operation_table() -> None:
     from lab_arena import operations
 

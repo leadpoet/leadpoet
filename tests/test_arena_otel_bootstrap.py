@@ -23,6 +23,7 @@ from gateway.observability.otel_bootstrap import (
     ARENA_PROVIDER_OUTCOMES,
     ARENA_PROVIDER_SCOPE,
     ARENA_PROVIDERS,
+    ARENA_TOOL_NONE,
     ARENA_RUN_SCOPE,
     ARENA_RUNTIME_SCOPE,
     ARENA_SERVICE_NAME,
@@ -212,6 +213,52 @@ def test_provider_span_carries_only_the_approved_attributes():
     assert span.attributes["arena.error_code"] == "-"
     assert span.attributes["arena.cost_microusd"] == 1375
     assert span.attributes["arena.attempts"] == 2
+    assert span.attributes["arena.tool"] == ARENA_TOOL_NONE
+
+
+def test_provider_span_names_the_deepline_tool():
+    """``deepline.execute`` is one operation over many upstream tools.
+
+    Without the tool, a Deepline failure can only be attributed to "Deepline",
+    which is never the answer an operator needs.
+    """
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_provider(
+        "deepline",
+        "deepline.execute",
+        "uncertain",
+        error_code="provider_unavailable",
+        tool="hunter_email_finder",
+        provider_status=502,
+    )
+
+    (span,) = exp.get_finished_spans()
+    assert span.attributes["arena.tool"] == "hunter_email_finder"
+    assert span.attributes["arena.operation"] == "deepline.execute"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        # a tool outside the frozen table
+        {"provider": "deepline", "operation": "deepline.execute",
+         "outcome": "ok", "tool": "exfiltrate_credentials"},
+        # a lead's email smuggled in as a tool
+        {"provider": "deepline", "operation": "deepline.execute",
+         "outcome": "ok", "tool": "ada@example.com"},
+        # a real tool paired with a provider that has no tools
+        {"provider": "openrouter", "operation": "openrouter.responses",
+         "outcome": "ok", "tool": "hunter_email_finder"},
+    ],
+)
+def test_provider_spans_with_an_inadmissible_tool_are_dropped_whole(kwargs):
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record_provider(
+        kwargs.pop("provider"), kwargs.pop("operation"), kwargs.pop("outcome"), **kwargs
+    )
+    assert exp.get_finished_spans() == ()
 
 
 def test_provider_and_terminal_spans_share_only_bounded_run_identity():
@@ -452,6 +499,26 @@ def test_the_service_projection_only_produces_admissible_provider_spans():
     assert len(spans) == len(summaries), "every projected call must be exportable"
     haystack = repr([dict(span.attributes) for span in spans])
     assert "sha256:" not in haystack and "claude-sonnet-4" not in haystack
+
+
+def test_the_service_tool_projection_resolves_and_degrades():
+    """``_telemetry_tool`` must only ever produce an admissible tool name."""
+    from lab_arena.service import _telemetry_tool
+
+    # the native execute route names its tool in the admitted frame
+    assert _telemetry_tool(
+        "deepline.execute", {"tool": "hunter_email_finder"}
+    ) == "hunter_email_finder"
+    # a compatibility route carries its pinned tool instead
+    assert _telemetry_tool("exa.search", {}) == "exa_search"
+    # a non-Deepline provider has no tool
+    assert _telemetry_tool("openrouter.responses", {}) == telemetry.NO_TOOL
+    # anything the table does not know degrades rather than leaking
+    for parameters in (
+        {}, {"tool": ""}, {"tool": "ada@example.com"}, {"tool": 7},
+    ):
+        assert _telemetry_tool("deepline.execute", parameters) == telemetry.NO_TOOL
+    assert _telemetry_tool("", {"tool": "exa_search"}) == telemetry.NO_TOOL
 
 
 # -- run outcomes -------------------------------------------------------------

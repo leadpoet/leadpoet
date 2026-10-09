@@ -44,6 +44,9 @@ from contextlib import contextmanager
 from typing import Any, Iterator, Mapping, Optional
 
 NO_ERROR = "-"
+# A provider call that names no Deepline tool: any non-Deepline provider, and
+# a Deepline operation whose tool could not be resolved from the frame.
+NO_TOOL = "-"
 
 _recorder: Optional[Any] = None
 
@@ -98,6 +101,7 @@ def record_provider(
     *,
     error_code: str = NO_ERROR,
     error_type: str = NO_ERROR,
+    tool: str = NO_TOOL,
     http_status: int = 0,
     provider_status: int = 0,
     attempts: int = 1,
@@ -117,6 +121,7 @@ def record_provider(
             outcome,
             error_code=error_code,
             error_type=error_type,
+            tool=tool,
             http_status=http_status,
             provider_status=provider_status,
             attempts=attempts,
@@ -233,6 +238,7 @@ def stage(name: str) -> Iterator[StageResult]:
 
 __all__ = [
     "NO_ERROR",
+    "NO_TOOL",
     "StageResult",
     "install_recorder",
     "note_denial",

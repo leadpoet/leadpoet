@@ -1916,7 +1916,7 @@ def test_public_current_discovers_latest_published_round_without_rewards():
             if status == "published":
                 assert _kwargs["limit"] == 1
                 assert _kwargs["columns"] == (
-                    "round_id,status,published_at,configuration_doc,king_outcome,"
+                    "round_id,status,published_at,cfg_mode:configuration_doc->mode::text,king_outcome,"
                     "king_hotkey,effective_reward_epoch,reward_basis_hash"
                 )
                 assert _kwargs["mode"] == "live"
@@ -2032,7 +2032,7 @@ def test_public_views_never_serialize_source_or_private_runtime_fields():
         ),
     )
     service._round = lambda _round_id: published
-    service.latest_published_round = lambda: None
+    service.latest_published_round = lambda **_kwargs: None
     service._objects = SimpleNamespace(get=lambda _ref: b"{}")
 
     current = service.public_current()

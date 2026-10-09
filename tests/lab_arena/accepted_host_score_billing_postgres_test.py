@@ -21,9 +21,14 @@ from tests.lab_arena.test_lab_arena_migration_postgres import complete
 
 SCRIPTS = Path(__file__).parents[2] / "scripts"
 MIGRATION_432 = SCRIPTS / "432-lab-arena-closed-host-score-billing.sql"
-MIGRATION_436 = SCRIPTS / "436-lab-arena-accepted-host-score-billing.sql"
+MIGRATION_436_QUERY = SCRIPTS / "436-lab-arena-closed-provider-candidate-query.sql"
+MIGRATION_437 = SCRIPTS / "437-lab-arena-accepted-host-score-billing.sql"
 HELPER = "public.lab_arena__closed_host_score_success_uncertainty_v1"
 HELPER_SIGNATURE = HELPER + "(bigint)"
+SELECTOR_SIGNATURE = (
+    "public.lab_arena_next_closed_deepline_reconciliation_v1"
+    "(text,text,integer,text,bigint)"
+)
 UNCHANGED_FUNCTIONS = (
     "public.lab_arena__closed_score_dynamic_uncertainty_v1(bigint)",
     "public.lab_arena__submission_kind_admission_spend_v1(text,text,boolean)",
@@ -32,7 +37,7 @@ UNCHANGED_FUNCTIONS = (
 
 
 def _function_definitions(cursor):
-    signatures = (HELPER_SIGNATURE, *UNCHANGED_FUNCTIONS)
+    signatures = (HELPER_SIGNATURE, SELECTOR_SIGNATURE, *UNCHANGED_FUNCTIONS)
     definitions = {}
     for signature in signatures:
         cursor.execute(
@@ -107,6 +112,7 @@ def test_accepted_host_score_exact_bill_without_publication_or_admission_rewrite
     ]
     with connect() as connection, connection.cursor() as cursor:
         cursor.execute(MIGRATION_432.read_text())
+        cursor.execute(MIGRATION_436_QUERY.read_text())
         assert _helper(cursor, candidate["uncertain_entry_id"]) is False
         assert _closed_candidate(cursor, h.round_id) == {"status": "none"}
         before = _function_definitions(cursor)
@@ -115,11 +121,12 @@ def test_accepted_host_score_exact_bill_without_publication_or_admission_rewrite
             "WHERE round_id=%s", (h.round_id,),
         )
         published_hash = cursor.fetchone()[0]
-        cursor.execute(MIGRATION_436.read_text())
+        cursor.execute(MIGRATION_437.read_text())
         first = _function_definitions(cursor)
-        cursor.execute(MIGRATION_436.read_text())
+        cursor.execute(MIGRATION_437.read_text())
         assert _function_definitions(cursor) == first
         assert before[HELPER_SIGNATURE] != first[HELPER_SIGNATURE]
+        assert before[SELECTOR_SIGNATURE] != first[SELECTOR_SIGNATURE]
         assert all(before[name] == first[name] for name in UNCHANGED_FUNCTIONS)
         assert _helper(cursor, candidate["uncertain_entry_id"]) is True
         assert _closed_candidate(cursor, h.round_id)["uncertain_entry_id"] == candidate["uncertain_entry_id"]
@@ -196,15 +203,9 @@ def test_accepted_host_score_exact_bill_without_publication_or_admission_rewrite
     with connect() as connection, connection.cursor() as cursor:
         cursor.execute("SELECT md5(to_jsonb(r)::text) FROM public.lab_arena_rounds r WHERE round_id=%s", (h.round_id,))
         assert cursor.fetchone()[0] == published_hash
-
-
-def test_original_failed_host_score_arm_still_matches(database, tmp_path, monkeypatch):
-    monkeypatch.setattr(br, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
-    h, _, connect, _, _, candidate = closed_call(
+    failed_round, _, failed_connect, _, _, failed_candidate = closed_call(
         database, tmp_path, "25", native=NATIVE
     )
-    with connect() as connection, connection.cursor() as cursor:
-        cursor.execute(MIGRATION_432.read_text())
-        cursor.execute(MIGRATION_436.read_text())
-        assert _helper(cursor, candidate["uncertain_entry_id"]) is True
-        assert _closed_candidate(cursor, h.round_id)["uncertain_entry_id"] == candidate["uncertain_entry_id"]
+    with failed_connect() as connection, connection.cursor() as cursor:
+        assert _helper(cursor, failed_candidate["uncertain_entry_id"]) is True
+        assert _closed_candidate(cursor, failed_round.round_id)["uncertain_entry_id"] == failed_candidate["uncertain_entry_id"]

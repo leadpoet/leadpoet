@@ -3033,6 +3033,7 @@ class RunnerConfig:
     # spare capacity. A retry may become eligible without a local future ending.
     claim_poll_seconds: float = 30.0
     workspace_cache_lock: Any = None
+    operational_logger: Any = None
 
     def __post_init__(self) -> None:
         if (
@@ -4058,6 +4059,8 @@ class Runner:
         if self._pinned:
             return self.round_id
         config = self._config
+        if config.operational_logger is not None:
+            config.operational_logger.state(scoring_state="discovering")
         current = config.api.current()
         rows = current.get("running_rounds") if isinstance(current, Mapping) else None
         if not isinstance(rows, list):
@@ -4071,6 +4074,9 @@ class Runner:
             if round_id not in self._round_ids:
                 config.api.round(round_id)
         self._round_ids = wanted
+        if config.operational_logger is not None:
+            config.operational_logger.state(progress=True, last_poll_at=config.clock().isoformat())
+            config.operational_logger.recovered("round_discovery")
         return self.round_id
 
     def claim_one(self, round_id: Optional[str] = None) -> Dict[str, Any]:
@@ -4102,8 +4108,15 @@ class Runner:
         retry_delays = iter(tuple(config.claim_retry_seconds))
         while True:
             try:
-                return config.api.claim(envelope)
+                response = config.api.claim(envelope)
+                if (config.operational_logger is not None and isinstance(response.get("status"), str)
+                    and response["status"] in (_IDLE_CLAIM_STATUSES | {"leased"})):
+                    config.operational_logger.recovered("claim", round_id=round_id)
+                return response
             except RunnerError as exc:
+                if config.operational_logger is not None:
+                    config.operational_logger.error("claim", exc, round_id=round_id,
+                        http_status=exc.http_status, denial_code=_known_claim_denial_code(exc.denial_code))
                 try:
                     delay = next(retry_delays)
                 except StopIteration:
@@ -4124,12 +4137,20 @@ class Runner:
         return max(0, capacity)
 
     def _run_lease(self, lease: Mapping[str, Any]) -> None:
+        log = self._config.operational_logger
+        phase = "execution"
         try:
             envelope = self._executor.execute(lease, str(lease["lease_token"]), lease["icp"])
+            phase = "completion"
             result = self._complete_with_retries(envelope)
             self.completed.append({"run_id": lease["run_id"], "result": result})
+            if log is not None:
+                log.state(progress=True, last_completion_at=self._config.clock().isoformat())
+                log.recovered("execution", run_id=lease.get("run_id"), round_id=lease.get("round_id") or self.round_id)
         except Exception as exc:  # the attempt fails closed; the service expires the lease
             self.abandoned += 1
+            if log is not None:
+                log.error(phase, exc, run_id=lease.get("run_id"), round_id=lease.get("round_id") or self.round_id)
             if isinstance(exc, RuntimeHostError):
                 detail = runtime_host_diagnostic(exc)
             elif isinstance(exc, leased_images.LeasedImageError):
@@ -4155,6 +4176,8 @@ class Runner:
                 }
             )
         finally:
+            if log is not None:
+                log.activity(-1)
             self._slots.release()
 
     def _complete_with_retries(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
@@ -4175,6 +4198,9 @@ class Runner:
             try:
                 result = self._config.api.complete(envelope)
             except Exception as exc:
+                if self._config.operational_logger is not None:
+                    self._config.operational_logger.error("completion", exc,
+                        run_id=envelope["body"].get("run_id"), round_id=envelope.get("round_id"))
                 try:
                     delay = next(failure_delays)
                 except StopIteration:
@@ -4192,6 +4218,13 @@ class Runner:
                     flush=True,
                 )
                 if status != "accounting_open":
+                    if self._config.operational_logger is not None:
+                        log = self._config.operational_logger
+                        if status == "rejected":
+                            log.error("completion", RunnerError("completion denied"), reason="completion_denied",
+                                run_id=envelope["body"].get("run_id"), round_id=envelope.get("round_id"))
+                        else:
+                            log.recovered("completion", run_id=envelope["body"].get("run_id"), round_id=envelope.get("round_id"))
                     return result
                 try:
                     delay = next(accounting_delays)
@@ -4225,10 +4258,16 @@ class Runner:
 
         if stop_event is not None and stop_event.is_set():
             return 0
+        log = self._config.operational_logger
+        pickup_failed = False
         if not self._pinned:
             try:
                 self.refresh_round()
             except RunnerError as exc:
+                if log is not None:
+                    log.state(scoring_state="unavailable")
+                    log.error("round_discovery", exc, http_status=exc.http_status,
+                              denial_code=_known_claim_denial_code(exc.denial_code))
                 _log_pickup_failure(
                     phase="round_discovery",
                     reason="request_failed",
@@ -4285,8 +4324,18 @@ class Runner:
                         break
                     continue
                 try:
+                    if log is not None:
+                        log.state(scoring_state="claiming")
                     response = self.claim_one(round_id)
+                    if log is not None:
+                        status = response.get("status")
+                        log.state(progress=isinstance(status, str) and status in (_IDLE_CLAIM_STATUSES | {"leased"}),
+                                  last_poll_at=self._config.clock().isoformat())
                 except RunnerError as exc:
+                    pickup_failed = True
+                    if log is not None:
+                        log.error("claim", exc, round_id=round_id, http_status=exc.http_status,
+                                  denial_code=_known_claim_denial_code(exc.denial_code))
                     self._slots.release()
                     _log_pickup_failure(
                         phase="claim",
@@ -4305,7 +4354,14 @@ class Runner:
                         isinstance(response_status, str)
                         and response_status in _IDLE_CLAIM_STATUSES
                     )
+                    if idle and log is not None:
+                        log.recovered("claim", round_id=round_id)
                     if not idle:
+                        pickup_failed = True
+                        if log is not None:
+                            log.error("claim", RunnerError("claim denied"), reason="claim_denied",
+                                round_id=round_id, http_status=getattr(response, "http_status", None),
+                                denial_code=_known_claim_denial_code(response.get("code")))
                         _log_pickup_failure(
                             phase="claim",
                             reason="claim_denied",
@@ -4319,7 +4375,16 @@ class Runner:
                     )
                     break
                 taken += 1
-                futures.add(self._pool.submit(self._run_lease, response))
+                if log is not None:
+                    log.recovered("claim", run_id=response.get("run_id"), round_id=round_id)
+                    log.activity(1)
+                try:
+                    future = self._pool.submit(self._run_lease, response)
+                except BaseException:
+                    if log is not None:
+                        log.activity(-1)
+                    raise
+                futures.add(future)
             round_index += 1
             if (
                 round_index == len(round_ids)
@@ -4335,6 +4400,8 @@ class Runner:
                 break
         for future in futures:
             future.result()
+        if log is not None:
+            log.state(scoring_state="unavailable" if pickup_failed else "idle", progress=not pickup_failed)
         return taken
 
     def close(self) -> None:

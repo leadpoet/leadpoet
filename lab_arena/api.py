@@ -14,7 +14,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
-from lab_arena import contracts, source_bundle, telemetry, trajectory
+from lab_arena import contracts, source_bundle, telemetry, trajectory, validator_events
 from lab_arena.contracts import ArenaContractError
 from lab_arena.service import ArenaService, ServiceError
 from lab_arena.store import ArenaStoreUnavailable
@@ -87,6 +87,8 @@ def create_app(service: ArenaService) -> FastAPI:
             content = await run_in_threadpool(call, *args, **kwargs)
         except ServiceError as exc:
             telemetry.note_denial(exc.code)
+            if exc.code == "validator_events_rate_limited":
+                headers["Retry-After"] = "60"
             return JSONResponse(
                 status_code=exc.status,
                 content={"status": "rejected", "code": exc.code},
@@ -163,6 +165,15 @@ def create_app(service: ArenaService) -> FastAPI:
     @app.get("/arena/v1/signing-key")
     async def signing_key() -> Any:
         return await run_in_threadpool(service.signing_key_document)
+
+    @app.post("/arena/v1/validators/events")
+    async def append_validator_events(request: Request) -> JSONResponse:
+        envelope = await _read_json(request, limits=contracts.StrictLimits(
+            max_depth=6, max_list_items=validator_events.MAX_EVENTS_PER_REQUEST,
+            max_object_keys=32, max_string_bytes=validator_events.MAX_EVENT_BYTES,
+            max_total_bytes=validator_events.MAX_REQUEST_BYTES,
+        ))
+        return await no_store_public_call(service.handle_validator_events, envelope)
 
     @app.post("/arena/v1/weight-state")
     async def accepted_weight_state(request: Request) -> JSONResponse:

@@ -237,6 +237,7 @@ def _service_for_trajectory(store, broker=None):
     service._require_round_ownership = lambda round_id: None
     if broker is not None:
         service._broker_for = lambda round_id: broker
+        service._hot_round = lambda round_id: {"round_id": round_id, "configuration_doc": {}}
     return service
 
 

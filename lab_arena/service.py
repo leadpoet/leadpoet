@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from lab_arena import telemetry, runtime_version
-from lab_arena import code_review, code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, trajectory
+from lab_arena import code_review, code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, trajectory, validator_events
 from lab_arena import broker as broker_module, chain as chain_module, contracts, credentials as credentials_module, operations, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, submission_similarity, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
@@ -5490,6 +5490,54 @@ class ArenaService:
         except (KeyError, TypeError, ValueError, ArenaStoreError) as exc:
             raise ServiceError("accepted_weight_state_conflict", 409) from exc
         return {"state": validate_accepted_weight_state(stored["state"]), "lookup_ok": True}
+
+    def handle_validator_events(self, envelope: Any) -> Dict[str, Any]:
+        """Accept private observations from a finalized permit holder without a lease."""
+        if len(contracts.canonical_json(envelope).encode("utf-8")) > validator_events.MAX_REQUEST_BYTES:
+            raise ServiceError("validator_events_too_large", 413)
+        validated = self.validate_request(
+            envelope, scope=contracts.SCOPE_VALIDATOR_EVENTS, round_id=None
+        )
+        network, netuid = self._chain_scope()
+        body = validated["body"]
+        if (validated["round_id"] != "validator-events"
+                or set(body) != {"network", "netuid", "events"}
+                or body.get("network") != network
+                or isinstance(body.get("netuid"), bool)
+                or not isinstance(body.get("netuid"), int)
+                or body["netuid"] != netuid):
+            raise ServiceError("validator_events_scope_invalid", 400)
+        try:
+            events = validator_events.validate_events(body["events"])
+            for item in events:
+                observed = datetime.fromisoformat(item["occurred_at"].replace("Z", "+00:00"))
+                if not -300 <= (self.now() - observed).total_seconds() <= 2 * 86400:
+                    raise validator_events.ValidatorEventError("validator event time invalid")
+        except validator_events.ValidatorEventError:
+            raise ServiceError("validator_events_invalid", 400) from None
+        try:
+            permitted_validator_uid(self._config.chain.metagraph(finalized=True),
+                                    validated["hotkey"], netuid=netuid)
+        except ValidatorIneligible as exc:
+            raise ServiceError(str(exc), 403) from None
+        except Exception:
+            raise ServiceError("validator_snapshot_unavailable", 503) from None
+        try:
+            result = self._store.append_validator_events(
+                validated["hotkey"], network, netuid, events,
+                runtime_version.SOURCE_METADATA["validator_source_commit"],
+            )
+        except ArenaStoreError:
+            raise ServiceError("validator_events_unavailable", 503) from None
+        if result.get("status") == "owner_required":
+            raise ServiceError("validator_events_owner_required", 403)
+        if result.get("status") == "correlation_invalid":
+            raise ServiceError("validator_events_correlation_invalid", 400)
+        if result.get("status") == "rate_limited":
+            raise ServiceError("validator_events_rate_limited", 429)
+        if result.get("status") != "accepted":
+            raise ServiceError("validator_events_unavailable", 503)
+        return result
 
     def handle_weight_state(self, envelope: Any) -> Dict[str, Any]:
         """Authorize a finalized permit holder before returning accepted state."""

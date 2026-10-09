@@ -27,6 +27,7 @@ _MAX_REQUEST_BYTES = 1_100_000
 # small signed-request wrapper. The sidecar performs the exact schema checks.
 _MAX_COMPLETION_REQUEST_BYTES = (2 * 1_048_576) + 65_536
 _MAX_TRAJECTORY_REQUEST_BYTES = 64 * 1024
+_MAX_VALIDATOR_EVENTS_REQUEST_BYTES = 32 * 1024
 _SIDECAR_URL = "http://127.0.0.1:8792"
 _TESTNET_SIDECAR_URL = "http://127.0.0.1:8793"
 _FORWARDED_REQUEST_HEADERS = ("content-type", "x-lab-arena-lease")
@@ -34,6 +35,7 @@ _FORWARDED_RESPONSE_HEADERS = (
     "content-type",
     "cache-control",
     "x-content-type-options",
+    "retry-after",
 )
 
 _HANDOFF_ROUTES = {"v1/current": "current", "v1/runs/claim": "claim", "v1/weight-state": "weights"}
@@ -285,6 +287,8 @@ async def _proxy_request(arena_path: str, request: Request, *, testnet: bool = F
         and len(parts) == 4
         and parts[:2] == ["v1", "runs"]
         and parts[3] == "trajectory"
+        else _MAX_VALIDATOR_EVENTS_REQUEST_BYTES
+        if request.method == "POST" and arena_path == "v1/validators/events"
         else _MAX_REQUEST_BYTES
     )
     body = await _bounded_body(request, limit=request_limit)

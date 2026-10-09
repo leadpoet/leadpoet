@@ -682,6 +682,33 @@ class _PublicationReads:
         return self.costs_by_position[key]
 
 
+class _PublicRunLookup(Mapping):
+    """Resolve cross-submission scoring sources without scanning the round."""
+
+    def __init__(self, rows: Mapping[str, Any], store: ArenaStore) -> None:
+        self._rows = dict(rows)
+        self._store = store
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        run_id = str(key)
+        if run_id not in self._rows:
+            self._rows[run_id] = self._store.get_run(run_id)
+        row = self._rows[run_id]
+        return default if row is None else row
+
+    def __getitem__(self, key: Any) -> Any:
+        row = self.get(key)
+        if row is None:
+            raise KeyError(key)
+        return row
+
+    def __iter__(self):
+        return iter(self._rows)
+
+    def __len__(self) -> int:
+        return len(self._rows)
+
+
 class ArenaService:
     def __init__(self, config: ServiceConfig) -> None:
         self._config = config
@@ -5914,19 +5941,28 @@ class ArenaService:
     def _public_scoring_attribution(
         self,
         round_id: str,
+        submission_id: str,
         execution_runs: Sequence[Mapping[str, Any]],
         source_execution_runs: Sequence[Mapping[str, Any]],
         public_positions: set[int],
     ) -> Dict[str, Any]:
         """Build aggregate and disclosed per-ICP judge attribution."""
 
-        score_runs = self._store.list_runs(round_id, kind="score")
+        # A score run belongs to the submission of its scored execution run.
+        # Cross-submission cache sources are resolved by id below.
+        score_runs = (
+            self._store.list_runs(round_id, kind="score", submission_id=submission_id)
+            if execution_runs else []
+        )
         judgments = self._select_scoring_outputs(score_runs)
-        runs_by_id = {
-            str(run["run_id"]): run
-            for run in list(source_execution_runs) + list(score_runs)
-            if run.get("run_id")
-        }
+        runs_by_id = _PublicRunLookup(
+            {
+                str(run["run_id"]): run
+                for run in list(source_execution_runs) + list(score_runs)
+                if run.get("run_id")
+            },
+            self._store,
+        )
         by_position: Dict[int, Dict[str, bool]] = {}
         unattributed_positions = set()
         versions_by_position: Dict[int, set] = {}
@@ -6040,7 +6076,9 @@ class ArenaService:
             raise ServiceError("submission_missing", 404)
         disclosure = self._public_icp_disclosure(row)
         public_positions = set(disclosure["public_positions"]) if disclosure else set()
-        source_execution_runs = self._store.list_runs(round_id, kind="execute")
+        source_execution_runs = self._store.list_runs(
+            round_id, kind="execute", submission_id=submission_id
+        )
         if completed is not None:
             # Projection only: preserve every stored output and write-once score.
             projected = {run["run_id"]: run for run in completed["execution_runs"]}
@@ -6102,6 +6140,7 @@ class ArenaService:
             },
             "scoring_attribution": self._public_scoring_attribution(
                 round_id,
+                submission_id,
                 execution_runs,
                 source_execution_runs,
                 public_positions,

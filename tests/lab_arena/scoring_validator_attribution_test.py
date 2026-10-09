@@ -233,6 +233,21 @@ def test_cached_follower_attributes_original_judge_with_blank_runner():
         public_positions={0},
         cache_rows={cache_key: cache_row},
     )
+    list_calls = []
+    get_calls = []
+    list_runs = service._store.list_runs
+    get_run = service._store.get_run
+
+    def counted_list_runs(round_id, **filters):
+        list_calls.append(filters)
+        return list_runs(round_id, **filters)
+
+    def counted_get_run(run_id):
+        get_calls.append(run_id)
+        return get_run(run_id)
+
+    service._store.list_runs = counted_list_runs
+    service._store.get_run = counted_get_run
 
     assert service.public_results(ROUND_ID, SUBMISSION_ID)[
         "scoring_attribution"
@@ -250,6 +265,11 @@ def test_cached_follower_attributes_original_judge_with_blank_runner():
         "unattributed_icp_count": 0,
         "code_versions": [],
     }
+    assert list_calls == [
+        {"kind": "execute", "submission_id": SUBMISSION_ID},
+        {"kind": "score", "submission_id": SUBMISSION_ID},
+    ]
+    assert get_calls == [original_score["run_id"], original_execution["run_id"]]
 
 
 def test_self_referenced_cache_is_not_reported_as_reused():
@@ -326,19 +346,20 @@ def test_attribution_is_private_before_round_publication():
         service.public_results(ROUND_ID, SUBMISSION_ID)
 
 
-def test_live_shape_uses_two_bulk_run_reads_for_98_judgments():
+def test_published_results_scope_both_run_reads_to_one_of_143_submissions():
     rows = []
-    for index in range(98):
-        submission_id = SUBMISSION_ID if index < 20 else "submission-%d" % index
-        execution = _execution(
-            "execute-bulk-%d" % index,
-            index if index < 20 else index % 20,
-            submission_id=submission_id,
-        )
-        rows.extend([
-            execution,
-            _score("score-bulk-%d" % index, execution, VALIDATOR_A),
-        ])
+    for participant in range(143):
+        submission_id = SUBMISSION_ID if participant == 0 else "submission-%d" % participant
+        for position in range(10):
+            execution = _execution(
+                "execute-%d-%d" % (participant, position),
+                position,
+                submission_id=submission_id,
+            )
+            rows.extend([
+                execution,
+                _score("score-%d-%d" % (participant, position), execution, VALIDATOR_A),
+            ])
     service = _service(rows, public_positions=None)
     calls = []
     list_runs = service._store.list_runs
@@ -348,15 +369,19 @@ def test_live_shape_uses_two_bulk_run_reads_for_98_judgments():
         return list_runs(round_id, **filters)
 
     service._store.list_runs = counted_list_runs
+    service._store.get_run = lambda run_id: pytest.fail("local judgments need no cross-submission lookup")
 
     attribution = service.public_results(ROUND_ID, SUBMISSION_ID)[
         "scoring_attribution"
     ]
 
-    assert calls == [{"kind": "execute"}, {"kind": "score"}]
+    assert calls == [
+        {"kind": "execute", "submission_id": SUBMISSION_ID},
+        {"kind": "score", "submission_id": SUBMISSION_ID},
+    ]
     assert attribution["validators"] == [{
         "hotkey": VALIDATOR_A,
-        "icp_count": 20,
+        "icp_count": 10,
         "reused_icp_count": 0,
     }]
     assert attribution["icps"] == []
@@ -402,6 +427,35 @@ def test_broken_cache_source_is_unattributed_without_breaking_results():
         "unattributed_icp_count": 1,
         "code_versions": [],
     }
+
+
+def test_cross_round_cache_source_cannot_supply_public_attribution():
+    source_execution = _execution("execute-other-round", 0, submission_id="other")
+    source_score = _score("score-other-round", source_execution, VALIDATOR_A)
+    source_execution["round_id"] = "arena-other-round"
+    source_score["round_id"] = "arena-other-round"
+    follower_execution = _execution("execute-follower", 0)
+    cache_key, cache_row = _cache(source_score, source_execution, VALIDATOR_A)
+    follower_score = _score(
+        "score-follower", follower_execution, None,
+        judgment_cache_key=cache_key,
+        judgment_cache_source_run_id=source_score["run_id"],
+        result_doc={
+            "schema_version": "leadpoet.lab_arena.cached_run_result.v1",
+            "terminal_status": "accepted",
+            "cache_key": cache_key,
+            "source_score_run_id": source_score["run_id"],
+        },
+    )
+    service = _service(
+        [source_execution, source_score, follower_execution, follower_score],
+        public_positions={0}, cache_rows={cache_key: cache_row},
+    )
+
+    attribution = service.public_results(ROUND_ID, SUBMISSION_ID)["scoring_attribution"]
+
+    assert attribution["validators"] == []
+    assert attribution["unattributed_icp_count"] == 1
 
 
 def _company_ref(index):

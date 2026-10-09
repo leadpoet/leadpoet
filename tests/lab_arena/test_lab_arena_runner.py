@@ -1814,6 +1814,210 @@ def test_http_source_download_uses_the_existing_lease_header_and_a_byte_cap():
         api.source("run-1", token)
 
 
+def test_http_source_download_retries_remote_protocol_error_with_same_lease(monkeypatch):
+    requests = []
+    sleeps = []
+    monkeypatch.setattr(rn.time, "sleep", sleeps.append)
+
+    def handler(request):
+        requests.append(request)
+        if len(requests) == 1:
+            raise httpx.RemoteProtocolError("peer disconnected", request=request)
+        return httpx.Response(200, content=SOURCE_BYTES)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        api = rn.HttpArenaApiClient("http://localhost", client=client)
+        assert api.source("run-1", "lease-token") == SOURCE_BYTES
+    assert len(requests) == 2
+    assert all(request.method == "GET" for request in requests)
+    assert all(request.url.path == "/arena/v1/runs/run-1/source" for request in requests)
+    assert all(request.headers["x-lab-arena-lease"] == "lease-token" for request in requests)
+    assert sleeps == [0.5]
+
+
+def test_http_source_download_discards_partial_stream_before_retry(monkeypatch):
+    attempts = []
+    closed = []
+    sleeps = []
+    monkeypatch.setattr(rn.time, "sleep", sleeps.append)
+    monkeypatch.setattr(source_bundle, "MAX_SOURCE_ARCHIVE_BYTES", len(SOURCE_BYTES))
+
+    class DisconnectedStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield SOURCE_BYTES[:20]
+            raise httpx.RemoteProtocolError("incomplete chunked read")
+
+        def close(self):
+            closed.append(True)
+
+    def handler(request):
+        attempts.append(request)
+        if len(attempts) == 1:
+            return httpx.Response(200, stream=DisconnectedStream())
+        assert closed == [True]
+        return httpx.Response(200, content=SOURCE_BYTES)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        api = rn.HttpArenaApiClient("http://localhost", client=client)
+        assert api.source("run-1", "lease-token") == SOURCE_BYTES
+    assert len(attempts) == 2
+    assert closed == [True]
+    assert sleeps == [0.5]
+
+
+@pytest.mark.parametrize("failure", (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout))
+def test_http_source_download_transport_retry_is_finite(monkeypatch, failure):
+    attempts = []
+    sleeps = []
+    monkeypatch.setattr(rn.time, "sleep", sleeps.append)
+
+    def handler(request):
+        attempts.append(request)
+        raise failure("transport failed", request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        api = rn.HttpArenaApiClient("http://localhost", client=client)
+        with pytest.raises(rn.RunnerError, match="Arena API transport failure: " + failure.__name__) as raised:
+            api.source("run-1", "lease-token")
+    assert isinstance(raised.value.__cause__, failure)
+    assert len(attempts) == 3
+    assert sleeps == [0.5, 1.0]
+
+
+@pytest.mark.parametrize("status", (401, 403, 404, 409, 500))
+def test_http_source_download_does_not_retry_status_errors(monkeypatch, status):
+    attempts = []
+    sleeps = []
+    monkeypatch.setattr(rn.time, "sleep", sleeps.append)
+
+    def handler(request):
+        attempts.append(request)
+        return httpx.Response(status)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        api = rn.HttpArenaApiClient("http://localhost", client=client)
+        with pytest.raises(rn.RunnerError, match="run source is unavailable: HTTP %d" % status):
+            api.source("run-1", "lease-token")
+    assert len(attempts) == 1
+    assert sleeps == []
+
+
+@pytest.mark.parametrize(
+    "declared, message",
+    (("not-a-length", "length is invalid"), ("5", "exceeds the archive limit"), (None, "exceeds the archive limit")),
+)
+def test_http_source_download_does_not_retry_length_or_size_errors(monkeypatch, declared, message):
+    attempts = []
+    sleeps = []
+    monkeypatch.setattr(rn.time, "sleep", sleeps.append)
+    monkeypatch.setattr(source_bundle, "MAX_SOURCE_ARCHIVE_BYTES", 4)
+
+    class OversizedStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"abc"
+            yield b"de"
+
+    def handler(request):
+        attempts.append(request)
+        return httpx.Response(
+            200, headers={"content-length": declared} if declared else {},
+            stream=OversizedStream(),
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        api = rn.HttpArenaApiClient("http://localhost", client=client)
+        with pytest.raises(rn.RunnerError, match=message):
+            api.source("run-1", "lease-token")
+    assert len(attempts) == 1
+    assert sleeps == []
+
+
+@pytest.mark.parametrize(
+    "failure", (httpx.DecodingError, httpx.LocalProtocolError, httpx.UnsupportedProtocol),
+)
+def test_http_source_download_does_not_retry_other_httpx_errors(monkeypatch, failure):
+    attempts = []
+    sleeps = []
+    monkeypatch.setattr(rn.time, "sleep", sleeps.append)
+
+    def handler(request):
+        attempts.append(request)
+        raise failure("invalid response or local request")
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        api = rn.HttpArenaApiClient("http://localhost", client=client)
+        with pytest.raises(rn.RunnerError, match="Arena API transport failure: " + failure.__name__):
+            api.source("run-1", "lease-token")
+    assert len(attempts) == 1
+    assert sleeps == []
+
+
+@pytest.mark.parametrize(
+    "payload, expected_size, message",
+    ((SOURCE_BYTES, len(SOURCE_BYTES) + 1, "size does not match its lease"),
+     (b"invalid archive", len(b"invalid archive"), "archive is invalid")),
+)
+def test_http_source_download_does_not_retry_source_integrity_errors(
+    tmp_path, monkeypatch, payload, expected_size, message,
+):
+    attempts = []
+    sleeps = []
+    monkeypatch.setattr(rn.time, "sleep", sleeps.append)
+
+    def handler(request):
+        attempts.append(request)
+        return httpx.Response(200, content=payload)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        api = rn.HttpArenaApiClient("http://localhost", client=client)
+        cache = rn.SourceCache(tmp_path / "sources", api.source)
+        with pytest.raises(rn.RunnerError, match=message):
+            with cache.acquire("run-1", "lease-token", SOURCE_REF, "s1", expected_size):
+                pytest.fail("invalid source reached execution")
+    assert len(attempts) == 1
+    assert sleeps == []
+    assert not (tmp_path / "sources" / "submission-s1").exists()
+
+
+def test_runner_source_download_retry_reaches_provider_work_and_completion(tmp_path, monkeypatch):
+    events = []
+    sleeps = []
+    monkeypatch.setattr(rn.time, "sleep", sleeps.append)
+
+    def handler(request):
+        assert request.headers["x-lab-arena-lease"] == "tok-r1"
+        events.append("source")
+        if len(events) == 1:
+            raise httpx.RemoteProtocolError("peer disconnected", request=request)
+        return httpx.Response(200, content=SOURCE_BYTES)
+
+    class TransitionRuntime(BridgingRuntime):
+        def run_icp(self, spec, **kwargs):
+            assert events == ["source", "source"]
+            assert (spec.source_dir / "harness.py").read_bytes() == b"def run_icp(icp):\n    return []\n"
+            events.append("execute")
+            return super().run_icp(spec, **kwargs)
+
+    api = FakeApi([lease()])
+    sandbox = TransitionRuntime(output={"companies": [valid_company(1)]})
+    (tmp_path / "work").mkdir()
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        monkeypatch.setattr(api, "source", rn.HttpArenaApiClient("http://localhost", client=client).source)
+        runner_ = rn.Runner(make_config(tmp_path, api, sandbox))
+        assert runner_.run_once() == 1
+    assert events == ["source", "source", "execute"]
+    assert sleeps == [0.5]
+    assert runner_.abandoned == 0
+    assert len(api.provider_frames) == 1
+    assert len(api.completions) == 1
+    envelope = api.completions[0]
+    assert envelope["scope"] == contracts.SCOPE_COMPLETE
+    assert verify(envelope["hotkey"], envelope["signature"], contracts.signed_request_message(envelope))
+    result = contracts.validate_run_result(envelope["body"]["result"])
+    assert result["terminal_status"] == "accepted"
+    assert result["resource_summary"]["provider_call_count"] == 1
+
+
 def test_frame_validation_rejects_identity_fields_and_unknown_operations(tmp_path):
     api = FakeApi([])
     state = rn.RunState(lease=lease(), lease_token="tok")

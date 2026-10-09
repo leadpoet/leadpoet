@@ -90,6 +90,7 @@ REQUIREMENT_RE = re.compile(
 )
 MAX_SOCKET_PATH_BYTES = 100
 API_TIMEOUT_SECONDS = 30.0
+SOURCE_DOWNLOAD_RETRY_SECONDS = (0.5, 1.0)
 COMPLETION_SIGNATURE_REFRESH_AGE_SECONDS = (
     contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS - int(API_TIMEOUT_SECONDS)
 )
@@ -871,36 +872,43 @@ class HttpArenaApiClient:
     def source(self, run_id: str, lease_token: str) -> bytes:
         """Download one bounded source archive under its active run lease."""
 
-        try:
-            with self._client.stream(
-                "GET",
-                self._base_url + "/arena/v1/runs/%s/source" % run_id,
-                headers={"x-lab-arena-lease": lease_token},
-                timeout=httpx.Timeout(API_TIMEOUT_SECONDS),
-            ) as response:
-                if response.status_code != 200:
-                    raise RunnerError(
-                        "run source is unavailable: HTTP %d" % response.status_code
-                    )
-                declared = response.headers.get("content-length")
-                if declared is not None:
-                    try:
-                        if int(declared) > source_bundle.MAX_SOURCE_ARCHIVE_BYTES:
+        retry_delays = iter(SOURCE_DOWNLOAD_RETRY_SECONDS)
+        while True:
+            # Discard all bytes and size accounting from a disconnected response.
+            chunks = []
+            total = 0
+            try:
+                with self._client.stream(
+                    "GET",
+                    self._base_url + "/arena/v1/runs/%s/source" % run_id,
+                    headers={"x-lab-arena-lease": lease_token},
+                    timeout=httpx.Timeout(API_TIMEOUT_SECONDS),
+                ) as response:
+                    if response.status_code != 200:
+                        raise RunnerError(
+                            "run source is unavailable: HTTP %d" % response.status_code
+                        )
+                    declared = response.headers.get("content-length")
+                    if declared is not None:
+                        try:
+                            if int(declared) > source_bundle.MAX_SOURCE_ARCHIVE_BYTES:
+                                raise RunnerError("run source exceeds the archive limit")
+                        except ValueError as exc:
+                            raise RunnerError("run source length is invalid") from exc
+                    for chunk in response.iter_bytes():
+                        total += len(chunk)
+                        if total > source_bundle.MAX_SOURCE_ARCHIVE_BYTES:
                             raise RunnerError("run source exceeds the archive limit")
-                    except ValueError as exc:
-                        raise RunnerError("run source length is invalid") from exc
-                chunks = []
-                total = 0
-                for chunk in response.iter_bytes():
-                    total += len(chunk)
-                    if total > source_bundle.MAX_SOURCE_ARCHIVE_BYTES:
-                        raise RunnerError("run source exceeds the archive limit")
-                    chunks.append(chunk)
-        except RunnerError:
-            raise
-        except httpx.HTTPError as exc:
-            raise RunnerError("Arena API transport failure: %s" % type(exc).__name__) from exc
-        return b"".join(chunks)
+                        chunks.append(chunk)
+                return b"".join(chunks)
+            except (httpx.NetworkError, httpx.TimeoutException, httpx.RemoteProtocolError) as exc:
+                try:
+                    delay = next(retry_delays)
+                except StopIteration:
+                    raise RunnerError("Arena API transport failure: %s" % type(exc).__name__) from exc
+                time.sleep(delay)
+            except httpx.HTTPError as exc:
+                raise RunnerError("Arena API transport failure: %s" % type(exc).__name__) from exc
 
     def image_access(self, run_id: str, lease_token: str) -> Dict[str, Any]:
         """Fetch one bounded, transient scorer-image access document."""

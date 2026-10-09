@@ -205,6 +205,26 @@ def _with_verifier_failure_reason(
     )
 
 
+def _incomplete_targeted_investigation(result: CompanyFitDecisionResult) -> bool:
+    """Keep a typed, unfinished investigation on the normal retry path."""
+
+    if result.decision != COMPANY_FIT_UNAVAILABLE:
+        return False
+    receipt = result.details.get("investigation_receipt")
+    return bool(
+        isinstance(receipt, Mapping)
+        and receipt.get("gate") == "company_evidence_investigation"
+        and receipt.get("completed_submitted_findings") is False
+        and receipt.get("failure_reason")
+        == result.details.get(VERIFIER_FAILURE_DETAIL_KEY)
+        and receipt.get("failure_reason") in {
+            ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON,
+            PROVIDER_ERROR_FAILURE_REASON,
+            MALFORMED_RESPONSE_FAILURE_REASON,
+        }
+    )
+
+
 def _record_verifier_failure(
     diagnostic: Optional[dict[str, str]], reason: str
 ) -> None:
@@ -8124,13 +8144,9 @@ async def _llm_reverify_company(
         )
         if not claims:
             return result
-        if (
-            result.decision == COMPANY_FIT_UNAVAILABLE
-            and result.details.get(VERIFIER_FAILURE_DETAIL_KEY)
-            == ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
-        ):
-            # The model submitted valid findings after research was refused
-            # for time. Retry the unresolved company with retained sources.
+        if _incomplete_targeted_investigation(result):
+            # Preserve valid partial findings, but retry an unresolved fact
+            # after its required research failed or was refused for time.
             return result
         if (
             positive_semantic_review
@@ -8574,11 +8590,7 @@ async def _llm_reverify_company(
             )
             if not post_repair_claims:
                 return repaired_result
-            if (
-                repaired_result.decision == COMPANY_FIT_UNAVAILABLE
-                and repaired_result.details.get(VERIFIER_FAILURE_DETAIL_KEY)
-                == ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
-            ):
+            if _incomplete_targeted_investigation(repaired_result):
                 return repaired_result
             if (
                 post_repair_positive_semantic_review

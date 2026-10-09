@@ -2977,6 +2977,7 @@ async def investigate_company_evidence(
     else:
         required_current_stage_query = ""
     current_stage_search_succeeded = False
+    required_stage_discovery_failure_reason = ""
     first_party_domains = {
         domain
         for domain in (
@@ -3310,8 +3311,14 @@ async def investigate_company_evidence(
                 }
                 if time.monotonic() - started >= ADMISSION_DEADLINE_SECONDS:
                     stage_discovery.update(ok=False, error="admission_budget_exhausted")
+                    required_stage_discovery_failure_reason = (
+                        ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+                    )
                 elif search_calls >= MAX_SEARCH_CALLS:
                     stage_discovery.update(ok=False, error="search_budget_exhausted")
+                    required_stage_discovery_failure_reason = (
+                        ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+                    )
                 else:
                     search_calls += 1
                     try:
@@ -3324,8 +3331,13 @@ async def investigate_company_evidence(
                         TimeoutError,
                         asyncio.TimeoutError,
                         ValueError,
-                    ):
+                    ) as exc:
                         stage_discovery.update(ok=False, error="search_failed")
+                        required_stage_discovery_failure_reason = (
+                            MALFORMED_RESPONSE_FAILURE_REASON
+                            if isinstance(exc, ValueError)
+                            else PROVIDER_ERROR_FAILURE_REASON
+                        )
                     else:
                         current_stage_search_succeeded = True
                         stage_discovery.update(ok=True, discovery=discovery)
@@ -4243,14 +4255,24 @@ async def investigate_company_evidence(
                                 for finding in claims.values()
                             )
                         )
-                        if budget_interrupted:
-                            _record_failure(
-                                diagnostic,
-                                ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON,
-                            )
+                        required_stage_incomplete = bool(
+                            required_stage_discovery_failure_reason
+                            and not current_stage_search_succeeded
+                            and (claims.get("stage") or {}).get("status")
+                            == "UNPROVEN"
+                        )
+                        failure_reason = (
+                            ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+                            if budget_interrupted
+                            else required_stage_discovery_failure_reason
+                            if required_stage_incomplete
+                            else ""
+                        )
+                        if failure_reason:
+                            _record_failure(diagnostic, failure_reason)
                         return {
                             "claims": claims,
-                            "_completed_submit": not budget_interrupted,
+                            "_completed_submit": not failure_reason,
                             # This receipt is constructed only after fetched-page,
                             # exact-quote, company-attribution, URL, and canonical
                             # stage validation. It is never read from model JSON.
@@ -4260,10 +4282,7 @@ async def investigate_company_evidence(
                                 in {"VERIFIED", "CONTRADICTED"}
                                 else {}
                             ),
-                            "failure_reason": (
-                                ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
-                                if budget_interrupted else ""
-                            ),
+                            "failure_reason": failure_reason,
                             "usage": {
                                 "reasoning_turns": _turn + 1,
                                 "search_calls": search_calls,
@@ -4311,6 +4330,7 @@ async def investigate_company_evidence(
                             )
                             if forced_stage_search_call:
                                 current_stage_search_succeeded = True
+                                required_stage_discovery_failure_reason = ""
                             if forced_industry_search_call:
                                 industry_followup_search_completed = True
                                 search_results = (

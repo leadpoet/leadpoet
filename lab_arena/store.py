@@ -390,6 +390,7 @@ class StoreTransport:
         status_in: Optional[Sequence[str]] = None,
         submission_ids: Optional[Sequence[str]] = None,
         run_ids: Optional[Sequence[str]] = None,
+        cache_keys: Optional[Sequence[str]] = None,
         columns: str = "*",
     ) -> List[Dict[str, Any]]:  # pragma: no cover - interface
         raise NotImplementedError
@@ -550,6 +551,7 @@ class PostgrestTransport(StoreTransport):
         status_in=None,
         submission_ids=None,
         run_ids=None,
+        cache_keys=None,
         columns="*",
     ):
         if table not in TABLES:
@@ -582,12 +584,19 @@ class PostgrestTransport(StoreTransport):
                 raise ArenaStoreError("submission inclusion filter is empty")
             query.append(("submission_id", "in.(%s)" % ",".join(ids)))
         if run_ids is not None:
-            if table != "lab_arena_trajectory_events" or "run_id" in (filters or {}):
+            if table not in ("lab_arena_runs", "lab_arena_trajectory_events") or "run_id" in (filters or {}):
                 raise ArenaStoreError("run inclusion filter is invalid")
             ids = tuple(str(value) for value in run_ids)
             if not ids or any(not re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", value) for value in ids):
                 raise ArenaStoreError("run inclusion ids are invalid")
             query.append(("run_id", "in.(%s)" % ",".join(ids)))
+        if cache_keys is not None:
+            if table != "lab_arena_judgment_cache" or "cache_key" in (filters or {}):
+                raise ArenaStoreError("cache-key inclusion filter is invalid")
+            keys = tuple(_check_filter_value(value) for value in cache_keys)
+            if not keys:
+                raise ArenaStoreError("cache-key inclusion filter is empty")
+            query.append(("cache_key", "in.(%s)" % ",".join(keys)))
         if order == "history_round":
             if table != "lab_arena_rounds" or not descending:
                 raise ArenaStoreError("history cursor requires descending rounds")
@@ -770,6 +779,7 @@ class PsycopgTransport(StoreTransport):
         status_in=None,
         submission_ids=None,
         run_ids=None,
+        cache_keys=None,
         columns="*",
     ):
         if table not in TABLES:
@@ -824,13 +834,21 @@ class PsycopgTransport(StoreTransport):
             clauses.append("submission_id = ANY(%s)")
             values.append(list(ids))
         if run_ids is not None:
-            if table != "lab_arena_trajectory_events" or "run_id" in (filters or {}):
+            if table not in ("lab_arena_runs", "lab_arena_trajectory_events") or "run_id" in (filters or {}):
                 raise ArenaStoreError("run inclusion filter is invalid")
             ids = tuple(str(value) for value in run_ids)
             if not ids or any(not re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", value) for value in ids):
                 raise ArenaStoreError("run inclusion ids are invalid")
             clauses.append("run_id = ANY(%s)")
             values.append(list(ids))
+        if cache_keys is not None:
+            if table != "lab_arena_judgment_cache" or "cache_key" in (filters or {}):
+                raise ArenaStoreError("cache-key inclusion filter is invalid")
+            keys = tuple(_check_filter_value(value) for value in cache_keys)
+            if not keys:
+                raise ArenaStoreError("cache-key inclusion filter is empty")
+            clauses.append("cache_key = ANY(%s)")
+            values.append(list(keys))
         projected_columns = ",".join(_RUNTIME_JSON_COLUMNS.get(column, column) for column in columns.split(","))
         sql = "SELECT row_to_json(t) FROM (SELECT %s FROM public.%s" % (projected_columns, table)
         if clauses:
@@ -2204,6 +2222,26 @@ class ArenaStore:
             raise ArenaStoreError("multiple accepted judgments exist for one cache key")
         return rows[0] if rows else None
 
+    def get_judgment_caches(self, cache_keys: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+        """Fetch only requested immutable cache authorities in bounded batches."""
+
+        found: Dict[str, Dict[str, Any]] = {}
+        keys = sorted(set(str(key) for key in cache_keys))
+        for first in range(0, len(keys), 25):
+            batch = keys[first:first + 25]
+            rows = self._transport.select(
+                "lab_arena_judgment_cache", cache_keys=batch, limit=50,
+                columns=("cache_key,scope_doc,scoring_input_hash,evidence_hash,"
+                         "evidence_doc,source_score_run_id,source_scored_run_id,"
+                         "source_runner_hotkey,created_at"),
+            )
+            for row in rows:
+                key = str(row.get("cache_key") or "")
+                if key not in batch or key in found:
+                    raise ArenaStoreError("accepted judgment cache bulk read is invalid")
+                found[key] = row
+        return found
+
     def get_company_judgments(self, cache_key: str) -> List[Dict[str, Any]]:
         """Read immutable authority variants for one gateway-built company key."""
 
@@ -2282,6 +2320,21 @@ class ArenaStore:
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
         rows = self._transport.select("lab_arena_runs", filters={"run_id": run_id}, limit=1)
         return rows[0] if rows else None
+
+    def get_runs(self, run_ids: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+        """Fetch only referenced runs, without a round-wide scan."""
+
+        found: Dict[str, Dict[str, Any]] = {}
+        ids = sorted(set(str(run_id) for run_id in run_ids))
+        for first in range(0, len(ids), 25):
+            batch = ids[first:first + 25]
+            rows = self._transport.select("lab_arena_runs", run_ids=batch, limit=50)
+            for row in rows:
+                run_id = str(row.get("run_id") or "")
+                if run_id not in batch or run_id in found:
+                    raise ArenaStoreError("referenced run bulk read is invalid")
+                found[run_id] = row
+        return found
 
     def list_trajectory_events(self, run_id: str) -> List[Dict[str, Any]]:
         """Read one private run in bounded pages, including long trajectories."""

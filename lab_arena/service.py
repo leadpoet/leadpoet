@@ -2275,7 +2275,11 @@ class ArenaService:
         return {"status": transition.get("status"), "participants": len(participants)}
 
     def benchmark_icps(self, round_id: str) -> List[Dict[str, Any]]:
-        round_row = self._round(round_id)
+        return self._benchmark_icps_from_row(round_id, self._round(round_id))
+
+    def _benchmark_icps_from_row(
+        self, round_id: str, round_row: Mapping[str, Any]
+    ) -> List[Dict[str, Any]]:
         ref = round_row.get("benchmark_ref")
         if not ref:
             raise ServiceError("benchmark_not_committed", 409)
@@ -2821,14 +2825,18 @@ class ArenaService:
             company_quality=True,
         )
 
-    def _verified_breakdowns(self, run: Mapping[str, Any], *, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], policy: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    def _verified_breakdowns(self, run: Mapping[str, Any], *, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], policy: Mapping[str, Any], cached_rows: Optional[Mapping[str, Any]] = None, source_rows: Optional[Mapping[str, Any]] = None) -> List[Dict[str, Any]]:
         if run.get("company_judgment_refs") is not None:
             return self._company_quality_breakdowns(
                 run, icp=icp, companies=companies, policy=policy
             )
         cache_key = str(run.get("judgment_cache_key") or "")
         if cache_key:
-            cached = self._store.get_judgment_cache(cache_key)
+            cached = (
+                cached_rows.get(cache_key)
+                if cached_rows is not None and cache_key in cached_rows
+                else self._store.get_judgment_cache(cache_key)
+            )
             if cached is None:
                 raise scoring.ScoringError("accepted judgment cache entry is missing")
             try:
@@ -2839,7 +2847,12 @@ class ArenaService:
                 )
             except judgment_cache.JudgmentCacheError as exc:
                 raise scoring.ScoringError("accepted judgment cache evidence is invalid") from exc
-            source = self._store.get_run(str(evidence["source_score_run_id"]))
+            source_id = str(evidence["source_score_run_id"])
+            source = (
+                source_rows.get(source_id)
+                if source_rows is not None and source_id in source_rows
+                else self._store.get_run(source_id)
+            )
             if (
                 source is None
                 or source.get("kind") != "score"
@@ -5966,6 +5979,81 @@ class ArenaService:
         attributed[hotkey] = False
         return attributed
 
+    def _public_result_authority_reads(
+        self,
+        round_id: str,
+        execution_runs: Sequence[Mapping[str, Any]],
+        score_runs: Sequence[Mapping[str, Any]],
+        public_run_ids: set[str],
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Prefetch only accepted, referenced authorities for this response."""
+
+        executions = {str(run["run_id"]): run for run in execution_runs}
+        judgments = self._select_scoring_outputs(score_runs)
+        selected = [
+            judge for run_id, judge in judgments.items()
+            if judge.get("status") == "accepted"
+            and run_id in executions
+            and self._same_scoring_membership(judge, executions[run_id], round_id=round_id)
+        ]
+        keys = {
+            str(judge["judgment_cache_key"])
+            for judge in selected
+            if str(judge.get("scored_run_id") or "") in public_run_ids
+            and judge.get("judgment_cache_key")
+            and judge.get("company_judgment_refs") is None
+        }
+        cache_reader = getattr(self._store, "get_judgment_caches", None)
+        caches = cache_reader(sorted(keys)) if keys and cache_reader is not None else {}
+        cached_rows = {key: caches.get(key) for key in keys} if cache_reader is not None else {}
+
+        local_rows = {
+            str(run["run_id"]): run
+            for run in list(execution_runs) + list(score_runs)
+        }
+        source_ids: set[str] = set()
+        for judge in selected:
+            cache_source = str(judge.get("judgment_cache_source_run_id") or "")
+            if cache_source:
+                source_ids.add(cache_source)
+            if judge.get("company_judgment_refs") is not None:
+                try:
+                    lease = company_judgments.validate_lease_context(
+                        (judge.get("claim_response") or {}).get("company_judgment_cache") or {}
+                    )
+                except company_judgments.CompanyJudgmentError:
+                    continue  # The existing attribution verifier marks this invalid.
+                for item in lease["hits"] + lease["misses"]:
+                    evidence = item.get("evidence_doc")
+                    if isinstance(evidence, Mapping) and evidence.get("source_score_run_id"):
+                        source_ids.add(str(evidence["source_score_run_id"]))
+
+        run_reader = getattr(self._store, "get_runs", None)
+        if run_reader is None:
+            return cached_rows, local_rows
+        missing_scores = source_ids - local_rows.keys()
+        try:
+            fetched_scores = run_reader(sorted(missing_scores)) if missing_scores else {}
+        except ArenaStoreError:
+            # The attribution path already treats a failed source read as
+            # unattributed. Keep that response behavior if bulk transport fails.
+            return cached_rows, local_rows
+        source_rows = {run_id: fetched_scores.get(run_id) for run_id in missing_scores}
+        source_rows.update(local_rows)
+        source_execution_ids = {
+            str(source["scored_run_id"])
+            for source_id in source_ids
+            if (source := source_rows.get(source_id)) is not None
+            and source.get("scored_run_id")
+        }
+        missing_executions = source_execution_ids - source_rows.keys()
+        try:
+            fetched_executions = run_reader(sorted(missing_executions)) if missing_executions else {}
+        except ArenaStoreError:
+            return cached_rows, local_rows
+        source_rows.update({run_id: fetched_executions.get(run_id) for run_id in missing_executions})
+        return cached_rows, source_rows
+
     def _public_scoring_attribution(
         self,
         round_id: str,
@@ -5973,23 +6061,28 @@ class ArenaService:
         execution_runs: Sequence[Mapping[str, Any]],
         source_execution_runs: Sequence[Mapping[str, Any]],
         public_positions: set[int],
+        score_runs: Optional[Sequence[Mapping[str, Any]]] = None,
+        source_rows: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Build aggregate and disclosed per-ICP judge attribution."""
 
         # A score run belongs to the submission of its scored execution run.
         # Cross-submission cache sources are resolved by id below.
-        score_runs = (
-            self._store.list_runs(round_id, kind="score", submission_id=submission_id)
-            if execution_runs else []
-        )
+        if score_runs is None:
+            score_runs = (
+                self._store.list_runs(round_id, kind="score", submission_id=submission_id)
+                if execution_runs else []
+            )
         judgments = self._select_scoring_outputs(score_runs)
         runs_by_id = _PublicRunLookup(
             {
-                str(run["run_id"]): run
-                for run in list(source_execution_runs) + list(score_runs)
-                if run.get("run_id")
-            },
-            self._store,
+                **(source_rows or {}),
+                **{
+                    str(run["run_id"]): run
+                    for run in list(source_execution_runs) + list(score_runs)
+                    if run.get("run_id")
+                },
+            }, self._store,
         )
         by_position: Dict[int, Dict[str, bool]] = {}
         unattributed_positions = set()
@@ -6151,6 +6244,18 @@ class ArenaService:
             except ArenaContractError as exc:
                 raise ServiceError("public_result_unavailable", 503) from exc
         run_results = validated_results
+        score_runs = (
+            self._store.list_runs(round_id, kind="score", submission_id=submission_id)
+            if execution_runs else []
+        )
+        verification_required = (
+            contact_policy.enabled(row.get("configuration_doc") or {})
+            or integrity.enabled(row.get("configuration_doc") or {})
+        )
+        cached_rows, source_rows = self._public_result_authority_reads(
+            round_id, execution_runs, score_runs,
+            set(outputs) if verification_required else set(),
+        )
         result = {
             "round_id": round_id, "submission_id": submission_id, "submission": {
                 "miner_hotkey": participant.get("miner_hotkey"),
@@ -6172,10 +6277,11 @@ class ArenaService:
                 execution_runs,
                 source_execution_runs,
                 public_positions,
+                score_runs=score_runs,
+                source_rows=source_rows,
             ),
         }
-        if (contact_policy.enabled(row.get("configuration_doc") or {})
-                or integrity.enabled(row.get("configuration_doc") or {})):
+        if verification_required:
             contacts_required = contact_policy.enabled(row.get("configuration_doc") or {})
             judgments = {}
             for stage in {
@@ -6184,12 +6290,9 @@ class ArenaService:
                 if int(run.get("icp_position") or 0) in public_positions
             }:
                 judgments.update(self._select_scoring_outputs(
-                    self._store.list_runs(
-                        round_id, stage=stage, kind="score",
-                        submission_id=submission_id,
-                    )
+                    [score_run for score_run in score_runs if score_run.get("stage") == stage]
                 ))
-            icps = self.evaluation_icps(round_id) if outputs else []
+            icps = self._benchmark_icps_from_row(round_id, row) if outputs else []
             contacts = {}
             diagnostics = []
             for run in runs:
@@ -6201,6 +6304,7 @@ class ArenaService:
                     breakdowns = self._verified_breakdowns(
                         judge, icp=icps[int(run["icp_position"])], companies=outputs[run_id]["companies"],
                         policy=row["configuration_doc"]["scorer_policy"],
+                        cached_rows=cached_rows, source_rows=source_rows,
                     )
                 except scoring.ScoringError as exc:
                     raise ServiceError(

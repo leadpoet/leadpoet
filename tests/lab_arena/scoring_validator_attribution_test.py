@@ -9,9 +9,11 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from lab_arena import company_judgments, contact_policy, contracts, integrity, judgment_cache
+from lab_arena import company_judgments, contact_policy, contracts, integrity, judgment_cache, scoring
 from lab_arena.api import create_app
 from lab_arena.service import ArenaService, ServiceError
+from lab_arena.store import ArenaStore, ArenaStoreError
+from tests.lab_arena.judgment_cache_test import _icp
 
 
 ROUND_ID = "arena-2026-09-20"
@@ -273,6 +275,121 @@ def test_cached_follower_attributes_original_judge_with_blank_runner():
         {"kind": "score", "submission_id": SUBMISSION_ID},
     ]
     assert get_calls == [original_score["run_id"], original_execution["run_id"]]
+    service._store.get_runs = lambda _ids: (_ for _ in ()).throw(ArenaStoreError("bulk unavailable"))
+    assert service.public_results(ROUND_ID, SUBMISSION_ID)["scoring_attribution"]["validators"] == [{
+        "hotkey": VALIDATOR_A, "icp_count": 1, "reused_icp_count": 1,
+    }]
+
+
+def test_public_results_bulk_authorities_match_single_reads_and_hide_private_icp(monkeypatch):
+    original_execution = _execution("execute-original", 0, submission_id="original")
+    original_score = _score("score-original", original_execution, VALIDATOR_A)
+    visible = _execution("execute-visible", 0)
+    visible["output_ref"] = "visible-output"
+    hidden = _execution("execute-hidden", 1)
+    hidden["output_ref"] = "hidden-output"
+    key, cache_row = _cache(original_score, original_execution, VALIDATOR_A)
+    follower = _score(
+        "score-follower", visible, None,
+        judgment_cache_key=key,
+        judgment_cache_source_run_id=original_score["run_id"],
+        result_doc={
+            "schema_version": "leadpoet.lab_arena.cached_run_result.v1",
+            "terminal_status": "accepted", "cache_key": key,
+            "source_score_run_id": original_score["run_id"],
+        },
+    )
+    hidden_score = _score("score-hidden", hidden, VALIDATOR_B,
+                          judgment_cache_key="private-cache-key",
+                          judgment_cache_source_run_id="score-hidden")
+    rows = [original_execution, original_score, visible, follower, hidden, hidden_score]
+
+    def setup():
+        service = _service(rows, public_positions={0}, cache_rows={key: cache_row})
+        round_row = service._round(ROUND_ID)
+        round_row["configuration_doc"] = {
+            "contact_policy": contact_policy.POLICY,
+            "scorer_policy": {"max_scored_companies": 5},
+        }
+        service._round = lambda _round_id: round_row
+        service._benchmark_icps_from_row = lambda _round_id, _row: [_icp()]
+        service._objects = SimpleNamespace(get_bounded=lambda ref, _limit: (
+            pytest.fail("private output read") if ref != "visible-output"
+            else json.dumps({"companies": []}).encode()
+        ))
+        return service
+
+    monkeypatch.setattr("lab_arena.service.validate_output_document", lambda doc: doc)
+    single = setup().public_results(ROUND_ID, SUBMISSION_ID)
+    bulk_service = setup()
+    calls = {"caches": [], "runs": []}
+    store = bulk_service._store
+    store.get_judgment_caches = lambda keys: (
+        calls["caches"].append(keys) or
+        {key: store.cache_rows[key] for key in keys if key in store.cache_rows}
+    )
+    store.get_runs = lambda ids: (
+        calls["runs"].append(ids) or
+        {run_id: store.rows[run_id] for run_id in ids if run_id in store.rows}
+    )
+    store.get_judgment_cache = lambda _key: pytest.fail("cache N+1 read")
+    store.get_run = lambda _id: pytest.fail("run N+1 read")
+
+    bulk = bulk_service.public_results(ROUND_ID, SUBMISSION_ID)
+    assert bulk == single
+    assert calls["caches"] == [[key]]
+    assert calls["runs"] == [["score-original"], ["execute-original"]]
+    assert "execute-hidden" not in json.dumps(bulk)
+    assert "private-cache-key" not in json.dumps(bulk)
+
+
+@pytest.mark.parametrize("damage", ["missing", "invalid_hash", "wrong_source"])
+def test_bulk_cache_authority_still_fails_closed(damage):
+    execution = _execution("execute-cache", 0)
+    score = _score("score-cache", execution, VALIDATOR_A)
+    key, cache_row = _cache(score, execution, VALIDATOR_A)
+    service = _service([execution, score], public_positions={0}, cache_rows={key: cache_row})
+    cached = dict(cache_row)
+    if damage == "missing":
+        cached = None
+    elif damage == "invalid_hash":
+        cached["evidence_hash"] = "sha256:" + "0" * 64
+    else:
+        cached["source_score_run_id"] = "foreign-score"
+    with pytest.raises(scoring.ScoringError):
+        service._verified_breakdowns(
+            score, icp=_icp(), companies=[], policy={"max_scored_companies": 5},
+            cached_rows={key: cached}, source_rows={score["run_id"]: score},
+        )
+
+
+def test_exact_bulk_store_reads_are_bounded_and_reject_duplicate_authority():
+    class Transport:
+        def __init__(self):
+            self.calls = []
+            self.duplicate = False
+
+        def select(self, table, **kwargs):
+            self.calls.append((table, kwargs))
+            ids = kwargs.get("run_ids") or kwargs.get("cache_keys")
+            column = "run_id" if table == "lab_arena_runs" else "cache_key"
+            rows = [{column: value} for value in ids]
+            return rows + rows[:1] if self.duplicate else rows
+
+    transport = Transport()
+    store = ArenaStore(transport)
+    ids = ["source-%02d" % index for index in range(26)]
+    assert set(store.get_runs(ids)) == set(ids)
+    assert set(store.get_judgment_caches(ids)) == set(ids)
+    assert [len(call[1].get("run_ids") or call[1].get("cache_keys"))
+            for call in transport.calls] == [25, 1, 25, 1]
+    assert all(call[1]["limit"] == 50 for call in transport.calls)
+
+    transport.duplicate = True
+    with pytest.raises(ArenaStoreError, match="bulk read is invalid"):
+        store.get_runs(["source-0"])
+    with pytest.raises(ArenaStoreError, match="bulk read is invalid"):
+        store.get_judgment_caches(["cache-0"])
 
 
 def test_self_referenced_cache_is_not_reported_as_reused():
@@ -419,7 +536,7 @@ def _policy_response(monkeypatch, contacts_required):
                            "companies": [{"company_name": "Public Company"}]}).encode()
 
     service._objects = SimpleNamespace(get_bounded=read_output)
-    service.evaluation_icps = lambda _round_id: [{}]
+    service._benchmark_icps_from_row = lambda _round_id, _row: [{}]
     service._verified_breakdowns = lambda *_args, **_kwargs: [{
         "company_index": 0,
         "company_qualified": True,
@@ -452,7 +569,6 @@ def test_policy_results_read_only_one_submission_and_keep_public_diagnostics(
     assert list_calls == [
         {"kind": "execute", "submission_id": SUBMISSION_ID},
         {"kind": "score", "submission_id": SUBMISSION_ID},
-        {"stage": 1, "kind": "score", "submission_id": SUBMISSION_ID},
     ]
     assert output_reads == ["visible-output"]
     assert set(result["outputs"]) == {"execute-visible"}
@@ -503,6 +619,9 @@ def test_broken_cache_source_is_unattributed_without_breaking_results():
         "unattributed_icp_count": 1,
         "code_versions": [],
     }
+    service._store.get_runs = lambda _ids: {}
+    service._store.get_run = lambda _id: pytest.fail("missing source must stay missing")
+    assert service.public_results(ROUND_ID, SUBMISSION_ID)["scoring_attribution"] == result["scoring_attribution"]
 
 
 def test_cross_round_cache_source_cannot_supply_public_attribution():
@@ -532,6 +651,12 @@ def test_cross_round_cache_source_cannot_supply_public_attribution():
 
     assert attribution["validators"] == []
     assert attribution["unattributed_icp_count"] == 1
+    service._store.get_runs = lambda ids: {
+        run_id: service._store.rows[run_id]
+        for run_id in ids if run_id in service._store.rows
+    }
+    service._store.get_run = lambda _id: pytest.fail("foreign source N+1 read")
+    assert service.public_results(ROUND_ID, SUBMISSION_ID)["scoring_attribution"] == attribution
 
 
 def _company_ref(index):
@@ -618,6 +743,16 @@ def test_company_cache_reports_each_authority_once_per_icp(monkeypatch):
         "validator_hotkeys": [VALIDATOR_A, VALIDATOR_B],
         "reused_judgment": True,
     }]
+    requests = []
+    service._store.get_runs = lambda ids: (
+        requests.append(ids) or {
+            run_id: service._store.rows[run_id] for run_id in ids
+            if run_id in service._store.rows
+        }
+    )
+    service._store.get_run = lambda _id: pytest.fail("company source N+1 read")
+    assert service.public_results(ROUND_ID, SUBMISSION_ID)["scoring_attribution"] == attribution
+    assert requests == [["score-company-source"], ["execute-company-source"]]
 
 
 def test_public_code_versions_bind_to_actual_judge_and_disclosed_icps():

@@ -275,10 +275,6 @@ def test_cached_follower_attributes_original_judge_with_blank_runner():
         {"kind": "score", "submission_id": SUBMISSION_ID},
     ]
     assert get_calls == [original_score["run_id"], original_execution["run_id"]]
-    service._store.get_runs = lambda _ids: (_ for _ in ()).throw(ArenaStoreError("bulk unavailable"))
-    assert service.public_results(ROUND_ID, SUBMISSION_ID)["scoring_attribution"]["validators"] == [{
-        "hotkey": VALIDATOR_A, "icp_count": 1, "reused_icp_count": 1,
-    }]
 
 
 def test_public_results_bulk_authorities_match_single_reads_and_hide_private_icp(monkeypatch):
@@ -342,6 +338,72 @@ def test_public_results_bulk_authorities_match_single_reads_and_hide_private_icp
     assert "execute-hidden" not in json.dumps(bulk)
     assert "private-cache-key" not in json.dumps(bulk)
 
+    for failure in ("cache", "run_first", "run_second"):
+        broken = setup()
+        broken._store.get_run = lambda _id: pytest.fail("bulk failure used single run read")
+        broken._store.get_judgment_cache = lambda _key: pytest.fail("bulk failure used single cache read")
+        if failure == "cache":
+            broken._store.get_judgment_caches = lambda _keys: (
+                _ for _ in ()
+            ).throw(ArenaStoreError("bulk cache authority invalid"))
+        else:
+            broken._store.get_judgment_caches = lambda _keys: {key: cache_row}
+            requests = []
+            def fail_run_batch(ids):
+                requests.append(ids)
+                if failure == "run_first" or len(requests) == 2:
+                    raise ArenaStoreError("bulk run authority invalid")
+                return {run_id: broken._store.rows[run_id] for run_id in ids}
+            broken._store.get_runs = fail_run_batch
+        with TestClient(create_app(broken)) as http:
+            response = http.get(f"/arena/v1/rounds/{ROUND_ID}/results/{SUBMISSION_ID}")
+        assert response.status_code == 503
+        assert response.json()["code"] == "public_result_unavailable"
+
+
+def test_active_completed_public_results_bulk_response_matches_single_reads():
+    source_execution = _execution("execute-completed-source", 0, submission_id="original")
+    source_score = _score("score-completed-source", source_execution, VALIDATOR_A)
+    execution = _execution("execute-completed", 0)
+    key, cache_row = _cache(source_score, source_execution, VALIDATOR_A)
+    follower = _score(
+        "score-completed", execution, None,
+        judgment_cache_key=key,
+        judgment_cache_source_run_id=source_score["run_id"],
+        result_doc={
+            "schema_version": "leadpoet.lab_arena.cached_run_result.v1",
+            "terminal_status": "accepted", "cache_key": key,
+            "source_score_run_id": source_score["run_id"],
+        },
+    )
+    rows = [source_execution, source_score, execution, follower]
+
+    def setup():
+        service = _service(rows, public_positions={0}, cache_rows={key: cache_row},
+                           status="stage1_scored")
+        round_row = service._round(ROUND_ID)
+        round_row["participants"] = round_row["publication_doc"]["participants"]
+        service._round = lambda _round_id: round_row
+        service.completed_submission_scores = lambda _row: {
+            SUBMISSION_ID: {
+                "execution_runs": [{**execution, "per_icp_score": 4.25}],
+                "final_score": 4.25,
+            }
+        }
+        return service
+
+    expected = setup().public_results(ROUND_ID, SUBMISSION_ID)
+    bulk = setup()
+    bulk._store.get_runs = lambda ids: {
+        run_id: bulk._store.rows[run_id] for run_id in ids
+    }
+    bulk._store.get_run = lambda _id: pytest.fail("active bulk response used single read")
+    result = bulk.public_results(ROUND_ID, SUBMISSION_ID)
+    assert result == expected
+    assert result["score_status"] == "complete"
+    assert result["submission_scores"]["final"] == 4.25
+    assert result["scores"]["stage_1"][0]["per_icp_score"] == 4.25
+
 
 @pytest.mark.parametrize("damage", ["missing", "invalid_hash", "wrong_source"])
 def test_bulk_cache_authority_still_fails_closed(damage):
@@ -390,6 +452,16 @@ def test_exact_bulk_store_reads_are_bounded_and_reject_duplicate_authority():
         store.get_runs(["source-0"])
     with pytest.raises(ArenaStoreError, match="bulk read is invalid"):
         store.get_judgment_caches(["cache-0"])
+    transport.duplicate = False
+    original_select = transport.select
+    transport.select = lambda table, **kwargs: [{
+        "run_id" if table == "lab_arena_runs" else "cache_key": "foreign"
+    }]
+    with pytest.raises(ArenaStoreError, match="bulk read is invalid"):
+        store.get_runs(["source-0"])
+    with pytest.raises(ArenaStoreError, match="bulk read is invalid"):
+        store.get_judgment_caches(["cache-0"])
+    transport.select = original_select
 
 
 def test_self_referenced_cache_is_not_reported_as_reused():
@@ -743,6 +815,24 @@ def test_company_cache_reports_each_authority_once_per_icp(monkeypatch):
         "validator_hotkeys": [VALIDATOR_A, VALIDATOR_B],
         "reused_judgment": True,
     }]
+    execution["output_ref"] = "company-output"
+    round_row = service._round(ROUND_ID)
+    round_row["configuration_doc"] = {
+        "integrity_policy": integrity.POLICY,
+        "scorer_policy": {"max_scored_companies": 5},
+    }
+    service._round = lambda _round_id: round_row
+    service._benchmark_icps_from_row = lambda _round_id, _row: [_icp()]
+    service._objects = SimpleNamespace(
+        get_bounded=lambda ref, _limit: (
+            json.dumps({"companies": []}).encode()
+            if ref == "company-output" else pytest.fail("unexpected output read")
+        )
+    )
+    monkeypatch.setattr("lab_arena.service.validate_output_document", lambda doc: doc)
+    service._verified_breakdowns = lambda *_args, **_kwargs: []
+    full_single = service.public_results(ROUND_ID, SUBMISSION_ID)
+    assert full_single["company_diagnostics"] == []
     requests = []
     service._store.get_runs = lambda ids: (
         requests.append(ids) or {
@@ -751,7 +841,9 @@ def test_company_cache_reports_each_authority_once_per_icp(monkeypatch):
         }
     )
     service._store.get_run = lambda _id: pytest.fail("company source N+1 read")
-    assert service.public_results(ROUND_ID, SUBMISSION_ID)["scoring_attribution"] == attribution
+    full_bulk = service.public_results(ROUND_ID, SUBMISSION_ID)
+    assert full_bulk == full_single
+    assert full_bulk["scoring_attribution"] == attribution
     assert requests == [["score-company-source"], ["execute-company-source"]]
 
 

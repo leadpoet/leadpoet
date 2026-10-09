@@ -2825,7 +2825,16 @@ class ArenaService:
             company_quality=True,
         )
 
-    def _verified_breakdowns(self, run: Mapping[str, Any], *, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], policy: Mapping[str, Any], cached_rows: Optional[Mapping[str, Any]] = None, source_rows: Optional[Mapping[str, Any]] = None) -> List[Dict[str, Any]]:
+    def _verified_breakdowns(
+        self,
+        run: Mapping[str, Any],
+        *,
+        icp: Mapping[str, Any],
+        companies: Sequence[Mapping[str, Any]],
+        policy: Mapping[str, Any],
+        cached_rows: Optional[Mapping[str, Any]] = None,
+        source_rows: Optional[Mapping[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         if run.get("company_judgment_refs") is not None:
             return self._company_quality_breakdowns(
                 run, icp=icp, companies=companies, policy=policy
@@ -6004,7 +6013,10 @@ class ArenaService:
             and judge.get("company_judgment_refs") is None
         }
         cache_reader = getattr(self._store, "get_judgment_caches", None)
-        caches = cache_reader(sorted(keys)) if keys and cache_reader is not None else {}
+        try:
+            caches = cache_reader(sorted(keys)) if keys and cache_reader is not None else {}
+        except ArenaStoreError as exc:
+            raise ServiceError("public_result_unavailable", 503) from exc
         cached_rows = {key: caches.get(key) for key in keys} if cache_reader is not None else {}
 
         local_rows = {
@@ -6034,10 +6046,8 @@ class ArenaService:
         missing_scores = source_ids - local_rows.keys()
         try:
             fetched_scores = run_reader(sorted(missing_scores)) if missing_scores else {}
-        except ArenaStoreError:
-            # The attribution path already treats a failed source read as
-            # unattributed. Keep that response behavior if bulk transport fails.
-            return cached_rows, local_rows
+        except ArenaStoreError as exc:
+            raise ServiceError("public_result_unavailable", 503) from exc
         source_rows = {run_id: fetched_scores.get(run_id) for run_id in missing_scores}
         source_rows.update(local_rows)
         source_execution_ids = {
@@ -6049,8 +6059,8 @@ class ArenaService:
         missing_executions = source_execution_ids - source_rows.keys()
         try:
             fetched_executions = run_reader(sorted(missing_executions)) if missing_executions else {}
-        except ArenaStoreError:
-            return cached_rows, local_rows
+        except ArenaStoreError as exc:
+            raise ServiceError("public_result_unavailable", 503) from exc
         source_rows.update({run_id: fetched_executions.get(run_id) for run_id in missing_executions})
         return cached_rows, source_rows
 

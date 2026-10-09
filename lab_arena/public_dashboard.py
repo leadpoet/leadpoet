@@ -718,11 +718,23 @@ def code_review_summary(
 
 
 _EVALUATION_COLUMNS = (
-    "run_id,assignment_id,submission_id,kind,status,runner_hotkey,attempt,"
+    "run_id,assignment_id,submission_id,kind,status,terminal_cause,runner_hotkey,attempt,"
     "lease_generation,lease_expires_at,"
     "source_commit:result_doc->resource_summary->>validator_source_commit,"
     "source_dirty:result_doc->resource_summary->>validator_source_dirty"
 )
+
+_EVALUATION_FAILURE_REASONS = {
+    "credential_error": "provider_credentials",
+    "stage_closed": "execution_window",
+    "judge_error": "review",
+    "judge_timeout": "review",
+    "provider_error": "provider",
+    "model_timeout": "execution",
+    "invalid_output": "execution",
+    "budget_exhausted": "execution",
+    "model_error": "execution",
+}
 
 
 def _recorded_source(record: Mapping[str, Any]) -> tuple:
@@ -803,6 +815,7 @@ def evaluation_progress(
         version = (hotkey, phase, *source)
         versions[version] = versions.get(version, 0) + 1
     counts = dict.fromkeys(("queued", "active", "completed", "failed", "retrying"), 0)
+    failure_reasons = set()
     validators = set()
     invalid_assignment = False
     submitted = False
@@ -812,6 +825,11 @@ def evaluation_progress(
             counts["completed"] += 1
         elif status == "failed":
             counts["failed"] += 1
+            cause = run.get("terminal_cause")
+            failure_reasons.add(
+                _EVALUATION_FAILURE_REASONS.get(cause, "unknown")
+                if isinstance(cause, str) else "unknown"
+            )
         elif status == "submitted":
             submitted = True
         else:
@@ -830,6 +848,7 @@ def evaluation_progress(
                 validators.add((hotkey, phase, *source))
             elif outcome is not None:
                 counts["failed"] += 1
+                failure_reasons.add("unknown")
             else:
                 retrying = (
                     type(run.get("attempt")) is int and run["attempt"] > 1
@@ -844,7 +863,7 @@ def evaluation_progress(
     # A malformed active identity makes the active identities unavailable.
     if invalid_assignment:
         validators.clear()
-    return {
+    result = {
         "state": state,
         "validators": [
             {"hotkey": key[0], "phase": key[1], "commit": key[2], "working_tree": key[3]}
@@ -858,6 +877,9 @@ def evaluation_progress(
             for key in sorted(versions, key=lambda key: (key[0], key[1], key[2] or "", key[3]))
         ],
     }
+    if failure_reasons and state != "completed":
+        result["failure_reasons"] = sorted(failure_reasons)
+    return result
 
 
 def _attach_evaluations(service: Any, round_id: str, entries: Sequence[dict]) -> None:

@@ -12586,6 +12586,12 @@ def test_required_current_stage_search_failure_returns_unproven(
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
     assert result["claims"]["stage"]["evidence_url"] == ""
     assert result["claims"]["stage"]["evidence_quote"] == ""
+    assert result["_completed_submit"] is False
+    assert result["failure_reason"] == {
+        "provider_failure": PROVIDER_ERROR_FAILURE_REASON,
+        "malformed_response": MALFORMED_RESPONSE_FAILURE_REASON,
+        "zero_budget": investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON,
+    }[search_mode]
     assert result["usage"]["search_calls"] == (
         0 if search_mode == "zero_budget" else 1
     )
@@ -12653,6 +12659,10 @@ def test_current_stage_search_deadline_returns_unproven(monkeypatch, deadline_mo
     ))
 
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["_completed_submit"] is False
+    assert result["failure_reason"] == (
+        investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+    )
     assert _core_usage(result["usage"]) == {
         "reasoning_turns": 0,
         "search_calls": 0 if deadline_mode == "before_admission" else 1,
@@ -12732,6 +12742,104 @@ def test_failed_current_stage_search_preserves_valid_other_findings(
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
     assert result["claims"]["headcount"]["status"] == "VERIFIED"
     assert result["claims"]["headcount"]["evidence_quote"] == headcount_quote
+    assert result["_completed_submit"] is False
+    assert result["failure_reason"] == (
+        MALFORMED_RESPONSE_FAILURE_REASON
+        if search_mode == "malformed_response"
+        else PROVIDER_ERROR_FAILURE_REASON
+    )
+
+
+@pytest.mark.parametrize("discovery_mode", ["empty_success", "later_general_search"])
+def test_required_stage_failure_is_not_cleared_by_unrelated_search(
+    monkeypatch, discovery_mode,
+):
+    requests = []
+    searches = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        if discovery_mode == "later_general_search" and len(requests) == 1:
+            name, arguments = "search_web", {"query": "Acme company history"}
+        else:
+            name, arguments = "submit_findings", {"findings": [_finding(
+                "stage", status="UNPROVEN", observed_value="",
+                evidence_url="", evidence_quote="", reason="No current stage proof.",
+            )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{len(requests)}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_search(_session, query, *, key):
+        del key
+        searches.append(query)
+        if discovery_mode == "later_general_search" and len(searches) == 1:
+            raise RuntimeError("search unavailable")
+        return {"results": []}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("stage",), requested_stage="Series A",
+    ))
+
+    assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["_completed_submit"] is (discovery_mode == "empty_success")
+    assert result["failure_reason"] == (
+        "" if discovery_mode == "empty_success"
+        else PROVIDER_ERROR_FAILURE_REASON
+    )
+    assert len(searches) == (1 if discovery_mode == "empty_success" else 2)
+
+
+def test_failed_required_stage_search_preserves_proved_different_stage(monkeypatch):
+    url = "https://acme.example/news/seed"
+    quote = "Acme today announced its completed Seed financing round."
+    turns = []
+
+    async def fake_post_json(_session, _url, *, headers, payload):
+        del headers
+        turns.append(payload)
+        name, arguments = (
+            ("fetch_page", {"url": url})
+            if len(turns) == 1 else
+            ("submit_findings", {"findings": [_finding(
+                "stage", status="CONTRADICTED", observed_value="Seed",
+                evidence_url=url, evidence_quote=quote,
+            )]})
+        )
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{len(turns)}", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def fake_search(_session, _query, *, key):
+        del key
+        raise RuntimeError("search unavailable")
+
+    async def fake_fetch(_session, requested_url):
+        return {"ok": True, "url": requested_url, "final_url": requested_url,
+                "text": quote}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("stage",), requested_stage="Series A",
+    ))
+    assert result["claims"]["stage"]["status"] == "CONTRADICTED"
+    assert result["_completed_submit"] is True
+    assert result["failure_reason"] == ""
 
 
 def test_curated_armada_relationship_rejection_forces_targeted_research(
@@ -15130,19 +15238,12 @@ def test_targeted_stage_classification_through_lab_scorer(
         assert kwargs["targets"] == ("stage",)
         if investigation_failure:
             diagnostic[VERIFIER_FAILURE_REASON_KEY] = investigation_failure
-            if investigation_failure == (
-                investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
-            ):
-                return {
-                    "claims": {"stage": _finding(
-                        "stage", status="UNPROVEN", observed_value="",
-                        evidence_url="", evidence_quote="",
-                    )},
-                    "_completed_submit": False,
-                    "failure_reason": investigation_failure,
-                }
             return {
-                "claims": {},
+                "claims": {"stage": _finding(
+                    "stage", status="UNPROVEN", observed_value="",
+                    evidence_url="", evidence_quote="",
+                )},
+                "_completed_submit": False,
                 "failure_reason": investigation_failure,
             }
         return {
@@ -15199,10 +15300,7 @@ def test_targeted_stage_classification_through_lab_scorer(
                 max_retries=3,
             )
         assert calls == {"broad": 3, "investigator": 3}
-        if investigation_failure == (
-            investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
-        ):
-            assert exc_info.value.failure_reason == investigation_failure
+        assert exc_info.value.failure_reason == investigation_failure
         return
 
     accepted = arena_scoring.score_work_item(
@@ -15982,8 +16080,10 @@ def test_industry_only_investigation_keeps_original_turn_threshold(monkeypatch):
     assert result["failure_reason"] == PROVIDER_ERROR_FAILURE_REASON
 
 
+@pytest.mark.parametrize("initial_search_fails", [False, True])
 def test_final_rejected_stage_quote_gets_one_bounded_search_and_source_fetch(
     monkeypatch,
+    initial_search_fails,
 ):
     weak_url = "https://www.bigtime.net/about-us/"
     strong_url = "https://www.bigtime.net/news/current-owner"
@@ -16028,6 +16128,8 @@ def test_final_rejected_stage_quote_gets_one_bounded_search_and_source_fetch(
     async def fake_search(_session, query, *, key):
         del key
         search_queries.append(query)
+        if initial_search_fails and len(search_queries) == 1:
+            raise RuntimeError("initial required search unavailable")
         return {"results": [{"url": strong_url}]}
 
     async def fake_fetch(_session, url):
@@ -16053,6 +16155,8 @@ def test_final_rejected_stage_quote_gets_one_bounded_search_and_source_fetch(
 
     assert "stage" in result["claims"], result
     assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["_completed_submit"] is True
+    assert result["failure_reason"] == ""
     assert _core_usage(result["usage"]) == {
         "reasoning_turns": 4,
         "search_calls": 2,

@@ -15223,15 +15223,35 @@ def test_targeted_stage_classification_through_lab_scorer(
     )
 
 
-@pytest.mark.parametrize("recurring_proved", [False, True])
+@pytest.mark.parametrize("recurring_proved,source_failure", [
+    (False, None), (True, None), (False, "unsupported"), (False, "transport"),
+])
 def test_reviewed_recurring_attribute_controls_arena_score(
-    monkeypatch, recurring_proved
+    monkeypatch, recurring_proved, source_failure,
 ):
     product_url = "https://acme.example/student-plans"
     product_quote = "Acme supplies schools with student planning software."
     terms_url = "https://acme.example/terms"
     terms_quote = "Acme's student planning software plan renews annually."
     calls = {"provider": 0, "investigator": 0, "intent": 0, "fetch": 0}
+    fetch_outcomes = []
+    if source_failure:
+        from tests.lab_arena.firecrawl_unsupported_source_test import POST_URL, routed_call
+
+        broker_result, *_ = routed_call()
+        monkeypatch.setenv("SCRAPINGDOG_API_KEY", "test-key")
+
+        async def source_fetch(_session, url, **_kwargs):
+            if source_failure == "transport":
+                return 503, url, "provider unavailable"
+            return broker_result.status, url, broker_result.body.decode()
+
+        monkeypatch.setattr(investigator, "_fetch_bounded_html", source_fetch)
+        fetched = asyncio.run(investigator._fetch_page(object(), POST_URL))
+        fetch_outcomes = [
+            {"ok": True}, {"ok": True},
+            investigator._fetch_outcome(POST_URL, fetched),
+        ]
 
     async def prechecks(*_args, **_kwargs):
         return lead_scorer.company_fit_match("prechecks passed")
@@ -15295,6 +15315,7 @@ def test_reviewed_recurring_attribute_controls_arena_score(
             investigator.PRIVATE_FETCHED_PAGES_KEY: pages,
             "_completed_submit": True,
             "failure_reason": "",
+            "usage": {"fetch_outcomes": fetch_outcomes},
         }
 
     async def keep_observation(verdict, *_args, **_kwargs):
@@ -15338,19 +15359,28 @@ def test_reviewed_recurring_attribute_controls_arena_score(
         **_competition_company(),
         "industry": "Education",
     }
-    rows = arena_scoring.score_work_item(
-        {"scored_run_id": "reviewed-attribute-control"},
-        icp=_icp(
-            industry="Education",
-            sub_industry="school planning software",
-            product_service="student planning software used by schools",
-            required_attribute=(
-                "Sells a recurring student planning software platform to schools."
-            ),
-            intent_signals=["Announced a completed funding event"],
-        ).model_dump(mode="json"),
-        companies=[company], scorer=scorer, max_retries=1,
-    )
+    def run_scoring():
+        return arena_scoring.score_work_item(
+            {"scored_run_id": "reviewed-attribute-control"},
+            icp=_icp(
+                industry="Education",
+                sub_industry="school planning software",
+                product_service="student planning software used by schools",
+                required_attribute=(
+                    "Sells a recurring student planning software platform to schools."
+                ),
+                intent_signals=["Announced a completed funding event"],
+            ).model_dump(mode="json"),
+            companies=[company], scorer=scorer, max_retries=3,
+        )
+
+    if source_failure == "transport":
+        with pytest.raises(arena_scoring.ScoringError, match="judge_exhausted"):
+            run_scoring()
+        assert calls["provider"] == calls["investigator"] == 3
+        assert calls["intent"] == 0
+        return
+    rows = run_scoring()
     assert calls["provider"] == 1, (calls, rows)
     assert calls["investigator"] == 1
     assert calls["fetch"] == 1

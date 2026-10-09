@@ -1497,6 +1497,7 @@ RUN_RESULT_FIELDS = (
                     "output_schema_mismatch",
                     "output_contract_violation",
                     "provider_error",
+                    "admission_budget_interrupted",
                     "unexpected_verifier_error",
                     "unknown",
                 ),

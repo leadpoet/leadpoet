@@ -28,7 +28,7 @@ import httpx
 from bittensor_wallet import Keypair
 
 from lab_arena import broker as br
-from lab_arena import contracts, intent_details_policy, operations, runner as rn, runtime, shim, source_bundle
+from lab_arena import contracts, intent_details_policy, operations, runner as rn, runtime, scoring, shim, source_bundle
 from lab_arena.output import OutputInvalid, output_document_from_bytes
 
 RUNNER = Keypair.create_from_uri("//Runner")
@@ -2868,11 +2868,10 @@ def test_a_refused_scoring_call_is_an_infrastructure_judge_error(tmp_path, code)
         }
 
 
-def test_previous_provider_failure_does_not_replace_scorer_reason(tmp_path):
-    from lab_arena import scoring
-
+@pytest.mark.parametrize("reason", sorted(scoring.FAILURE_REASON_CODES))
+def test_previous_provider_failure_does_not_replace_scorer_reason(tmp_path, reason):
     failure = scoring.build_scoring_failure(
-        "r1", "judge_error", reason="malformed_response",
+        "r1", "judge_error", reason=reason,
         detail="current judge response is malformed",
     )
     api = RefusingApi([scoring_lease()], code="provider_unavailable")
@@ -2882,7 +2881,7 @@ def test_previous_provider_failure_does_not_replace_scorer_reason(tmp_path):
     result = contracts.validate_run_result(api.completions[0]["body"]["result"])
     assert result["terminal_status"] == "judge_error"
     assert result["failure_diagnostic"] == {
-        "stage": "scorer", "error_class": "judge_error", "reason": "malformed_response",
+        "stage": "scorer", "error_class": "judge_error", "reason": reason,
     }
 
 

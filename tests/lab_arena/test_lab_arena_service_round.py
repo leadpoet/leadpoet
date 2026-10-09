@@ -1929,6 +1929,109 @@ def test_systemic_verifier_reason_survives_runner_completion_and_publication(
     assert published["publication_doc"] is not None
 
 
+def test_admission_budget_failure_completes_over_http_and_retries(
+    connect, tmp_path, monkeypatch
+):
+    """A scorer's fixed reason crosses runner, HTTP, and store; a bad one cannot."""
+
+    from fastapi.testclient import TestClient
+
+    from lab_arena.api import create_app
+
+    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+    participants = _start_round(harness, day=28, epoch=33428)
+    _run_stage_one_to_scoring(harness, participants, runners=1)
+
+    original_run_icp = harness.sandbox.run_icp
+    injected = False
+
+    def one_interrupted_score(spec, **kwargs):
+        nonlocal injected
+        document = json.loads((spec.input_dir / runtime.INPUT_FILE_NAME).read_text())
+        if (
+            not injected
+            and document.get("schema_version") == scoring.SCORING_INPUT_SCHEMA_VERSION
+        ):
+            injected = True
+            failure = scoring.build_scoring_failure(
+                document["scored_run_id"], "judge_error",
+                reason="admission_budget_interrupted",
+            )
+            return runtime.fake_result(
+                exit_code=0, output_bytes=json.dumps(failure).encode("utf-8")
+            )
+        return original_run_icp(spec, **kwargs)
+
+    monkeypatch.setattr(harness.sandbox, "run_icp", one_interrupted_score)
+    client = TestClient(create_app(harness.service))
+    original_post = client.post
+    observed = {}
+    runner_key = keypair("svc-runner-alpha")
+
+    def checked_post(url, *args, **kwargs):
+        if str(url).endswith("/complete"):
+            envelope = json.loads(kwargs["content"])
+            body = envelope["body"]
+            result = body["result"]
+            diagnostic = result.get("failure_diagnostic") or {}
+            if diagnostic.get("reason") == "admission_budget_interrupted":
+                run_id = body["run_id"]
+                assert harness.service.store.get_run(run_id)["status"] == "leased"
+                bad_result = {
+                    **result,
+                    "failure_diagnostic": {**diagnostic, "reason": "unknown_new_reason"},
+                }
+                bad = contracts.build_signed_request(
+                    scope=contracts.SCOPE_COMPLETE,
+                    round_id=harness.round_id,
+                    hotkey=runner_key.ss58_address,
+                    body={**body, "result": bad_result},
+                    timestamp=int(harness.clock().timestamp()),
+                    sign_message=lambda message: runner_key.sign(message.encode()).hex(),
+                )
+                rejected = original_post(
+                    url, content=contracts.canonical_json(bad).encode("utf-8"),
+                    headers={"content-type": "application/json"},
+                )
+                assert rejected.status_code == 400
+                assert rejected.json()["code"].startswith("run_result_invalid:")
+                assert harness.service.store.get_run(run_id)["status"] == "leased"
+                observed["failed_run_id"] = run_id
+            response = original_post(url, *args, **kwargs)
+            if diagnostic.get("reason") == "admission_budget_interrupted":
+                assert response.status_code == 200
+            return response
+        return original_post(url, *args, **kwargs)
+
+    client.post = checked_post
+    harness.api_factory = lambda: rn.HttpArenaApiClient("http://localhost", client=client)
+    build_runner = harness.runner
+    monkeypatch.setattr(
+        harness, "runner", lambda index, parallel=4: build_runner(index, parallel=1)
+    )
+    harness.run_stage_with_runners(1)
+
+    assert injected and observed.get("failed_run_id")
+    failed = harness.service.store.get_run(observed["failed_run_id"])
+    assert failed["status"] == "failed" and failed["terminal_cause"] == "judge_error"
+    assert failed["result_doc"]["failure_diagnostic"] == {
+        "stage": "scorer",
+        "error_class": "judge_error",
+        "reason": "admission_budget_interrupted",
+    }
+    retries = [
+        run for run in harness.service.store.list_runs(
+            harness.round_id, stage=1, kind="score"
+        )
+        if run["assignment_id"] == failed["assignment_id"]
+        and run["attempt"] == 2
+    ]
+    assert len(retries) == 1
+    assert retries[0]["status"] == "accepted"
+    assert retries[0]["scored_run_id"] == failed["scored_run_id"]
+    assert retries[0]["output_ref"]
+
+
 def test_exhausted_company_evidence_continues_remaining_companies_and_round(
     connect, tmp_path, monkeypatch
 ):

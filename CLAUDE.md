@@ -1,5 +1,20 @@
 # Agent Instructions
 
+## Scoped production authorization: centralized validator operational logs
+
+On 2026-10-09 the user authorized bounded validator startup, execution-loop,
+claim, recovery, worker/proxy and sandbox diagnostics through the existing
+hotkey-authenticated gateway to private database storage. Use the overnight
+validation procedures for narrow source changes, exact committed migrations,
+focused signed HTTP and PostgreSQL tests, safe push/merge, canonical paired
+restarts and bounded production checks through the shared validator code.
+No external validator receives database credentials or new secrets. Preserve
+scoring, leases, sandbox isolation, provider accounting, eligibility, weights,
+accepted work and concurrent changes. Logs are observational and must not
+control execution. Do not impersonate Rizzo or Yuma or claim their deployment
+or recovery without evidence. This authority ends after deployed centralized
+logging and both shared primary/external client paths are verified.
+
 ## Scoped production authorization: external validator startup diagnosis
 
 On 2026-10-09 the user authorized correlating Rizzo's supplied host logs with

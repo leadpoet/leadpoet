@@ -251,6 +251,7 @@ SCOPE_SUBMISSION_PRESIGN = "lab_arena.submission.presign.v1"
 SCOPE_SUBMISSION_FINALIZE = "lab_arena.submission.finalize.v1"
 SCOPE_SUBMISSION_CREDIT_RETRY = "lab_arena.submission.credit_retry.v1"
 SCOPE_WEIGHT_STATE = "lab_arena.weight_state.v1"
+SCOPE_VALIDATOR_EVENTS = "lab_arena.validator_events.v1"
 REQUEST_SCOPES = frozenset(
     {
         SCOPE_CLAIM,
@@ -259,6 +260,7 @@ REQUEST_SCOPES = frozenset(
         SCOPE_SUBMISSION_FINALIZE,
         SCOPE_SUBMISSION_CREDIT_RETRY,
         SCOPE_WEIGHT_STATE,
+        SCOPE_VALIDATOR_EVENTS,
     }
 )
 

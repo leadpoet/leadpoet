@@ -5930,13 +5930,25 @@ def _has_explicitly_unproven_fit_dimensions(
                     == "rebrand_continuity_unproven"
                     and identity_receipt.get("evidence_source")
                     == "company_web_reverification"
+                    # The submitted LinkedIn URL is optional. An explicit
+                    # empty slug can establish exhausted proof, but a missing
+                    # or malformed receipt field cannot.
+                    and isinstance(
+                        identity_receipt.get("submitted_linkedin_slug"), str
+                    )
+                    and (
+                        identity_receipt["submitted_linkedin_slug"] == ""
+                        or bool(
+                            identity_receipt["submitted_linkedin_slug"].strip()
+                        )
+                    )
                     and all(
                         isinstance(identity_receipt.get(field), str)
                         and bool(identity_receipt[field].strip())
                         for field in (
                             "submitted_name", "submitted_domain",
-                            "submitted_linkedin_slug", "observed_name",
-                            "observed_domain", "observed_linkedin_slug",
+                            "observed_name", "observed_domain",
+                            "observed_linkedin_slug",
                         )
                     )
                     and identity_receipt["submitted_domain"]

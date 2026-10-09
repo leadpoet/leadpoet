@@ -14,6 +14,7 @@ import math
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from lab_arena import code_review_policy, contracts, icp_disclosure, source_disclosure, verify
+from lab_arena.store import COMPETITION_CONFIGURATION_FIELDS
 
 
 PUBLIC_BASELINE_REPOSITORY = "https://github.com/leadpoet/leadpoet-sales-agent/tree/lab"
@@ -131,6 +132,27 @@ _ROUND_COLUMNS = (
     "publication_doc,published_at,cancel_reason,promotion_required,"
     "baseline_promoted_at,icp_set_date,evaluation_date"
 )
+_COMPETITION_ROUND_COLUMNS = _ROUND_COLUMNS.replace(
+    "configuration_doc",
+    ",".join(
+        "cfg_%s:configuration_doc->%s::text" % (key, key)
+        for key in COMPETITION_CONFIGURATION_FIELDS
+    ),
+)
+
+
+def _competition_round(row: Mapping[str, Any]) -> Mapping[str, Any]:
+    if "configuration_doc" in row:
+        # Embedded stores can return complete rows regardless of the SELECT.
+        return row
+    # SQL NULL is an absent key; text 'null' is an explicit JSON null. Keep
+    # their distinct legacy defaults and validation behavior.
+    configuration = {
+        key: json.loads(row["cfg_" + key])
+        for key in COMPETITION_CONFIGURATION_FIELDS
+        if row.get("cfg_" + key) is not None
+    }
+    return {**row, "configuration_doc": configuration}
 
 
 def _timestamp(value: Any) -> Optional[str]:
@@ -488,12 +510,13 @@ def _recent_competition_rounds(
             netuid=netuid,
             limit=limit,
             offset=offset,
-            columns=_ROUND_COLUMNS,
+            columns=_COMPETITION_ROUND_COLUMNS,
         )
         if not page:
             break
         unseen = []
         for row in page:
+            row = _competition_round(row)
             round_id = str(row.get("round_id") or "")
             if round_id in seen_round_ids:
                 continue
@@ -538,8 +561,9 @@ def competition_snapshot(service: Any, *, limit: int = DEFAULT_RECENT_ROUND_LIMI
             network_name=network_name,
             netuid=netuid,
             limit=1,
-            columns=_ROUND_COLUMNS,
+            columns=_COMPETITION_ROUND_COLUMNS,
         )
+        published = [_competition_round(row) for row in published]
         latest_completed = round_summary(published[0]) if published else None
         if latest_completed is not None:
             summarized_rounds.append((published[0], latest_completed))

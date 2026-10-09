@@ -300,6 +300,11 @@ TABLES = (
 )
 ROUND_MODE_FILTER = "configuration_doc->>mode"
 PROMOTION_OUTCOME_FILTER = "publication_doc->king_decision->>outcome"
+COMPETITION_CONFIGURATION_FIELDS = (
+    "mode", "network_name", "netuid", "schedule",
+    "benchmark_disclosure_policy", "stage_1_icp_count", "stage_2_icp_count",
+    "promotion_margin", "execution_sequence_policy", "sourcing_cost_eligibility_policy",
+)
 # Fixed public audit projections. Never fetch source or provider documents.
 _RUNTIME_JSON_COLUMNS = {
     "source_commit:result_doc->resource_summary->>validator_source_commit": "result_doc #>> '{resource_summary,validator_source_commit}' AS source_commit",
@@ -307,6 +312,11 @@ _RUNTIME_JSON_COLUMNS = {
     "source_commit:content->>validator_source_commit": "content ->> 'validator_source_commit' AS source_commit",
     "source_dirty:content->>validator_source_dirty": "content ->> 'validator_source_dirty' AS source_dirty",
     "start_lease_generation:content->>lease_generation": "content ->> 'lease_generation' AS start_lease_generation",
+    **{
+        "cfg_%s:configuration_doc->%s::text" % (key, key):
+        "(configuration_doc -> '%s')::text AS cfg_%s" % (key, key)
+        for key in COMPETITION_CONFIGURATION_FIELDS
+    },
 }
 ROUND_NETWORK_COLUMN = "arena_network_name"
 ROUND_NETUID_COLUMN = "arena_netuid"
@@ -1452,7 +1462,7 @@ class ArenaStore:
                 ROUND_NETUID_COLUMN: int(netuid),
             },
             order="evaluation_date", descending=True, limit=1,
-            columns="round_id,evaluation_date,configuration_doc",
+            columns="round_id,evaluation_date",
         )
         return rows[0] if rows else None
 

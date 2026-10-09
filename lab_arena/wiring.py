@@ -635,7 +635,7 @@ def build_service_from_environment(mode: str):
     return service, app
 
 
-def build_runner_from_environment(args, *, keypair=None):
+def build_runner_from_environment(args, *, keypair=None, operational_logger=None):
     # Keep the CLI readiness check and real scoring setup on the same path.
     # This runs only inside the retryable scoring loop, never the weight loop.
     round_id = str(getattr(args, "round_id", "") or "").strip() or None
@@ -686,11 +686,19 @@ def build_runner_from_environment(args, *, keypair=None):
             round_id=round_id, identity=identity, api=api, sandbox_runtime=sandbox_runtime, image_cache=cache, source_cache=source_cache,
             work_dir=runs_work, workspace_cache_lock=cache_lock, max_parallel_runs=startup.parallelism, proxy_worker_pool=proxy_pool,
             claim_poll_seconds=max(5, int(getattr(args, "poll_seconds", 30))),
+            operational_logger=operational_logger,
         )
         if round_id is not None:
             api.round(round_id)
             runner_config.evaluation_date = round_id.replace("arena-", "")[:10]
-        return runner_module.Runner(runner_config)
+        runner = runner_module.Runner(runner_config)
+        if operational_logger is not None:
+            fields = {"phase": "scoring_setup", "ready_slots": startup.parallelism,
+                      "proxy_count": startup.verified_proxies.webshare_worker_count}
+            operational_logger.state(scoring_state="ready", progress=True,
+                                     ready_slots=startup.parallelism, proxy_count=fields["proxy_count"])
+            operational_logger.emit("validator.ready", fields)
+        return runner
     except BaseException:
         cache_lock.close()
         raise

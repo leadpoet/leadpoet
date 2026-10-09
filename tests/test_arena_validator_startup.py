@@ -410,7 +410,7 @@ def test_once_passes_resolved_api_to_runner_factory_and_keeps_state_default(
     monkeypatch.setenv("LAB_ARENA_SIGNING_KEY_HASH", startup_harness.signing_key_hash)
     monkeypatch.setattr(
         "lab_arena.wiring.build_runner_from_environment",
-        lambda args, *, keypair: startup_harness.captured["runner_args"].append(
+        lambda args, *, keypair, operational_logger: startup_harness.captured["runner_args"].append(
             (args, keypair)
         ) or object(),
     )
@@ -443,7 +443,7 @@ def test_round_pin_flows_from_environment_to_retryable_scoring_wiring(
     monkeypatch.setenv("LAB_ARENA_ROUND_ID", "arena-2026-09-16")
     monkeypatch.setattr(
         "lab_arena.wiring.build_runner_from_environment",
-        lambda args, *, keypair: startup_harness.captured["runner_args"].append(
+        lambda args, *, keypair, operational_logger: startup_harness.captured["runner_args"].append(
             (args, keypair)
         ) or object(),
     )

@@ -30,6 +30,11 @@ from lab_arena.runtime_host import RuntimeHostError, runtime_host_diagnostic
 from lab_arena.scoring_startup import ScoringStartupError, scoring_startup_diagnostic
 
 MAX_ARENA_WEIGHT_ATTEMPTS = 3
+_OPERATIONAL_WEIGHT_STATES = frozenset({
+    "state_unavailable", "blocked_on_participation", "rate_limited",
+    "outside_submission_window", "broadcast", "rebroadcast",
+    "included_pending_reveal", "finalized", "not_included_expired",
+})
 FINNEY_SN71_API_BASE_URL = "https://gateway.subnet71.com"
 FINNEY_SN71_SIGNING_KEY_HASH = "sha256:fb0a422d437700f468beda94b4d3e05bb22dbaa6141f0e6c5f1dac9e7257d99a"
 DEFAULT_RUNSC_PATH = "/usr/local/bin/runsc"
@@ -648,8 +653,9 @@ def load_local_hotkey(args):
 
 
 def run_validator_loops(*, orchestrator, runner_factory, epoch_supplier, stop,
-                        poll_seconds=30, once=False) -> None:
+                        poll_seconds=30, once=False, operational_logger=None) -> None:
     """Start weights first; retry scoring setup and cycles without stopping them."""
+    log = operational_logger
     interval = max(5, int(poll_seconds))
     first_weight_cycle = threading.Event()
     weight_stop = threading.Event()
@@ -659,10 +665,18 @@ def run_validator_loops(*, orchestrator, runner_factory, epoch_supplier, stop,
     def weight_loop() -> None:
         while not weight_stop.is_set():
             try:
+                if log is not None:
+                    log.state(weights_state="active")
                 epoch = int(epoch_supplier())
                 status = orchestrator.run_once(epoch)
                 print("Arena validator weight status: %s" % status, flush=True)
+                if log is not None:
+                    log.state(weights_state=status if isinstance(status, str) and status in _OPERATIONAL_WEIGHT_STATES else "unknown")
+                    log.recovered("weights")
             except Exception as exc:
+                if log is not None:
+                    log.state(weights_state="unavailable")
+                    log.error("weights", exc)
                 print("Arena validator weight cycle failed: %s" % type(exc).__name__,
                       file=sys.stderr, flush=True)
             finally:
@@ -671,7 +685,11 @@ def run_validator_loops(*, orchestrator, runner_factory, epoch_supplier, stop,
                 # Refresh after the current operation; neither recovery nor
                 # its failures may prevent attempting the current epoch first.
                 orchestrator.poll_prior_outcomes(int(epoch_supplier()))
+                if log is not None:
+                    log.recovered("weight_recovery")
             except Exception as exc:
+                if log is not None:
+                    log.error("weight_recovery", exc)
                 print("Arena validator prior polling failed: type=%s" % type(exc).__name__,
                       file=sys.stderr, flush=True)
             if once:
@@ -691,14 +709,23 @@ def run_validator_loops(*, orchestrator, runner_factory, epoch_supplier, stop,
         while not stop.is_set():
             try:
                 if runner is None:
+                    if log is not None:
+                        log.state(scoring_state="starting")
                     runner = runner_factory()
+                    if log is not None:
+                        log.recovered("scoring_setup")
                 taken = runner.run_once(stop_event=stop)
+                if log is not None:
+                    log.recovered("scoring_cycle")
                 if scoring_failed:
                     print("Arena validator scoring loop resumed; sandbox completion is reported separately",
                           flush=True)
                     scoring_failed = False
             except Exception as exc:
                 scoring_failed = True
+                if log is not None:
+                    log.state(scoring_state="unavailable")
+                    log.error("scoring_setup" if runner is None else "scoring_cycle", exc)
                 if isinstance(exc, RuntimeHostError):
                     print("Arena validator scoring unavailable: phase=%s %s; weight loop continues"
                           % ("setup" if runner is None else "cycle", runtime_host_diagnostic(exc)),
@@ -715,6 +742,8 @@ def run_validator_loops(*, orchestrator, runner_factory, epoch_supplier, stop,
                     try:
                         runner.close()
                     except Exception as close_exc:
+                        if log is not None:
+                            log.error("cleanup", close_exc)
                         print("Arena validator scoring cleanup failed: type=%s"
                               % type(close_exc).__name__, file=sys.stderr, flush=True)
                     runner = None
@@ -726,12 +755,16 @@ def run_validator_loops(*, orchestrator, runner_factory, epoch_supplier, stop,
             if taken == 0:
                 stop.wait(interval)
     finally:
+        if log is not None:
+            log.state(scoring_state="stopping")
         stop.set()
         try:
             if runner is not None:
                 try:
                     runner.close()
                 except Exception as exc:
+                    if log is not None:
+                        log.error("cleanup", exc)
                     print("Arena validator scoring cleanup failed: type=%s"
                           % type(exc).__name__, file=sys.stderr, flush=True)
         finally:
@@ -823,9 +856,20 @@ def main(argv=None) -> int:
         raise ArenaValidatorError("LAB_ARENA_SIGNING_KEY_HASH is required for this gateway/network/subnet")
 
     keypair = load_local_hotkey(args)
-    chain = chain_module.ArenaChain(config, chain_module.connect_substrate(config))
+    # Start after the existing origin checks and wallet load, before opening
+    # chain/signing/scoring dependencies. The wallet is never loaded twice.
+    from lab_arena.validator_logging import ValidatorOperationalLogger
+    from lab_arena.runtime_version import SOURCE_METADATA
+
+    log = ValidatorOperationalLogger(
+        args.api_base_url, keypair=keypair, network=config.network_name, netuid=config.netuid,
+    )
+    log.start()
+    log.emit("validator.startup", {"phase": "startup", **SOURCE_METADATA, **log.snapshot()})
+    chain = None
     signer = None
     try:
+        chain = chain_module.ArenaChain(config, chain_module.connect_substrate(config))
         public_api = ArenaPublicApi(
             args.api_base_url, keypair=keypair,
             network=config.network_name, netuid=config.netuid,
@@ -858,7 +902,7 @@ def main(argv=None) -> int:
             # Scoring-only imports are part of retryable scoring setup too.
             from lab_arena.wiring import build_runner_from_environment
 
-            return build_runner_from_environment(args, keypair=keypair)
+            return build_runner_from_environment(args, keypair=keypair, operational_logger=log)
 
         orchestrator = ArenaWeightOrchestrator(
             api=public_api, chain=chain, signer=signer,
@@ -871,17 +915,25 @@ def main(argv=None) -> int:
         stop = threading.Event()
         for signum in (signal.SIGINT, signal.SIGTERM):
             signal.signal(signum, lambda _signum, _frame: stop.set())
+        log.emit("validator.ready", {"phase": "weights"})
         run_validator_loops(
             orchestrator=orchestrator,
             runner_factory=runner_factory,
             epoch_supplier=lambda: chain_module.current_settlement_epoch(chain, cutover),
-            stop=stop, poll_seconds=args.poll_seconds, once=args.once,
+            stop=stop, poll_seconds=args.poll_seconds, once=args.once, operational_logger=log,
         )
         return 0
+    except Exception as exc:
+        log.error("startup", exc)
+        raise
     finally:
-        if signer is not None:
-            signer.close()
-        chain.close()
+        try:
+            if signer is not None:
+                signer.close()
+            if chain is not None:
+                chain.close()
+        finally:
+            log.close()
 
 
 if __name__ == "__main__":

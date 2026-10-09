@@ -152,6 +152,7 @@ CURRENT_PROVIDER_SERVICE_MIGRATIONS = CURRENT_SERVICE_MIGRATIONS + (
     "425-lab-arena-successful-deepline-cost-priority.sql",
     "426-lab-arena-deepline-response-missing-guard.sql",
     "432-lab-arena-closed-host-score-billing.sql",
+    "434-lab-arena-validator-events.sql",
 )
 
 # Reward activation depends on the exact predecessor and day-authority seams.

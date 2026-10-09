@@ -58,6 +58,11 @@ SERVICE_ROLE_NAME = "lab_arena_service"
 SCORE_BATCH_SIZE = 500
 
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
+    "lab_arena_append_validator_events_v1": (
+        ("p_validator_hotkey", "text"), ("p_network", "text"),
+        ("p_netuid", "integer"), ("p_events", "jsonb"),
+        ("p_gateway_source_commit", "text"),
+    ),
     "lab_arena_retry_credit_failures_v1": (
         ("p_round_id", "text"), ("p_submission_id", "text"),
         ("p_miner_hotkey", "text"), ("p_request_hash", "text"),
@@ -287,6 +292,7 @@ TABLES = (
     "lab_arena_runs",
     "lab_arena_ledger",
     "lab_arena_trajectory_events",
+    "lab_arena_validator_events",
     "lab_arena_accepted_weight_states",
     "lab_arena_chain_outcomes",
     "lab_arena_judgment_cache",
@@ -952,6 +958,16 @@ class ArenaStore:
             ):
                 raise ArenaStoreError("run quota snapshot schema mismatch")
         return result
+
+    def append_validator_events(self, hotkey: str, network: str, netuid: int,
+                                events: Sequence[Mapping[str, Any]],
+                                gateway_source_commit: str) -> Dict[str, Any]:
+        return _require_mapping(self._transport.rpc(
+            "lab_arena_append_validator_events_v1", {
+                "p_validator_hotkey": hotkey, "p_network": network,
+                "p_netuid": netuid, "p_events": [dict(item) for item in events],
+                "p_gateway_source_commit": gateway_source_commit,
+            }), "append_validator_events")
 
     def append_trajectory_events(
         self,

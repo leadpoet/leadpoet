@@ -398,6 +398,57 @@ validator from new assignments for the rest of that round. A local restart does
 not clear that guard; use the installed-runtime probe to check a repair without
 consuming another miner job.
 
+### Central operational diagnostics
+
+Updated validators send bounded operational events through
+`POST /arena/v1/validators/events` on their existing gateway. The normal primary
+service and external `neurons/validator.py` entrypoint use the same sender.
+No database credentials, new secret, or additional logging service is needed.
+Apply migration `434-lab-arena-validator-events.sql` before deploying the receiver.
+
+The existing hotkey signs each request. The gateway checks the signature,
+network, subnet, and finalized validator permit, then writes private
+`lab_arena_validator_events` rows. An active job lease is not required, so
+scoring setup failures remain visible while weights continue. If an event names
+a run, the database checks that validator's ownership and derives the round,
+submission and ICP fields. Self-reported logs grant no execution, scoring,
+recovery or weight authority.
+
+Events cover startup, worker/proxy readiness, loop failures and recovery,
+claim/discovery errors, sandbox startup errors, and completion delivery errors.
+Five-minute state summaries include observed loop state, active work and recent
+progress times. Each process has a session ID and source metadata. Compare
+these observations with the existing per-run trajectories; a live weight loop
+does not prove an active scoring loop.
+
+The sender keeps at most 64 events in memory and suppresses repeated errors for
+five minutes. Delivery runs separately from scoring and weights, with a bounded
+transport timeout and retry backoff. Requests contain at most 16 events and
+32 KiB; each event is at most 4 KiB. Storage accepts at most 60 events per minute
+and 1,000 per day per validator, with bounded cleanup of records older than
+14 days. Only allowlisted fields are accepted. Credentials, full provider
+bodies, environment dumps and unrestricted host-log streams are excluded.
+
+For a private operator query, use the existing protected database access:
+
+```sql
+SELECT created_at, occurred_at, validator_hotkey, event_kind,
+       round_id, submission_id, icp_position, run_id,
+       gateway_source_commit, content
+FROM public.lab_arena_validator_events
+WHERE validator_hotkey = '<validator hotkey>'
+ORDER BY created_at DESC
+LIMIT 50;
+```
+
+A missing heartbeat means no recent report, not a proven host cause. A process
+that cannot load its signing identity, is killed before sending, cannot reach
+the gateway, or still runs old code cannot report that condition centrally.
+Events queued only in memory can be lost on a hard kill. The absence of reports
+must therefore be checked against authenticated gateway requests and job state.
+Normal external-validator upgrades activate capture; no operator must export
+host log files for failures that the updated running service records.
+
 Then verify a real eligible Arena job reaches an accepted completion, and
 independently verify finalized weight reveal for that validator. An empty queue
 or a live process proves neither. `included_pending_reveal` means the commitment

@@ -7973,10 +7973,12 @@ def _completed_cross_domain_rebrand_receipts():
 
 
 @pytest.mark.parametrize("typed_refusal", [False, True])
+@pytest.mark.parametrize("submitted_linkedin_slug", ["abacus-group", ""])
 def test_completed_cross_domain_unproven_rebrand_is_company_local(
-    typed_refusal,
+    typed_refusal, submitted_linkedin_slug,
 ):
     identity, investigation = _completed_cross_domain_rebrand_receipts()
+    identity["submitted_linkedin_slug"] = submitted_linkedin_slug
     investigation["usage"] = {"fetch_outcomes": [
         {"ok": False, "error_class": "provider_request_refused"}
         if typed_refusal else {"ok": True, "error_class": ""},
@@ -7984,6 +7986,47 @@ def test_completed_cross_domain_unproven_rebrand_is_company_local(
 
     assert lead_scorer._has_explicitly_unproven_fit_dimensions(
         {}, ("identity",), identity_receipt=identity,
+        investigation_receipt=investigation,
+    )
+
+
+@pytest.mark.parametrize("invalid_value", [None, 7, [], {}, "   "])
+def test_cross_domain_unproven_rebrand_requires_typed_submitted_linkedin_field(
+    invalid_value,
+):
+    identity, investigation = _completed_cross_domain_rebrand_receipts()
+    identity["submitted_linkedin_slug"] = invalid_value
+
+    assert not lead_scorer._has_explicitly_unproven_fit_dimensions(
+        {}, ("identity",), identity_receipt=identity,
+        investigation_receipt=investigation,
+    )
+
+
+def test_cross_domain_unproven_rebrand_rejects_missing_submitted_linkedin_field():
+    identity, investigation = _completed_cross_domain_rebrand_receipts()
+    del identity["submitted_linkedin_slug"]
+
+    assert not lead_scorer._has_explicitly_unproven_fit_dimensions(
+        {}, ("identity",), identity_receipt=identity,
+        investigation_receipt=investigation,
+    )
+
+
+def test_empty_submitted_linkedin_needs_completed_stage_and_rebrand_findings():
+    identity, investigation = _completed_cross_domain_rebrand_receipts()
+    identity["submitted_linkedin_slug"] = ""
+    investigation["claims"]["stage"] = {
+        "target": "stage", "status": "UNPROVEN",
+        "evidence_url": "", "evidence_quote": "",
+    }
+    assert lead_scorer._has_explicitly_unproven_fit_dimensions(
+        {}, ("identity", "stage"), identity_receipt=identity,
+        investigation_receipt=investigation,
+    )
+    investigation["completed_submitted_findings"] = False
+    assert not lead_scorer._has_explicitly_unproven_fit_dimensions(
+        {}, ("identity", "stage"), identity_receipt=identity,
         investigation_receipt=investigation,
     )
 
@@ -8007,10 +8050,12 @@ def test_completed_cross_domain_unproven_rebrand_is_company_local(
         ]}}),
     ],
 )
+@pytest.mark.parametrize("submitted_linkedin_slug", ["abacus-group", ""])
 def test_cross_domain_rebrand_without_completed_unproven_review_stays_retryable(
-    identity_update, investigation_update,
+    identity_update, investigation_update, submitted_linkedin_slug,
 ):
     identity, investigation = _completed_cross_domain_rebrand_receipts()
+    identity["submitted_linkedin_slug"] = submitted_linkedin_slug
     identity.update(identity_update)
     investigation.update(investigation_update)
 
@@ -15626,9 +15671,19 @@ def test_real_reserve_forced_unproven_retries_with_retained_source(monkeypatch):
     assert rows[0]["final_score"] == 54
 
 
-@pytest.mark.parametrize("cross_domain", [False, True])
-def test_completed_unproven_alias_is_terminal_zero_through_lab_scorer(
-    monkeypatch, cross_domain,
+@pytest.mark.parametrize(
+    ("cross_domain", "missing_submitted_linkedin", "review_state"),
+    [
+        (False, False, "completed"),
+        (True, False, "completed"),
+        (True, True, "completed"),
+        (True, True, "incomplete"),
+        (True, True, "transport_fault"),
+        (True, True, "refresh_fault"),
+    ],
+)
+def test_unproven_alias_completion_and_fault_classification_through_lab_scorer(
+    monkeypatch, cross_domain, missing_submitted_linkedin, review_state,
 ):
     submitted_name = "Abacus" if cross_domain else "DBS"
     submitted_domain = (
@@ -15684,6 +15739,10 @@ def test_completed_unproven_alias_is_terminal_zero_through_lab_scorer(
         return None
 
     async def preserve_broad_employee_observation(value, *_args, **_kwargs):
+        if review_state == "refresh_fault":
+            _kwargs["invocation_cache"]["refresh_outcome"] = (
+                "retryable_failure"
+            )
         return value
 
     async def bounded_investigation(*, targets, **_kwargs):
@@ -15715,12 +15774,15 @@ def test_completed_unproven_alias_is_terminal_zero_through_lab_scorer(
                 )
             },
             "failure_reason": "",
-            "_completed_submit": True,
+            "_completed_submit": review_state != "incomplete",
             "_validated_stage_finding": (
                 {} if cross_domain else stage_finding
             ),
             "usage": {"fetch_outcomes": [
-                {"ok": False, "error_class": "provider_request_refused"}
+                {"ok": False, "error_class": (
+                    "http_error" if review_state == "transport_fault"
+                    else "provider_request_refused"
+                )}
             ]},
         }
 
@@ -15775,7 +15837,7 @@ def test_completed_unproven_alias_is_terminal_zero_through_lab_scorer(
         "company_website": f"https://www.{submitted_domain}/",
         "company_linkedin": (
             "https://www.linkedin.com/company/abacus-group"
-            if cross_domain else ""
+            if cross_domain and not missing_submitted_linkedin else ""
         ),
         "industry": "Financial Services",
         "company_stage": "Public",
@@ -15791,19 +15853,26 @@ def test_completed_unproven_alias_is_terminal_zero_through_lab_scorer(
         }
         for index in range(1, 5 if cross_domain else 2)
     ]
-    accepted = arena_scoring.score_work_item(
-        {"scored_run_id": "same-domain-unproven-alias"},
-        icp=_icp(
-            industry="Financial Services",
-            sub_industry="Banking",
-            product_service="banking",
-            company_stage="Public",
-            intent_signals=["Announced a completed funding event"],
-        ).model_dump(mode="json"),
-        companies=[submitted, *good_companies],
-        scorer=scorer,
-        max_retries=3,
-    )
+    def run_scoring():
+        return arena_scoring.score_work_item(
+            {"scored_run_id": "same-domain-unproven-alias"},
+            icp=_icp(
+                industry="Financial Services",
+                sub_industry="Banking",
+                product_service="banking",
+                company_stage="Public",
+                intent_signals=["Announced a completed funding event"],
+            ).model_dump(mode="json"),
+            companies=[submitted, *good_companies],
+            scorer=scorer,
+            max_retries=3,
+        )
+
+    if review_state != "completed":
+        with pytest.raises(arena_scoring.ScoringError, match="judge_exhausted"):
+            run_scoring()
+        return
+    accepted = run_scoring()
 
     assert calls == {
         "broad": 1, "investigator": 1, "good": len(good_companies),

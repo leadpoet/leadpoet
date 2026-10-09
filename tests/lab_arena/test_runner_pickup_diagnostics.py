@@ -172,7 +172,9 @@ def test_deep_500_claim_body_cannot_escape_runner_error_handling(
     )
 
 
-@pytest.mark.parametrize("status", ("no_pending", "no_open_round", "stage_closed"))
+@pytest.mark.parametrize("status", (
+    "no_pending", "no_open_round", "stage_closed", "paused", "no_free_slot", "cache_busy",
+))
 def test_normal_idle_claim_responses_do_not_log(tmp_path, capsys, status):
     class IdleApi:
         def claim(self, _envelope):

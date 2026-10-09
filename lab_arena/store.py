@@ -305,6 +305,10 @@ COMPETITION_CONFIGURATION_FIELDS = (
     "benchmark_disclosure_policy", "stage_1_icp_count", "stage_2_icp_count",
     "promotion_margin", "execution_sequence_policy", "sourcing_cost_eligibility_policy",
 )
+CURRENT_CONFIGURATION_FIELDS = (
+    "mode", "schedule", "stage_1_icp_count", "stage_2_icp_count", "promotion_margin",
+    "integrity_policy", "contact_policy", "company_quality_policy", "intent_details_policy",
+)
 # Fixed public audit projections. Never fetch source or provider documents.
 _RUNTIME_JSON_COLUMNS = {
     "source_commit:result_doc->resource_summary->>validator_source_commit": "result_doc #>> '{resource_summary,validator_source_commit}' AS source_commit",
@@ -315,7 +319,7 @@ _RUNTIME_JSON_COLUMNS = {
     **{
         "cfg_%s:configuration_doc->%s::text" % (key, key):
         "(configuration_doc -> '%s')::text AS cfg_%s" % (key, key)
-        for key in COMPETITION_CONFIGURATION_FIELDS
+        for key in COMPETITION_CONFIGURATION_FIELDS + CURRENT_CONFIGURATION_FIELDS + ("baseline_hotkey",)
     },
 }
 ROUND_NETWORK_COLUMN = "arena_network_name"
@@ -1469,7 +1473,7 @@ class ArenaStore:
     def published_reward_bases(
         self, *, mode: Optional[str] = None,
         network_name: Optional[str] = None, netuid: Optional[int] = None,
-        limit: int = 200
+        limit: int = 200, public_only: bool = False,
     ) -> List[Dict[str, Any]]:
         if (network_name is None) != (netuid is None):
             raise ArenaStoreError("round network filters must be supplied together")
@@ -1492,7 +1496,11 @@ class ArenaStore:
                 descending=True,
                 limit=page_size,
                 offset=offset,
-                columns="round_id,status,arena_network_name,arena_netuid,rewards_enabled,effective_reward_epoch,king_outcome,king_hotkey,king_start_epoch,reward_basis_hash,reward_basis_doc,signing_key_doc,reward_activated_at,published_at,configuration_doc",
+                columns=(
+                    "round_id,status,arena_network_name,arena_netuid,rewards_enabled,effective_reward_epoch,king_outcome,king_hotkey,king_start_epoch,reward_basis_hash,reward_basis_doc,signing_key_doc,reward_activated_at,published_at,"
+                    + ("cfg_mode:configuration_doc->mode::text,cfg_baseline_hotkey:configuration_doc->baseline_hotkey::text"
+                       if public_only else "configuration_doc")
+                ),
             )
             activated.extend(
                 row for row in rows

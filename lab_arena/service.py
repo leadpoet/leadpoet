@@ -33,6 +33,7 @@ from lab_arena.store import (
     ArenaStore,
     ArenaStoreError,
     ArenaStoreUnavailable,
+    CURRENT_CONFIGURATION_FIELDS,
     hash_lease_token,
 )
 from gateway.utils.hotkey_roles import (
@@ -1292,7 +1293,19 @@ class ArenaService:
                 return self._round(row["round_id"])
         return None
 
-    def active_rounds(self) -> List[Dict[str, Any]]:
+    @staticmethod
+    def _public_current_round(row: Mapping[str, Any]) -> Dict[str, Any]:
+        if "configuration_doc" in row:
+            return dict(row)
+        # Text casts preserve explicit JSON null while SQL NULL means absent.
+        configuration = {
+            key: json.loads(row["cfg_" + key])
+            for key in CURRENT_CONFIGURATION_FIELDS + ("baseline_hotkey",)
+            if row.get("cfg_" + key) is not None
+        }
+        return {**row, "configuration_doc": configuration}
+
+    def active_rounds(self, *, public_only: bool = False) -> List[Dict[str, Any]]:
         """Every active round, oldest first, with its public pinned output policy.
 
         Rounds overlap (one open for submissions while the previous one runs),
@@ -1322,8 +1335,15 @@ class ArenaService:
                 netuid=netuid,
                 limit=page_size,
                 offset=offset,
-                columns="round_id,status,created_at,configuration_doc",
+                columns=(
+                    "round_id,status,created_at,"
+                    + (",".join("cfg_%s:configuration_doc->%s::text" % (key, key)
+                                for key in CURRENT_CONFIGURATION_FIELDS)
+                       if public_only else "configuration_doc")
+                ),
             )
+            if public_only:
+                page = [self._public_current_round(row) for row in page]
             rows.extend(
                 row
                 for row in page
@@ -1403,7 +1423,7 @@ class ArenaService:
             raise ServiceError("hotkey_banned", 403)
         return validated, round_row
 
-    def latest_published_round(self) -> Optional[Dict[str, Any]]:
+    def latest_published_round(self, *, public_only: bool = False) -> Optional[Dict[str, Any]]:
         if self._pinned_round_id() is not None:
             row = self._pinned_round()
             return row if row is not None and row["status"] == "published" else None
@@ -1415,10 +1435,13 @@ class ArenaService:
             # Current-round polling needs one summary, not every large result.
             limit=1,
             columns=(
-                "round_id,status,published_at,configuration_doc,king_outcome,"
-                "king_hotkey,effective_reward_epoch,reward_basis_hash"
+                "round_id,status,published_at,"
+                + ("cfg_mode:configuration_doc->mode::text" if public_only else "configuration_doc")
+                + ",king_outcome,king_hotkey,effective_reward_epoch,reward_basis_hash"
             ),
         )
+        if public_only:
+            rows = [self._public_current_round(row) for row in rows]
         return next(
             (row for row in rows if (row.get("configuration_doc") or {}).get("mode") == self._config.mode),
             None,
@@ -5381,11 +5404,11 @@ class ArenaService:
             raise ServiceError(exc.code, exc.status) from exc
 
     def public_current(self) -> Dict[str, Any]:
-        active = self.active_rounds()
+        active = self.active_rounds(public_only=True)
         current = active[-1] if active else None
         open_round = next((row for row in active if row["status"] == "open"), None)
         running = [row for row in active if row["status"] != "open"]
-        published = self.latest_published_round()
+        published = self.latest_published_round(public_only=True)
         published_round = (
             {
                 "round_id": published["round_id"],
@@ -5404,7 +5427,7 @@ class ArenaService:
         week = None
         governing = None
         if epoch is not None:
-            governing = self.public_reward_basis(epoch)
+            governing = self.public_reward_basis(epoch, public_only=True)
             if governing is None:
                 eligibility = False
             else:
@@ -5414,8 +5437,10 @@ class ArenaService:
         elif self._config.mode == "live":
             network_name, netuid = self._chain_scope()
             rows = self._store.published_reward_bases(
-                mode="live", network_name=network_name, netuid=netuid, limit=200
+                mode="live", network_name=network_name, netuid=netuid, limit=200,
+                public_only=True,
             )
+            rows = [self._public_current_round(row) for row in rows]
             bases = self._usable_reward_bases(rows)
             if bases:
                 governing = max(
@@ -5436,13 +5461,16 @@ class ArenaService:
             "current_epoch": epoch,
         }
 
-    def public_reward_basis(self, epoch: int) -> Optional[Dict[str, Any]]:
+    def public_reward_basis(self, epoch: int, *, public_only: bool = False) -> Optional[Dict[str, Any]]:
         if self._config.mode != "live":
             return None
         network_name, netuid = self._chain_scope()
         rows = self._store.published_reward_bases(
-            mode="live", network_name=network_name, netuid=netuid, limit=200
+            mode="live", network_name=network_name, netuid=netuid, limit=200,
+            **({"public_only": True} if public_only else {}),
         )
+        if public_only:
+            rows = [self._public_current_round(row) for row in rows]
         return rewards.governing_reward_basis(
             self._usable_reward_bases(rows), int(epoch)
         )

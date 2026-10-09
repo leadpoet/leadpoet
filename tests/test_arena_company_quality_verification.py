@@ -578,6 +578,118 @@ def test_later_web_omission_preserves_verified_homepage_linkedin():
     assert canonical["observed_linkedin_slug"] == "acme"
 
 
+@pytest.mark.parametrize("unusable_linkedin", [
+    "not available",
+    "https://www.linkedin.com/in/acme",
+])
+@pytest.mark.parametrize("company_quality", [False, True])
+def test_unusable_web_linkedin_preserves_exact_verified_homepage_identity(
+    unusable_linkedin, company_quality,
+):
+    receipt = _web_identity_receipt(
+        _company(),
+        {
+            "observed_company_name": "Acme",
+            "observed_company_website": "https://acme.com/about",
+            "observed_company_linkedin": unusable_linkedin,
+        },
+        verified_homepage_identity=_homepage_anchor(),
+        company_quality=company_quality,
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_MATCH
+    assert receipt["observed_linkedin_slug"] == "acme"
+    assert receipt["linkedin_evidence_source"] == "company_homepage"
+    assert receipt["web_observed_linkedin_slug"] == ""
+    assert company_quality_receipt_matches_claim(
+        receipt, _company().model_dump(mode="json")
+    )
+
+
+@pytest.mark.parametrize("conflicting_linkedin", [
+    "https://linkedin.com/company/other",
+    "linkedin.com/company/other",
+])
+@pytest.mark.parametrize("company_quality", [False, True])
+def test_valid_conflicting_web_linkedin_is_not_replaced_by_homepage(
+    conflicting_linkedin, company_quality,
+):
+    receipt = _web_identity_receipt(
+        _company(),
+        {
+            "observed_company_name": "Acme",
+            "observed_company_website": "https://acme.com/about",
+            "observed_company_linkedin": conflicting_linkedin,
+        },
+        verified_homepage_identity=_homepage_anchor(),
+        company_quality=company_quality,
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_UNAVAILABLE
+    assert receipt["reason_code"] == "web_linkedin_conflicts_with_verified_homepage"
+    assert receipt["observed_linkedin_slug"] == "other"
+
+
+@pytest.mark.parametrize("company_quality", [False, True])
+def test_valid_schemeless_matching_web_linkedin_keeps_web_evidence(company_quality):
+    receipt = _web_identity_receipt(
+        _company(),
+        {
+            "observed_company_name": "Acme",
+            "observed_company_website": "https://acme.com/about",
+            "observed_company_linkedin": "linkedin.com/company/acme",
+        },
+        verified_homepage_identity=_homepage_anchor(),
+        company_quality=company_quality,
+    )
+
+    assert receipt["decision"] == COMPANY_FIT_MATCH
+    assert receipt["observed_linkedin_slug"] == "acme"
+    assert receipt.get("linkedin_evidence_source") != "company_homepage"
+
+
+@pytest.mark.parametrize(
+    ("observed_name", "observed_website", "observed_linkedin", "anchor", "expected"),
+    [
+        ("Other", "https://acme.com/about", "not available", _homepage_anchor(),
+         COMPANY_FIT_UNAVAILABLE),
+        ("Acme", "https://other.example/about", "not available", _homepage_anchor(),
+         COMPANY_FIT_MISMATCH),
+        ("Acme", "https://acme.com/about", None, _homepage_anchor(),
+         COMPANY_FIT_UNAVAILABLE),
+        ("Acme", "https://acme.com/about", "not available", None,
+         COMPANY_FIT_UNAVAILABLE),
+        ("Acme", "https://acme.com/about", "not available",
+         {**_homepage_anchor(), "linkedin_company_slug": "other"},
+         COMPANY_FIT_UNAVAILABLE),
+        ("Acme", "https://acme.com/about", "not available",
+         {**_homepage_anchor(), "linkedin_company_slug": ""},
+         COMPANY_FIT_UNAVAILABLE),
+    ],
+)
+@pytest.mark.parametrize("company_quality", [False, True])
+def test_unusable_web_linkedin_does_not_bypass_identity_guards(
+    observed_name, observed_website, observed_linkedin, anchor, expected,
+    company_quality,
+):
+    receipt = _web_identity_receipt(
+        _company(),
+        {
+            "observed_company_name": observed_name,
+            "observed_company_website": observed_website,
+            "observed_company_linkedin": observed_linkedin,
+        },
+        verified_homepage_identity=anchor,
+        company_quality=company_quality,
+    )
+
+    if company_quality:
+        assert receipt["decision"] == expected
+    else:
+        assert receipt["decision"] != COMPANY_FIT_MATCH
+    assert receipt.get("linkedin_evidence_source") != "company_homepage"
+
+
 def test_later_web_linkedin_conflict_is_not_erased():
     receipt = _web_identity_receipt(
         _company(),

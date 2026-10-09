@@ -1,0 +1,42 @@
+-- Index the uncertain-cost candidate lookup used by the billing reconcilers.
+--
+-- WHY
+--   `lab_arena_list_deepline_cost_reconciliations_v1/v2` and
+--   `lab_arena_list_openrouter_cost_reconciliations_v1` both drive off
+--     uncertainty.round_id = p_round_id
+--     AND uncertainty.entry_kind = 'uncertain'
+--     AND uncertainty.provider  = '<provider>'
+--     ORDER BY ... uncertainty.entry_id
+--   and `lab_arena_ledger` carries no index on `round_id` at all. The existing
+--   indexes are keyed on call_identity, run_id and submission_id, so the outer
+--   candidate scan reads the whole round's ledger on every driver tick.
+--
+--   The ledger is append-only and grows with every provider call in the round,
+--   so the cost of that scan rises monotonically through the day. On
+--   2026-10-09 the `advance_billing_read` step went from 5.5s at 00:00Z to the
+--   8s PostgREST timeout by 13:00Z, after a payment outage added tens of
+--   thousands of uncertain entries to the open round; `advance_round` then
+--   aborted on roughly half of its ticks, and successful provider calls
+--   started landing with no settled cost (which marks their submissions
+--   ineligible).
+--
+-- WHAT THIS CHANGES
+--   One partial btree index. No function, grant, constraint or row is touched,
+--   and no query result changes — only the plan the candidate scan can use.
+--   Reversible with:
+--     DROP INDEX CONCURRENTLY IF EXISTS public.lab_arena_ledger_uncertain_round_idx;
+--
+--   `provider` is the second key so a single index serves both the Deepline and
+--   the OpenRouter lister; `entry_id` is last so the ORDER BY can be satisfied
+--   from the index rather than a sort over the whole round.
+--
+-- HOW TO APPLY
+--   CREATE INDEX CONCURRENTLY cannot run inside a transaction block, so this
+--   script intentionally has no BEGIN/COMMIT. Run it as a single statement
+--   against the Arena database. It takes no write lock on the table.
+--   If a previous attempt was interrupted, Postgres leaves the index INVALID;
+--   drop it (statement above) before re-running.
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS lab_arena_ledger_uncertain_round_idx
+  ON public.lab_arena_ledger (round_id, provider, entry_id)
+  WHERE entry_kind = 'uncertain';

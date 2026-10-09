@@ -6155,7 +6155,12 @@ class ArenaService:
                 for run in runs
                 if int(run.get("icp_position") or 0) in public_positions
             }:
-                judgments.update(self._scoring_outputs(round_id, stage))
+                judgments.update(self._select_scoring_outputs(
+                    self._store.list_runs(
+                        round_id, stage=stage, kind="score",
+                        submission_id=submission_id,
+                    )
+                ))
             icps = self.evaluation_icps(round_id) if outputs else []
             contacts = {}
             diagnostics = []

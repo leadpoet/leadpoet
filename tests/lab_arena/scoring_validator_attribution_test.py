@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from types import SimpleNamespace
 
 import pytest
+from fastapi.testclient import TestClient
 
-from lab_arena import company_judgments, contracts, judgment_cache
+from lab_arena import company_judgments, contact_policy, contracts, integrity, judgment_cache
+from lab_arena.api import create_app
 from lab_arena.service import ArenaService, ServiceError
 
 
@@ -385,6 +388,79 @@ def test_published_results_scope_both_run_reads_to_one_of_143_submissions():
         "reused_icp_count": 0,
     }]
     assert attribution["icps"] == []
+
+
+def _policy_response(monkeypatch, contacts_required):
+    visible = _execution("execute-visible", 0)
+    visible["output_ref"] = "visible-output"
+    private = _execution("execute-private", 1)
+    private["output_ref"] = "private-output"
+    other = _execution("execute-other", 0, submission_id="submission-other")
+    other["output_ref"] = "other-output"
+    service = _service(
+        [visible, private, other,
+         _score("score-visible", visible, VALIDATOR_A),
+         _score("score-private", private, VALIDATOR_B),
+         _score("score-other", other, VALIDATOR_C)],
+        public_positions={0},
+    )
+    round_row = service._round(ROUND_ID)
+    round_row["configuration_doc"] = {
+        "integrity_policy": integrity.POLICY,
+        "scorer_policy": {"max_scored_companies": 5},
+        **({"contact_policy": contact_policy.POLICY} if contacts_required else {}),
+    }
+    service._round = lambda _round_id: round_row
+    output_reads = []
+
+    def read_output(ref, _limit):
+        output_reads.append(ref)
+        return json.dumps({"schema_version": contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION,
+                           "companies": [{"company_name": "Public Company"}]}).encode()
+
+    service._objects = SimpleNamespace(get_bounded=read_output)
+    service.evaluation_icps = lambda _round_id: [{}]
+    service._verified_breakdowns = lambda *_args, **_kwargs: [{
+        "company_index": 0,
+        "company_qualified": True,
+        "contact_qualified": True,
+        "contact_identity_key": "public-identity",
+        "email_status": "verified",
+        "contact_verification": {"decision": "verified"},
+    }]
+    monkeypatch.setattr("lab_arena.service.validate_output_document", lambda document: document)
+    list_calls = []
+    list_runs = service._store.list_runs
+
+    def counted_list_runs(round_id, **filters):
+        list_calls.append(filters)
+        return list_runs(round_id, **filters)
+
+    service._store.list_runs = counted_list_runs
+    with TestClient(create_app(service)) as http:
+        response = http.get(f"/arena/v1/rounds/{ROUND_ID}/results/{SUBMISSION_ID}")
+
+    assert response.status_code == 200
+    return response.json(), list_calls, output_reads
+
+
+@pytest.mark.parametrize("contacts_required", [False, True])
+def test_policy_results_read_only_one_submission_and_keep_public_diagnostics(
+    monkeypatch, contacts_required,
+):
+    result, list_calls, output_reads = _policy_response(monkeypatch, contacts_required)
+    assert list_calls == [
+        {"kind": "execute", "submission_id": SUBMISSION_ID},
+        {"kind": "score", "submission_id": SUBMISSION_ID},
+        {"stage": 1, "kind": "score", "submission_id": SUBMISSION_ID},
+    ]
+    assert output_reads == ["visible-output"]
+    assert set(result["outputs"]) == {"execute-visible"}
+    assert result["company_diagnostics"][0]["company_name"] == "Public Company"
+    assert result["company_diagnostics"][0]["qualified"] is True
+    assert ("contact_verifications" in result) is contacts_required
+    if contacts_required:
+        assert result["contact_verifications"]["execute-visible"][0]["contact_qualified"] is True
 
 
 def test_broken_cache_source_is_unattributed_without_breaking_results():

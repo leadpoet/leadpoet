@@ -617,6 +617,30 @@ def _parse_iso(value: str) -> datetime:
     return datetime.strptime(value, timestamp_format).replace(tzinfo=timezone.utc)
 
 
+def _partial_baseline_transition_deadline(
+    round_row: Mapping[str, Any], *, stage: int,
+    execution_incomplete: bool, judge_incomplete: bool,
+) -> Optional[datetime]:
+    """Use the same proof deadlines as SQL for an incomplete stage-one baseline."""
+
+    configuration = round_row.get("configuration_doc") or {}
+    if (
+        stage != 1
+        or configuration.get("execution_sequence_policy") != contracts.BASELINE_SCORED_FIRST_POLICY
+        or configuration.get("integrity_policy") != "arena_integrity_v1"
+        or configuration.get("sourcing_cost_eligibility_policy")
+            != contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+    ):
+        return None
+    schedule = configuration["schedule"]
+    deadlines = []
+    if execution_incomplete:
+        deadlines.append(_parse_iso(schedule["stage_1_close"]))
+    if judge_incomplete:
+        deadlines.append(_parse_iso(schedule["stage_1_scoring_close"]))
+    return max(deadlines) if deadlines else None
+
+
 def round_id_for_cutoff(cutoff: datetime) -> str:
     return "arena-%s" % cutoff.astimezone(timezone.utc).strftime("%Y-%m-%d")
 
@@ -2915,6 +2939,10 @@ class ArenaService:
         }
         if len(baseline_ids) != 1:
             raise ServiceError("baseline_submission_invalid", 500)
+        baseline_execution_incomplete = any(
+            item["submission_id"] in baseline_ids
+            for item in plan.get("incomplete_rows") or []
+        )
         failed_items: Dict[str, str] = {}
         incomplete_items: Dict[str, str] = {}
         for item in plan["work_items"]:
@@ -2941,6 +2969,11 @@ class ArenaService:
             # Miner-account failures retain the frozen zero rule. A judge
             # infrastructure failure has no measured score for this ICP.
             failed_items[scored_run_id] = cause
+        baseline_judge_incomplete = any(
+            item["submission_id"] in baseline_ids
+            and incomplete_items.get(item["scored_run_id"]) == "stage_closed"
+            for item in plan["work_items"]
+        )
         breakdowns_by_item: Dict[str, List[Dict[str, Any]]] = {}
         judge_executions = 0
         for item in plan["work_items"]:
@@ -2998,6 +3031,17 @@ class ArenaService:
             # The per-run scores are part of the published result; a write the
             # database refused must stop the stage, never pass silently.
             raise ServiceError("scores_not_recorded:%s" % str(recorded.get("status") or "unknown")[:40], 500)
+        deadline = _partial_baseline_transition_deadline(
+            round_row, stage=stage,
+            execution_incomplete=baseline_execution_incomplete,
+            judge_incomplete=baseline_judge_incomplete,
+        )
+        if deadline is not None and self.now() < deadline:
+            return {
+                "status": "retry", "round_status": round_row["status"],
+                "reason": "partial_baseline_deadline_pending",
+                "judge_executions": judge_executions,
+            }
         if stage == 1:
             if (
                 (round_row.get("configuration_doc") or {}).get(

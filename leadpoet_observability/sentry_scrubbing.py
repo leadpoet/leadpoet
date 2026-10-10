@@ -114,6 +114,7 @@ _ALLOWED_SPAN_KEYS = frozenset(
 # model internals, qualification lead content paths, and the
 # LLM provider clients whose exceptions echo request/response fragments.
 PROTECTED_MODULE_PREFIXES: Tuple[str, ...] = (
+    "lab_arena",
     "research_lab",
     "gateway.research_lab",
     "gateway.qualification",
@@ -138,6 +139,9 @@ PROTECTED_MODULE_PREFIXES: Tuple[str, ...] = (
 # Path fragments that mark a stack frame as protected when the module name
 # is unavailable (scripts running as __main__, site-packages clients).
 PROTECTED_PATH_FRAGMENTS: Tuple[str, ...] = (
+    "/lab_arena/",
+    "/scripts/run_lab_arena_service.py",
+    "/scripts/run_arena_validator.py",
     "/research_lab/",
     "/qualification/",
     "/leadpoet_verifier/",

@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
 
 from lab_arena import telemetry  # noqa: E402
 from lab_arena.driver import drive_once  # noqa: E402
+from leadpoet_observability.sentry_bootstrap import INGEST_ENVIRONMENT_KEYS  # noqa: E402
 
 
 def _install_arena_telemetry(app) -> None:
@@ -45,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--environment-file",
         type=Path,
-        help="load only LAB_ARENA_* values from the protected gateway env cache",
+        help="load Arena and Sentry ingest values from the protected gateway env cache",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8792)
@@ -58,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def load_scoped_environment(path: Path) -> None:
-    """Load only Arena-owned values without restoring gateway provider aliases."""
+    """Load Arena and explicit Sentry ingest values, never provider aliases."""
 
     try:
         raw = Path(path).read_text(encoding="utf-8")
@@ -78,7 +79,7 @@ def load_scoped_environment(path: Path) -> None:
         scoped = {
             str(name): str(value)
             for name, value in parsed.items()
-            if str(name).startswith("LAB_ARENA_")
+            if str(name).startswith("LAB_ARENA_") or str(name) in INGEST_ENVIRONMENT_KEYS
         }
     else:
         scoped = {}
@@ -90,7 +91,9 @@ def load_scoped_environment(path: Path) -> None:
                 line = line[len("export ") :].strip()
             name, separator, raw_value = line.partition("=")
             name = name.strip()
-            if not separator or not name.startswith("LAB_ARENA_"):
+            if not separator or not (
+                name.startswith("LAB_ARENA_") or name in INGEST_ENVIRONMENT_KEYS
+            ):
                 continue
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
                 raise ValueError(
@@ -126,9 +129,9 @@ OTEL_ENVIRONMENT_KEYS = (
 def load_otel_environment(path: Path) -> None:
     """Load ONLY the three telemetry values from the protected gateway env.
 
-    ``load_scoped_environment`` deliberately refuses everything outside
-    ``LAB_ARENA_*`` so gateway provider credentials cannot be resurrected in
-    this process. The telemetry destination is the one documented exception:
+    ``load_scoped_environment`` accepts only Arena and explicit Sentry ingest
+    settings so gateway provider credentials cannot be resurrected in this
+    process. OTel is the other explicit telemetry exception:
     endpoint plus ingest token are a write-only pair that can do nothing but
     append spans, and reusing them is what lets Arena telemetry turn on with
     no new secret and no new host configuration. The keys are enumerated by
@@ -158,6 +161,12 @@ def main(argv=None) -> int:
     if mode == "off":
         print("LAB_ARENA_MODE=off: nothing starts and nothing is served")
         return 0
+    try:
+        from leadpoet_observability import init_sentry
+
+        init_sentry(component="arena-service")
+    except Exception as exc:
+        print("arena sentry unavailable", type(exc).__name__, file=sys.stderr)
     from lab_arena.wiring import build_service_from_environment  # lazy: production dependencies
 
     service, app = build_service_from_environment(mode)

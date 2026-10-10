@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from leadpoet_observability.sentry_bootstrap import INGEST_ENVIRONMENT_KEYS  # noqa: E402
+
 
 def _read_environment(path: Path) -> tuple[dict[str, str], str]:
     descriptor = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
@@ -38,7 +40,7 @@ def _read_environment(path: Path) -> tuple[dict[str, str], str]:
         name = name.strip()
         if not separator or not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
             raise ValueError("Arena validator env file has an invalid assignment")
-        if not name.startswith("LAB_ARENA_"):
+        if not (name.startswith("LAB_ARENA_") or name in INGEST_ENVIRONMENT_KEYS):
             raise ValueError("Arena validator env file contains an unrelated setting")
         try:
             parts = shlex.split("VALUE=" + value, comments=True, posix=True)

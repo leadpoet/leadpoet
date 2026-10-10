@@ -21,10 +21,39 @@ def test_environment_is_data_and_overrides_ambient_settings(tmp_path, monkeypatc
     assert os.environ["LAB_ARENA_API_BASE_URL"] == "https://arena.example/$(false)"
 
 
+@pytest.mark.parametrize("secondary_proxy", [False, True])
+def test_ingest_only_sentry_settings_survive_private_snapshot(
+    tmp_path, monkeypatch, secondary_proxy
+):
+    from leadpoet_observability.sentry_bootstrap import INGEST_ENVIRONMENT_KEYS
+
+    settings = dict(zip(INGEST_ENVIRONMENT_KEYS, (
+        "1", "https://fixture@example.invalid/1", "production", "a" * 40,
+    )))
+    content = "".join(f"{key}={shlex.quote(value)}\n" for key, value in settings.items())
+    if secondary_proxy:
+        proxy = tmp_path / "proxies.env"
+        proxy.write_text("QUALIFICATION_WEBSHARE_PROXY_1=http://proxy.example:80\n")
+        proxy.chmod(0o600)
+        content += f"LAB_ARENA_PROXY_ENV_FILE={shlex.quote(str(proxy))}\n"
+    source = _env(tmp_path, content)
+    snapshot = tmp_path / "service.env"
+    write_environment_snapshot(source, snapshot)
+    for key in settings:
+        monkeypatch.setenv(key, "")
+    load_environment(snapshot)
+    assert {key: os.environ[key] for key in settings} == settings
+    assert snapshot.stat().st_mode & 0o777 == 0o600
+
+
 @pytest.mark.parametrize("body", [
     "LEADPOET_WEIGHT_MODE=legacy\n",
     "ENCLAVE_CID=8\n",
     "PATH=/tmp\n",
+    "LEADPOET_SENTRY_API_TOKEN=fixture-private\n",
+    "LEADPOET_SENTRY_MESSAGE_MODE=scrub\n",
+    "LEADPOET_SENTRY_OTHER=fixture-private\n",
+    "OPENROUTER_API_KEY=fixture-private\n",
     "LAB_ARENA_API_BASE_URL=one\nLAB_ARENA_API_BASE_URL=two\n",
     "LAB_ARENA_SECRET=private value\n",
 ])

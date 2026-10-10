@@ -53,6 +53,16 @@ def test_standard_script_delegates_to_one_validator_from_unrelated_cwd(tmp_path)
     assert "sudo permission" not in result.stdout
 
 
+def test_rootful_reexec_script_imports_from_unrelated_cwd(tmp_path):
+    script = Path(__file__).resolve().parents[1] / "lab_arena/validator_startup.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"], cwd=tmp_path,
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--wallet.path" in result.stdout
+
+
 def test_runsc_default_uses_only_supported_install_locations(monkeypatch):
     assert _default_runsc_path(
         {}, path_exists=lambda path: path == DEFAULT_RUNSC_PATH
@@ -164,6 +174,24 @@ def test_secondary_proxy_file_is_read_as_caller_and_not_again_as_root(monkeypatc
     assert "UNRELATED" not in preserve
     assert "secret" not in repr(command) + preserve
     assert original == {"LAB_ARENA_PROXY_ENV_FILE": str(proxy), "UNRELATED": "untouched"}
+
+
+def test_sudo_preserves_only_explicit_sentry_ingest_settings():
+    from leadpoet_observability.sentry_bootstrap import INGEST_ENVIRONMENT_KEYS
+
+    original = {name: "fixture-private" for name in INGEST_ENVIRONMENT_KEYS}
+    original.update({"LEADPOET_SENTRY_API_TOKEN": "fixture-read-token",
+                     "OPENROUTER_API_KEY": "fixture-provider-key"})
+    command, environment, preserve = startup.rootful_startup_command(
+        _parser().parse_args([]), [], original,
+    )
+    names = preserve.partition("=")[2].split(",")
+    assert set(INGEST_ENVIRONMENT_KEYS) <= set(names)
+    assert "LEADPOET_SENTRY_API_TOKEN" not in environment
+    assert "LEADPOET_SENTRY_API_TOKEN" not in names
+    assert "OPENROUTER_API_KEY" not in names
+    assert "fixture-private" not in repr(command) + preserve
+    assert "fixture-read-token" not in repr(command) + preserve
 
 
 @pytest.mark.parametrize("mode", ["root", "not_linux", "--check-only", "no_sudo"])

@@ -1014,6 +1014,114 @@ _ACQUISITION_CONDITIONAL_RE = re.compile(
     r"\b(?:acquisition|acquired|subsidiary)\b.{0,100}\bsubject\s+to\b",
     re.I | re.S,
 )
+
+_PRIVATE_EQUITY_SPONSOR_CLASSIFICATION_RE = re.compile(
+    r"(?:^|[.!?;\n]\s*)(?P<sponsor>[A-Z][A-Za-z0-9&/'’.-]*"
+    r"(?:[ \t]+[A-Z][A-Za-z0-9&/'’.-]*){0,9})\s+"
+    r"(?i:(?:(?:is|remains)\s+"
+    r"(?:(?:a|an|the|leading|global|independent|specialist|international|"
+    r"diversified|alternative)\s+){0,6}"
+    r"(?:private[- ]equity|private[- ]markets)\s+"
+    r"(?:firm|investor|sponsor|investment\s+(?:firm|manager))\b"
+    r"|sponsors\s+investment\s+funds\s+that\s+invest\s+in\s+private\s+equity\b)"
+    # The classification noun must be complete. A possessive, compound, or
+    # following role noun describes a relationship to a PE firm, not its type.
+    r"(?=$|[.!?;,](?:\s|$)|\s+(?:focused\s+on|speciali[sz]ing\s+in|"
+    r"based\s+in|headquartered\s+in|that|which|with|and|whose)\b))"
+)
+
+
+def _private_equity_linked_support_proves_ownership(
+    company_names: Sequence[str],
+    ownership_quote: str,
+    supporting_quotes: Sequence[str],
+) -> bool:
+    """Bind separate sponsor classification to explicit control of this company.
+
+    Callers must separately check that each exact quote occurs in its loaded
+    source. This fallback does not turn an investor or portfolio label into
+    ownership proof, or transfer another sponsor's classification.
+    """
+
+    if (
+        not ownership_quote
+        or _ACQUISITION_NO_LONGER_CURRENT_RE.search(ownership_quote)
+        or _ACQUISITION_CONDITIONAL_RE.search(ownership_quote)
+        or _ACQUISITION_FAILED_RE.search(ownership_quote)
+        or _has_affirmed_stage_proof(
+            ownership_quote,
+            _PRIVATE_EQUITY_STAGE_SUPERSESSION_PATTERNS,
+            reject_future_will=True,
+        )
+    ):
+        return False
+    sponsors: set[str] = set()
+    for quote in supporting_quotes:
+        for match in _PRIVATE_EQUITY_SPONSOR_CLASSIFICATION_RE.finditer(quote):
+            if _has_affirmed_stage_proof(
+                quote, (re.compile(re.escape(match.group(0))),),
+                reject_historical=True,
+            ):
+                sponsors.add(match.group("sponsor"))
+    for company_name in company_names:
+        compact_company = _compact_company_name(company_name)
+        if len(compact_company) < 4:
+            continue
+        # Investigator identity names are compact. Permit only separators
+        # between their exact letters; do not accept a partial entity name.
+        company = r"\b" + r"[\s&.'’-]*".join(map(re.escape, compact_company))
+        company += r"(?:\s+(?:corporation|corp|inc|llc|ltd|limited)\.?)?\b"
+        entity_end = r"(?=[,;.!?\n]|$|\s+in\s+(?:19|20)\d{2}\b)"
+        for sponsor_name in sponsors:
+            sponsor = r"\b" + r"\s+".join(
+                map(re.escape, sponsor_name.split())
+            ) + r"\b"
+            # Each pattern states the direction of control. In particular,
+            # classification of an unrelated firm mentioned nearby is useless.
+            patterns = (
+                rf"{company}\s+(?:is|remains)\s+(?:currently\s+|now\s+)?"
+                rf"(?:majority[- ]owned|controlled)\s+by\s+"
+                rf"(?:(?:a|an|the|global|leading|investment|firm|financial|"
+                rf"private[- ]markets|infrastructure)\s+){{0,6}}{sponsor}{entity_end}",
+                rf"{company}['’]s\s+(?:majority|controlling)\s+owner\s+"
+                rf"(?:is|remains)\s+{sponsor}{entity_end}",
+                rf"{company}\s+welcomes\s+[^.!?;\n]{{1,150}}?"
+                rf"into\s+its\s+investor\s+group,\s+alongside\s+"
+                rf"(?:its\s+)?majority\s+owner,\s+{sponsor}{entity_end}",
+                rf"{sponsor}\s+(?:is|remains)\s+(?:the\s+)?"
+                rf"(?:majority|controlling)\s+owner\s+of\s+{company}{entity_end}",
+                rf"{sponsor}\s+(?:holds|owns)\s+(?:an?\s+|the\s+)?"
+                rf"(?:majority|controlling)\s+(?:stake|interest)\s+in\s+{company}{entity_end}",
+                rf"{company}\s+(?:today\s+)?announced\s+(?:today\s+)?"
+                rf"the\s+(?:completion|closing)\s+of\s+"
+                rf"(?:its|the)\s+(?:majority|controlling)\s+"
+                rf"(?:acquisition|investment)\s+by\s+{sponsor}{entity_end}",
+                rf"{sponsor}\s+(?:has\s+)?completed\s+(?:its|the|an?)\s+"
+                rf"(?:majority|controlling)\s+(?:acquisition|investment)\s+"
+                rf"(?:of|in)\s+{company}{entity_end}",
+            )
+            completed_fund_acquisition = re.compile(
+                r"\bannounced\s+(?:today\s+)?the\s+(?:completion|closing)\s+"
+                r"of\s+the\s+acquisition\s+of\s+(?:a|the)\s+"
+                r"(?:majority|controlling)\s+(?:equity\s+)?(?:interest|stake)\s+"
+                rf"in\s+{company}\s+by\s+"
+                r"(?:investment\s+)?funds\s+(?:and\s+accounts\s+)?"
+                rf"managed\s+by\s+{sponsor}{entity_end}",
+                re.I,
+            )
+            if _has_affirmed_stage_proof(
+                ownership_quote,
+                tuple(
+                    re.compile(r"(?:^|[.!?;\n]\s*)" + pattern, re.I)
+                    for pattern in patterns
+                ) + (completed_fund_acquisition,),
+                reject_historical=True,
+                reject_future_will=True,
+            ):
+                return True
+    return False
+
+
 _BOUND_PUBLIC_SUPERSESSION_SUBJECT_PATTERNS = (
     re.compile(
         r"\b(?:completed|closed|finali[sz]ed)\b[^.!?;:\n]{0,100}"
@@ -1744,6 +1852,8 @@ def _validated_investigator_stage_matches_verdict(
         and finding_url == evidence["url"]
         and finding_quote
         and finding_quote == evidence["quote"]
+        and (value.get("supporting_evidence") or [])
+        == (evidence.get("supporting_evidence") or [])
     )
 
 
@@ -2008,7 +2118,7 @@ def _verified_homepage_rebrand_redirect(
     return {key: str(candidate[key]) for key in expected_keys}
 
 
-def _dimension_web_evidence(verdict: Mapping[str, Any], dimension: str) -> dict[str, str]:
+def _dimension_web_evidence(verdict: Mapping[str, Any], dimension: str) -> dict[str, Any]:
     """Extract the URL and quote required to make one web claim auditable."""
 
     nested = verdict.get("dimension_evidence")
@@ -2032,10 +2142,26 @@ def _dimension_web_evidence(verdict: Mapping[str, Any], dimension: str) -> dict[
         or ""
     )
     quote_text = quote.strip()[:2000] if isinstance(quote, str) else ""
-    return {
+    evidence = {
         "url": _valid_web_evidence_url(url),
         "quote": quote_text,
     }
+    # Linked PE proof remains auditable through projection and fit calculation.
+    # These receipts prove nothing without the internally validated finding.
+    support = nested_value.get("supporting_evidence")
+    if dimension == "stage" and isinstance(support, list) and 0 < len(support) <= 2:
+        if all(
+            isinstance(item, Mapping)
+            and _valid_web_evidence_url(item.get("url")) == item.get("url")
+            and isinstance(item.get("quote"), str)
+            and 0 < len(item["quote"]) <= 2000
+            for item in support
+        ):
+            evidence["supporting_evidence"] = [
+                {"url": item["url"], "quote": item["quote"]}
+                for item in support
+            ]
+    return evidence
 
 
 def _decision_with_web_evidence(
@@ -6544,10 +6670,13 @@ def _project_investigator_stage(
         stage_evidence_quote=quote,
     )
     nested = verdict.get("dimension_evidence")
-    if isinstance(nested, Mapping):
-        nested_copy = dict(nested)
-        nested_copy["stage"] = {"url": url, "quote": quote}
-        projected["dimension_evidence"] = nested_copy
+    nested_copy = dict(nested) if isinstance(nested, Mapping) else {}
+    nested_copy["stage"] = {"url": url, "quote": quote}
+    if value.get("supporting_evidence"):
+        nested_copy["stage"]["supporting_evidence"] = [
+            dict(item) for item in value["supporting_evidence"]
+        ]
+    projected["dimension_evidence"] = nested_copy
     return projected
 
 

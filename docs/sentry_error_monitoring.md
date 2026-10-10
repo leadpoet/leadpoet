@@ -11,12 +11,12 @@ restart, scoring, attestation, weight submission, finalization, or cleanup.
 Export fails closed by dropping an event that cannot be scrubbed; application
 behavior fails open by preserving the original result or exception.
 
-The validator restart controller prepares a hash-locked, host-only telemetry
-environment before production shutdown when its authoritative Python does not
-already contain the SDK. The environment is cached and used only to emit the
-bounded restart summary; it never replaces `VALIDATOR_PYTHON_BIN` or enters a
-validator, worker, or enclave authority path. Preparation is
-bounded and fail-open, so telemetry installation cannot block a restart.
+The existing host telemetry helper can prepare a hash-locked, host-only
+environment when a restart summary interpreter does not contain the SDK.
+That cached environment is used only for bounded summaries; it never replaces
+`VALIDATOR_PYTHON_BIN` or enters a validator, worker, or enclave authority path.
+Preparation is bounded and fail-open, so telemetry installation cannot block
+a restart. The normal Arena validator controller is not wired to this helper.
 
 The restart and canonical-weight event matrix is in
 [`sentry_restart_weight_instrumentation.md`](sentry_restart_weight_instrumentation.md).
@@ -31,7 +31,10 @@ The restart and canonical-weight event matrix is in
 | Gateway PCR0 builder | `validator_tee/host/gateway_pcr0_builder.py` |
 | Arena service | `scripts/run_lab_arena_service.py` |
 | Shared Arena validator | `lab_arena/validator.py` after optional sudo re-exec |
-| Restart controllers | `gw_restart.sh`, `validator_restart.sh` through the bounded `sentry_cli` bridge |
+| Gateway restart controller | `gw_restart.sh` through the bounded `sentry_cli` bridge |
+
+The normal Arena `validator_restart.sh` does not currently emit a Sentry
+restart summary. Its validator process has the separate host coverage above.
 
 Measured gateway code and the weight signer do not import Sentry. The host
 reports sanitized state. `tests/test_sentry_boundary_guard.py` checks this
@@ -78,10 +81,12 @@ optional sudo re-exec preserves only those named ingest settings. The Sentry
 API read token and gateway provider aliases are never imported by these paths.
 
 The normal Arena validator restart does not hydrate the legacy validator
-Secrets Manager environment. Enabling its existing opt-in gate requires the
-four ingest settings from the existing protected Sentry source in its Arena
-operator environment before a separately authorized canonical release. No
-new secret is required. Public validators with the gate unset stay inert.
+Secrets Manager environment. Enabling its existing opt-in gate requires
+`LEADPOET_SENTRY_ENABLED` and `LEADPOET_SENTRY_DSN` from the existing protected
+Sentry source in its Arena operator environment before a separately authorized
+canonical release. `LEADPOET_SENTRY_ENVIRONMENT` is optional; do not copy a
+stale `LEADPOET_SENTRY_RELEASE`, since Arena derives its loaded source identity.
+No new secret is required. Public validators with the gate unset stay inert.
 
 This wiring captures uncaught process/thread errors and ERROR logs. Caught
 failures printed as class-only diagnostics are not converted into new logical

@@ -41,6 +41,7 @@ _REASONS = {
     "unsafe_work_directory": "runner directories must be real directories at a dedicated path",
     "work_directory_unwritable": "check runner directory ownership, permissions and available storage",
     "sandbox_launch_failed": "runsc exited before sandbox creation completed",
+    "sandbox_launcher_signaled": "the host runsc process was terminated by a signal",
     "sandbox_startup_timeout": "runsc did not complete sandbox creation before the startup deadline",
     "parallel_memory_insufficient": "configured proxy slots exceed available memory; provide 2 GiB per sandbox plus host reserve",
     "parallel_memory_unavailable": "the host memory limit could not be verified",
@@ -135,7 +136,7 @@ def runtime_host_diagnostic(error: RuntimeHostError) -> str:
 def runtime_host_private_diagnostic(error: RuntimeHostError) -> str:
     """Include bounded redacted launcher detail only in private host logs."""
     diagnostic = runtime_host_diagnostic(error)
-    if error.reason not in ("sandbox_launch_failed", "sandbox_startup_timeout"):
+    if error.reason not in ("sandbox_launch_failed", "sandbox_launcher_signaled", "sandbox_startup_timeout"):
         return diagnostic
     return "%s launch_exit_code=%s launch_timed_out=%s launch_stderr_truncated=%s launch_stderr=%s" % (
         diagnostic, error.launch_exit_code, str(error.launch_timed_out).lower(),

@@ -1071,6 +1071,10 @@ def run_sandbox(
             raise launch_failure("sandbox_launch_failed") from exc
         if not stat.S_ISREG(pid_file_mode):
             raise launch_failure("sandbox_launch_failed")
+        # A negative Popen return code means the host runsc process was
+        # signaled. runsc reports a signaled sandbox process as 128 + signal.
+        if not timed_out and process.returncode < 0:
+            raise launch_failure("sandbox_launcher_signaled")
         cpu_seconds, max_rss = _completed_process_rusage(
             process,
             injected_rusage=rusage,

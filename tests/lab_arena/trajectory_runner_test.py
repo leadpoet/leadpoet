@@ -464,7 +464,7 @@ def test_external_client_upload_uses_only_existing_gateway_lease(monkeypatch):
 
 
 @pytest.mark.parametrize("job_lease", [lease, scoring_lease])
-@pytest.mark.parametrize("reason", ["sandbox_launch_failed", "sandbox_startup_timeout"])
+@pytest.mark.parametrize("reason", ["sandbox_launch_failed", "sandbox_launcher_signaled", "sandbox_startup_timeout"])
 def test_host_launch_failure_retains_private_diagnostic_and_no_completion(
     tmp_path, capsys, job_lease, reason,
 ):
@@ -475,7 +475,8 @@ def test_host_launch_failure_retains_private_diagnostic_and_no_completion(
         def run_icp(self, _spec, **_kwargs):
             raise runtime.RuntimeHostError(
                 "untrusted exception secret-text", reason=reason,
-                launch_exit_code=128, launch_timed_out=reason.endswith("timeout"),
+                launch_exit_code=-2 if reason == "sandbox_launcher_signaled" else 128,
+                launch_timed_out=reason.endswith("timeout"),
                 launch_stderr=("mount namespace: operation not permitted\nlease=" + token).encode(),
             )
 
@@ -493,7 +494,7 @@ def test_host_launch_failure_retains_private_diagnostic_and_no_completion(
     assert content["failure_stage"] == "runtime"
     assert content["error_class"] == "RuntimeHostError"
     assert content["runtime_host_reason"] == reason
-    assert content["launch_exit_code"] == 128
+    assert content["launch_exit_code"] == (-2 if reason == "sandbox_launcher_signaled" else 128)
     assert content["launch_timed_out"] == reason.endswith("timeout")
     assert "operation not permitted" in content["launch_stderr"]
     logs = capsys.readouterr().err

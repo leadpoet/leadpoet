@@ -3,12 +3,18 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
 
+import pytest
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 
 from gateway.observability import otel_bootstrap as otel
+from lab_arena import telemetry
+from tests.lab_arena.deepline_billing_capacity_test import (
+    ROUND_ID, QueueStore, RecordingBroker, service_for,
+)
 
 
-def test_real_http_export_keeps_only_approved_operational_metadata(monkeypatch):
+@pytest.mark.parametrize("settled_entries", [(), (1000, 1002)])
+def test_real_http_export_keeps_only_approved_operational_metadata(monkeypatch, settled_entries):
     received = []
     arrived = threading.Event()
 
@@ -50,6 +56,14 @@ def test_real_http_export_keeps_only_approved_operational_metadata(monkeypatch):
         recorder.record_provider("openrouter", "openrouter.responses", "ok", cost_microusd=60000)
         recorder.record("driver_tick", "ok", count=1)
         recorder.record("fixture-private-prompt", "ok")
+        monkeypatch.setattr(telemetry, "_recorder", recorder)
+        store = QueueStore()
+        service, _ = service_for(store, RecordingBroker(
+            store, statuses={entry_id: "settled" for entry_id in settled_entries},
+        ))
+        result = service._reconcile_active_deepline_cost(ROUND_ID)
+        assert result["checked"] == 8
+        assert result["settled"] == len(settled_entries)
         assert processors[0].force_flush(timeout_millis=3000)
         assert arrived.wait(1)
         assert len(received) == 1
@@ -61,7 +75,16 @@ def test_real_http_export_keeps_only_approved_operational_metadata(monkeypatch):
         assert len(resources) == 1
         assert resources[0].resource.attributes[0].value.string_value == "leadpoet-arena"
         spans = [span for scope in resources[0].scope_spans for span in scope.spans]
-        assert {span.name for span in spans} == {"arena.provider.openrouter", "arena.driver_tick"}
+        assert {span.name for span in spans} == {
+            "arena.provider.openrouter", "arena.driver_tick",
+            "arena.reconcile_active_deepline_costs",
+        }
+        billing = next(span for span in spans if span.name == "arena.reconcile_active_deepline_costs")
+        attributes = {item.key: item.value for item in billing.attributes}
+        assert attributes["arena.stage"].string_value == "reconcile_active_deepline_costs"
+        assert attributes["arena.outcome"].string_value == ("ok" if settled_entries else "idle")
+        assert attributes["arena.count"].int_value == len(settled_entries)
+        assert attributes["arena.error_type"].string_value == "-"
         assert b"fixture-private-prompt" not in body
         assert b"fixture-ingest-token" not in body
     finally:

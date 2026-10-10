@@ -1,5 +1,5 @@
 """Local PostgreSQL proof for the unrendered Oct10 uniform rejudge template."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import re
 from pathlib import Path
@@ -9,7 +9,7 @@ import pytest
 
 from lab_arena import contact_policy, provider_observations
 from lab_arena.service import ArenaService
-from lab_arena.store import ArenaStore, PsycopgTransport
+from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport
 from tests.lab_arena import oct10_baseline_recovery440_postgres_test as old
 from tests.lab_arena import settled_score_host_recovery441_postgres_test as current
 from tests.lab_arena import oct10_uniform_pe_rejudge445_postgres_test as prior
@@ -108,15 +108,51 @@ def _hold_render(cur):
 
 
 def _render(cur):
-    return (TEMPLATE.read_text()
-            .replace('__NEW_SCORER_IMAGE_DIGEST__', DIGEST)
-            .replace('__NEW_SCORER_IMAGE_REFERENCE__', '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@' + DIGEST)
-            .replace('__REVIEWED_SCORER_SOURCE_COMMIT__', 'c' * 40)
-            .replace('__REVIEWED_FINAL_ACTOR__', FINAL_ACTOR)
-            .replace('__REVIEWED_TERMINAL_INVENTORY_JSON__', json.dumps(_inventory(cur)).replace("'", "''"))
-            .replace('__BASELINE_SCORING_CLOSE__', '2026-10-10T16:00:00Z')
-            .replace('__STAGE2_RESUME_START__', '2026-10-10T16:00:01Z')
-            .replace('__STAGE2_RESUME_CLOSE__', '2026-10-10T18:00:02Z'))
+    inventory = json.dumps(_inventory(cur)).replace("'", "''")
+    parameters = {
+        '__NEW_SCORER_IMAGE_DIGEST__': DIGEST,
+        '__NEW_SCORER_IMAGE_REFERENCE__': '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@'+DIGEST,
+        '__REVIEWED_SCORER_SOURCE_COMMIT__': 'c'*40,
+        '__REVIEWED_FINAL_ACTOR__': FINAL_ACTOR,
+        '__REVIEWED_TERMINAL_INVENTORY_JSON__': inventory,
+        '__BASELINE_SCORING_CLOSE__': '2026-10-10T16:00:00Z',
+        '__STAGE2_RESUME_START__': '2026-10-10T16:00:01Z',
+        '__STAGE2_RESUME_CLOSE__': '2026-10-10T16:00:02Z',
+    }
+    rendered = TEMPLATE.read_text()
+    for token,value in parameters.items():
+        rendered=rendered.replace(token,value)
+    committed = TEMPLATE.with_suffix('')
+    if not committed.exists():
+        return rendered
+    exact = committed.read_text()
+    # Only the reviewed live parameters and captured inventory differ in this
+    # disposable database. Every guard, statement, function seam and byte stays.
+    replacements = []
+    for variable,token in (
+        ('v_final_actor','__REVIEWED_FINAL_ACTOR__'),
+        ('v_new_reference','__NEW_SCORER_IMAGE_REFERENCE__'),
+        ('v_new_digest','__NEW_SCORER_IMAGE_DIGEST__'),
+        ('v_source_commit','__REVIEWED_SCORER_SOURCE_COMMIT__'),
+    ):
+        found=re.findall(variable+r" CONSTANT TEXT := '([^']+)';",exact)
+        assert len(found)==1
+        replacements.append((found[0],parameters[token]))
+    for field,token in (
+        ('stage_1_scoring_close','__BASELINE_SCORING_CLOSE__'),
+        ('stage_2_start','__STAGE2_RESUME_START__'),
+        ('stage_2_close','__STAGE2_RESUME_CLOSE__'),
+    ):
+        found=re.findall("'"+field+r"','([^']+)'",exact)
+        assert len(found)==1
+        replacements.append((found[0],parameters[token]))
+    for original,replacement in replacements:
+        exact=exact.replace(original,replacement)
+    exact,count=re.subn(r"v_expected CONSTANT JSONB := '[^\n]*'::JSONB;",
+        lambda match: "v_expected CONSTANT JSONB := '"+inventory+"'::JSONB;",exact)
+    assert count==1
+    assert exact[exact.index('BEGIN;'):]==rendered[rendered.index('BEGIN;'):]
+    return exact
 
 
 def _canonical_restart(cur):
@@ -230,6 +266,8 @@ def _snapshot(cur):
 
 def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, monkeypatch):
     psycopg, dsn = seeded
+    cost_store = ArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
+    prior_cost = cost_store.submission_costs('miner440-4')
     with psycopg.connect(**dsn) as conn:
         conn.autocommit = True
         with conn.cursor() as cur:
@@ -285,6 +323,7 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
                     original_state = _snapshot(cur)
                     participants = [{'submission_id': p['submission_id'], 'miner_hotkey': p['miner_hotkey']} for p in row['participants'] if not p['is_king']]
                     for mutation in (
+                        "UPDATE public.lab_arena_runs SET result_doc='{}' WHERE round_id='arena-2026-10-10-r445archive' AND kind='score'",
                         "UPDATE public.lab_arena_runs SET output_ref='arena/tampered.json' WHERE round_id='arena-2026-10-10' AND stage=2 AND kind='execute' AND icp_position=0",
                         "UPDATE public.lab_arena_runs SET stage_generation=99 WHERE round_id='arena-2026-10-10' AND stage=2 AND kind='execute' AND icp_position=0",
                         "UPDATE public.lab_arena_submissions SET source_size_bytes=999 WHERE submission_id='miner440-4'",
@@ -347,6 +386,14 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
                     assert funding['funding_source'] == 'miner_key'
                     assert funding['credential_submission_id'] == sid
                     assert funding['credential_miner_hotkey'] == hotkey(sid)
+            # The existing public cost projection follows unchanged miner IDs
+            # across both archives and includes this additional judge pass.
+            current_cost = cost_store.submission_costs('miner440-4')
+            prior_judge = ArenaService._cost_kind_summary(prior_cost,'score')
+            current_judge = ArenaService._cost_kind_summary(current_cost,'score')
+            assert current_judge['settled_microusd'] == prior_judge['settled_microusd'] + 10*50
+            assert current_judge['reserved_or_uncertain_microusd'] == prior_judge['reserved_or_uncertain_microusd']
+            assert ArenaService._cost_kind_summary(current_cost,'execute') == ArenaService._cost_kind_summary(prior_cost,'execute')
             # The unchanged real RPC appends one settlement; the uncertain
             # receipt and old prefix remain immutable and replay still passes.
             cur.execute("SELECT entry_id FROM public.lab_arena_ledger WHERE round_id=%s AND call_identity=%s AND entry_kind='uncertain'", (ARCHIVE, 'sha256:' + '6' * 64))
@@ -359,6 +406,41 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
             cur.execute(sql)
             cur.execute("SELECT count(*),sum(amount_microusd) FROM public.lab_arena_ledger WHERE round_id=%s AND operation_id='new_judge448'", (ROUND,))
             assert cur.fetchone() == (682, 682 * 50)
+    # The one-second terminal stage2 window cannot consume the final judging
+    # window. The real driver already progressed at 16:00:01 with all execution
+    # terminal; it now publishes through the unchanged service and SQL guards.
+    assert row['configuration_doc']['schedule']['stage_2_close'] == '2026-10-10T16:00:02Z'
+    assert row['configuration_doc']['schedule']['final_scoring_close'] == '2026-10-10T20:30:02Z'
+    assert row['configuration_doc']['schedule']['publication_deadline'] == '2026-10-10T20:30:03Z'
+    with psycopg.connect(**dsn) as conn, conn.cursor() as cur:
+        cur.execute('SELECT clock_timestamp()')
+        database_now = cur.fetchone()[0]
+    if database_now < datetime(2026,10,10,16,0,2,tzinfo=timezone.utc):
+        # Publication's real PostgreSQL clock also proves a host-incomplete
+        # assignment's execution window is closed. A mocked service clock
+        # cannot bypass this existing guard.
+        with pytest.raises(ArenaStoreError,match='lab_arena_publication_ranking_invalid'):
+            service._advance_round_locked(ROUND)
+        assert store.get_round(ROUND)['status'] == 'scored'
+        # Only this disposable fixture's three ordered timestamps move into
+        # the past to model elapsed time. No function, ACL, row proof, final
+        # judging deadline, or publication deadline changes.
+        elapsed = database_now - timedelta(minutes=1)
+        with psycopg.connect(**dsn) as conn, conn.cursor() as cur:
+            cur.execute('SET LOCAL session_replication_role=replica')
+            cur.execute("UPDATE public.lab_arena_rounds SET configuration_doc=jsonb_set(configuration_doc,'{schedule}',(configuration_doc->'schedule')||%s::jsonb) WHERE round_id=%s",(json.dumps({
+                'stage_1_scoring_close': (elapsed-timedelta(seconds=2)).isoformat(),
+                'stage_2_start': (elapsed-timedelta(seconds=1)).isoformat(),
+                'stage_2_close': elapsed.isoformat(),
+            }),ROUND))
+    service.now = lambda: database_now
+    assert service._advance_round_locked(ROUND)['status'] == 'ok'
+    published = store.get_round(ROUND)
+    assert published['status'] == 'published'
+    assert len(published['publication_doc']['final_ranking']) == 70
+    assert {entry['submission_id'] for entry in published['publication_doc']['final_ranking'] if entry['final_score'] is None} == {'miner440-1','miner440-2'}
+    assert len(store.list_runs(ROUND,kind='execute')) == 764
+    assert len({run['assignment_id'] for run in store.list_runs(ROUND,stage=2,kind='execute')}) == 690
 
 
 @pytest.mark.parametrize('mutation', [
@@ -435,6 +517,7 @@ def test_unrendered_and_replay_payload_drift_fail_closed(seeded):
 
 
 @pytest.mark.parametrize('mutation', [
+    "ALTER FUNCTION public.lab_arena_open_stage(text,smallint,jsonb,integer[]) SET search_path=public,pg_catalog",
     "UPDATE public.lab_arena_rounds SET status='stage2' WHERE round_id='arena-2026-10-10'",
     "UPDATE public.lab_arena_runs SET status='pending' WHERE run_id=(SELECT min(run_id) FROM public.lab_arena_runs WHERE round_id='arena-2026-10-10' AND kind='execute')",
     "UPDATE public.lab_arena_runs SET status='leased' WHERE run_id='old448-score-2'",
@@ -643,3 +726,91 @@ def test_fenced_billing_guard_keeps_mutation_and_null_identity_semantics(seeded)
             assert heads==_billing_heads(cur,fenced=False)
             assert next(row[1] for row in heads if row[0]=='sha256:'+'8'*64)=='refusal'
             cur.execute('ROLLBACK')
+
+
+def test_new_image_isolates_saved_output_and_company_cache_identities():
+    from lab_arena import company_judgments, judgment_cache
+    from tests.lab_arena.company_judgments_test import _input
+    document = _input()
+    document['evaluation_date'] = '2026-10-10'
+    def identity(digest):
+        return dict(scoring_input=document,round_id=ROUND,network_name='finney',netuid=71,
+            scorer_image_digest=digest,
+            scorer_image_reference='493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@'+digest,
+            integrity_policy='arena_integrity_v1')
+    old_scope=judgment_cache.build_cache_scope(**identity(OLD_DIGEST))
+    new_scope=judgment_cache.build_cache_scope(**identity(DIGEST))
+    assert old_scope['scoring_input_hash']==new_scope['scoring_input_hash']
+    assert old_scope['cache_key']!=new_scope['cache_key']
+    old_companies=company_judgments.build_company_scopes(**identity(OLD_DIGEST),company_quality_policy='company_quality_v1')
+    new_companies=company_judgments.build_company_scopes(**identity(DIGEST),company_quality_policy='company_quality_v1')
+    assert old_companies and len(old_companies)==len(new_companies)
+    assert {row['cache_key'] for row in old_companies}.isdisjoint(row['cache_key'] for row in new_companies)
+
+
+def test_late_terminal_bill_requires_fresh_snapshot_and_preserves_prefix(seeded):
+    psycopg,dsn=seeded
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit=True
+        with conn.cursor() as cur:
+            stale_sql=_render(cur)
+            cur.execute("SELECT entry_id FROM public.lab_arena_ledger WHERE round_id=%s AND call_identity=%s AND entry_kind='uncertain'",(ROUND,'sha256:'+'6'*64))
+            uncertain=cur.fetchone()[0]
+            cur.execute('SELECT public.lab_arena_reconcile_openrouter_cost_v1(%s,%s,%s,%s,%s,%s,%s,%s)',
+                (ROUND,'old448-score-1','sha256:'+'6'*64,uncertain,'gen-test448','sha256:'+'a'*64,111,'0.000111'))
+            assert cur.fetchone()[0]['status']=='settled'
+            cur.execute('COMMIT')  # Provider receipt is committed before the independent migration.
+            before=_snapshot(cur)
+            with pytest.raises(psycopg.Error,match='terminal preimage differs'):
+                cur.execute(stale_sql)
+            cur.execute('ROLLBACK')
+            after=_snapshot(cur)
+            assert after==before
+            sql=_render(cur)
+            cur.execute(sql)
+            cur.execute(sql)
+            cur.execute("SELECT entry_kind,amount_microusd FROM public.lab_arena_ledger WHERE call_identity=%s ORDER BY entry_id",('sha256:'+'6'*64,))
+            assert cur.fetchall()==[('reservation',1000),('dispatch',1000),('uncertain',1000),('settlement',111)]
+
+
+@pytest.mark.parametrize('original,replacement',[
+    ('c'*40,'invalid-source'),
+    ('leadpoet/sourcing-model@'+DIGEST,'leadpoet/sourcing-model@'+OLD_DIGEST),
+    ('2026-10-10T16:00:02Z','2026-10-10T20:30:02Z'),
+])
+def test_reviewed_release_parameters_and_schedule_fail_closed(seeded,original,replacement):
+    psycopg,dsn=seeded
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit=True
+        with conn.cursor() as cur:
+            before=_snapshot(cur)
+            sql=_render(cur)
+            assert original in sql
+            with pytest.raises(psycopg.Error,match='reviewed parameters required|terminal hold or inventory invalid'):
+                cur.execute(sql.replace(original,replacement))
+            cur.execute('ROLLBACK')
+            assert _snapshot(cur)==before
+
+
+def test_exact_release_sql_normalization_changes_only_reviewed_inputs(seeded,tmp_path,monkeypatch):
+    import sys
+    psycopg,dsn=seeded
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit=True
+        with conn.cursor() as cur:
+            expected=_render(cur)
+            # These synthetic release values only exist under pytest's temp path.
+            exact=(expected.replace(DIGEST,'sha256:'+'b'*64)
+                .replace(FINAL_ACTOR,'canonical-active-release:'+'a'*40)
+                .replace('c'*40,'a'*40)
+                .replace('2026-10-10T16:00:00Z','2026-10-10T17:00:00Z')
+                .replace('2026-10-10T16:00:01Z','2026-10-10T17:00:01Z')
+                .replace('2026-10-10T16:00:02Z','2026-10-10T19:00:02Z'))
+            template=tmp_path/TEMPLATE.name
+            template.write_text(TEMPLATE.read_text())
+            template.with_suffix('').write_text(exact)
+            monkeypatch.setattr(sys.modules[__name__],'TEMPLATE',template)
+            sql=_render(cur)
+            assert sql==expected
+            cur.execute(sql)
+            cur.execute(sql)

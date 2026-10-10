@@ -1,0 +1,191 @@
+[
+  {
+    "id": "sokin_undated_stake_matches_earlier_timeline",
+    "name": "Sokin",
+    "website": "https://sokin.com",
+    "requested_stage": "Series B",
+    "pages": [
+      {
+        "url": "https://sokin.com/investors",
+        "text": "Sokin funding milestones. 2024 Institutional backing Secured investment from Morgan Stanley, Aurum Partners and former PayPal executives, strengthening our ability to scale product innovation, market expansion and customer growth. 2025 Scaling globally Raised $50m Series B led by Prysm Capital, with participation from Morgan Stanley, to accelerate Sokin's path to becoming the leader in global business payments. 2026 Platform expansion Secured a $100 million debt facility from Oxford Finance, backing Sokin's continued global expansion."
+      },
+      {
+        "url": "https://sokin.com/news/morgan-stanley-expansion-capital-acquires-stake-in-global-payments-fintech-sokin",
+        "text": "Additional investors include Gary Marino, former CCO at PayPal who will join the Board, Mark Britto, former CPO at PayPal, and Aurum Partners, the investment fund affiliated with the owners of the San Francisco 49ers and other strategic LPs. Investment funds managed by Morgan Stanley Expansion Capital have acquired a stake in UK headquartered payments business Sokin, marking an exciting new chapter for the fast-expanding fintech firm."
+      }
+    ],
+    "expected_status": "VERIFIED",
+    "expected_stage": "Series B",
+    "evidence_page": 0,
+    "evidence_quote": "Raised $50m Series B led by Prysm Capital, with participation from Morgan Stanley, to accelerate Sokin's path to becoming the leader in global business payments.",
+    "reason": "The company timeline places this matching investor group before the Series B; later debt does not change the equity stage."
+  },
+  {
+    "id": "republication_date_does_not_create_second_investment",
+    "name": "Acme",
+    "website": "https://acme.example",
+    "requested_stage": "Series B",
+    "pages": [
+      {
+        "url": "https://acme.example/investors",
+        "text": "Funding milestones. 2024: Acme received a $20 million investment from Northstar. 2025: Acme completed a $50 million Series B funding round led by Northstar on December 2, 2025."
+      },
+      {
+        "url": "https://acme.example/news/republication_date_does_not_create_second_investment",
+        "text": "Updated June 3, 2026. Historical investment: On July 24, 2024, Acme completed a $20 million investment from Northstar."
+      }
+    ],
+    "expected_status": "VERIFIED",
+    "expected_stage": "Series B",
+    "evidence_page": 0,
+    "evidence_quote": "Acme completed a $50 million Series B funding round led by Northstar on December 2, 2025.",
+    "reason": "The event date is July 24, 2024; the later page update does not create another investment."
+  },
+  {
+    "id": "later_debt_preserves_equity_stage",
+    "name": "Acme",
+    "website": "https://acme.example",
+    "requested_stage": "Series B",
+    "pages": [
+      {
+        "url": "https://acme.example/investors",
+        "text": "Funding milestones. 2024: Acme received a $20 million investment from Northstar. 2025: Acme completed a $50 million Series B funding round led by Northstar on December 2, 2025."
+      },
+      {
+        "url": "https://acme.example/news/later_debt_preserves_equity_stage",
+        "text": "On June 3, 2026, Acme secured a $100 million debt facility from Northstar."
+      }
+    ],
+    "expected_status": "VERIFIED",
+    "expected_stage": "Series B",
+    "evidence_page": 0,
+    "evidence_quote": "Acme completed a $50 million Series B funding round led by Northstar on December 2, 2025.",
+    "reason": "The later transaction is debt, not a superseding equity round."
+  },
+  {
+    "id": "same_investor_separate_later_series_c",
+    "name": "Acme",
+    "website": "https://acme.example",
+    "requested_stage": "Series B",
+    "pages": [
+      {
+        "url": "https://acme.example/investors",
+        "text": "Funding milestones. 2024: Acme received a $20 million investment from Northstar. 2025: Acme completed a $50 million Series B funding round led by Northstar on December 2, 2025."
+      },
+      {
+        "url": "https://acme.example/news/same_investor_separate_later_series_c",
+        "text": "On June 3, 2026, Acme completed a $90 million Series C funding round led by Northstar."
+      }
+    ],
+    "expected_status": "CONTRADICTED",
+    "expected_stage": "Series C+",
+    "evidence_page": 1,
+    "evidence_quote": "On June 3, 2026, Acme completed a $90 million Series C funding round led by Northstar.",
+    "reason": "The same investor led a separate later completed Series C round."
+  },
+  {
+    "id": "later_completed_control_acquisition",
+    "name": "Acme",
+    "website": "https://acme.example",
+    "requested_stage": "Series B",
+    "pages": [
+      {
+        "url": "https://acme.example/investors",
+        "text": "Funding milestones. 2024: Acme received a $20 million investment from Northstar. 2025: Acme completed a $50 million Series B funding round led by Northstar on December 2, 2025."
+      },
+      {
+        "url": "https://acme.example/news/later_completed_control_acquisition",
+        "text": "On June 3, 2026, Northstar completed its acquisition of Acme, acquiring all outstanding shares of Acme."
+      }
+    ],
+    "expected_status": "CONTRADICTED",
+    "expected_stage": "Acquired",
+    "evidence_page": 1,
+    "evidence_quote": "On June 3, 2026, Northstar completed its acquisition of Acme, acquiring all outstanding shares of Acme.",
+    "reason": "The later completed acquisition is of the investigated company."
+  },
+  {
+    "id": "later_ipo_with_current_listing",
+    "name": "Acme",
+    "website": "https://acme.example",
+    "requested_stage": "Series B",
+    "pages": [
+      {
+        "url": "https://acme.example/investors",
+        "text": "Funding milestones. 2024: Acme received a $20 million investment from Northstar. 2025: Acme completed a $50 million Series B funding round led by Northstar on December 2, 2025."
+      },
+      {
+        "url": "https://acme.example/news/later_ipo_with_current_listing",
+        "text": "Acme common stock is listed on NASDAQ under ticker ACME following its completed IPO on June 3, 2026."
+      }
+    ],
+    "expected_status": "CONTRADICTED",
+    "expected_stage": "Public",
+    "evidence_page": 1,
+    "evidence_quote": "Acme common stock is listed on NASDAQ under ticker ACME following its completed IPO on June 3, 2026.",
+    "reason": "The later completed IPO and current company-bound listing supersede the Series B."
+  },
+  {
+    "id": "original_announcement_today_grounds_later_event",
+    "name": "Acme",
+    "website": "https://acme.example",
+    "requested_stage": "Series B",
+    "pages": [
+      {
+        "url": "https://acme.example/investors",
+        "text": "Funding milestones. 2024: Acme received a $20 million investment from Northstar. 2025: Acme completed a $50 million Series B funding round led by Northstar on December 2, 2025."
+      },
+      {
+        "url": "https://acme.example/news/original_announcement_today_grounds_later_event",
+        "text": "June 3, 2026. Acme today announced it has completed a $90 million Series C funding round led by Northstar."
+      }
+    ],
+    "expected_status": "CONTRADICTED",
+    "expected_stage": "Series C+",
+    "evidence_page": 1,
+    "evidence_quote": "June 3, 2026. Acme today announced it has completed a $90 million Series C funding round led by Northstar.",
+    "reason": "The original announcement date and completed-today body establish the later transaction date."
+  },
+  {
+    "id": "separate_later_equity_type_unresolved",
+    "name": "Acme",
+    "website": "https://acme.example",
+    "requested_stage": "Series B",
+    "pages": [
+      {
+        "url": "https://acme.example/investors",
+        "text": "Funding milestones. 2024: Acme received a $20 million investment from Northstar. 2025: Acme completed a $50 million Series B funding round led by Northstar on December 2, 2025."
+      },
+      {
+        "url": "https://acme.example/news/separate_later_equity_type_unresolved",
+        "text": "Following its December 2025 Series B, Acme completed a new $90 million equity investment from Northstar. The round label and ownership terms were not disclosed."
+      }
+    ],
+    "expected_status": "UNPROVEN",
+    "expected_stage": null,
+    "evidence_page": 1,
+    "evidence_quote": "",
+    "reason": "The source explicitly identifies a separate later equity transaction whose stage is unresolved."
+  },
+  {
+    "id": "explicit_same_transaction_dates_conflict",
+    "name": "Acme",
+    "website": "https://acme.example",
+    "requested_stage": "Series B",
+    "pages": [
+      {
+        "url": "https://acme.example/investors",
+        "text": "Funding milestones. 2024: Acme received a $20 million investment from Northstar. 2025: Acme completed a $50 million Series B funding round led by Northstar on December 2, 2025."
+      },
+      {
+        "url": "https://acme.example/news/explicit_same_transaction_dates_conflict",
+        "text": "Acme completed the $20 million Northstar investment on June 3, 2026. This is the transaction described as its 2024 Northstar investment in the company funding timeline."
+      }
+    ],
+    "expected_status": "UNPROVEN",
+    "expected_stage": null,
+    "evidence_page": 1,
+    "evidence_quote": "",
+    "reason": "The sources explicitly give conflicting transaction dates for the same investment."
+  }
+]

@@ -20,7 +20,7 @@ TARGET_ICP_SIGNAL = "Company has an active enterprise sales job posting."
 SIGNAL_DATE = "2026-09-05"
 
 
-def _row(*, exact_binding=False):
+def _row():
     return {
         "id": "signal-1",
         "company": "example.com",
@@ -34,7 +34,6 @@ def _row(*, exact_binding=False):
         "_target_signal_text": TARGET_ICP_SIGNAL,
         "_declared_source": "job_board",
         "_evidence_type": "HIRING",
-        "_exact_hiring_employer_binding": exact_binding,
     }
 
 
@@ -82,7 +81,7 @@ def test_conversion_sized_prompt_preserves_required_context_and_validates():
     body = _long_job_body()
     assert len(body) > 26_000
     prompt = intent._build_final_judge_prompt(
-        _row(exact_binding=True),
+        _row(),
         {
             "results": [{"url": SOURCE_URL, "title": "Open role", "text": body}],
             "statuses": [],
@@ -98,7 +97,7 @@ def test_conversion_sized_prompt_preserves_required_context_and_validates():
     assert "SOURCE-END Applications are closed" in prompt
     assert body in prompt
     assert _common._SOURCE_OMISSION_MARKER.strip() not in prompt
-    assert "MODEL-OWNED EXACT HIRING EMPLOYER BINDING" in prompt
+    assert "MODEL-OWNED EXACT HIRING EMPLOYER BINDING" not in prompt
     assert "Use only the exact source extraction above" in prompt
     operations.validate_operation_request(
         "openrouter.chat", _openrouter_parameters(prompt)
@@ -295,7 +294,7 @@ def _exact_ats_result(
         ))
 
 
-def test_exact_ats_can_resolve_identity_for_semantically_supported_claim():
+def test_exact_ats_does_not_resolve_ambiguous_employer_identity():
     result = _exact_ats_result(
         _exact_ats_stage_verdict(
             "supported",
@@ -304,9 +303,17 @@ def test_exact_ats_can_resolve_identity_for_semantically_supported_claim():
         )
     )
 
+    assert result["client_ready"] is False
+    assert result["decision"] == "review"
+    assert result["stage3"]["status"] == "supported"
+    assert result["stage3"]["same_entity_check"] == "unclear"
+
+
+def test_exact_ats_preserves_grounded_employer_pass():
+    result = _exact_ats_result(_exact_ats_stage_verdict("supported"))
+
     assert result["client_ready"] is True
     assert result["decision"] == "approve"
-    assert result["stage3"]["status"] == "supported"
     assert result["stage3"]["same_entity_check"] == "pass"
 
 
@@ -356,7 +363,7 @@ def test_exact_ats_does_not_promote_true_but_semantically_wrong_role():
 
 @pytest.mark.parametrize("source_count", [1, 3])
 def test_integrity_bundle_and_exact_binding_preserve_prompt_bound(source_count):
-    row = _row(exact_binding=source_count == 1)
+    row = _row()
     row["_integrity_policy"] = True
     row["_evidence_bundle"] = [
         {"url": SOURCE_URL + "?evidence=" + str(index), "description": CLAIM,
@@ -378,7 +385,7 @@ def test_integrity_bundle_and_exact_binding_preserve_prompt_bound(source_count):
     ("source_count", "exact_ats"),
     [(1, False), (2, False), (3, False), (1, True)],
 )
-def test_full_verifier_budgets_verified_identity_and_exact_ats_suffixes(
+def test_full_verifier_budgets_verified_identity_and_exact_ats_sources(
     source_count, exact_ats
 ):
     urls = [
@@ -472,9 +479,7 @@ def test_full_verifier_budgets_verified_identity_and_exact_ats_suffixes(
         assert _common._SOURCE_OMISSION_MARKER.strip() in stage3_prompt
     else:
         assert body[:_common.MAX_SCRAPED_CHARS] in stage3_prompt
-    assert (
-        "MODEL-OWNED EXACT HIRING EMPLOYER BINDING" in stage3_prompt
-    ) is exact_ats
+    assert "MODEL-OWNED EXACT HIRING EMPLOYER BINDING" not in stage3_prompt
     assert result["company_check"] is True
     assert result["decision"] == "approve"
 

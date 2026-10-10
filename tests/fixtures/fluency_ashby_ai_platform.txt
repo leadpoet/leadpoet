@@ -1,0 +1,153 @@
+Software Engineer, AI Platform
+2026-05-16T00:13:29.700+00:00
+San Francisco
+OnSite
+Engineering
+Engineering
+FullTime
+We're hiring a full-time Software Engineer, AI Platform to own the data platform, ETL pipelines, and agent infrastructure that everything else at the company runs on.
+
+ 
+
+This is the platform layer that makes Fluency's AI work reliable, observable, and usable in production. It moves data through LLMs, transforms agent outputs into structured downstream data, runs jobs reliably, and keeps the system fast, cheap, and observable as we scale.
+
+ 
+
+Because we're an early-stage company moving fast, we're looking for an engineer who can build the platform, keep it running, and make tradeoffs while priorities shift. This is an in-person role, 5 days a week in our office. The ability to balance reliability with iteration speed is essential.
+
+ 
+
+
+KEY RESPONSIBILITIES
+
+ - Own the data platform: Maintain and evolve the platform that powers every job across the company.
+
+ - Run the LLM ETL pipeline: Ingestion, transformation, enrichment, and storage of LLM-driven data.
+
+ - Build agent transformation infrastructure: The systems that take agent outputs and turn them into structured, queryable data downstream.
+
+ - Improve reliability, throughput, and cost of LLM-driven jobs in production.
+
+ - Build observability and tooling so the team can debug and iterate quickly.
+
+ - Partner with AI Engineers: Expose new capabilities through the platform and shape the interfaces they build on.
+
+ - Operate the system: Participate in on-call rotation and incident response.
+
+ 
+
+
+WHAT WE ARE LOOKING FOR
+
+ - Strong Python engineering experience supporting production systems (FastAPI or similar)
+
+ - Experience building or maintaining production pipelines that handle non-trivial volume, retries, backfills, and failure recovery
+
+ - Hands-on experience with a data orchestrator (Dagster, Airflow, Prefect, or Temporal) and dbt or similar transformation tooling
+
+ - Comfort with PostgreSQL at scale: schema design, multi-schema setups, and migrations
+
+ - Comfort with AWS infrastructure (ECS, Lambda, SQS, Step Functions, RDS, S3) and IaC (Terraform / Terragrunt)
+
+ - Familiarity with LLM APIs and the operational realities of LLM-based systems (latency, cost, retries, structured output, failure modes)
+
+ 
+
+
+NICE TO HAVE
+
+ - Experience with distributed compute for Python workloads: Anyscale Ray, Dask, or Spark
+
+ - Experience with Polars and Pandas for data processing
+
+ - Familiarity with Datadog for observability, metrics, and tracing
+
+ - Cost optimization experience for LLM workloads
+
+ - Familiarity with pgvector or other vector stores
+
+ - Multi-region AWS deployment experience
+
+ - Some TypeScript/Node experience, since parts of the platform live there
+
+ 
+
+
+ABOUT FLUENCY
+
+Fluency builds a platform that captures how work actually happens inside large organizations, measures productivity and process conformance, and analyzes where AI can do the work.
+
+ 
+
+We capture observable work data across tools and systems, structure it into a model of how work runs, and use it to measure productivity, check process conformance, and analyze where AI changes the work.
+
+ 
+
+Fluency is looking for a Software Engineer, AI Platform to build the data platform, LLM pipelines, and agent infrastructure that every AI feature at the company runs on, deployed across Fortune 500 organizations.
+
+ 
+
+
+OUR CUSTOMERS
+
+Customers include CVS Health, Aon, and PVH.
+
+ 
+
+
+LOCATION
+
+ - Full-time, in-person role based in San Francisco, CA.
+
+ - We offer E-3 sponsorship for Australians to relocate with stipend.
+
+ 
+
+
+THIS ROLE IS NOT A FIT IF
+
+ - You want hybrid or remote
+
+ - You're not comfortable with rapid iteration
+
+ - You haven't owned production systems
+
+ - You've never operated production pipelines
+
+ - You don't want to be on-call
+
+ - You dislike constraints (we have them: cost, latency, reliability tradeoffs are real)
+
+ - Requirements need to be locked down before you can move
+
+ 
+
+
+HIRING PROCESS
+
+ - Resume screen
+
+ - 1:1 with founder
+
+ - Technical deep-dive on past data platform or backend engineering work
+
+ - Work through a real problem with the team
+
+ - Offer
+
+ 
+
+We strongly encourage applicants from underrepresented backgrounds to apply. Diverse teams build better products.
+
+ 
+
+
+COMPENSATION & BENEFITS
+
+ - Base salary: US$180,000 to US$250,000
+
+ - ESOP: Available
+
+ - US$1,000 per month food and commuting allowance
+
+ - Laptop of choice

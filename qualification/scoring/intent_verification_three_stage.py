@@ -810,6 +810,9 @@ async def _scrape_ashby_job(source_url: str) -> Dict[str, Any]:
                 "ok": True,
                 "stage": f"sd:ashby_api:{attempt}",
                 "content": content,
+                "observed_ownership_links": _observed_ownership_links(
+                    str(posting.get("descriptionHtml") or ""), source_url
+                ),
                 "error": "",
                 "stage_history": history,
             }
@@ -917,6 +920,7 @@ async def _scrape_greenhouse_job(source_url: str) -> Dict[str, Any]:
             # Greenhouse returns HTML-escaped posting content. Decode its text
             # before extraction and the existing job-body checks.
             description = html.unescape(description)
+            ownership_links = _observed_ownership_links(description, source_url)
             try:
                 from qualification.scoring.verification_helpers import (
                     extract_article_body,
@@ -970,6 +974,7 @@ async def _scrape_greenhouse_job(source_url: str) -> Dict[str, Any]:
                 "stage": f"sd:greenhouse_api:{attempt}",
                 "content": content,
                 "source_publication_date": source_publication_date,
+                "observed_ownership_links": ownership_links,
                 "error": "",
                 "stage_history": history,
             }
@@ -1798,6 +1803,155 @@ def _is_recognized_ats_posting(source_url: str) -> bool:
     )
 
 
+def _observed_ownership_links(
+    body: str, source_url: str, *, archive_url: str = ""
+) -> list[Dict[str, str]]:
+    """Retain visible fetched links, never candidate-supplied assertions."""
+    links = []
+    visible = _visible_page_links(body)
+    if not re.search(r"</?[A-Za-z][^>]*>", body):
+        visible.extend((url, label) for label, url in re.findall(
+            r"(?<!!)\[([^\]\n]{1,300})\]\((https?://[^\s()]+)\)",
+            body[:MAX_SCRAPED_CHARS],
+        )[:80])
+    for href, label in visible:
+        try:
+            href = urljoin(archive_url or source_url, href)
+            if archive_url:
+                href = _wayback_original_url(href) or href
+            parsed = urlsplit(href)
+            resource = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
+            url = canonical_candidate_prompt_url(resource, "employer_link.url")
+        except (TypeError, ValueError):
+            continue
+        links.append({"url": url, "label": " ".join(label.split())[:300]})
+        if len(links) >= 80:
+            break
+    return links
+
+
+def _ats_board_identity(url: str) -> tuple[str, str] | None:
+    """Identify an exact ATS board; its name never proves ownership."""
+    try:
+        parsed = urlsplit(url)
+        clean = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+        host = (parsed.hostname or "").casefold()
+        provider = host
+        if _GREENHOUSE_EXACT_POSTING_HOST_RE.fullmatch(host):
+            region = host.split(".")[1:-2]
+            provider = "greenhouse:" + ".".join(region)
+        for parser in (_ashby_posting_identity, _greenhouse_posting_identity,
+                       _lever_posting_identity):
+            identity = parser(clean)
+            if identity:
+                return provider, identity[0].casefold()
+        parts = [part for part in parsed.path.split("/") if part]
+        host = (parsed.hostname or "").casefold()
+        if parsed.scheme == "https" and len(parts) == 1 and re.fullmatch(
+            r"[A-Za-z0-9._-]{1,100}", parts[0]
+        ) and (host == "jobs.ashbyhq.com"
+               or _GREENHOUSE_EXACT_POSTING_HOST_RE.fullmatch(host)
+               or _LEVER_EXACT_POSTING_HOST_RE.fullmatch(host)):
+            return provider, parts[0].casefold()
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _ownership_links_for_result(result: Mapping[str, Any]) -> list[Dict[str, str]]:
+    observed = (result.get("meta") or {}).get("observed_ownership_links")
+    if isinstance(observed, list) and observed:
+        return observed[:80]
+    return _observed_ownership_links(
+        str(result.get("text") or ""), str(result.get("url") or "")
+    )
+
+
+def _ats_ownership_anchors(
+    results: list[Dict[str, Any]], target_urls: list[str], identity: Mapping[str, Any]
+) -> list[Dict[str, str]]:
+    """Require a fetched careers relationship, not name or domain mentions."""
+    anchors = []
+    for result in results:
+        source = str(result.get("url") or "")
+        official = _url_on_verified_company_identity(source, identity)
+        for link in _ownership_links_for_result(result):
+            if not isinstance(link, Mapping):
+                continue
+            url, label = str(link.get("url") or ""), str(link.get("label") or "")
+            parsed = urlsplit(url)
+            clean = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
+            for target in target_urls:
+                if (
+                    official
+                    and _ats_board_identity(url) == _ats_board_identity(target)
+                    and _ats_board_identity(target) is not None
+                    and (_is_careers_index_url(source) or re.search(
+                        r"\b(careers?|jobs?|apply|open positions|join (?:us|our team))\b",
+                        label, re.I,
+                    ))
+                ):
+                    anchors.append({"source_url": source, "linked_url": url,
+                                    "posting_url": target, "kind": "official_careers_link",
+                                    **({"archive_url": result["meta"]["ownership_archive_url"]}
+                                       if (result.get("meta") or {}).get("ownership_archive_url") else {})})
+                elif (
+                    _normalize_url(source) == _normalize_url(target)
+                    and _url_on_verified_company_identity(clean, identity)
+                    and _is_careers_index_url(clean)
+                    and not re.search(r"\bpowered\s+by\b", label, re.I)
+                ):
+                    anchors.append({"source_url": source, "linked_url": url,
+                                    "posting_url": target, "kind": "job_official_careers_link",
+                                    **({"archive_url": result["meta"]["ownership_archive_url"]}
+                                       if (result.get("meta") or {}).get("ownership_archive_url") else {})})
+    return anchors
+
+
+def _observed_official_careers_url(
+    results: list[Dict[str, Any]], identity: Mapping[str, Any], attempted: list[str]
+) -> str:
+    for result in results:
+        if not _url_on_verified_company_identity(str(result.get("url") or ""), identity):
+            continue
+        for link in _ownership_links_for_result(result):
+            if not isinstance(link, Mapping):
+                continue
+            url = str(link.get("url") or "")
+            if (_url_on_verified_company_identity(url, identity)
+                and _is_careers_index_url(url)
+                and _normalize_url(url) not in attempted):
+                return url
+    return ""
+
+
+async def _resolve_ats_employer_ownership(
+    contents: Dict[str, Any], target_urls: list[str], identity: Mapping[str, Any],
+    claimed_urls: list[str],
+) -> Dict[str, Any]:
+    """Observe ownership within the existing three-source allowance."""
+    results = list(contents.get("results") or [])
+    attempted = list(dict.fromkeys(_normalize_url(url) for url in claimed_urls))
+    anchors = _ats_ownership_anchors(results, target_urls, identity)
+    domain = str(identity.get("observed_domain") or "")
+    next_url = _observed_official_careers_url(results, identity, attempted)
+    if not next_url and domain:
+        next_url = "https://" + domain + "/"
+    while not anchors and next_url and len(attempted) < 3:
+        key = _normalize_url(next_url)
+        if key in attempted or not _url_on_verified_company_identity(next_url, identity):
+            break
+        attempted.append(key)
+        extra = await _fetch_sd_then_exa([next_url])
+        contents.setdefault("statuses", []).extend(extra.get("statuses") or [])
+        fetched = list(extra.get("results") or [])
+        results.extend(fetched)
+        anchors = _ats_ownership_anchors(results, target_urls, identity)
+        next_url = _observed_official_careers_url(fetched, identity, attempted)
+    return {"anchors": anchors, "source_count": len(attempted),
+            "resolved": bool(anchors)}
+
+
 def _grounded_exact_text(source_text: str, quote: Any) -> bool:
     """Match source text, ignoring whitespace and optional quotation wrappers.
 
@@ -1931,6 +2085,23 @@ def _get_openrouter_key() -> str:
 # ─────────────────────────────────────────────────────────────────────
 # Scraping — SD primary (host-aware hardened) + Exa fallback
 # ─────────────────────────────────────────────────────────────────────
+def _wayback_original_url(url: str) -> str:
+    """Decode only the documented exact snapshot wrapper, without fetching."""
+    try:
+        parsed = urlsplit(url)
+        if parsed.hostname != "web.archive.org" or parsed.scheme not in {"http", "https"}:
+            return ""
+        match = re.fullmatch(r"/web/\d{14}(?:[a-z_]+)?/(https?://.+)", parsed.path)
+        if not match:
+            return ""
+        original = match.group(1) + (("?" + parsed.query) if parsed.query else "")
+        return canonical_candidate_prompt_url(original, "archived_resource.url")
+    except (TypeError, ValueError):
+        # A missing ownership attestation must not reject fallback content.
+        return ""
+
+
+
 async def _try_wayback(url: str) -> Dict[str, Any]:
     """Final-fallback: Wayback Machine snapshot of the URL.
 
@@ -1956,8 +2127,17 @@ async def _try_wayback(url: str) -> Dict[str, Any]:
             if len(body) < 500:
                 return {"ok": False, "stage": "wayback_too_short",
                         "content": "", "error": f"len={len(body)}"}
+            snapshot_url = str(r.url)
+            ownership_meta = {}
+            if _normalize_url(_wayback_original_url(snapshot_url)) == _normalize_url(url):
+                ownership_meta = {
+                    "observed_ownership_links": _observed_ownership_links(
+                        body, url, archive_url=snapshot_url
+                    ),
+                    "ownership_archive_url": snapshot_url,
+                }
             return {"ok": True, "stage": "wayback",
-                    "content": body[:MAX_SCRAPED_CHARS], "error": None}
+                    "content": body[:MAX_SCRAPED_CHARS], "meta": ownership_meta, "error": None}
     except Exception as e:
         return {"ok": False, "stage": "wayback_exception",
                 "content": "", "error": f"{type(e).__name__}: {str(e)[:80]}"}
@@ -2109,6 +2289,8 @@ async def _scrape_sd_hardened(
                                 continue
                             break
                     result_meta: Dict[str, Any] = dict(listing_receipt or {})
+                    if listing_receipt is None:
+                        result_meta["observed_ownership_links"] = _observed_ownership_links(raw_body, url)
                     if same_host_event_links and listing_receipt is None:
                         result_meta["same_host_event_links"] = (
                             same_host_event_links
@@ -2183,7 +2365,7 @@ async def _scrape_sd_hardened(
         if wb["ok"]:
             return {"ok": True, "stage": "wayback",
                     "content": wb["content"], "error": None,
-                    "stage_history": history}
+                    "meta": wb.get("meta") or {}, "stage_history": history}
 
     # A target 404 alone cannot prove semantic absence. The caller compares it
     # with the independent Exa result before separating a missing source from
@@ -3014,6 +3196,23 @@ def _build_final_judge_prompt(
         suffix += _verified_company_identity_instructions(
             row, verified_identity_context
         )
+    if "_ats_employer_ownership" in row:
+        suffix += (
+            "\n\nATS EMPLOYER OWNERSHIP:\n"
+            "For this ATS hiring source, a shared company name or tenant is not "
+            "ownership proof. Require a grounded relationship to the verified "
+            "official company property. The server-observed careers links below "
+            "establish only that relationship; they do not prove the job's duties, "
+            "date or ICP fit. Assess those separately from the supplied job body. "
+            "Apply this requirement to ATS evidence actually relied on. Fetched "
+            "official-company job pages or structured LinkedIn job evidence remain "
+            "eligible under their existing source-grounding rules. "
+            "If no ownership anchor is observed for relied-on ATS evidence, "
+            "do not infer same_entity=pass "
+            "from name resemblance. Use unclear unless independent supplied "
+            "evidence proves a different employer.\n"
+            + json.dumps(row["_ats_employer_ownership"], sort_keys=True)
+        )
     if row.get("_same_event_resolution") is True:
         suffix += (
             "\n\nONE-HOP SAME-EVENT SOURCE RESOLUTION:\n"
@@ -3229,7 +3428,7 @@ async def _fetch_sd_then_exa(
                     "url": url,
                     "title": "",
                     "text": str(ashby["content"])[:max_chars],
-                    "meta": {"kind": "ashby_job"},
+                    "meta": {"kind": "ashby_job", "observed_ownership_links": ashby.get("observed_ownership_links") or []},
                 })
                 statuses.append({
                     "url": url,
@@ -3259,7 +3458,7 @@ async def _fetch_sd_then_exa(
                     "source_publication_date": (
                         greenhouse.get("source_publication_date") or ""
                     ),
-                    "meta": {"kind": "greenhouse_job"},
+                    "meta": {"kind": "greenhouse_job", "observed_ownership_links": greenhouse.get("observed_ownership_links") or []},
                 })
                 statuses.append({
                     "url": url,
@@ -4604,6 +4803,10 @@ async def verify_three_stage(
             "usage": s1_envelope.get("usage") or {},
         }
 
+    if require_ats_employer_identity and s1_decision == "approve":
+        s1_decision = "review"
+        stage1_info["decision"] = "review"
+
     if s1_decision == "approve" and not stage1_soft_reject:
         return {
             "client_ready": True,
@@ -4765,15 +4968,6 @@ async def verify_three_stage(
             # "Hive"). Defer to the authoritative Stage-3 entity judge.
             company_check = None
 
-    exact_ats_employer_binding = bool(
-        not company_quality
-        and _exact_ats_result_binds_company(
-            source_url=fetch_source_url,
-            contents=contents,
-            company_domain=prompt_identity["company"],
-            company_name=company_name,
-        )
-    )
     for res in (contents.get("results") or []):
         meta = res.get("meta") or {}
         if meta.get("kind") != "linkedin_job":
@@ -4845,7 +5039,8 @@ async def verify_three_stage(
                 ]
                 break
     is_job_board = (
-        row.get("_declared_source") == "job_board"
+        require_ats_employer_identity
+        or row.get("_declared_source") == "job_board"
         or _is_job_board_url(fetch_source_url)
         or (
             integrity_policy
@@ -4894,6 +5089,15 @@ async def verify_three_stage(
         }
         else STAGE3_MODEL
     )
+    ats_ownership = None
+    if require_ats_employer_identity:
+        ats_ownership = await _resolve_ats_employer_ownership(
+            contents,
+            [url for url in row["claimed_source_urls"] if _is_recognized_ats_posting(url)],
+            verified_identity_context,
+            row["claimed_source_urls"],
+        )
+        row["_ats_employer_ownership"] = ats_ownership
     # ── STAGE 3: source-grounded final judge ───────────────────────
     s3_prompt = _build_final_judge_prompt(
         row,
@@ -5260,6 +5464,26 @@ async def verify_three_stage(
         s3_verdict, company_quality=company_quality,
         require_same_entity=require_ats_employer_identity,
     )
+    ats_identity_unresolved = False
+    owned = {_normalize_url(a["posting_url"]) for a in (ats_ownership or {}).get("anchors", [])}
+    cited_urls = {_normalize_url(url) for url in s3_item.get("evidence_urls_used") or []}
+    grounded_alternative_job = bool(require_ats_employer_identity and any(
+        _normalize_url(item.get("url") or "") in cited_urls
+        and (
+            (_url_on_verified_company_identity(str(item.get("url") or ""), verified_identity_context)
+             and _looks_like_job_body(str(item.get("text") or "")))
+            or ((item.get("meta") or {}).get("kind") == "linkedin_job"
+                and bool(_extract_linkedin_job_id(str(item.get("url") or ""))))
+        )
+        for item in contents.get("results") or []
+    ))
+    if require_ats_employer_identity and s3_decision == "approve":
+        cited_ats = {_normalize_url(url) for url in s3_item.get("evidence_urls_used") or []
+                     if _is_recognized_ats_posting(url)}
+        if ((cited_ats and not cited_ats.issubset(owned))
+            or (not cited_ats and not grounded_alternative_job)):
+            s3_decision = "review"
+            ats_identity_unresolved = True
     closed_only_hiring_evidence = False
     if integrity_policy and is_hiring_claim and len(bundle) > 1:
         cited_urls = {
@@ -5294,7 +5518,9 @@ async def verify_three_stage(
         )
         and (
             official_publisher_binding
-            or exact_ats_employer_binding
+            or (grounded_alternative_job and s3_item.get("same_entity_check") == "pass")
+            or (bool(ats_ownership and ats_ownership["anchors"])
+                and s3_item.get("same_entity_check") == "pass")
             or (
                 has_linkedin_structured
                 and s3_item.get("same_entity_check") == "pass"
@@ -5347,8 +5573,9 @@ async def verify_three_stage(
         )
     else:  # review
         if (
-            (company_quality or require_ats_employer_identity)
-            and s3_item.get("same_entity_check") != "pass"
+            ats_identity_unresolved
+            or ((company_quality or require_ats_employer_identity)
+                and s3_item.get("same_entity_check") != "pass")
         ):
             client_ready = False
             reason = "stage3_identity_unresolved"
@@ -5366,6 +5593,7 @@ async def verify_three_stage(
         "stage3": stage3_info,
         "company_check": company_check,
         "verdict": s3_verdict,
+        **({"ats_employer_ownership": ats_ownership} if ats_ownership is not None else {}),
         **(
             {"identity_clarification": identity_clarification}
             if identity_clarification is not None
@@ -5412,15 +5640,7 @@ async def verify_three_stage(
                         item["url"], company_website, company_linkedin
                     )
                 )
-                or (
-                    not company_quality
-                    and _exact_ats_result_binds_company(
-                        source_url=item["url"],
-                        contents={"results": [item]},
-                        company_domain=prompt_identity["company"],
-                        company_name=company_name,
-                    )
-                )
+                or (_normalize_url(item["url"]) in owned)
                 or ((item.get("meta") or {}).get("kind") == "linkedin_job"
                     and s3_item.get("same_entity_check") == "pass")
             )

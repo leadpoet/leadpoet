@@ -24,7 +24,8 @@ QUOTE = (
 
 def _verify(
     *, entity, domain="fluency.inc", slug="fluencyinc", source=SOURCE,
-    meta=None, confidence="high", stage1_soft_reject=True,
+    meta=None, confidence="high", stage1_soft_reject=True, official_links=(),
+    status="supported",
 ):
     prompts = []
     verdict = {
@@ -32,7 +33,7 @@ def _verify(
             "overall_verdict": "qualified" if entity == "pass" else "not_qualified",
             "overall_confidence": "high",
             "signal_evaluations": [{
-                "signal_status": "supported",
+                "signal_status": status,
                 "verification_mode": "source_grounded",
                 "same_entity_check": entity,
                 "confidence": confidence,
@@ -58,8 +59,15 @@ def _verify(
         "results": [{"url": source, "text": BODY, "meta": meta or {"kind": "ashby_job"}}],
         "statuses": [],
     }
+    async def fetched(urls, **kwargs):
+        if urls == [source]:
+            return contents
+        return {"results": [{"url": urls[0], "text": "Official company page",
+                "meta": {"observed_ownership_links": [
+                    {"url": url, "label": "Careers"} for url in official_links]}}],
+                "statuses": []}
     with mock.patch.object(intent, "_call_openrouter", judge), mock.patch.object(
-        intent, "_fetch_sd_then_exa", mock.AsyncMock(return_value=contents)
+        intent, "_fetch_sd_then_exa", mock.AsyncMock(side_effect=fetched)
     ) as fetch:
         result = asyncio.run(intent.verify_three_stage(
             None,
@@ -84,7 +92,7 @@ def _verify(
             },
             buyer_max_age_days=365,
         ))
-    fetch.assert_awaited_once()
+    assert fetch.await_count == (2 if intent._is_recognized_ats_posting(source) else 1)
     assert all("MODEL-OWNED EXACT HIRING EMPLOYER BINDING" not in p for p in prompts)
     assert all("ATS tenant slug or URL resemblance is only a lookup hint" in p for p in prompts)
     item = (result.get("verdict", {}).get("signal_evaluations") or [{}])[0]
@@ -140,7 +148,8 @@ def test_non_ats_historical_decision_is_unchanged():
 
 def test_independently_grounded_ats_employer_pass_is_preserved():
     # usefluency.com's first-party Careers link points to this exact board.
-    result = _verify(entity="pass", domain="usefluency.com", slug="usefluency")
+    result = _verify(entity="pass", domain="usefluency.com", slug="usefluency",
+                     official_links=["https://jobs.ashbyhq.com/fluency"])
 
     assert result["decision"] == "approve"
     assert result["client_ready"] is True
@@ -173,3 +182,27 @@ def test_existing_exact_ats_source_shape_controls_remain_fail_closed(url, text, 
         company_domain="fluency.inc",
         company_name="Fluency",
     ) is False
+
+
+def test_unsupported_model_pass_cannot_replace_employer_ownership():
+    result = _verify(entity="pass")
+    assert result["decision"] == "review"
+    assert result["rejection_reason"] == "stage3_identity_unresolved"
+    assert result["ats_employer_ownership"]["resolved"] is False
+    assert result["job_publisher_relationship"] == "unverified"
+    assert result["verified_job_source_urls"] == []
+
+
+def test_stage1_model_pass_cannot_skip_fetched_ownership():
+    result = _verify(entity="pass", stage1_soft_reject=False)
+    assert result["stage1"]["decision"] == "review"
+    assert result["decision"] == "review"
+
+
+def test_owned_employer_does_not_promote_partial_criterion():
+    result = _verify(entity="pass", status="partially_supported",
+                     domain="usefluency.com", slug="usefluency",
+                     official_links=["https://jobs.ashbyhq.com/fluency"])
+    assert result["decision"] == "review"
+    assert result["stage3"]["same_entity_check"] == "pass"
+    assert result["ats_employer_ownership"]["resolved"] is True

@@ -304,6 +304,7 @@ COMPETITION_CONFIGURATION_FIELDS = (
     "mode", "network_name", "netuid", "schedule",
     "benchmark_disclosure_policy", "stage_1_icp_count", "stage_2_icp_count",
     "promotion_margin", "execution_sequence_policy", "sourcing_cost_eligibility_policy",
+    "recovery_source_round_id",
 )
 CURRENT_CONFIGURATION_FIELDS = (
     "mode", "schedule", "stage_1_icp_count", "stage_2_icp_count", "promotion_margin",

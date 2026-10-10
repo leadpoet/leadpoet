@@ -222,6 +222,21 @@ def test_every_supplied_support_pair_must_be_loaded():
     assert finding["status"] == "UNPROVEN"
 
 
+@pytest.mark.parametrize("support_url,support,pages", [
+    ("https://www.antin-ip.com/", ANTIN_QUOTE, {ORIGIS_URL: ORIGIS_QUOTE + " " + ANTIN_QUOTE}),
+    (ORIGIS_URL, ANTIN_QUOTE, {ORIGIS_URL: ORIGIS_QUOTE}),
+])
+def test_missing_support_has_specific_feedback_without_verifying_primary(support_url, support, pages):
+    finding = _validated(
+        ORIGIS_QUOTE, support, company="Origis Energy", primary_url=ORIGIS_URL,
+        support_url=support_url, pages=pages,
+    )
+    assert finding["status"] == "UNPROVEN"
+    assert finding["reason"] == investigator.PRIVATE_EQUITY_SUPPORT_QUOTE_REJECTION_REASON
+    assert finding["evidence_quote"] == ""
+    assert finding["supporting_evidence"] == []
+
+
 def test_model_unproven_is_never_forced_to_verified():
     finding = _validated(status="UNPROVEN")
     assert finding["status"] == "UNPROVEN"
@@ -350,7 +365,7 @@ def test_private_equity_prompt_keeps_existing_research_and_tool_limits():
 @pytest.mark.parametrize("model_status", ["VERIFIED", "UNPROVEN"])
 def test_normal_company_scoring_uses_real_investigator_and_preserves_support(
     monkeypatch, name, primary, primary_url, support, support_url, classifier_valid,
-    model_status,
+    model_status, support_repair=False,
 ):
     # Positive ownership/classification spans are real source fixtures. Invalid
     # classifier spans and other qualification dimensions are synthetic controls.
@@ -417,6 +432,24 @@ def test_normal_company_scoring_uses_real_investigator_and_preserves_support(
                 supporting_evidence_quote_1=support,
                 reason="Exact majority-owner quote and same-sponsor classification.",
             )
+            if support_repair and turn == len(urls) + 1:
+                # Exact first Origis probe citation mistake: the current
+                # company quote was fetched; the support cites an unfetched
+                # sponsor homepage rather than the loaded company page.
+                raw.update(
+                    supporting_evidence_url_1="https://www.antin-ip.com/",
+                    observed_country="United States", observed_state="Florida",
+                    observed_industry="Renewable energy",
+                    observed_subindustry="Utility-scale solar power generation",
+                    activity_role="supplier_operator", reason="",
+                )
+            elif support_repair and turn == len(urls) + 2:
+                feedback = json.loads(payload["messages"][-1]["content"])
+                assert feedback["rejected_findings"][0]["reason"] == investigator.PRIVATE_EQUITY_SUPPORT_QUOTE_REJECTION_REASON
+                assert "primary ownership span" in feedback["instruction"]
+                assert "all current ownership, company, sponsor" in feedback["instruction"]
+                assert "Never repeat a rejected quote" not in feedback["instruction"]
+                assert payload["tool_choice"] != {"type": "function", "function": {"name": "search_web"}}
             if model_status == "UNPROVEN":
                 raw.update(
                     observed_value=None, evidence_url="", evidence_quote="",
@@ -489,7 +522,7 @@ def test_normal_company_scoring_uses_real_investigator_and_preserves_support(
     assert row["final_score"] == (54 if accepted else 0)
     assert calls["intent"] == int(accepted)
     if classifier_valid or model_status == "UNPROVEN":
-        assert calls["model"] == len(urls) + 1, row
+        assert calls["model"] == len(urls) + 1 + int(support_repair), row
     else:
         assert len(urls) + 1 < calls["model"] <= investigator.MAX_REASONING_TURNS + 1
     receipt = row["verifier_gate_receipts"][0]
@@ -499,3 +532,19 @@ def test_normal_company_scoring_uses_real_investigator_and_preserves_support(
         ]
     else:
         assert receipt["company_fit_dimensions"]["stage"] == COMPANY_FIT_UNAVAILABLE
+
+
+@pytest.mark.parametrize("primary,support,accepted", [
+    (ORIGIS_QUOTE, ANTIN_QUOTE, True),
+    ("Origis Energy announced an agreement for a majority acquisition by Antin Infrastructure Partners.", ANTIN_QUOTE, False),
+    ("Origis Energy received a minority investment from Antin Infrastructure Partners.", ANTIN_QUOTE, False),
+    ("Origis Energy received funding from Antin Infrastructure Partners.", ANTIN_QUOTE, False),
+    ("OtherCo is majority-owned by Antin Infrastructure Partners.", ANTIN_QUOTE, False),
+    ("Origis Energy is majority-owned by Other Capital.", ANTIN_QUOTE, False),
+    (ORIGIS_QUOTE, "Antin Infrastructure Partners is a private equity firm's customer.", False),
+])
+def test_captured_origis_support_repair_keeps_full_scoring_guards(monkeypatch, primary, support, accepted):
+    test_normal_company_scoring_uses_real_investigator_and_preserves_support(
+        monkeypatch, "Origis Energy", primary, ORIGIS_URL, support, ORIGIS_URL,
+        accepted, "VERIFIED", support_repair=True,
+    )

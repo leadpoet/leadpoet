@@ -91,6 +91,9 @@ TARGETS = frozenset({
     "required_attribute",
 })
 STATUSES = frozenset({"VERIFIED", "CONTRADICTED", "UNPROVEN"})
+PRIVATE_EQUITY_SUPPORT_QUOTE_REJECTION_REASON = (
+    "supporting private-equity classification quote was not present in fetched source"
+)
 _NON_SUPPLIER_ACTIVITY_ROLES = frozenset({
     "customer_user", "internal_function", "third_party",
 })
@@ -2428,6 +2431,7 @@ def _validated_findings(
                     finding["observed_value"]
                 )
                 linked_pe_support: list[dict[str, str]] = []
+                linked_pe_support_invalid = False
                 if normalized_stage == "private equity" and raw_support:
                     for item in raw_support:
                         url = _safe_https_url(item["url"])
@@ -2438,6 +2442,7 @@ def _validated_findings(
                             or not _quote_occurs(quote, fetched_pages.get(url, ""))
                         ):
                             linked_pe_support = []
+                            linked_pe_support_invalid = True
                             break
                         linked_pe_support.append({"url": url, "quote": quote})
                 linked_pe_ownership = bool(
@@ -2476,7 +2481,11 @@ def _validated_findings(
                         status="UNPROVEN",
                         evidence_url="",
                         evidence_quote="",
-                        reason="source quote did not prove current private-equity ownership",
+                        reason=(
+                            PRIVATE_EQUITY_SUPPORT_QUOTE_REJECTION_REASON
+                            if linked_pe_support_invalid
+                            else "source quote did not prove current private-equity ownership"
+                        ),
                     )
                 elif normalized_stage == "acquired" and not (
                     _acquired_stage_quote_supports_names(
@@ -3995,6 +4004,11 @@ async def investigate_company_evidence(
                         and time.monotonic() - started
                         < ADMISSION_DEADLINE_SECONDS
                     )
+                    private_equity_support_repair = any(
+                        item.get("target") == "stage"
+                        and item.get("reason") == PRIVATE_EQUITY_SUPPORT_QUOTE_REJECTION_REASON
+                        for item in rejected
+                    )
                     force_stage_search = bool(
                         not scoped_correction_active
                         and rejected
@@ -4266,7 +4280,20 @@ async def investigate_company_evidence(
                                         )
                                     )
                                 )
-                                + "Never repeat a rejected quote. Use one exact continuous "
+                                + (
+                                    "The supporting classification URL/quote was not present "
+                                    "in its fetched source. Repair that pair from an already "
+                                    "loaded page, or fetch its exact source if needed and "
+                                    "budget remains. This support failure does not itself "
+                                    "reject the primary ownership span. You may reuse that "
+                                    "span only if all current ownership, company, sponsor, "
+                                    "exact-quote and source checks pass. Pending acquisitions, "
+                                    "minority investments and funding alone remain insufficient. "
+                                    "Do not repeat the invalid supporting pair unchanged. "
+                                    if private_equity_support_repair
+                                    else "Never repeat a rejected quote. "
+                                )
+                                + "Use one exact continuous "
                                 "company-bound span from a fetched page; do not paraphrase, "
                                 "join passages, or insert ellipses. VERIFIED and "
                                 "CONTRADICTED require that exact quote and its fetched URL. "

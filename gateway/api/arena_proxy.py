@@ -20,6 +20,8 @@ from typing import Mapping
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 
+from lab_arena import operations
+
 
 router = APIRouter(prefix="/arena", tags=["agent-competition"])
 testnet_router = APIRouter(prefix="/testnet/arena", tags=["agent-competition-testnet"])
@@ -52,6 +54,12 @@ _HANDOFF_LOG_WINDOW = 0.0
 _HANDOFF_LOG_COUNT = 0
 _SIDECAR_SSL_CONTEXT = None
 _SIDECAR_SSL_CONTEXT_LOCK = threading.Lock()
+_PROVIDER_READ_TIMEOUT_SECONDS = (
+    operations.BUDGET_ADMISSION_MAX_SECONDS
+    + max(operation.timeout_seconds for operation in operations.OPERATIONS.values())
+    + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
+    + operations.PROVIDER_API_TIMEOUT_GRACE_SECONDS
+)
 
 
 def _sidecar_ssl_context() -> ssl.SSLContext:
@@ -234,11 +242,12 @@ async def _request_sidecar(
         and parts[:2] == ["v1", "runs"]
         and parts[3] == "provider"
     )
-    # Match the validator's bounded provider window: 20s admission, 300s
-    # execution, 30s billing reconciliation, and 15s transport grace. Other
+    # Match the validator's bounded admission, execution, billing and grace
+    # window from the operation table, including native Responses calls. Other
     # routes retain their existing deadline; no paid request is retried here.
     timeout = httpx.Timeout(
-        connect=3.0, read=380.0 if provider_call else 150.0, write=30.0, pool=3.0
+        connect=3.0, read=_PROVIDER_READ_TIMEOUT_SECONDS if provider_call else 150.0,
+        write=30.0, pool=3.0
     )
     async with httpx.AsyncClient(
         timeout=timeout,

@@ -32,12 +32,16 @@ class QueueStore:
         return self.urgent
 
     def list_deepline_cost_reconciliations(
-        self, round_id, *, run_id, after_entry_id, limit, successful_execute_only=False,
+        self, round_id, *, run_id, after_entry_id, limit,
+        successful_execute_only=False, score_only=False,
     ):
-        self.reads.append((run_id, after_entry_id, limit, successful_execute_only))
+        assert 1 <= limit <= 20
+        self.reads.append((run_id, after_entry_id, limit,
+                           successful_execute_only, score_only))
         rows = [item for item in self.items
                 if (not run_id or item['run_id'] == run_id)
-                and (not successful_execute_only or item['kind'] == 'execute')]
+                and (not successful_execute_only or item['kind'] == 'execute')
+                and (not score_only or item['kind'] == 'score')]
         page = sorted(rows, key=lambda row: (
             row['uncertain_entry_id'] <= after_entry_id, row['uncertain_entry_id'],
         ))[:limit]
@@ -73,22 +77,70 @@ def service_for(store, broker=None):
     return service, broker
 
 
+def test_store_routes_three_read_only_candidate_lanes_without_false_v2():
+    class Transport:
+        def __init__(self):
+            self.calls = []
+
+        def rpc(self, name, params):
+            self.calls.append((name, params))
+            return {'status': 'ok', 'items': []}
+
+    transport = Transport()
+    store = ArenaStore(transport)
+    store.list_deepline_cost_reconciliations(ROUND_ID)
+    store.list_deepline_cost_reconciliations(ROUND_ID, successful_execute_only=True)
+    store.list_deepline_cost_reconciliations(ROUND_ID, score_only=True)
+    assert [name[-2:] for name, _ in transport.calls] == ['v1', 'v2', 'v3']
+    assert transport.calls[1][1]['p_successful_execute_only'] is True
+    assert 'p_successful_execute_only' not in transport.calls[2][1]
+    with pytest.raises(ValueError, match='mutually exclusive'):
+        store.list_deepline_cost_reconciliations(
+            ROUND_ID, successful_execute_only=True, score_only=True)
+
+
 def test_twelve_abandoned_runs_get_checks_before_606_old_unknowns_drain():
     store = QueueStore()
     service, broker = service_for(store)
     for step in range(3):
         result = service._reconcile_active_deepline_cost(ROUND_ID)
-        assert result['checked'] == 8
-        assert len(set(broker.seen[step * 8:(step + 1) * 8])) == 8
+        assert result['checked'] == 32
+        assert len(set(broker.seen[step * 32:(step + 1) * 32])) == 32
     assert set(range(1000, 1012)) <= set(broker.seen)
-    assert set(range(1, 10)) <= set(broker.seen)
+    assert set(range(1, 25)) <= set(broker.seen)
     assert broker.seen.count(2000) == 3
-    assert service._deepline_reconciliation_after[(ROUND_ID, '')] == 9
+    assert service._deepline_score_reconciliation_after[(ROUND_ID, '')] >= 24
     # Pending bills stay unknown; priority only selects, never expires or frees.
     assert len(store.items) == 619
     service._reconcile_active_deepline_cost(ROUND_ID)
     assert broker.seen.count(1000) == 2  # Urgent run cursor wraps.
-    assert {10, 11, 12} <= set(broker.seen)
+    assert {30, 31, 32} <= set(broker.seen)
+
+
+def test_592_older_failed_execute_heads_do_not_starve_new_score_bills():
+    store = QueueStore()
+    store.urgent = []
+    store.items = ([candidate(n, kind='execute') for n in range(1, 593)]
+                   + [candidate(n, kind='score') for n in range(593, 673)])
+    original = store.list_deepline_cost_reconciliations
+
+    def list_candidates(round_id, **options):
+        # The old execute heads have call_succeeded=false and are correctly
+        # absent from the separate successful-execute RPC.
+        if options.get('successful_execute_only'):
+            return []
+        return original(round_id, **options)
+
+    store.list_deepline_cost_reconciliations = list_candidates
+    service, broker = service_for(store)
+    assert service._reconcile_active_deepline_cost(ROUND_ID)['checked'] == 32
+    assert len([number for number in broker.seen if number > 592]) == 29
+    assert broker.seen.count(593) == 1
+    assert service._deepline_reconciliation_after[(ROUND_ID, '')] == 3
+    assert service._deepline_score_reconciliation_after[(ROUND_ID, '')] == 621
+    assert service._reconcile_active_deepline_cost(ROUND_ID)['checked'] == 32
+    assert len([number for number in broker.seen[32:] if number > 592]) == 29
+    assert all(read[2] <= 20 for read in store.reads)
 
 
 def test_failure_and_pending_bill_do_not_cancel_other_reads_or_leak_error(caplog):
@@ -98,8 +150,8 @@ def test_failure_and_pending_bill_do_not_cancel_other_reads_or_leak_error(caplog
         1001: 'pending', 1002: 'settled', 1003: 'stale',
     }))
     result = service._reconcile_active_deepline_cost(ROUND_ID)
-    assert result == {'status': 'settled', 'checked': 8, 'settled': 1}
-    assert len(broker.seen) == 8
+    assert result == {'status': 'settled', 'checked': 32, 'settled': 1}
+    assert len(broker.seen) == 32
     assert 'RuntimeError' in caplog.text
     assert 'private provider payload' not in caplog.text
     assert service._active_deepline_reconciliations == set()
@@ -134,14 +186,14 @@ def test_overlapping_driver_cannot_select_or_dispatch_same_batch_twice():
         assert service._reconcile_active_deepline_cost(ROUND_ID) == {'status': 'none'}
         assert store.reads == reads
         # Cursors are reserved before any provider read completes.
-        assert service._deepline_reconciliation_after[(ROUND_ID, '')] == 3
+        assert service._deepline_score_reconciliation_after[(ROUND_ID, '')] >= 24
         release.set()
-        assert pending.result(timeout=3)['checked'] == 8
-    assert len(broker.seen) == len(set(broker.seen)) == 8
+        assert pending.result(timeout=3)['checked'] == 32
+    assert len(broker.seen) == len(set(broker.seen)) == 32
     assert service._active_deepline_reconciliations == set()
 
 
-def test_four_worker_bound_finishes_eight_slow_reads_in_two_waves():
+def test_eight_worker_bound_finishes_32_slow_reads_in_four_waves():
     store = QueueStore()
 
     class SlowBroker(RecordingBroker):
@@ -160,14 +212,14 @@ def test_four_worker_bound_finishes_eight_slow_reads_in_two_waves():
 
     service, broker = service_for(store, SlowBroker(store))
     started = time.monotonic()
-    assert service._reconcile_active_deepline_cost(ROUND_ID)['checked'] == 8
+    assert service._reconcile_active_deepline_cost(ROUND_ID)['checked'] == 32
     elapsed = time.monotonic() - started
-    assert broker.maximum == 4
-    assert 0.09 <= elapsed < 2
+    assert broker.maximum == 8
+    assert 0.19 <= elapsed < 2
     assert br.DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS == 5
 
 
-@pytest.mark.parametrize('failure', ['abandoned', 'urgent', 'priority', 'general'])
+@pytest.mark.parametrize('failure', ['abandoned', 'urgent', 'priority', 'score', 'general'])
 def test_selection_failure_keeps_other_lanes_and_clears_inflight(failure):
     class FailingStore(QueueStore):
         def list_abandoned_billing_runs(self, round_id):
@@ -178,8 +230,10 @@ def test_selection_failure_keeps_other_lanes_and_clears_inflight(failure):
         def list_deepline_cost_reconciliations(self, round_id, **options):
             if ((failure == 'urgent' and options['run_id'])
                 or (failure == 'priority' and options.get('successful_execute_only'))
+                or (failure == 'score' and options.get('score_only'))
                 or (failure == 'general' and not options['run_id']
-                    and not options.get('successful_execute_only'))):
+                    and not options.get('successful_execute_only')
+                    and not options.get('score_only'))):
                 raise TimeoutError('candidate')
             return super().list_deepline_cost_reconciliations(round_id, **options)
 
@@ -187,7 +241,7 @@ def test_selection_failure_keeps_other_lanes_and_clears_inflight(failure):
     service, broker = service_for(store)
     assert service._reconcile_active_deepline_cost(ROUND_ID)['checked'] >= 4
     assert service._active_deepline_reconciliations == set()
-    if failure != 'general':
+    if failure not in ('general', 'score'):
         assert {1, 2, 3} <= set(broker.seen)
     if failure not in ('abandoned', 'urgent'):
         assert {1000, 1001, 1002, 1003} <= set(broker.seen)
@@ -310,8 +364,8 @@ def test_wrapped_rpc_page_reserves_last_cursor_item_not_largest_entry_id():
     store.items = [candidate(n) for n in range(1, 11)]
     service, broker = service_for(store)
     service._deepline_reconciliation_after[(ROUND_ID, '')] = 9
-    service._reconcile_active_deepline_cost(ROUND_ID)
-    assert set(broker.seen) == {10, 1, 2}
+    first = service._deepline_cost_candidates(ROUND_ID, limit=3)
+    assert {item['uncertain_entry_id'] for item in first} == {10, 1, 2}
     assert service._deepline_reconciliation_after[(ROUND_ID, '')] == 2
-    service._reconcile_active_deepline_cost(ROUND_ID)
-    assert set(broker.seen[3:]) == {3, 4, 5}
+    second = service._deepline_cost_candidates(ROUND_ID, limit=3)
+    assert {item['uncertain_entry_id'] for item in second} == {3, 4, 5}

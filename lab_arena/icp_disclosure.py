@@ -69,6 +69,29 @@ def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def is_administrative_archive(round_row: Mapping[str, Any]) -> bool:
+    """Identify server-authored evidence copies, not competition rounds."""
+
+    reason = round_row.get("cancel_reason")
+    if (
+        round_row.get("status") != "cancelled"
+        or not isinstance(reason, str)
+        or not reason.startswith("authorized_")
+    ):
+        return False
+    source_round_id = (round_row.get("configuration_doc") or {}).get(
+        "recovery_source_round_id"
+    )
+    return bool(
+        reason.rstrip("0123456789").endswith("_archive")
+        or (
+            isinstance(source_round_id, str)
+            and source_round_id.strip()
+            and source_round_id != round_row.get("round_id")
+        )
+    )
+
+
 def disclosure_metadata(round_row: Mapping[str, Any]) -> dict | None:
     """Return stable bank and publication dates without inspecting private ICPs.
 
@@ -80,6 +103,8 @@ def disclosure_metadata(round_row: Mapping[str, Any]) -> dict | None:
     publication time.
     """
 
+    if is_administrative_archive(round_row):
+        return None
     policy = configured_policy(round_row)
     schedule = (round_row.get("configuration_doc") or {}).get("schedule") or {}
     submission_open = _instant(schedule.get("submission_open"))

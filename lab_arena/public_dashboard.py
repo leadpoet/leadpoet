@@ -488,13 +488,7 @@ def round_summary(row: Mapping[str, Any], *, completed_scores: Optional[Mapping[
 
 def _is_administrative_archive(row: Mapping[str, Any]) -> bool:
     """Identify immutable evidence copies that are not competition rounds."""
-    reason = row.get("cancel_reason")
-    return bool(
-        row.get("status") == "cancelled"
-        and isinstance(reason, str)
-        and reason.startswith("authorized_")
-        and reason.rstrip("0123456789").endswith("_archive")
-    )
+    return icp_disclosure.is_administrative_archive(row)
 
 
 def _recent_competition_rounds(

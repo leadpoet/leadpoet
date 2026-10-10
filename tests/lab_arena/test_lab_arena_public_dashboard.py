@@ -357,6 +357,7 @@ def test_competition_snapshot_fetches_the_latest_published_outside_recent_window
 @pytest.mark.parametrize("archive_reason", [
     "authorized_sep16_failed_native_rerun_archive",
     "authorized_sep20_invalid_champion_reward_archive340",
+    "authorized_baseline_recovery440",
 ])
 def test_competition_snapshot_pages_past_server_authored_archives_with_scope(archive_reason):
     # Preserve the archive filter for both old and numbered migration reasons.
@@ -376,6 +377,10 @@ def test_competition_snapshot_pages_past_server_authored_archives_with_scope(arc
         "configuration_doc": _configuration(),
         "participants": [],
     }
+    if archive_reason == "authorized_baseline_recovery440":
+        recovery_archive["configuration_doc"]["recovery_source_round_id"] = (
+            "arena-2026-09-16"
+        )
     running = {
         "round_id": "arena-2026-09-16",
         "status": "stage1",
@@ -399,7 +404,20 @@ def test_competition_snapshot_pages_past_server_authored_archives_with_scope(arc
                 0: [recovery_archive, prior_archive],
                 2: [running, published],
             }
-            return pages.get(kwargs.get("offset", 0), [])
+            rows = pages.get(kwargs.get("offset", 0), [])
+            if archive_reason == "authorized_baseline_recovery440":
+                # Production fetches compact JSON projections, not full config.
+                assert "cfg_recovery_source_round_id:" in kwargs["columns"]
+                return [
+                    {
+                        **{key: value for key, value in row.items()
+                           if key != "configuration_doc"},
+                        **{"cfg_" + key: json.dumps(value)
+                           for key, value in row["configuration_doc"].items()},
+                    }
+                    for row in rows
+                ]
+            return rows
 
     store = Store()
     service = SimpleNamespace(

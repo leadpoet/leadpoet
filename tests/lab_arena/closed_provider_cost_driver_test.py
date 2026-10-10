@@ -45,13 +45,17 @@ def test_closed_billing_is_scoped_bounded_and_advances_cursor_on_missing_receipt
                                       pinned_round_id=pinned)
     service._store = SimpleNamespace(next_closed_provider_reconciliation=candidate)
     service._closed_provider_reconciliation_after = 123
-    service._reconcile_deepline_cost = service._reconcile_openrouter_cost = (
+    service._reconcile_active_deepline_cost = (
+        lambda round_id: calls.append((round_id, {})) or {"status": "pending"}
+    )
+    service._reconcile_openrouter_cost = (
         lambda round_id, **kwargs: calls.append((round_id, kwargs)) or {"status": "pending"}
     )
     assert service.reconcile_closed_provider_costs() == {"status": "pending"}
     assert requests == [{"mode": "live", "network_name": "finney", "netuid": 71,
                          "round_id": pinned or "", "after_entry_id": 123}]
-    assert calls == [(pinned or "arena-closed", {"run_id": "failed-score"})]
+    assert calls == [(pinned or "arena-closed",
+                      {} if provider == "deepline" else {"run_id": "failed-score"})]
     assert service._closed_provider_reconciliation_after == 321
 
 

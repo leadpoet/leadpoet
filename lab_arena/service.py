@@ -43,12 +43,12 @@ from gateway.utils.hotkey_roles import (
 
 logger = logging.getLogger(__name__)
 
-_DEEPLINE_BILLING_BATCH_LIMIT = 32
+_DEEPLINE_BILLING_BATCH_LIMIT = 96
 _DEEPLINE_BILLING_WORKERS = 8
 _DEEPLINE_BILLING_PAGE_LIMIT = 20  # Candidate RPC contract.
 _DEEPLINE_BILLING_ABANDONED_SLOTS = 4
 _DEEPLINE_BILLING_EXECUTE_SLOTS = 1
-_DEEPLINE_BILLING_SCORE_SLOTS = 24
+_DEEPLINE_BILLING_SCORE_SLOTS = 88
 _DEEPLINE_BILLING_GENERAL_SLOTS = 3
 
 # Provider error codes that mean "the call was declined before or instead of
@@ -4646,7 +4646,7 @@ class ArenaService:
         }
 
     def reconcile_closed_provider_costs(self) -> Dict[str, Any]:
-        """Check one closed judge call; missing billing never blocks a round."""
+        """Check a closed judge round without changing published results."""
         network_name, netuid = self._chain_scope()
         candidate = self._store.next_closed_provider_reconciliation(
             mode=self._config.mode, network_name=network_name, netuid=netuid,
@@ -4660,10 +4660,12 @@ class ArenaService:
         }:
             raise ServiceError("closed_provider_cost_candidate_invalid", 500)
         self._closed_provider_reconciliation_after = int(candidate["uncertain_entry_id"])
-        reconcile = (self._reconcile_openrouter_cost
-                     if candidate["provider"] == "openrouter"
-                     else self._reconcile_deepline_cost)
-        return reconcile(
+        if candidate["provider"] == "deepline":
+            # V1/V3 SQL alone decides which published score liabilities are
+            # still billable. The active batch already uses those exact lists
+            # and never replays a provider operation or rewrites publication.
+            return self._reconcile_active_deepline_cost(str(candidate["round_id"]))
+        return self._reconcile_openrouter_cost(
             str(candidate["round_id"]), run_id=str(candidate["run_id"]),
         )
 
@@ -4726,7 +4728,7 @@ class ArenaService:
         return items
 
     def _reconcile_active_deepline_cost(self, round_id: str) -> Dict[str, Any]:
-        """Check at most 32 bills in four waves of eight five-second reads.
+        """Check at most 96 bills in twelve waves of eight five-second reads.
 
         Abandoned, successful execute, score, and general lanes rotate
         independently. Selection does not authorize expiry or provider replay.
@@ -4749,14 +4751,15 @@ class ArenaService:
                 # Overlapping lanes may need more than one cursor page. Cap
                 # selection reads even when a small candidate set wraps.
                 seen_in_lane: set[str] = set()
-                for _ in range(4):
+                for _ in range(6):
                     missing = min(target - len(unique),
                                   _DEEPLINE_BILLING_BATCH_LIMIT - len(unique))
                     if missing <= 0:
                         return
+                    page_limit = min(_DEEPLINE_BILLING_PAGE_LIMIT, missing)
                     try:
                         items = self._deepline_cost_candidates(
-                            round_id, limit=min(_DEEPLINE_BILLING_PAGE_LIMIT, missing),
+                            round_id, limit=page_limit,
                             **options,
                         )
                     except Exception as exc:
@@ -4770,7 +4773,7 @@ class ArenaService:
                     seen_in_lane.update(identities)
                     for item in items:
                         unique.setdefault(str(item["call_identity"]), item)
-                    if len(items) < min(_DEEPLINE_BILLING_PAGE_LIMIT, missing):
+                    if len(items) < page_limit:
                         return
 
             ordered = [run for run in abandoned if run > after_run]
@@ -4781,8 +4784,8 @@ class ArenaService:
                     self._abandoned_billing_run_after[round_id] = run_id
             select(len(unique) + _DEEPLINE_BILLING_EXECUTE_SLOTS,
                    successful_execute_only=True)
-            select(len(unique) + _DEEPLINE_BILLING_SCORE_SLOTS, score_only=True)
             select(len(unique) + _DEEPLINE_BILLING_GENERAL_SLOTS)
+            select(len(unique) + _DEEPLINE_BILLING_SCORE_SLOTS, score_only=True)
             # Unused reserved slots return first to score, then to general.
             select(_DEEPLINE_BILLING_BATCH_LIMIT, score_only=True)
             select(_DEEPLINE_BILLING_BATCH_LIMIT)

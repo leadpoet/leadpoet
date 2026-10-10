@@ -1,5 +1,6 @@
 """Recovery bills make progress beside old unknowns without replay or expiry."""
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 import threading
 import time
 
@@ -104,12 +105,12 @@ def test_twelve_abandoned_runs_get_checks_before_606_old_unknowns_drain():
     service, broker = service_for(store)
     for step in range(3):
         result = service._reconcile_active_deepline_cost(ROUND_ID)
-        assert result['checked'] == 32
-        assert len(set(broker.seen[step * 32:(step + 1) * 32])) == 32
+        assert result['checked'] == 96
+        assert len(set(broker.seen[step * 96:(step + 1) * 96])) == 96
     assert set(range(1000, 1012)) <= set(broker.seen)
     assert set(range(1, 25)) <= set(broker.seen)
     assert broker.seen.count(2000) == 3
-    assert service._deepline_score_reconciliation_after[(ROUND_ID, '')] >= 24
+    assert service._deepline_score_reconciliation_after[(ROUND_ID, '')] >= 88
     # Pending bills stay unknown; priority only selects, never expires or frees.
     assert len(store.items) == 619
     service._reconcile_active_deepline_cost(ROUND_ID)
@@ -121,7 +122,7 @@ def test_592_older_failed_execute_heads_do_not_starve_new_score_bills():
     store = QueueStore()
     store.urgent = []
     store.items = ([candidate(n, kind='execute') for n in range(1, 593)]
-                   + [candidate(n, kind='score') for n in range(593, 673)])
+                   + [candidate(n, kind='score') for n in range(593, 793)])
     original = store.list_deepline_cost_reconciliations
 
     def list_candidates(round_id, **options):
@@ -133,14 +134,84 @@ def test_592_older_failed_execute_heads_do_not_starve_new_score_bills():
 
     store.list_deepline_cost_reconciliations = list_candidates
     service, broker = service_for(store)
-    assert service._reconcile_active_deepline_cost(ROUND_ID)['checked'] == 32
-    assert len([number for number in broker.seen if number > 592]) == 29
+    assert service._reconcile_active_deepline_cost(ROUND_ID)['checked'] == 96
+    assert len([number for number in broker.seen if number > 592]) == 93
     assert broker.seen.count(593) == 1
     assert service._deepline_reconciliation_after[(ROUND_ID, '')] == 3
-    assert service._deepline_score_reconciliation_after[(ROUND_ID, '')] == 621
-    assert service._reconcile_active_deepline_cost(ROUND_ID)['checked'] == 32
-    assert len([number for number in broker.seen[32:] if number > 592]) == 29
+    assert service._deepline_score_reconciliation_after[(ROUND_ID, '')] >= 680
+    assert service._reconcile_active_deepline_cost(ROUND_ID)['checked'] == 96
+    assert len([number for number in broker.seen[96:] if number > 592]) == 93
     assert all(read[2] <= 20 for read in store.reads)
+
+
+def test_pending_score_pages_wrap_without_skipping_unconsumed_calls():
+    store = QueueStore()
+    store.urgent = []
+    store.items = [candidate(n) for n in range(1, 607)]
+    service, broker = service_for(store)
+    for _ in range(7):
+        assert service._reconcile_active_deepline_cost(ROUND_ID)['checked'] == 96
+    assert set(broker.seen) == set(range(1, 607))
+    assert all(read[2] <= 20 for read in store.reads)
+
+
+def test_56_new_judge_bills_each_tick_still_reduces_old_backlog():
+    store = QueueStore()
+    store.urgent = []
+    store.items = [candidate(n) for n in range(1, 1701)]
+    service, broker = service_for(store)
+    for tick in range(3):
+        before = len(store.items)
+        assert service._reconcile_active_deepline_cost(ROUND_ID)['checked'] == 96
+        settled = set(broker.seen[-96:])
+        store.items = [item for item in store.items
+                       if item['uncertain_entry_id'] not in settled]
+        store.items += [candidate(1701 + tick * 56 + n) for n in range(56)]
+        assert len(store.items) == before - 40
+
+
+def test_closed_deepline_selector_batches_published_scores_only():
+    class ClosedStore(QueueStore):
+        def __init__(self):
+            super().__init__()
+            self.urgent = []
+            self.items = [candidate(n) for n in range(1, 151)]
+            self.items += [candidate(1000, kind='execute')]
+            self.selected = []
+
+        def next_closed_provider_reconciliation(self, **scope):
+            self.selected.append(scope)
+            return {'status': 'ok', 'provider': 'deepline', 'round_id': ROUND_ID,
+                    'run_id': 'old-0001',
+                    'uncertain_entry_id': min(item['uncertain_entry_id']
+                                              for item in self.items if item['kind'] == 'score')}
+
+        def list_deepline_cost_reconciliations(self, round_id, **options):
+            if options.get('successful_execute_only'):
+                return []
+            original = self.items
+            try:
+                # Published V1/V3 admit only the strict closed score helpers;
+                # the execute liability remains in the ledger, not this list.
+                self.items = [item for item in original if item['kind'] == 'score']
+                return super().list_deepline_cost_reconciliations(round_id, **options)
+            finally:
+                self.items = original
+
+    store = ClosedStore()
+    service, broker = service_for(store)
+    service._config = SimpleNamespace(mode='live', network_name='finney',
+                                      netuid=71, pinned_round_id=None)
+    service._closed_provider_reconciliation_after = 0
+    assert service.reconcile_closed_provider_costs()['checked'] == 96
+    assert 1000 not in broker.seen
+    assert service._closed_provider_reconciliation_after == 1
+    first = set(broker.seen)
+    store.items = [item for item in store.items
+                   if item['uncertain_entry_id'] not in first]
+    assert service.reconcile_closed_provider_costs()['checked'] == 54
+    assert not first.intersection(broker.seen[96:])
+    assert store.selected[1]['after_entry_id'] == 1
 
 
 def test_failure_and_pending_bill_do_not_cancel_other_reads_or_leak_error(caplog):
@@ -150,8 +221,8 @@ def test_failure_and_pending_bill_do_not_cancel_other_reads_or_leak_error(caplog
         1001: 'pending', 1002: 'settled', 1003: 'stale',
     }))
     result = service._reconcile_active_deepline_cost(ROUND_ID)
-    assert result == {'status': 'settled', 'checked': 32, 'settled': 1}
-    assert len(broker.seen) == 32
+    assert result == {'status': 'settled', 'checked': 96, 'settled': 1}
+    assert len(broker.seen) == 96
     assert 'RuntimeError' in caplog.text
     assert 'private provider payload' not in caplog.text
     assert service._active_deepline_reconciliations == set()
@@ -186,14 +257,14 @@ def test_overlapping_driver_cannot_select_or_dispatch_same_batch_twice():
         assert service._reconcile_active_deepline_cost(ROUND_ID) == {'status': 'none'}
         assert store.reads == reads
         # Cursors are reserved before any provider read completes.
-        assert service._deepline_score_reconciliation_after[(ROUND_ID, '')] >= 24
+        assert service._deepline_score_reconciliation_after[(ROUND_ID, '')] >= 88
         release.set()
-        assert pending.result(timeout=3)['checked'] == 32
-    assert len(broker.seen) == len(set(broker.seen)) == 32
+        assert pending.result(timeout=3)['checked'] == 96
+    assert len(broker.seen) == len(set(broker.seen)) == 96
     assert service._active_deepline_reconciliations == set()
 
 
-def test_eight_worker_bound_finishes_32_slow_reads_in_four_waves():
+def test_eight_worker_bound_finishes_96_slow_reads_in_twelve_waves():
     store = QueueStore()
 
     class SlowBroker(RecordingBroker):
@@ -212,10 +283,10 @@ def test_eight_worker_bound_finishes_32_slow_reads_in_four_waves():
 
     service, broker = service_for(store, SlowBroker(store))
     started = time.monotonic()
-    assert service._reconcile_active_deepline_cost(ROUND_ID)['checked'] == 32
+    assert service._reconcile_active_deepline_cost(ROUND_ID)['checked'] == 96
     elapsed = time.monotonic() - started
     assert broker.maximum == 8
-    assert 0.19 <= elapsed < 2
+    assert 0.59 <= elapsed < 2
     assert br.DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS == 5
 
 

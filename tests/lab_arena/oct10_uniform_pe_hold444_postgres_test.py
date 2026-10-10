@@ -53,9 +53,10 @@ def test_terminal_hold_preserves_active_judge_blocks_new_work_and_allows_rpc_com
         with conn.cursor() as cur:
             cur.execute(sql)
             assert recovery._snapshot(cur)['hold'] == held['hold']
+            recovery._canonical_restart(cur)
             cur.execute(recovery._render(cur))
             cur.execute('SELECT operator_paused,guard_generation FROM public.lab_arena_restart_claim_control WHERE singleton')
-            assert cur.fetchone() == (False, held['hold']['guard_generation'])
+            assert cur.fetchone() == (False, held['hold']['guard_generation'] + 1)
 
 
 @pytest.mark.parametrize('mutation', [
@@ -99,6 +100,7 @@ def test_unrelated_non_live_or_idle_committed_round_does_not_block_hold(unheld, 
             cur.execute('SET session_replication_role=origin')
             cur.execute(recovery._hold_render(cur))
             assert recovery._snapshot(cur)['hold']['operator_paused']
+            recovery._canonical_restart(cur)
             cur.execute(recovery._render(cur))
             assert not recovery._snapshot(cur)['hold']['operator_paused']
 

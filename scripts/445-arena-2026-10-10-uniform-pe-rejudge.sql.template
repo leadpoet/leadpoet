@@ -2,7 +2,9 @@
 -- Reviewed source and image must be supplied after the final root build review.
 -- Required reviewed inputs: NEW_SCORER_IMAGE_DIGEST, NEW_SCORER_IMAGE_REFERENCE,
 -- REVIEWED_SCORER_SOURCE_COMMIT, BASELINE_SCORING_CLOSE, STAGE2_RESUME_START,
--- REVIEWED_TERMINAL_INVENTORY_JSON. No terminal snapshot is selected here.
+-- REVIEWED_FINAL_ACTOR, REVIEWED_TERMINAL_INVENTORY_JSON.
+-- No terminal snapshot is selected here. The exact reviewed canonical actor
+-- follows the independent 444 hold and retains its fixed pause reason.
 -- The inventory seals the complete round, all submissions/source hashes, bank,
 -- ALL execution/score attempts, both function preimages, trigger/security state,
 -- exact hold owner/generation and ledger/event prefixes. Distinct stage2
@@ -34,6 +36,9 @@ DECLARE
   v_new_digest CONSTANT TEXT := '__NEW_SCORER_IMAGE_DIGEST__';
   v_new_reference CONSTANT TEXT := '__NEW_SCORER_IMAGE_REFERENCE__';
   v_source_commit CONSTANT TEXT := '__REVIEWED_SCORER_SOURCE_COMMIT__';
+  -- A reviewed canonical restart retains the independent 444 pause reason,
+  -- but binds actor_ref to its exact deployment commit and advances the guard.
+  v_final_actor CONSTANT TEXT := '__REVIEWED_FINAL_ACTOR__';
   v_expected CONSTANT JSONB := '__REVIEWED_TERMINAL_INVENTORY_JSON__'::JSONB;
   v_actual JSONB;
   v_frozen JSONB;
@@ -107,6 +112,7 @@ BEGIN
      OR v_new_reference IS DISTINCT FROM
         '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@'||v_new_digest
      OR strpos(v_source_commit,'__')>0
+     OR v_final_actor !~ '^canonical-active-release:[0-9a-f]{40}$'
      OR jsonb_typeof(v_expected)<>'object' THEN
     RAISE EXCEPTION 'Oct10 uniform rejudge445 reviewed parameters required';
   END IF;
@@ -195,7 +201,7 @@ BEGIN
   END IF;
   IF v_control.singleton IS NULL OR NOT v_control.operator_paused
      OR v_control.pause_reason IS DISTINCT FROM 'oct10_uniform_pe_boundary_recovery'
-     OR v_control.actor_ref IS DISTINCT FROM 'oct10-uniform-pe-hold444'
+     OR v_control.actor_ref IS DISTINCT FROM v_final_actor
      OR v_control.guard_generation IS DISTINCT FROM (v_expected->>'hold_generation')::BIGINT
      OR v_control.guard_commitment<>'' OR v_control.owner_commitment<>''
      OR v_control.restart_scope<>'' OR v_control.restart_phase<>''

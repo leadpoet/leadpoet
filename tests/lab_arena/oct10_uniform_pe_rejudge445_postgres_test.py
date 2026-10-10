@@ -19,16 +19,19 @@ TEMPLATE = ROOT / 'scripts/445-arena-2026-10-10-uniform-pe-rejudge.sql.template'
 ROUND, BASE = old.ROUND, old.BASE
 ARCHIVE = ROUND + '-r445archive'
 DIGEST = 'sha256:' + 'b' * 64  # Test-only candidate; never a production constant.
+DEPLOYMENT = 'd' * 40  # Separate from the sourcing-model source commit.
+FINAL_ACTOR = 'canonical-active-release:' + DEPLOYMENT
 database = current.database
 @pytest.fixture(scope='module')
 def migrated(database):
     current.migrated.__wrapped__(database)
     psycopg, dsn = database
     with psycopg.connect(**dsn) as conn, conn.cursor() as cur:
-        paths = list((ROOT / 'scripts').glob('442-*.sql'))
-        assert len(paths) == 1
-        cur.execute(paths[0].read_text())
-        cur.execute(paths[0].read_text())
+        for number in (374, 442):
+            paths = list((ROOT / 'scripts').glob(f'{number}-*.sql'))
+            assert len(paths) == 1
+            cur.execute(paths[0].read_text())
+            cur.execute(paths[0].read_text())
     return True
 
 
@@ -91,9 +94,32 @@ def _render(cur):
             .replace('__NEW_SCORER_IMAGE_DIGEST__', DIGEST)
             .replace('__NEW_SCORER_IMAGE_REFERENCE__', '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@' + DIGEST)
             .replace('__REVIEWED_SCORER_SOURCE_COMMIT__', 'c' * 40)
+            .replace('__REVIEWED_FINAL_ACTOR__', FINAL_ACTOR)
             .replace('__REVIEWED_TERMINAL_INVENTORY_JSON__', json.dumps(_inventory(cur)).replace("'", "''"))
             .replace('__BASELINE_SCORING_CLOSE__', '2026-10-10T13:59:58Z')
             .replace('__STAGE2_RESUME_START__', '2026-10-10T13:59:59Z'))
+
+
+def _canonical_restart(cur):
+    """Exercise the current guard RPCs after the actual independent 444 hold."""
+    from tests.lab_arena.test_lab_arena_restart_claim_drain_postgres import GUARD, OWNER
+    def rpc(function, *values):
+        cur.execute('SELECT public.' + function + '(' + ','.join(['%s'] * len(values)) + ')', values)
+        return cur.fetchone()[0]
+    cur.execute('SELECT operator_paused,pause_reason,guard_generation FROM public.lab_arena_restart_claim_control WHERE singleton')
+    paused, reason, generation = cur.fetchone()
+    assert paused and reason == 'oct10_uniform_pe_boundary_recovery'
+    acquired = rpc('lab_arena_acquire_restart_guard_v1', GUARD, OWNER, generation, 600, DEPLOYMENT, 'gateway', FINAL_ACTOR)
+    assert acquired['guard_present'] and acquired['guard_generation'] == generation + 1
+    renewed = rpc('lab_arena_acquire_restart_guard_v1', GUARD, OWNER, generation + 1, 600, DEPLOYMENT, 'gateway', FINAL_ACTOR)
+    assert renewed['guard_present'] and renewed['guard_generation'] == generation + 1
+    rpc('lab_arena_authorize_restart_phase_v1', GUARD, OWNER, generation + 1, 'gateway_destructive')
+    rpc('lab_arena_mark_restart_ready_v1', GUARD, OWNER, generation + 1, 'gateway_ready')
+    released = rpc('lab_arena_release_restart_guard_v1', GUARD, OWNER, generation + 1, FINAL_ACTOR)
+    assert not released['guard_present'] and released['operator_paused']
+    cur.execute('SELECT actor_ref,pause_reason,guard_generation FROM public.lab_arena_restart_claim_control WHERE singleton')
+    assert cur.fetchone() == (FINAL_ACTOR, reason, generation + 1)
+    return released
 
 
 def _prepare(cur, *, apply_hold=True):
@@ -151,6 +177,7 @@ def _prepare(cur, *, apply_hold=True):
     cur.execute('SET session_replication_role=origin')
     if apply_hold:
         cur.execute(_hold_render(cur))
+        _canonical_restart(cur)
 
 
 def _seeded(database, *, apply_hold):
@@ -329,6 +356,7 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
     "UPDATE public.lab_arena_runs SET status='leased' WHERE run_id='old445-score-2'",
     "UPDATE public.lab_arena_restart_claim_control SET operator_paused=false WHERE singleton",
     "UPDATE public.lab_arena_restart_claim_control SET actor_ref='foreign' WHERE singleton",
+    "UPDATE public.lab_arena_restart_claim_control SET updated_at=updated_at+interval '1 second' WHERE singleton",
     "UPDATE public.lab_arena_restart_claim_control SET guard_generation=999 WHERE singleton",
     "UPDATE public.lab_arena_submissions SET source_size_bytes=999 WHERE submission_id='miner440-1'",
     "UPDATE public.lab_arena_runs SET output_ref='arena/wrong.json' WHERE run_id=(SELECT min(run_id) FROM public.lab_arena_runs WHERE round_id='arena-2026-10-10' AND kind='execute')",
@@ -401,6 +429,9 @@ def test_unrendered_and_replay_payload_drift_fail_closed(seeded):
     "UPDATE public.lab_arena_runs SET status='pending' WHERE run_id=(SELECT min(run_id) FROM public.lab_arena_runs WHERE round_id='arena-2026-10-10' AND kind='execute')",
     "UPDATE public.lab_arena_runs SET status='leased' WHERE run_id='old445-score-2'",
     "UPDATE public.lab_arena_restart_claim_control SET operator_paused=false WHERE singleton",
+    "UPDATE public.lab_arena_restart_claim_control SET actor_ref='oct10-uniform-pe-hold444' WHERE singleton",
+    "UPDATE public.lab_arena_restart_claim_control SET actor_ref='canonical-active-release:'||repeat('e',40) WHERE singleton",
+    "UPDATE public.lab_arena_restart_claim_control SET pause_reason='foreign' WHERE singleton",
     "UPDATE public.lab_arena_rounds SET status='stage2' WHERE round_id='arena-2026-10-10-r440archive'",
     "UPDATE public.lab_arena_runs SET stage_generation=10 WHERE round_id='arena-2026-10-10' AND stage=2 AND kind='execute' AND icp_position=0",
     "UPDATE public.lab_arena_ledger SET entry_kind='dispatch' WHERE round_id='arena-2026-10-10' AND run_id='old445-score-2'",
@@ -418,5 +449,18 @@ def test_invalid_terminal_boundary_is_rejected_even_with_matching_snapshot(seede
             sql = _render(cur)
             with pytest.raises(psycopg.Error, match='terminal hold or inventory invalid'):
                 cur.execute(sql)
+            cur.execute('ROLLBACK')
+            assert _snapshot(cur) == original
+
+
+@pytest.mark.parametrize('actor', ['__REVIEWED_FINAL_ACTOR__', 'oct10-uniform-pe-hold444', 'canonical-active-release:invalid'])
+def test_final_actor_parameter_must_name_exact_canonical_deployment(seeded, actor):
+    psycopg, dsn = seeded
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            original = _snapshot(cur)
+            with pytest.raises(psycopg.Error, match='reviewed parameters required'):
+                cur.execute(_render(cur).replace(FINAL_ACTOR, actor))
             cur.execute('ROLLBACK')
             assert _snapshot(cur) == original

@@ -401,7 +401,10 @@ an extension does not require a new stage label. Debt, grants, planned rounds,
 and unresolved ownership or chronology do not establish that value.
 
 Public stage needs current company-attributed exchange/ticker or current
-listed/traded-share proof. A 'Public Company' label, planned IPO, old listing,
+listed/traded-share proof. A current issuer announcement naming the exact
+company with an exchange/ticker parenthetical is this proof; it does not also
+need a separate sentence saying the shares are listed or traded. Formatting
+whitespace and a quoted company alias do not change that attribution. A 'Public Company' label, planned IPO, old listing,
 product launch, or funding total is insufficient. A current SEC filing's
 Section 12(b) table can establish registered common/ordinary shares, their
 ticker, and exchange. Quote one continuous span that includes the registrant
@@ -4208,7 +4211,10 @@ async def investigate_company_evidence(
                                 "Re-review Public stage once using the already fetched "
                                 "issuer-bound market sources and the completed current-status "
                                 "discovery. A failed optional fetch does not by itself erase "
-                                "valid company-bound exchange or ticker evidence. A later "
+                                "valid company-bound exchange or ticker evidence. A current issuer "
+                                "announcement naming the exact company with its exchange/ticker "
+                                "is sufficient without a separate listed/traded-share sentence, "
+                                "unless concrete conflicting evidence remains unresolved. A later "
                                 "filing date, generic SEC filing reference, or unfetched filing "
                                 "locator is not by itself a material listing conflict and does "
                                 "not require valid listing evidence to postdate it. Only concrete "

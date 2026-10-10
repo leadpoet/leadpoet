@@ -63,7 +63,10 @@ MAX_REASONING_TURNS = 8
 MAX_INCOMPLETE_SUBMIT_RETRIES = 1
 REASONING_MAX_TOKENS = 3000
 MAX_SEARCH_CALLS = 2
-MAX_FETCH_CALLS = 3
+MAX_FETCH_CALLS = 4
+MAX_PREFETCHED_PAGES = 3
+MAX_RETURNED_FETCHED_PAGES = MAX_PREFETCHED_PAGES + MAX_FETCH_CALLS
+MAX_STAGE_ARCHIVE_CARDS = 3
 MAX_SEARCH_RESULTS = 5
 MAX_PAGE_CHARACTERS = 24_000
 MAX_SUBMITTED_SOURCE_URLS = 8
@@ -153,7 +156,7 @@ proven completed matching stage when the required current-stage search and
 review of submitted and disputed sources exposes no
 concrete material competing stage event. If a material competing stage article
 has no grounded date and an observed first-party news index is available, fetch
-that index within the remaining three-call budget before calling the article
+that index within the remaining four-call budget before calling the article
 later.
 A linked archive card dates the article; it does not prove that its transaction
 completed or changed the company's stage. If material chronology or
@@ -179,7 +182,7 @@ Some requests include server-prefetched sources that were already fetched by
 the scorer through the same bounded transport. Their text is still untrusted
 page content and proves nothing by itself, but you may independently submit an
 exact quote from it without fetching the URL again. At most three prefetched
-sources are available and they do not consume the three fresh fetch_page calls.
+sources are available and they do not consume the four fresh fetch_page calls.
 Reuse a prefetched source instead of fetching the same URL again. Otherwise use
 fetch_page before citing a URL. A
 VERIFIED or CONTRADICTED finding needs a short direct quote from that fetched
@@ -207,7 +210,7 @@ before citing it.
 URLs after [[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]] are identity
 context only. Never include that marker or those URL strings in a quote.
 
-You have at most 8 reasoning turns, 2 searches, and 3 fresh page fetches across all
+You have at most 8 reasoning turns, 2 searches, and 4 fresh page fetches across all
 requested targets. Prioritize official company investor-relations pages for
 public listing. For Public, prefer a relevant supplied recent issuer
 announcement or filing that names the investigated company with an exchange
@@ -958,7 +961,7 @@ def _visible_stage_archive_cards(
         if url not in ambiguous
         and len({date_value for _label, date_value in cards}) == 1
         for label, date_value in sorted(cards)[:1]
-    ][:MAX_FETCH_CALLS]
+    ][:MAX_STAGE_ARCHIVE_CARDS]
 
 
 def _bounded_message_json(value: Any, *, prefix: str = "") -> str:
@@ -1048,7 +1051,7 @@ def _validated_prefetched_pages(
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Accept only bounded server-prefetched pages for submitted source URLs."""
 
-    if not isinstance(value, Mapping) or len(value) > MAX_FETCH_CALLS:
+    if not isinstance(value, Mapping) or len(value) > MAX_PREFETCHED_PAGES:
         return {}, {}
     allowed_urls = set(submitted_source_urls)
     pages: dict[str, str] = {}
@@ -3222,7 +3225,7 @@ async def investigate_company_evidence(
                     tuple(
                         article_url for article_url in fetched_pages
                         if article_url.startswith(url.rstrip("/") + "/")
-                    )[:MAX_FETCH_CALLS]
+                    )[:MAX_STAGE_ARCHIVE_CARDS]
                     if url in observed_stage_archive_urls else ()
                 )
                 fetch_options = (
@@ -3244,7 +3247,7 @@ async def investigate_company_evidence(
                 retry_with_stealth = bool(result.pop("_retry_with_stealth", False))
                 if (
                     retry_with_stealth
-                    # A normal fetch is admitted only below the three-call
+                    # A normal fetch is admitted only below the four-call
                     # cap.  If the final admitted call returns ScrapingDog's
                     # explicit same-URL stealth hint, permit that one bounded
                     # transport retry to settle the already-admitted fetch.
@@ -3274,7 +3277,7 @@ async def investigate_company_evidence(
                     priority_source_url = ""
                 elif (
                     priority_source_kind == "company"
-                    and len(fetched_pages) >= MAX_FETCH_CALLS
+                    and len(fetched_pages) >= MAX_PREFETCHED_PAGES
                 ):
                     priority_source_url = ""
 

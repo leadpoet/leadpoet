@@ -94,7 +94,8 @@ def test_search_page_dates_cannot_enter_automatic_or_tool_discovery(monkeypatch)
     assert result["_validated_stage_finding"]["evidence_quote"] == case["evidence_quote"]
     assert result["usage"]["search_calls"] == investigator.MAX_SEARCH_CALLS == 2
     assert result["usage"]["fetch_calls"] == 0
-    assert investigator.MAX_FETCH_CALLS == 3
+    assert investigator.MAX_FETCH_CALLS == 4
+    assert investigator.MAX_PREFETCHED_PAGES == 3
     fetch.assert_not_called()
 
 

@@ -1018,13 +1018,16 @@ _ACQUISITION_CONDITIONAL_RE = re.compile(
 _PRIVATE_EQUITY_SPONSOR_CLASSIFICATION_RE = re.compile(
     r"(?:^|[.!?;\n]\s*)(?P<sponsor>[A-Z][A-Za-z0-9&/'’.-]*"
     r"(?:[ \t]+[A-Z][A-Za-z0-9&/'’.-]*){0,9})\s+"
-    r"(?i:(?:is|remains)\s+"
+    r"(?i:(?:(?:is|remains)\s+"
     r"(?:(?:a|an|the|leading|global|independent|specialist|international|"
     r"diversified|alternative)\s+){0,6}"
     r"(?:private[- ]equity|private[- ]markets)\s+"
     r"(?:firm|investor|sponsor|investment\s+(?:firm|manager))\b"
-    r"(?!\s*['’]s\b)|"
-    r"sponsors\s+investment\s+funds\s+that\s+invest\s+in\s+private\s+equity\b)"
+    r"|sponsors\s+investment\s+funds\s+that\s+invest\s+in\s+private\s+equity\b)"
+    # The classification noun must be complete. A possessive, compound, or
+    # following role noun describes a relationship to a PE firm, not its type.
+    r"(?=$|[.!?;,](?:\s|$)|\s+(?:focused\s+on|speciali[sz]ing\s+in|"
+    r"based\s+in|headquartered\s+in|that|which|with|and|whose)\b))"
 )
 
 

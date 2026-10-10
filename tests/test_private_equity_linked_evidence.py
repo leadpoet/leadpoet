@@ -156,6 +156,17 @@ def test_insufficient_pending_wrong_entity_or_superseded_ownership_is_unproven(p
     "Atlas Capital is a private equity investor's subsidiary.",
     "Atlas Capital is a private equity investor’s subsidiary.",
     "Atlas Capital is a private markets investment manager's client.",
+    "Atlas Capital is a private equity firm-backed provider.",
+    "Atlas Capital is a private equity investor-owned subsidiary.",
+    "Atlas Capital is a private equity firm consultant.",
+    "Atlas Capital is a private equity firm service provider.",
+    "Atlas Capital is a private equity firm customer.",
+    "Atlas Capital is a private equity investment manager subsidiary.",
+    "Atlas Capital is a private equity firm/customer.",
+    "Atlas Capital is a private equity firm—customer.",
+    "Atlas Capital is a private equity firm – customer.",
+    "Atlas Capital is a private equity firm.customer.",
+    "Atlas Capital sponsors investment funds that invest in private equity-backed debt.",
     "Atlas Capital is not a private equity firm.",
     "Atlas Capital was previously a private equity firm.",
     "Other Capital is a private equity firm. Its investor is Atlas Capital.",
@@ -165,6 +176,18 @@ def test_classification_requires_same_explicit_sponsor(support):
         ["Acme"], "Acme is majority-owned by Atlas Capital.", [support],
     )
     assert _validated(support=support)["status"] == "UNPROVEN"
+
+
+@pytest.mark.parametrize("ending", [
+    "", ".", ", with offices worldwide.", "; it operates worldwide.",
+    " focused on infrastructure.", " specializing in infrastructure.",
+    " based in London.", " headquartered in London.",
+    " that invests in infrastructure.", " which invests in infrastructure.",
+    " with infrastructure funds.", " and manages infrastructure funds.",
+    " whose funds invest in infrastructure.",
+])
+def test_complete_classification_and_grammatical_continuations(ending):
+    assert _validated(support="Atlas Capital is a private equity firm" + ending)["status"] == "VERIFIED"
 
 
 @pytest.mark.parametrize("primary", [
@@ -295,6 +318,33 @@ def test_private_equity_prompt_keeps_existing_research_and_tool_limits():
      "KKR is a private equity firm's customer.", KKR_URL, False),
     ("Origis Energy", ORIGIS_QUOTE, ORIGIS_URL,
      "Antin Infrastructure Partners is a private equity investor’s subsidiary.",
+     ORIGIS_URL, False),
+    ("Avantus", AVANTUS_QUOTE, AVANTUS_URL,
+     "KKR is a private equity firm-backed provider.", KKR_URL, False),
+    ("Origis Energy", ORIGIS_QUOTE, ORIGIS_URL,
+     "Antin Infrastructure Partners is a private equity investor-owned subsidiary.",
+     ORIGIS_URL, False),
+    ("Avantus", AVANTUS_QUOTE, AVANTUS_URL,
+     "KKR sponsors investment funds that invest in private equity-backed debt.",
+     KKR_URL, False),
+    ("Avantus", AVANTUS_QUOTE, AVANTUS_URL,
+     "KKR is a private equity firm consultant.", KKR_URL, False),
+    ("Avantus", AVANTUS_QUOTE, AVANTUS_URL,
+     "KKR is a private equity firm service provider.", KKR_URL, False),
+    ("Avantus", AVANTUS_QUOTE, AVANTUS_URL,
+     "KKR is a private equity firm customer.", KKR_URL, False),
+    ("Origis Energy", ORIGIS_QUOTE, ORIGIS_URL,
+     "Antin Infrastructure Partners is a private equity investment manager subsidiary.",
+     ORIGIS_URL, False),
+    ("Avantus", AVANTUS_QUOTE, AVANTUS_URL,
+     "KKR is a private equity firm/customer.", KKR_URL, False),
+    ("Origis Energy", ORIGIS_QUOTE, ORIGIS_URL,
+     "Antin Infrastructure Partners is a private equity firm—customer.",
+     ORIGIS_URL, False),
+    ("Avantus", AVANTUS_QUOTE, AVANTUS_URL,
+     "Other Capital is a private equity firm. KKR advises Other Capital.", KKR_URL, False),
+    ("Origis Energy", ORIGIS_QUOTE, ORIGIS_URL,
+     "Other Capital is a private equity firm. Antin Infrastructure Partners is an investor.",
      ORIGIS_URL, False),
 ])
 @pytest.mark.parametrize("model_status", ["VERIFIED", "UNPROVEN"])

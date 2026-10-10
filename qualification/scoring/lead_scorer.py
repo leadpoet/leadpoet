@@ -6971,8 +6971,9 @@ async def _run_targeted_company_evidence_investigation(
     )
     submitted_source_hints: list[dict[str, str]] = []
     if (
-        "stage" in investigation_targets
-        and _normalize_company_stage(icp_stage) == "public"
+        ("stage" in investigation_targets
+         and _normalize_company_stage(icp_stage) == "public")
+        or "required_attribute" in investigation_targets
     ):
         hint_candidates = [
             *((item.get("url"), item.get("quote")) for item in stage_evidence),

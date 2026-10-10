@@ -2323,6 +2323,27 @@ class ArenaService:
     def benchmark_icps(self, round_id: str) -> List[Dict[str, Any]]:
         return self._benchmark_icps_from_row(round_id, self._round(round_id))
 
+    @staticmethod
+    def _benchmark_document_round_id(
+        round_id: str, round_row: Mapping[str, Any]
+    ) -> str:
+        """Return the round id the committed benchmark document must carry.
+
+        A recovery archive round is an immutable copy of its source round and
+        reuses that round's committed benchmark object, so the document names
+        the source round rather than the archive. Only the archive's own frozen
+        configuration can nominate that source id; every other round still has
+        to match its own id exactly.
+        """
+
+        configuration = round_row.get("configuration_doc") or {}
+        source_round_id = configuration.get("recovery_source_round_id")
+        if type(source_round_id) is not str or not source_round_id:
+            return round_id
+        if str(round_row.get("benchmark_ref") or "") != "arena/%s/benchmark.json" % source_round_id:
+            return round_id
+        return source_round_id
+
     def _benchmark_icps_from_row(
         self, round_id: str, round_row: Mapping[str, Any]
     ) -> List[Dict[str, Any]]:
@@ -2332,7 +2353,7 @@ class ArenaService:
         document = json.loads(self._objects.get(ref).decode("utf-8"))
         if not isinstance(document, Mapping) or set(document) != {"schema_version", "round_id", "icps"}:
             raise ServiceError("benchmark_data_invalid", 500)
-        if document.get("schema_version") != "leadpoet.lab_arena.benchmark.v1" or document.get("round_id") != round_id:
+        if document.get("schema_version") != "leadpoet.lab_arena.benchmark.v1" or document.get("round_id") != self._benchmark_document_round_id(round_id, round_row):
             raise ServiceError("benchmark_data_invalid", 500)
         icps = list(document["icps"])
         if len(icps) != contracts.benchmark_icp_count(round_row.get("configuration_doc")):

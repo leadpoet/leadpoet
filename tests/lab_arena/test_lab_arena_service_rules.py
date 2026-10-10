@@ -3066,3 +3066,68 @@ def test_duplicate_daily_icp_ids_cancel_the_round_as_invalid():
     assert service._store.cancelled == [
         ("arena-2026-09-03", "benchmark_data_invalid")
     ]
+
+
+def _recovery_archive_service(icps, document_round_id="arena-2026-10-10"):
+    """A recovery archive round reusing its source round's benchmark object."""
+
+    ref = "arena/%s/benchmark.json" % document_round_id
+    document = json.dumps({
+        "schema_version": "leadpoet.lab_arena.benchmark.v1",
+        "round_id": document_round_id,
+        "icps": icps,
+    }).encode("utf-8")
+
+    class Objects:
+        @staticmethod
+        def get(requested_ref):
+            assert requested_ref == ref
+            return document
+
+    service = object.__new__(ArenaService)
+    service._objects = Objects()
+    return service, ref
+
+
+def _archive_row(ref, *, source_round_id="arena-2026-10-10"):
+    return {
+        "round_id": "arena-2026-10-10-r445archive",
+        "benchmark_ref": ref,
+        "configuration_doc": {
+            "mode": "live",
+            "recovery_source_round_id": source_round_id,
+        },
+    }
+
+
+def test_recovery_archive_round_reads_its_source_round_benchmark():
+    icps = _daily_source_icps()
+    service, ref = _recovery_archive_service(icps)
+
+    assert service._benchmark_icps_from_row(
+        "arena-2026-10-10-r445archive", _archive_row(ref)
+    ) == icps
+
+
+def test_recovery_archive_cannot_nominate_an_unrelated_source_round():
+    """The nominated source must be the round the frozen pointer names."""
+
+    service, ref = _recovery_archive_service(_daily_source_icps())
+    row = _archive_row(ref, source_round_id="arena-2026-10-09")
+
+    with pytest.raises(ServiceError) as raised:
+        service._benchmark_icps_from_row("arena-2026-10-10-r445archive", row)
+    assert raised.value.code == "benchmark_data_invalid"
+
+
+def test_ordinary_round_still_requires_its_own_benchmark_identity():
+    service, ref = _recovery_archive_service(_daily_source_icps())
+    row = {
+        "round_id": "arena-2026-10-11",
+        "benchmark_ref": ref,
+        "configuration_doc": {"mode": "live"},
+    }
+
+    with pytest.raises(ServiceError) as raised:
+        service._benchmark_icps_from_row("arena-2026-10-11", row)
+    assert raised.value.code == "benchmark_data_invalid"

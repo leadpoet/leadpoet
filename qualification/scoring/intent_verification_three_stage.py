@@ -1786,6 +1786,18 @@ def _exact_ats_result_binds_company(
     )
 
 
+def _is_recognized_ats_posting(source_url: str) -> bool:
+    """Recognize a posting for identity checks without asserting ownership."""
+
+    parsed = urlsplit(source_url)
+    location = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    return (
+        _ashby_posting_identity(location) is not None
+        or _greenhouse_posting_identity(location) is not None
+        or _lever_posting_identity(location) is not None
+    )
+
+
 def _grounded_exact_text(source_text: str, quote: Any) -> bool:
     """Match source text, ignoring whitespace and optional quotation wrappers.
 
@@ -2998,18 +3010,6 @@ def _build_final_judge_prompt(
     Snapshot equality test: ``tests/test_prompt_refactor.py``.
     """
     suffix = ""
-    if row.get("_exact_hiring_employer_binding") is True:
-        suffix += (
-            "\n\nMODEL-OWNED EXACT HIRING EMPLOYER BINDING:\n"
-            "Deterministic checks established that the exact supplied URL is "
-            "a successfully fetched single-posting ATS page whose strict "
-            "tenant binds to the lead. Do not fail same_entity_check or "
-            "return wrong_entity solely because the grounded job text omits "
-            "the employer name. Still return wrong_entity if the fetched "
-            "body explicitly identifies a different employer. Evaluate role "
-            "alignment, source grounding, open/closed state, freshness, and "
-            "every other invariant normally."
-        )
     if verified_identity_context:
         suffix += _verified_company_identity_instructions(
             row, verified_identity_context
@@ -3625,7 +3625,8 @@ def _apply_guardrails(
 
 
 def _decision(
-    verdict: Dict[str, Any], *, company_quality: bool = False
+    verdict: Dict[str, Any], *, company_quality: bool = False,
+    require_same_entity: bool = False,
 ) -> str:
     item = ((verdict.get("signal_evaluations") or [{}]) or [{}])[0]
     if item.get("same_entity_check") == "fail":
@@ -3638,7 +3639,7 @@ def _decision(
             or verdict.get("overall_verdict") == "qualified"
         )
         and (
-            not company_quality
+            not (company_quality or require_same_entity)
             or item.get("same_entity_check") == "pass"
         )
     ):
@@ -4496,6 +4497,19 @@ async def verify_three_stage(
         # builder.  None is fine; the dispatcher's default branch handles it.
         "_evidence_type": (evidence_type or "").strip().upper() or None,
     }
+    is_hiring_claim = bool(
+        row["_evidence_type"] == "HIRING"
+        or (
+            not row["_evidence_type"]
+            and _is_active_hiring_claim(miner_claim, target_signal_text)
+        )
+    )
+    # Exact ATS retrieval establishes which posting was fetched, not who owns
+    # its tenant. A hiring verdict must independently bind the employer.
+    require_ats_employer_identity = is_hiring_claim and any(
+        _is_recognized_ats_posting(url)
+        for url in row["claimed_source_urls"]
+    )
 
     # Structural same-entity override: when the source URL is on the
     # lead's own ``company_website`` host (or subdomain), or on the
@@ -4574,7 +4588,8 @@ async def verify_three_stage(
         s1_verdict = _apply_guardrails(row, s1_verdict_raw)
         s1_item = ((s1_verdict.get("signal_evaluations") or [{}]) or [{}])[0]
         s1_decision = _decision(
-            s1_verdict, company_quality=company_quality
+            s1_verdict, company_quality=company_quality,
+            require_same_entity=require_ats_employer_identity,
         )
         stage1_info = {
             "model": s1_envelope.get("model"),
@@ -4750,17 +4765,6 @@ async def verify_three_stage(
             # "Hive"). Defer to the authoritative Stage-3 entity judge.
             company_check = None
 
-    evidence_type = str(row.get("_evidence_type") or "").strip().upper()
-    is_hiring_claim = bool(
-        evidence_type == "HIRING"
-        or (
-            not evidence_type
-            and _is_active_hiring_claim(
-                row.get("claim") or "",
-                row.get("_target_signal_text") or "",
-            )
-        )
-    )
     exact_ats_employer_binding = bool(
         not company_quality
         and _exact_ats_result_binds_company(
@@ -4770,11 +4774,6 @@ async def verify_three_stage(
             company_name=company_name,
         )
     )
-    exact_hiring_employer_binding = bool(
-        len(bundle) <= 1 and is_hiring_claim and exact_ats_employer_binding
-    )
-    if exact_hiring_employer_binding:
-        row["_exact_hiring_employer_binding"] = True
     for res in (contents.get("results") or []):
         meta = res.get("meta") or {}
         if meta.get("kind") != "linkedin_job":
@@ -4928,78 +4927,6 @@ async def verify_three_stage(
             "company_check": company_check,
         }
     s3_verdict_raw = (s3_envelope.get("answer") or {})
-    if exact_hiring_employer_binding:
-        combined_exact_source = "\n".join(
-            str(result.get("text") or "")
-            for result in (contents.get("results") or [])
-            if isinstance(result, Mapping)
-        )
-        normalized_source_url = _normalize_url(fetch_source_url)
-        for item in (s3_verdict_raw.get("signal_evaluations") or []):
-            supporting_quotes = [
-                str(value or "").strip()
-                for value in (item.get("supporting_quotes") or [])
-                if str(value or "").strip()
-            ]
-            grounded_contradictions = [
-                value
-                for value in (item.get("contradicting_quotes") or [])
-                if _grounded_exact_text(combined_exact_source, value)
-            ]
-            cited_urls = {
-                _normalize_url(url)
-                for url in (item.get("evidence_urls_used") or [])
-                if str(url or "").strip()
-            }
-            deterministic_exact_hiring_evidence = (
-                # The exact, currently listed ATS record is the authority here.
-                # It can resolve employer identity and posting state, but it
-                # cannot resolve a partial or failed claim-to-ICP semantic fit.
-                # Normalize only a verdict that already says the claim is
-                # supported; every other semantic status keeps its normal
-                # fail-closed outcome.
-                item.get("signal_status") == "supported"
-                and item.get("verification_mode") == "source_grounded"
-                and item.get("confidence") in {"medium", "high"}
-                and item.get("same_entity_check") in {"pass", "unclear", "fail"}
-                and (
-                    item.get("claim_matches_miner_date")
-                    in {"consistent", "no_date_in_content"}
-                    or (
-                        integrity_policy
-                        and item.get("claim_matches_miner_date") == "contradicted"
-                    )
-                )
-                and str(item.get("claim") or "") == str(row.get("claim") or "")
-                # Model-owned verified-event summaries are normalized claims,
-                # not promised verbatim source spans.  Ground the evidence
-                # quotes below against the exact live ATS body instead of
-                # rejecting a valid posting because its summary was rewritten.
-                and supporting_quotes
-                and all(
-                    _grounded_exact_text(combined_exact_source, quote)
-                    for quote in supporting_quotes
-                )
-                and not grounded_contradictions
-                and cited_urls == {normalized_source_url}
-                and str(item.get("source_accessibility") or "")
-                .strip()
-                .casefold()
-                == "accessible"
-                and _LINKEDIN_JOB_CLOSED_RE.search(combined_exact_source) is None
-                and s3_verdict_raw.get("overall_confidence")
-                in {"medium", "high"}
-            )
-            if deterministic_exact_hiring_evidence:
-                item["same_entity_check"] = "pass"
-                item["signal_status"] = "supported"
-                item["confidence"] = "high"
-                item["unsupported_parts"] = []
-                item.setdefault("risk_notes", []).append(
-                    "normalized_exact_hiring_employer_binding"
-                )
-                s3_verdict_raw["overall_verdict"] = "qualified"
-                s3_verdict_raw["overall_confidence"] = "high"
     s3_verdict = _apply_guardrails(row, s3_verdict_raw)
     s3_item = ((s3_verdict.get("signal_evaluations") or [{}]) or [{}])[0]
     _bind_approximate_event_month(s3_item, combined_text, str(row["claim"]))
@@ -5169,7 +5096,7 @@ async def verify_three_stage(
     evidence_clarification: Optional[Dict[str, Any]] = None
     clarification_kind = None
     if (
-        company_quality
+        (company_quality or require_ats_employer_identity)
         and s3_item.get("signal_status") == "supported"
         and s3_item.get("confidence") == "high"
         and s3_item.get("same_entity_check") == "unclear"
@@ -5329,7 +5256,10 @@ async def verify_three_stage(
             identity_clarification = clarification_receipt
         else:
             evidence_clarification = clarification_receipt
-    s3_decision = _decision(s3_verdict, company_quality=company_quality)
+    s3_decision = _decision(
+        s3_verdict, company_quality=company_quality,
+        require_same_entity=require_ats_employer_identity,
+    )
     closed_only_hiring_evidence = False
     if integrity_policy and is_hiring_claim and len(bundle) > 1:
         cited_urls = {
@@ -5417,7 +5347,7 @@ async def verify_three_stage(
         )
     else:  # review
         if (
-            company_quality
+            (company_quality or require_ats_employer_identity)
             and s3_item.get("same_entity_check") != "pass"
         ):
             client_ready = False

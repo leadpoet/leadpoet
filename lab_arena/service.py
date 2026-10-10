@@ -34,6 +34,7 @@ from lab_arena.store import (
     ArenaStoreError,
     ArenaStoreUnavailable,
     CURRENT_CONFIGURATION_FIELDS,
+    PUBLIC_RESULTS_CONFIGURATION_FIELDS,
     hash_lease_token,
 )
 from gateway.utils.hotkey_roles import (
@@ -357,12 +358,14 @@ class S3ObjectStore:
 
     def get_bounded(self, ref: str, max_bytes: int) -> bytes:
         key = self._key(ref)
-        head = self._client.head_object(Bucket=self._bucket, Key=key)
-        if int(head.get("ContentLength") or 0) > int(max_bytes):
-            raise ArenaContractError("object exceeds source size limit")
         response = self._client.get_object(Bucket=self._bucket, Key=key)
         body = response["Body"]
         try:
+            # GET carries the size of the same object version as its body.
+            # Check before reading; the bounded read also covers absent or
+            # understated lengths without a separate HEAD round trip.
+            if int(response.get("ContentLength") or 0) > int(max_bytes):
+                raise ArenaContractError("object exceeds source size limit")
             data = body.read(int(max_bytes) + 1)
         finally:
             close = getattr(body, "close", None)
@@ -799,6 +802,25 @@ class ArenaService:
         if row is None:
             raise ServiceError("round_missing", 404)
         return self._require_round_mode(row)
+
+    def _public_results_round(self, round_id: str) -> Dict[str, Any]:
+        """Keep the published read small; other statuses need the full row."""
+
+        read_published = getattr(self._store, "get_published_results_round", None)
+        if read_published is None:
+            return self._round(round_id)
+        self._require_round_ownership(round_id)
+        row = read_published(round_id)
+        if row is None:
+            # Completed, unpublished submissions use the whole frozen round
+            # when their score cache refreshes.
+            return self._round(round_id)
+        configuration = {
+            key: json.loads(row["cfg_" + key])
+            for key in PUBLIC_RESULTS_CONFIGURATION_FIELDS
+            if row.get("cfg_" + key) is not None
+        }
+        return self._require_round_mode({**row, "configuration_doc": configuration})
 
     def _pinned_round_id(self) -> Optional[str]:
         return getattr(getattr(self, "_config", None), "pinned_round_id", None)
@@ -6238,7 +6260,7 @@ class ArenaService:
     def public_results(self, round_id: str, submission_id: str) -> Dict[str, Any]:
         if not submission_id or not isinstance(submission_id, str):
             raise ServiceError("submission_missing", 404)  # an empty id must never mean "every submission"
-        row = self._round(round_id)
+        row = self._public_results_round(round_id)
         round_status = str(row["status"])
         completed = self.completed_submission_scores(row).get(submission_id) if round_status != "published" else None
         if round_status != "published" and completed is None:

@@ -409,6 +409,7 @@ class StoreTransport:
         before_round: Optional[tuple[str, str]] = None,
         status_in: Optional[Sequence[str]] = None,
         submission_ids: Optional[Sequence[str]] = None,
+        public_result_pair: Optional[tuple[str, str]] = None,
         run_ids: Optional[Sequence[str]] = None,
         cache_keys: Optional[Sequence[str]] = None,
         columns: str = "*",
@@ -570,6 +571,7 @@ class PostgrestTransport(StoreTransport):
         before_round=None,
         status_in=None,
         submission_ids=None,
+        public_result_pair=None,
         run_ids=None,
         cache_keys=None,
         columns="*",
@@ -604,6 +606,11 @@ class PostgrestTransport(StoreTransport):
             if not ids:
                 raise ArenaStoreError("submission inclusion filter is empty")
             query.append(("submission_id", "in.(%s)" % ",".join(ids)))
+        if public_result_pair is not None:
+            if table != "lab_arena_runs" or len(public_result_pair) != 2 or "kind" in (filters or {}) or "submission_id" in (filters or {}) or submission_ids is not None:
+                raise ArenaStoreError("public result run filter is invalid")
+            baseline_id, target_id = (_check_filter_value(value) for value in public_result_pair)
+            query.append(("or", "(and(submission_id.eq.%s,kind.eq.execute),and(submission_id.eq.%s,kind.in.(execute,score)))" % (baseline_id, target_id)))
         if run_ids is not None:
             if table not in ("lab_arena_runs", "lab_arena_trajectory_events") or "run_id" in (filters or {}):
                 raise ArenaStoreError("run inclusion filter is invalid")
@@ -799,6 +806,7 @@ class PsycopgTransport(StoreTransport):
         before_round=None,
         status_in=None,
         submission_ids=None,
+        public_result_pair=None,
         run_ids=None,
         cache_keys=None,
         columns="*",
@@ -854,6 +862,12 @@ class PsycopgTransport(StoreTransport):
                 raise ArenaStoreError("submission inclusion filter is empty")
             clauses.append("submission_id = ANY(%s)")
             values.append(list(ids))
+        if public_result_pair is not None:
+            if table != "lab_arena_runs" or len(public_result_pair) != 2 or "kind" in (filters or {}) or "submission_id" in (filters or {}) or submission_ids is not None:
+                raise ArenaStoreError("public result run filter is invalid")
+            baseline_id, target_id = (_check_filter_value(value) for value in public_result_pair)
+            clauses.append("((submission_id = %s AND kind = 'execute') OR (submission_id = %s AND kind IN ('execute', 'score')))")
+            values.extend((baseline_id, target_id))
         if run_ids is not None:
             if table not in ("lab_arena_runs", "lab_arena_trajectory_events") or "run_id" in (filters or {}):
                 raise ArenaStoreError("run inclusion filter is invalid")
@@ -2450,7 +2464,7 @@ class ArenaStore:
                 offset += 500
         return rows
 
-    def list_runs(self, round_id: str, *, stage: Optional[int] = None, status: Optional[str] = None, submission_id: Optional[str] = None, kind: Optional[str] = None, columns: str = "*", submission_ids: Optional[Sequence[str]] = None) -> List[Dict[str, Any]]:
+    def list_runs(self, round_id: str, *, stage: Optional[int] = None, status: Optional[str] = None, submission_id: Optional[str] = None, kind: Optional[str] = None, columns: str = "*", submission_ids: Optional[Sequence[str]] = None, public_result_pair: Optional[tuple[str, str]] = None) -> List[Dict[str, Any]]:
         filters: Dict[str, Any] = {"round_id": round_id}
         if stage is not None:
             filters["stage"] = int(stage)
@@ -2471,6 +2485,7 @@ class ArenaStore:
                 limit=page_size, after_run_id=after_run_id,
                 **({"columns": columns} if columns != "*" else {}),
                 **({"submission_ids": submission_ids} if submission_ids is not None else {}),
+                **({"public_result_pair": public_result_pair} if public_result_pair is not None else {}),
             )
             rows.extend(page)
             if len(page) < page_size:
@@ -2485,6 +2500,15 @@ class ArenaStore:
         return self.list_runs(
             round_id, kind="execute",
             submission_ids=tuple(dict.fromkeys((baseline_id, submission_id))),
+        )
+
+    def list_public_result_runs(
+        self, round_id: str, baseline_id: str, submission_id: str
+    ) -> List[Dict[str, Any]]:
+        """Read baseline executions and target executions/scores in run order."""
+
+        return self.list_runs(
+            round_id, public_result_pair=(baseline_id, submission_id),
         )
 
     def list_ledger(

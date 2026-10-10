@@ -309,6 +309,12 @@ CURRENT_CONFIGURATION_FIELDS = (
     "mode", "schedule", "stage_1_icp_count", "stage_2_icp_count", "promotion_margin",
     "integrity_policy", "contact_policy", "company_quality_policy", "intent_details_policy",
 )
+PUBLIC_RESULTS_CONFIGURATION_FIELDS = (
+    "mode", "network_name", "netuid", "schedule",
+    "benchmark_disclosure_policy", "stage_1_icp_count", "stage_2_icp_count",
+    "integrity_policy", "contact_policy", "company_quality_policy",
+    "intent_details_policy", "scorer_policy",
+)
 # Fixed public audit projections. Never fetch source or provider documents.
 _RUNTIME_JSON_COLUMNS = {
     "source_commit:result_doc->resource_summary->>validator_source_commit": "result_doc #>> '{resource_summary,validator_source_commit}' AS source_commit",
@@ -319,7 +325,8 @@ _RUNTIME_JSON_COLUMNS = {
     **{
         "cfg_%s:configuration_doc->%s::text" % (key, key):
         "(configuration_doc -> '%s')::text AS cfg_%s" % (key, key)
-        for key in COMPETITION_CONFIGURATION_FIELDS + CURRENT_CONFIGURATION_FIELDS + ("baseline_hotkey",)
+        for key in COMPETITION_CONFIGURATION_FIELDS + CURRENT_CONFIGURATION_FIELDS
+        + PUBLIC_RESULTS_CONFIGURATION_FIELDS + ("baseline_hotkey",)
     },
 }
 ROUND_NETWORK_COLUMN = "arena_network_name"
@@ -1427,6 +1434,23 @@ class ArenaStore:
 
     def get_round(self, round_id: str) -> Optional[Dict[str, Any]]:
         rows = self._transport.select("lab_arena_rounds", filters={"round_id": round_id}, limit=1)
+        return rows[0] if rows else None
+
+    def get_published_results_round(self, round_id: str) -> Optional[Dict[str, Any]]:
+        """Read only published result authorities and the configuration they use."""
+
+        columns = (
+            "round_id,status,participants,benchmark_ref,evaluation_date,icp_set_date,publication_doc,"
+            + ",".join(
+                "cfg_%s:configuration_doc->%s::text" % (key, key)
+                for key in PUBLIC_RESULTS_CONFIGURATION_FIELDS
+            )
+        )
+        rows = self._transport.select(
+            "lab_arena_rounds",
+            filters={"round_id": round_id, "status": "published"},
+            limit=1, columns=columns,
+        )
         return rows[0] if rows else None
 
     def list_rounds(

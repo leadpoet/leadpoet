@@ -1,5 +1,16 @@
 # Agent Instructions
 
+## Scoped production authorization: October 10 restart and result latency
+
+On 2026-10-10 the user authorized completion of the validator restart,
+result-read latency, and October 10 publication audit. Use the overnight
+validation procedures for protected inspection, narrow proven fixes, focused
+tests, safe push/merge, canonical paired deployment, and live load/publication
+checks. Preserve scoring, round timing, retries, concurrency limits, active
+jobs, credentials, weights, operator controls, and concurrent work. Identify
+the external updater before changing it; do not claim its recovery without
+host evidence. This authority ends after the requested production verification.
+
 ## Scoped production authorization: October 9 dashboard failure audit
 
 The user authorized minimal live dashboard cleanup followed by investigation

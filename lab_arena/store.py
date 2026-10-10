@@ -288,6 +288,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
 
 TABLES = (
     "lab_arena_rounds",
+    "lab_arena_published_results_v1",
     "lab_arena_submissions",
     "lab_arena_runs",
     "lab_arena_ledger",
@@ -1454,7 +1455,7 @@ class ArenaStore:
             )
         )
         rows = self._transport.select(
-            "lab_arena_rounds",
+            "lab_arena_published_results_v1",
             filters={"round_id": round_id, "status": "published"},
             limit=1, columns=columns,
         )

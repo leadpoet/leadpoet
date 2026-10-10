@@ -42,7 +42,8 @@ def _round(status="published", **configuration):
                             "stage1_ranking": [{"submission_id": SUBMISSION_ID,
                                                 "stage1_score": 12.5}],
                             "final_ranking": [{"submission_id": SUBMISSION_ID,
-                                               "final_score": 15.0}]},
+                                               "final_score": 15.0,
+                                               "cost_summary": {"unused": "x" * 20_000}}]},
     }
 
 
@@ -51,12 +52,19 @@ class RoundTransport:
         self.row, self.calls, self.returned = row, [], []
 
     def select(self, table, **query):
-        assert table == "lab_arena_rounds"
+        assert table == "lab_arena_published_results_v1"
         self.calls.append(query)
         if self.row is None or any(self.row.get(key) != value for key, value
                                    in query["filters"].items()):
             return []
         result = _project(self.row, query.get("columns", "*"))
+        publication = result.get("publication_doc")
+        if isinstance(publication, dict) and isinstance(publication.get("final_ranking"), list):
+            publication["final_ranking"] = [
+                {key: value for key, value in entry.items() if key != "cost_summary"}
+                if isinstance(entry, dict) else entry
+                for entry in publication["final_ranking"]
+            ]
         self.returned.append(result)
         return [result]
 
@@ -84,6 +92,7 @@ def test_published_results_match_full_row_and_omit_catalog():
     assert compact.public_results(ROUND_ID, SUBMISSION_ID) == expected
     assert transport.calls[0]["filters"] == {"round_id": ROUND_ID, "status": "published"}
     assert "configuration_doc" not in transport.returned[0]
+    assert "cost_summary" not in json.dumps(transport.returned[0])
     assert "private-catalog" not in json.dumps(transport.returned)
     assert len(json.dumps(transport.returned)) < len(json.dumps(row)) / 10
 
@@ -181,6 +190,7 @@ def test_result_projection_uses_fixed_json_aliases_in_both_transports():
         ArenaStore(PostgrestTransport("https://example.test", service_key="sb_secret_test",
                                      http_client=http)).get_published_results_round(ROUND_ID)
     params = requests[0].url.params
+    assert requests[0].url.path.endswith("/lab_arena_published_results_v1")
     assert params["status"] == "eq.published"
     assert "configuration_doc" not in params["select"].split(",")
     assert "stage2_scoring_plan_doc" not in params["select"]
@@ -202,6 +212,7 @@ def test_result_projection_uses_fixed_json_aliases_in_both_transports():
     direct._release = lambda _connection: None
     ArenaStore(direct).get_published_results_round(ROUND_ID)
     sql, values = queries[0]
+    assert "FROM public.lab_arena_published_results_v1" in sql
     assert "status = %s" in sql and values == [ROUND_ID, "published"]
     assert ":configuration_doc" not in sql
     for key in PUBLIC_RESULTS_CONFIGURATION_FIELDS:

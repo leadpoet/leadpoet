@@ -74,6 +74,10 @@ BEGIN
      OR v_round.status_generation IS DISTINCT FROM ((v_expected->>'round_status_generation')::INTEGER
        + array_position(ARRAY['stage2_closed','stage2_scoring','stage2_judged','scored'],v_round.status)
        - array_position(ARRAY['stage2_closed','stage2_scoring','stage2_judged','scored'],v_expected->>'round_status'))
+     OR v_actual->>'scoring_function_sha256' IS DISTINCT FROM (SELECT configuration_doc->>'recovery_scoring_function_sha256' FROM public.lab_arena_rounds WHERE round_id='arena-2026-10-10-r445archive')
+     OR v_actual->>'stage_function_sha256' IS DISTINCT FROM (SELECT configuration_doc->>'recovery_stage_function_sha256' FROM public.lab_arena_rounds WHERE round_id='arena-2026-10-10-r445archive')
+     OR v_actual->>'functions_security_sha256' IS DISTINCT FROM (SELECT configuration_doc#>>'{recovery_terminal_inventory,functions_security_sha256}' FROM public.lab_arena_rounds WHERE round_id='arena-2026-10-10-r445archive')
+     OR v_actual->>'triggers_sha256' IS DISTINCT FROM (SELECT configuration_doc#>>'{recovery_terminal_inventory,triggers_sha256}' FROM public.lab_arena_rounds WHERE round_id='arena-2026-10-10-r445archive')
      OR v_round.status NOT IN ('stage2_closed','stage2_scoring','stage2_judged','scored')
      OR v_round.configuration_doc->>'mode' IS DISTINCT FROM 'live'
      OR v_round.configuration_doc->>'execution_sequence_policy' IS DISTINCT FROM 'baseline_scored_first_v1'

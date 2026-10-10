@@ -72,3 +72,23 @@ def test_hold_rejects_wrong_proof_with_no_writes(unheld,mutation):
                 cur.execute(sql)
             cur.execute('ROLLBACK')
             assert recovery._snapshot(cur)==before
+
+
+@pytest.mark.parametrize('mutation',[
+    "ALTER FUNCTION public.lab_arena_open_stage(text,smallint,jsonb,integer[]) SET search_path=public,pg_catalog",
+    "ALTER FUNCTION public.lab_arena_open_scoring_v2(text,smallint,jsonb) SECURITY INVOKER",
+])
+def test_fresh_hold_snapshot_cannot_authorize_changed_canonical_function(unheld,mutation):
+    psycopg,dsn=unheld
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit=True
+        with conn.cursor() as cur:
+            before=recovery._snapshot(cur)
+            cur.execute('BEGIN')
+            cur.execute(mutation)
+            # The independently captured445 postimage still binds canonical SQL.
+            sql=recovery._hold_render(cur)
+            with pytest.raises(psycopg.Error,match='Oct10 uniform hold447 terminal inventory'):
+                cur.execute(sql)
+            cur.execute('ROLLBACK')
+            assert recovery._snapshot(cur)==before

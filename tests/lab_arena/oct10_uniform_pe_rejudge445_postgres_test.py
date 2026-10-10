@@ -535,3 +535,101 @@ def test_orphan_or_mislabeled_score_event_is_not_archived(seeded):
             with pytest.raises(psycopg.Error, match='terminal hold or inventory invalid'):
                 cur.execute(_render(cur))
             cur.execute('ROLLBACK')
+
+
+def _billing_heads(cur, *, fenced):
+    # Read every fixed-round head, so equality proves more than the Boolean gate.
+    if fenced:
+        source = "(SELECT call_identity,entry_kind,entry_id FROM public.lab_arena_ledger WHERE round_id=%s AND call_identity IS NOT NULL OFFSET 0) exact_round"
+    else:
+        source = 'public.lab_arena_ledger WHERE round_id=%s AND call_identity IS NOT NULL'
+    cur.execute('SELECT DISTINCT ON(call_identity) call_identity,entry_kind,entry_id FROM ' + source + ' ORDER BY call_identity,entry_id DESC', (ROUND,))
+    return cur.fetchall()
+
+
+def _billing_test_entry(cur, kind, *, run_bound=False, round_id=ROUND, call='8'):
+    cur.execute("""INSERT INTO public.lab_arena_ledger
+        (entry_kind,round_id,submission_id,miner_hotkey,run_id,stage,provider,operation_id,funding_source,call_identity,amount_microusd)
+        SELECT %s,%s,submission_id,miner_hotkey,CASE WHEN %s THEN run_id ELSE NULL END,stage,
+          'openrouter','billing445-fence','miner_key','sha256:'||repeat(%s,64),123
+        FROM public.lab_arena_runs WHERE round_id=%s AND kind='execute' LIMIT 1""", (kind,round_id,run_bound,call,ROUND))
+
+
+@pytest.mark.parametrize('head', ['reservation','dispatch','settlement','uncertain','refusal','recovery'])
+@pytest.mark.parametrize('run_bound', [False,True])
+def test_fenced_billing_guard_preserves_every_head_including_unbound(seeded, head, run_bound):
+    psycopg, dsn = seeded
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute('BEGIN')
+            cur.execute('SET LOCAL session_replication_role=replica')
+            _billing_test_entry(cur,'reservation',run_bound=run_bound)
+            if head != 'reservation':
+                _billing_test_entry(cur,'dispatch',run_bound=run_bound)
+            if head not in ('reservation','dispatch'):
+                if head == 'settlement':
+                    _billing_test_entry(cur,'uncertain',run_bound=run_bound)
+                _billing_test_entry(cur,head,run_bound=run_bound)
+            cur.execute('SET LOCAL session_replication_role=origin')
+            before = _billing_heads(cur,fenced=False)
+            assert _billing_heads(cur,fenced=True) == before
+            assert next(row[1] for row in before if row[0]=='sha256:'+'8'*64) == head
+            # Exercise the actual rendered migration for active-head refusal.
+            if head in ('reservation','dispatch'):
+                with pytest.raises(psycopg.Error,match='terminal hold or inventory invalid'):
+                    cur.execute(_render(cur))
+            cur.execute('ROLLBACK')
+
+
+def test_fenced_billing_guard_excludes_foreign_later_rows_and_keeps_late_settlement(seeded):
+    psycopg, dsn = seeded
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute('SET session_replication_role=replica')
+            _billing_test_entry(cur,'reservation')
+            _billing_test_entry(cur,'settlement',round_id=old.ARCHIVE)
+            cur.execute('SET session_replication_role=origin')
+            heads = _billing_heads(cur,fenced=False)
+            assert _billing_heads(cur,fenced=True)==heads
+            assert next(row[1] for row in heads if row[0]=='sha256:'+'8'*64)=='reservation'
+            with pytest.raises(psycopg.Error,match='terminal hold or inventory invalid'):
+                cur.execute(_render(cur))
+            cur.execute('ROLLBACK')
+            # A same-round later terminal receipt closes the unbound call.
+            cur.execute('SET session_replication_role=replica')
+            _billing_test_entry(cur,'uncertain')
+            cur.execute('SET session_replication_role=origin')
+            heads = _billing_heads(cur,fenced=False)
+            assert _billing_heads(cur,fenced=True)==heads
+            assert next(row[1] for row in heads if row[0]=='sha256:'+'8'*64)=='uncertain'
+            cur.execute("SELECT to_jsonb(l) FROM public.lab_arena_ledger l WHERE call_identity=%s ORDER BY entry_id",('sha256:'+'8'*64,))
+            original=cur.fetchall()
+            sql=_render(cur)
+            cur.execute(sql)
+            cur.execute(sql)
+            cur.execute("SELECT to_jsonb(l) FROM public.lab_arena_ledger l WHERE call_identity=%s ORDER BY entry_id",('sha256:'+'8'*64,))
+            assert cur.fetchall()==original
+
+
+def test_fenced_billing_guard_keeps_mutation_and_null_identity_semantics(seeded):
+    psycopg, dsn = seeded
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute('BEGIN')
+            cur.execute('SET LOCAL session_replication_role=replica')
+            _billing_test_entry(cur,'reservation')
+            _billing_test_entry(cur,'dispatch',call='9')
+            cur.execute("UPDATE public.lab_arena_ledger SET call_identity=NULL WHERE operation_id='billing445-fence' AND entry_kind='dispatch'")
+            cur.execute('SET LOCAL session_replication_role=origin')
+            assert _billing_heads(cur,fenced=True)==_billing_heads(cur,fenced=False)
+            assert all(row[0]!='sha256:'+'9'*64 for row in _billing_heads(cur,fenced=True))
+            cur.execute('SET LOCAL session_replication_role=replica')
+            cur.execute("UPDATE public.lab_arena_ledger SET entry_kind='refusal' WHERE operation_id='billing445-fence' AND entry_kind='reservation'")
+            cur.execute('SET LOCAL session_replication_role=origin')
+            heads=_billing_heads(cur,fenced=True)
+            assert heads==_billing_heads(cur,fenced=False)
+            assert next(row[1] for row in heads if row[0]=='sha256:'+'8'*64)=='refusal'
+            cur.execute('ROLLBACK')

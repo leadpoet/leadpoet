@@ -75,7 +75,8 @@ from qualification.scoring.company_fit_decision import (
 )
 from qualification.scoring.company_evidence_investigator import (
     ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON,
-    MAX_FETCH_CALLS,
+    MAX_PREFETCHED_PAGES,
+    MAX_RETURNED_FETCHED_PAGES,
     MAX_PAGE_CHARACTERS,
     MAX_SUBMITTED_SOURCE_URLS,
     PRIVATE_FETCHED_PAGES_KEY,
@@ -2479,7 +2480,7 @@ def _hydrate_required_attribute_source_cache(
     """Replace one exact-URL negative with a trusted investigator fetch."""
 
     fetched_pages = investigation.get(PRIVATE_FETCHED_PAGES_KEY)
-    if not isinstance(fetched_pages, Mapping) or len(fetched_pages) > MAX_FETCH_CALLS:
+    if not isinstance(fetched_pages, Mapping) or len(fetched_pages) > MAX_RETURNED_FETCHED_PAGES:
         return
     for raw_url, raw_page in fetched_pages.items():
         if not isinstance(raw_page, Mapping):
@@ -2864,7 +2865,7 @@ def _retain_matched_company_retry_sources(
         if url in retained:
             retained[url] = page
             continue
-        if len(retained) >= MAX_FETCH_CALLS:
+        if len(retained) >= MAX_PREFETCHED_PAGES:
             continue
         retained[url] = page
     retry_cache.clear()
@@ -2898,7 +2899,7 @@ def _hydrate_verified_required_attribute_recovery_source(
         or not isinstance(quote, str)
         or not quote
         or not isinstance(fetched_pages, Mapping)
-        or len(fetched_pages) > MAX_FETCH_CALLS
+        or len(fetched_pages) > MAX_RETURNED_FETCHED_PAGES
     ):
         return False
     raw_page = fetched_pages.get(raw_url)
@@ -3023,7 +3024,7 @@ def _investigator_prefetched_pages_from_attribute_cache(
 
     candidates: dict[str, dict[str, Any]] = {}
     for raw_url in submitted_source_urls:
-        if len(candidates) >= MAX_FETCH_CALLS:
+        if len(candidates) >= MAX_PREFETCHED_PAGES:
             break
         entry = source_cache.get(raw_url)
         if not isinstance(entry, Mapping) or entry.get("status") != "fetched":
@@ -3072,7 +3073,7 @@ def _investigator_prefetched_pages(
         submitted_source_urls=submitted_source_urls,
     )
     for url, text in retry_pages.items():
-        if len(candidates) >= MAX_FETCH_CALLS:
+        if len(candidates) >= MAX_PREFETCHED_PAGES:
             break
         candidates.setdefault(
             url,
@@ -3083,7 +3084,7 @@ def _investigator_prefetched_pages(
         submitted_source_urls,
     )
     for url, page in attribute_pages.items():
-        if len(candidates) >= MAX_FETCH_CALLS:
+        if len(candidates) >= MAX_PREFETCHED_PAGES:
             break
         candidates.setdefault(url, page)
     evidence = structured_profile_description_evidence or {}
@@ -3108,7 +3109,7 @@ def _investigator_prefetched_pages(
     )
     if (
         include_structured_description
-        and len(candidates) < MAX_FETCH_CALLS
+        and len(candidates) < MAX_PREFETCHED_PAGES
         and set(evidence) == expected_keys
         and evidence.get("provider") == STRUCTURED_PROFILE_PROVIDER
         and evidence.get("source_field")

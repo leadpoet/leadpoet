@@ -329,7 +329,7 @@ def test_public_source_selection_prefers_supplied_issuer_evidence_within_limits(
         investigator.MAX_REASONING_TURNS,
         investigator.MAX_SEARCH_CALLS,
         investigator.MAX_FETCH_CALLS,
-    ) == (8, 2, 3)
+    ) == (8, 2, 4)
 
 
 def test_multitarget_budget_moves_from_proven_stage_to_unresolved_product():
@@ -1546,6 +1546,34 @@ def test_investigator_hydrates_only_matching_failed_attribute_source():
     assert "https://different.example/news" not in cache
 
 
+
+@pytest.mark.parametrize("page_count", [4, 7, 8])
+def test_investigator_returned_page_bound_preserves_a_later_quoted_source(page_count):
+    urls = [f"https://acme.example/source-{index}" for index in range(page_count)]
+    quote = "Acme supplies a payments platform to businesses."
+    pages = {url: {"final_url": url, "text": quote} for url in urls}
+    investigation = {investigator.PRIVATE_FETCHED_PAGES_KEY: pages}
+    target = urls[-1]
+    cache = {target: {"status": "source_unavailable", "final_url": "", "text": ""}}
+    lead_scorer._hydrate_required_attribute_source_cache(cache, investigation)
+    accepted = page_count <= investigator.MAX_RETURNED_FETCHED_PAGES
+    assert investigator.MAX_RETURNED_FETCHED_PAGES == 7
+    assert (cache[target]["status"] == "fetched") is accepted
+    if accepted:
+        assert cache[target]["text"] == quote
+
+    alternate_cache = {}
+    claim = _finding(
+        "industry", status="VERIFIED", activity_role="supplier_operator",
+        evidence_url=target, evidence_quote=quote,
+    )
+    assert lead_scorer._hydrate_verified_required_attribute_recovery_source(
+        alternate_cache, investigation, claim, verified_transport_domain="acme.example",
+    ) is accepted
+    assert (target in alternate_cache) is accepted
+    if accepted:
+        assert alternate_cache[target]["text"] == quote
+
 @pytest.mark.parametrize(
     "mode",
     [
@@ -1600,6 +1628,11 @@ def test_alternate_attribute_recovery_source_stays_fail_closed(mode):
             }
         }
     }
+    investigation[investigator.PRIVATE_FETCHED_PAGES_KEY].update({
+        f"https://www.happyrobot.ai/context-{index}": {
+            "final_url": f"https://www.happyrobot.ai/context-{index}", "text": quote,
+        } for index in range(3)
+    })
     if mode == "unfetched":
         investigation[investigator.PRIVATE_FETCHED_PAGES_KEY] = {}
     cache = {
@@ -3989,7 +4022,7 @@ def test_company_geography_repair_uses_bounded_current_contact_source(
         document = json.loads(payload["messages"][1]["content"].split("\n", 1)[1])
         assert document["requested_targets"] == ["geography"]
         assert document["server_priority_submitted_source"]["url"] == contact_url
-        assert document["investigation_limits"]["remaining_fetch_calls"] == 2
+        assert document["investigation_limits"]["remaining_fetch_calls"] == 3
         if isinstance(payload["tool_choice"], dict) and (
             payload["tool_choice"]["function"]["name"] == "search_web"
         ):
@@ -11357,7 +11390,7 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
     assert input_document["investigation_limits"] == {
         "reasoning_turns": 8,
         "search_calls": 2,
-        "fetch_calls": 3,
+        "fetch_calls": 4,
         "admission_deadline_seconds": 110.0,
         "remaining_search_calls": 1,
     }
@@ -11722,10 +11755,10 @@ def test_positive_semantic_review_routes_one_bounded_loop_to_existing_luna(
     assert input_document["investigation_limits"] == {
         "reasoning_turns": 8,
         "search_calls": 2,
-        "fetch_calls": 3,
+        "fetch_calls": 4,
         "admission_deadline_seconds": 110.0,
         "prefetched_pages": 1,
-        "remaining_fetch_calls": 3,
+        "remaining_fetch_calls": 4,
     }
     if positive_semantic_review:
         assert input_document["untrusted_homepage_navigation_locators"] == [{
@@ -13730,7 +13763,7 @@ def test_prefetched_grab_source_requires_independent_exact_stage_submission(
         requests[0]["messages"][1]["content"].split("\n", 1)[1]
     )
     assert input_document["prefetched_sources"] == [{"url": url, "text": text}]
-    assert input_document["investigation_limits"]["remaining_fetch_calls"] == 3
+    assert input_document["investigation_limits"]["remaining_fetch_calls"] == 4
     assert "strategic partnership" in input_document["requested_attribute"]
     assert "required_attribute" not in result["claims"]
 
@@ -14333,12 +14366,14 @@ def test_exact_provider_hint_allows_one_counted_same_url_stealth_call(
     requests = []
 
     async def fake_post(_session, _url, *, headers, payload):
-        del headers, payload
+        del headers
         requests.append(True)
         if len(requests) == 1:
             name, arguments = "fetch_page", {"url": first_url}
         elif len(requests) == 2:
             name, arguments = "fetch_page", {"url": url}
+        elif isinstance(payload["tool_choice"], dict) and payload["tool_choice"]["function"]["name"] == "search_web":
+            name, arguments = "search_web", {"query": "Acme software evidence"}
         else:
             name, arguments = "submit_findings", {"findings": [_finding(
                 "industry",
@@ -14379,7 +14414,7 @@ def test_exact_provider_hint_allows_one_counted_same_url_stealth_call(
     monkeypatch.setattr(investigator, "_post_json", fake_post)
     monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
     monkeypatch.setattr(investigator, "_search_web", AsyncMock(return_value={
-        "results": [{"url": url}],
+        "results": [],
     }))
 
     result = asyncio.run(investigator.investigate_company_evidence(
@@ -14564,7 +14599,7 @@ def test_stealth_transport_preserves_unrelated_target_redirect(monkeypatch):
 
 
 def test_final_admitted_fetch_hint_allows_one_same_url_stealth_retry(monkeypatch):
-    urls = [f"https://acme.example/source-{index}" for index in range(3)]
+    urls = [f"https://acme.example/source-{index}" for index in range(4)]
     calls = []
     model_turns = []
 
@@ -14621,10 +14656,11 @@ def test_final_admitted_fetch_hint_allows_one_same_url_stealth_retry(monkeypatch
         (urls[0], False),
         (urls[1], False),
         (urls[2], False),
-        (urls[2], True),
+        (urls[3], False),
+        (urls[3], True),
     ]
-    assert result["usage"]["fetch_calls"] == 4
-    assert len(result["usage"]["fetch_outcomes"]) == 4
+    assert result["usage"]["fetch_calls"] == 5
+    assert len(result["usage"]["fetch_outcomes"]) == 5
     assert result[investigator.PRIVATE_FETCHED_PAGES_KEY][urls[-1]]["text"] == (
         "Acme sells commercial workflow software."
     )
@@ -14681,8 +14717,8 @@ def test_hint_does_not_retry_after_deadline(monkeypatch):
 
 
 @pytest.mark.parametrize("hint", [False, True])
-def test_failed_final_fetch_never_admits_an_unrelated_fourth_fetch(monkeypatch, hint):
-    urls = [f"https://acme.example/source-{index}" for index in range(4)]
+def test_failed_final_fetch_never_admits_an_unrelated_fifth_fetch(monkeypatch, hint):
+    urls = [f"https://acme.example/source-{index}" for index in range(5)]
     calls = []
     requests = []
 
@@ -14726,16 +14762,20 @@ def test_failed_final_fetch_never_admits_an_unrelated_fourth_fetch(monkeypatch, 
         (urls[0], False),
         (urls[1], False),
         (urls[2], False),
-        *([(urls[2], True)] if hint else []),
+        (urls[3], False),
+        *([(urls[3], True)] if hint else []),
     ]
-    assert result["usage"]["fetch_calls"] == (4 if hint else 3)
-    assert all(call[0] != urls[3] for call in calls)
+    assert result["usage"]["fetch_calls"] == (5 if hint else 4)
+    assert all(call[0] != urls[4] for call in calls)
 
 
-def test_three_fresh_fetch_cap_remains_with_three_prefetched_pages(monkeypatch):
+@pytest.mark.parametrize("fresh_cap", [3, 4])
+def test_fresh_fetch_cap_is_separate_from_three_prefetched_pages(monkeypatch, fresh_cap):
+    monkeypatch.setattr(investigator, "MAX_FETCH_CALLS", fresh_cap)
     prefetched = [f"https://acme.example/saved-{index}" for index in range(3)]
-    fresh = [f"https://acme.example/fresh-{index}" for index in range(4)]
+    fresh = [f"https://acme.example/fresh-{index}" for index in range(5)]
     requests = []
+    fourth_quote = "Acme supplies a transaction-based checkout for card and bank payments to businesses."
 
     async def fake_post(_session, _url, *, headers, payload):
         del headers
@@ -14743,8 +14783,15 @@ def test_three_fresh_fetch_cap_remains_with_three_prefetched_pages(monkeypatch):
         if len(requests) <= len(fresh):
             name, args = "fetch_page", {"url": fresh[len(requests) - 1]}
         else:
+            # Both caps receive the same first finding. Only the admitted
+            # fourth source can pass the real fetched-source/exact-quote gate.
+            proven = len(requests) == len(fresh) + 1
             name, args = "submit_findings", {"findings": [_finding(
-                "industry", status="UNPROVEN", evidence_url="", evidence_quote=""
+                "industry", status="VERIFIED" if proven else "UNPROVEN",
+                observed_value="Card and bank checkout",
+                observed_industry="Payments", activity_role="supplier_operator",
+                evidence_url=fresh[3] if proven else "",
+                evidence_quote=fourth_quote if proven else "",
             )]}
         return 200, {"choices": [{"message": {"tool_calls": [{
             "id": str(len(requests)), "type": "function",
@@ -14752,7 +14799,8 @@ def test_three_fresh_fetch_cap_remains_with_three_prefetched_pages(monkeypatch):
         }]}}]}
 
     async def fake_fetch(_session, url):
-        return {"ok": True, "url": url, "final_url": url, "text": "No proof."}
+        return {"ok": True, "url": url, "final_url": url,
+                "text": fourth_quote if url == fresh[3] else "No proof."}
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("EXA_API_KEY", "test-key")
@@ -14765,7 +14813,12 @@ def test_three_fresh_fetch_cap_remains_with_three_prefetched_pages(monkeypatch):
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example"},
         targets=("industry",),
-        requested_industry="Software",
+        requested_industry="Payments",
+        requested_product_service="Transaction-based checkout for card and bank payments to businesses",
+        verified_homepage_identity={
+            "normalized_name": "acme", "registrable_dns_domain": "acme.example",
+            "linkedin_company_slug": "acme",
+        },
         prior_observations={"submitted_source_urls": prefetched},
         prefetched_pages={
             url: {"final_url": url, "text": "Saved untrusted page."}
@@ -14773,12 +14826,34 @@ def test_three_fresh_fetch_cap_remains_with_three_prefetched_pages(monkeypatch):
         },
     ))
 
-    assert result["usage"]["fetch_calls"] == 3
+    assert result["usage"]["fetch_calls"] == fresh_cap
     assert result["usage"]["prefetched_pages"] == 3
-    assert result["usage"]["total_loaded_pages"] == 6
-    exhausted = json.loads(requests[4]["messages"][-1]["content"])
+    assert result["usage"]["total_loaded_pages"] == 3 + fresh_cap
+    exhausted = json.loads(requests[fresh_cap + 1]["messages"][-1]["content"])
     assert exhausted == {"ok": False, "error": "fetch_budget_exhausted"}
+    assert result["claims"]["industry"]["status"] == (
+        "VERIFIED" if fresh_cap == 4 else "UNPROVEN"
+    )
+    stored = result[investigator.PRIVATE_FETCHED_PAGES_KEY]
+    assert (fresh[3] in stored) is (fresh_cap == 4)
+    if fresh_cap == 4:
+        assert stored[fresh[3]]["text"] == fourth_quote
 
+
+
+def test_four_fresh_fetches_do_not_admit_a_fourth_prefetched_page():
+    urls = [f"https://acme.example/saved-{index}" for index in range(4)]
+    pages = {url: {"final_url": url, "text": "Saved source."} for url in urls}
+    assert investigator.MAX_FETCH_CALLS == 4
+    assert investigator.MAX_PREFETCHED_PAGES == 3
+    assert investigator._validated_prefetched_pages(
+        pages, submitted_source_urls=urls,
+    ) == ({}, {})
+    assert lead_scorer._investigator_prefetched_pages(
+        {}, urls, verified_homepage_pages=pages,
+    ) == {}
+    assert investigator.ADMISSION_DEADLINE_SECONDS == 110.0
+    assert investigator.JUDGMENT_ADMISSION_RESERVE_SECONDS == 30.0
 
 def test_harness_accepts_semantic_stage_finding_after_source_checks(monkeypatch):
     url = "https://costar.example/investors"

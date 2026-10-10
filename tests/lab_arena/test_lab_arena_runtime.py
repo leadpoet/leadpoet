@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import signal
 import shutil
 import socket
 import subprocess
@@ -552,7 +553,8 @@ def test_runsc_exit_before_sandbox_creation_is_a_host_error(tmp_path):
     assert list(config.work_dir.iterdir()) == []
 
 
-def test_nonzero_exit_after_sandbox_creation_remains_a_sandbox_result(tmp_path):
+@pytest.mark.parametrize("exit_code", [3, 128 + signal.SIGINT])
+def test_nonzero_exit_after_sandbox_creation_remains_a_sandbox_result(tmp_path, exit_code):
     config = make_config(tmp_path)
     spec = make_spec(tmp_path)
     clock = FakeClock()
@@ -562,7 +564,7 @@ def test_nonzero_exit_after_sandbox_creation_remains_a_sandbox_result(tmp_path):
             argv,
             clock=clock,
             finish_at=clock(),
-            returncode=3,
+            returncode=exit_code,
         )
 
     result = rt.run_sandbox(
@@ -573,9 +575,32 @@ def test_nonzero_exit_after_sandbox_creation_remains_a_sandbox_result(tmp_path):
         sleep=clock.sleep,
         rusage=lambda: (0.0, 0),
     )
-    assert result.exit_code == 3
+    assert result.exit_code == exit_code
     assert result.output_bytes is None
     assert result.output_error is None
+
+
+def test_signaled_runsc_after_sandbox_creation_is_a_host_error(tmp_path):
+    config = make_config(tmp_path)
+    spec = make_spec(tmp_path)
+    clock = FakeClock()
+    runner = FakeRunner(
+        clock,
+        run_process=lambda argv: FakeProcess(
+            argv, clock=clock, finish_at=clock(), returncode=-signal.SIGINT,
+        ),
+    )
+
+    with pytest.raises(rt.RuntimeHostError) as failure:
+        rt.run_sandbox(
+            config, spec, process_runner=runner, clock=clock,
+            sleep=clock.sleep, rusage=lambda: (0.0, 0),
+        )
+    assert failure.value.reason == "sandbox_launcher_signaled"
+    assert failure.value.launch_exit_code == -signal.SIGINT
+    assert failure.value.launch_timed_out is False
+    assert runner.kinds() == ["mount", "run", "delete", "umount"]
+    assert list(config.work_dir.iterdir()) == []
 
 
 def test_timeout_kills_deletes_and_never_keeps_output(tmp_path):

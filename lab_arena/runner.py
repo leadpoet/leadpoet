@@ -3174,7 +3174,7 @@ def _record_runtime_failure(
         }
         if isinstance(exc, RuntimeHostError):
             error_content["runtime_host_reason"] = exc.reason
-            if exc.reason in ("sandbox_launch_failed", "sandbox_startup_timeout"):
+            if exc.reason in ("sandbox_launch_failed", "sandbox_launcher_signaled", "sandbox_startup_timeout"):
                 error_content.update({
                     "launch_exit_code": exc.launch_exit_code,
                     "launch_timed_out": exc.launch_timed_out,

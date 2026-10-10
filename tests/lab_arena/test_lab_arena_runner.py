@@ -645,13 +645,14 @@ def test_model_failures_map_to_terminal_causes_with_no_output_hash(tmp_path, kin
     assert api.completions[0]["body"]["output"] is None
 
 
-def test_runtime_host_error_abandons_the_lease_without_a_model_result(tmp_path, capsys):
+@pytest.mark.parametrize("reason", ["sandbox_launch_failed", "sandbox_launcher_signaled"])
+def test_runtime_host_error_abandons_the_lease_without_a_model_result(tmp_path, capsys, reason):
     class HostFailureRuntime:
         @staticmethod
         def run_icp(_spec, **_kwargs):
             raise runtime.RuntimeHostError(
                 "untrusted subprocess detail: secret-token",
-                reason="sandbox_launch_failed", runsc_path=Path("/usr/local/bin/runsc"),
+                reason=reason, runsc_path=Path("/usr/local/bin/runsc"),
             )
 
     api = FakeApi([lease()])
@@ -663,7 +664,7 @@ def test_runtime_host_error_abandons_the_lease_without_a_model_result(tmp_path, 
     assert api.completions == []
     assert runner_.completed[0]["error"] == "RuntimeHostError"
     diagnostic = capsys.readouterr().err
-    assert "reason=sandbox_launch_failed" in diagnostic
+    assert "reason=" + reason in diagnostic
     assert "secret-token" not in diagnostic
     assert "secret-token" not in runner_.completed[0]["detail"]
 

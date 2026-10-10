@@ -43,6 +43,14 @@ from gateway.utils.hotkey_roles import (
 
 logger = logging.getLogger(__name__)
 
+_DEEPLINE_BILLING_BATCH_LIMIT = 32
+_DEEPLINE_BILLING_WORKERS = 8
+_DEEPLINE_BILLING_PAGE_LIMIT = 20  # Candidate RPC contract.
+_DEEPLINE_BILLING_ABANDONED_SLOTS = 4
+_DEEPLINE_BILLING_EXECUTE_SLOTS = 1
+_DEEPLINE_BILLING_SCORE_SLOTS = 24
+_DEEPLINE_BILLING_GENERAL_SLOTS = 3
+
 # Provider error codes that mean "the call was declined before or instead of
 # doing upstream work" versus "the call may have happened and we cannot tell"
 # versus "our own machinery failed". Telemetry only; dispatch never reads it.
@@ -756,6 +764,7 @@ class ArenaService:
         self._openrouter_reconciliation_after: Dict[Tuple[str, str], int] = {}
         self._deepline_reconciliation_after: Dict[Tuple[str, str], int] = {}
         self._deepline_priority_reconciliation_after: Dict[Tuple[str, str], int] = {}
+        self._deepline_score_reconciliation_after: Dict[Tuple[str, str], int] = {}
         self._active_deepline_reconciliations: set[str] = set()
         self._abandoned_billing_run_after: Dict[str, str] = {}
         self._closed_provider_reconciliation_after = 0
@@ -4682,18 +4691,21 @@ class ArenaService:
 
     def _deepline_cost_candidates(
         self, round_id: str, *, run_id: str = "",
-        successful_execute_only: bool = False, limit: int = 1,
+        successful_execute_only: bool = False, score_only: bool = False,
+        limit: int = 1,
     ) -> List[Dict[str, Any]]:
         """Reserve a bounded cursor page before its billing reads begin."""
         cursor_key = (round_id, run_id)
-        cursors = (
-            self._deepline_priority_reconciliation_after
-            if successful_execute_only
-            else self._deepline_reconciliation_after
-        )
+        if successful_execute_only and score_only:
+            raise ValueError("Deepline candidate lanes are mutually exclusive")
+        cursors = (self._deepline_priority_reconciliation_after
+                   if successful_execute_only else
+                   self._deepline_score_reconciliation_after
+                   if score_only else self._deepline_reconciliation_after)
         with self._lock:
             after_entry_id = cursors.get(cursor_key, 0)
-        options = {"successful_execute_only": True} if successful_execute_only else {}
+        options = ({"successful_execute_only": True} if successful_execute_only else
+                   {"score_only": True} if score_only else {})
         items = self._store.list_deepline_cost_reconciliations(
             round_id,
             run_id=run_id,
@@ -4714,12 +4726,10 @@ class ArenaService:
         return items
 
     def _reconcile_active_deepline_cost(self, round_id: str) -> Dict[str, Any]:
-        """Check at most eight bills, with four concurrent five-second reads.
+        """Check at most 32 bills in four waves of eight five-second reads.
 
-        Abandoned leases get a separate rotating lane. Three general slots
-        and one successful-execute slot remain available on every step, so
-        pending urgent bills cannot starve other liabilities. Selection does
-        not authorize expiry; the existing all-settled guard still owns it.
+        Abandoned, successful execute, score, and general lanes rotate
+        independently. Selection does not authorize expiry or provider replay.
         """
         with self._lock:
             if round_id in self._active_deepline_reconciliations:
@@ -4727,7 +4737,7 @@ class ArenaService:
             self._active_deepline_reconciliations.add(round_id)
             after_run = self._abandoned_billing_run_after.get(round_id, "")
         try:
-            candidates: List[Dict[str, Any]] = []
+            unique: Dict[str, Dict[str, Any]] = {}
             logger = logging.getLogger(__name__)
             try:
                 abandoned = sorted(self._store.list_abandoned_billing_runs(round_id))
@@ -4735,21 +4745,47 @@ class ArenaService:
                 logger.warning("Arena abandoned billing lookup failed: %s", type(exc).__name__)
                 abandoned = []
 
-            def select(**options: Any) -> None:
-                try:
-                    candidates.extend(self._deepline_cost_candidates(round_id, **options))
-                except Exception as exc:
-                    logger.warning("Arena billing candidate lookup failed: %s", type(exc).__name__)
+            def select(target: int, **options: Any) -> None:
+                # Overlapping lanes may need more than one cursor page. Cap
+                # selection reads even when a small candidate set wraps.
+                seen_in_lane: set[str] = set()
+                for _ in range(4):
+                    missing = min(target - len(unique),
+                                  _DEEPLINE_BILLING_BATCH_LIMIT - len(unique))
+                    if missing <= 0:
+                        return
+                    try:
+                        items = self._deepline_cost_candidates(
+                            round_id, limit=min(_DEEPLINE_BILLING_PAGE_LIMIT, missing),
+                            **options,
+                        )
+                    except Exception as exc:
+                        logger.warning("Arena billing candidate lookup failed: %s", type(exc).__name__)
+                        return
+                    if not items:
+                        return
+                    identities = {str(item["call_identity"]) for item in items}
+                    if identities <= seen_in_lane:
+                        return
+                    seen_in_lane.update(identities)
+                    for item in items:
+                        unique.setdefault(str(item["call_identity"]), item)
+                    if len(items) < min(_DEEPLINE_BILLING_PAGE_LIMIT, missing):
+                        return
 
             ordered = [run for run in abandoned if run > after_run]
             ordered += [run for run in abandoned if run <= after_run]
-            for run_id in ordered[:4]:
-                select(run_id=run_id, limit=1)
+            for run_id in ordered[:_DEEPLINE_BILLING_ABANDONED_SLOTS]:
+                select(len(unique) + 1, run_id=run_id)
                 with self._lock:
                     self._abandoned_billing_run_after[round_id] = run_id
-            select(successful_execute_only=True, limit=1)
-            select(limit=3)
-            unique = {str(item["call_identity"]): item for item in candidates}
+            select(len(unique) + _DEEPLINE_BILLING_EXECUTE_SLOTS,
+                   successful_execute_only=True)
+            select(len(unique) + _DEEPLINE_BILLING_SCORE_SLOTS, score_only=True)
+            select(len(unique) + _DEEPLINE_BILLING_GENERAL_SLOTS)
+            # Unused reserved slots return first to score, then to general.
+            select(_DEEPLINE_BILLING_BATCH_LIMIT, score_only=True)
+            select(_DEEPLINE_BILLING_BATCH_LIMIT)
             if not unique:
                 return {"status": "none"}
             broker = self._broker_for(round_id)
@@ -4767,7 +4803,8 @@ class ArenaService:
                     return {"status": "unavailable"}
 
             with telemetry.stage("reconcile_active_deepline_costs") as observed:
-                with ThreadPoolExecutor(max_workers=4, thread_name_prefix="arena-billing") as pool:
+                with ThreadPoolExecutor(max_workers=_DEEPLINE_BILLING_WORKERS,
+                                        thread_name_prefix="arena-billing") as pool:
                     results = list(pool.map(reconcile, unique.values()))
                 settled = sum(result.get("status") == "settled" for result in results)
                 observed.count = settled

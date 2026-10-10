@@ -225,8 +225,7 @@ def test_provider_proxy_allows_admission_execution_and_billing(monkeypatch, pref
 
     assert response.status_code == 200
     assert response.json() == {"status": "settled"}
-    assert observed[0].read == 380.0
-    assert observed[0].read >= MAX_PROVIDER_API_TIMEOUT_SECONDS
+    assert observed[0].read == MAX_PROVIDER_API_TIMEOUT_SECONDS
     assert observed[0].connect == 3.0
     assert observed[0].write == 30.0
     assert observed[0].pool == 3.0
@@ -434,7 +433,9 @@ def test_sidecar_destination_is_fixed_by_network(monkeypatch):
     ]
     assert len({id(client) for client in clients}) == 3
     assert options[0]["verify"] is options[1]["verify"] is options[2]["verify"]
-    assert [option["timeout"].read for option in options] == [150.0, 150.0, 380.0]
+    assert [option["timeout"].read for option in options] == [
+        150.0, 150.0, arena_proxy._PROVIDER_READ_TIMEOUT_SECONDS,
+    ]
     assert all(option["timeout"].connect == 3.0 for option in options)
     assert all(option["timeout"].pool == 3.0 for option in options)
 

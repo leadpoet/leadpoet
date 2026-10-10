@@ -439,6 +439,7 @@ def _bare_service(store, broker):
     service._brokers = {ROUND_ID: broker}
     service._deepline_reconciliation_after = {}
     service._deepline_priority_reconciliation_after = {}
+    service._deepline_score_reconciliation_after = {}
     service._active_deepline_reconciliations = set()
     service._abandoned_billing_run_after = {}
     return service

@@ -1022,7 +1022,8 @@ _PRIVATE_EQUITY_SPONSOR_CLASSIFICATION_RE = re.compile(
     r"(?:(?:a|an|the|leading|global|independent|specialist|international|"
     r"diversified|alternative)\s+){0,6}"
     r"(?:private[- ]equity|private[- ]markets)\s+"
-    r"(?:firm|investor|sponsor|investment\s+(?:firm|manager))\b|"
+    r"(?:firm|investor|sponsor|investment\s+(?:firm|manager))\b"
+    r"(?!\s*['’]s\b)|"
     r"sponsors\s+investment\s+funds\s+that\s+invest\s+in\s+private\s+equity\b)"
 )
 

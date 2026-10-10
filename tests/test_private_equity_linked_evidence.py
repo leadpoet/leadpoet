@@ -151,11 +151,19 @@ def test_insufficient_pending_wrong_entity_or_superseded_ownership_is_unproven(p
     "Atlas Capital is an investor.",
     "Atlas Capital is an adviser to a private equity firm.",
     "Atlas Capital is a portfolio company of a private equity firm.",
+    "Atlas Capital is a private equity firm's customer.",
+    "Atlas Capital is a private equity firm’s customer.",
+    "Atlas Capital is a private equity investor's subsidiary.",
+    "Atlas Capital is a private equity investor’s subsidiary.",
+    "Atlas Capital is a private markets investment manager's client.",
     "Atlas Capital is not a private equity firm.",
     "Atlas Capital was previously a private equity firm.",
     "Other Capital is a private equity firm. Its investor is Atlas Capital.",
 ])
 def test_classification_requires_same_explicit_sponsor(support):
+    assert not lead_scorer._private_equity_linked_support_proves_ownership(
+        ["Acme"], "Acme is majority-owned by Atlas Capital.", [support],
+    )
     assert _validated(support=support)["status"] == "UNPROVEN"
 
 
@@ -280,16 +288,22 @@ def test_private_equity_prompt_keeps_existing_research_and_tool_limits():
     assert investigator.MAX_FETCH_CALLS == 3
 
 
-@pytest.mark.parametrize("name,primary,primary_url,support,support_url", [
-    ("Avantus", AVANTUS_QUOTE, AVANTUS_URL, KKR_QUOTE, KKR_URL),
-    ("Origis Energy", ORIGIS_QUOTE, ORIGIS_URL, ANTIN_QUOTE, ORIGIS_URL),
+@pytest.mark.parametrize("name,primary,primary_url,support,support_url,classifier_valid", [
+    ("Avantus", AVANTUS_QUOTE, AVANTUS_URL, KKR_QUOTE, KKR_URL, True),
+    ("Origis Energy", ORIGIS_QUOTE, ORIGIS_URL, ANTIN_QUOTE, ORIGIS_URL, True),
+    ("Avantus", AVANTUS_QUOTE, AVANTUS_URL,
+     "KKR is a private equity firm's customer.", KKR_URL, False),
+    ("Origis Energy", ORIGIS_QUOTE, ORIGIS_URL,
+     "Antin Infrastructure Partners is a private equity investor’s subsidiary.",
+     ORIGIS_URL, False),
 ])
 @pytest.mark.parametrize("model_status", ["VERIFIED", "UNPROVEN"])
 def test_normal_company_scoring_uses_real_investigator_and_preserves_support(
-    monkeypatch, name, primary, primary_url, support, support_url, model_status,
+    monkeypatch, name, primary, primary_url, support, support_url, classifier_valid,
+    model_status,
 ):
-    # Only the ownership/classification spans are real source fixtures. Other
-    # qualification dimensions below are synthetic passing pipeline controls.
+    # Positive ownership/classification spans are real source fixtures. Invalid
+    # classifier spans and other qualification dimensions are synthetic controls.
     website = "https://" + urlsplit(primary_url).hostname
     domain = urlsplit(primary_url).hostname
     slug = lead_scorer._compact_company_name(name)
@@ -420,11 +434,14 @@ def test_normal_company_scoring_uses_real_investigator_and_preserves_support(
     assert json.loads(json.dumps(rows)) == rows
     assert len(rows) == 1
     row = rows[0]
-    accepted = model_status == "VERIFIED"
+    accepted = model_status == "VERIFIED" and classifier_valid
     assert row["company_qualified"] is accepted, row
     assert row["final_score"] == (54 if accepted else 0)
     assert calls["intent"] == int(accepted)
-    assert calls["model"] == len(urls) + 1, row
+    if classifier_valid or model_status == "UNPROVEN":
+        assert calls["model"] == len(urls) + 1, row
+    else:
+        assert len(urls) + 1 < calls["model"] <= investigator.MAX_REASONING_TURNS + 1
     receipt = row["verifier_gate_receipts"][0]
     if accepted:
         assert receipt["dimension_evidence"]["stage"]["web_evidence"]["supporting_evidence"] == [

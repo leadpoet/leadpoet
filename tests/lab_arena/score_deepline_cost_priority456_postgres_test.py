@@ -68,6 +68,8 @@ def test_score_lane_preserves_bindings_failed_calls_and_cursor(database, migrate
     adaptation = priority.uncertain(h, score, token, 'score-adaptation',
                                     reason='settle_failure', success=False)[0]
     corrupt = priority.uncertain(h, score, token, 'score-corrupt', success=True)[0]
+    no_dispatch = priority.uncertain(h, score, token, 'score-no-dispatch', success=True)[0]
+    settled = priority.uncertain(h, score, token, 'score-settled', success=True)[0]
     with connect() as conn, conn.cursor() as cur:
         cur.execute('ALTER TABLE public.lab_arena_ledger DISABLE TRIGGER lab_arena_ledger_append_only')
         cur.execute("UPDATE public.lab_arena_ledger SET entry_doc=jsonb_set("
@@ -78,6 +80,15 @@ def test_score_lane_preserves_bindings_failed_calls_and_cursor(database, migrate
                     "entry_doc,'{call,credential_fingerprint}',"
                     "'\"sha256:0000000000000000000000000000000000000000000000000000000000000000\"'::jsonb) "
                     "WHERE call_identity=%s AND entry_kind='uncertain'", (corrupt,))
+        cur.execute("DELETE FROM public.lab_arena_ledger WHERE call_identity=%s "
+                    "AND entry_kind='dispatch'", (no_dispatch,))
+        cur.execute("INSERT INTO public.lab_arena_ledger "
+                    "(entry_kind,miner_hotkey,round_id,submission_id,run_id,stage,"
+                    "call_identity,provider,operation_id,funding_source,amount_microusd,entry_doc) "
+                    "SELECT 'settlement',miner_hotkey,round_id,submission_id,run_id,stage,"
+                    "call_identity,provider,operation_id,funding_source,0,'{}'::jsonb "
+                    "FROM public.lab_arena_ledger WHERE call_identity=%s AND entry_kind='uncertain'",
+                    (settled,))
         cur.execute('ALTER TABLE public.lab_arena_ledger ENABLE TRIGGER lab_arena_ledger_append_only')
     ordinary = store.list_deepline_cost_reconciliations(rid, limit=20)
     selected = store.list_deepline_cost_reconciliations(rid, limit=20, score_only=True)
@@ -93,6 +104,17 @@ def test_score_lane_preserves_bindings_failed_calls_and_cursor(database, migrate
         rid, after_entry_id=third['uncertain_entry_id'], score_only=True)[0]
     assert len({row['call_identity'] for row in (first, second, third)}) == 3
     assert wrapped['call_identity'] == first['call_identity']
+    with connect() as conn, conn.cursor() as cur:
+        for run_id in ('', score['run_id'], execute['run_id'], 'missing-run'):
+            for cursor in (0, second['uncertain_entry_id'], 9223372036854775807):
+                for limit in (0, 1, 2, 20, 21):
+                    cur.execute('SELECT public.lab_arena_list_deepline_cost_reconciliations_v1('
+                                '%s,%s,%s,%s), public.lab_arena_list_deepline_cost_reconciliations_v3('
+                                '%s,%s,%s,%s)',
+                                (rid, run_id, cursor, limit, rid, run_id, cursor, limit))
+                    ordinary_doc, score_doc = cur.fetchone()
+                    assert score_doc['items'] == [item for item in ordinary_doc['items']
+                                                  if item['kind'] == 'score']
     assert store.list_deepline_cost_reconciliations('arena-missing', score_only=True) == []
     store.close()
     h.service.store.close()

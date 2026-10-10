@@ -358,6 +358,14 @@ URL/quote pairs in supporting_evidence_url_1 and
 supporting_evidence_quote_1, then pair 2 if needed. Leave unused fields
 empty. Do not claim an unquoted source fact or use a search snippet as
 supporting evidence.
+When untrusted_headcount_conflict_context supplies an independently observed
+structured LinkedIn company-size band, compare it with the prior web count.
+The structured range is discovery context, not a fetched quote. Fetch that exact
+LinkedIn company profile before generic about/contact research for headcount,
+and quote its current company-size band with the company name. Do not infer a
+count from associated members or accept either conflicting range by default.
+If the profile cannot be fetched or its evidence remains conflicting, return
+UNPROVEN. All ordinary fetched-text, identity and quote checks still apply.
 For geography, find the current headquarters of the investigated company.
 Prefer a known current first-party contact or about navigation locator and
 fetch it before relying on a generic profile location. A navigation label is

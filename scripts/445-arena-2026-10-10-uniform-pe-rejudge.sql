@@ -34,13 +34,13 @@ DECLARE
   v_round_id CONSTANT TEXT := 'arena-2026-10-10';
   v_archive_id CONSTANT TEXT := 'arena-2026-10-10-r445archive';
   v_archive_baseline_id CONSTANT TEXT := 'baseline-2026-10-10-r445archive';
-  v_new_digest CONSTANT TEXT := '__NEW_SCORER_IMAGE_DIGEST__';
-  v_new_reference CONSTANT TEXT := '__NEW_SCORER_IMAGE_REFERENCE__';
-  v_source_commit CONSTANT TEXT := '__REVIEWED_SCORER_SOURCE_COMMIT__';
+  v_new_digest CONSTANT TEXT := 'sha256:227d36302522165b615afa1d51c9bcd18df3ed71a461fd0143157bb9d7b82520';
+  v_new_reference CONSTANT TEXT := '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:227d36302522165b615afa1d51c9bcd18df3ed71a461fd0143157bb9d7b82520';
+  v_source_commit CONSTANT TEXT := '0fca790162147c2ac4eb0a89c15a0ebd78b3b89c';
   -- A reviewed canonical restart retains the independent 444 pause reason,
   -- but binds actor_ref to its exact deployment commit and advances the guard.
-  v_final_actor CONSTANT TEXT := '__REVIEWED_FINAL_ACTOR__';
-  v_expected CONSTANT JSONB := '__REVIEWED_TERMINAL_INVENTORY_JSON__'::JSONB;
+  v_final_actor CONSTANT TEXT := 'canonical-active-release:04de9bd382c9a5ff7d7e7e448372241c76e48179';
+  v_expected CONSTANT JSONB := '{"bank_sha256": "30b673c4c32d2ef3716701aa65d543b70cc87c6414fe281a45d6fb7e8d84dfb8", "events_max": 1419817, "events_rows": 336, "events_sha256": "de0893f1a6cb7d3764e5b57e92ca94bd84fbfeae2da015ffdc9a76c62d289d59", "execution_attempts": 764, "execution_full_sha256": "4fd7b76eb91e52590c0139a7ed1bacd2068d98e9012d5798372fe654eecbc03d", "execution_sha256": "c5cfc22a173bb2ef7bae38f9a66eb1864ecaadd8bc4301ee7d3a00bded992e49", "functions_security_sha256": "a53d4ad26c0a68379ee93307701e3ccb8a27acca0e21ba249a50f8f5cae6dae1", "hold_generation": 419, "hold_sha256": "2f1182b2dde61a04387b042f34f6b9ce347ea03365aef9f10e333cd9c5f8c2bf", "ledger_max": 3012875, "ledger_rows": 480, "ledger_sha256": "24f693b150ca4c4abf27732ee8d85fdbba34302b9a99c2167693d81bdb43b72f", "participants_sha256": "e272d0d25813b1d4c60f62cee8753c96d7f58b93660ea3086a46d03fd252acb8", "round_sha256": "8112b3ef3721e5c250a962c228bfb9279666691aee93e4f5eafb6857de8aa818", "runs_sha256": "9a385277e182c935039142fb3f38ec21792a6ddeb8c61137fd70f1cf0d88d848", "score_attempts": 11, "scoring_function_sha256": "8777bd9b757a774623233aa5c5dc2a5e5ca1666fb127ce6132ffe0ce789b6b61", "stage_function_sha256": "35adefcc70140ea9378d19413f5a6619beaf4ddc7bc41431ec8d08a80b5b477c", "submissions_sha256": "f4608f08670b523fccc7de0708c7c24208dfb3afbfb3ad5f0fda6afe137a5e4a", "triggers_sha256": "cdd4b970ab4e074af3c82db94b2be3a7a95399af716638245cb28318a55c5cc1"}'::JSONB;
   v_actual JSONB;
   v_frozen JSONB;
   v_key TEXT;
@@ -76,8 +76,8 @@ $namespace445$;
   IF p_round_id = 'arena-2026-10-10' AND p_stage = 2 AND EXISTS (
     SELECT 1 FROM public.lab_arena_rounds
     WHERE round_id = 'arena-2026-10-10-r445archive') THEN
-    IF v_round.configuration_doc->>'scorer_image_digest' IS DISTINCT FROM '__NEW_SCORER_IMAGE_DIGEST__'
-       OR v_round.configuration_doc->>'scorer_image_reference' IS DISTINCT FROM '__NEW_SCORER_IMAGE_REFERENCE__'
+    IF v_round.configuration_doc->>'scorer_image_digest' IS DISTINCT FROM 'sha256:227d36302522165b615afa1d51c9bcd18df3ed71a461fd0143157bb9d7b82520'
+       OR v_round.configuration_doc->>'scorer_image_reference' IS DISTINCT FROM '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:227d36302522165b615afa1d51c9bcd18df3ed71a461fd0143157bb9d7b82520'
        OR (SELECT jsonb_agg(p ORDER BY p->>'submission_id') FROM jsonb_array_elements(p_participants) p)
           IS DISTINCT FROM (SELECT jsonb_agg(jsonb_build_object('submission_id',p->>'submission_id','miner_hotkey',p->>'miner_hotkey') ORDER BY p->>'submission_id')
             FROM jsonb_array_elements(v_round.participants) p WHERE NOT (p->>'is_king')::BOOLEAN)
@@ -122,8 +122,8 @@ BEGIN
   SELECT * INTO v_control FROM public.lab_arena_restart_claim_control WHERE singleton FOR UPDATE;
   IF v_round.round_id IS NULL THEN RAISE EXCEPTION 'Oct10 uniform rejudge445 round missing'; END IF;
   v_new_schedule := COALESCE(v_archive.configuration_doc#>'{recovery_original_round,configuration_doc,schedule}',v_round.configuration_doc->'schedule')
-    || jsonb_build_object('stage_1_scoring_close','__BASELINE_SCORING_CLOSE__',
-                         'stage_2_start','__STAGE2_RESUME_START__');
+    || jsonb_build_object('stage_1_scoring_close','2026-10-10T13:59:58Z',
+                         'stage_2_start','2026-10-10T13:59:59Z');
 
   SELECT jsonb_build_object(
     'triggers_sha256',(SELECT encode(extensions.digest(coalesce(jsonb_agg(jsonb_build_array(c.relname,t.tgname,t.tgenabled,pg_get_triggerdef(t.oid),pg_get_functiondef(t.tgfoid),owner.rolname,p.proacl::text,p.prosecdef,p.proconfig) ORDER BY c.relname,t.tgname),'[]'::jsonb)::text,'sha256'),'hex') FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_proc p ON p.oid=t.tgfoid JOIN pg_roles owner ON owner.oid=p.proowner WHERE t.tgrelid IN ('public.lab_arena_rounds'::regclass,'public.lab_arena_submissions'::regclass,'public.lab_arena_runs'::regclass,'public.lab_arena_ledger'::regclass,'public.lab_arena_trajectory_events'::regclass) AND NOT t.tgisinternal),

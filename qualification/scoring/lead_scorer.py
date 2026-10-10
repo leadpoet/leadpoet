@@ -85,6 +85,8 @@ from qualification.scoring.company_evidence_investigator import (
     _plain_text,
     _priority_headquarters_navigation_source,
     _quote_occurs,
+    _quote_names_company,
+    _quote_supports_headcount,
     _quote_identifies_headquarters,
     _same_domain_name_alias,
     _validated_homepage_navigation_locators,
@@ -6549,6 +6551,67 @@ def _project_investigator_stage(
     return projected
 
 
+def _headcount_conflict_context(
+    structured_evidence: Optional[Mapping[str, Any]],
+    identity: Mapping[str, Any],
+    icp: ICPPrompt,
+) -> dict[str, Any]:
+    """Expose an exact-identity profile range as discovery, never a quote."""
+
+    if _structured_employee_size_decision(structured_evidence, icp) == COMPANY_FIT_UNAVAILABLE:
+        return {}
+    evidence = structured_evidence or {}
+    domain = str(identity.get("registrable_dns_domain") or "").strip()
+    slug = str(identity.get("linkedin_company_slug") or "").strip().casefold()
+    if not (
+        identity.get("normalized_name") and domain and slug
+        and _registrable_domain(str(evidence.get("website") or "")) == domain
+        and linkedin_company_page_slug(evidence.get("url")) == slug
+    ):
+        return {}
+    return {
+        "structured_profile_evidence": dict(evidence),
+        "notice": "structured_range_is_discovery_context_not_a_fetched_quote",
+    }
+
+
+def _fetched_linkedin_headcount_resolves_conflict(
+    finding: Mapping[str, Any],
+    investigation: Mapping[str, Any],
+    context: Mapping[str, Any],
+    identity: Mapping[str, Any],
+) -> bool:
+    """Require a completed fetched company-profile quote corroborating the range."""
+
+    structured = context.get("structured_profile_evidence")
+    if not (
+        isinstance(structured, Mapping)
+        and investigation.get("_completed_submit") is True
+        and investigation.get("failure_reason") == ""
+        and finding.get("status") in {"VERIFIED", "CONTRADICTED"}
+        and isinstance(finding.get("observed_value"), str)
+        and finding["observed_value"] in LINKEDIN_EMPLOYEE_BUCKETS
+        and finding["observed_value"] == structured.get("employee_count")
+    ):
+        return False
+    url = _valid_web_evidence_url(finding.get("evidence_url"))
+    profile = _strict_linkedin_company_profile_url(url)
+    slug = str(identity.get("linkedin_company_slug") or "").strip().casefold()
+    if not profile or not slug or linkedin_company_page_slug(profile) != slug:
+        return False
+    pages, final_urls = _validated_prefetched_pages(
+        investigation.get(PRIVATE_FETCHED_PAGES_KEY), submitted_source_urls=(url,),
+    )
+    final_profile = _strict_linkedin_company_profile_url(final_urls.get(url))
+    quote = str(finding.get("evidence_quote") or "").strip()
+    return bool(
+        final_profile and linkedin_company_page_slug(final_profile) == slug
+        and quote and _quote_occurs(quote, pages.get(url, ""))
+        and _quote_names_company(quote, {_compact_company_name(identity.get("normalized_name"))})
+        and _quote_supports_headcount(quote, finding["observed_value"])
+    )
+
+
 def _project_investigator_headcount(
     verdict: Mapping[str, Any],
     finding: Optional[Mapping[str, Any]],
@@ -7015,6 +7078,13 @@ async def _run_targeted_company_evidence_investigation(
             verified_transport_domain,
         )
     )
+    headcount_conflict_context = (
+        _headcount_conflict_context(
+            structured_employee_size_evidence, investigation_verified_identity, icp,
+        )
+        if employee_size_conflict and "headcount" in investigation_targets
+        else {}
+    )
     submitted_source_urls: list[str] = []
     homepage_pages = verified_homepage_pages or {}
     independently_bound_homepage = False
@@ -7060,6 +7130,11 @@ async def _run_targeted_company_evidence_investigation(
         investigation_verified_identity,
     )
     source_candidates = [
+        *(
+            [headcount_conflict_context["structured_profile_evidence"]["url"],
+             _dimension_web_evidence(verdict, "employee_size")["url"]]
+            if headcount_conflict_context else []
+        ),
         *(
             [verified_rebrand_redirect.get("request_url")]
             if verified_rebrand_redirect
@@ -7167,6 +7242,10 @@ async def _run_targeted_company_evidence_investigation(
                     "geography_evidence_quote",
                 )
             },
+            **(
+                {"untrusted_headcount_conflict_context": headcount_conflict_context}
+                if headcount_conflict_context else {}
+            ),
             **(
                 {"untrusted_company_stage_evidence": stage_evidence}
                 if stage_evidence
@@ -7416,6 +7495,17 @@ async def _run_targeted_company_evidence_investigation(
                 key: value for key, value in projected["dimension_evidence"].items()
                 if key != "stage"
             }
+    headcount_finding = claims.get("headcount")
+    headcount_conflict_resolved = bool(
+        employee_size_conflict
+        and isinstance(headcount_finding, Mapping)
+        and _fetched_linkedin_headcount_resolves_conflict(
+            headcount_finding, investigation, headcount_conflict_context,
+            investigation_verified_identity,
+        )
+    )
+    if headcount_conflict_resolved:
+        employee_size_conflict = False
     projected = _project_investigator_headcount(
         projected,
         (
@@ -7515,6 +7605,18 @@ async def _run_targeted_company_evidence_investigation(
         employee_size_conflict=employee_size_conflict,
         company_quality=company_quality,
     )
+    if headcount_conflict_resolved:
+        projected_result.details["employee_size_conflict_receipt"] = {
+            "status": headcount_finding["status"],
+            "resolution": "fetched_linkedin_band_corroborates_structured_profile",
+            "evaluation_date": evaluation_date().isoformat(),
+            "web_evidence": _dimension_web_evidence(verdict, "employee_size"),
+            "structured_evidence": dict(structured_employee_size_evidence or {}),
+            "fetched_evidence": {
+                "url": headcount_finding["evidence_url"],
+                "quote": headcount_finding["evidence_quote"],
+            },
+        }
     investigation_receipt["projected_decision"] = projected_result.decision
     investigation_receipt["positive_semantic_review_resolved"] = (
         positive_semantic_resolved

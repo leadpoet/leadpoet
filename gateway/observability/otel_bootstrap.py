@@ -119,6 +119,7 @@ ARENA_TASK_STAGES = frozenset(
         "ensure_daily_round",
         "activate_rewards",
         "reconcile_provider_costs",
+        "reconcile_active_deepline_costs",
         "review_submissions",
         # Steps inside one advance_round. The parent stage reports only that
         # the whole transition failed, which is not enough to tell a slow

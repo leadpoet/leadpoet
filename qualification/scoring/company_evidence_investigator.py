@@ -44,6 +44,8 @@ from qualification.scoring.linkedin_company_size import (
     PROVIDER_ERROR_FAILURE_REASON,
     UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON,
     VERIFIER_FAILURE_REASON_KEY,
+    _strict_linkedin_company_profile_url,
+    fetch_current_linkedin_company_size,
     linkedin_company_page_slug,
 )
 from qualification.scoring.pre_checks import _resolve_country
@@ -818,9 +820,21 @@ def _is_known_binary_document(value: str) -> bool:
 
 
 def _is_known_provider_diagnostic_only(value: str) -> bool:
-    """Reject the exact standalone provider placeholder, not short page text."""
+    """Reject confirmed standalone provider messages, not short page text."""
 
-    return _normalized_span(value) == "provider account capacity details redacted."
+    if _normalized_span(value) == "provider account capacity details redacted.":
+        return True
+    try:
+        diagnostic = json.loads(value)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(diagnostic, Mapping) or set(diagnostic) != {"message"}:
+        return False
+    message = str(diagnostic["message"]).casefold()
+    return bool(
+        message.startswith("to scrape linkedin use our dedicated linkedin api.")
+        and "https://docs.scrapingdog.com/linkedin-scraper-api" in message
+    )
 
 
 def _plain_text(value: str) -> str:
@@ -2058,6 +2072,32 @@ async def _fetch_page(
         return {"ok": False, "error": "invalid_url"}
     try:
         canonical_url = public_http_url(safe_url)
+        linkedin_profile = _strict_linkedin_company_profile_url(canonical_url)
+        if linkedin_profile:
+            diagnostic: dict[str, str] = {}
+            source: dict[str, str] = {}
+            current = await fetch_current_linkedin_company_size(
+                linkedin_profile, diagnostic=diagnostic, source_text_sink=source,
+            )
+            final_profile = _strict_linkedin_company_profile_url(source.get("url"))
+            text = source.get("text", "")
+            if not (
+                isinstance(current, Mapping)
+                and final_profile == linkedin_profile
+                and _strict_linkedin_company_profile_url(current.get("url"))
+                == linkedin_profile
+                and text
+            ):
+                return {
+                    "ok": False,
+                    "error": diagnostic.get(VERIFIER_FAILURE_REASON_KEY) or "empty_page",
+                }
+            if _is_known_provider_diagnostic_only(text):
+                return {"ok": False, "error": "provider_diagnostic_body"}
+            return {
+                "ok": True, "url": canonical_url,
+                "final_url": source["url"], "text": text,
+            }
         api_key = os.environ.get("SCRAPINGDOG_API_KEY") or os.environ.get(
             "QUALIFICATION_SCRAPINGDOG_API_KEY"
         )

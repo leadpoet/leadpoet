@@ -65,13 +65,13 @@ BEGIN
   -- Full archive proof is complete before the live claim-control fence.
   PERFORM pg_catalog.pg_advisory_xact_lock(
     pg_catalog.hashtextextended('lab-arena-claim-control', 0));
-  LOCK TABLE public.lab_arena_restart_claim_control IN ACCESS EXCLUSIVE MODE;
-  LOCK TABLE public.lab_arena_rounds IN ACCESS EXCLUSIVE MODE;
-  LOCK TABLE public.lab_arena_submissions IN ACCESS EXCLUSIVE MODE;
-  LOCK TABLE public.lab_arena_runs IN ACCESS EXCLUSIVE MODE;
   LOCK TABLE public.qualification_private_icp_sets IN SHARE MODE;
   SELECT * INTO v_control FROM public.lab_arena_restart_claim_control WHERE singleton FOR UPDATE;
-  SELECT * INTO v_round FROM public.lab_arena_rounds WHERE round_id=v_round_id FOR UPDATE;
+  -- Ordinary score writers may already hold the live round before waiting
+  -- on this advisory fence. The hold writes only claim control; do not wait
+  -- on live round/run locks in the opposite order. Stable source guards below
+  -- exclude only normal qualification projections and judge progress.
+  SELECT * INTO v_round FROM public.lab_arena_rounds WHERE round_id=v_round_id;
   IF current_setting('session_replication_role')<>'origin'
      OR jsonb_typeof(v_expected)<>'object' OR v_round.round_id IS NULL
      OR v_control.singleton IS NULL OR v_control.guard_commitment<>''

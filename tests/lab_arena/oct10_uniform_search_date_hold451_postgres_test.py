@@ -165,3 +165,103 @@ def test_archive_hash_phase_keeps_live_writes_free_and_archives_locked(unheld):
             assert not thread.is_alive()
             assert result == [None], result
             assert recovery._snapshot(cur)['hold']['operator_paused'] is True
+
+
+@pytest.mark.parametrize("pathway", ["trajectory", "score_projection"])
+def test_hold_fence_allows_trajectory_and_round_share_score_writer(unheld, pathway):
+    """Reproduce both production lock orders without live-table/round locks."""
+    import json
+    import queue
+    import threading
+    import time
+
+    from lab_arena.trajectory import event
+
+    psycopg, dsn = unheld
+    store = ArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
+    barrier = 451202611
+    results, hold_pid, score_pid = {}, queue.Queue(), queue.Queue()
+    with psycopg.connect(**dsn) as owner:
+        owner.autocommit = True
+        with owner.cursor() as cur:
+            lease, token, _, _ = claim(store,recovery.ROUND,hotkey('judge-race451'))
+            assert lease['status'] == 'leased'
+            # record_run_scores accepts the ordinary judged stage. The hold
+            # binds this fresh state and permits no further progression.
+            if pathway == 'score_projection':
+                cur.execute('SET session_replication_role=replica')
+                cur.execute("UPDATE public.lab_arena_rounds SET status='stage2_judged',stage_generation=stage_generation+1,status_generation=status_generation+1 WHERE round_id=%s", (recovery.ROUND,))
+                cur.execute('SET session_replication_role=origin')
+            cur.execute("SELECT min(run_id) FROM public.lab_arena_runs WHERE round_id=%s AND kind='execute' AND stage=2 AND status='accepted' AND per_icp_score IS NULL", (recovery.ROUND,))
+            source_run = cur.fetchone()[0]
+            assert source_run
+            sql = recovery._hold_render(cur)
+            owner.commit()
+            marker = '  SELECT * INTO v_control FROM public.lab_arena_restart_claim_control WHERE singleton FOR UPDATE;'
+            assert sql.count(marker) == 1
+            sql = sql.replace(marker, f'  PERFORM pg_advisory_xact_lock({barrier});\n'+marker)
+            cur.execute('SELECT pg_advisory_lock(%s)', (barrier,))
+
+            def apply_hold():
+                try:
+                    with psycopg.connect(**dsn) as conn:
+                        conn.autocommit = True
+                        with conn.cursor() as worker:
+                            worker.execute('SELECT pg_backend_pid()')
+                            hold_pid.put(worker.fetchone()[0])
+                            worker.execute(sql)
+                    results['hold'] = 'applied'
+                except Exception as exc:
+                    results['hold'] = exc
+
+            def record_scores():
+                try:
+                    with psycopg.connect(**dsn) as conn, conn.cursor() as worker:
+                        worker.execute('SELECT pg_backend_pid()')
+                        score_pid.put(worker.fetchone()[0])
+                        # This is the exact round-before-advisory order used by
+                        # the production score RPC, not a changed test function.
+                        worker.execute('SELECT 1 FROM public.lab_arena_rounds WHERE round_id=%s FOR SHARE', (recovery.ROUND,))
+                        worker.execute('SELECT public.lab_arena_record_run_scores(%s,2::smallint,%s::jsonb)',
+                            (recovery.ROUND,json.dumps([{'run_id':source_run,'per_icp_score':0,'qualification_doc':{'companies':[]}}])))
+                    results['score'] = 'unexpected write'
+                except psycopg.Error as exc:
+                    results['score'] = (exc.pgcode, 'lab_arena_round_progression_paused' in str(exc))
+
+            def wait_advisory(pid):
+                deadline = time.monotonic()+3
+                while True:
+                    cur.execute("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=%s AND locktype='advisory' AND NOT granted)", (pid,))
+                    if cur.fetchone()[0]:
+                        return
+                    assert time.monotonic() < deadline
+                    time.sleep(0.01)
+
+            hold = threading.Thread(target=apply_hold)
+            scores = threading.Thread(target=record_scores)
+            hold.start()
+            try:
+                wait_advisory(hold_pid.get(timeout=2))
+                # Exact authenticated production trajectory RPC must remain
+                # usable while the hold owns the claim-control advisory fence.
+                if pathway == 'trajectory':
+                    assert store.append_trajectory_events(lease['run_id'],hash_lease_token(token),
+                        [event('runtime.stdout',{'text':'concurrent hold451 proof'})])['status'] == 'accepted'
+                    assert complete(store,lease['run_id'],hash_lease_token(token),'accepted',
+                        output_ref='arena/test/concurrent-drain451.json')['status'] == 'accepted'
+                else:
+                    scores.start()
+                    wait_advisory(score_pid.get(timeout=2))
+            finally:
+                cur.execute('SELECT pg_advisory_unlock(%s)', (barrier,))
+                hold.join(timeout=10)
+                if scores.ident is not None:
+                    scores.join(timeout=10)
+            assert not hold.is_alive() and not scores.is_alive()
+            expected = {'hold':'applied'}
+            if pathway == 'score_projection':
+                expected['score'] = ('55000',True)
+            assert results == expected, results
+            assert recovery._snapshot(cur)['hold']['operator_paused'] is True
+            cur.execute('SELECT per_icp_score FROM public.lab_arena_runs WHERE run_id=%s', (source_run,))
+            assert cur.fetchone()[0] is None

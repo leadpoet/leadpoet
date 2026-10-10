@@ -2079,10 +2079,11 @@ async def _search_web(
         url = _safe_https_url(item.get("url") or item.get("id"))
         if not url:
             continue
+        # Search publication metadata can date a republication instead of the
+        # transaction. Keep discovery to locators; fetched text owns chronology.
         locators.append({
             "url": url,
             "title": str(item.get("title") or "")[:300],
-            "published_date": str(item.get("publishedDate") or "")[:40],
         })
     return {"results": locators, "notice": "discovery_only_not_evidence"}
 

@@ -424,6 +424,7 @@ def project_structured_linkedin_company_identity(
     observed_profile_url: str = "",
     expected_company_name: str = "",
     allow_website_redirect: bool = False,
+    preserve_identity_website: bool = False,
 ) -> Optional[dict[str, str]]:
     """Project one exact main profile, including a proved numeric-ID alias."""
 
@@ -461,6 +462,8 @@ def project_structured_linkedin_company_identity(
             "source_field": STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD,
             "url": profile_url,
             "website": f"https://{domain}/",
+            **({"provider_website_url": element.get("website")}
+               if preserve_identity_website else {}),
         }
     observed_profile = _strict_linkedin_company_profile_url(observed_profile_url)
     observed_slug = linkedin_company_page_slug(observed_profile)
@@ -695,6 +698,7 @@ async def fetch_structured_linkedin_company_size(
     company_identity_observed_profile_url: str = "",
     company_description_evidence: Optional[dict[str, str]] = None,
     expected_company_name: str = "",
+    preserve_identity_website: bool = False,
 ) -> Optional[StructuredLinkedInCompanySizeEvidence]:
     """Fetch one profile and project size plus optional company-type evidence."""
 
@@ -745,11 +749,14 @@ async def fetch_structured_linkedin_company_size(
         observed_profile_url=company_identity_observed_profile_url,
         expected_company_name=expected_company_name,
         allow_website_redirect=bool(company_identity_observed_profile_url),
+        preserve_identity_website=preserve_identity_website,
     )
     projection_body = body
+    # Only a numeric profile alias can authorize the existing redirect lookup.
+    # Retaining a website for identity proof must not add a provider request.
     provider_website_url = str(
         (identity_evidence or {}).get("provider_website_url") or ""
-    )
+    ) if (identity_evidence or {}).get("requested_url") else ""
     if provider_website_url:
         final_url = await _verified_provider_website_redirect(
             key,

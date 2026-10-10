@@ -6390,26 +6390,41 @@ class ArenaService:
         )
         if participant is None:
             raise ServiceError("submission_missing", 404)
+        combined_all_reader = getattr(self._store, "list_public_result_runs", None)
         combined_reader = getattr(self._store, "list_public_result_execution_runs", None)
         disclosure_metadata = (
             icp_disclosure.disclosure_metadata(row)
-            if round_status == "published" and combined_reader is not None else None
+            if round_status == "published"
+            and (combined_all_reader is not None or combined_reader is not None)
+            else None
         )
         baselines = (
             [p for p in row.get("participants") or [] if p.get("is_king") is True]
             if disclosure_metadata is not None else []
         )
+        combined_score_runs = None
         if disclosure_metadata is not None and len(baselines) == 1:
             baseline_id = str(baselines[0]["submission_id"])
-            combined_runs = combined_reader(round_id, baseline_id, submission_id)
+            combined_runs = (
+                combined_all_reader(round_id, baseline_id, submission_id)
+                if combined_all_reader is not None
+                else combined_reader(round_id, baseline_id, submission_id)
+            )
             disclosure = icp_disclosure.baseline_disclosure(
                 row,
-                [run for run in combined_runs if run.get("submission_id") == baseline_id],
+                [run for run in combined_runs
+                 if run.get("submission_id") == baseline_id and run.get("kind") == "execute"],
                 self.now(),
             )
             source_execution_runs = [
-                run for run in combined_runs if run.get("submission_id") == submission_id
+                run for run in combined_runs
+                if run.get("submission_id") == submission_id and run.get("kind") == "execute"
             ]
+            if combined_all_reader is not None:
+                combined_score_runs = [
+                    run for run in combined_runs
+                    if run.get("submission_id") == submission_id and run.get("kind") == "score"
+                ]
         else:
             disclosure = self._public_icp_disclosure(row)
             source_execution_runs = self._store.list_runs(
@@ -6460,10 +6475,14 @@ class ArenaService:
             except ArenaContractError as exc:
                 raise ServiceError("public_result_unavailable", 503) from exc
         run_results = validated_results
-        score_runs = (
-            self._store.list_runs(round_id, kind="score", submission_id=submission_id)
-            if execution_runs else []
-        )
+        if not execution_runs:
+            score_runs = []
+        elif combined_score_runs is not None:
+            score_runs = combined_score_runs
+        else:
+            score_runs = self._store.list_runs(
+                round_id, kind="score", submission_id=submission_id
+            )
         verification_required = (
             contact_policy.enabled(row.get("configuration_doc") or {})
             or integrity.enabled(row.get("configuration_doc") or {})

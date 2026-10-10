@@ -1469,6 +1469,12 @@ async def verify_company_exists(
                     "final_url": canonical_final_url,
                     "text": evidence_text,
                 }
+                if homepage_navigation_locator_sink is not None:
+                    homepage_navigation_locator_sink.extend(
+                        _homepage_navigation_locators(
+                            text, final_url=observed_url, verified_domain=domain,
+                        )
+                    )
         return _identity_result(
             submitted_identity,
             "homepage identity evidence unavailable: LinkedIn company binding not found",

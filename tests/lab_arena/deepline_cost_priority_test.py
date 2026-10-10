@@ -14,22 +14,25 @@ from tests.lab_arena.deepline_execution_recovery_test import exact_bill
 
 class PriorityStore:
     def __init__(self, *, priority=True):
-        self.items = [_candidate(uncertain_entry_id=n) for n in (10, 20, 100, 200)]
+        self.items = [_candidate(uncertain_entry_id=n, call_identity='sha256:' + ('%064x' % n)) for n in (10, 20, 100, 200)]
         self.priority = {100, 200} if priority else set()
         self.reads = []
+
+    def list_abandoned_billing_runs(self, round_id):
+        return []
 
     def list_deepline_cost_reconciliations(
         self, round_id, *, run_id, after_entry_id, limit,
         successful_execute_only=False,
     ):
         self.reads.append((successful_execute_only, run_id, after_entry_id))
-        assert round_id == ROUND_ID and limit == 1
+        assert round_id == ROUND_ID and 1 <= limit <= 20
         rows = [item for item in self.items
                 if (not successful_execute_only or item['uncertain_entry_id'] in self.priority)
                 and (not run_id or item['run_id'] == run_id)]
         return sorted(rows, key=lambda item: (
             item['uncertain_entry_id'] <= after_entry_id, item['uncertain_entry_id']
-        ))[:1]
+        ))[:limit]
 
 
 def service_for(store):
@@ -38,41 +41,33 @@ def service_for(store):
     service = _bare_service(store, broker)
     service._lock = lock
     service._deepline_priority_reconciliation_after = {}
-    service._deepline_priority_next = {}
     return service, broker
 
 
-def test_successes_are_checked_first_without_starving_older_failures_and_wrap():
+def test_successes_and_older_failures_have_independent_wrapping_cursors():
     store = PriorityStore()
     service, broker = service_for(store)
-    for _ in range(10):
-        service._reconcile_active_deepline_cost(ROUND_ID)
-    assert broker.seen == [100, 10, 200, 20, 100, 100, 200, 200, 100, 10]
-    assert store.reads[:6] == [
-        (True, '', 0), (False, '', 0), (True, '', 100),
-        (False, '', 10), (True, '', 200), (False, '', 20),
-    ]
-    # Restart discards both in-memory cursors but still checks priority first.
+    first = service._reconcile_active_deepline_cost(ROUND_ID)
+    assert first['checked'] == 3  # Priority100 is also in the general page.
+    assert sorted(broker.seen) == [10, 20, 100]
+    service._reconcile_active_deepline_cost(ROUND_ID)
+    assert sorted(broker.seen[3:]) == [10, 20, 200]
+    assert store.reads == [(True, '', 0), (False, '', 0),
+                           (True, '', 100), (False, '', 100)]
     restarted, broker = service_for(store)
     restarted._reconcile_active_deepline_cost(ROUND_ID)
-    restarted._reconcile_active_deepline_cost(ROUND_ID)
-    assert broker.seen == [100, 10]
-    assert store.reads[-2:] == [(True, '', 0), (False, '', 0)]
+    assert sorted(broker.seen) == [10, 20, 100]
 
 
-def test_empty_priority_falls_back_without_consuming_a_provider_check():
+def test_empty_priority_does_not_remove_general_capacity():
     store = PriorityStore(priority=False)
     service, broker = service_for(store)
-    for _ in range(3):
-        service._reconcile_active_deepline_cost(ROUND_ID)
-    assert broker.seen == [10, 20, 100]
-    assert store.reads == [
-        (True, '', 0), (False, '', 0), (False, '', 10),
-        (True, '', 0), (False, '', 20),
-    ]
+    assert service._reconcile_active_deepline_cost(ROUND_ID)['checked'] == 3
+    assert sorted(broker.seen) == [10, 20, 100]
+    assert store.reads == [(True, '', 0), (False, '', 0)]
 
 
-def test_ordinary_empty_and_targeted_recovery_keep_existing_semantics():
+def test_targeted_recovery_keeps_existing_semantics_and_empty_batch_is_idle():
     store = PriorityStore()
     service, broker = service_for(store)
     run_id = store.items[0]['run_id']
@@ -80,7 +75,6 @@ def test_ordinary_empty_and_targeted_recovery_keep_existing_semantics():
     service._reconcile_deepline_cost(ROUND_ID, run_id=run_id)
     assert broker.seen == [10, 20]
     assert store.reads == [(False, run_id, 0), (False, run_id, 10)]
-    assert service._deepline_priority_next == {}
     assert service._deepline_priority_reconciliation_after == {}
     store.items = []
     assert service._reconcile_active_deepline_cost(ROUND_ID) == {'status': 'none'}
@@ -97,9 +91,11 @@ def test_prioritized_execute_keeps_exact_cost_credentials_and_get_only(amount, u
         operation_aliases=['exa_search', 'search'])
 
     class Store(ReconciliationStore):
+        def list_abandoned_billing_runs(self, _round):
+            return []
+
         def list_deepline_cost_reconciliations(self, _round, **options):
-            assert options['successful_execute_only'] is True
-            return [] if self.calls else [candidate]
+            return [candidate] if options.get('successful_execute_only') else []
 
     class Transport:
         def __init__(self):
@@ -120,7 +116,6 @@ def test_prioritized_execute_keeps_exact_cost_credentials_and_get_only(amount, u
     broker._provider_funding_source_for = lambda _context, provider: 'miner_key'
     service = _bare_service(store, broker)
     service._deepline_priority_reconciliation_after = {}
-    service._deepline_priority_next = {}
     assert service._reconcile_active_deepline_cost(ROUND_ID)['status'] == 'settled'
     assert len(transport.requests) == len(store.calls) == 1
     assert store.calls[0]['actual_microusd'] == amount
@@ -146,9 +141,9 @@ def test_priority_does_not_bypass_original_credential_and_key_binding(patch, sta
     broker = _broker(store, NoRequests())
     broker._provider_funding_source_for = lambda _context, _provider: 'miner_key'
     service = _bare_service(type('Store', (), {
+        'list_abandoned_billing_runs': lambda _self, _round: [],
         'list_deepline_cost_reconciliations': lambda _self, _round, **_options: [candidate]
     })(), broker)
     service._deepline_priority_reconciliation_after = {}
-    service._deepline_priority_next = {}
     assert service._reconcile_active_deepline_cost(ROUND_ID)['status'] == status
     assert store.calls == []

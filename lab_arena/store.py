@@ -325,6 +325,9 @@ _RUNTIME_JSON_COLUMNS = {
     "source_commit:content->>validator_source_commit": "content ->> 'validator_source_commit' AS source_commit",
     "source_dirty:content->>validator_source_dirty": "content ->> 'validator_source_dirty' AS source_dirty",
     "start_lease_generation:content->>lease_generation": "content ->> 'lease_generation' AS start_lease_generation",
+    "status:content->>status": "content ->> 'status' AS status",
+    "error_class:content->>error_class": "content ->> 'error_class' AS error_class",
+    "failure_stage:content->>failure_stage": "content ->> 'failure_stage' AS failure_stage",
     **{
         "cfg_%s:configuration_doc->%s::text" % (key, key):
         "(configuration_doc -> '%s')::text AS cfg_%s" % (key, key)
@@ -570,8 +573,9 @@ class PostgrestTransport(StoreTransport):
         for key, value in (filters or {}).items():
             if key not in (ROUND_MODE_FILTER, PROMOTION_OUTCOME_FILTER) and not key.replace("_", "").isalnum():
                 raise ArenaStoreError("invalid filter column")
-            if key == "event_kind" and value == "runtime.started" and table == "lab_arena_trajectory_events":
-                query.append((key, "eq.runtime.started"))
+            if (key == "event_kind" and value in ("runtime.started", "runtime.error")
+                    and table == "lab_arena_trajectory_events"):
+                query.append((key, "eq." + value))
             elif key == "operation_id" and value is not None:
                 operation = str(value)
                 if not re.fullmatch(r"[a-z0-9_.]{1,64}", operation):
@@ -2380,6 +2384,33 @@ class ArenaStore:
             if len(page) < 500:
                 break
         return rows
+
+    def list_abandoned_billing_runs(self, round_id: str) -> List[str]:
+        """Prioritize retained bills, without granting lease recovery authority.
+
+        Only leased runs are read, then their indexed runtime errors. Billing
+        and expiry keep their existing identity and all-settled checks.
+        """
+        leased = self.list_runs(round_id, status="leased", columns="run_id")
+        ids = sorted({str(row["run_id"]) for row in leased})
+        abandoned = set()
+        for first in range(0, len(ids), 25):
+            rows = self._transport.select(
+                "lab_arena_trajectory_events",
+                filters={"round_id": round_id, "event_kind": "runtime.error"},
+                run_ids=ids[first:first + 25], order="trajectory_id",
+                descending=True, limit=500,
+                columns=("run_id,status:content->>status,"
+                         "error_class:content->>error_class,"
+                         "failure_stage:content->>failure_stage"),
+            )
+            abandoned.update(
+                str(row["run_id"]) for row in rows
+                if row.get("status") == "abandoned"
+                and row.get("error_class") == "RuntimeHostError"
+                and row.get("failure_stage") == "runtime"
+            )
+        return sorted(abandoned.intersection(ids))
 
     def list_runtime_starts(self, round_id: str, *, run_ids: Sequence[str]) -> List[Dict[str, Any]]:
         """Read indexed start receipts only for runs missing source metadata.

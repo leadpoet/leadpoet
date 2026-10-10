@@ -2477,6 +2477,16 @@ class ArenaStore:
                 return rows
             after_run_id = str(page[-1]["run_id"])
 
+    def list_public_result_execution_runs(
+        self, round_id: str, baseline_id: str, submission_id: str
+    ) -> List[Dict[str, Any]]:
+        """Read baseline and requested executions in one fresh ordered query."""
+
+        return self.list_runs(
+            round_id, kind="execute",
+            submission_ids=tuple(dict.fromkeys((baseline_id, submission_id))),
+        )
+
     def list_ledger(
         self,
         *,

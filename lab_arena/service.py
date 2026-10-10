@@ -6387,11 +6387,32 @@ class ArenaService:
         )
         if participant is None:
             raise ServiceError("submission_missing", 404)
-        disclosure = self._public_icp_disclosure(row)
-        public_positions = set(disclosure["public_positions"]) if disclosure else set()
-        source_execution_runs = self._store.list_runs(
-            round_id, kind="execute", submission_id=submission_id
+        combined_reader = getattr(self._store, "list_public_result_execution_runs", None)
+        disclosure_metadata = (
+            icp_disclosure.disclosure_metadata(row)
+            if round_status == "published" and combined_reader is not None else None
         )
+        baselines = (
+            [p for p in row.get("participants") or [] if p.get("is_king") is True]
+            if disclosure_metadata is not None else []
+        )
+        if disclosure_metadata is not None and len(baselines) == 1:
+            baseline_id = str(baselines[0]["submission_id"])
+            combined_runs = combined_reader(round_id, baseline_id, submission_id)
+            disclosure = icp_disclosure.baseline_disclosure(
+                row,
+                [run for run in combined_runs if run.get("submission_id") == baseline_id],
+                self.now(),
+            )
+            source_execution_runs = [
+                run for run in combined_runs if run.get("submission_id") == submission_id
+            ]
+        else:
+            disclosure = self._public_icp_disclosure(row)
+            source_execution_runs = self._store.list_runs(
+                round_id, kind="execute", submission_id=submission_id
+            )
+        public_positions = set(disclosure["public_positions"]) if disclosure else set()
         if completed is not None:
             # Projection only: preserve every stored output and write-once score.
             projected = {run["run_id"]: run for run in completed["execution_runs"]}

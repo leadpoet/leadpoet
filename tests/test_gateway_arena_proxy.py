@@ -401,9 +401,13 @@ def test_sidecar_destination_is_fixed_by_network(monkeypatch):
     import asyncio
 
     observed = []
+    clients = []
+    options = []
 
     class Client:
         def __init__(self, **kwargs):
+            clients.append(self)
+            options.append(kwargs)
             assert kwargs["follow_redirects"] is False
             assert kwargs["trust_env"] is False
 
@@ -420,4 +424,86 @@ def test_sidecar_destination_is_fixed_by_network(monkeypatch):
     monkeypatch.setattr(arena_proxy.httpx, "AsyncClient", Client)
     for testnet in [False, True]:
         asyncio.run(arena_proxy._request_sidecar("GET", "v1/current", query="", body=b"", headers={}, testnet=testnet))
-    assert observed == ["http://127.0.0.1:8792/arena/v1/current", "http://127.0.0.1:8793/arena/v1/current"]
+    asyncio.run(arena_proxy._request_sidecar(
+        "POST", "v1/runs/r1/provider", query="", body=b"", headers={}
+    ))
+    assert observed == [
+        "http://127.0.0.1:8792/arena/v1/current",
+        "http://127.0.0.1:8793/arena/v1/current",
+        "http://127.0.0.1:8792/arena/v1/runs/r1/provider",
+    ]
+    assert len({id(client) for client in clients}) == 3
+    assert options[0]["verify"] is options[1]["verify"] is options[2]["verify"]
+    assert [option["timeout"].read for option in options] == [150.0, 150.0, 380.0]
+    assert all(option["timeout"].connect == 3.0 for option in options)
+    assert all(option["timeout"].pool == 3.0 for option in options)
+
+
+def test_sidecar_ssl_context_uses_httpx_default_trust_once(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+
+    original = httpx.create_ssl_context
+    calls = []
+
+    def create_context(**kwargs):
+        calls.append(kwargs)
+        time.sleep(0.002)  # Make simultaneous first use overlap.
+        return original(**kwargs)
+
+    monkeypatch.setattr(arena_proxy, "_SIDECAR_SSL_CONTEXT", None)
+    monkeypatch.setattr(httpx, "create_ssl_context", create_context)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        contexts = list(pool.map(lambda _: arena_proxy._sidecar_ssl_context(), range(8)))
+    context = contexts[0]
+    assert all(other is context for other in contexts)
+    assert calls == [{"trust_env": False}]
+    default = original(trust_env=False)
+    assert context.verify_mode == default.verify_mode
+    assert context.check_hostname == default.check_hostname
+    assert context.cert_store_stats() == default.cert_store_stats()
+
+
+def test_sidecar_ssl_context_keeps_cookies_and_connections_per_request(monkeypatch):
+    import asyncio
+
+    async def run():
+        connections = 0
+        cookies = []
+
+        async def sidecar(reader, writer):
+            nonlocal connections
+            connections += 1
+            try:
+                while True:
+                    try:
+                        request = await reader.readuntil(b"\r\n\r\n")
+                    except asyncio.IncompleteReadError:
+                        break
+                    cookies.append(b"\r\ncookie:" in request.lower())
+                    writer.write(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                        b"Set-Cookie: probe=1; Path=/\r\nConnection: keep-alive\r\n\r\nok"
+                    )
+                    await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(sidecar, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        monkeypatch.setattr(arena_proxy, "_SIDECAR_URL", f"http://127.0.0.1:{port}")
+        try:
+            for _ in range(2):
+                response = await arena_proxy._request_sidecar(
+                    "GET", "v1/current", query="", body=b"", headers={}
+                )
+                assert response.status_code == 200
+                assert response.content == b"ok"
+        finally:
+            server.close()
+            await server.wait_closed()
+        assert connections == 2
+        assert cookies == [False, False]
+
+    asyncio.run(run())

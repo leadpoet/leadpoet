@@ -11,6 +11,8 @@ import ipaddress
 import json
 import os
 import re
+import ssl
+import threading
 import time
 from collections import OrderedDict
 from typing import Mapping
@@ -48,6 +50,20 @@ _AUTHENTICATED_CLAIM_DENIALS = {
 _HANDOFF_LAST_LOGGED: OrderedDict = OrderedDict()
 _HANDOFF_LOG_WINDOW = 0.0
 _HANDOFF_LOG_COUNT = 0
+_SIDECAR_SSL_CONTEXT = None
+_SIDECAR_SSL_CONTEXT_LOCK = threading.Lock()
+
+
+def _sidecar_ssl_context() -> ssl.SSLContext:
+    global _SIDECAR_SSL_CONTEXT
+    # HTTPX builds the default certifi context for every new client, even for
+    # plain-HTTP loopback. Configure trust once and do not mutate it; each
+    # request still gets its own client, cookies, and TCP connection.
+    if _SIDECAR_SSL_CONTEXT is None:
+        with _SIDECAR_SSL_CONTEXT_LOCK:
+            if _SIDECAR_SSL_CONTEXT is None:
+                _SIDECAR_SSL_CONTEXT = httpx.create_ssl_context(trust_env=False)
+    return _SIDECAR_SSL_CONTEXT
 
 
 def _handoff_log_due(key: tuple) -> bool:
@@ -228,6 +244,7 @@ async def _request_sidecar(
         timeout=timeout,
         follow_redirects=False,
         trust_env=False,
+        verify=_sidecar_ssl_context(),
     ) as client:
         return await client.request(
             method,

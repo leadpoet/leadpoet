@@ -1803,7 +1803,9 @@ def _is_recognized_ats_posting(source_url: str) -> bool:
     )
 
 
-def _observed_ownership_links(body: str, source_url: str) -> list[Dict[str, str]]:
+def _observed_ownership_links(
+    body: str, source_url: str, *, archive_url: str = ""
+) -> list[Dict[str, str]]:
     """Retain visible fetched links, never candidate-supplied assertions."""
     links = []
     visible = _visible_page_links(body)
@@ -1814,9 +1816,12 @@ def _observed_ownership_links(body: str, source_url: str) -> list[Dict[str, str]
         )[:80])
     for href, label in visible:
         try:
-            url = canonical_candidate_prompt_url(
-                urljoin(source_url, href), "employer_link.url"
-            )
+            href = urljoin(archive_url or source_url, href)
+            if archive_url:
+                href = _wayback_original_url(href) or href
+            parsed = urlsplit(href)
+            resource = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
+            url = canonical_candidate_prompt_url(resource, "employer_link.url")
         except (TypeError, ValueError):
             continue
         links.append({"url": url, "label": " ".join(label.split())[:300]})
@@ -1887,7 +1892,9 @@ def _ats_ownership_anchors(
                     ))
                 ):
                     anchors.append({"source_url": source, "linked_url": url,
-                                    "posting_url": target, "kind": "official_careers_link"})
+                                    "posting_url": target, "kind": "official_careers_link",
+                                    **({"archive_url": result["meta"]["ownership_archive_url"]}
+                                       if (result.get("meta") or {}).get("ownership_archive_url") else {})})
                 elif (
                     _normalize_url(source) == _normalize_url(target)
                     and _url_on_verified_company_identity(clean, identity)
@@ -1895,7 +1902,9 @@ def _ats_ownership_anchors(
                     and not re.search(r"\bpowered\s+by\b", label, re.I)
                 ):
                     anchors.append({"source_url": source, "linked_url": url,
-                                    "posting_url": target, "kind": "job_official_careers_link"})
+                                    "posting_url": target, "kind": "job_official_careers_link",
+                                    **({"archive_url": result["meta"]["ownership_archive_url"]}
+                                       if (result.get("meta") or {}).get("ownership_archive_url") else {})})
     return anchors
 
 
@@ -2076,6 +2085,23 @@ def _get_openrouter_key() -> str:
 # ─────────────────────────────────────────────────────────────────────
 # Scraping — SD primary (host-aware hardened) + Exa fallback
 # ─────────────────────────────────────────────────────────────────────
+def _wayback_original_url(url: str) -> str:
+    """Decode only the documented exact snapshot wrapper, without fetching."""
+    try:
+        parsed = urlsplit(url)
+        if parsed.hostname != "web.archive.org" or parsed.scheme not in {"http", "https"}:
+            return ""
+        match = re.fullmatch(r"/web/\d{14}(?:[a-z_]+)?/(https?://.+)", parsed.path)
+        if not match:
+            return ""
+        original = match.group(1) + (("?" + parsed.query) if parsed.query else "")
+        return canonical_candidate_prompt_url(original, "archived_resource.url")
+    except (TypeError, ValueError):
+        # A missing ownership attestation must not reject fallback content.
+        return ""
+
+
+
 async def _try_wayback(url: str) -> Dict[str, Any]:
     """Final-fallback: Wayback Machine snapshot of the URL.
 
@@ -2101,8 +2127,17 @@ async def _try_wayback(url: str) -> Dict[str, Any]:
             if len(body) < 500:
                 return {"ok": False, "stage": "wayback_too_short",
                         "content": "", "error": f"len={len(body)}"}
+            snapshot_url = str(r.url)
+            ownership_meta = {}
+            if _normalize_url(_wayback_original_url(snapshot_url)) == _normalize_url(url):
+                ownership_meta = {
+                    "observed_ownership_links": _observed_ownership_links(
+                        body, url, archive_url=snapshot_url
+                    ),
+                    "ownership_archive_url": snapshot_url,
+                }
             return {"ok": True, "stage": "wayback",
-                    "content": body[:MAX_SCRAPED_CHARS], "error": None}
+                    "content": body[:MAX_SCRAPED_CHARS], "meta": ownership_meta, "error": None}
     except Exception as e:
         return {"ok": False, "stage": "wayback_exception",
                 "content": "", "error": f"{type(e).__name__}: {str(e)[:80]}"}
@@ -2330,7 +2365,7 @@ async def _scrape_sd_hardened(
         if wb["ok"]:
             return {"ok": True, "stage": "wayback",
                     "content": wb["content"], "error": None,
-                    "stage_history": history}
+                    "meta": wb.get("meta") or {}, "stage_history": history}
 
     # A target 404 alone cannot prove semantic absence. The caller compares it
     # with the independent Exa result before separating a missing source from
@@ -3169,7 +3204,11 @@ def _build_final_judge_prompt(
             "official company property. The server-observed careers links below "
             "establish only that relationship; they do not prove the job's duties, "
             "date or ICP fit. Assess those separately from the supplied job body. "
-            "If no ownership anchor is observed, do not infer same_entity=pass "
+            "Apply this requirement to ATS evidence actually relied on. Fetched "
+            "official-company job pages or structured LinkedIn job evidence remain "
+            "eligible under their existing source-grounding rules. "
+            "If no ownership anchor is observed for relied-on ATS evidence, "
+            "do not infer same_entity=pass "
             "from name resemblance. Use unclear unless independent supplied "
             "evidence proves a different employer.\n"
             + json.dumps(row["_ats_employer_ownership"], sort_keys=True)
@@ -5427,10 +5466,22 @@ async def verify_three_stage(
     )
     ats_identity_unresolved = False
     owned = {_normalize_url(a["posting_url"]) for a in (ats_ownership or {}).get("anchors", [])}
+    cited_urls = {_normalize_url(url) for url in s3_item.get("evidence_urls_used") or []}
+    grounded_alternative_job = bool(require_ats_employer_identity and any(
+        _normalize_url(item.get("url") or "") in cited_urls
+        and (
+            (_url_on_verified_company_identity(str(item.get("url") or ""), verified_identity_context)
+             and _looks_like_job_body(str(item.get("text") or "")))
+            or ((item.get("meta") or {}).get("kind") == "linkedin_job"
+                and bool(_extract_linkedin_job_id(str(item.get("url") or ""))))
+        )
+        for item in contents.get("results") or []
+    ))
     if require_ats_employer_identity and s3_decision == "approve":
-        cited = {_normalize_url(url) for url in s3_item.get("evidence_urls_used") or []
-                 if _is_recognized_ats_posting(url)}
-        if not owned or not cited or not cited.issubset(owned):
+        cited_ats = {_normalize_url(url) for url in s3_item.get("evidence_urls_used") or []
+                     if _is_recognized_ats_posting(url)}
+        if ((cited_ats and not cited_ats.issubset(owned))
+            or (not cited_ats and not grounded_alternative_job)):
             s3_decision = "review"
             ats_identity_unresolved = True
     closed_only_hiring_evidence = False
@@ -5467,6 +5518,7 @@ async def verify_three_stage(
         )
         and (
             official_publisher_binding
+            or (grounded_alternative_job and s3_item.get("same_entity_check") == "pass")
             or (bool(ats_ownership and ats_ownership["anchors"])
                 and s3_item.get("same_entity_check") == "pass")
             or (

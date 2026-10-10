@@ -136,3 +136,70 @@ def test_hidden_markdown_inside_html_is_not_an_observed_link():
 def test_powered_by_label_is_not_job_employer_ownership():
     result = page(ASHBY, '<a href="https://usefluency.com/careers">Powered by Fluency</a>')
     assert intent._ats_ownership_anchors([result], [ASHBY], IDENTITY) == []
+
+
+def test_retained_customerio_text_fragment_is_not_part_of_resource_identity():
+    href = 'https://customer.io/careers#:~:text=our%20collective%20success.-,BENEFITS,-Our%C2%A0'
+    result = page(GH, f'<a href="{href}">See full benefits here</a>')
+    assert result["meta"]["observed_ownership_links"][0]["url"] == "https://customer.io/careers"
+    assert intent._ats_ownership_anchors([result], [GH], {"observed_domain": "customer.io"})
+
+
+@pytest.mark.parametrize("relative", [False, True])
+@pytest.mark.parametrize("snapshot_source, expected", [
+    ("https://usefluency.com/", True),
+    ("https://unrelated.example/", False),
+    ("https://usefluency.com/%0Aunsafe", False),
+])
+def test_wayback_ownership_links_require_exact_official_snapshot_provenance(snapshot_source, expected, relative):
+    import httpx
+    snapshot = "https://web.archive.org/web/20260721211653/" + snapshot_source
+    href = ("" if relative else "http://web.archive.org") + "/web/20260721211653id_/https://jobs.ashbyhq.com/fluency"
+    body = '<html><body><p>' + ('Company information. ' * 40) + f'</p><a href="{href}">Careers</a></body></html>'
+    def reply(request):
+        if request.url.host == "archive.org":
+            return httpx.Response(200, json={"archived_snapshots": {"closest": {"url": snapshot}}})
+        return httpx.Response(200, text=body)
+    original = httpx.AsyncClient
+    with mock.patch.object(intent.httpx, "AsyncClient", lambda **kwargs: original(transport=httpx.MockTransport(reply), **kwargs)):
+        fetched = asyncio.run(intent._try_wayback("https://usefluency.com/"))
+    assert fetched["ok"] is True
+    result = {"url": "https://usefluency.com/", "text": fetched["content"], "meta": fetched["meta"]}
+    anchors = intent._ats_ownership_anchors([result], [ASHBY], IDENTITY)
+    assert bool(anchors) is expected
+    if expected:
+        assert anchors[0]["archive_url"] == snapshot
+        assert anchors[0]["linked_url"] == "https://jobs.ashbyhq.com/fluency"
+
+
+def test_normal_page_cannot_unwrap_wayback_link_into_ownership():
+    result = page("https://usefluency.com/", '<a href="https://web.archive.org/web/20260721211653/https://jobs.ashbyhq.com/fluency">Careers</a>')
+    assert intent._ats_ownership_anchors([result], [ASHBY], IDENTITY) == []
+
+
+@pytest.mark.parametrize("citation, expected", [
+    ("https://usefluency.com/careers/platform-engineer", "approve"),
+    (ASHBY, "review"),
+    ("https://news.example/hiring", "review"),
+    ("https://www.linkedin.com/jobs/view/1234567890/", "approve"),
+])
+def test_unused_ats_does_not_block_other_grounded_job_evidence(citation, expected):
+    official = "https://usefluency.com/careers/platform-engineer"
+    alternate = citation if citation not in {ASHBY, official} else official
+    urls = [ASHBY, alternate]
+    contents = {"results": [{"url": url, "text": "We're hiring a platform engineer. Responsibilities: build and operate our platform.",
+        "meta": {"kind": "linkedin_job"} if "linkedin.com/jobs/" in url else {}}
+        for url in urls], "statuses": []}
+    response = {"model": "test", "usage": {}, "answer": {"overall_verdict": "qualified", "overall_confidence": "high", "signal_evaluations": [{
+        "signal_status": "supported", "confidence": "high", "same_entity_check": "pass", "verification_mode": "source_grounded",
+        "evidence_urls_used": [citation], "claim_matches_miner_date": "no_date_in_content", "source_accessibility": "accessible",
+        "supporting_quotes": ["We're hiring a platform engineer."], "contradicting_quotes": [], "unsupported_parts": [], "risk_notes": []}]}}
+    async def fetch(requested, **_kwargs):
+        return contents if requested == urls else {"results": [], "statuses": []}
+    with mock.patch.object(intent, "_fetch_sd_then_exa", mock.AsyncMock(side_effect=fetch)), mock.patch.object(intent, "_call_openrouter", mock.AsyncMock(return_value=response)):
+        result = asyncio.run(intent.verify_three_stage(None, company_name="Fluency", company_website="https://usefluency.com", company_linkedin="https://www.linkedin.com/company/usefluency",
+            source_url=ASHBY, miner_claim="We're hiring a platform engineer.", target_signal_text="Hiring platform engineers", evidence_type="HIRING", integrity_policy=True, company_quality=False, stage1_soft_reject=True,
+            verified_company_identity={"decision": "match", "observed_name": "fluency", "observed_domain": "usefluency.com", "observed_linkedin_slug": "usefluency", "evidence_source": "company_web_reverification"},
+            evidence_bundle=[{"url": url, "description": "We're hiring a platform engineer.", "snippet": "We're hiring a platform engineer."} for url in urls]))
+    assert result["decision"] == expected
+    assert result["client_ready"] is (expected == "approve")

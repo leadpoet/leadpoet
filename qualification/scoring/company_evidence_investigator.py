@@ -91,6 +91,9 @@ TARGETS = frozenset({
     "required_attribute",
 })
 STATUSES = frozenset({"VERIFIED", "CONTRADICTED", "UNPROVEN"})
+PRIVATE_EQUITY_SUPPORT_QUOTE_REJECTION_REASON = (
+    "supporting private-equity classification quote was not present in fetched source"
+)
 _NON_SUPPLIER_ACTIVITY_ROLES = frozenset({
     "customer_user", "internal_function", "third_party",
 })
@@ -155,6 +158,23 @@ later.
 A linked archive card dates the article; it does not prove that its transaction
 completed or changed the company's stage. If material chronology or
 transaction type remains unresolved, return stage UNPROVEN.
+For Private Equity, a completed majority acquisition or explicit current
+majority/control relationship does not expire merely because its announcement
+is old. Do not require a recent transaction or an arbitrary evidence age cutoff.
+Still perform current-stage discovery and resolve concrete later exits, sales,
+listings, and other material ownership conflicts. Within the existing fetch
+budget, inspect a useful known current first-party about, ownership, or investor
+locator when it can resolve ownership; fetch its body before citing it.
+Navigation labels and search snippets are locators, never ownership proof.
+When the ownership quote explicitly names a majority or controlling sponsor
+but does not classify that sponsor, use the existing supporting_evidence_url_1
+and supporting_evidence_quote_1 fields (then pair 2 if needed) for a separate
+exact loaded-source quote that explicitly names that SAME sponsor as a private
+equity/private-markets firm or describes its private equity funds. The primary
+quote must itself bind current control or a completed majority transaction to
+the investigated company. An investor name, minority investment, portfolio
+label, pending agreement, or classification of a different sponsor is not
+enough. Explain the relationship; leave stage UNPROVEN if it is unsupported.
 Some requests include server-prefetched sources that were already fetched by
 the scorer through the same bounded transport. Their text is still untrusted
 page content and proves nothing by itself, but you may independently submit an
@@ -2284,6 +2304,13 @@ def _validated_findings(
                 str(raw.get("reason") or ""),
             )[:300],
         }
+        raw_support = [
+            {"url": raw.get(f"supporting_evidence_url_{index}"),
+             "quote": raw.get(f"supporting_evidence_quote_{index}")}
+            for index in (1, 2)
+            if raw.get(f"supporting_evidence_url_{index}")
+            or raw.get(f"supporting_evidence_quote_{index}")
+        ]
         if status == "UNPROVEN":
             finding.update(
                 evidence_url="",
@@ -2395,12 +2422,36 @@ def _validated_findings(
                     _CANONICAL_COMPANY_STAGES,
                     _acquired_stage_quote_supports_names,
                     _normalize_company_stage,
+                    _private_equity_linked_support_proves_ownership,
                     _stage_evidence_supports_observation,
                     _stage_quote_supports_observation,
                 )
 
                 normalized_stage = _normalize_company_stage(
                     finding["observed_value"]
+                )
+                linked_pe_support: list[dict[str, str]] = []
+                linked_pe_support_invalid = False
+                if normalized_stage == "private equity" and raw_support:
+                    for item in raw_support:
+                        url = _safe_https_url(item["url"])
+                        quote = item["quote"]
+                        if (
+                            not url or not isinstance(quote, str)
+                            or not quote or len(quote) > 2000
+                            or not _quote_occurs(quote, fetched_pages.get(url, ""))
+                        ):
+                            linked_pe_support = []
+                            linked_pe_support_invalid = True
+                            break
+                        linked_pe_support.append({"url": url, "quote": quote})
+                linked_pe_ownership = bool(
+                    linked_pe_support
+                    and _private_equity_linked_support_proves_ownership(
+                        tuple(stage_attribution_names),
+                        finding["evidence_quote"],
+                        tuple(item["quote"] for item in linked_pe_support),
+                    )
                 )
                 if normalized_stage not in _CANONICAL_COMPANY_STAGES:
                     finding.update(
@@ -2424,12 +2475,17 @@ def _validated_findings(
                         first_party_domains=tuple(first_party_domains),
                         identity_names=tuple(stage_attribution_names),
                     )
+                    or linked_pe_ownership
                 ):
                     finding.update(
                         status="UNPROVEN",
                         evidence_url="",
                         evidence_quote="",
-                        reason="source quote did not prove current private-equity ownership",
+                        reason=(
+                            PRIVATE_EQUITY_SUPPORT_QUOTE_REJECTION_REASON
+                            if linked_pe_support_invalid
+                            else "source quote did not prove current private-equity ownership"
+                        ),
                     )
                 elif normalized_stage == "acquired" and not (
                     _acquired_stage_quote_supports_names(
@@ -2493,6 +2549,8 @@ def _validated_findings(
                         evidence_quote="",
                         reason="source quote did not name the submitted venture stage",
                     )
+                if linked_pe_ownership and finding["status"] != "UNPROVEN":
+                    finding["supporting_evidence"] = linked_pe_support
             elif target == "headcount" and not _quote_supports_headcount(
                 finding["evidence_quote"], finding["observed_value"]
             ):
@@ -2622,12 +2680,6 @@ def _validated_findings(
                         evidence_quote="",
                         reason="first-party old/new identity continuity was not complete",
                     )
-        raw_support = []
-        for index in (1, 2):
-            support_url = raw.get(f"supporting_evidence_url_{index}")
-            support_quote = raw.get(f"supporting_evidence_quote_{index}")
-            if support_url or support_quote:
-                raw_support.append({"url": support_url, "quote": support_quote})
         if target == "required_attribute" and finding["status"] != "UNPROVEN":
             validated_support: list[dict[str, str]] = []
             if not isinstance(raw_support, list) or len(raw_support) > 2:
@@ -3952,6 +4004,11 @@ async def investigate_company_evidence(
                         and time.monotonic() - started
                         < ADMISSION_DEADLINE_SECONDS
                     )
+                    private_equity_support_repair = any(
+                        item.get("target") == "stage"
+                        and item.get("reason") == PRIVATE_EQUITY_SUPPORT_QUOTE_REJECTION_REASON
+                        for item in rejected
+                    )
                     force_stage_search = bool(
                         not scoped_correction_active
                         and rejected
@@ -4223,7 +4280,20 @@ async def investigate_company_evidence(
                                         )
                                     )
                                 )
-                                + "Never repeat a rejected quote. Use one exact continuous "
+                                + (
+                                    "The supporting classification URL/quote was not present "
+                                    "in its fetched source. Repair that pair from an already "
+                                    "loaded page, or fetch its exact source if needed and "
+                                    "budget remains. This support failure does not itself "
+                                    "reject the primary ownership span. You may reuse that "
+                                    "span only if all current ownership, company, sponsor, "
+                                    "exact-quote and source checks pass. Pending acquisitions, "
+                                    "minority investments and funding alone remain insufficient. "
+                                    "Do not repeat the invalid supporting pair unchanged. "
+                                    if private_equity_support_repair
+                                    else "Never repeat a rejected quote. "
+                                )
+                                + "Use one exact continuous "
                                 "company-bound span from a fetched page; do not paraphrase, "
                                 "join passages, or insert ellipses. VERIFIED and "
                                 "CONTRADICTED require that exact quote and its fetched URL. "

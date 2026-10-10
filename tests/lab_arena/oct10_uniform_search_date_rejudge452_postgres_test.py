@@ -928,3 +928,94 @@ def test_inflight_normal_settlement_conflict_fails_before_writes_then_retries(se
             cur.execute("SELECT entry_kind,amount_microusd,round_id FROM public.lab_arena_ledger WHERE call_identity=%s ORDER BY entry_id", (identity,))
             assert cur.fetchall() == [('reservation',1000,ARCHIVE),('dispatch',1000,ARCHIVE),
                 ('uncertain',1000,ARCHIVE),('settlement',111,ARCHIVE)]
+
+
+def test_short_round_reader_finishes_and_new_reader_queues_behind_migration(seeded):
+    import queue
+    import time
+
+    psycopg, dsn = seeded
+    results, pids = [], queue.Queue()
+    with psycopg.connect(**dsn) as setup, psycopg.connect(**dsn) as reader, psycopg.connect(**dsn) as observer:
+        setup.autocommit = observer.autocommit = True
+        with setup.cursor() as cur, reader.cursor() as first, observer.cursor() as watch:
+            sql = _render(cur)
+            setup.commit()
+            watch.execute("SELECT 'public.lab_arena_rounds'::regclass::oid,'public.lab_arena_restart_claim_control'::regclass::oid,'public.lab_arena_runs'::regclass::oid")
+            round_oid, control_oid, runs_oid = watch.fetchone()
+            observer.commit()
+            first.execute('SELECT status FROM public.lab_arena_rounds WHERE round_id=%s', (ROUND,))
+            assert first.fetchone()[0] == 'stage2_scoring'
+
+            def migrate():
+                try:
+                    with psycopg.connect(**dsn) as worker, worker.cursor() as call:
+                        worker.autocommit = True
+                        pids.put(('migration', worker.get_backend_pid()))
+                        call.execute(sql)
+                        results.append(('migration', 'ok'))
+                except Exception as exc:
+                    results.append(('migration', exc))
+
+            def read_new():
+                try:
+                    with psycopg.connect(**dsn) as worker, worker.cursor() as call:
+                        worker.autocommit = True
+                        pids.put(('reader', worker.get_backend_pid()))
+                        call.execute('SELECT status FROM public.lab_arena_rounds WHERE round_id=%s', (ROUND,))
+                        results.append(('reader', call.fetchone()[0]))
+                except Exception as exc:
+                    results.append(('reader', exc))
+
+            def waiting(pid, mode):
+                deadline = time.monotonic()+3
+                while True:
+                    watch.execute("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=%s AND relation=%s AND mode=%s AND NOT granted)", (pid, round_oid, mode))
+                    if watch.fetchone()[0]:
+                        return
+                    assert time.monotonic()<deadline
+                    time.sleep(0.01)
+
+            migration = threading.Thread(target=migrate)
+            new_reader = threading.Thread(target=read_new)
+            migration.start()
+            try:
+                kind, pid = pids.get(timeout=2)
+                assert kind == 'migration'
+                waiting(pid, 'AccessExclusiveLock')
+                # Before this first bounded wait, no control/table/advisory
+                # resource can invert another production transaction's order.
+                watch.execute("SELECT count(*) FROM pg_locks WHERE pid=%s AND granted AND (locktype='advisory' OR relation=ANY(%s::oid[]))", (pid,[control_oid,runs_oid]))
+                assert watch.fetchone()[0] == 0
+                new_reader.start()
+                kind, pid = pids.get(timeout=2)
+                assert kind == 'reader'
+                waiting(pid, 'AccessShareLock')
+            finally:
+                reader.commit()
+                migration.join(timeout=8)
+                if new_reader.ident is not None:
+                    new_reader.join(timeout=8)
+            assert not migration.is_alive() and not new_reader.is_alive()
+            assert sorted(results) == [('migration','ok'),('reader','stage1_closed')], results
+
+
+def test_busy_claim_advisory_refuses_atomically_after_nonblocking_table_fences(seeded):
+    psycopg, dsn = seeded
+    with psycopg.connect(**dsn) as conn, psycopg.connect(**dsn) as owner:
+        conn.autocommit = True
+        with conn.cursor() as cur, owner.cursor() as lock:
+            sql = _render(cur)
+            before = _snapshot(cur)
+            lock.execute("SELECT pg_advisory_xact_lock(hashtextextended('lab-arena-claim-control',0))")
+            with pytest.raises(psycopg.Error, match='claim control busy') as conflict:
+                cur.execute(sql)
+            assert conflict.value.pgcode == '55P03'
+            cur.execute('ROLLBACK')
+            assert _snapshot(cur) == before
+            cur.execute("SELECT count(*) FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='advisory'")
+            assert cur.fetchone()[0] == 0
+            owner.rollback()
+            cur.execute(_render(cur))
+            cur.execute('SELECT status FROM public.lab_arena_rounds WHERE round_id=%s', (ROUND,))
+            assert cur.fetchone()[0] == 'stage1_closed'

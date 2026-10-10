@@ -4,18 +4,25 @@ BEGIN;
 SET LOCAL TIME ZONE 'UTC';
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
-SELECT pg_catalog.pg_advisory_xact_lock(
-  pg_catalog.hashtextextended('lab-arena-claim-control', 0));
+-- Queue behind short round readers before owning any competing resource.
+-- The existing five-second lock timeout bounds this first and only wait.
+LOCK TABLE public.lab_arena_rounds IN ACCESS EXCLUSIVE MODE;
 -- Terminal leases do not exclude late authenticated provider events or bills.
--- Fail before any write if a background transaction holds a conflicting lock;
--- never wait while holding a partial table fence in the opposite lock order.
+-- Every remaining acquisition fails immediately; never wait with rounds held.
 LOCK TABLE public.lab_arena_restart_claim_control IN ACCESS EXCLUSIVE MODE NOWAIT;
-LOCK TABLE public.lab_arena_rounds IN ACCESS EXCLUSIVE MODE NOWAIT;
 LOCK TABLE public.lab_arena_submissions IN ACCESS EXCLUSIVE MODE NOWAIT;
 LOCK TABLE public.lab_arena_runs IN ACCESS EXCLUSIVE MODE NOWAIT;
 LOCK TABLE public.lab_arena_ledger IN ACCESS EXCLUSIVE MODE NOWAIT;
 LOCK TABLE public.lab_arena_trajectory_events IN ACCESS EXCLUSIVE MODE NOWAIT;
 LOCK TABLE public.qualification_private_icp_sets IN SHARE MODE NOWAIT;
+DO $claim_control_fence452$
+BEGIN
+  IF NOT pg_catalog.pg_try_advisory_xact_lock(
+      pg_catalog.hashtextextended('lab-arena-claim-control', 0)) THEN
+    RAISE EXCEPTION 'Oct10 uniform rejudge452 claim control busy' USING ERRCODE='55P03';
+  END IF;
+END;
+$claim_control_fence452$;
 
 DO $oct10_uniform_rejudge452$
 DECLARE

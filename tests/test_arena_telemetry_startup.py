@@ -6,6 +6,36 @@ from lab_arena import telemetry
 from scripts import run_lab_arena_service as launcher
 
 
+@pytest.mark.parametrize("json_format", [False, True])
+def test_scoped_environment_imports_only_sentry_ingest_settings(
+    tmp_path, monkeypatch, json_format
+):
+    import json
+    import os
+    from leadpoet_observability.sentry_bootstrap import INGEST_ENVIRONMENT_KEYS
+
+    values = dict(zip(INGEST_ENVIRONMENT_KEYS, (
+        "1", "https://fixture@example.invalid/1", "production", "a" * 40,
+    )))
+    forbidden = {"LEADPOET_SENTRY_API_TOKEN": "fixture-read-token",
+                 "LEADPOET_SENTRY_MESSAGE_MODE": "scrub",
+                 "OPENROUTER_API_KEY": "fixture-provider-key"}
+    values.update(forbidden)
+    path = tmp_path / "gateway.env"
+    path.write_text(json.dumps(values) if json_format else
+                    "".join(f"{key}={value}\n" for key, value in values.items()))
+    for key in values:
+        # Track absence as well as replacement when the loader writes os.environ.
+        monkeypatch.setenv(key, "fixture-before-load")
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("LEADPOET_SENTRY_ENABLED", "0")
+    launcher.load_scoped_environment(path)
+    assert os.environ["LEADPOET_SENTRY_ENABLED"] == "0"
+    for key in INGEST_ENVIRONMENT_KEYS[1:]:
+        assert os.environ[key] == values[key]
+    assert not any(key in os.environ for key in forbidden)
+
+
 @pytest.fixture(autouse=True)
 def isolated_telemetry(monkeypatch):
     for key in launcher.OTEL_ENVIRONMENT_KEYS:

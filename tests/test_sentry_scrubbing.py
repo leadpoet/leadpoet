@@ -48,6 +48,17 @@ def _exception_event(module, value="boom", filename="gateway/api/validate.py"):
     }
 
 
+def test_arena_module_and_entrypoint_paths_are_protected():
+    for module, filename in (
+        ("lab_arena.runner", "lab_arena/runner.py"),
+        ("__main__", "scripts/run_lab_arena_service.py"),
+        ("__main__", "scripts/run_arena_validator.py"),
+    ):
+        event = _exception_event(module, "fixture private research", filename)
+        assert event_touches_protected_surface(event)
+        assert scrub_event(event)["exception"]["values"][0]["value"] == REDACTED_PROTECTED
+
+
 # ---------------------------------------------------------------------------
 # Frame hygiene: source context and locals never leave the process
 # ---------------------------------------------------------------------------

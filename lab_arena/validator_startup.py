@@ -33,6 +33,7 @@ def _absolute_path(value: str) -> str:
 def rootful_startup_command(args, argv: Sequence[str], environment: Mapping[str, str]):
     """Freeze user-relative paths before sudo changes HOME or environment."""
     from lab_arena.validator_proxy_environment import validator_proxy_environment
+    from leadpoet_observability.sentry_bootstrap import INGEST_ENVIRONMENT_KEYS
 
     # A root process must not re-read a user-owned proxy file under a different
     # ownership rule. Validate it as the caller and carry only proxy settings.
@@ -49,7 +50,9 @@ def rootful_startup_command(args, argv: Sequence[str], environment: Mapping[str,
     cutover = child_environment.get("LEADPOET_SUBNET_EPOCH_CUTOVER_PATH")
     if cutover:
         child_environment["LEADPOET_SUBNET_EPOCH_CUTOVER_PATH"] = _absolute_path(cutover)
-    names = sorted(name for name in child_environment if _CONFIG_NAME.fullmatch(name))
+    child_environment.pop("LEADPOET_SENTRY_API_TOKEN", None)
+    names = sorted(name for name in child_environment
+                   if _CONFIG_NAME.fullmatch(name) or name in INGEST_ENVIRONMENT_KEYS)
     command = [
         _absolute_path(sys.executable), "-B", str(Path(__file__).resolve()), *argv,
         "--wallet.path", _absolute_path(args.wallet_path),

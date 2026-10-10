@@ -57,6 +57,11 @@ EXTRA_PROTECTED_ENV = "LEADPOET_SENTRY_EXTRA_PROTECTED_MODULES"
 MESSAGE_MODE_ENV = "LEADPOET_SENTRY_MESSAGE_MODE"  # "scrub" (default) | "redact-all"
 TRACES_SAMPLE_RATE_ENV = "LEADPOET_SENTRY_TRACES_SAMPLE_RATE"
 
+# The only non-Arena settings accepted by the private Arena launchers. The
+# operator's read-only Sentry API token is deliberately not runtime config.
+INGEST_ENVIRONMENT_KEYS = (ENABLED_ENV, DSN_ENV, ENVIRONMENT_ENV, RELEASE_ENV)
+_ARENA_COMPONENTS = frozenset({"arena-service", "arena-validator"})
+
 _DEFAULT_TRACES_SAMPLE_RATE = 0.01
 _MAX_TRACES_SAMPLE_RATE = 0.10
 _MAX_BREADCRUMBS = 50
@@ -164,7 +169,14 @@ def _looks_like_sha(value: str) -> bool:
     return len(value) == 40 and all(c in "0123456789abcdef" for c in value.lower())
 
 
-def _release_identity() -> Optional[str]:
+def _release_identity(component: Optional[str] = None) -> Optional[str]:
+    if component in _ARENA_COMPONENTS:
+        # Reuse the existing loaded-source snapshot, including git archives.
+        # A legacy secret's release override must not relabel an Arena process.
+        from lab_arena.runtime_version import SOURCE_METADATA
+
+        candidate = SOURCE_METADATA.get("validator_source_commit", "")
+        return candidate if _looks_like_sha(candidate) else None
     configured = os.getenv(RELEASE_ENV, "").strip()
     if configured:
         return configured
@@ -466,10 +478,12 @@ def init_sentry(component: str, tags: Optional[Dict[str, str]] = None) -> bool:
                 os.getenv(ENVIRONMENT_ENV, "").strip() or "production", 100
             )
             release = sentry_scrubbing.scrub_text(
-                _release_identity() or "unknown", 200
+                _release_identity(component) or "unknown", 200
             )
             extra_prefixes = _extra_protected_prefixes()
-            redact_all = _redact_all()
+            # Arena host exceptions can embed private benchmark/provider data.
+            # Their message policy cannot be weakened by an ambient setting.
+            redact_all = component in _ARENA_COMPONENTS or _redact_all()
 
             sentry_sdk.init(
                 # Explicit options only; ambient SENTRY_* variables never apply.

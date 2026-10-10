@@ -30,6 +30,58 @@ class _CaptureTransport(Transport):
                 self._events.append(event)
 
 
+@pytest.mark.parametrize("component", ["arena-service", "arena-validator"])
+def test_arena_real_sdk_redacts_private_errors_without_network(monkeypatch, component):
+    captured, network_attempts = [], []
+    real_init = sentry_sdk.init
+
+    def forbidden_network(*args, **kwargs):
+        network_attempts.append(True)
+        raise AssertionError("SDK contract must remain offline")
+
+    def init_without_network(**options):
+        options["transport"] = _CaptureTransport(captured)
+        return real_init(**options)
+
+    monkeypatch.setattr(socket.socket, "connect", forbidden_network)
+    monkeypatch.setattr(socket, "getaddrinfo", forbidden_network)
+    monkeypatch.setattr(sentry_sdk, "init", init_without_network)
+    monkeypatch.setenv(sentry_bootstrap.ENABLED_ENV, "1")
+    monkeypatch.setenv(sentry_bootstrap.DSN_ENV, "https://public@example.invalid/1")
+    monkeypatch.setenv(sentry_bootstrap.MESSAGE_MODE_ENV, "scrub")
+    monkeypatch.setenv(sentry_bootstrap.RELEASE_ENV, "ab" * 20)
+    sentry_bootstrap._reset_for_tests()
+    try:
+        assert sentry_bootstrap.init_sentry(component)
+        sentry_sdk.add_breadcrumb(message="fixture research beneath copper skies")
+        try:
+            local_fixture = "fixture scoring input beneath violet skies"
+            raise RuntimeError(local_fixture)
+        except RuntimeError:
+            sentry_sdk.capture_exception()
+        sentry_sdk.capture_event({
+            "message": "fixture provider response beneath amber skies",
+            "request": {"data": "fixture benchmark beneath silver skies"},
+            "future_payload": "fixture candidate code beneath blue skies",
+        })
+        sentry_sdk.flush(timeout=1)
+        assert len(captured) == 2
+        encoded = repr(captured)
+        assert "beneath" not in encoded
+        assert "local_fixture" not in encoded
+        assert "context_line" not in encoded and "vars" not in encoded
+        assert all(not event.get("breadcrumbs", {}).get("values") for event in captured)
+        exception = captured[0]["exception"]["values"][0]
+        assert exception["type"] == "RuntimeError"
+        assert exception["stacktrace"]["frames"][-1]["function"] == (
+            "test_arena_real_sdk_redacts_private_errors_without_network"
+        )
+        assert not network_attempts
+    finally:
+        real_init(dsn=None, default_integrations=False)
+        sentry_bootstrap._reset_for_tests()
+
+
 def test_real_sdk_captures_only_coalesced_scrubbed_errors(monkeypatch):
     captured = []
     real_init = sentry_sdk.init

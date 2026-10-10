@@ -152,6 +152,75 @@ def _clear_startup_environment(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.mark.parametrize("bootstrap_fails", [False, True])
+def test_shared_validator_sentry_runs_after_sudo_and_fails_open(
+    monkeypatch, startup_harness, capsys, bootstrap_fails
+):
+    import leadpoet_observability
+    import lab_arena.validator_startup
+
+    _clear_startup_environment(monkeypatch)
+    calls = []
+    monkeypatch.setattr(lab_arena.validator_startup, "maybe_reexec_rootful",
+                        lambda *args: calls.append("sudo"))
+
+    def initialize(*, component):
+        assert calls == ["sudo"]
+        calls.append(component)
+        if bootstrap_fails:
+            raise RuntimeError("fixture-private-detail")
+        return False
+
+    monkeypatch.setattr(leadpoet_observability, "init_sentry", initialize)
+    assert validator.main(["--check-only"]) == 0
+    assert calls == ["sudo", "arena-validator"]
+    assert startup_harness.captured["signers"][-1].readiness_epochs == [123]
+    log = capsys.readouterr().err
+    assert "fixture-private-detail" not in log
+    assert ("arena sentry unavailable RuntimeError" in log) == bootstrap_fails
+
+
+@pytest.mark.parametrize("protected_launcher", [False, True])
+def test_normal_launchers_do_not_initialize_a_less_private_client_first(
+    monkeypatch, startup_harness, tmp_path, protected_launcher
+):
+    import runpy
+    import sys
+    from pathlib import Path
+    import leadpoet_observability
+    import lab_arena.validator_startup
+
+    _clear_startup_environment(monkeypatch)
+    calls = []
+    monkeypatch.setattr(lab_arena.validator_startup, "maybe_reexec_rootful",
+                        lambda *args: calls.append("sudo"))
+
+    def initialize(*, component):
+        # The first call chooses mandatory Arena privacy, in the final process.
+        assert calls == ["sudo"]
+        calls.append(component)
+        return False
+
+    monkeypatch.setattr(leadpoet_observability, "init_sentry", initialize)
+    root = Path(__file__).resolve().parents[1]
+    if protected_launcher:
+        path = tmp_path / "arena.env"
+        path.write_text("LEADPOET_SENTRY_ENABLED=1\n")
+        path.chmod(0o600)
+        monkeypatch.setenv("LEADPOET_SENTRY_ENABLED", "")
+        monkeypatch.delenv("LEADPOET_SENTRY_ENABLED", raising=False)
+        script = root / "scripts/run_arena_validator.py"
+        argv = [str(script), "--environment-file", str(path), "--check-only"]
+    else:
+        script = root / "neurons/validator.py"
+        argv = [str(script), "--check-only"]
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit) as exit_info:
+        runpy.run_path(str(script), run_name="__main__")
+    assert exit_info.value.code == 0
+    assert calls == ["sudo", "arena-validator"]
+
+
 def test_advertised_finney71_check_only_uses_public_defaults_and_stops_at_readiness(
     monkeypatch, startup_harness, capsys
 ):

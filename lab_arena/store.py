@@ -226,6 +226,12 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_limit", "integer"),
         ("p_successful_execute_only", "boolean"),
     ),
+    "lab_arena_list_deepline_cost_reconciliations_v3": (
+        ("p_round_id", "text"),
+        ("p_run_id", "text"),
+        ("p_after_entry_id", "bigint"),
+        ("p_limit", "integer"),
+    ),
     "lab_arena_reconcile_deepline_cost_v1": (
         ("p_round_id", "text"),
         ("p_run_id", "text"),
@@ -2100,7 +2106,10 @@ class ArenaStore:
         after_entry_id: int = 0,
         limit: int = 1,
         successful_execute_only: bool = False,
+        score_only: bool = False,
     ) -> List[Dict[str, Any]]:
+        if successful_execute_only and score_only:
+            raise ValueError("Deepline candidate lanes are mutually exclusive")
         params = {
             "p_round_id": str(round_id),
             "p_run_id": str(run_id),
@@ -2111,6 +2120,8 @@ class ArenaStore:
         if successful_execute_only:
             rpc = "lab_arena_list_deepline_cost_reconciliations_v2"
             params["p_successful_execute_only"] = True
+        elif score_only:
+            rpc = "lab_arena_list_deepline_cost_reconciliations_v3"
         result = _require_mapping(
             self._transport.rpc(rpc, params),
             "list_deepline_cost_reconciliations",

@@ -831,3 +831,100 @@ def test_valid_source_sha_replay_drift_is_rejected_without_writes(seeded, tamper
                 cur.execute(sql)
             cur.execute('ROLLBACK')
             assert _snapshot(cur) == before
+
+
+def test_terminal_provider_trajectory_conflict_fails_before_writes_then_retries(seeded):
+    import queue
+    import time
+
+    from lab_arena.trajectory import event
+
+    psycopg, dsn = seeded
+    results, pids = [], queue.Queue()
+    token = 'sha256:'+'a'*64
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute('SET session_replication_role=replica')
+            cur.execute("UPDATE public.lab_arena_runs SET lease_token_hash=%s,runner_hotkey=%s WHERE run_id='old452-score-1'", (token,hotkey('terminal-provider452')))
+            cur.execute('SET session_replication_role=origin')
+            sql = _render(cur)
+            conn.commit()
+            before = _snapshot(cur)
+            # Pause at the exact table-fence seam which previously deadlocked:
+            # migration owns rounds AX; terminal provider event owns runs AS.
+            marker = 'LOCK TABLE public.lab_arena_submissions IN ACCESS EXCLUSIVE MODE NOWAIT;'
+            prefix, suffix = sql.split(marker, 1)
+            cur.execute(prefix)
+
+            def append_late():
+                try:
+                    with psycopg.connect(**dsn) as provider, provider.cursor() as worker:
+                        worker.execute('SELECT pg_backend_pid()')
+                        pids.put(worker.fetchone()[0])
+                        worker.execute('SET ROLE lab_arena_service')
+                        worker.execute('SELECT public.lab_arena_append_trajectory_events_v1(%s,%s,%s::jsonb)',
+                            ('old452-score-1',token,json.dumps([event('provider.response',{'http_status':200})])))
+                        results.append(worker.fetchone()[0])
+                except Exception as exc:
+                    results.append(exc)
+
+            thread = threading.Thread(target=append_late)
+            thread.start()
+            try:
+                pid = pids.get(timeout=2)
+                deadline = time.monotonic()+3
+                while True:
+                    cur.execute("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=%s AND relation='public.lab_arena_rounds'::regclass AND NOT granted)", (pid,))
+                    if cur.fetchone()[0]:
+                        break
+                    assert time.monotonic() < deadline
+                    time.sleep(0.01)
+                with pytest.raises(psycopg.Error) as conflict:
+                    cur.execute(marker+suffix)
+                assert conflict.value.pgcode == '55P03'
+            finally:
+                cur.execute('ROLLBACK')
+                thread.join(timeout=5)
+            assert not thread.is_alive()
+            assert len(results) == 1 and isinstance(results[0],dict) and results[0]['status'] == 'accepted', results
+            after = _snapshot(cur)
+            assert {k:v for k,v in after.items() if k!='lab_arena_trajectory_events'} == {
+                k:v for k,v in before.items() if k!='lab_arena_trajectory_events'}
+            assert len(after['lab_arena_trajectory_events']) == len(before['lab_arena_trajectory_events'])+1
+            # The completed provider event is captured, retained and archived
+            # by a fresh exact migration; no guard or liability is bypassed.
+            cur.execute(_render(cur))
+            cur.execute("SELECT count(*) FROM public.lab_arena_trajectory_events WHERE round_id=%s AND event_kind='provider.response'", (ARCHIVE,))
+            assert cur.fetchone()[0] == 1
+            cur.execute("SELECT entry_kind,amount_microusd FROM public.lab_arena_ledger WHERE call_identity=%s ORDER BY entry_id", ('sha256:'+'c'*64,))
+            assert cur.fetchall() == [('reservation',1000),('dispatch',1000),('uncertain',1000)]
+
+
+def test_inflight_normal_settlement_conflict_fails_before_writes_then_retries(seeded):
+    psycopg, dsn = seeded
+    identity = 'sha256:'+'c'*64
+    with psycopg.connect(**dsn) as conn, psycopg.connect(**dsn) as billing:
+        conn.autocommit = True
+        with conn.cursor() as cur, billing.cursor() as bill:
+            sql = _render(cur)
+            conn.commit()
+            before = _snapshot(cur)
+            cur.execute("SELECT entry_id FROM public.lab_arena_ledger WHERE call_identity=%s AND entry_kind='uncertain'", (identity,))
+            uncertain = cur.fetchone()[0]
+            bill.execute('SET ROLE lab_arena_service')
+            bill.execute('SELECT public.lab_arena_reconcile_openrouter_cost_v1(%s,%s,%s,%s,%s,%s,%s,%s)',
+                (ROUND,'old452-score-1',identity,uncertain,'gen-test452','sha256:'+'a'*64,111,'0.000111'))
+            assert bill.fetchone()[0]['status'] == 'settled'
+            # The real normal billing transaction still owns round/run/ledger
+            # locks. The migration must stop before any archive or SQL rewrite.
+            with pytest.raises(psycopg.Error) as conflict:
+                cur.execute(sql)
+            assert conflict.value.pgcode == '55P03'
+            cur.execute('ROLLBACK')
+            assert _snapshot(cur) == before
+            billing.commit()
+            cur.execute(_render(cur))
+            cur.execute("SELECT entry_kind,amount_microusd,round_id FROM public.lab_arena_ledger WHERE call_identity=%s ORDER BY entry_id", (identity,))
+            assert cur.fetchall() == [('reservation',1000,ARCHIVE),('dispatch',1000,ARCHIVE),
+                ('uncertain',1000,ARCHIVE),('settlement',111,ARCHIVE)]

@@ -18,13 +18,16 @@ SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '120s';
 SELECT pg_catalog.pg_advisory_xact_lock(
   pg_catalog.hashtextextended('lab-arena-claim-control', 0));
-LOCK TABLE public.lab_arena_restart_claim_control IN ACCESS EXCLUSIVE MODE;
-LOCK TABLE public.lab_arena_rounds IN ACCESS EXCLUSIVE MODE;
-LOCK TABLE public.lab_arena_submissions IN ACCESS EXCLUSIVE MODE;
-LOCK TABLE public.lab_arena_runs IN ACCESS EXCLUSIVE MODE;
-LOCK TABLE public.lab_arena_ledger IN ACCESS EXCLUSIVE MODE;
-LOCK TABLE public.lab_arena_trajectory_events IN ACCESS EXCLUSIVE MODE;
-LOCK TABLE public.qualification_private_icp_sets IN SHARE MODE;
+-- Terminal leases do not exclude late authenticated provider events or bills.
+-- Fail before any write if a background transaction holds a conflicting lock;
+-- never wait while holding a partial table fence in the opposite lock order.
+LOCK TABLE public.lab_arena_restart_claim_control IN ACCESS EXCLUSIVE MODE NOWAIT;
+LOCK TABLE public.lab_arena_rounds IN ACCESS EXCLUSIVE MODE NOWAIT;
+LOCK TABLE public.lab_arena_submissions IN ACCESS EXCLUSIVE MODE NOWAIT;
+LOCK TABLE public.lab_arena_runs IN ACCESS EXCLUSIVE MODE NOWAIT;
+LOCK TABLE public.lab_arena_ledger IN ACCESS EXCLUSIVE MODE NOWAIT;
+LOCK TABLE public.lab_arena_trajectory_events IN ACCESS EXCLUSIVE MODE NOWAIT;
+LOCK TABLE public.qualification_private_icp_sets IN SHARE MODE NOWAIT;
 
 DO $oct10_uniform_rejudge452$
 DECLARE

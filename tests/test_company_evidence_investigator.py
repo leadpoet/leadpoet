@@ -2126,6 +2126,12 @@ def test_investigator_fetch_uses_bounded_transport_and_validates_final_url(
 @pytest.mark.parametrize("body", [
     "Provider account capacity details redacted.",
     "<html><body><p>  PROVIDER account capacity details redacted. </p></body></html>",
+    "Robot Challenge Screen origisenergy.com Checking the site connection security",
+    (
+        "<html><head><title>Robot Challenge Screen</title></head><body>"
+        "<h1>origisenergy.com</h1><p>Checking the site connection security</p>"
+        "</body></html>"
+    ),
 ])
 def test_investigator_fetch_rejects_exact_provider_diagnostic_body(monkeypatch, body):
     url = "https://example.com/evidence"
@@ -2151,6 +2157,17 @@ def test_investigator_fetch_rejects_exact_provider_diagnostic_body(monkeypatch, 
      "Provider account capacity details redacted. Service is live."),
     ("Provider account capacity details are redacted.",
      "Provider account capacity details are redacted."),
+    ("Robot Challenge Screen", "Robot Challenge Screen"),
+    (
+        "Robot Challenge Screen origisenergy.com Checking the site connection "
+        "security. Acme supplies browser security software.",
+        "Robot Challenge Screen origisenergy.com Checking the site connection "
+        "security. Acme supplies browser security software.",
+    ),
+    (
+        "<article>Acme builds robots and solves browser challenges.</article>",
+        "Acme builds robots and solves browser challenges.",
+    ),
 ])
 def test_investigator_fetch_keeps_other_short_page_text(monkeypatch, body, expected):
     url = "https://example.com/evidence"
@@ -2167,13 +2184,17 @@ def test_investigator_fetch_keeps_other_short_page_text(monkeypatch, body, expec
     assert result["text"] == expected
 
 
-def test_prefetched_provider_diagnostic_cannot_reenter_evidence_context():
+@pytest.mark.parametrize("diagnostic", [
+    " Provider account capacity details redacted. ",
+    "Robot Challenge Screen origisenergy.com Checking the site connection security",
+])
+def test_prefetched_provider_diagnostic_cannot_reenter_evidence_context(diagnostic):
     url = "https://example.com/evidence"
     good_url = "https://example.com/news"
     pages, final_urls = investigator._validated_prefetched_pages(
         {
             url: {"final_url": url,
-                  "text": " Provider account capacity details redacted. "},
+                  "text": diagnostic},
             good_url: {"final_url": good_url, "text": "A"},
         },
         submitted_source_urls=(url, good_url),
@@ -2869,6 +2890,10 @@ def _completed_unproven_investigation(target):
 @pytest.mark.parametrize(
     ("status", "body", "expected_class", "completed_is_local"),
     [
+        (200, "Robot Challenge Screen origisenergy.com Checking the site connection security",
+         "provider_diagnostic_body", False),
+        (200, "Provider account capacity details redacted.",
+         "provider_diagnostic_body", False),
         (404, "missing", "source_not_found", True),
         (410, "gone", "source_gone", True),
         (403, '{"error":{"code":"provider_request_refused"}}',

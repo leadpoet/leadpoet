@@ -840,9 +840,17 @@ def _is_known_binary_document(value: str) -> bool:
 
 
 def _is_known_provider_diagnostic_only(value: str) -> bool:
-    """Reject confirmed standalone provider messages, not short page text."""
+    """Reject confirmed standalone transport messages, not short page text."""
 
-    if _normalized_span(value) == "provider account capacity details redacted.":
+    normalized = _normalized_span(value)
+    if normalized == "provider account capacity details redacted.":
+        return True
+    if re.fullmatch(
+        r"robot challenge screen "
+        r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+        r"[a-z]{2,63} checking the site connection security",
+        normalized,
+    ):
         return True
     try:
         diagnostic = json.loads(value)

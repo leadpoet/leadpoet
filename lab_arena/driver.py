@@ -82,17 +82,19 @@ def _advance_active(service) -> str:
             )
         else:
             outcomes.append("advanced %s" % row["round_id"])
-    if not any(row.get("status") == "open" for row in active):
-        try:
-            with telemetry.stage("ensure_daily_round") as observed:
-                ensured = service.ensure_daily_round()
-                observed.idle = ensured.get("status") != "created"
-                observed.count = 0 if observed.idle else 1
-        except Exception as exc:
-            outcomes.append("failed ensure_daily_round: %s" % type(exc).__name__)
-        else:
-            if ensured.get("status") == "created":
-                outcomes.append("created %s" % ensured.get("round_id"))
+    # Advancing the open round can commit it during this tick. The snapshot in
+    # ``active`` is then stale, so always use the service's idempotent open-round
+    # check to create its successor without waiting for another driver tick.
+    try:
+        with telemetry.stage("ensure_daily_round") as observed:
+            ensured = service.ensure_daily_round()
+            observed.idle = ensured.get("status") != "created"
+            observed.count = 0 if observed.idle else 1
+    except Exception as exc:
+        outcomes.append("failed ensure_daily_round: %s" % type(exc).__name__)
+    else:
+        if ensured.get("status") == "created":
+            outcomes.append("created %s" % ensured.get("round_id"))
     return "; ".join(outcomes) if outcomes else "idle"
 
 

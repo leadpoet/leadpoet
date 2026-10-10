@@ -19,6 +19,7 @@ def test_closed_billing_failure_runs_after_live_round_and_rewards():
         promote_pending_baselines=lambda: {"promoted": 0},
         active_rounds=lambda: [{"round_id": "active", "status": "open"}],
         advance_round=lambda round_id: events.append("advance:" + round_id),
+        ensure_daily_round=lambda: {"status": "existing"},
         activate_pending_rewards=lambda: events.append("rewards") or {"activated": 1},
         reconcile_closed_provider_costs=billing,
     )
@@ -81,6 +82,7 @@ def test_failed_closed_candidate_keeps_cursor_and_next_driver_tick_recovers():
     service.promote_pending_baselines = lambda: {"promoted": 0}
     service.active_rounds = lambda: [{"round_id": "arena-open", "status": "open"}]
     service.advance_round = lambda _round_id: None
+    service.ensure_daily_round = lambda: {"status": "existing"}
     service.activate_pending_rewards = lambda: {"activated": 0}
     service._reconcile_openrouter_cost = lambda _round_id, **_kwargs: {"status": "settled"}
 

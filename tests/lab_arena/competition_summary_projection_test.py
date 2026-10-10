@@ -25,6 +25,23 @@ def _project(row, columns):
             key = path.removeprefix("configuration_doc->").removesuffix("::text")
             configuration = row.get("configuration_doc") or {}
             projected[alias] = json.dumps(configuration[key]) if key in configuration else None
+        elif column == "publication_doc:lab_arena_competition_publication_v1":
+            # Unit fixtures are canonical. PostgreSQL tests exercise the actual
+            # function, including conservative fallback for legacy documents.
+            publication = deepcopy(row.get("publication_doc"))
+            if row.get("status") == "published" and isinstance(publication, dict):
+                selected = {
+                    item["submission_id"] for item in publication["participants"]
+                    if item.get("is_baseline", item.get("is_king", False))
+                }
+                selected.add(dashboard._champion_submission_id(row))
+                publication = {
+                    "participants": publication["participants"],
+                    "king_decision": publication["king_decision"],
+                    "final_ranking": [item for item in publication["final_ranking"]
+                                      if item["submission_id"] in selected],
+                }
+            projected["publication_doc"] = publication
         elif column in row:
             projected[column] = deepcopy(row[column])
     return projected
@@ -114,6 +131,7 @@ def test_145_model_competition_response_matches_full_configuration(monkeypatch, 
     assert rows == before
     assert expected["rounds"][0]["participant_count"] == 145
     assert expected["rounds"][0]["baseline"]["final_score"] == 0
+    assert len(transport.returned[0]["publication_doc"]["final_ranking"]) == 2
     assert expected["rounds"][1]["promotion_status"] == "superseded"
     assert "configuration_doc" not in transport.returned[0]
     assert "private_frozen_catalog" not in json.dumps(transport.returned)
@@ -238,6 +256,7 @@ def test_exact_postgrest_select_and_fixed_psycopg_projection():
     for key in COMPETITION_CONFIGURATION_FIELDS:
         assert "(configuration_doc -> '%s')::text AS cfg_%s" % (key, key) in sql
     assert "cfg_" in sql and ":configuration_doc" not in sql
+    assert "public.lab_arena_competition_publication_v1(lab_arena_rounds) AS publication_doc" in sql
     assert "ORDER BY created_at DESC LIMIT 30 OFFSET 30" in sql
     assert values == ["live", "finney", 71]
     store.latest_published_day(network_name="finney", netuid=71)

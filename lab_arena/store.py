@@ -317,6 +317,8 @@ PUBLIC_RESULTS_CONFIGURATION_FIELDS = (
 )
 # Fixed public audit projections. Never fetch source or provider documents.
 _RUNTIME_JSON_COLUMNS = {
+    "publication_doc:lab_arena_competition_publication_v1":
+        "public.lab_arena_competition_publication_v1(lab_arena_rounds) AS publication_doc",
     "source_commit:result_doc->resource_summary->>validator_source_commit": "result_doc #>> '{resource_summary,validator_source_commit}' AS source_commit",
     "source_dirty:result_doc->resource_summary->>validator_source_dirty": "result_doc #>> '{resource_summary,validator_source_dirty}' AS source_dirty",
     "source_commit:content->>validator_source_commit": "content ->> 'validator_source_commit' AS source_commit",

@@ -7,7 +7,8 @@
 -- follows the independent 444 hold and retains its fixed pause reason.
 -- The inventory seals the complete round, all submissions/source hashes, bank,
 -- ALL execution/score attempts, both function preimages, trigger/security state,
--- exact hold owner/generation and ledger/event prefixes. Distinct stage2
+-- exact hold owner/generation and indexed judge ledger/event prefixes.
+-- Execution and unbound provider history is never moved or materialized. Distinct stage2
 -- assignments are 690; the total attempt count MUST come from the snapshot.
 -- Only baseline judging close and its strictly ordered stage2 start may move.
 -- All accepted saved outputs use one new judge version. No execution is opened.
@@ -48,8 +49,8 @@ DECLARE
   v_archive_participants JSONB;
   v_receipts JSONB;
   v_scores JSONB;
-  v_ledger JSONB;
-  v_events JSONB;
+  v_ledger_hash TEXT;
+  v_events_hash TEXT;
   v_score_hash TEXT;
   v_execution_hash TEXT;
   v_execution_full_hash TEXT;
@@ -87,9 +88,9 @@ $namespace445$;
        OR encode(extensions.digest(v_round.participants::text,'sha256'),'hex') IS DISTINCT FROM (SELECT configuration_doc#>>'{recovery_terminal_inventory,participants_sha256}' FROM public.lab_arena_rounds WHERE round_id='arena-2026-10-10-r445archive')
        OR (SELECT encode(extensions.digest(jsonb_agg(to_jsonb(s) ORDER BY submission_id)::text,'sha256'),'hex') FROM public.lab_arena_submissions s WHERE round_id=p_round_id) IS DISTINCT FROM (SELECT configuration_doc#>>'{recovery_terminal_inventory,submissions_sha256}' FROM public.lab_arena_rounds WHERE round_id='arena-2026-10-10-r445archive')
        OR (SELECT encode(extensions.digest(icps::text,'sha256'),'hex') FROM public.qualification_private_icp_sets WHERE set_id=20261009) IS DISTINCT FROM (SELECT configuration_doc#>>'{recovery_terminal_inventory,bank_sha256}' FROM public.lab_arena_rounds WHERE round_id='arena-2026-10-10-r445archive')
-       OR (SELECT encode(extensions.digest(coalesce(jsonb_agg(to_jsonb(l)||jsonb_build_object('round_id',p_round_id,'submission_id',CASE WHEN l.submission_id='baseline-2026-10-10-r445archive' THEN 'baseline-2026-10-10' ELSE l.submission_id END) ORDER BY entry_id),'[]'::jsonb)::text,'sha256'),'hex') FROM public.lab_arena_ledger l WHERE round_id IN(p_round_id,'arena-2026-10-10-r445archive') AND entry_id<=(SELECT (configuration_doc->>'recovery_ledger_max')::BIGINT FROM public.lab_arena_rounds WHERE round_id='arena-2026-10-10-r445archive'))
+       OR (SELECT encode(extensions.digest(coalesce(string_agg(encode(extensions.digest((to_jsonb(l)||jsonb_build_object('round_id',p_round_id,'submission_id',CASE WHEN l.submission_id='baseline-2026-10-10-r445archive' THEN 'baseline-2026-10-10' ELSE l.submission_id END))::text,'sha256'),'hex'),'' ORDER BY entry_id),''),'sha256'),'hex') FROM public.lab_arena_runs linked CROSS JOIN LATERAL (SELECT l.* FROM public.lab_arena_ledger l WHERE l.entry_id<=(SELECT (configuration_doc->>'recovery_ledger_max')::BIGINT FROM public.lab_arena_rounds WHERE round_id='arena-2026-10-10-r445archive') AND l.run_id=linked.run_id AND l.round_id IN(p_round_id,'arena-2026-10-10-r445archive') OFFSET 0) l WHERE linked.round_id IN(p_round_id,'arena-2026-10-10-r445archive') AND linked.kind='score')
           IS DISTINCT FROM (SELECT configuration_doc->>'recovery_ledger_sha256' FROM public.lab_arena_rounds WHERE round_id='arena-2026-10-10-r445archive')
-       OR (SELECT encode(extensions.digest(coalesce(jsonb_agg(to_jsonb(e)||jsonb_build_object('round_id',p_round_id,'submission_id',CASE WHEN e.submission_id='baseline-2026-10-10-r445archive' THEN 'baseline-2026-10-10' ELSE e.submission_id END) ORDER BY trajectory_id),'[]'::jsonb)::text,'sha256'),'hex') FROM public.lab_arena_trajectory_events e WHERE round_id IN(p_round_id,'arena-2026-10-10-r445archive') AND trajectory_id<=(SELECT (configuration_doc->>'recovery_events_max')::BIGINT FROM public.lab_arena_rounds WHERE round_id='arena-2026-10-10-r445archive'))
+       OR (SELECT encode(extensions.digest(coalesce(string_agg(encode(extensions.digest((to_jsonb(e)||jsonb_build_object('round_id',p_round_id,'submission_id',CASE WHEN e.submission_id='baseline-2026-10-10-r445archive' THEN 'baseline-2026-10-10' ELSE e.submission_id END))::text,'sha256'),'hex'),'' ORDER BY trajectory_id),''),'sha256'),'hex') FROM public.lab_arena_runs linked CROSS JOIN LATERAL (SELECT e.* FROM public.lab_arena_trajectory_events e WHERE e.trajectory_id<=(SELECT (configuration_doc->>'recovery_events_max')::BIGINT FROM public.lab_arena_rounds WHERE round_id='arena-2026-10-10-r445archive') AND e.run_id=linked.run_id AND e.round_id IN(p_round_id,'arena-2026-10-10-r445archive') OFFSET 0) e WHERE linked.round_id IN(p_round_id,'arena-2026-10-10-r445archive') AND linked.kind='score')
           IS DISTINCT FROM (SELECT configuration_doc->>'recovery_events_sha256' FROM public.lab_arena_rounds WHERE round_id='arena-2026-10-10-r445archive')
        OR (SELECT count(DISTINCT assignment_id) FROM public.lab_arena_runs
            WHERE round_id=p_round_id AND stage=2 AND kind='execute') <> 690
@@ -134,9 +135,11 @@ BEGIN
     'execution_sha256',(SELECT encode(extensions.digest(coalesce(jsonb_agg(to_jsonb(r)-'qualification_doc'-'per_icp_score'-'updated_at' ORDER BY run_id),'[]'::jsonb)::text,'sha256'),'hex') FROM public.lab_arena_runs r WHERE round_id=v_round_id AND kind='execute'),
     'execution_attempts',(SELECT count(*) FROM public.lab_arena_runs WHERE round_id=v_round_id AND kind='execute'),
     'ledger_max',(v_expected->>'ledger_max')::BIGINT,
-    'ledger_sha256',(SELECT encode(extensions.digest(coalesce(jsonb_agg(to_jsonb(l)||jsonb_build_object('round_id',v_round_id,'submission_id',CASE WHEN l.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-10' ELSE l.submission_id END) ORDER BY entry_id),'[]'::jsonb)::text,'sha256'),'hex') FROM public.lab_arena_ledger l WHERE round_id IN (v_round_id,v_archive_id) AND entry_id<=(v_expected->>'ledger_max')::BIGINT),
+    'ledger_rows',(SELECT count(*) FROM public.lab_arena_runs linked CROSS JOIN LATERAL (SELECT l.* FROM public.lab_arena_ledger l WHERE l.entry_id<=(v_expected->>'ledger_max')::BIGINT AND l.run_id=linked.run_id AND l.round_id IN(v_round_id,v_archive_id) OFFSET 0) l WHERE linked.round_id IN(v_round_id,v_archive_id) AND linked.kind='score'),
+    'ledger_sha256',(SELECT encode(extensions.digest(coalesce(string_agg(encode(extensions.digest((to_jsonb(l)||jsonb_build_object('round_id',v_round_id,'submission_id',CASE WHEN l.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-10' ELSE l.submission_id END))::text,'sha256'),'hex'),'' ORDER BY entry_id),''),'sha256'),'hex') FROM public.lab_arena_runs linked CROSS JOIN LATERAL (SELECT l.* FROM public.lab_arena_ledger l WHERE l.entry_id<=(v_expected->>'ledger_max')::BIGINT AND l.run_id=linked.run_id AND l.round_id IN(v_round_id,v_archive_id) OFFSET 0) l WHERE linked.round_id IN(v_round_id,v_archive_id) AND linked.kind='score'),
     'events_max',(v_expected->>'events_max')::BIGINT,
-    'events_sha256',(SELECT encode(extensions.digest(coalesce(jsonb_agg(to_jsonb(e)||jsonb_build_object('round_id',v_round_id,'submission_id',CASE WHEN e.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-10' ELSE e.submission_id END) ORDER BY trajectory_id),'[]'::jsonb)::text,'sha256'),'hex') FROM public.lab_arena_trajectory_events e WHERE round_id IN (v_round_id,v_archive_id) AND trajectory_id<=(v_expected->>'events_max')::BIGINT)
+    'events_rows',(SELECT count(*) FROM public.lab_arena_runs linked CROSS JOIN LATERAL (SELECT e.* FROM public.lab_arena_trajectory_events e WHERE e.trajectory_id<=(v_expected->>'events_max')::BIGINT AND e.run_id=linked.run_id AND e.round_id IN(v_round_id,v_archive_id) OFFSET 0) e WHERE linked.round_id IN(v_round_id,v_archive_id) AND linked.kind='score'),
+    'events_sha256',(SELECT encode(extensions.digest(coalesce(string_agg(encode(extensions.digest((to_jsonb(e)||jsonb_build_object('round_id',v_round_id,'submission_id',CASE WHEN e.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-10' ELSE e.submission_id END))::text,'sha256'),'hex'),'' ORDER BY trajectory_id),''),'sha256'),'hex') FROM public.lab_arena_runs linked CROSS JOIN LATERAL (SELECT e.* FROM public.lab_arena_trajectory_events e WHERE e.trajectory_id<=(v_expected->>'events_max')::BIGINT AND e.run_id=linked.run_id AND e.round_id IN(v_round_id,v_archive_id) OFFSET 0) e WHERE linked.round_id IN(v_round_id,v_archive_id) AND linked.kind='score')
   ) INTO v_frozen;
   FOR v_key IN SELECT jsonb_object_keys(v_frozen) LOOP
     IF v_frozen->v_key IS DISTINCT FROM v_expected->v_key THEN
@@ -175,9 +178,9 @@ BEGIN
        OR v_archive.configuration_doc->>'recovery_score_runs_sha256' IS DISTINCT FROM
           (SELECT encode(extensions.digest(coalesce(jsonb_agg(to_jsonb(s)||jsonb_build_object('round_id',v_round_id,'submission_id',CASE WHEN s.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-10' ELSE s.submission_id END) ORDER BY run_id),'[]'::jsonb)::text,'sha256'),'hex') FROM public.lab_arena_runs s WHERE round_id=v_archive_id AND kind='score')
        OR v_archive.configuration_doc->>'recovery_ledger_sha256' IS DISTINCT FROM
-          (SELECT encode(extensions.digest(coalesce(jsonb_agg(to_jsonb(l)||jsonb_build_object('round_id',v_round_id,'submission_id',CASE WHEN l.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-10' ELSE l.submission_id END) ORDER BY entry_id),'[]'::jsonb)::text,'sha256'),'hex') FROM public.lab_arena_ledger l WHERE round_id IN(v_round_id,v_archive_id) AND entry_id<=(v_archive.configuration_doc->>'recovery_ledger_max')::BIGINT)
+          (SELECT encode(extensions.digest(coalesce(string_agg(encode(extensions.digest((to_jsonb(l)||jsonb_build_object('round_id',v_round_id,'submission_id',CASE WHEN l.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-10' ELSE l.submission_id END))::text,'sha256'),'hex'),'' ORDER BY entry_id),''),'sha256'),'hex') FROM public.lab_arena_runs linked CROSS JOIN LATERAL (SELECT l.* FROM public.lab_arena_ledger l WHERE l.entry_id<=(v_archive.configuration_doc->>'recovery_ledger_max')::BIGINT AND l.run_id=linked.run_id AND l.round_id IN(v_round_id,v_archive_id) OFFSET 0) l WHERE linked.round_id IN(v_round_id,v_archive_id) AND linked.kind='score')
        OR v_archive.configuration_doc->>'recovery_events_sha256' IS DISTINCT FROM
-          (SELECT encode(extensions.digest(coalesce(jsonb_agg(to_jsonb(e)||jsonb_build_object('round_id',v_round_id,'submission_id',CASE WHEN e.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-10' ELSE e.submission_id END) ORDER BY trajectory_id),'[]'::jsonb)::text,'sha256'),'hex') FROM public.lab_arena_trajectory_events e WHERE round_id IN(v_round_id,v_archive_id) AND trajectory_id<=(v_archive.configuration_doc->>'recovery_events_max')::BIGINT)
+          (SELECT encode(extensions.digest(coalesce(string_agg(encode(extensions.digest((to_jsonb(e)||jsonb_build_object('round_id',v_round_id,'submission_id',CASE WHEN e.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-10' ELSE e.submission_id END))::text,'sha256'),'hex'),'' ORDER BY trajectory_id),''),'sha256'),'hex') FROM public.lab_arena_runs linked CROSS JOIN LATERAL (SELECT e.* FROM public.lab_arena_trajectory_events e WHERE e.trajectory_id<=(v_archive.configuration_doc->>'recovery_events_max')::BIGINT AND e.run_id=linked.run_id AND e.round_id IN(v_round_id,v_archive_id) OFFSET 0) e WHERE linked.round_id IN(v_round_id,v_archive_id) AND linked.kind='score')
        OR v_archive.configuration_doc->>'recovery_scoring_function_sha256' IS DISTINCT FROM encode(extensions.digest(pg_get_functiondef('public.lab_arena_open_scoring_v2(text,smallint,jsonb)'::regprocedure),'sha256'),'hex')
        OR v_archive.configuration_doc->>'recovery_stage_function_sha256' IS DISTINCT FROM encode(extensions.digest(pg_get_functiondef('public.lab_arena_open_stage(text,smallint,jsonb,integer[])'::regprocedure),'sha256'),'hex') THEN
       RAISE EXCEPTION 'Oct10 uniform rejudge445 archive replay differs';
@@ -189,6 +192,10 @@ BEGIN
     'round_sha256',encode(extensions.digest(to_jsonb(v_round)::text,'sha256'),'hex'),
     'runs_sha256',(SELECT encode(extensions.digest(coalesce(jsonb_agg(to_jsonb(r) ORDER BY run_id),'[]'::jsonb)::text,'sha256'),'hex') FROM public.lab_arena_runs r WHERE round_id=v_round_id),
     'score_attempts',(SELECT count(*) FROM public.lab_arena_runs WHERE round_id=v_round_id AND kind='score'),
+    'ledger_max',(SELECT coalesce(max(l.entry_id),0) FROM public.lab_arena_runs linked CROSS JOIN LATERAL (SELECT l.* FROM public.lab_arena_ledger l WHERE l.run_id=linked.run_id AND l.round_id IN(v_round_id,v_archive_id) OFFSET 0) l WHERE linked.round_id IN(v_round_id,v_archive_id) AND linked.kind='score'),
+    'ledger_rows',(SELECT count(*) FROM public.lab_arena_runs linked CROSS JOIN LATERAL (SELECT l.* FROM public.lab_arena_ledger l WHERE l.run_id=linked.run_id AND l.round_id IN(v_round_id,v_archive_id) OFFSET 0) l WHERE linked.round_id IN(v_round_id,v_archive_id) AND linked.kind='score'),
+    'events_max',(SELECT coalesce(max(e.trajectory_id),0) FROM public.lab_arena_runs linked CROSS JOIN LATERAL (SELECT e.* FROM public.lab_arena_trajectory_events e WHERE e.run_id=linked.run_id AND e.round_id IN(v_round_id,v_archive_id) OFFSET 0) e WHERE linked.round_id IN(v_round_id,v_archive_id) AND linked.kind='score'),
+    'events_rows',(SELECT count(*) FROM public.lab_arena_runs linked CROSS JOIN LATERAL (SELECT e.* FROM public.lab_arena_trajectory_events e WHERE e.run_id=linked.run_id AND e.round_id IN(v_round_id,v_archive_id) OFFSET 0) e WHERE linked.round_id IN(v_round_id,v_archive_id) AND linked.kind='score'),
     'hold_generation',v_control.guard_generation,
     'execution_full_sha256',(SELECT encode(extensions.digest(coalesce(jsonb_agg(to_jsonb(r)-'qualification_doc'-'per_icp_score' ORDER BY run_id),'[]'::jsonb)::text,'sha256'),'hex') FROM public.lab_arena_runs r WHERE round_id=v_round_id AND kind='execute'),
     'hold_sha256',encode(extensions.digest(to_jsonb(v_control)::text,'sha256'),'hex'),
@@ -236,6 +243,14 @@ BEGIN
      OR EXISTS (SELECT 1 FROM (SELECT DISTINCT ON(call_identity) entry_kind FROM public.lab_arena_ledger WHERE round_id=v_round_id AND call_identity IS NOT NULL ORDER BY call_identity,entry_id DESC) h WHERE entry_kind IN('reservation','dispatch'))
      OR EXISTS (SELECT 1 FROM public.lab_arena_runs r JOIN public.lab_arena_rounds rr USING(round_id) WHERE r.round_id<>v_round_id AND rr.configuration_doc->>'mode'='live' AND r.status IN('leased','submitted'))
      OR EXISTS (SELECT 1 FROM public.lab_arena_runs s LEFT JOIN public.lab_arena_runs e ON e.run_id=s.scored_run_id WHERE s.round_id=v_round_id AND s.kind='score' AND (s.status NOT IN('accepted','failed','pending') OR e.round_id IS DISTINCT FROM v_round_id OR e.kind IS DISTINCT FROM 'execute' OR e.status IS DISTINCT FROM 'accepted' OR e.submission_id IS DISTINCT FROM s.submission_id OR e.miner_hotkey IS DISTINCT FROM s.miner_hotkey OR e.stage IS DISTINCT FROM s.stage OR e.icp_position IS DISTINCT FROM s.icp_position))
+     OR EXISTS (SELECT 1 FROM public.lab_arena_trajectory_events e LEFT JOIN public.lab_arena_runs s ON s.run_id=e.run_id
+          WHERE e.round_id=v_round_id AND e.run_kind='score' AND (s.round_id IS DISTINCT FROM v_round_id OR s.kind IS DISTINCT FROM 'score'))
+     OR EXISTS (SELECT 1 FROM public.lab_arena_runs s CROSS JOIN LATERAL
+          (SELECT e.* FROM public.lab_arena_trajectory_events e WHERE e.run_id=s.run_id AND e.round_id=v_round_id OFFSET 0) e
+          WHERE s.round_id=v_round_id AND s.kind='score' AND (e.run_kind IS DISTINCT FROM 'score' OR e.submission_id IS DISTINCT FROM s.submission_id OR e.miner_hotkey IS DISTINCT FROM s.miner_hotkey OR e.stage IS DISTINCT FROM s.stage))
+     OR EXISTS (SELECT 1 FROM public.lab_arena_runs s CROSS JOIN LATERAL
+          (SELECT l.* FROM public.lab_arena_ledger l WHERE l.run_id=s.run_id AND l.round_id=v_round_id OFFSET 0) l
+          WHERE s.round_id=v_round_id AND s.kind='score' AND (l.submission_id IS DISTINCT FROM s.submission_id OR l.miner_hotkey IS DISTINCT FROM s.miner_hotkey OR l.stage IS DISTINCT FROM s.stage))
      OR EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid IN('public.lab_arena_rounds'::regclass,'public.lab_arena_submissions'::regclass,'public.lab_arena_runs'::regclass,'public.lab_arena_ledger'::regclass,'public.lab_arena_trajectory_events'::regclass) AND NOT tgisinternal AND tgenabled<>'O') THEN
     RAISE EXCEPTION 'Oct10 uniform rejudge445 terminal hold or inventory invalid';
   END IF;
@@ -246,8 +261,11 @@ BEGIN
   SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY run_id),'[]'::jsonb) INTO v_scores FROM public.lab_arena_runs s WHERE round_id=v_round_id AND kind='score';
   v_score_hash := encode(extensions.digest(v_scores::text,'sha256'),'hex');
   SELECT coalesce(jsonb_agg(jsonb_build_object('run_id',run_id,'qualification_doc',qualification_doc,'per_icp_score',per_icp_score) ORDER BY run_id),'[]'::jsonb) INTO v_receipts FROM public.lab_arena_runs WHERE round_id=v_round_id AND kind='execute';
-  SELECT coalesce(max(entry_id),0),coalesce(jsonb_agg(to_jsonb(l) ORDER BY entry_id),'[]'::jsonb) INTO v_ledger_max,v_ledger FROM public.lab_arena_ledger l WHERE round_id=v_round_id;
-  SELECT coalesce(max(trajectory_id),0),coalesce(jsonb_agg(to_jsonb(e) ORDER BY trajectory_id),'[]'::jsonb) INTO v_events_max,v_events FROM public.lab_arena_trajectory_events e WHERE round_id=v_round_id;
+  v_ledger_max := (v_expected->>'ledger_max')::BIGINT;
+  v_events_max := (v_expected->>'events_max')::BIGINT;
+  v_ledger_hash := v_expected->>'ledger_sha256';
+  v_events_hash := v_expected->>'events_sha256';
+
   SELECT jsonb_agg(p||jsonb_build_object('submission_id',CASE WHEN p->>'submission_id'='baseline-2026-10-10' THEN v_archive_baseline_id ELSE p->>'submission_id' END) ORDER BY ordinal)
     INTO v_archive_participants FROM jsonb_array_elements(v_round.participants) WITH ORDINALITY t(p,ordinal);
   -- Cancelled live archives retain the existing late-billing reconciliation path.
@@ -261,8 +279,8 @@ BEGIN
     'recovery_original_champion_fallback_providers',v_round.champion_fallback_providers,
     'recovery_source_receipts',v_receipts,'recovery_source_receipts_sha256',encode(extensions.digest(v_receipts::text,'sha256'),'hex'),
     'recovery_score_runs_sha256',v_score_hash,
-    'recovery_ledger_max',v_ledger_max,'recovery_ledger_sha256',encode(extensions.digest(v_ledger::text,'sha256'),'hex'),
-    'recovery_events_max',v_events_max,'recovery_events_sha256',encode(extensions.digest(v_events::text,'sha256'),'hex'));
+    'recovery_ledger_max',v_ledger_max,'recovery_ledger_sha256',v_ledger_hash,
+    'recovery_events_max',v_events_max,'recovery_events_sha256',v_events_hash);
 
   ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER USER;
   ALTER TABLE public.lab_arena_submissions DISABLE TRIGGER USER;
@@ -324,14 +342,28 @@ BEGIN
   SET round_id=v_archive_id,
     submission_id=CASE WHEN l.submission_id='baseline-2026-10-10'
       THEN v_archive_baseline_id ELSE l.submission_id END
-  WHERE l.round_id=v_round_id AND EXISTS (SELECT 1 FROM public.lab_arena_runs s
-    WHERE s.round_id=v_archive_id AND s.kind='score' AND s.run_id=l.run_id);
+  FROM (SELECT affected.entry_id FROM public.lab_arena_runs linked
+    CROSS JOIN LATERAL (SELECT entry_id FROM public.lab_arena_ledger affected
+      WHERE affected.run_id=linked.run_id AND affected.round_id=v_round_id OFFSET 0) affected
+    WHERE linked.round_id=v_archive_id AND linked.kind='score') moved
+  WHERE l.entry_id=moved.entry_id;
+  GET DIAGNOSTICS v_count=ROW_COUNT;
+  IF v_count<>(v_expected->>'ledger_rows')::BIGINT THEN
+    RAISE EXCEPTION 'Oct10 uniform rejudge445 ledger archive count differs';
+  END IF;
   UPDATE public.lab_arena_trajectory_events e
   SET round_id=v_archive_id,
     submission_id=CASE WHEN e.submission_id='baseline-2026-10-10'
       THEN v_archive_baseline_id ELSE e.submission_id END
-  WHERE e.round_id=v_round_id AND e.run_kind='score';
-
+  FROM (SELECT affected.trajectory_id FROM public.lab_arena_runs linked
+    CROSS JOIN LATERAL (SELECT trajectory_id FROM public.lab_arena_trajectory_events affected
+      WHERE affected.run_id=linked.run_id AND affected.round_id=v_round_id OFFSET 0) affected
+    WHERE linked.round_id=v_archive_id AND linked.kind='score') moved
+  WHERE e.trajectory_id=moved.trajectory_id;
+  GET DIAGNOSTICS v_count=ROW_COUNT;
+  IF v_count<>(v_expected->>'events_rows')::BIGINT THEN
+    RAISE EXCEPTION 'Oct10 uniform rejudge445 events archive count differs';
+  END IF;
 
 
   UPDATE public.lab_arena_runs SET qualification_doc=NULL,per_icp_score=NULL
@@ -372,9 +404,10 @@ BEGIN
     RAISE EXCEPTION 'Oct10 uniform rejudge445 postcondition differs';
   END IF;
   -- Compare every archived score byte and remapped original ledger/event prefix.
+
   IF (SELECT encode(extensions.digest(coalesce(jsonb_agg(to_jsonb(s)||jsonb_build_object('round_id',v_round_id,'submission_id',CASE WHEN s.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-10' ELSE s.submission_id END) ORDER BY run_id),'[]'::jsonb)::text,'sha256'),'hex') FROM public.lab_arena_runs s WHERE round_id=v_archive_id AND kind='score') IS DISTINCT FROM v_score_hash
-     OR (SELECT encode(extensions.digest(coalesce(jsonb_agg(to_jsonb(l)||jsonb_build_object('round_id',v_round_id,'submission_id',CASE WHEN l.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-10' ELSE l.submission_id END) ORDER BY entry_id),'[]'::jsonb)::text,'sha256'),'hex') FROM public.lab_arena_ledger l WHERE round_id IN(v_round_id,v_archive_id) AND entry_id<=v_ledger_max) IS DISTINCT FROM encode(extensions.digest(v_ledger::text,'sha256'),'hex')
-     OR (SELECT encode(extensions.digest(coalesce(jsonb_agg(to_jsonb(e)||jsonb_build_object('round_id',v_round_id,'submission_id',CASE WHEN e.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-10' ELSE e.submission_id END) ORDER BY trajectory_id),'[]'::jsonb)::text,'sha256'),'hex') FROM public.lab_arena_trajectory_events e WHERE round_id IN(v_round_id,v_archive_id) AND trajectory_id<=v_events_max) IS DISTINCT FROM encode(extensions.digest(v_events::text,'sha256'),'hex') THEN
+     OR (SELECT encode(extensions.digest(coalesce(string_agg(encode(extensions.digest((to_jsonb(l)||jsonb_build_object('round_id',v_round_id,'submission_id',CASE WHEN l.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-10' ELSE l.submission_id END))::text,'sha256'),'hex'),'' ORDER BY entry_id),''),'sha256'),'hex') FROM public.lab_arena_runs linked CROSS JOIN LATERAL (SELECT l.* FROM public.lab_arena_ledger l WHERE l.entry_id<=v_ledger_max AND l.run_id=linked.run_id AND l.round_id IN(v_round_id,v_archive_id) OFFSET 0) l WHERE linked.round_id IN(v_round_id,v_archive_id) AND linked.kind='score') IS DISTINCT FROM v_ledger_hash
+     OR (SELECT encode(extensions.digest(coalesce(string_agg(encode(extensions.digest((to_jsonb(e)||jsonb_build_object('round_id',v_round_id,'submission_id',CASE WHEN e.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-10' ELSE e.submission_id END))::text,'sha256'),'hex'),'' ORDER BY trajectory_id),''),'sha256'),'hex') FROM public.lab_arena_runs linked CROSS JOIN LATERAL (SELECT e.* FROM public.lab_arena_trajectory_events e WHERE e.trajectory_id<=v_events_max AND e.run_id=linked.run_id AND e.round_id IN(v_round_id,v_archive_id) OFFSET 0) e WHERE linked.round_id IN(v_round_id,v_archive_id) AND linked.kind='score') IS DISTINCT FROM v_events_hash THEN
     RAISE EXCEPTION 'Oct10 uniform rejudge445 archived payload differs';
   END IF;
   SELECT * INTO v_round FROM public.lab_arena_rounds WHERE round_id=v_round_id;

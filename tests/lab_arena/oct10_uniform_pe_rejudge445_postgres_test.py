@@ -51,8 +51,8 @@ def _inventory(cur):
         'runs': f"SELECT jsonb_agg(to_jsonb(r) ORDER BY run_id) FROM public.lab_arena_runs r WHERE round_id='{ROUND}'",
         'execution_full': f"SELECT jsonb_agg(to_jsonb(r)-'qualification_doc'-'per_icp_score' ORDER BY run_id) FROM public.lab_arena_runs r WHERE round_id='{ROUND}' AND kind='execute'",
         'execution': f"SELECT jsonb_agg(to_jsonb(r)-'qualification_doc'-'per_icp_score'-'updated_at' ORDER BY run_id) FROM public.lab_arena_runs r WHERE round_id='{ROUND}' AND kind='execute'",
-        'ledger': f"SELECT jsonb_agg(to_jsonb(l) ORDER BY entry_id) FROM public.lab_arena_ledger l WHERE round_id='{ROUND}'",
-        'events': f"SELECT jsonb_agg(to_jsonb(e) ORDER BY trajectory_id) FROM public.lab_arena_trajectory_events e WHERE round_id='{ROUND}'",
+        'ledger': f"SELECT coalesce(string_agg(encode(extensions.digest(to_jsonb(l)::text,'sha256'),'hex'),'' ORDER BY entry_id),'') FROM public.lab_arena_ledger l WHERE round_id='{ROUND}' AND run_id IN (SELECT run_id FROM public.lab_arena_runs WHERE round_id='{ROUND}' AND kind='score')",
+        'events': f"SELECT coalesce(string_agg(encode(extensions.digest(to_jsonb(e)::text,'sha256'),'hex'),'' ORDER BY trajectory_id),'') FROM public.lab_arena_trajectory_events e WHERE round_id='{ROUND}' AND run_id IN (SELECT run_id FROM public.lab_arena_runs WHERE round_id='{ROUND}' AND kind='score')",
         'hold': 'SELECT to_jsonb(c) FROM public.lab_arena_restart_claim_control c WHERE singleton',
     }.items():
         result[key + '_sha256'] = _hash(cur, '(' + expression + ')')
@@ -74,15 +74,15 @@ def _inventory(cur):
         cur.execute('SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s AND kind=%s', (ROUND, kind))
         result[('execution' if kind == 'execute' else 'score') + '_attempts'] = cur.fetchone()[0]
     for key, table, column in (('ledger', 'lab_arena_ledger', 'entry_id'), ('events', 'lab_arena_trajectory_events', 'trajectory_id')):
-        cur.execute(f'SELECT coalesce(max({column}),0) FROM public.{table} WHERE round_id=%s', (ROUND,))
-        result[key + '_max'] = cur.fetchone()[0]
+        cur.execute(f"SELECT coalesce(max({column}),0),count(*) FROM public.{table} WHERE round_id=%s AND run_id IN (SELECT run_id FROM public.lab_arena_runs WHERE round_id=%s AND kind='score')", (ROUND,ROUND))
+        result[key + '_max'], result[key + '_rows'] = cur.fetchone()
     cur.execute('SELECT guard_generation FROM public.lab_arena_restart_claim_control WHERE singleton')
     result['hold_generation'] = cur.fetchone()[0]
     return result
 
 
 def _hold_render(cur):
-    inventory = {k:v for k,v in _inventory(cur).items() if k not in ('round_sha256','runs_sha256','score_attempts','execution_full_sha256')}
+    inventory = {k:v for k,v in _inventory(cur).items() if k not in ('round_sha256','runs_sha256','score_attempts','execution_full_sha256','ledger_max','ledger_rows','ledger_sha256','events_max','events_rows','events_sha256')}
     inventory['round_identity_sha256'] = _hash(cur, "(SELECT to_jsonb(r)-ARRAY['status','status_generation','stage_generation','stage1_scoring_plan_doc','stage2_scoring_plan_doc','finalists','updated_at'] FROM public.lab_arena_rounds r WHERE round_id='arena-2026-10-10')")
     cur.execute('SELECT status,stage_generation,status_generation FROM public.lab_arena_rounds WHERE round_id=%s', (ROUND,))
     inventory['round_status'], inventory['round_stage_generation'], inventory['round_status_generation'] = cur.fetchone()
@@ -410,7 +410,7 @@ def test_unrendered_and_replay_payload_drift_fail_closed(seeded):
                 "UPDATE public.lab_arena_rounds SET champion_submission_id='wrong' WHERE round_id='arena-2026-10-10-r445archive'",
                 "UPDATE public.lab_arena_rounds SET rewards_enabled=true WHERE round_id='arena-2026-10-10-r445archive'",
                 "UPDATE public.lab_arena_runs SET result_doc='{}' WHERE round_id='arena-2026-10-10-r445archive' AND run_id='old445-score-1'",
-                "UPDATE public.lab_arena_ledger SET amount_microusd=1 WHERE entry_id=(SELECT min(entry_id) FROM public.lab_arena_ledger WHERE round_id='arena-2026-10-10')",
+                "UPDATE public.lab_arena_ledger SET amount_microusd=1 WHERE entry_id=(SELECT min(entry_id) FROM public.lab_arena_ledger WHERE round_id='arena-2026-10-10-r445archive')",
                 "UPDATE public.lab_arena_trajectory_events SET content='{}' WHERE trajectory_id=(SELECT min(trajectory_id) FROM public.lab_arena_trajectory_events WHERE round_id='arena-2026-10-10-r445archive')",
             ):
                 cur.execute('BEGIN')
@@ -464,3 +464,74 @@ def test_final_actor_parameter_must_name_exact_canonical_deployment(seeded, acto
                 cur.execute(_render(cur).replace(FINAL_ACTOR, actor))
             cur.execute('ROLLBACK')
             assert _snapshot(cur) == original
+
+
+def test_large_unrelated_accounting_history_remains_byte_exact(seeded):
+    psycopg, dsn = seeded
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute('SET session_replication_role=replica')
+            cur.execute("""INSERT INTO public.lab_arena_ledger
+                (entry_kind,round_id,submission_id,miner_hotkey,run_id,stage,provider,operation_id,funding_source,amount_microusd,entry_doc)
+                SELECT 'settlement',r.round_id,r.submission_id,r.miner_hotkey,
+                  CASE WHEN mod(n,2)=0 THEN NULL ELSE r.run_id END,r.stage,'openrouter','unrelated445-scale','miner_key',123,
+                  jsonb_build_object('payload',repeat('0123456789abcdef',488),'ordinal',n)
+                FROM (SELECT * FROM public.lab_arena_runs WHERE round_id=%s AND kind='execute' LIMIT 1) r
+                CROSS JOIN generate_series(1,5000) n""", (ROUND,))
+            cur.execute("""INSERT INTO public.lab_arena_trajectory_events
+                (run_id,event_id,round_id,submission_id,miner_hotkey,runner_hotkey,assignment_id,icp_identifier,stage,icp_position,attempt,run_kind,model_role,event_kind,occurred_at,content)
+                SELECT r.run_id,md5('unrelated445-scale-'||n)::uuid,r.round_id,r.submission_id,r.miner_hotkey,r.miner_hotkey,r.assignment_id,r.icp_position::text,r.stage,r.icp_position,r.attempt,'execute','baseline','runtime.progress',now(),
+                  jsonb_build_object('payload',repeat('0123456789abcdef',128),'ordinal',n)
+                FROM (SELECT * FROM public.lab_arena_runs WHERE round_id=%s AND kind='execute' LIMIT 1) r
+                CROSS JOIN generate_series(1,5000) n""", (ROUND,))
+            cur.execute('SET session_replication_role=origin')
+            def untouched():
+                result = []
+                for table, alias, column in (('lab_arena_ledger','l','entry_id'),('lab_arena_trajectory_events','e','trajectory_id')):
+                    cur.execute(f"""SELECT count(*),encode(extensions.digest(coalesce(string_agg(
+                        encode(extensions.digest(to_jsonb({alias})::text,'sha256'),'hex'),'' ORDER BY {column}),''),'sha256'),'hex')
+                        FROM public.{table} {alias} WHERE round_id=%s
+                        AND NOT EXISTS (SELECT 1 FROM public.lab_arena_runs s WHERE s.run_id={alias}.run_id AND s.kind='score')""", (ROUND,))
+                    result.append(cur.fetchone())
+                return result
+            before = untouched()
+            assert all(count>=5000 for count,_ in before)
+            inventory = _inventory(cur)
+            assert inventory['ledger_rows']==6 and inventory['events_rows']==3
+            sql = _render(cur)
+            cur.execute(sql)
+            assert untouched()==before
+            cur.execute(sql)  # Replay ignores preserved unrelated history.
+            assert untouched()==before
+
+
+@pytest.mark.parametrize('kind', ['reservation','dispatch'])
+def test_unbound_active_provider_head_still_blocks_rejudge(seeded, kind):
+    psycopg, dsn = seeded
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute('BEGIN')
+            cur.execute('SET LOCAL session_replication_role=replica')
+            cur.execute("""INSERT INTO public.lab_arena_ledger (entry_kind,round_id,submission_id,miner_hotkey,run_id,stage,provider,operation_id,funding_source,call_identity,amount_microusd)
+                SELECT %s,round_id,submission_id,miner_hotkey,NULL,stage,'openrouter','unbound445-head','miner_key','sha256:'||repeat('7',64),123
+                FROM public.lab_arena_runs WHERE round_id=%s AND kind='execute' LIMIT 1""", (kind,ROUND))
+            cur.execute('SET LOCAL session_replication_role=origin')
+            with pytest.raises(psycopg.Error, match='terminal hold or inventory invalid'):
+                cur.execute(_render(cur))
+            cur.execute('ROLLBACK')
+
+
+def test_orphan_or_mislabeled_score_event_is_not_archived(seeded):
+    psycopg, dsn = seeded
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute('BEGIN')
+            cur.execute('SET LOCAL session_replication_role=replica')
+            cur.execute("UPDATE public.lab_arena_trajectory_events SET run_kind='score' WHERE trajectory_id=(SELECT min(trajectory_id) FROM public.lab_arena_trajectory_events WHERE round_id=%s AND run_kind='execute')", (ROUND,))
+            cur.execute('SET LOCAL session_replication_role=origin')
+            with pytest.raises(psycopg.Error, match='terminal hold or inventory invalid'):
+                cur.execute(_render(cur))
+            cur.execute('ROLLBACK')

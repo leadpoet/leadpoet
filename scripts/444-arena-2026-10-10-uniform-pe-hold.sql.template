@@ -14,8 +14,6 @@ LOCK TABLE public.lab_arena_restart_claim_control IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE public.lab_arena_rounds IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE public.lab_arena_submissions IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE public.lab_arena_runs IN ACCESS EXCLUSIVE MODE;
-LOCK TABLE public.lab_arena_ledger IN ACCESS EXCLUSIVE MODE;
-LOCK TABLE public.lab_arena_trajectory_events IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE public.qualification_private_icp_sets IN SHARE MODE;
 
 DO $oct10_uniform_hold444$
@@ -53,11 +51,7 @@ BEGIN
     'bank_sha256',(SELECT encode(extensions.digest(icps::text,'sha256'),'hex') FROM public.qualification_private_icp_sets WHERE set_id=20261009),
     -- Stable resume identity permits only normal score writes and their timestamp.
     'execution_sha256',(SELECT encode(extensions.digest(coalesce(jsonb_agg(to_jsonb(r)-'qualification_doc'-'per_icp_score'-'updated_at' ORDER BY run_id),'[]'::jsonb)::text,'sha256'),'hex') FROM public.lab_arena_runs r WHERE round_id=v_round_id AND kind='execute'),
-    'execution_attempts',(SELECT count(*) FROM public.lab_arena_runs WHERE round_id=v_round_id AND kind='execute'),
-    'ledger_max',(v_expected->>'ledger_max')::BIGINT,
-    'ledger_sha256',(SELECT encode(extensions.digest(coalesce(jsonb_agg(to_jsonb(l)||jsonb_build_object('round_id',v_round_id,'submission_id',CASE WHEN l.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-10' ELSE l.submission_id END) ORDER BY entry_id),'[]'::jsonb)::text,'sha256'),'hex') FROM public.lab_arena_ledger l WHERE round_id IN (v_round_id,v_archive_id) AND entry_id<=(v_expected->>'ledger_max')::BIGINT),
-    'events_max',(v_expected->>'events_max')::BIGINT,
-    'events_sha256',(SELECT encode(extensions.digest(coalesce(jsonb_agg(to_jsonb(e)||jsonb_build_object('round_id',v_round_id,'submission_id',CASE WHEN e.submission_id=v_archive_baseline_id THEN 'baseline-2026-10-10' ELSE e.submission_id END) ORDER BY trajectory_id),'[]'::jsonb)::text,'sha256'),'hex') FROM public.lab_arena_trajectory_events e WHERE round_id IN (v_round_id,v_archive_id) AND trajectory_id<=(v_expected->>'events_max')::BIGINT)
+    'execution_attempts',(SELECT count(*) FROM public.lab_arena_runs WHERE round_id=v_round_id AND kind='execute')
   ) INTO v_frozen;
   SELECT v_frozen || jsonb_build_object(
     'round_identity_sha256',encode(extensions.digest((to_jsonb(v_round)-ARRAY['status','status_generation','stage_generation','stage1_scoring_plan_doc','stage2_scoring_plan_doc','finalists','updated_at'])::text,'sha256'),'hex'),

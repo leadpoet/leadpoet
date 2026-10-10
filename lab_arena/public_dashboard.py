@@ -138,7 +138,7 @@ _COMPETITION_ROUND_COLUMNS = _ROUND_COLUMNS.replace(
         "cfg_%s:configuration_doc->%s::text" % (key, key)
         for key in COMPETITION_CONFIGURATION_FIELDS
     ),
-)
+).replace("publication_doc", "publication_doc:lab_arena_competition_publication_v1")
 
 
 def _competition_round(row: Mapping[str, Any]) -> Mapping[str, Any]:

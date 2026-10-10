@@ -57,7 +57,8 @@ def _encoded_greenhouse_payload() -> dict:
         "company_name": "Acme",
         "content": (
             "&lt;section&gt;&lt;h2&gt;What You&#39;ll Do&lt;/h2&gt;"
-            "&lt;p&gt;Design autonomous systems for industrial sites.&lt;/p&gt;&lt;/section&gt;"
+            "&lt;p&gt;Design autonomous systems for industrial sites.&lt;/p&gt;"
+            "&lt;a href=&quot;https://acme.com/careers&quot;&gt;Careers&lt;/a&gt;&lt;/section&gt;"
         ),
     }
 
@@ -80,7 +81,8 @@ def _scale_greenhouse_payload() -> dict:
         "offices": [{"id": 456, "name": "Restricted Office Metadata"}],
         "content": (
             "<section><h2>About the Role</h2>"
-            "<p>Build reliable platform systems for AI applications.</p></section>"
+            "<p>Build reliable platform systems for AI applications.</p>"
+            '<a href="https://scale.com/careers">Careers</a></section>'
         ),
     }
 
@@ -266,6 +268,9 @@ async def _run_greenhouse_verification(monkeypatch, payload, stage3_status):
         company_name="Acme",
         company_linkedin="",
         company_website="https://acme.com",
+        verified_company_identity={"decision": "match", "observed_name": "acme",
+            "observed_domain": "acme.com", "observed_linkedin_slug": "",
+            "evidence_source": "company_web_reverification"},
         source_url=GREENHOUSE_URL,
         miner_claim=GREENHOUSE_CLAIM,
         target_signal_text=GREENHOUSE_TARGET,
@@ -344,6 +349,9 @@ async def test_scale_greenhouse_department_reaches_source_and_semantic_gate(
         company_name="Scale AI",
         company_linkedin="https://www.linkedin.com/company/scaleai",
         company_website="https://scale.com",
+        verified_company_identity={"decision": "match", "observed_name": "scaleai",
+            "observed_domain": "scale.com", "observed_linkedin_slug": "scaleai",
+            "evidence_source": "company_web_reverification"},
         source_url=SCALE_GREENHOUSE_URL,
         miner_claim="Scale AI is hiring in Horizontals EPD.",
         target_signal_text="Company is actively hiring in Horizontals EPD.",

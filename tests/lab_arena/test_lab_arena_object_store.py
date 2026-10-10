@@ -35,7 +35,8 @@ class _ConditionalS3:
 
     def get_object(self, **request):
         self.gets.append(request)
-        return {"Body": BytesIO(self.objects[request["Key"]])}
+        data = self.objects[request["Key"]]
+        return {"Body": BytesIO(data), "ContentLength": len(data)}
 
     def head_object(self, **request):
         self.heads.append(request)
@@ -77,7 +78,7 @@ def test_empty_s3_key_prefix_preserves_logical_keys_for_every_operation():
 
     assert client.puts[0]["Key"] == logical_ref
     assert all(request["Key"] == logical_ref for request in client.gets)
-    assert client.heads == [{"Bucket": "arena", "Key": logical_ref}]
+    assert client.heads == []
     assert client.presigns[0][1]["Params"]["Key"] == logical_ref
     assert "ContentMD5" not in client.presigns[0][1]["Params"]
 
@@ -104,11 +105,77 @@ def test_s3_key_prefix_is_applied_without_changing_the_logical_ref():
     assert client.objects == {physical_key: b"source"}
     assert client.puts[0]["Key"] == physical_key
     assert all(request["Key"] == physical_key for request in client.gets)
-    assert client.heads == [{"Bucket": "arena", "Key": physical_key}]
+    assert client.heads == []
     assert client.presigns[0][1]["Params"]["Key"] == physical_key
     assert client.presigns[0][1]["Params"]["ContentMD5"] == "ycS5J9O2S8sMKVgsf+qGQw=="
     assert upload["upload_headers"]["content-md5"] == "ycS5J9O2S8sMKVgsf+qGQw=="
     assert upload["upload_url"] == "https://uploads.example/object"
+
+
+@pytest.mark.parametrize("length", (6, None, 0))
+def test_bounded_get_accepts_exact_limit_and_closes_body(length):
+    from types import SimpleNamespace
+
+    body = BytesIO(b"source")
+    client = SimpleNamespace(get_object=lambda **kwargs: {
+        "Body": body, "ContentLength": length,
+    })
+    assert S3ObjectStore("arena", client=client).get_bounded("ref", 6) == b"source"
+    assert body.closed
+
+
+def test_bounded_get_refuses_oversize_headers_without_reading_body():
+    from types import SimpleNamespace
+
+    class Body(BytesIO):
+        def read(self, *args):
+            pytest.fail("oversize object must not be read")
+
+    body = Body(b"source")
+    client = SimpleNamespace(get_object=lambda **kwargs: {
+        "Body": body, "ContentLength": 6,
+    })
+    with pytest.raises(ArenaContractError, match="source size limit"):
+        S3ObjectStore("arena", client=client).get_bounded("ref", 5)
+    assert body.closed
+
+
+@pytest.mark.parametrize("length", (None, 1))
+def test_bounded_get_checks_stream_when_length_is_missing_or_understated(length):
+    from types import SimpleNamespace
+
+    reads = []
+
+    class Body(BytesIO):
+        def read(self, limit):
+            reads.append(limit)
+            return super().read(limit)
+
+    body = Body(b"more than the limit")
+    client = SimpleNamespace(get_object=lambda **kwargs: {
+        "Body": body, "ContentLength": length,
+    })
+    with pytest.raises(ArenaContractError, match="source size limit"):
+        S3ObjectStore("arena", client=client).get_bounded("ref", 5)
+    assert reads == [6]
+    assert body.closed
+
+
+@pytest.mark.parametrize("bad_header", (False, True))
+def test_bounded_get_closes_body_when_read_or_header_fails(bad_header):
+    from types import SimpleNamespace
+
+    class Body(BytesIO):
+        def read(self, limit):
+            raise OSError("stream failed")
+
+    body = Body(b"source")
+    client = SimpleNamespace(get_object=lambda **kwargs: {
+        "Body": body, "ContentLength": "invalid" if bad_header else 6,
+    })
+    with pytest.raises(ValueError if bad_header else OSError):
+        S3ObjectStore("arena", client=client).get_bounded("ref", 10)
+    assert body.closed
 
 
 @pytest.mark.parametrize("checksum", ("not-base64", "c2hvcnQ=", "A" * 24))

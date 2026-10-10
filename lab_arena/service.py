@@ -357,12 +357,14 @@ class S3ObjectStore:
 
     def get_bounded(self, ref: str, max_bytes: int) -> bytes:
         key = self._key(ref)
-        head = self._client.head_object(Bucket=self._bucket, Key=key)
-        if int(head.get("ContentLength") or 0) > int(max_bytes):
-            raise ArenaContractError("object exceeds source size limit")
         response = self._client.get_object(Bucket=self._bucket, Key=key)
         body = response["Body"]
         try:
+            # GET carries the size of the same object version as its body.
+            # Check before reading; the bounded read also covers absent or
+            # understated lengths without a separate HEAD round trip.
+            if int(response.get("ContentLength") or 0) > int(max_bytes):
+                raise ArenaContractError("object exceeds source size limit")
             data = body.read(int(max_bytes) + 1)
         finally:
             close = getattr(body, "close", None)

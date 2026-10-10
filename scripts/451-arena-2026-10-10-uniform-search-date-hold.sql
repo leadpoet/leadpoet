@@ -1,0 +1,163 @@
+-- Reviewed October10 search-date uniform rejudge owner hold451.
+-- Both prior archives and all source identities are sealed by the exact inventory.
+-- Current judges may finish; no new claims open.
+BEGIN;
+SET LOCAL TIME ZONE 'UTC';
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '120s';
+
+
+DO $oct10_uniform_hold451$
+DECLARE
+  v_round public.lab_arena_rounds;
+  v_control public.lab_arena_restart_claim_control;
+  v_round_id CONSTANT TEXT := 'arena-2026-10-10';
+  v_archive_id CONSTANT TEXT := 'arena-2026-10-10-r452archive';
+  v_archive_baseline_id CONSTANT TEXT := 'baseline-2026-10-10-r452archive';
+  v_actor CONSTANT TEXT := 'oct10-uniform-evidence-hold451';
+  v_reason CONSTANT TEXT := 'oct10_uniform_search_date_recovery';
+  v_expected CONSTANT JSONB := '{"bank_sha256": "30b673c4c32d2ef3716701aa65d543b70cc87c6414fe281a45d6fb7e8d84dfb8", "execution_attempts": 764, "execution_sha256": "c5cfc22a173bb2ef7bae38f9a66eb1864ecaadd8bc4301ee7d3a00bded992e49", "functions_security_sha256": "a53d4ad26c0a68379ee93307701e3ccb8a27acca0e21ba249a50f8f5cae6dae1", "hold_generation": 423, "hold_sha256": "82f26b64d99aba0cd344f40b4a0010ea7f1ae8b2801e0d7d80e1a45b759e93b8", "participants_sha256": "e272d0d25813b1d4c60f62cee8753c96d7f58b93660ea3086a46d03fd252acb8", "prior445_archive_sha256": "bfe2833dad2c8f9b825c9e5ec17c6675d5c5292a7b6bc99c07c2c72bc3face1b", "prior448_archive_sha256": "be78bf752b4d09371e7d3690fd03b3f1c3b8de77f19746457a34d65081492b71", "round_identity_sha256": "bdb420ba9c3a3cb62bdfd10a39a8ec05406c3b40947a195c209a038a728d7933", "round_stage_generation": 22, "round_status": "stage2_scoring", "round_status_generation": 26, "scoring_function_sha256": "f51d7f54a99c8956523d8ba74c45c7d2866632fd7c8d6c07ead6132fc6104580", "stage_function_sha256": "464298b33f876403b1c2e1260be873e0e69becb2512aa1ba6ebb2b63a1f34324", "submissions_sha256": "f4608f08670b523fccc7de0708c7c24208dfb3afbfb3ad5f0fda6afe137a5e4a", "triggers_sha256": "cdd4b970ab4e074af3c82db94b2be3a7a95399af716638245cb28318a55c5cc1"}'::JSONB;
+  v_frozen JSONB;
+  v_actual JSONB;
+  v_count INTEGER;
+  v_prior445_hash TEXT;
+  v_prior448_hash TEXT;
+BEGIN
+  -- Protect only the two historical archives during their full-byte proof.
+  -- Normal live provider/completion writes continue until the short hold CAS.
+  PERFORM 1 FROM public.lab_arena_rounds
+    WHERE round_id IN ('arena-2026-10-10-r445archive','arena-2026-10-10-r448archive')
+    ORDER BY round_id FOR SHARE;
+  PERFORM 1 FROM public.lab_arena_submissions
+    WHERE round_id IN ('arena-2026-10-10-r445archive','arena-2026-10-10-r448archive')
+    ORDER BY submission_id FOR SHARE;
+  PERFORM 1 FROM public.lab_arena_runs
+    WHERE round_id IN ('arena-2026-10-10-r445archive','arena-2026-10-10-r448archive')
+    ORDER BY run_id FOR SHARE;
+  SELECT (WITH archive AS MATERIALIZED (
+ SELECT to_jsonb(z) AS doc,z.round_id,(z.configuration_doc->>'recovery_ledger_max')::bigint AS ledger_max,(z.configuration_doc->>'recovery_events_max')::bigint AS events_max
+ FROM public.lab_arena_rounds z WHERE z.round_id='arena-2026-10-10-r445archive' AND z.status='cancelled' AND NOT z.rewards_enabled
+), ledger_hashes AS MATERIALIZED (
+ SELECT l.entry_id,encode(extensions.digest(to_jsonb(l)::text,'sha256'),'hex') AS h FROM archive a JOIN public.lab_arena_runs linked ON linked.round_id=a.round_id AND linked.kind='score'
+ CROSS JOIN LATERAL(SELECT l.* FROM public.lab_arena_ledger l WHERE l.run_id=linked.run_id AND l.round_id=a.round_id AND l.entry_id<=a.ledger_max OFFSET 0) l
+), event_hashes AS MATERIALIZED (
+ SELECT e.trajectory_id,encode(extensions.digest(to_jsonb(e)::text,'sha256'),'hex') AS h FROM archive a JOIN public.lab_arena_runs linked ON linked.round_id=a.round_id AND linked.kind='score'
+ CROSS JOIN LATERAL(SELECT e.* FROM public.lab_arena_trajectory_events e WHERE e.run_id=linked.run_id AND e.round_id=a.round_id AND e.trajectory_id<=a.events_max OFFSET 0) e
+) SELECT encode(extensions.digest(jsonb_build_object('round',a.doc,
+ 'submissions',(SELECT jsonb_agg(to_jsonb(s) ORDER BY submission_id) FROM public.lab_arena_submissions s WHERE s.round_id=a.round_id),
+ 'runs',(SELECT jsonb_agg(to_jsonb(r) ORDER BY run_id) FROM public.lab_arena_runs r WHERE r.round_id=a.round_id),
+ 'ledger',(SELECT string_agg(h,'' ORDER BY entry_id) FROM ledger_hashes),
+ 'events',(SELECT string_agg(h,'' ORDER BY trajectory_id) FROM event_hashes))::text,'sha256'),'hex') FROM archive a),
+    (WITH archive AS MATERIALIZED (
+ SELECT to_jsonb(z) AS doc,z.round_id,(z.configuration_doc->>'recovery_ledger_max')::bigint AS ledger_max,(z.configuration_doc->>'recovery_events_max')::bigint AS events_max
+ FROM public.lab_arena_rounds z WHERE z.round_id='arena-2026-10-10-r448archive' AND z.status='cancelled' AND NOT z.rewards_enabled
+), ledger_hashes AS MATERIALIZED (
+ SELECT l.entry_id,encode(extensions.digest(to_jsonb(l)::text,'sha256'),'hex') AS h FROM archive a JOIN public.lab_arena_runs linked ON linked.round_id=a.round_id AND linked.kind='score'
+ CROSS JOIN LATERAL(SELECT l.* FROM public.lab_arena_ledger l WHERE l.run_id=linked.run_id AND l.round_id=a.round_id AND l.entry_id<=a.ledger_max OFFSET 0) l
+), event_hashes AS MATERIALIZED (
+ SELECT e.trajectory_id,encode(extensions.digest(to_jsonb(e)::text,'sha256'),'hex') AS h FROM archive a JOIN public.lab_arena_runs linked ON linked.round_id=a.round_id AND linked.kind='score'
+ CROSS JOIN LATERAL(SELECT e.* FROM public.lab_arena_trajectory_events e WHERE e.run_id=linked.run_id AND e.round_id=a.round_id AND e.trajectory_id<=a.events_max OFFSET 0) e
+) SELECT encode(extensions.digest(jsonb_build_object('round',a.doc,
+ 'submissions',(SELECT jsonb_agg(to_jsonb(s) ORDER BY submission_id) FROM public.lab_arena_submissions s WHERE s.round_id=a.round_id),
+ 'runs',(SELECT jsonb_agg(to_jsonb(r) ORDER BY run_id) FROM public.lab_arena_runs r WHERE r.round_id=a.round_id),
+ 'ledger',(SELECT string_agg(h,'' ORDER BY entry_id) FROM ledger_hashes),
+ 'events',(SELECT string_agg(h,'' ORDER BY trajectory_id) FROM event_hashes))::text,'sha256'),'hex') FROM archive a) INTO v_prior445_hash,v_prior448_hash;
+  -- Full archive proof is complete before the live claim-control fence.
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('lab-arena-claim-control', 0));
+  LOCK TABLE public.lab_arena_restart_claim_control IN ACCESS EXCLUSIVE MODE;
+  LOCK TABLE public.lab_arena_rounds IN ACCESS EXCLUSIVE MODE;
+  LOCK TABLE public.lab_arena_submissions IN ACCESS EXCLUSIVE MODE;
+  LOCK TABLE public.lab_arena_runs IN ACCESS EXCLUSIVE MODE;
+  LOCK TABLE public.qualification_private_icp_sets IN SHARE MODE;
+  SELECT * INTO v_control FROM public.lab_arena_restart_claim_control WHERE singleton FOR UPDATE;
+  SELECT * INTO v_round FROM public.lab_arena_rounds WHERE round_id=v_round_id FOR UPDATE;
+  IF current_setting('session_replication_role')<>'origin'
+     OR jsonb_typeof(v_expected)<>'object' OR v_round.round_id IS NULL
+     OR v_control.singleton IS NULL OR v_control.guard_commitment<>''
+     OR v_control.owner_commitment<>'' OR v_control.restart_scope<>''
+     OR v_control.restart_phase<>'' OR v_control.guard_expires_at IS NOT NULL
+     OR v_control.captured_leases<>'[]'::JSONB
+     OR v_control.guard_generation IS DISTINCT FROM (v_expected->>'hold_generation')::BIGINT
+     OR (v_control.operator_paused AND (v_control.actor_ref,v_control.pause_reason)
+          IS DISTINCT FROM (v_actor,v_reason)) THEN
+    RAISE EXCEPTION 'Oct10 uniform hold451 owner or restart guard differs';
+  END IF;
+  SELECT jsonb_build_object(
+    'triggers_sha256',(SELECT encode(extensions.digest(coalesce(jsonb_agg(jsonb_build_array(c.relname,t.tgname,t.tgenabled,pg_get_triggerdef(t.oid),pg_get_functiondef(t.tgfoid),owner.rolname,p.proacl::text,p.prosecdef,p.proconfig) ORDER BY c.relname,t.tgname),'[]'::jsonb)::text,'sha256'),'hex') FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_proc p ON p.oid=t.tgfoid JOIN pg_roles owner ON owner.oid=p.proowner WHERE t.tgrelid IN ('public.lab_arena_rounds'::regclass,'public.lab_arena_submissions'::regclass,'public.lab_arena_runs'::regclass,'public.lab_arena_ledger'::regclass,'public.lab_arena_trajectory_events'::regclass) AND NOT t.tgisinternal),
+    'functions_security_sha256',(SELECT encode(extensions.digest(jsonb_agg(jsonb_build_array(p.oid::regprocedure::text,owner.rolname,p.proacl::text,p.prosecdef,p.provolatile,p.proconfig) ORDER BY p.oid::regprocedure::text)::text,'sha256'),'hex') FROM pg_proc p JOIN pg_roles owner ON owner.oid=p.proowner WHERE p.oid IN('public.lab_arena_open_scoring_v2(text,smallint,jsonb)'::regprocedure,'public.lab_arena_open_stage(text,smallint,jsonb,integer[])'::regprocedure)),
+    'prior445_archive_sha256',v_prior445_hash,
+    'prior448_archive_sha256',v_prior448_hash,
+    'participants_sha256',encode(extensions.digest(v_round.participants::text,'sha256'),'hex'),
+    'submissions_sha256',(SELECT encode(extensions.digest(coalesce(jsonb_agg(to_jsonb(s) ORDER BY submission_id),'[]'::jsonb)::text,'sha256'),'hex') FROM public.lab_arena_submissions s WHERE round_id=v_round_id),
+    'bank_sha256',(SELECT encode(extensions.digest(icps::text,'sha256'),'hex') FROM public.qualification_private_icp_sets WHERE set_id=20261009),
+    -- Stable resume identity permits only normal score writes and their timestamp.
+    'execution_sha256',(SELECT encode(extensions.digest(coalesce(jsonb_agg(to_jsonb(r)-'qualification_doc'-'per_icp_score'-'updated_at' ORDER BY run_id),'[]'::jsonb)::text,'sha256'),'hex') FROM public.lab_arena_runs r WHERE round_id=v_round_id AND kind='execute'),
+    'execution_attempts',(SELECT count(*) FROM public.lab_arena_runs WHERE round_id=v_round_id AND kind='execute')
+  ) INTO v_frozen;
+  SELECT v_frozen || jsonb_build_object(
+    'round_identity_sha256',encode(extensions.digest((to_jsonb(v_round)-ARRAY['status','status_generation','stage_generation','stage1_scoring_plan_doc','stage2_scoring_plan_doc','finalists','updated_at'])::text,'sha256'),'hex'),
+    'hold_generation',v_control.guard_generation,
+    'hold_sha256',encode(extensions.digest(to_jsonb(v_control)::text,'sha256'),'hex'),
+    'scoring_function_sha256',encode(extensions.digest(pg_get_functiondef('public.lab_arena_open_scoring_v2(text,smallint,jsonb)'::regprocedure),'sha256'),'hex'),
+    'stage_function_sha256',encode(extensions.digest(pg_get_functiondef('public.lab_arena_open_stage(text,smallint,jsonb,integer[])'::regprocedure),'sha256'),'hex'),
+    'triggers_sha256',(SELECT encode(extensions.digest(coalesce(jsonb_agg(jsonb_build_array(c.relname,t.tgname,t.tgenabled,pg_get_triggerdef(t.oid),pg_get_functiondef(t.tgfoid),owner.rolname,p.proacl::text,p.prosecdef,p.proconfig) ORDER BY c.relname,t.tgname),'[]'::jsonb)::text,'sha256'),'hex') FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_proc p ON p.oid=t.tgfoid JOIN pg_roles owner ON owner.oid=p.proowner WHERE t.tgrelid IN ('public.lab_arena_rounds'::regclass,'public.lab_arena_submissions'::regclass,'public.lab_arena_runs'::regclass,'public.lab_arena_ledger'::regclass,'public.lab_arena_trajectory_events'::regclass) AND NOT t.tgisinternal)
+  ) INTO v_actual;
+  IF (v_control.operator_paused AND (v_actual-'hold_sha256') IS DISTINCT FROM (v_expected-ARRAY['hold_sha256','round_status','round_stage_generation','round_status_generation']))
+     OR (NOT v_control.operator_paused AND v_actual IS DISTINCT FROM (v_expected-ARRAY['round_status','round_stage_generation','round_status_generation'])) THEN
+    RAISE EXCEPTION 'Oct10 uniform hold451 reviewed preimage differs';
+  END IF;
+  IF array_position(ARRAY['stage2_closed','stage2_scoring','stage2_judged','scored'],v_round.status)
+       < array_position(ARRAY['stage2_closed','stage2_scoring','stage2_judged','scored'],v_expected->>'round_status')
+     OR v_round.stage_generation IS DISTINCT FROM ((v_expected->>'round_stage_generation')::INTEGER
+       + (CASE v_round.status WHEN 'stage2_closed' THEN 0 WHEN 'stage2_scoring' THEN 1 ELSE 2 END)
+       - (CASE v_expected->>'round_status' WHEN 'stage2_closed' THEN 0 WHEN 'stage2_scoring' THEN 1 ELSE 2 END))
+     OR v_round.status_generation IS DISTINCT FROM ((v_expected->>'round_status_generation')::INTEGER
+       + array_position(ARRAY['stage2_closed','stage2_scoring','stage2_judged','scored'],v_round.status)
+       - array_position(ARRAY['stage2_closed','stage2_scoring','stage2_judged','scored'],v_expected->>'round_status'))
+     OR v_actual->>'scoring_function_sha256' IS DISTINCT FROM (SELECT configuration_doc->>'recovery_scoring_function_sha256' FROM public.lab_arena_rounds WHERE round_id='arena-2026-10-10-r448archive')
+     OR v_actual->>'stage_function_sha256' IS DISTINCT FROM (SELECT configuration_doc->>'recovery_stage_function_sha256' FROM public.lab_arena_rounds WHERE round_id='arena-2026-10-10-r448archive')
+     OR v_actual->>'functions_security_sha256' IS DISTINCT FROM (SELECT configuration_doc#>>'{recovery_terminal_inventory,functions_security_sha256}' FROM public.lab_arena_rounds WHERE round_id='arena-2026-10-10-r448archive')
+     OR v_actual->>'triggers_sha256' IS DISTINCT FROM (SELECT configuration_doc#>>'{recovery_terminal_inventory,triggers_sha256}' FROM public.lab_arena_rounds WHERE round_id='arena-2026-10-10-r448archive')
+     OR v_round.status NOT IN ('stage2_closed','stage2_scoring','stage2_judged','scored')
+     OR v_round.configuration_doc->>'mode' IS DISTINCT FROM 'live'
+     OR v_round.configuration_doc->>'execution_sequence_policy' IS DISTINCT FROM 'baseline_scored_first_v1'
+     OR v_round.evaluation_date IS DISTINCT FROM '2026-10-10'
+     OR v_round.icp_set_date IS DISTINCT FROM '2026-10-09'
+     OR v_round.published_at IS NOT NULL OR v_round.publication_doc IS NOT NULL
+     OR v_round.reward_activated_at IS NOT NULL OR v_round.effective_reward_epoch IS NOT NULL
+     OR EXISTS (SELECT 1 FROM public.lab_arena_rounds WHERE round_id=v_archive_id)
+     OR v_frozen->>'prior445_archive_sha256' IS NULL
+     OR v_frozen->>'prior448_archive_sha256' IS NULL
+     OR v_round.configuration_doc->>'scorer_image_digest' IS DISTINCT FROM 'sha256:1b3d6f9005362453431ab7710cb0ba0be1288495334e2167a4425d57583db70a'
+     OR (SELECT count(*) FROM public.lab_arena_runs WHERE round_id=v_round_id AND kind='execute')<>764
+     OR (SELECT count(*) FROM public.lab_arena_runs WHERE round_id=v_round_id AND stage=2 AND kind='execute' AND status='accepted')<>672
+     OR jsonb_array_length(v_round.participants)<>70
+     OR (SELECT jsonb_array_length(icps) FROM public.qualification_private_icp_sets WHERE set_id=20261009)<>10
+     OR (SELECT count(*) FROM public.lab_arena_submissions WHERE round_id=v_round_id AND status='frozen' AND NOT is_king)<>69
+     OR (SELECT count(*) FROM public.lab_arena_runs WHERE round_id=v_round_id AND stage=1 AND kind='execute' AND status='accepted' AND output_ref IS NOT NULL)<>10
+     OR (SELECT count(DISTINCT assignment_id) FROM public.lab_arena_runs WHERE round_id=v_round_id AND stage=2 AND kind='execute')<>690
+     OR EXISTS (SELECT 1 FROM public.lab_arena_runs r LEFT JOIN public.lab_arena_submissions s ON s.submission_id=r.submission_id AND s.round_id=r.round_id
+        WHERE r.round_id=v_round_id AND r.kind='execute' AND (r.status NOT IN('accepted','failed') OR r.icp_position NOT BETWEEN 0 AND 9
+          OR r.assignment_id IS DISTINCT FROM v_round_id||':'||r.submission_id||':'||r.stage||':'||r.icp_position
+          OR (r.status='accepted' AND r.output_ref IS NULL) OR s.status IS DISTINCT FROM 'frozen'
+          OR s.miner_hotkey IS DISTINCT FROM r.miner_hotkey OR (r.stage=2 AND (r.stage_generation<>9 OR s.is_king))))
+     OR EXISTS (SELECT 1 FROM public.lab_arena_rounds WHERE round_id<>v_round_id AND configuration_doc->>'mode'='live' AND status NOT IN('open','committed','published','cancelled'))
+     OR EXISTS (SELECT 1 FROM public.lab_arena_runs s LEFT JOIN public.lab_arena_runs e ON e.run_id=s.scored_run_id WHERE s.round_id=v_round_id AND s.kind='score' AND (s.status NOT IN('accepted','failed','pending','leased','submitted') OR e.round_id IS DISTINCT FROM v_round_id OR e.kind IS DISTINCT FROM 'execute' OR e.status IS DISTINCT FROM 'accepted' OR e.submission_id IS DISTINCT FROM s.submission_id OR e.miner_hotkey IS DISTINCT FROM s.miner_hotkey OR e.stage IS DISTINCT FROM s.stage OR e.icp_position IS DISTINCT FROM s.icp_position))
+     OR EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid IN('public.lab_arena_rounds'::regclass,'public.lab_arena_submissions'::regclass,'public.lab_arena_runs'::regclass,'public.lab_arena_ledger'::regclass,'public.lab_arena_trajectory_events'::regclass) AND NOT tgisinternal AND tgenabled<>'O')
+     OR EXISTS (SELECT 1 FROM public.lab_arena_runs r JOIN public.lab_arena_rounds rr USING(round_id)
+          WHERE r.round_id<>v_round_id AND rr.configuration_doc->>'mode'='live'
+            AND r.status IN('leased','submitted')) THEN
+    RAISE EXCEPTION 'Oct10 uniform hold451 terminal inventory or foreign live activity differs';
+  END IF;
+  IF v_control.operator_paused THEN
+    RETURN; -- Same-owner replay does not mutate hold time or active judge leases.
+  END IF;
+  UPDATE public.lab_arena_restart_claim_control SET operator_paused=TRUE,
+    pause_reason=v_reason,actor_ref=v_actor,updated_at=clock_timestamp()
+    WHERE singleton AND NOT operator_paused AND guard_generation=v_control.guard_generation;
+  GET DIAGNOSTICS v_count=ROW_COUNT;
+  IF v_count<>1 THEN RAISE EXCEPTION 'Oct10 uniform hold451 claim control changed'; END IF;
+END;
+$oct10_uniform_hold451$;
+COMMIT;

@@ -603,6 +603,27 @@ def test_signaled_runsc_after_sandbox_creation_is_a_host_error(tmp_path):
     assert list(config.work_dir.iterdir()) == []
 
 
+@pytest.mark.parametrize("failed_cleanup", ["delete", "umount"])
+def test_signaled_launcher_cannot_report_host_abandonment_before_cleanup(tmp_path, failed_cleanup):
+    config = make_config(tmp_path)
+    spec = make_spec(tmp_path)
+    clock = FakeClock()
+    runner = FakeRunner(
+        clock, fail={failed_cleanup},
+        run_process=lambda argv: FakeProcess(
+            argv, clock=clock, finish_at=clock(), returncode=-signal.SIGINT,
+        ),
+    )
+    # AssignmentExecutor reports this as cleanup, never the recoverable
+    # RuntimeHostError. A live or uncleared sandbox cannot authorize recovery.
+    with pytest.raises(rt.SandboxCleanupError):
+        rt.run_sandbox(
+            config, spec, process_runner=runner, clock=clock,
+            sleep=clock.sleep, rusage=lambda: (0.0, 0),
+        )
+    assert runner.kinds() == ["mount", "run", "delete", "umount"]
+
+
 def test_timeout_kills_deletes_and_never_keeps_output(tmp_path):
     config = make_config(tmp_path)
     spec = make_spec(tmp_path, wall_clock_seconds=30)

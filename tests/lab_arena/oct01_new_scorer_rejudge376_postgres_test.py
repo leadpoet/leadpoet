@@ -212,6 +212,12 @@ def test_rejudge_archives_history_and_reopens_only_baseline_scoring(database):
     assert service.current_round()['round_id'] != archive['round_id']
     assert archive['round_id'] not in {r['round_id'] for r in service.active_rounds()}
     assert service.open_round()['round_id'] != archive['round_id']
+    # Historical recovery assertions above use the original schema. Current
+    # dashboard reads require their publication projection migration first.
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cursor:
+            cursor.execute((MIGRATION.parent / "443-lab-arena-competition-publication-projection.sql").read_text())
     assert archive['round_id'] not in {
         r['round_id'] for r in public_dashboard._recent_competition_rounds(
             service, network_name='finney', netuid=71, limit=20)

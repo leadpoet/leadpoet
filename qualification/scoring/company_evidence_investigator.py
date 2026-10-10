@@ -176,6 +176,9 @@ When a commercial-model or customer-facing capability criterion remains
 unresolved, inspect known relevant first-party product, pricing, subscription,
 or platform links before returning UNPROVEN while fresh fetch calls remain.
 Do not infer a commercial model from a product description or company category.
+For a required launch or hiring criterion, prioritize a relevant submitted
+first-party event locator over generic about or contact pages. Submitted
+source hints are discovery only; fetch their URL and verify the exact text.
 Server current-stage discovery is also locator context only. Review its results
 before preserving an older matching stage, and fetch any useful result
 before citing it.
@@ -401,7 +404,10 @@ an extension does not require a new stage label. Debt, grants, planned rounds,
 and unresolved ownership or chronology do not establish that value.
 
 Public stage needs current company-attributed exchange/ticker or current
-listed/traded-share proof. A 'Public Company' label, planned IPO, old listing,
+listed/traded-share proof. A current issuer announcement naming the exact
+company with an exchange/ticker parenthetical is this proof; it does not also
+need a separate sentence saying the shares are listed or traded. Formatting
+whitespace and a quoted company alias do not change that attribution. A 'Public Company' label, planned IPO, old listing,
 product launch, or funding total is insufficient. A current SEC filing's
 Section 12(b) table can establish registered common/ordinary shares, their
 ticker, and exchange. Quote one continuous span that includes the registrant
@@ -1301,6 +1307,48 @@ def _priority_submitted_company_source(
         url for url in candidates if url in set(submitted_stage_source_urls)
     ]
     return stage_candidates[0] if stage_candidates else ""
+
+
+def _priority_submitted_attribute_event_source(
+    *,
+    targets: Sequence[str],
+    requested_attribute: str,
+    submitted_source_urls: Sequence[str],
+    submitted_stage_source_urls: Sequence[str],
+    submitted_source_hints: Mapping[str, Sequence[str]],
+    first_party_domains: set[str],
+    identity_names: set[str],
+) -> str:
+    """Choose a company-bound launch/hiring locator, never attribute proof."""
+
+    if "required_attribute" not in targets or not identity_names:
+        return ""
+    launch = r"\b(?:launch(?:ed|es|ing)?|major\s+capabilit(?:y|ies))\b"
+    hiring = r"\b(?:hir(?:e|es|ed|ing)|recruit(?:s|ed|ing)?)\b"
+    event_patterns = []
+    if re.search(launch, requested_attribute, re.I):
+        event_patterns.append(
+            r"\b(?:launch(?:ed|es|ing)?|announc(?:e|ed|es|ing)|"
+            r"introduc(?:e|ed|es|ing))\b"
+        )
+    if re.search(hiring, requested_attribute, re.I):
+        event_patterns.append(hiring)
+    if not event_patterns:
+        return ""
+    for url in submitted_source_urls:
+        if (
+            url in submitted_stage_source_urls
+            or not urlsplit(url).path.strip("/")
+            or not _first_party_url(url, first_party_domains)
+        ):
+            continue
+        if any(
+            _quote_names_company(text, identity_names)
+            and any(re.search(pattern, text, re.I) for pattern in event_patterns)
+            for text in submitted_source_hints.get(url, ())
+        ):
+            return url
+    return ""
 
 
 def _priority_subscription_navigation_source(
@@ -2773,8 +2821,9 @@ async def investigate_company_evidence(
     )
 
     normalized_requested_stage = _normalize_company_stage(requested_stage)
-    public_source_hints_enabled = bool(
-        "stage" in requested_targets and normalized_requested_stage == "public"
+    submitted_source_hints_enabled = bool(
+        ("stage" in requested_targets and normalized_requested_stage == "public")
+        or "required_attribute" in requested_targets
     )
 
     bounded_prior_observations = dict(prior_observations or {})
@@ -2834,7 +2883,7 @@ async def investigate_company_evidence(
         bounded_prior_observations.pop("stage_dispute_urls", None)
     raw_source_hints = (
         bounded_prior_observations.get("submitted_source_hints")
-        if public_source_hints_enabled
+        if submitted_source_hints_enabled
         else None
     )
     submitted_source_hints: dict[str, list[str]] = {}
@@ -3130,6 +3179,19 @@ async def investigate_company_evidence(
                     identity_names=identity_names,
                     fetched_pages=fetched_pages,
                 )
+            defer_cached_priority()
+            if not priority_source_url and not stage_dispute_urls:
+                priority_source_url = _priority_submitted_attribute_event_source(
+                    targets=requested_targets,
+                    requested_attribute=requested_attribute,
+                    submitted_source_urls=submitted_source_urls,
+                    submitted_stage_source_urls=submitted_stage_source_urls,
+                    submitted_source_hints=submitted_source_hints,
+                    first_party_domains=first_party_domains,
+                    identity_names=identity_names,
+                )
+                if priority_source_url:
+                    priority_source_kind = "company"
             defer_cached_priority()
             if not priority_source_url and "geography" in requested_targets:
                 priority_source_url = _priority_headquarters_navigation_source(
@@ -4208,7 +4270,10 @@ async def investigate_company_evidence(
                                 "Re-review Public stage once using the already fetched "
                                 "issuer-bound market sources and the completed current-status "
                                 "discovery. A failed optional fetch does not by itself erase "
-                                "valid company-bound exchange or ticker evidence. A later "
+                                "valid company-bound exchange or ticker evidence. A current issuer "
+                                "announcement naming the exact company with its exchange/ticker "
+                                "is sufficient without a separate listed/traded-share sentence, "
+                                "unless concrete conflicting evidence remains unresolved. A later "
                                 "filing date, generic SEC filing reference, or unfetched filing "
                                 "locator is not by itself a material listing conflict and does "
                                 "not require valid listing evidence to postdate it. Only concrete "

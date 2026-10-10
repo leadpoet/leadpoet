@@ -388,7 +388,7 @@ _PUBLIC_COMPANY_ALIAS_RE = re.compile(
     r'no\s+longer|planned|proposed|expected)\b))'
     r'[A-Za-z0-9][A-Za-z0-9&,.’\'+/-]*(?:\s+[A-Za-z0-9][A-Za-z0-9&,.’\'+/-]*){0,7}”)'
     r'(?:\s+or\s+the\s+(?:"Company"|“Company”))?\)\s+'
-    r'(?=\((?i:nasdaq|nyse)\s*:\s*[A-Z][A-Z0-9.-]{0,9}\))'
+    r'(?=\(\s*(?i:nasdaq|nyse)\s*:\s*[A-Z][A-Z0-9.-]{0,9}\s*\))'
 )
 _PUBLIC_STAGE_PROOF_PATTERNS = (
     re.compile(r"\bpublicly\s+traded\b", re.I),
@@ -396,7 +396,7 @@ _PUBLIC_STAGE_PROOF_PATTERNS = (
     re.compile(
         r"(?:^|[.!?;:\n]\s*|(?:--|[–—])\s*)"
         r"(?:(?:[A-Z][A-Za-z0-9&,.'’+®-]*|[&+])\s+){1,8}"
-        r"\((?i:nasdaq|nyse)\s*:\s*[A-Z][A-Z0-9.-]{0,9}\)",
+        r"\(\s*(?i:nasdaq|nyse)\s*:\s*[A-Z][A-Z0-9.-]{0,9}\s*\)",
     ),
     re.compile(
         r"\b(?:shares?|stock)\b.{0,35}\b(?:listed|trad(?:e|es|ed))\s+on\b",
@@ -808,6 +808,7 @@ def _public_quote_has_bound_market_locator(
 ) -> bool:
     """Require a named current market locator near the investigated issuer."""
 
+    quote = _PUBLIC_COMPANY_ALIAS_RE.sub("", quote)
     names = {
         compact
         for value in identity_names
@@ -818,7 +819,7 @@ def _public_quote_has_bound_market_locator(
             if not names:
                 return False
             # Parenthetical exchange forms name the issuer inside the match.
-            if re.search(r"\((?:nasdaq|nyse)\s*:", match.group(0), re.I):
+            if re.search(r"\(\s*(?:nasdaq|nyse)\s*:", match.group(0), re.I):
                 candidate = match.group(0)
             else:
                 prefix = quote[max(0, match.start() - 180):match.start()]
@@ -885,6 +886,7 @@ def _stage_evidence_supports_observation(
         return lexical_support
     if normalized_stage != "public":
         return lexical_support
+    quote = _PUBLIC_COMPANY_ALIAS_RE.sub("", quote)
     current_exchange_profile = _current_exchange_profile_names_issuer(
         quote, identity_names,
     )
@@ -914,6 +916,10 @@ def _stage_evidence_supports_observation(
             )
             or any(
                 (match := pattern.search(quote))
+                and (
+                    pattern is not _PUBLIC_STAGE_PROOF_PATTERNS[2]
+                    or _public_quote_has_bound_market_locator(quote, identity_names)
+                )
                 and (
                     pattern not in _PUBLIC_EXCHANGE_TRADING_STAGE_PROOF_PATTERNS
                     or (
@@ -6965,8 +6971,9 @@ async def _run_targeted_company_evidence_investigation(
     )
     submitted_source_hints: list[dict[str, str]] = []
     if (
-        "stage" in investigation_targets
-        and _normalize_company_stage(icp_stage) == "public"
+        ("stage" in investigation_targets
+         and _normalize_company_stage(icp_stage) == "public")
+        or "required_attribute" in investigation_targets
     ):
         hint_candidates = [
             *((item.get("url"), item.get("quote")) for item in stage_evidence),

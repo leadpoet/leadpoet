@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -41,7 +42,7 @@ def _validate_stage(name, stage, url, quote, *, first_party_domain=""):
         targets=("stage",),
         fetched_pages={url: quote},
         first_party_domains={first_party_domain} if first_party_domain else set(),
-        identity_names={name.casefold().replace(" ", "")},
+        identity_names={re.sub(r"[^a-z0-9]+", "", name.casefold())},
     )["stage"]
 
 
@@ -969,3 +970,70 @@ def test_three_pe_prefetches_keep_fresh_fetch_budget(monkeypatch):
     assert requests[0]["tool_choice"] == "required"
     document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
     assert document["investigation_limits"]["remaining_fetch_calls"] == 3
+
+
+ACADEMY_IR_URL = (
+    "https://investors.academy.com/news-releases/news-release-details/"
+    "academy-sports-outdoors-grows-retail-footprint-two-new-locations"
+)
+ACADEMY_IR_QUOTE = (
+    'March 10, 2026 /PRNewswire/ -- Academy Sports + Outdoors '
+    '("Academy" or the "Company") ( Nasdaq: ASO ), a leading full-line '
+    'sporting goods and outdoor recreation retailer, is excited to announce '
+    'it will open two new locations in North Canton, Ohio and Muskogee, Oklahoma.'
+)
+
+
+@pytest.mark.parametrize("quote", [
+    ACADEMY_IR_QUOTE,
+    'Academy Sports + Outdoors ( Nasdaq: ASO ) announced quarterly results.',
+    'Academy Sports + Outdoors ("Academy") (Nasdaq: ASO) announced quarterly results.',
+    'Academy Sports + Outdoors (“Academy” or the “Company”) ( Nasdaq: ASO ) announced quarterly results.',
+])
+def test_current_issuer_parenthetical_preserves_whitespace_and_quoted_alias(quote):
+    assert _validate_stage(
+        "Academy Sports + Outdoors", "Public", ACADEMY_IR_URL, quote,
+        first_party_domain="academy.com",
+    )["status"] == "VERIFIED"
+    assert lead_scorer._public_quote_has_bound_market_locator(
+        quote, ("academysportsoutdoors", "academysportsandoutdoors"),
+    )
+
+
+@pytest.mark.parametrize("quote", [
+    'Academy Sports + Outdoors received funding from ParentCo ( Nasdaq: PCO ).',
+    'Other Retailer ( Nasdaq: OTHR ) announced a partnership with Academy Sports + Outdoors.',
+    'Academy Sports + Outdoors bonds trade on Nasdaq.',
+    'Academy Sports + Outdoors ( Nasdaq: ASO ) completed its initial public offering in 2020.',
+    'Academy Sports + Outdoors ( Nasdaq: ASO ) ceased trading and became private.',
+])
+def test_whitespace_does_not_admit_unrelated_non_equity_or_superseded_ticker(quote):
+    assert _validate_stage(
+        "Academy Sports + Outdoors", "Public", ACADEMY_IR_URL, quote,
+        first_party_domain="academy.com",
+    )["status"] == "UNPROVEN"
+
+
+def test_issuer_parenthetical_unproven_gets_bounded_rereview(monkeypatch):
+    from tests.test_public_stage_unproven_rereview import (
+        _finding, _prefetched_request,
+    )
+
+    result, requests = _prefetched_request(
+        monkeypatch,
+        company_name="Academy Sports + Outdoors",
+        company_url="https://academy.com/",
+        evidence_url=ACADEMY_IR_URL,
+        evidence_text=ACADEMY_IR_QUOTE,
+        findings=[
+            _finding(reason="ticker lacks a separate current listed-share sentence"),
+            _finding(status="VERIFIED", value="Public", url=ACADEMY_IR_URL,
+                     quote=ACADEMY_IR_QUOTE),
+        ],
+    )
+    assert len(requests) == 2
+    assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["usage"]["search_calls"] == 1
+    assert result["usage"]["fetch_calls"] == 0
+    correction = json.loads(requests[1]["messages"][-1]["content"])
+    assert "without a separate listed/traded-share sentence" in correction["instruction"]

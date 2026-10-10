@@ -300,6 +300,67 @@ def test_redact_all_message_mode(monkeypatch, enabled_env, stub_sdk):
     assert scrubbed["message"] == REDACTED_PROTECTED
 
 
+@pytest.mark.parametrize("component", ["arena-service", "arena-validator"])
+def test_arena_hosts_force_redact_all(monkeypatch, enabled_env, stub_sdk, component):
+    monkeypatch.setenv(sentry_bootstrap.MESSAGE_MODE_ENV, "scrub")
+    assert sentry_bootstrap.init_sentry(component)
+    hooks = stub_sdk.init_calls[0]
+    event = {
+        "message": "fixture private company research",
+        "request": {"data": "fixture benchmark"},
+        "extra": {"sys.argv": ["fixture credential"]},
+        "exception": {"values": [{
+            "type": "RuntimeError", "value": "fixture provider response",
+            "stacktrace": {"frames": [{
+                "module": "unclassified.module", "filename": "/repo/unknown.py",
+                "function": "run", "lineno": 3,
+                "vars": {"fixture": "private"}, "context_line": "private()",
+            }]},
+        }]},
+    }
+    scrubbed = hooks["before_send"](event, None)
+    assert scrubbed["message"] == REDACTED_PROTECTED
+    value = scrubbed["exception"]["values"][0]
+    assert value["value"] == REDACTED_PROTECTED
+    assert value["type"] == "RuntimeError"
+    frame = value["stacktrace"]["frames"][0]
+    assert frame["function"] == "run" and frame["lineno"] == 3
+    assert "vars" not in frame and "context_line" not in frame
+    assert "request" not in scrubbed
+    assert "sys.argv" not in scrubbed.get("extra", {})
+    assert hooks["before_breadcrumb"]({"message": "fixture private"}, None) is None
+
+
+@pytest.mark.parametrize("component", ["arena-service", "arena-validator"])
+def test_arena_archive_release_overrides_stale_secret_and_git_env(
+    tmp_path, monkeypatch, enabled_env, stub_sdk, component
+):
+    from lab_arena import runtime_version
+
+    root = tmp_path / "archive"
+    (root / "lab_arena").mkdir(parents=True)
+    (root / ".release-commit").write_text("cd" * 20 + "\n")
+    metadata = runtime_version.source_metadata(str(root / "lab_arena/validator.py"))
+    assert metadata["validator_source_origin"] == "release_marker"
+    assert not (root / ".git").exists()
+    monkeypatch.setattr(runtime_version, "SOURCE_METADATA", metadata)
+    monkeypatch.setenv(sentry_bootstrap.RELEASE_ENV, "ab" * 20)
+    monkeypatch.setenv("GITHUB_SHA", "ef" * 20)
+    assert sentry_bootstrap.init_sentry(component)
+    assert stub_sdk.init_calls[0]["release"] == "cd" * 20
+
+
+def test_arena_unknown_release_does_not_use_stale_config(monkeypatch, enabled_env, stub_sdk):
+    from lab_arena import runtime_version
+
+    monkeypatch.setattr(runtime_version, "SOURCE_METADATA", {
+        "validator_source_commit": "unknown",
+    })
+    monkeypatch.setenv(sentry_bootstrap.RELEASE_ENV, "ab" * 20)
+    assert sentry_bootstrap.init_sentry("arena-validator")
+    assert stub_sdk.init_calls[0]["release"] == "unknown"
+
+
 def test_release_env_override_wins(monkeypatch, enabled_env, stub_sdk):
     monkeypatch.setenv(sentry_bootstrap.RELEASE_ENV, "ab" * 20)
     sentry_bootstrap.init_sentry("gateway")

@@ -801,6 +801,14 @@ def main(argv=None) -> int:
     from lab_arena.validator_startup import maybe_reexec_rootful
 
     maybe_reexec_rootful(args, sys.argv[1:] if argv is None else argv)
+    # Initialize only in the final process, after an optional sudo replacement.
+    # Both the private launcher and public validator use this shared entrypoint.
+    try:
+        from leadpoet_observability import init_sentry
+
+        init_sentry(component="arena-validator")
+    except Exception as exc:
+        print("arena sentry unavailable", type(exc).__name__, file=sys.stderr)
     if args.check_scoring_only:
         from lab_arena.runtime_host import scoring_host_details
         from lab_arena.scoring_startup import prepare_validator_scoring

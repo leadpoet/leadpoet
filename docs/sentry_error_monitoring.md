@@ -29,6 +29,8 @@ The restart and canonical-weight event matrix is in
 |---|---|
 | Gateway | `gateway/main.py` |
 | Gateway PCR0 builder | `validator_tee/host/gateway_pcr0_builder.py` |
+| Arena service | `scripts/run_lab_arena_service.py` |
+| Shared Arena validator | `lab_arena/validator.py` after optional sudo re-exec |
 | Restart controllers | `gw_restart.sh`, `validator_restart.sh` through the bounded `sentry_cli` bridge |
 
 Measured gateway code and the weight signer do not import Sentry. The host
@@ -55,6 +57,35 @@ Anything less is a complete no-op. Ambient `SENTRY_*` variables are ignored;
 all SDK options are explicit. Successful manual traces default to 1% and are
 clamped to 10%. Terminal errors are not sampled. The SDK shutdown flush is
 bounded to one second.
+
+Arena hosts always use the existing `redact-all` policy, regardless of
+`LEADPOET_SENTRY_MESSAGE_MODE`. They retain exception type and scrubbed stack
+locations, remove error messages, and drop breadcrumbs. Arena modules and
+entrypoint paths are also protected when another wired host observes them.
+No SDK is added to model sandboxes or enclave runtimes.
+Arena release tags use the existing loaded-source metadata, including the
+canonical archive's `.release-commit` marker. A stale release value in a
+legacy secret cannot override that identity; an unavailable identity is
+reported as `unknown` without blocking startup.
+
+The Arena service accepts only four Sentry ingest settings from its existing
+protected gateway environment cache: `LEADPOET_SENTRY_ENABLED`,
+`LEADPOET_SENTRY_DSN`, `LEADPOET_SENTRY_ENVIRONMENT`, and
+`LEADPOET_SENTRY_RELEASE`. The private validator launcher accepts the same
+four settings in its existing mode-0600 Arena operator environment file. The
+canonical restart snapshots them into the private service environment, and
+optional sudo re-exec preserves only those named ingest settings. The Sentry
+API read token and gateway provider aliases are never imported by these paths.
+
+The normal Arena validator restart does not hydrate the legacy validator
+Secrets Manager environment. Enabling its existing opt-in gate requires the
+four ingest settings from the existing protected Sentry source in its Arena
+operator environment before a separately authorized canonical release. No
+new secret is required. Public validators with the gate unset stay inert.
+
+This wiring captures uncaught process/thread errors and ERROR logs. Caught
+failures printed as class-only diagnostics are not converted into new logical
+events. No extra tracing or logical event system is introduced.
 
 ## Read-only Codex API access
 

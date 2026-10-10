@@ -39,6 +39,8 @@ ENCLAVE_SURFACE_PREFIXES = ("gateway/tee/",)
 WIRED_ENTRY_POINTS = (
     "gateway/main.py",
     "validator_tee/host/gateway_pcr0_builder.py",
+    "scripts/run_lab_arena_service.py",
+    "lab_arena/validator.py",
 )
 
 

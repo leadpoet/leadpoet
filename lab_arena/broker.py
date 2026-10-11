@@ -1131,23 +1131,26 @@ class _ProviderHTTPLogFilter(logging.Filter):
 _PROVIDER_HTTP_LOG_FILTER = _ProviderHTTPLogFilter()
 
 
-def _deepline_response_header_request_id(headers: Mapping[str, str]) -> Optional[str]:
-    """Retain the provider's identity before reading a possibly broken body."""
+def _deepline_response_header_request_id(
+    headers: Mapping[str, str], *, allow_edge_fallback: bool = True,
+) -> Optional[str]:
+    """Prefer the native receipt; use a legacy edge ID only without a body ID."""
 
     explicit = headers.get("x-deepline-request-id")
+    if explicit is not None:
+        if (not _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(explicit)
+            or _DEEPLINE_REQUEST_ID_RE.fullmatch(explicit)):
+            return None
+        return explicit
+    if not allow_edge_fallback:
+        return None
     vercel = headers.get("x-vercel-id", "")
-    # Public API responses prepend the edge region to the native job identity.
+    # Legacy responses can prepend another edge region to this trace.
     if vercel.count("::") == 2:
         edge, vercel = vercel.split("::", 1)
         if re.fullmatch(r"[a-z0-9]{3,8}", edge) is None:
             return None
     valid_vercel = vercel if _DEEPLINE_BILLING_REQUEST_ID_RE.fullmatch(vercel) else None
-    if explicit is not None:
-        if not _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(explicit):
-            return None
-        if valid_vercel is not None and explicit != valid_vercel:
-            return None
-        return explicit
     return valid_vercel
 
 
@@ -5044,9 +5047,14 @@ class Broker:
                             )
                         )
                     response_request_id = _deepline_job_request_id(raw_document)
-                    header_request_id = _deepline_response_header_request_id(response.headers)
                     body_identity_present = isinstance(raw_document, Mapping) and any(
                         name in raw_document for name in ("job_id", "request_id", "requestId")
+                    )
+                    # Vercel's edge trace can differ from the public-execute
+                    # job ID. It is a legacy fallback, not a conflicting native
+                    # receipt when the body already supplies an identity.
+                    header_request_id = _deepline_response_header_request_id(
+                        response.headers, allow_edge_fallback=not body_identity_present,
                     )
                     if response_request_id is None and not body_identity_present:
                         response_request_id = header_request_id

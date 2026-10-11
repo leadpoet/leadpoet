@@ -36,9 +36,10 @@ def clock(monkeypatch):
 
 
 class CompletedTransport(RecoveryTransport):
-    def __init__(self, *, inline=False, missing_id=False, conflicting_header=False):
+    def __init__(self, *, inline=False, missing_id=False, conflicting_header=False, headers=None):
         super().__init__(bill_final=False)
         self.conflicting_header = conflicting_header
+        self.post_headers = headers
         self.response = record()["response"]
         if not inline:
             self.response.pop("billing")
@@ -53,6 +54,8 @@ class CompletedTransport(RecoveryTransport):
             self.document["toolId"] = self.operation
             self.document["executionRecovery"]["idempotencyKey"] = request["headers"]["idempotency-key"]
             headers = {"x-deepline-request-id": "different-request"} if self.conflicting_header else {}
+            if self.post_headers is not None:
+                headers = self.post_headers
             return br.ProviderResponse(200, headers, json.dumps(self.response).encode())
         return super().send(**request)
 
@@ -161,6 +164,130 @@ def test_inline_native_bill_needs_no_readback(clock):
     assert result.call["outcome"] == "settled"
     assert [request["method"] for request in transport.requests] == ["POST"]
     assert clock.sleeps == [] and store.calls[result.call["call_identity"]]["kind"] == "settlement"
+
+
+EDGE_TRACE = "iad1::iad1::r8lss-1791733849845-85245ab6933a"
+
+
+@pytest.mark.parametrize("kind", ["execute", "score"])
+@pytest.mark.parametrize("headers", [
+    {"x-vercel-id": EDGE_TRACE},
+    {"x-vercel-id": EDGE_TRACE, "x-deepline-request-id": NATIVE},
+])
+def test_native_inline_bill_outweighs_edge_trace(clock, kind, headers):
+    transport = CompletedTransport(inline=True, headers=headers)
+    # The live compatibility response uses string amounts, final pricing, and
+    # a queued ledger write; the inline price is already authoritative.
+    transport.response["billing"].update(
+        credits_charged="0.02", pricing_status="final", settlement_status="queued",
+    )
+    broker, store, context = setup(transport, kind=kind)
+    result = execute(broker, context)
+    assert result.status == 200 and result.call["outcome"] == "settled"
+    assert result.call["actual_microusd"] == 2000
+    saved = store.calls[result.call["call_identity"]]
+    assert saved["terminal"]["provider_cost"]["request_id"] == NATIVE
+    assert [request["method"] for request in transport.requests] == ["POST"]
+    assert clock.sleeps == []
+
+
+def test_routed_judge_inline_bill_ignores_edge_trace(clock):
+    transport = CompletedTransport(inline=True, headers={"x-vercel-id": EDGE_TRACE})
+    transport.response["result"] = {"data": {
+        "rawHtml": "<html>Official company evidence</html>",
+        "metadata": {"url": "https://example.com/", "sourceURL": "https://example.com/",
+                     "statusCode": 200},
+    }}
+    broker, store, _ = make_broker(store=CostStore(), transport=transport,
+        credential_for=lambda _context, _provider: DL_KEY,
+        funding_source_for=lambda _context: "miner_key")
+    result = broker.execute(replace(CONTEXT, kind="score", round_id="arena-2026-10-11"),
+        operation_id="scrapingdog.scrape", parameters={"url": "https://example.com/"},
+        action_sequence=0, timeout_ms=60_000)
+    assert result.status == 200 and b"Official company evidence" in result.body
+    assert result.call["outcome"] == "settled" and result.call["actual_microusd"] == 2000
+    assert json.loads(transport.requests[0]["body"])["operation"] == "firecrawl_scrape"
+    assert [request["method"] for request in transport.requests] == ["POST"]
+    assert clock.sleeps == []
+
+
+@pytest.mark.parametrize("operation, parameters, tool", [
+    ("exa.search", {"query": "Official example company"}, "exa_search"),
+    ("exa.contents", {"urls": ["https://example.com/"]}, "exa_contents"),
+])
+def test_exa_judge_compatibility_preserves_inline_price_and_evidence(clock, operation, parameters, tool):
+    transport = CompletedTransport(inline=True, headers={"x-vercel-id": EDGE_TRACE})
+    transport.response["result"] = {"data": {"results": [
+        {"url": "https://example.com/", "title": "Official company evidence", "text": "Company facts"},
+    ]}}
+    broker, store, _ = make_broker(store=CostStore(), transport=transport,
+        credential_for=lambda _context, _provider: DL_KEY,
+        funding_source_for=lambda _context: "miner_key")
+    result = broker.execute(replace(CONTEXT, kind="score", round_id="arena-2026-10-11"),
+        operation_id=operation, parameters=parameters, action_sequence=0, timeout_ms=60_000)
+    assert result.status == 200 and json.loads(result.body)["results"][0]["title"] == "Official company evidence"
+    assert result.call["outcome"] == "settled" and result.call["actual_microusd"] == 2000
+    assert json.loads(transport.requests[0]["body"])["operation"] == tool
+    assert [request["method"] for request in transport.requests] == ["POST"]
+    assert clock.sleeps == []
+
+
+@pytest.mark.parametrize("finality", ["pending", "unknown"])
+def test_edge_trace_does_not_make_pending_inline_bill_final(clock, finality):
+    transport = CompletedTransport(inline=True, headers={"x-vercel-id": EDGE_TRACE})
+    transport.response["billing"]["pricing_status"] = finality
+    broker, store, context = setup(transport)
+    result = execute(broker, context)
+    assert result.status == 200 and result.call["outcome"] == "uncertain"
+    assert "actual_microusd" not in result.call
+    assert store.calls[result.call["call_identity"]]["kind"] == "uncertain"
+    assert [request["method"] for request in transport.requests] == ["POST", "GET"]
+    assert clock.sleeps == []
+
+
+@pytest.mark.parametrize("credits, expected", [("0", 0), ("0.1", 10_000), ("0.00000001", 1)])
+def test_native_receipt_preserves_exact_credit_conversion(clock, credits, expected):
+    transport = CompletedTransport(inline=True, headers={"x-vercel-id": EDGE_TRACE})
+    transport.response["billing"]["credits_charged"] = credits
+    broker, _, context = setup(transport)
+    result = execute(broker, context)
+    assert result.call["outcome"] == "settled" and result.call["actual_microusd"] == expected
+    assert [request["method"] for request in transport.requests] == ["POST"]
+
+
+@pytest.mark.parametrize("credits", [True, "NaN", "-0.02", "invalid"])
+def test_native_receipt_does_not_invent_unparseable_inline_price(clock, credits):
+    transport = CompletedTransport(inline=True, headers={"x-vercel-id": EDGE_TRACE})
+    transport.response["billing"]["credits_charged"] = credits
+    broker, _, context = setup(transport)
+    result = execute(broker, context)
+    assert result.status == 200 and result.call["outcome"] == "uncertain"
+    assert "actual_microusd" not in result.call
+    assert [request["method"] for request in transport.requests] == ["POST", "GET"]
+
+
+def test_conflicting_body_native_aliases_cannot_authorize_inline_bill(clock):
+    transport = CompletedTransport(inline=True, headers={"x-vercel-id": EDGE_TRACE})
+    transport.response["requestId"] = "different-request"
+    broker, _, context = setup(transport)
+    result = execute(broker, context)
+    assert result.call["outcome"] == "uncertain" and "actual_microusd" not in result.call
+    assert sum(request["method"] == "POST" for request in transport.requests) == 1
+
+
+@pytest.mark.parametrize("edge", [False, True])
+def test_conflicting_native_receipt_cannot_authorize_inline_bill(clock, edge):
+    headers = {"x-deepline-request-id": "different-request"}
+    if edge:
+        headers["x-vercel-id"] = EDGE_TRACE
+    transport = CompletedTransport(inline=True, headers=headers)
+    broker, _, context = setup(transport)
+    result = execute(broker, context)
+    assert result.status == 200 and result.call["outcome"] == "uncertain"
+    assert "actual_microusd" not in result.call
+    assert [request["method"] for request in transport.requests] == ["POST", "GET", "GET"]
+    assert "/executions/by-key/" in transport.requests[1]["url"]
+    assert clock.sleeps == []
 
 
 def test_non_score_completed_response_keeps_existing_billing_poll(clock):

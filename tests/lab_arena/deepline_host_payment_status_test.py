@@ -21,6 +21,8 @@ REFUSAL = {
                 "balance_credits": -4.993, "needed_credits": 0.02},
 }
 PARAMETERS = {"tool": "exa_search", "payload": {"query": "example"}}
+NATIVE = "public-execute:11111111-2222-4333-8444-555555555555"
+EDGE_TRACE = "iad1::iad1::r8lss-1791733849845-85245ab6933a"
 
 
 @pytest.fixture(autouse=True)
@@ -155,6 +157,72 @@ def test_body_and_header_identity_conflict_cannot_preserve_402():
     result = broker.execute(context, **arguments)
     assert result.status == 502 and result.call["outcome"] == "uncertain"
     assert "actual_microusd" not in result.call
+
+
+@pytest.mark.parametrize("alias", ["job_id", "request_id", "requestId"])
+def test_native_refusal_identity_outranks_generic_edge_trace(alias):
+    document = {**deepcopy(REFUSAL), alias: NATIVE}
+    response = br.ProviderResponse(402, {"x-vercel-id": EDGE_TRACE}, json.dumps(document).encode())
+    assert br._deepline_insufficient_credit_response(response, document)
+    # Identity classification alone is not proof that the provider charged zero.
+    assert provider_costs.deepline_payment_refusal_cost(402, document) is None
+
+
+@pytest.mark.parametrize("routed", [False, True])
+@pytest.mark.parametrize("credits", [None, "0.5"])
+def test_native_refusal_with_edge_trace_preserves_status_exact_cost_and_replay(routed, credits):
+    document = {**deepcopy(REFUSAL), "job_id": NATIVE}
+    broker, store, transport, context, arguments = setup(document=document, routed=routed)
+    original_send = transport.send
+
+    def send(**request):
+        if request["method"] == "POST":
+            response = original_send(**request)
+            return br.ProviderResponse(402, {"x-vercel-id": EDGE_TRACE}, response.body)
+        transport.sent.append(request)
+        assert request["method"] == "GET"
+        assert request["url"] == br.DEEPLINE_EXACT_BILLING_URL + br.quote(NATIVE, safe="")
+        bill = billing(credits=credits) if credits is not None else {"recent": {"entries": []}}
+        bill["recent"]["request_id"] = NATIVE
+        for entry in bill["recent"]["entries"]:
+            entry["request_id"] = NATIVE
+        return br.ProviderResponse(200, {}, json.dumps(bill).encode())
+
+    transport.send = send
+    result = broker.execute(context, **arguments)
+    assert result.status == 402 and result.call["provider_status"] == 402
+    assert result.call["outcome"] == ("uncertain" if credits is None else "settled")
+    assert "credit_failure_proof" not in result.call
+    if credits is None:
+        assert "actual_microusd" not in result.call
+    else:
+        assert result.call["actual_microusd"] == 50_000
+    before = len(transport.sent)
+    replay = broker.execute(context, **arguments)
+    assert replay.status == 402 and replay.call["idempotent"]
+    assert len(transport.sent) == before
+    assert sum(request["method"] == "POST" for request in transport.sent) == 1
+
+
+@pytest.mark.parametrize("headers", [
+    {"x-vercel-id": EDGE_TRACE, "x-deepline-request-id": "different-native-request"},
+    {"x-vercel-id": EDGE_TRACE, "x-deepline-request-id": "invalid/id"},
+])
+def test_native_refusal_does_not_ignore_invalid_or_conflicting_provider_header(headers):
+    document = {**deepcopy(REFUSAL), "job_id": NATIVE}
+    response = br.ProviderResponse(402, headers, json.dumps(document).encode())
+    assert not br._deepline_insufficient_credit_response(response, document)
+
+
+def test_native_refusal_edge_trace_keeps_strict_zero_charge_proof():
+    document = {**deepcopy(REFUSAL), "job_id": NATIVE}
+    document["billing"].update(required_credits="0.02", balance_credits="0", needed_credits="0.02")
+    response = br.ProviderResponse(402, {"x-vercel-id": EDGE_TRACE}, json.dumps(document).encode())
+    assert br._deepline_insufficient_credit_response(response, document)
+    assert provider_costs.deepline_payment_refusal_cost(402, document).microusd == 0
+    document["billing"]["balance_credits"] = "NaN"
+    assert not br._deepline_insufficient_credit_response(response, document)
+    assert provider_costs.deepline_payment_refusal_cost(402, document) is None
 
 
 def test_refusal_replay_requires_bound_original_reservation():

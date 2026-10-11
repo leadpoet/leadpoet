@@ -6421,7 +6421,7 @@ class ArenaService:
             public_reads
             if round_status == "published" and public_reads is not None
             and public_reads.source is self._objects
-            else self._objects
+            else None
         )
         completed = self.completed_submission_scores(row).get(submission_id) if round_status != "published" else None
         if round_status != "published" and completed is None:
@@ -6495,7 +6495,9 @@ class ArenaService:
         for run in runs:
             if run.get("output_ref"):
                 try:
-                    raw = read_objects.get_bounded(str(run["output_ref"]), MAX_OUTPUT_BYTES)
+                    raw = (read_objects or self._objects).get_bounded(
+                        str(run["output_ref"]), MAX_OUTPUT_BYTES,
+                    )
                     outputs[run["run_id"]] = validate_output_document(json.loads(raw.decode("utf-8")))
                 except Exception as exc:
                     raise ServiceError("public_output_unavailable", 503) from exc
@@ -6577,7 +6579,7 @@ class ArenaService:
                 ))
             icps = []
             if outputs:
-                if read_objects is self._objects:
+                if read_objects is None:
                     icps = self._benchmark_icps_from_row(round_id, row)
                 else:
                     icps = self._benchmark_icps_from_row(

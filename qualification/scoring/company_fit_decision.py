@@ -40,7 +40,7 @@ CompanyFitDecision = Literal["match", "mismatch", "unavailable"]
 
 _LEGAL_SUFFIXES: Final = frozenset({
     "incorporated", "corporation", "company", "limited", "holdings",
-    "group", "inc", "corp", "co", "llc", "ltd", "plc", "gmbh",
+    "group", "inc", "corp", "co", "llc", "llp", "ltd", "plc", "gmbh",
     "ag", "sa", "nv", "bv", "oy", "ab", "as", "pty", "pte",
     "kk", "srl", "spa",
 })

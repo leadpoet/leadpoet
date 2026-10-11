@@ -8,7 +8,7 @@ import hmac
 import json
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 import secrets
 import threading
 import time
@@ -245,6 +245,45 @@ class ObjectStore(Protocol):
     def get_bounded(self, ref: str, max_bytes: int) -> bytes: ...
 
     def presign_put(self, ref: str, *, size_bytes: int, content_type: str, expires_seconds: int, source_content_md5: Optional[str] = None) -> Mapping[str, Any]: ...
+
+
+class _PublicResultInFlightReads:
+    """Share only overlapping public-result object reads, never completed reads."""
+
+    def __init__(self, source: ObjectStore) -> None:
+        self.source = source
+        self._lock = threading.Lock()
+        self._pending: Dict[Tuple[str, str, Optional[int]], Future[bytes]] = {}
+
+    def _read(self, key: Tuple[str, str, Optional[int]], fetch: Callable[[], bytes]) -> bytes:
+        with self._lock:
+            pending = self._pending.get(key)
+            owner = pending is None
+            if owner:
+                pending = Future()
+                self._pending[key] = pending
+        if not owner:
+            return pending.result()
+        try:
+            data = fetch()
+        except BaseException as exc:
+            with self._lock:
+                del self._pending[key]
+            pending.set_exception(exc)
+            raise
+        with self._lock:
+            del self._pending[key]
+        pending.set_result(data)
+        return data
+
+    def get(self, ref: str) -> bytes:
+        return self._read(("get", ref, None), lambda: self.source.get(ref))
+
+    def get_bounded(self, ref: str, max_bytes: int) -> bytes:
+        return self._read(
+            ("get_bounded", ref, max_bytes),
+            lambda: self.source.get_bounded(ref, max_bytes),
+        )
 
 
 class LocalObjectStore:
@@ -750,6 +789,7 @@ class ArenaService:
         self._config = config
         self._store = config.store
         self._objects = config.object_store
+        self._public_result_reads = _PublicResultInFlightReads(self._objects)
         self._signer = config.signer
         self._signer_lock = threading.Lock()
         self._clock = config.clock
@@ -2334,12 +2374,13 @@ class ArenaService:
         return self._benchmark_icps_from_row(round_id, self._round(round_id))
 
     def _benchmark_icps_from_row(
-        self, round_id: str, round_row: Mapping[str, Any]
+        self, round_id: str, round_row: Mapping[str, Any],
+        *, get_object: Optional[Callable[[str], bytes]] = None,
     ) -> List[Dict[str, Any]]:
         ref = round_row.get("benchmark_ref")
         if not ref:
             raise ServiceError("benchmark_not_committed", 409)
-        document = json.loads(self._objects.get(ref).decode("utf-8"))
+        document = json.loads((get_object or self._objects.get)(ref).decode("utf-8"))
         if not isinstance(document, Mapping) or set(document) != {"schema_version", "round_id", "icps"}:
             raise ServiceError("benchmark_data_invalid", 500)
         if document.get("schema_version") != "leadpoet.lab_arena.benchmark.v1" or document.get("round_id") != round_id:
@@ -6375,6 +6416,13 @@ class ArenaService:
             raise ServiceError("submission_missing", 404)  # an empty id must never mean "every submission"
         row = self._public_results_round(round_id)
         round_status = str(row["status"])
+        public_reads = getattr(self, "_public_result_reads", None)
+        read_objects = (
+            public_reads
+            if round_status == "published" and public_reads is not None
+            and public_reads.source is self._objects
+            else self._objects
+        )
         completed = self.completed_submission_scores(row).get(submission_id) if round_status != "published" else None
         if round_status != "published" and completed is None:
             raise ServiceError("results_not_public", 403)
@@ -6447,7 +6495,7 @@ class ArenaService:
         for run in runs:
             if run.get("output_ref"):
                 try:
-                    raw = self._objects.get_bounded(str(run["output_ref"]), MAX_OUTPUT_BYTES)
+                    raw = read_objects.get_bounded(str(run["output_ref"]), MAX_OUTPUT_BYTES)
                     outputs[run["run_id"]] = validate_output_document(json.loads(raw.decode("utf-8")))
                 except Exception as exc:
                     raise ServiceError("public_output_unavailable", 503) from exc
@@ -6527,7 +6575,14 @@ class ArenaService:
                 judgments.update(self._select_scoring_outputs(
                     [score_run for score_run in score_runs if score_run.get("stage") == stage]
                 ))
-            icps = self._benchmark_icps_from_row(round_id, row) if outputs else []
+            icps = []
+            if outputs:
+                if read_objects is self._objects:
+                    icps = self._benchmark_icps_from_row(round_id, row)
+                else:
+                    icps = self._benchmark_icps_from_row(
+                        round_id, row, get_object=read_objects.get,
+                    )
             contacts = {}
             diagnostics = []
             for run in runs:

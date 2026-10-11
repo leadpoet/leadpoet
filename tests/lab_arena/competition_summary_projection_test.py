@@ -11,7 +11,8 @@ import pytest
 from lab_arena import contracts, icp_disclosure, public_dashboard as dashboard
 from lab_arena.service import ArenaService
 from lab_arena.store import (
-    ArenaStore, COMPETITION_CONFIGURATION_FIELDS, PostgrestTransport, PsycopgTransport,
+    ArenaStore, COMPETITION_CONFIGURATION_FIELDS, PUBLIC_CONFIGURATION_COLUMN,
+    PUBLIC_CONFIGURATION_FIELDS, PostgrestTransport, PsycopgTransport,
 )
 
 
@@ -20,7 +21,13 @@ def _project(row, columns):
         return deepcopy(row)
     projected = {}
     for column in columns.split(","):
-        if ":configuration_doc->" in column:
+        if column == PUBLIC_CONFIGURATION_COLUMN:
+            configuration = row.get("configuration_doc") or {}
+            projected["configuration_doc"] = {
+                key: deepcopy(configuration[key])
+                for key in PUBLIC_CONFIGURATION_FIELDS if key in configuration
+            }
+        elif ":configuration_doc->" in column:
             alias, path = column.split(":", 1)
             key = path.removeprefix("configuration_doc->").removesuffix("::text")
             configuration = row.get("configuration_doc") or {}
@@ -133,7 +140,10 @@ def test_145_model_competition_response_matches_full_configuration(monkeypatch, 
     assert expected["rounds"][0]["baseline"]["final_score"] == 0
     assert len(transport.returned[0]["publication_doc"]["final_ranking"]) == 2
     assert expected["rounds"][1]["promotion_status"] == "superseded"
-    assert "configuration_doc" not in transport.returned[0]
+    assert transport.returned[0]["configuration_doc"] == {
+        key: value for key, value in rows[0]["configuration_doc"].items()
+        if key in PUBLIC_CONFIGURATION_FIELDS
+    }
     assert "private_frozen_catalog" not in json.dumps(transport.returned)
     assert len(json.dumps(transport.returned)) < len(json.dumps(rows)) / 2
     assert transport.calls[-1]["columns"] == "round_id,evaluation_date"
@@ -146,6 +156,14 @@ def test_configuration_projection_preserves_json_types_and_missing_keys(key, val
     projected = _project(row, dashboard._COMPETITION_ROUND_COLUMNS)
     assert dashboard._competition_round(projected)["configuration_doc"] == {key: value}
     assert dashboard._competition_round(_project({"configuration_doc": {}}, dashboard._COMPETITION_ROUND_COLUMNS))["configuration_doc"] == {}
+
+
+def test_public_configuration_projection_excludes_private_configuration():
+    projected = _project({"configuration_doc": {
+        "mode": "live", "baseline_hotkey": "baseline", "scorer_policy": {"private": True},
+        "deepline_catalog": {"private": True},
+    }}, dashboard._COMPETITION_ROUND_COLUMNS)
+    assert projected["configuration_doc"] == {"mode": "live", "baseline_hotkey": "baseline"}
 
 
 @pytest.mark.parametrize("configuration", [
@@ -253,9 +271,9 @@ def test_exact_postgrest_select_and_fixed_psycopg_projection():
     store = ArenaStore(direct)
     store.list_rounds(mode="live", network_name="finney", netuid=71, limit=30, offset=30, columns=dashboard._COMPETITION_ROUND_COLUMNS)
     sql, values = queries[-1]
-    for key in COMPETITION_CONFIGURATION_FIELDS:
-        assert "(configuration_doc -> '%s')::text AS cfg_%s" % (key, key) in sql
-    assert "cfg_" in sql and ":configuration_doc" not in sql
+    assert params["select"].split(",").count(PUBLIC_CONFIGURATION_COLUMN) == 1
+    assert "public.lab_arena_public_configuration_v1(lab_arena_rounds) AS configuration_doc" in sql
+    assert "cfg_" not in sql and ":configuration_doc" not in sql
     assert "public.lab_arena_competition_publication_v1(lab_arena_rounds) AS publication_doc" in sql
     assert "ORDER BY created_at DESC LIMIT 30 OFFSET 30" in sql
     assert values == ["live", "finney", 71]

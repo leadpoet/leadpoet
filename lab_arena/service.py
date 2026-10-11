@@ -34,6 +34,7 @@ from lab_arena.store import (
     ArenaStoreError,
     ArenaStoreUnavailable,
     CURRENT_CONFIGURATION_FIELDS,
+    PUBLIC_CONFIGURATION_COLUMN,
     PUBLIC_RESULTS_CONFIGURATION_FIELDS,
     hash_lease_token,
 )
@@ -1460,9 +1461,7 @@ class ArenaService:
                 offset=offset,
                 columns=(
                     "round_id,status,created_at,"
-                    + (",".join("cfg_%s:configuration_doc->%s::text" % (key, key)
-                                for key in CURRENT_CONFIGURATION_FIELDS)
-                       if public_only else "configuration_doc")
+                    + (PUBLIC_CONFIGURATION_COLUMN if public_only else "configuration_doc")
                 ),
             )
             if public_only:
@@ -1559,7 +1558,7 @@ class ArenaService:
             limit=1,
             columns=(
                 "round_id,status,published_at,"
-                + ("cfg_mode:configuration_doc->mode::text" if public_only else "configuration_doc")
+                + (PUBLIC_CONFIGURATION_COLUMN if public_only else "configuration_doc")
                 + ",king_outcome,king_hotkey,effective_reward_epoch,reward_basis_hash"
             ),
         )

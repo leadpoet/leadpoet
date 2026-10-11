@@ -317,6 +317,10 @@ CURRENT_CONFIGURATION_FIELDS = (
     "mode", "schedule", "stage_1_icp_count", "stage_2_icp_count", "promotion_margin",
     "integrity_policy", "contact_policy", "company_quality_policy", "intent_details_policy",
 )
+PUBLIC_CONFIGURATION_FIELDS = tuple(dict.fromkeys(
+    COMPETITION_CONFIGURATION_FIELDS + CURRENT_CONFIGURATION_FIELDS + ("baseline_hotkey",)
+))
+PUBLIC_CONFIGURATION_COLUMN = "configuration_doc:lab_arena_public_configuration_v1"
 PUBLIC_RESULTS_CONFIGURATION_FIELDS = (
     "mode", "network_name", "netuid", "schedule",
     "benchmark_disclosure_policy", "stage_1_icp_count", "stage_2_icp_count",
@@ -325,6 +329,8 @@ PUBLIC_RESULTS_CONFIGURATION_FIELDS = (
 )
 # Fixed public audit projections. Never fetch source or provider documents.
 _RUNTIME_JSON_COLUMNS = {
+    PUBLIC_CONFIGURATION_COLUMN:
+        "public.lab_arena_public_configuration_v1(lab_arena_rounds) AS configuration_doc",
     "publication_doc:lab_arena_competition_publication_v1":
         "public.lab_arena_competition_publication_v1(lab_arena_rounds) AS publication_doc",
     "source_commit:result_doc->resource_summary->>validator_source_commit": "result_doc #>> '{resource_summary,validator_source_commit}' AS source_commit",
@@ -1568,8 +1574,7 @@ class ArenaStore:
                 offset=offset,
                 columns=(
                     "round_id,status,arena_network_name,arena_netuid,rewards_enabled,effective_reward_epoch,king_outcome,king_hotkey,king_start_epoch,reward_basis_hash,reward_basis_doc,signing_key_doc,reward_activated_at,published_at,"
-                    + ("cfg_mode:configuration_doc->mode::text,cfg_baseline_hotkey:configuration_doc->baseline_hotkey::text"
-                       if public_only else "configuration_doc")
+                    + (PUBLIC_CONFIGURATION_COLUMN if public_only else "configuration_doc")
                 ),
             )
             activated.extend(

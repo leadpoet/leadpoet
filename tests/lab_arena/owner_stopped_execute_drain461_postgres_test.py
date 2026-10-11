@@ -229,3 +229,67 @@ def test_completed_unpriced_execute_is_not_a_settled_execute(database, migrated)
         drained = guard._quiescence(conn, generation=generation)
         assert not drained['preserved'] and drained['expired_receipt_count'] == 0
         assert paid._audit(conn, lease) == before
+
+
+def test_uncertain_execute_natural_expiry_preserves_bills_and_creates_one_retry(database, migrated):
+    psycopg, dsn = database
+    with psycopg.connect(**dsn) as conn:
+        lease = _seed(conn, settled=111, uncertain=2)
+        with conn.cursor() as cur:
+            # Move the disposable claim and its authenticated runtime window
+            # together. Keep the effective expiry one second ahead, then let
+            # real database time cross it without changing the captured claim.
+            cur.execute('SELECT lease_expires_at-(clock_timestamp()+interval \'1 second\') '
+                        'FROM public.lab_arena_runs WHERE run_id=%s', (lease['run_id'],))
+            shift = cur.fetchone()[0]
+            cur.execute('SET LOCAL session_replication_role=replica')
+            cur.execute("UPDATE public.lab_arena_runs SET lease_expires_at=lease_expires_at-%s,"
+                        "claim_response=jsonb_set(claim_response,'{lease_expires_at}',"
+                        "to_jsonb(((claim_response->>'lease_expires_at')::timestamptz-%s)::text)) "
+                        "WHERE run_id=%s", (shift, shift, lease['run_id']))
+            cur.execute('UPDATE public.lab_arena_trajectory_events '
+                        'SET created_at=created_at-%s,occurred_at=occurred_at-%s '
+                        'WHERE run_id=%s', (shift, shift, lease['run_id']))
+            cur.execute('SET LOCAL session_replication_role=origin')
+        conn.commit()
+        generation = prior._hold_capture(conn)
+        before, frozen = paid._audit(conn, lease), _round(conn)
+        with conn.cursor() as cur:
+            cur.execute("SELECT entry_kind,count(*) FROM (SELECT DISTINCT ON (call_identity) "
+                        "entry_kind FROM public.lab_arena_ledger WHERE run_id=%s "
+                        "ORDER BY call_identity,entry_id DESC) heads GROUP BY entry_kind",
+                        (lease['run_id'],))
+            assert dict(cur.fetchall()) == {'settlement': 111, 'uncertain': 2}
+            cur.execute('SELECT public.lab_arena__submission_kind_spend(%s,\'execute\')',
+                        (lease['submission_id'],))
+            spend = cur.fetchone()[0]
+        waiting = guard._quiescence(conn, generation=generation)
+        assert (waiting['still_leased_count'], waiting['expired_receipt_count'],
+                waiting['pending_retry_count'], waiting['preserved']) == (1, 0, 0, False)
+        assert paid._audit(conn, lease) == before
+        with conn.cursor() as cur:
+            cur.execute('SELECT pg_sleep(greatest(0,extract(epoch FROM '
+                        '(lease_expires_at-clock_timestamp())))+0.02) '
+                        'FROM public.lab_arena_runs WHERE run_id=%s', (lease['run_id'],))
+        drained = guard._quiescence(conn, generation=generation)
+        assert (drained['captured_count'], drained['still_leased_count'],
+                drained['expired_receipt_count'], drained['lost_or_mutated_count'],
+                drained['pending_retry_count'], drained['preserved']) == (1, 0, 1, 0, 1, True)
+        assert guard._quiescence(conn, generation=generation)['outcome_commitment'] == drained['outcome_commitment']
+        after = paid._audit(conn, lease)
+        assert after['lab_arena_ledger'] == before['lab_arena_ledger']
+        assert after['lab_arena_trajectory_events'] == before['lab_arena_trajectory_events']
+        assert after['run'][0:2] == ('failed', 'lease_expired')
+        assert set(after['run'][2]) == {'expired_at'}  # Normal expiry receipt.
+        assert after['run'][3:] == before['run'][3:]
+        assert _round(conn) == frozen
+        with conn.cursor() as cur:
+            cur.execute('SELECT status,attempt FROM public.lab_arena_runs '
+                        'WHERE assignment_id=%s ORDER BY attempt', (lease['assignment_id'],))
+            assert cur.fetchall() == [('failed', 1), ('pending', 2)]
+            cur.execute('SELECT public.lab_arena__submission_kind_spend(%s,\'execute\')',
+                        (lease['submission_id'],))
+            assert cur.fetchone()[0] == spend
+        assert paid.recovery._claim(conn, paid.recovery.prior.RUNNER_B, 'b')['status'] == 'paused'
+        assert guard._rpc(conn, 'lab_arena_authorize_restart_phase_v1',
+            guard.GUARD, guard.OWNER, generation, 'gateway_destructive')['restart_phase'] == 'gateway_destructive'

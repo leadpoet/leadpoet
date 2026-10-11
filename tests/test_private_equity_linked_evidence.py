@@ -55,6 +55,15 @@ ANTIN_QUOTE = (
 ACME_URL = "https://acme.example/about"
 ATLAS_URL = "https://atlas.example/about"
 ATLAS_QUOTE = "Atlas Capital is a private equity firm."
+TOWERBROOK_CLASSIFICATION_URL = (
+    "https://www.prnewswire.com/news-releases/"
+    "jack-azagury-appointed-as-chair-of-global-consulting-firm-brg-302550050.html"
+)
+# Exact source span; ownership controls below are synthetic, separately loaded.
+TOWERBROOK_CLASSIFICATION_QUOTE = (
+    "TowerBrook is the first mainstream private equity firm to be certified "
+    "as a B Corporation"
+)
 
 
 def _validated(
@@ -114,6 +123,67 @@ def test_real_ownership_and_same_sponsor_classification_compose(
 ])
 def test_explicit_current_control_and_old_completed_control_are_supported(primary):
     assert _validated(primary)["status"] == "VERIFIED"
+
+
+@pytest.mark.parametrize("primary,support,accepted", [
+    ("Acme is majority-owned by TowerBrook.", TOWERBROOK_CLASSIFICATION_QUOTE, True),
+    ("TowerBrook plans to acquire a majority stake in Acme.", TOWERBROOK_CLASSIFICATION_QUOTE, False),
+    ("TowerBrook owns a minority stake in Acme.", TOWERBROOK_CLASSIFICATION_QUOTE, False),
+    ("Acme is majority-owned by TowerBrook.", TOWERBROOK_CLASSIFICATION_QUOTE.replace("TowerBrook", "Other Capital"), False),
+    ("Acme is majority-owned by TowerBrook.", "TowerBrook is not a mainstream private equity firm.", False),
+    ("Acme is majority-owned by TowerBrook.", "TowerBrook is the first mainstream private equity firm client.", False),
+    ("Acme is majority-owned by TowerBrook.", "TowerBrook is the first mainstream private equity firm's customer.", False),
+    ("Acme is majority-owned by TowerBrook.", "TowerBrook is the first mainstream private equity firm-backed provider.", False),
+    ("Acme is majority-owned by TowerBrook.", "TowerBrook is the first mainstream private equity firm to advise a certified business.", False),
+])
+def test_certification_classification_keeps_loaded_ownership_and_stage_guards(
+    primary, support, accepted,
+):
+    finding = _validated(
+        primary, support, support_url=TOWERBROOK_CLASSIFICATION_URL,
+    )
+    assert finding["status"] == ("VERIFIED" if accepted else "UNPROVEN")
+    projected = lead_scorer._project_investigator_stage(
+        {"stage_matches": None}, finding, icp_stage="private equity",
+    )
+    assert lead_scorer._decision_from_observed_stage(
+        projected, "private equity", validated_stage_finding=finding,
+    ) == (COMPANY_FIT_MATCH if accepted else COMPANY_FIT_UNAVAILABLE)
+    if accepted:
+        assert finding["supporting_evidence"] == [{
+            "url": TOWERBROOK_CLASSIFICATION_URL, "quote": support,
+        }]
+
+
+def test_certification_classification_still_requires_exact_loaded_source():
+    primary = "Acme is majority-owned by TowerBrook."
+    finding = _validated(
+        primary, TOWERBROOK_CLASSIFICATION_QUOTE,
+        support_url=TOWERBROOK_CLASSIFICATION_URL,
+        pages={ACME_URL: primary, TOWERBROOK_CLASSIFICATION_URL: "About TowerBrook"},
+    )
+    assert finding["status"] == "UNPROVEN"
+    assert finding["reason"] == investigator.PRIVATE_EQUITY_SUPPORT_QUOTE_REJECTION_REASON
+
+
+def test_jdg4_majority_investment_announcement_remains_unproven():
+    primary = (
+        "TowerBrook Capital Partners L.P. (“TowerBrook”) today announced a "
+        "majority equity investment in Washington D.C.-based Berkeley Research "
+        "Group (“BRG”)"
+    )
+    finding = _validated(
+        primary, TOWERBROOK_CLASSIFICATION_QUOTE,
+        company="Berkeley Research Group", support_url=TOWERBROOK_CLASSIFICATION_URL,
+    )
+    assert finding["status"] == "UNPROVEN"
+    assert finding["reason"] == "source quote did not prove current private-equity ownership"
+    projected = lead_scorer._project_investigator_stage(
+        {"stage_matches": None}, finding, icp_stage="private equity",
+    )
+    assert lead_scorer._decision_from_observed_stage(
+        projected, "private equity", validated_stage_finding=finding,
+    ) == COMPANY_FIT_UNAVAILABLE
 
 
 @pytest.mark.parametrize("primary", [
@@ -323,10 +393,12 @@ def test_private_equity_prompt_keeps_existing_research_and_tool_limits():
     assert "does not expire merely because its announcement" in investigator._SYSTEM_PROMPT
     assert "SAME sponsor" in investigator._SYSTEM_PROMPT
     assert investigator.MAX_SEARCH_CALLS == 2
-    assert investigator.MAX_FETCH_CALLS == 3
+    assert investigator.MAX_FETCH_CALLS == 4
 
 
 @pytest.mark.parametrize("name,primary,primary_url,support,support_url,classifier_valid", [
+    ("Acme", "Acme is majority-owned by TowerBrook.", ACME_URL,
+     TOWERBROOK_CLASSIFICATION_QUOTE, TOWERBROOK_CLASSIFICATION_URL, True),
     ("Avantus", AVANTUS_QUOTE, AVANTUS_URL, KKR_QUOTE, KKR_URL, True),
     ("Origis Energy", ORIGIS_QUOTE, ORIGIS_URL, ANTIN_QUOTE, ORIGIS_URL, True),
     ("Avantus", AVANTUS_QUOTE, AVANTUS_URL,

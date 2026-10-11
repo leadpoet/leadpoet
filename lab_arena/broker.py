@@ -2209,6 +2209,31 @@ def _validated_credit_failure_proof(value: Any) -> Optional[Mapping[str, Any]]:
     return value
 
 
+def provider_credit_failure_reason(call: Mapping[str, Any]) -> Optional[str]:
+    """Expose only a bound, settled miner-credit refusal as a safe diagnostic.
+
+    The operational error and its retry behavior remain unchanged. Missing
+    credentials and unpriced or upstream account errors have no such proof.
+    """
+    try:
+        proof = _validated_credit_failure_proof(call.get("credit_failure_proof"))
+    except BrokerError:
+        return None
+    if (
+        proof is not None
+        and call.get("funding_source") == "miner_key"
+        and call.get("error_code") == "miner_credentials_unavailable"
+        and call.get("outcome") == "settled"
+        and call.get("provider") == proof["provider"]
+        and type(call.get("provider_status")) is int
+        and call["provider_status"] == 402
+        and type(call.get("actual_microusd")) is int
+        and call["actual_microusd"] == 0
+    ):
+        return "provider_credit_exhausted"
+    return None
+
+
 def _judgment_cache_material(
     context: RunContext,
     *,

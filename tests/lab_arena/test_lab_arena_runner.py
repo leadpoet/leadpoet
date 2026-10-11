@@ -3313,6 +3313,148 @@ def test_a_transient_completion_failure_is_retried_before_the_run_is_abandoned(t
         assert runner_.completed[0]["error"] == "RunnerError"
 
 
+def completion_recovery_clock(monkeypatch, config):
+    elapsed = [0.0]
+    start = config.clock().timestamp()
+    config.clock = lambda: datetime.fromtimestamp(start + elapsed[0], tz=timezone.utc)
+    monkeypatch.setattr(rn.time, "monotonic", lambda: elapsed[0])
+
+    def advance(delay):
+        elapsed[0] += delay
+
+    monkeypatch.setattr(rn.time, "sleep", advance)
+    return elapsed, advance
+
+
+def test_completion_survives_database_outage_without_repeating_paid_work(tmp_path, monkeypatch):
+    class OutageApi(FakeApi):
+        def complete(self, envelope):
+            self.completions.append(envelope)
+            if elapsed[0] < 90:
+                raise rn.RunnerError("Arena API failed: HTTP 503", http_status=503)
+            return {"status": "accepted"}
+
+    api = OutageApi([lease()])
+    sandbox = BridgingRuntime(output={"companies": [valid_company(1)]}, calls=1)
+    (tmp_path / "work").mkdir()
+    config = make_config(tmp_path, api, sandbox)
+    config.completion_retry_seconds = rn.COMPLETION_RECOVERY_RETRY_SECONDS
+    elapsed, _ = completion_recovery_clock(monkeypatch, config)
+    runner_ = rn.Runner(config)
+
+    assert runner_.run_once() == 1
+    assert runner_.abandoned == 0
+    assert elapsed[0] == 112
+    assert len(sandbox.specs) == len(api.provider_frames) == 1
+    assert len(api.completions) > 3
+    assert all(item is api.completions[0] for item in api.completions)
+    assert runner_.completed == [{"run_id": "r1", "result": {"status": "accepted"}}]
+
+
+def test_completion_lost_commit_response_replays_same_signed_request(tmp_path, monkeypatch):
+    class LostReplyApi(FakeApi):
+        commits = 0
+
+        def complete(self, envelope):
+            self.completions.append(envelope)
+            if self.commits == 0:
+                self.commits += 1
+                raise rn.RunnerError("Arena API transport failure: ReadError")
+            assert envelope["request_id"] == self.completions[0]["request_id"]
+            assert envelope["body"] == self.completions[0]["body"]
+            return {"status": "accepted", "idempotent": True}
+
+    api = LostReplyApi([])
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0))
+    config.completion_retry_seconds = rn.COMPLETION_RECOVERY_RETRY_SECONDS
+    completion_recovery_clock(monkeypatch, config)
+    original = completion_envelope(output={"companies": [valid_company(1)]}, timestamp=int(config.clock().timestamp()))
+    assert rn.Runner(config)._complete_with_retries(original) == {"status": "accepted", "idempotent": True}
+    assert api.commits == 1
+    assert api.completions == [original, original]
+
+
+@pytest.mark.parametrize("http_status", (408, 429, 500, 503))
+def test_http_completion_availability_statuses_are_retryable(tmp_path, monkeypatch, http_status):
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(http_status if len(requests) == 1 else 200,
+                              json={"status": "rejected"} if len(requests) == 1 else {"status": "accepted"})
+
+    api = rn.HttpArenaApiClient("https://arena.example", client=httpx.Client(transport=httpx.MockTransport(respond)))
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0))
+    completion_recovery_clock(monkeypatch, config)
+    original = completion_envelope(output={"companies": [valid_company(1)]}, timestamp=int(config.clock().timestamp()))
+    assert rn.Runner(config)._complete_with_retries(original) == {"status": "accepted"}
+    assert requests == [original, original]
+
+
+@pytest.mark.parametrize("http_status,document", ((401, {"detail": "lease_invalid"}), (409, {"detail": "lease_expired"}), (403, {"status": "accounting_open"}), (200, {"status": "stale"})))
+def test_http_completion_denial_or_expiry_stops_without_retry(tmp_path, monkeypatch, http_status, document):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(http_status, json=document)
+
+    api = rn.HttpArenaApiClient("https://arena.example", client=httpx.Client(transport=httpx.MockTransport(respond)))
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0))
+    monkeypatch.setattr(rn.time, "sleep", lambda _: pytest.fail("permanent denial retried"))
+    original = completion_envelope(output={"companies": [valid_company(1)]}, timestamp=int(config.clock().timestamp()))
+    result = rn.Runner(config)._complete_with_retries(original)
+    assert result["status"] == ("stale" if http_status == 200 else "rejected")
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("failure", (ValueError("bad completion"), rn.RunnerError("bad completion", http_status=400)))
+def test_completion_does_not_retry_programming_or_permanent_failures(tmp_path, monkeypatch, failure):
+    api = FakeApi([])
+    api.complete = Mock(side_effect=failure)
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0))
+    monkeypatch.setattr(rn.time, "sleep", lambda _: pytest.fail("permanent failure retried"))
+    original = completion_envelope(output=None, timestamp=int(config.clock().timestamp()))
+    with pytest.raises(type(failure)):
+        rn.Runner(config)._complete_with_retries(original)
+    assert api.complete.call_count == 1
+
+
+def test_mixed_completion_failures_share_one_elapsed_deadline(tmp_path, monkeypatch):
+    class MixedApi(FakeApi):
+        def complete(self, envelope):
+            self.completions.append(envelope)
+            advance(rn.API_TIMEOUT_SECONDS)
+            if len(self.completions) % 2:
+                raise rn.RunnerError("Arena API failed: HTTP 503", http_status=503)
+            return {"status": "accounting_open", "open_calls": 1}
+
+    api = MixedApi([])
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0))
+    config.completion_retry_seconds = rn.COMPLETION_RECOVERY_RETRY_SECONDS
+    elapsed, advance = completion_recovery_clock(monkeypatch, config)
+    original = completion_envelope(output={"companies": [valid_company(1)]}, timestamp=int(config.clock().timestamp()))
+    with pytest.raises(rn.RunnerError, match="recovery deadline exceeded"):
+        rn.Runner(config)._complete_with_retries(original)
+    assert elapsed[0] <= rn.COMPLETION_RECOVERY_SECONDS < contracts.LEASE_TTL_SECONDS
+    assert elapsed[0] + 60 + rn.API_TIMEOUT_SECONDS > rn.COMPLETION_RECOVERY_SECONDS
+    assert all(item["body"] == original["body"] and item["request_id"] == original["request_id"] for item in api.completions)
+    assert len({item["timestamp"] for item in api.completions}) > 1
+
+
+def test_default_completion_availability_retry_budget_is_finite(tmp_path, monkeypatch):
+    api = FlakyCompletionApi([], failures=100)
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0))
+    config.completion_retry_seconds = rn.COMPLETION_RECOVERY_RETRY_SECONDS
+    assert rn.RunnerConfig.__dataclass_fields__["completion_retry_seconds"].default == config.completion_retry_seconds
+    elapsed, _ = completion_recovery_clock(monkeypatch, config)
+    original = completion_envelope(output=None, timestamp=int(config.clock().timestamp()))
+    with pytest.raises(rn.RunnerError, match="HTTP 503"):
+        rn.Runner(config)._complete_with_retries(original)
+    assert api.attempts == len(rn.COMPLETION_RECOVERY_RETRY_SECONDS) + 1
+    assert elapsed[0] == sum(rn.COMPLETION_RECOVERY_RETRY_SECONDS)
+
+
 def test_accounting_open_retries_the_original_completion_until_accepted(
     tmp_path, capsys
 ):

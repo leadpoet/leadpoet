@@ -90,6 +90,17 @@ REQUIREMENT_RE = re.compile(
 )
 MAX_SOCKET_PATH_BYTES = 100
 API_TIMEOUT_SECONDS = 30.0
+COMPLETION_RECOVERY_RETRY_SECONDS = (
+    2.0, 5.0, 10.0, 20.0, 30.0, 45.0,
+    60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 80.0,
+)
+# Both availability and accounting retries share this elapsed-time bound.
+# Reserve one API timeout before each attempt; even a mixed failure sequence
+# cannot retain a worker past the minimum lease TTL solely for completion.
+COMPLETION_RECOVERY_SECONDS = (
+    sum(COMPLETION_RECOVERY_RETRY_SECONDS)
+    + (len(COMPLETION_RECOVERY_RETRY_SECONDS) + 1) * API_TIMEOUT_SECONDS
+)
 SOURCE_DOWNLOAD_RETRY_SECONDS = (0.5, 1.0)
 COMPLETION_SIGNATURE_REFRESH_AGE_SECONDS = (
     contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS - int(API_TIMEOUT_SECONDS)
@@ -867,7 +878,18 @@ class HttpArenaApiClient:
             raise RunnerError("run quota is unavailable") from None
 
     def complete(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
-        return self._post("/arena/v1/runs/%s/complete" % envelope["body"]["run_id"], envelope)
+        result = self._post(
+            "/arena/v1/runs/%s/complete" % envelope["body"]["run_id"],
+            envelope, preserve_http_status=True,
+        )
+        if result.http_status in (408, 429):
+            raise RunnerError(
+                "Arena completion unavailable: HTTP %d" % result.http_status,
+                http_status=result.http_status,
+            )
+        if result.http_status is not None and result.http_status >= 400:
+            result["status"] = "rejected"
+        return result
 
     def source(self, run_id: str, lease_token: str) -> bytes:
         """Download one bounded source archive under its active run lease."""
@@ -3002,28 +3024,12 @@ class RunnerConfig:
     slot_ceiling: int = contracts.RUNNER_SLOT_CEILING
     wall_clock_seconds: int = contracts.ICP_WALL_CLOCK_SECONDS
     # Waits between completion retries after a transport or server failure.
-    completion_retry_seconds: Tuple[float, ...] = (2.0, 5.0)
+    completion_retry_seconds: Tuple[float, ...] = COMPLETION_RECOVERY_RETRY_SECONDS
     # Execution and scoring sandboxes can end while their last provider request
     # is still settling. This fixed 672-second retry-wait budget covers the
     # full 665-second provider API deadline, including host overhead. The retry
-    # waits and bounded API calls still end before the 20-minute lease expires.
-    accounting_open_retry_seconds: Tuple[float, ...] = (
-        2.0,
-        5.0,
-        10.0,
-        20.0,
-        30.0,
-        45.0,
-        60.0,
-        60.0,
-        60.0,
-        60.0,
-        60.0,
-        60.0,
-        60.0,
-        60.0,
-        80.0,
-    )
+    # waits and bounded API calls use less than the minimum 25-minute lease TTL.
+    accounting_open_retry_seconds: Tuple[float, ...] = COMPLETION_RECOVERY_RETRY_SECONDS
     evaluation_date: str = ""  # fallback only; every lease names the round's evaluation date
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
     socket_root: Path = Path(DEFAULT_SOCKET_ROOT)
@@ -4189,23 +4195,30 @@ class Runner:
             self._slots.release()
 
     def _complete_with_retries(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
-        """Deliver the signed completion; a transport or server failure is retried briefly.
+        """Keep the exact completion through bounded availability failures.
 
         The envelope is idempotent, so a lost response or a transient object
         store failure on the Arena costs a retry, not the whole sandbox run. An
         ``accounting_open`` document is retried separately while an in-flight
-        provider call settles. Other response documents are never retried.
+        provider call settles. One elapsed-time bound covers both retry paths.
+        Other response documents and permanent HTTP denials are never retried.
+        The service owns renewed lease expiry and returns ``stale`` if it ends.
         """
 
         failure_delays = iter(tuple(self._config.completion_retry_seconds))
         accounting_delays = iter(
             tuple(self._config.accounting_open_retry_seconds)
         )
+        deadline = time.monotonic() + COMPLETION_RECOVERY_SECONDS
         while True:
+            if time.monotonic() + API_TIMEOUT_SECONDS > deadline:
+                raise RunnerError("completion recovery deadline exceeded")
             envelope = self._completion_envelope_for_attempt(envelope)
             try:
                 result = self._config.api.complete(envelope)
             except Exception as exc:
+                if not isinstance(exc, RunnerError) or not _retryable_claim_availability(exc):
+                    raise
                 if self._config.operational_logger is not None:
                     self._config.operational_logger.error("completion", exc,
                         run_id=envelope["body"].get("run_id"), round_id=envelope.get("round_id"))
@@ -4238,7 +4251,10 @@ class Runner:
                     delay = next(accounting_delays)
                 except StopIteration:
                     raise RunnerError("completion remained accounting_open")
-            time.sleep(max(0.0, float(delay)))
+            delay = max(0.0, float(delay))
+            if time.monotonic() + delay + API_TIMEOUT_SECONDS > deadline:
+                raise RunnerError("completion recovery deadline exceeded")
+            time.sleep(delay)
 
     def _completion_envelope_for_attempt(
         self, envelope: Mapping[str, Any]

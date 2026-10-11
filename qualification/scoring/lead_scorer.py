@@ -92,6 +92,7 @@ from qualification.scoring.company_evidence_investigator import (
     _same_domain_name_alias,
     _validated_homepage_navigation_locators,
     _validated_prefetched_pages,
+    _validated_returned_fetched_pages,
     investigate_company_evidence,
 )
 from qualification.scoring.evaluation_clock import evaluation_date
@@ -2757,7 +2758,7 @@ def _retain_matched_investigator_source_contexts(
     admitted_urls = (
         tuple(raw_pages) if isinstance(raw_pages, Mapping) else ()
     )
-    pages, final_urls = _validated_prefetched_pages(
+    pages, final_urls = _validated_returned_fetched_pages(
         raw_pages, submitted_source_urls=admitted_urls,
     )
     auxiliary_urls: set[str] = set()
@@ -2833,6 +2834,46 @@ def _retain_matched_investigator_source_contexts(
                 "final_url": final_urls[source_url],
                 "text": pages[source_url],
             }
+
+
+def _investigator_retention_projection(
+    result: CompanyFitDecisionResult,
+) -> Optional[CompanyFitDecisionResult]:
+    """Adapt one targeted web result to the strict source-retention shape."""
+
+    details = result.details if isinstance(result.details, Mapping) else {}
+    identity = details.get("identity_receipt")
+    decisions = details.get("dimension_decisions")
+    evidence = details.get("dimension_evidence")
+    if (
+        details.get("identity_decision") != COMPANY_FIT_MATCH
+        or not isinstance(identity, Mapping)
+        or identity.get("decision") != COMPANY_FIT_MATCH
+        or not isinstance(decisions, Mapping)
+        or not isinstance(evidence, Mapping)
+    ):
+        return None
+    projected_evidence: dict[str, Any] = {
+        "identity": {
+            "decision": COMPANY_FIT_MATCH,
+            "web_identity_receipt": dict(identity),
+        },
+    }
+    for dimension in ("industry", "employee_size", "geography", "stage"):
+        raw_evidence = evidence.get(dimension)
+        if (
+            decisions.get(dimension) == COMPANY_FIT_MATCH
+            and isinstance(raw_evidence, Mapping)
+        ):
+            projected_evidence[dimension] = {
+                "decision": COMPANY_FIT_MATCH,
+                "web_evidence": dict(raw_evidence),
+            }
+    projected = CompanyFitDecisionResult(
+        result.decision, result.reason,
+        details={"dimension_evidence": projected_evidence},
+    )
+    return projected if _complete_company_identity(projected) else None
 
 
 def _retain_matched_company_retry_sources(
@@ -6457,7 +6498,7 @@ def _reopened_stage_dispute_resolved(
         return False
     fetched_pages = investigation.get(PRIVATE_FETCHED_PAGES_KEY)
     trigger_urls = tuple(dict.fromkeys(url for url, _stage in hints))
-    pages, _final_urls = _validated_prefetched_pages(
+    pages, _final_urls = _validated_returned_fetched_pages(
         fetched_pages,
         submitted_source_urls=trigger_urls,
     )
@@ -6833,7 +6874,7 @@ def _fetched_linkedin_headcount_resolves_conflict(
     slug = str(identity.get("linkedin_company_slug") or "").strip().casefold()
     if not profile or not slug or linkedin_company_page_slug(profile) != slug:
         return False
-    pages, final_urls = _validated_prefetched_pages(
+    pages, final_urls = _validated_returned_fetched_pages(
         investigation.get(PRIVATE_FETCHED_PAGES_KEY), submitted_source_urls=(url,),
     )
     final_profile = _strict_linkedin_company_profile_url(final_urls.get(url))
@@ -7862,12 +7903,14 @@ async def _run_targeted_company_evidence_investigation(
     projected_result = _with_verifier_failure_reason(
         projected_result, investigation_receipt["failure_reason"]
     )
-    _retain_matched_investigator_source_contexts(
-        matched_company_source_sink,
-        projected_result,
-        investigation,
-        company=company,
-    )
+    retention_projection = _investigator_retention_projection(projected_result)
+    if retention_projection is not None:
+        _retain_matched_investigator_source_contexts(
+            matched_company_source_sink,
+            retention_projection,
+            investigation,
+            company=company,
+        )
     return (
         projected,
         projected_result,

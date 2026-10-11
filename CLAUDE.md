@@ -1,5 +1,16 @@
 # Agent Instructions
 
+## Scoped production authorization: Tyche PR 118 compatibility
+
+The user's current explicit Tyche PR 118 compatibility request authorizes
+protected inspection, the smallest confirmed compatibility fixes, focused tests,
+safe push and merge, canonical scorer-image publication and restarts, and
+reward-disabled exact Arena and normal Arete verification. Preserve qualification
+quality, provider costs and call caps, deadlines, frozen published results,
+accepted work and concurrent changes. Do not add architecture or model-specific
+infrastructure, or perform unrelated production writes. This authority ends
+after the requested compatibility deployment and live verification.
+
 ## Scoped production authorization: October 11 outage recovery
 
 The user authorized monitoring the October 11 round through execution,

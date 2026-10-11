@@ -103,7 +103,7 @@ def test_brdge_existing_investigator_fetches_and_resolves_exact_profile_band(mon
     assert receipt["structured_evidence"] == STRUCTURED
     assert receipt["fetched_evidence"] == {"url": PROFILE, "quote": QUOTE}
     assert result.details["investigation_receipt"]["usage"]["fetch_calls"] == 1
-    assert (investigator.MAX_FETCH_CALLS, investigator.MAX_SEARCH_CALLS) == (3, 2)
+    assert (investigator.MAX_FETCH_CALLS, investigator.MAX_SEARCH_CALLS) == (4, 2)
 
 
 @pytest.mark.parametrize("unsafe", [

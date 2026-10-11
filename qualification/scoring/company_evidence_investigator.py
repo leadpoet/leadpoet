@@ -1051,7 +1051,34 @@ def _validated_prefetched_pages(
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Accept only bounded server-prefetched pages for submitted source URLs."""
 
-    if not isinstance(value, Mapping) or len(value) > MAX_PREFETCHED_PAGES:
+    return _validated_server_pages(
+        value, submitted_source_urls=submitted_source_urls,
+        max_pages=MAX_PREFETCHED_PAGES,
+    )
+
+
+def _validated_returned_fetched_pages(
+    value: Any,
+    *,
+    submitted_source_urls: Sequence[str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Validate private investigator output under its existing return bound."""
+
+    return _validated_server_pages(
+        value, submitted_source_urls=submitted_source_urls,
+        max_pages=MAX_RETURNED_FETCHED_PAGES,
+    )
+
+
+def _validated_server_pages(
+    value: Any,
+    *,
+    submitted_source_urls: Sequence[str],
+    max_pages: int,
+) -> tuple[dict[str, str], dict[str, str]]:
+    # Check the complete map before selecting cited pages. Incoming prefetch
+    # and returned investigator pages have different existing count bounds.
+    if not isinstance(value, Mapping) or len(value) > max_pages:
         return {}, {}
     allowed_urls = set(submitted_source_urls)
     pages: dict[str, str] = {}

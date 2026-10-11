@@ -68,7 +68,16 @@ class PerIcpHarness(QualityHarness):
 @pytest.fixture
 def database():
     yield from database_with_lab_arena_migration(
-        CURRENT_SERVICE_MIGRATIONS + ("409-lab-arena-publication-cost-document-reuse.sql",)
+        CURRENT_SERVICE_MIGRATIONS + (
+            "409-lab-arena-publication-cost-document-reuse.sql",
+            # The round lifecycle test calls the current signed reward API.
+            # Keep its existing slot, cumulative-pot and decay RPCs available.
+            "342-lab-arena-reward-predecessor-barrier.sql",
+            "377-lab-arena-monotonic-day-authority.sql",
+            "428-lab-arena-reward-slots.sql",
+            "429-lab-arena-cumulative-reward-pot.sql",
+            "431-lab-arena-slot-decay.sql",
+        )
     )
 
 

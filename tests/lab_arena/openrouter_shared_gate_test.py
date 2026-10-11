@@ -649,6 +649,9 @@ def test_unknown_canonical_failure_cost_stays_uncertain_and_reconcilable(
     call = next(iter(store.calls.values()))
     assert result.call["outcome"] == "uncertain"
     assert result.call["provider_status"] == effective_status
+    assert result.call["openrouter_original_http_status"] == 200
+    assert result.call["openrouter_effective_error_status"] == effective_status
+    assert result.call["openrouter_error_type"] == error_type
     assert call["kind"] == "uncertain"
     assert call["uncertain_doc"]["reason"] == "missing_provider_cost"
     assert call["uncertain_doc"]["call_succeeded"] is False
@@ -835,6 +838,8 @@ def test_provider_credential_echo_never_enters_error_diagnostics(monkeypatch):
 
     call = next(iter(store.calls.values()))
     assert result.call["outcome"] == "uncertain"
+    assert "openrouter_error_type" not in result.call
+    assert "openrouter_original_http_status" not in result.call
     assert call["kind"] == "uncertain"
     assert call["uncertain_doc"]["response_provenance"] == "credential_echo"
     assert HOST_KEYS["openrouter"] not in json.dumps(call, sort_keys=True)

@@ -9,6 +9,7 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 from urllib.parse import parse_qs, quote, urlparse
@@ -1476,7 +1477,17 @@ def test_scrapingdog_storage_403_compact_readback_conflict_fails_closed(conflict
     "rpc lab_arena_settle_call failed: HTTP 503",
     "rpc lab_arena_other_call failed: HTTP 403",
 ])
-def test_scrapingdog_storage_refusal_without_compact_acceptance_stays_uncertain(error):
+def test_scrapingdog_storage_refusal_without_compact_acceptance_stays_uncertain(error, monkeypatch):
+    simulated_time = [0.0]
+    if "HTTP 503" in error:
+        # A transient store outage has a 120-second retry window. Advance it
+        # without making this control wait for the entire real-time deadline.
+        monkeypatch.setattr(br.time, "monotonic", lambda: simulated_time[0])
+        monkeypatch.setattr(
+            br.time, "sleep",
+            lambda seconds: simulated_time.__setitem__(0, simulated_time[0] + seconds),
+        )
+
     class RefusingStore(FakeLedgerStore):
         def settle_call(self, **kwargs):
             self.log.append("settle")
@@ -1494,9 +1505,13 @@ def test_scrapingdog_storage_refusal_without_compact_acceptance_stays_uncertain(
 
     assert result.status == 502 and result.call["outcome"] == "uncertain"
     assert len(transport.sent) == 1
-    assert store.log.count("settle") == (
-        4 if "HTTP 403" in error and "lab_arena_settle_call" in error else 3
-    )
+    if "HTTP 503" in error:
+        assert simulated_time[0] == br._ACCOUNTING_STORE_RECOVERY_SECONDS
+        assert store.log.count("settle") >= 3
+    else:
+        assert store.log.count("settle") == (
+            4 if "HTTP 403" in error and "lab_arena_settle_call" in error else 3
+        )
     assert store.calls[result.call["call_identity"]]["uncertain_doc"]["known_actual_microusd"] == 250
 
 
@@ -3380,7 +3395,7 @@ def test_openrouter_valid_generation_header_allows_strict_insured_error_after_40
     not_found = (404, {"error": {"code": 404, "message": "not found"}})
     transport = FakeTransport(
         [(502, error, {"X-Generation-Id": generation_id})]
-        + [not_found] * br._OPENROUTER_BILLING_MAX_ATTEMPTS
+        + [not_found]
     )
     broker, store, _transport = make_broker(transport=transport)
 
@@ -3397,11 +3412,181 @@ def test_openrouter_valid_generation_header_allows_strict_insured_error_after_40
     assert result.call["cost_basis"] == (
         "openrouter_zero_completion_insurance_error_20260911"
     )
-    assert [sent["method"] for sent in transport.sent] == ["POST"] + [
-        "GET"
-    ] * br._OPENROUTER_BILLING_MAX_ATTEMPTS
+    assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
     assert transport.responses == []
     assert store.log == ["reserve", "dispatch", "settle"]
+
+
+@pytest.mark.parametrize("original_status", (200, 502))
+@pytest.mark.parametrize("run_kind", ("execute", "score"))
+@pytest.mark.parametrize("metadata_type, expected_type", (
+    ("provider_unavailable", "provider_unavailable"),
+    ("arbitrary-private-text", "unmapped"),
+))
+def test_complete_openrouter_error_uses_one_exact_get_and_safe_trajectory_fields(
+    original_status, run_kind, metadata_type, expected_type
+):
+    from lab_arena import trajectory
+
+    generation_id = "gen-one-error-readback"
+    untrusted_message = "private provider text must not enter diagnostics"
+    error = {
+        "id": generation_id,
+        "error": {
+            "code": 502,
+            "message": untrusted_message,
+            "metadata": {"error_type": metadata_type},
+        },
+    }
+    transport = FakeTransport([
+        (original_status, error, {"X-Generation-Id": generation_id}),
+        (404, {"error": {"code": 404, "message": "not found"}}),
+    ])
+    broker, store, _ = make_broker(
+        transport=transport, judge_models=(CHAT["model"],),
+    )
+
+    result = broker.execute(
+        replace(CONTEXT, kind=run_kind), operation_id="openrouter.chat",
+        parameters=CHAT, action_sequence=0, timeout_ms=30000,
+    )
+
+    assert result.status == 502
+    assert_unpriced_uncertain(result)
+    assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
+    assert transport.sent[1]["url"] == br.OPENROUTER_GENERATION_URL + generation_id
+    assert transport.responses == []
+    uncertain = store.calls[result.call["call_identity"]]["uncertain_doc"]
+    assert uncertain["call_succeeded"] is False
+    assert uncertain["openrouter_generation_id"] == generation_id
+    assert "known_actual_microusd" not in uncertain
+    assert result.call["openrouter_original_http_status"] == original_status
+    assert result.call["openrouter_effective_error_status"] == 502
+    assert result.call["openrouter_error_type"] == expected_type
+    event = trajectory.provider_response_content(result.to_document(), elapsed_ms=1)
+    assert event["call"]["openrouter_error_type"] == expected_type
+    assert untrusted_message not in json.dumps(event, sort_keys=True)
+    if expected_type == "unmapped":
+        assert metadata_type not in json.dumps(event, sort_keys=True)
+
+
+def test_unpriced_success_keeps_generation_polling(monkeypatch):
+    monkeypatch.setattr(br, "_OPENROUTER_BILLING_POLL_SECONDS", 0.001)
+    generation_id = "gen-success-delayed-price"
+    completion = {
+        "id": generation_id, "model": "openai/gpt-4o-mini",
+        "choices": [{"message": {"role": "assistant", "content": "ok"},
+                     "finish_reason": "stop"}],
+    }
+    generation = {"data": {"id": generation_id, "total_cost": "0.000123",
+                           "usage": "0.000123"}}
+    broker, store, transport = make_broker(transport=FakeTransport([
+        (200, completion),
+        (404, {"error": {"code": 404}}),
+        (404, {"error": {"code": 404}}),
+        (200, generation),
+    ]))
+
+    result = broker.execute(
+        CONTEXT, operation_id="openrouter.chat", parameters=CHAT,
+        action_sequence=0, timeout_ms=30000,
+    )
+
+    assert result.status == 200 and result.call["actual_microusd"] == 123
+    assert [sent["method"] for sent in transport.sent] == ["POST", "GET", "GET", "GET"]
+    assert store.calls[result.call["call_identity"]]["terminal"]["call_succeeded"] is True
+    assert "openrouter_error_type" not in result.call
+
+
+def test_ambiguous_openrouter_error_with_valid_id_keeps_polling(monkeypatch):
+    monkeypatch.setattr(br, "_OPENROUTER_BILLING_POLL_SECONDS", 0.001)
+    generation_id = "gen-ambiguous-error"
+    transport = FakeTransport([
+        (200, {"id": generation_id, "error": {"code": "502", "message": "opaque"}},
+         {"X-Generation-Id": generation_id}),
+        *[(404, {"error": {"code": 404}})] * br._OPENROUTER_BILLING_MAX_ATTEMPTS,
+    ])
+    broker, store, _ = make_broker(transport=transport)
+
+    result = broker.execute(
+        CONTEXT, operation_id="openrouter.chat", parameters=CHAT,
+        action_sequence=0, timeout_ms=30000,
+    )
+
+    assert_unpriced_uncertain(result)
+    assert [sent["method"] for sent in transport.sent] == ["POST"] + [
+        "GET"] * br._OPENROUTER_BILLING_MAX_ATTEMPTS
+    assert "openrouter_error_type" not in result.call
+    assert store.calls[result.call["call_identity"]]["uncertain_doc"][
+        "openrouter_generation_id"] == generation_id
+
+
+@pytest.mark.parametrize("original_status", (200, 502))
+def test_openrouter_error_without_message_keeps_polling(monkeypatch, original_status):
+    monkeypatch.setattr(br, "_OPENROUTER_BILLING_POLL_SECONDS", 0.001)
+    generation_id = "gen-missing-error-message"
+    transport = FakeTransport([
+        (original_status, {"id": generation_id, "error": {"code": 502}},
+         {"X-Generation-Id": generation_id}),
+        *[(404, {"error": {"code": 404}})] * br._OPENROUTER_BILLING_MAX_ATTEMPTS,
+    ])
+    broker, _store, _ = make_broker(transport=transport)
+
+    result = broker.execute(
+        CONTEXT, operation_id="openrouter.chat", parameters=CHAT,
+        action_sequence=0, timeout_ms=30000,
+    )
+
+    assert_unpriced_uncertain(result)
+    assert [sent["method"] for sent in transport.sent] == ["POST"] + [
+        "GET"] * br._OPENROUTER_BILLING_MAX_ATTEMPTS
+    assert "openrouter_error_type" not in result.call
+
+
+def test_nonerror_redirect_status_keeps_existing_billing_polling(monkeypatch):
+    monkeypatch.setattr(br, "_OPENROUTER_BILLING_POLL_SECONDS", 0.001)
+    generation_id = "gen-nonerror-redirect"
+    transport = FakeTransport([
+        (302, {"error": {"code": 302, "message": "redirect"}},
+         {"X-Generation-Id": generation_id}),
+        *[(404, {"error": {"code": 404}})] * br._OPENROUTER_BILLING_MAX_ATTEMPTS,
+    ])
+    broker, _store, _ = make_broker(transport=transport)
+
+    result = broker.execute(
+        CONTEXT, operation_id="openrouter.chat", parameters=CHAT,
+        action_sequence=0, timeout_ms=30000,
+    )
+
+    assert [sent["method"] for sent in transport.sent] == ["POST"] + [
+        "GET"] * br._OPENROUTER_BILLING_MAX_ATTEMPTS
+    assert "openrouter_error_type" not in result.call
+
+
+def test_internal_or_conflicting_openrouter_error_is_not_short_polled():
+    document = {"error": {
+        "code": 502, "message": "complete provider error",
+        "metadata": {"error_type": "provider_unavailable"},
+    }}
+    synthetic = br.ProviderResponse(
+        502, {}, json.dumps(document).encode(), "credential_echo",
+    )
+    native = br.ProviderResponse(502, {}, json.dumps(document).encode())
+    conflicting = {"error": {
+        "code": 503, "message": "complete but conflicting provider error",
+        "metadata": {"error_type": "provider_overloaded"},
+    }}
+
+    assert br._openrouter_complete_provider_error(native, document, native) is True
+    assert br._openrouter_complete_provider_error(synthetic, document, synthetic) is False
+    assert br._openrouter_complete_provider_error(native, conflicting, native) is False
+    assert br._openrouter_safe_error_type({
+        "error": {"metadata": {"error_type": "arbitrary-private-text"}},
+    }) == "unmapped"
+    assert br._openrouter_safe_error_type({
+        "error_type": "provider_unavailable",
+        "error": {"metadata": {"error_type": "provider_overloaded"}},
+    }) == "unmapped"
 
 
 @pytest.mark.parametrize(
@@ -3469,20 +3654,22 @@ def test_openrouter_generation_conflict_or_failed_readback_stays_uncertain(respo
 
 
 @pytest.mark.parametrize("exact_cost", ("0", "0.001234", "1.25"))
+@pytest.mark.parametrize("run_kind", ("execute", "score"))
 def test_delayed_exact_generation_settles_after_restart_without_second_post(
-    monkeypatch, exact_cost
+    exact_cost, run_kind
 ):
     generation_id = "gen-delayed-after-inline-window"
     error = {"error": {"code": 502, "message": "Provider returned an error"}}
-    monkeypatch.setattr(br, "_openrouter_generation_readback", lambda **_kwargs: None)
+    run_context = replace(CONTEXT, kind=run_kind)
     first_broker, store, first_transport = make_broker(
         transport=FakeTransport(
-            [(502, error, {"X-Generation-Id": generation_id})]
-        )
+            [(502, error, {"X-Generation-Id": generation_id}),
+             (404, {"error": {"code": 404, "message": "not found"}})]
+        ), judge_models=(CHAT["model"],),
     )
 
     first = first_broker.execute(
-        CONTEXT,
+        run_context,
         operation_id="openrouter.chat",
         parameters=CHAT,
         action_sequence=0,
@@ -3492,14 +3679,14 @@ def test_delayed_exact_generation_settles_after_restart_without_second_post(
     candidate = {
         "uncertain_entry_id": 1,
         "round_id": "arena-2026-09-02",
-        "run_id": CONTEXT.run_id,
-        "submission_id": CONTEXT.submission_id,
-        "miner_hotkey": CONTEXT.miner_hotkey,
-        "assignment_id": CONTEXT.assignment_id,
-        "stage": CONTEXT.stage,
-        "icp_position": CONTEXT.icp_position,
-        "attempt": CONTEXT.attempt,
-        "kind": CONTEXT.kind,
+        "run_id": run_context.run_id,
+        "submission_id": run_context.submission_id,
+        "miner_hotkey": run_context.miner_hotkey,
+        "assignment_id": run_context.assignment_id,
+        "stage": run_context.stage,
+        "icp_position": run_context.icp_position,
+        "attempt": run_context.attempt,
+        "kind": run_context.kind,
         "call_identity": first.call["call_identity"],
         "generation_id": diagnostic["openrouter_generation_id"],
         "credential_fingerprint": diagnostic["credential_fingerprint"],
@@ -3528,7 +3715,7 @@ def test_delayed_exact_generation_settles_after_restart_without_second_post(
     reconciled = restarted_broker.reconcile_openrouter_cost(candidate)
 
     assert first.call["outcome"] == "uncertain"
-    assert [request["method"] for request in first_transport.sent] == ["POST"]
+    assert [request["method"] for request in first_transport.sent] == ["POST", "GET"]
     assert [request["method"] for request in second_transport.sent] == ["GET"]
     assert reconciled["status"] == "settled"
     assert store.calls[first.call["call_identity"]]["actual"] == (

@@ -1809,14 +1809,15 @@ def _openrouter_generation_readback(
     secret: str,
     generation_id: str,
     reconciliation_deadline: float,
+    poll: bool = True,
 ) -> Optional[provider_costs.ProviderCost]:
-    """Poll one exact OpenRouter generation without retrying the paid request."""
+    """Read exact billing; complete provider errors need one synchronous lookup."""
 
     readback_deadline = min(
         reconciliation_deadline,
         time.monotonic() + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS,
     )
-    for attempt in range(_OPENROUTER_BILLING_MAX_ATTEMPTS):
+    for attempt in range(_OPENROUTER_BILLING_MAX_ATTEMPTS if poll else 1):
         now = time.monotonic()
         if now >= readback_deadline:
             break
@@ -2828,6 +2829,49 @@ def _openrouter_effective_response(response: ProviderResponse) -> ProviderRespon
     if len(set(statuses)) != 1:
         raise operations.OperationResponseError("invalid_response")
     return ProviderResponse(statuses[0], response.headers, response.body)
+
+
+def _openrouter_complete_provider_error(
+    response: ProviderResponse,
+    document: Any,
+    effective_response: Optional[ProviderResponse],
+) -> bool:
+    """Recognize a complete provider error without trusting an ambiguous body."""
+
+    if (
+        response.internal_provenance is not None
+        or not isinstance(document, Mapping)
+        or effective_response is None
+        or not 400 <= effective_response.status <= 599
+    ):
+        return False
+    error = document.get("error")
+    if (
+        not isinstance(error, Mapping)
+        or not isinstance(error.get("message"), str)
+        or not error["message"].strip()
+    ):
+        return False
+    if 200 <= response.status < 300:
+        # The effective-response parser validated the embedded error status.
+        return True
+    return (
+        type(error.get("code")) is int
+        and error["code"] == response.status
+    )
+
+
+def _openrouter_safe_error_type(document: Mapping[str, Any]) -> str:
+    """Expose only OpenRouter's fixed typed vocabulary, never provider text."""
+
+    error = document.get("error")
+    metadata = error.get("metadata") if isinstance(error, Mapping) else None
+    nested = metadata.get("error_type") if isinstance(metadata, Mapping) else None
+    top_level = document.get("error_type")
+    if top_level is not None and nested is not None and top_level != nested:
+        return "unmapped"
+    value = top_level if top_level is not None else nested
+    return value if isinstance(value, str) and value in _OPENROUTER_RESPONSE_ERROR_TYPE_STATUSES else "unmapped"
 
 
 def _provider_call_succeeded(
@@ -4816,6 +4860,7 @@ class Broker:
         openrouter_readback_cost: Optional[provider_costs.ProviderCost] = None
         openrouter_insured_cost: Optional[provider_costs.ProviderCost] = None
         openrouter_effective_response: Optional[ProviderResponse] = None
+        openrouter_complete_error = False
         openrouter_generation_present = False
         openrouter_generation_id: Optional[str] = None
         openrouter_canonical_response_error = False
@@ -4895,6 +4940,15 @@ class Broker:
                         raw_document = json.loads(response.body.decode("utf-8"))
                     except (UnicodeDecodeError, ValueError):
                         raw_document = None
+                    openrouter_complete_error = _openrouter_complete_provider_error(
+                        response, raw_document, openrouter_effective_response,
+                    )
+                    if openrouter_complete_error:
+                        summary.update({
+                            "openrouter_original_http_status": int(response.status),
+                            "openrouter_effective_error_status": int(openrouter_effective_response.status),
+                            "openrouter_error_type": _openrouter_safe_error_type(raw_document),
+                        })
                     openrouter_canonical_response_error = bool(
                         openrouter_effective_response is not None
                         and 200 <= response.status < 300
@@ -4956,6 +5010,7 @@ class Broker:
                             transport=self._transport,
                             secret=secret,
                             generation_id=openrouter_generation_id,
+                            poll=not openrouter_complete_error,
                             reconciliation_deadline=(
                                 min(
                                     time.monotonic()

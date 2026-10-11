@@ -117,6 +117,31 @@ def test_bounded_outage_does_not_falsely_report_a_durable_uncertain_head(monkeyp
     assert len(transport.sent) == 1
 
 
+def test_transport_failure_uncertainty_exhaustion_reports_undurable_dispatch(monkeypatch):
+    clock = clock_fixture(monkeypatch)
+    broker, store, transport = make_broker(transport=FakeTransport(fail=True))
+    attempts = []
+    started = []
+
+    def unavailable(**kwargs):
+        if not attempts:
+            started.append(clock.now)
+        attempts.append(deepcopy(kwargs))
+        raise br.ArenaStoreUnavailable("transport unavailable")
+
+    store.mark_uncertain = unavailable
+    result = broker.execute(CONTEXT, operation_id="deepline.execute",
+                            parameters={"tool": "exa_search", "payload": {"query": "x"}},
+                            action_sequence=0, timeout_ms=5000)
+    assert clock.now - started[0] == 120
+    assert result.call["outcome"] == "dispatched"
+    assert json.loads(result.body)["error"]["code"] == "broker_unavailable"
+    assert next(iter(store.calls.values()))["kind"] == "dispatch"
+    assert all(attempt == attempts[0] for attempt in attempts)
+    assert attempts[0]["call_doc"]["reason"] == "transport_failure"
+    assert [request["method"] for request in transport.sent].count("POST") == 1
+
+
 @pytest.mark.parametrize("failure", [
     br.ArenaStoreError("rpc lab_arena_settle_call failed: HTTP 403 forbidden"),
     br.ArenaStoreError("rpc lab_arena_settle_call failed: HTTP 400 bad input"),

@@ -5199,10 +5199,14 @@ class Broker:
                     deepline_readback_cost is None
                     and scrapingdog_observed_success_status is None
                 ):
-                    self._persist_provider_accounting(self._store.mark_uncertain,
-                        run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
-                        call_doc=uncertain_doc, lease_ttl_seconds=self._lease_ttl_seconds,
-                    )
+                    try:
+                        self._persist_provider_accounting(self._store.mark_uncertain,
+                            run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
+                            call_doc=uncertain_doc, lease_ttl_seconds=self._lease_ttl_seconds,
+                        )
+                    except ArenaStoreError:
+                        summary.update({"outcome": "dispatched"})
+                        return _error_result("broker_unavailable", summary)
                     summary.update({"outcome": "uncertain"})
                     return _error_result("provider_unavailable", summary)
                 if deepline_readback_cost is not None:

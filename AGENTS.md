@@ -1,5 +1,16 @@
 # Agent Instructions
 
+## Scoped production authorization: October 11 outage recovery
+
+The user authorized monitoring the October 11 round through execution,
+scoring, publication, rewards, and weights. This includes protected inspection,
+narrow fixes for confirmed faults, focused tests, safe push and merge,
+canonical gateway and normal-validator deployment, and live verification.
+Preserve accepted work, provider identities and costs, scoring, qualification,
+round timing, credentials, weights, and concurrent changes. Preserve October 10
+published results exactly. Do not rescore or change historical results, or force
+live jobs to stop. This authority ends after recovery and live verification.
+
 ## Scoped production authorization: October 10 restart and result latency
 
 On 2026-10-10 the user authorized completion of the validator restart,

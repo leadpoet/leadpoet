@@ -156,6 +156,11 @@ _OPENROUTER_RESPONSE_ERROR_TYPE_STATUSES = {
 }
 OPENROUTER_DELAYED_RECONCILIATION_TIMEOUT_SECONDS = 5.0
 _SETTLEMENT_STORE_MAX_ATTEMPTS = 3
+# Keep a paid reply in its existing request thread through a short database
+# restart. This grace applies only to idempotent accounting writes, never to
+# provider dispatch, and uses one deadline for settlement and its fallback.
+_ACCOUNTING_STORE_RECOVERY_SECONDS = 120.0
+_ACCOUNTING_STORE_MAX_BACKOFF_SECONDS = 5.0
 DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS = 5.0
 _DEEPLINE_REQUEST_ID_RE = re.compile(r"^ctx-tool-[0-9a-f]{32}$")
 _DEEPLINE_EXECUTION_KEY_RE = re.compile(r"^arena:[0-9a-f]{64}$")
@@ -3194,6 +3199,31 @@ class Broker:
     def _timestamp(self) -> str:
         return self._clock().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    def _persist_provider_accounting(
+        self, write: Callable[..., Dict[str, Any]], *,
+        deadline: Optional[float] = None, **arguments: Any,
+    ) -> Dict[str, Any]:
+        """Retry an exact accounting receipt while its database is unavailable."""
+        if deadline is None:
+            deadline = time.monotonic() + _ACCOUNTING_STORE_RECOVERY_SECONDS
+        backoff = 0.5
+        while True:
+            try:
+                return write(**arguments)
+            except ArenaStoreError as exc:
+                # HTTP availability responses are currently plain StoreError.
+                # Do not pace/retry authorization, input, or contract failures.
+                transient = isinstance(exc, ArenaStoreUnavailable) or re.match(
+                    r"^rpc lab_arena_(?:settle_call|mark_uncertain|recover_deepline_response_v1) "
+                    r"(?:failed: HTTP (?:502|503|504)(?: |$)|returned non-JSON$)",
+                    str(exc),
+                ) is not None
+                remaining = deadline - time.monotonic()
+                if not transient or remaining <= 0:
+                    raise
+                time.sleep(min(backoff, remaining))
+                backoff = min(backoff * 2, _ACCOUNTING_STORE_MAX_BACKOFF_SECONDS)
+
     def _openrouter_parameters(self, parameters: Mapping[str, Any], *, kind: str = "execute") -> Tuple[Dict[str, Any], int]:
         model = str(parameters.get("model") or "")
         if kind == "score" and model not in self._judge_models:
@@ -5169,10 +5199,14 @@ class Broker:
                     deepline_readback_cost is None
                     and scrapingdog_observed_success_status is None
                 ):
-                    self._store.mark_uncertain(
-                        run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
-                        call_doc=uncertain_doc, lease_ttl_seconds=self._lease_ttl_seconds,
-                    )
+                    try:
+                        self._persist_provider_accounting(self._store.mark_uncertain,
+                            run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
+                            call_doc=uncertain_doc, lease_ttl_seconds=self._lease_ttl_seconds,
+                        )
+                    except ArenaStoreError:
+                        summary.update({"outcome": "dispatched"})
+                        return _error_result("broker_unavailable", summary)
                     summary.update({"outcome": "uncertain"})
                     return _error_result("provider_unavailable", summary)
                 if deepline_readback_cost is not None:
@@ -5251,6 +5285,7 @@ class Broker:
         adapted_response_url = ""
         call_succeeded = False
         judgment_cache_eligible = False
+        accounting_store_deadline = time.monotonic() + _ACCOUNTING_STORE_RECOVERY_SECONDS
         try:
             if effective_operation.provider == "openrouter":
                 response = (
@@ -5416,7 +5451,8 @@ class Broker:
                             judgment_cache_eligible=True,
                         )
                     )
-                uncertain_state = self._store.mark_uncertain(
+                uncertain_state = self._persist_provider_accounting(self._store.mark_uncertain,
+                    deadline=accounting_store_deadline,
                     run_id=context.run_id,
                     lease_token_hash=context.lease_token_hash,
                     call_identity=call_identity,
@@ -5428,7 +5464,8 @@ class Broker:
                     and deepline_execution_key is not None
                     and deepline_response_request_id is not None
                     and hasattr(self._store, "recover_deepline_response")):
-                    uncertain_state = self._store.recover_deepline_response(
+                    uncertain_state = self._persist_provider_accounting(self._store.recover_deepline_response,
+                        deadline=accounting_store_deadline,
                         run_id=context.run_id, lease_token_hash=context.lease_token_hash,
                         call_identity=call_identity, request_hash=request_hash,
                         execution_key=deepline_execution_key,
@@ -5584,12 +5621,14 @@ class Broker:
             )
             for attempt in range(_SETTLEMENT_STORE_MAX_ATTEMPTS):
                 try:
-                    settled = (self._store.recover_deepline_response(
+                    settled = (self._persist_provider_accounting(self._store.recover_deepline_response,
+                        deadline=accounting_store_deadline,
                         **settlement, request_hash=request_hash,
                         execution_key=deepline_execution_key,
                         credential_fingerprint=provider_credential_fingerprint,
                         request_id=deepline_response_request_id, operation=deepline_operation,
-                    ) if deepline_response_recovery else self._store.settle_call(**settlement))
+                    ) if deepline_response_recovery else self._persist_provider_accounting(
+                        self._store.settle_call, deadline=accounting_store_deadline, **settlement))
                 except ArenaStoreError as exc:
                     if attempt + 1 == _SETTLEMENT_STORE_MAX_ATTEMPTS:
                         if (
@@ -5614,7 +5653,8 @@ class Broker:
                             )
                             if deepline_async_ids:
                                 compact_terminal["deepline_async_job_ids"] = list(deepline_async_ids)
-                            settled = self._store.settle_call(
+                            settled = self._persist_provider_accounting(self._store.settle_call,
+                                deadline=accounting_store_deadline,
                                 **dict(settlement, terminal_response=compact_terminal)
                             )
                             if settled.get("status") != "settled":
@@ -5663,7 +5703,8 @@ class Broker:
                     provider_cost=cost_record,
                 )
                 try:
-                    settled = self._store.settle_call(
+                    settled = self._persist_provider_accounting(self._store.settle_call,
+                        deadline=accounting_store_deadline,
                         run_id=context.run_id,
                         lease_token_hash=context.lease_token_hash,
                         call_identity=call_identity,
@@ -5731,14 +5772,18 @@ class Broker:
                     "transport_error_class": summary["transport_error_class"],
                 })
             try:
-                self._store.mark_uncertain(
+                self._persist_provider_accounting(self._store.mark_uncertain,
+                    deadline=accounting_store_deadline,
                     run_id=context.run_id, lease_token_hash=context.lease_token_hash, call_identity=call_identity,
                     call_doc=uncertain_doc,
                     lease_ttl_seconds=self._lease_ttl_seconds,
                 )
                 summary.update({"outcome": "uncertain"})
             except Exception:
-                summary.update({"outcome": "uncertain"})
+                # No uncertainty receipt was confirmed. Do not claim the
+                # durable head changed, or discard its unknown accounting state.
+                summary.update({"outcome": "dispatched"})
+                return _error_result("broker_unavailable", summary)
             return _error_result("provider_unavailable", summary)
         settle_status = settled.get("status")
         if settle_status == "settled" and credit_failure_proof is not None:

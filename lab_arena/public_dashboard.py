@@ -735,7 +735,8 @@ _EVALUATION_COLUMNS = (
     "run_id,assignment_id,submission_id,kind,status,terminal_cause,runner_hotkey,attempt,"
     "lease_generation,lease_expires_at,"
     "source_commit:result_doc->resource_summary->>validator_source_commit,"
-    "source_dirty:result_doc->resource_summary->>validator_source_dirty"
+    "source_dirty:result_doc->resource_summary->>validator_source_dirty,"
+    "failure_reason:result_doc->failure_diagnostic->>reason"
 )
 
 _EVALUATION_FAILURE_REASONS = {
@@ -749,6 +750,20 @@ _EVALUATION_FAILURE_REASONS = {
     "budget_exhausted": "execution",
     "model_error": "execution",
 }
+
+
+def _evaluation_failure_reason(run: Mapping[str, Any]) -> str:
+    cause = run.get("terminal_cause")
+    if not isinstance(cause, str):
+        return "unknown"
+    if cause == "stage_closed" and run.get("kind") == "score":
+        return "scoring_window"
+    if (
+        cause == "credential_error"
+        and run.get("failure_reason") == "provider_credit_exhausted"
+    ):
+        return "provider_credit_exhausted"
+    return _EVALUATION_FAILURE_REASONS.get(cause, "unknown")
 
 
 def _recorded_source(record: Mapping[str, Any]) -> tuple:
@@ -839,11 +854,7 @@ def evaluation_progress(
             counts["completed"] += 1
         elif status == "failed":
             counts["failed"] += 1
-            cause = run.get("terminal_cause")
-            failure_reasons.add(
-                _EVALUATION_FAILURE_REASONS.get(cause, "unknown")
-                if isinstance(cause, str) else "unknown"
-            )
+            failure_reasons.add(_evaluation_failure_reason(run))
         elif status == "submitted":
             submitted = True
         else:

@@ -288,7 +288,7 @@ def test_unclaimed_stage_closed_assignments_explain_all_49_incomplete_models():
 
 
 @pytest.mark.parametrize("cause,reason", [
-    ("credential_error", "provider_credentials"), ("stage_closed", "execution_window"),
+    ("credential_error", "provider_credentials"), ("stage_closed", "scoring_window"),
     ("judge_error", "review"), ("judge_timeout", "review"), ("provider_error", "provider"),
     ("model_timeout", "execution"), ("invalid_output", "execution"),
     ("budget_exhausted", "execution"), ("model_error", "execution"),
@@ -315,5 +315,5 @@ def test_failure_reasons_follow_effective_assignments_and_do_not_change_retry_or
     assert public_dashboard.evaluation_progress([failed, latest], NOW)["failure_reasons"] == ["review"]
     mixed = [failed, run(assignment_id="other", status="failed", terminal_cause="stage_closed")]
     projected = public_dashboard.evaluation_progress(mixed, NOW)
-    assert projected["failure_reasons"] == ["execution_window", "provider_credentials"]
+    assert projected["failure_reasons"] == ["provider_credentials", "scoring_window"]
     assert "failure_reasons" not in public_dashboard.evaluation_progress(mixed, NOW, outcome="completed")

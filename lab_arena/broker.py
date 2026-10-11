@@ -480,6 +480,8 @@ def _retry_after_seconds(headers: Mapping[str, str]) -> object:
 def _safe_exception_class(exc: BaseException) -> str:
     """Return only a bounded Python class label, never exception text."""
 
+    if isinstance(exc, ArenaStoreError):
+        return "ArenaStoreError"
     name = type(exc).__name__
     return name if name in _SAFE_EXCEPTION_CLASSES else "Exception"
 

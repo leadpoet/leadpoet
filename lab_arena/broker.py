@@ -1330,7 +1330,9 @@ def _deepline_insufficient_credit_response(response: ProviderResponse, document:
         or _DEEPLINE_REQUEST_ID_RE.fullmatch(body_id) is not None
     ):
         return False
-    header_id = _deepline_response_header_request_id(response.headers)
+    header_id = _deepline_response_header_request_id(
+        response.headers, allow_edge_fallback=body_id is None,
+    )
     if "x-deepline-request-id" in response.headers and header_id is None:
         return False
     return body_id is None or header_id is None or body_id == header_id

@@ -14,7 +14,7 @@ import math
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from lab_arena import code_review_policy, contracts, icp_disclosure, source_disclosure, verify
-from lab_arena.store import COMPETITION_CONFIGURATION_FIELDS
+from lab_arena.store import COMPETITION_CONFIGURATION_FIELDS, PUBLIC_CONFIGURATION_COLUMN
 
 
 PUBLIC_BASELINE_REPOSITORY = "https://github.com/leadpoet/leadpoet-sales-agent/tree/lab"
@@ -133,11 +133,7 @@ _ROUND_COLUMNS = (
     "baseline_promoted_at,icp_set_date,evaluation_date"
 )
 _COMPETITION_ROUND_COLUMNS = _ROUND_COLUMNS.replace(
-    "configuration_doc",
-    ",".join(
-        "cfg_%s:configuration_doc->%s::text" % (key, key)
-        for key in COMPETITION_CONFIGURATION_FIELDS
-    ),
+    "configuration_doc", PUBLIC_CONFIGURATION_COLUMN,
 ).replace("publication_doc", "publication_doc:lab_arena_competition_publication_v1")
 
 

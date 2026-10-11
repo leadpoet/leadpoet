@@ -9,7 +9,10 @@ import pytest
 
 from lab_arena import contact_policy, contracts, integrity, intent_details_policy, quality_policy, rewards, signing
 from lab_arena.service import ArenaService, ServiceError
-from lab_arena.store import ArenaStore, CURRENT_CONFIGURATION_FIELDS, PostgrestTransport, PsycopgTransport
+from lab_arena.store import (
+    ArenaStore, CURRENT_CONFIGURATION_FIELDS, PUBLIC_CONFIGURATION_COLUMN,
+    PUBLIC_CONFIGURATION_FIELDS, PostgrestTransport, PsycopgTransport,
+)
 from leadpoet_canonical.lab_arena_rewards import verify_reward_basis_signature
 from tests.lab_arena.competition_summary_projection_test import _project
 
@@ -107,8 +110,8 @@ def test_current_response_matches_full_rows_and_preserves_signed_governing_basis
     assert expected["round"]["benchmark_icp_count"] == 10
     assert expected["round"]["output_schema_version"] == intent_details_policy.OUTPUT_SCHEMA
     assert "private-catalog" not in json.dumps(transport.returned)
-    assert all("configuration_doc" not in row for row in transport.returned)
-    assert all("configuration_doc" not in call["columns"].split(",") for call in transport.calls)
+    assert all("private-catalog" not in json.dumps(row.get("configuration_doc")) for row in transport.returned)
+    assert all(PUBLIC_CONFIGURATION_COLUMN in call["columns"].split(",") for call in transport.calls)
     if epoch is not None:
         full_basis = original.public_reward_basis(epoch)
         compact_basis = candidate.public_reward_basis(epoch, public_only=True)
@@ -239,7 +242,13 @@ def test_reward_paging_filters_and_signed_metadata_match_full_read():
     assert [row["round_id"] for row in compact] == [row["round_id"] for row in full]
     assert [query["offset"] for query in transport.calls] == [0, 2]
     for original, candidate in zip(full, compact):
-        assert {key: value for key, value in candidate.items() if not key.startswith("cfg_")} == {key: value for key, value in original.items() if key != "configuration_doc"}
+        assert {key: value for key, value in candidate.items() if key != "configuration_doc"} == {
+            key: value for key, value in original.items() if key != "configuration_doc"
+        }
+        assert candidate["configuration_doc"] == {
+            key: value for key, value in original["configuration_doc"].items()
+            if key in PUBLIC_CONFIGURATION_FIELDS
+        }
     for original, candidate in zip(full_queries, transport.calls):
         assert {key: value for key, value in candidate.items() if key != "columns"} == {key: value for key, value in original.items() if key != "columns"}
 
@@ -251,11 +260,10 @@ def test_compact_postgrest_select_and_fixed_psycopg_aliases():
         service._store = ArenaStore(PostgrestTransport("https://example.test", service_key="sb_secret_test", http_client=http))
         service.public_current()
     assert len(requests) == 3
-    expected_fields = [CURRENT_CONFIGURATION_FIELDS, ("mode",), ("mode", "baseline_hotkey")]
-    for request, fields in zip(requests, expected_fields):
+    for request in requests:
         params = request.url.params
         assert "configuration_doc" not in params["select"].split(",")
-        assert {column for column in params["select"].split(",") if ":configuration_doc" in column} == {"cfg_%s:configuration_doc->%s::text" % (key, key) for key in fields}
+        assert params["select"].split(",").count(PUBLIC_CONFIGURATION_COLUMN) == 1
         assert params["configuration_doc->>mode"] == "eq.live"
         assert params["arena_network_name"] == "eq.finney" and params["arena_netuid"] == "eq.71"
     assert requests[0].url.params["limit"] == "20"
@@ -274,8 +282,7 @@ def test_compact_postgrest_select_and_fixed_psycopg_aliases():
     direct._release = lambda _connection: None
     service._store = ArenaStore(direct)
     service.public_current()
-    for (sql, values), fields in zip(queries, expected_fields):
-        for key in fields:
-            assert "(configuration_doc -> '%s')::text AS cfg_%s" % (key, key) in sql
+    for sql, values in queries:
+        assert "public.lab_arena_public_configuration_v1(lab_arena_rounds) AS configuration_doc" in sql
         assert ":configuration_doc" not in sql
         assert "finney" in values and 71 in values and "live" in values

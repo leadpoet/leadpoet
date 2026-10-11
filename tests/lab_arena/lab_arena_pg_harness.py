@@ -133,6 +133,7 @@ CURRENT_SERVICE_MIGRATIONS = POSTGREST_MIGRATIONS + (
     "403-lab-arena-credit-failure-retry.sql",
     "405-lab-arena-submission-duplicates.sql",
     "449-lab-arena-published-results-rank-view.sql",
+    "464-lab-arena-public-read-index.sql",
 )
 
 # Full current-service flows need the latest provider RPCs. Historical migration

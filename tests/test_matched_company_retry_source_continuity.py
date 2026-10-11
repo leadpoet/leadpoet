@@ -9,6 +9,7 @@ from gateway.qualification.models import CompanyOutput, ICPPrompt
 from qualification.scoring import lead_scorer
 from qualification.scoring.company_evidence_investigator import (
     MAX_FETCH_CALLS,
+    MAX_PREFETCHED_PAGES,
     MAX_PAGE_CHARACTERS,
 )
 from qualification.scoring.company_fit_decision import (
@@ -215,7 +216,7 @@ def test_later_matched_page_does_not_replace_first_retry_page():
 
 def test_fresh_same_url_bytes_replace_old_bytes_even_when_cache_is_full():
     cache = _retry_cache()
-    for index in range(1, MAX_FETCH_CALLS):
+    for index in range(1, MAX_PREFETCHED_PAGES):
         url = f"https://unibuddy.com/retained-{index}/"
         cache["pages"][url] = {"final_url": url, "text": f"retained {index}"}
     updated_text = f"Updated platform page\n{PLATFORM_QUOTE}\nNew exact body."
@@ -226,13 +227,13 @@ def test_fresh_same_url_bytes_replace_old_bytes_even_when_cache_is_full():
         _fit_result(decision=COMPANY_FIT_UNAVAILABLE),
     )
 
-    assert len(cache["pages"]) == MAX_FETCH_CALLS
+    assert len(cache["pages"]) == MAX_PREFETCHED_PAGES
     assert cache["pages"][PLATFORM_URL]["text"] == updated_text
 
 
 def test_full_cache_skips_new_page_but_refreshes_later_existing_page():
     cache = _retry_cache()
-    for index in range(1, MAX_FETCH_CALLS):
+    for index in range(1, MAX_PREFETCHED_PAGES):
         url = f"https://unibuddy.com/retained-{index}/"
         cache["pages"][url] = {"final_url": url, "text": f"retained {index}"}
     new_url = "https://unibuddy.com/new-platform/"
@@ -251,7 +252,7 @@ def test_full_cache_skips_new_page_but_refreshes_later_existing_page():
         result,
     )
 
-    assert len(cache["pages"]) == MAX_FETCH_CALLS
+    assert len(cache["pages"]) == MAX_PREFETCHED_PAGES
     assert new_url not in cache["pages"]
     assert cache["pages"][PLATFORM_URL]["text"] == updated_text
 

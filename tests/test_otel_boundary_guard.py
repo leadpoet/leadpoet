@@ -466,3 +466,32 @@ def test_literal_service_denial_codes_remain_exportable() -> None:
             if re.fullmatch(r"[a-z][a-z0-9_]{0,47}", prefix):
                 required.add(prefix)
     assert required <= allowed
+
+
+def test_literal_source_disclosure_denial_codes_remain_exportable() -> None:
+    """``public_submission_code`` re-raises with a *variable* code.
+
+    ``raise ServiceError(exc.code, exc.status)`` hides every source-disclosure
+    refusal from the literal scan above, so those codes could fall out of the
+    vocabulary and export as the no-denial mark while the route 403s. Scan
+    where they are actually raised instead.
+    """
+    allowed = set(_frozen_literal(_read(BOOTSTRAP), "ARENA_DENIAL_CODES"))
+    tree = ast.parse(_read("lab_arena/source_disclosure.py"))
+    required = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name) or node.func.id != "SourceDisclosureError":
+            continue
+        if not node.args:
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.BinOp) and isinstance(first.op, ast.Mod):
+            first = first.left
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            prefix = first.value.split(":", 1)[0]
+            if re.fullmatch(r"[a-z][a-z0-9_]{0,47}", prefix):
+                required.add(prefix)
+    assert required, "no literal SourceDisclosureError codes found to check"
+    assert required <= allowed

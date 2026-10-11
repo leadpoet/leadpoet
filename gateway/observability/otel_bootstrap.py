@@ -464,6 +464,8 @@ ARENA_DENIAL_CODES = frozenset(
         "signature_invalid",
         "similarity_reference_limit",
         "similarity_reference_unavailable",
+        "source_not_public",
+        "source_unavailable",
         "source_upload_not_configured",
         "source_upload_unavailable",
         "stage_invalid",

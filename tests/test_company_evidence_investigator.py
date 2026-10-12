@@ -2127,6 +2127,66 @@ def test_attribute_cache_does_not_project_unusable_source(
     ) == {}
 
 
+@pytest.mark.parametrize("region", ["ca", "uk", "in"])
+def test_regional_linkedin_fetch_uses_exact_profile_and_preserves_citation(
+    monkeypatch, region,
+):
+    requested = f"https://{region}.linkedin.com/company/acme"
+    canonical = "https://www.linkedin.com/company/acme"
+    text = "Acme | LinkedIn. 900 followers. Company size 11-50 employees"
+    calls = []
+
+    async def profile(url, *, diagnostic, source_text_sink):
+        calls.append(url)
+        source_text_sink.update(url=canonical, text=text)
+        return {"url": canonical, "employee_count": "11-50", "quote": text}
+
+    generic = AsyncMock(side_effect=AssertionError("generic profile fetch"))
+    monkeypatch.setattr(investigator, "fetch_current_linkedin_company_size", profile)
+    monkeypatch.setattr(investigator, "_fetch_bounded_html", generic)
+    fetched = asyncio.run(investigator._fetch_page(object(), requested))
+    assert calls == [canonical]
+    assert fetched == {
+        "ok": True, "url": requested, "final_url": canonical, "text": text,
+    }
+    finding = _finding(
+        "headcount", observed_value="11-50", evidence_url=requested,
+        evidence_quote=text,
+    )
+    result = _validated_findings(
+        {"findings": [finding]}, targets=("headcount",),
+        fetched_pages={requested: fetched["text"]},
+        fetched_final_urls={requested: fetched["final_url"]},
+        first_party_domains={"acme.example"}, identity_names={"acme"},
+    )
+    assert result["headcount"]["status"] == "VERIFIED"
+    assert result["headcount"]["evidence_url"] == requested
+    generic.assert_not_awaited()
+
+
+@pytest.mark.parametrize("source_url,current_url", [
+    ("https://www.linkedin.com/company/other", "https://www.linkedin.com/company/other"),
+    ("https://www.linkedin.com/company/acme", "https://www.linkedin.com/company/other"),
+    ("https://evil.example/company/acme", "https://www.linkedin.com/company/acme"),
+])
+def test_regional_linkedin_fetch_rejects_mismatched_returned_profile(
+    monkeypatch, source_url, current_url,
+):
+    async def profile(url, *, diagnostic, source_text_sink):
+        assert url == "https://www.linkedin.com/company/acme"
+        source_text_sink.update(url=source_url, text="Acme Company size 11-50 employees")
+        return {"url": current_url, "employee_count": "11-50"}
+
+    generic = AsyncMock(side_effect=AssertionError("generic profile fetch"))
+    monkeypatch.setattr(investigator, "fetch_current_linkedin_company_size", profile)
+    monkeypatch.setattr(investigator, "_fetch_bounded_html", generic)
+    result = asyncio.run(investigator._fetch_page(
+        object(), "https://ca.linkedin.com/company/acme",
+    ))
+    assert result["ok"] is False
+    generic.assert_not_awaited()
+
+
 def test_investigator_fetch_uses_bounded_transport_and_validates_final_url(
     monkeypatch,
 ):

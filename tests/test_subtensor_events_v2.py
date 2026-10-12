@@ -38,6 +38,7 @@ CURRENT_RUNTIME_FIXTURES = {
     472: ROOT / "tests" / "fixtures" / "subtensor_events_spec472_block9198408.json",
     473: ROOT / "tests" / "fixtures" / "subtensor_events_spec473_block9217488.json",
     475: ROOT / "tests" / "fixtures" / "subtensor_events_spec475_block9234048.json",
+    477: ROOT / "tests" / "fixtures" / "subtensor_events_spec477_block9267887.json",
 }
 
 
@@ -233,6 +234,12 @@ def test_real_spec455_archive_events_prove_exact_adjacent_reveal():
             "0x557634c8c31bc639ea6552e297dcfb781cd7d9bdd491a5352c151305db33d3a0",
             265,
         ),
+        (
+            477,
+            "1d9a056217f440400df497ad70d4a6a6148abc19871d1b28e52464c507c11260",
+            "0x18b52484d9c5d7523f704c86b17b2ab959fffbc6edb6766a77e9877f0ad19387",
+            262,
+        ),
     ),
 )
 def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
@@ -322,7 +329,7 @@ def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
     assert proof["account_id_hex"] == expected["account_id_hex"]
 
 
-@pytest.mark.parametrize("spec_version", [464, 466, 467, 468, 469, 470, 472, 473, 475])
+@pytest.mark.parametrize("spec_version", [464, 466, 467, 468, 469, 470, 472, 473, 475, 477])
 def test_exact_runtime_and_reveal_tampering_fail_closed(spec_version):
     fixture = json.loads(
         CURRENT_RUNTIME_FIXTURES[spec_version].read_text(encoding="utf-8")
@@ -465,6 +472,66 @@ def test_spec475_measured_normal_validator_reveal_is_exact():
         _proof(validated, other, events_raw, count_raw)
     with pytest.raises(SubtensorEventsV2Error, match="EventCount"):
         _proof(validated, fixture, events_raw, (264).to_bytes(4, "little"))
+    with pytest.raises(SubtensorEventsV2Error, match="trailing"):
+        _proof(validated, fixture, events_raw + b"\x00", count_raw)
+
+
+def test_spec477_missing_or_wrong_profile_fails_closed(monkeypatch):
+    fixture = json.loads(CURRENT_RUNTIME_FIXTURES[477].read_text(encoding="utf-8"))
+    with pytest.raises(SubtensorEventsV2Error, match="observed spec version differs"):
+        validate_subtensor_events_profile_v2(
+            load_subtensor_events_profile_v2(spec_version=475),
+            genesis_hash="0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03",
+            spec_version=477,
+            transaction_version=1,
+            metadata_raw=bytes.fromhex(fixture["metadata_hex"][2:]),
+            runtime_code_hash=fixture["runtime_code_storage_hash"],
+        )
+    monkeypatch.delitem(event_module.DEFAULT_PROFILE_PATHS, 477)
+    with pytest.raises(SubtensorEventsV2Error, match="unavailable"):
+        load_subtensor_events_profile_v2(spec_version=477)
+    with pytest.raises(SubtensorEventsV2Error, match="unavailable"):
+        load_subtensor_events_profile_v2(spec_version=478)
+
+
+def test_spec477_measured_current_epoch_reveal_is_exact():
+    fixture = json.loads(CURRENT_RUNTIME_FIXTURES[477].read_text(encoding="utf-8"))
+    profile = load_subtensor_events_profile_v2(spec_version=477)
+    assert fixture["block_number"] == 9267887
+    assert fixture["block_hash"] == (
+        "0x3d2535c72a8ba0d3602896bbc09e381fce20b74caddf4ce5a2150c12612a6f3c"
+    )
+    assert fixture["metadata_block_number"] == fixture["block_number"] - 1
+    assert fixture["metadata_block_hash"] == "0x" + fixture["parent_hash"]
+    assert profile["measurement"]["parent_hash"] == fixture["metadata_block_hash"]
+    validated = validate_subtensor_events_profile_v2(
+        profile,
+        genesis_hash=profile["genesis_hash"],
+        spec_version=477,
+        transaction_version=1,
+        metadata_raw=bytes.fromhex(fixture["metadata_hex"][2:]),
+        runtime_code_hash=fixture["runtime_code_storage_hash"],
+    )
+    events_raw = bytes.fromhex(fixture["system_events"][2:])
+    count_raw = bytes.fromhex(fixture["system_event_count"][2:])
+    proof = _proof(validated, fixture, events_raw, count_raw)
+    assert proof["profile_sha256"] == (
+        "sha256:4b56f1628fc52898f2f5396bffc7130a5991b795a3370b3130c752e9387889f2"
+    )
+    assert proof["events_sha256"] == (
+        "sha256:6189dd23a563dabd440f6f00a2643f932f233fc00e25c073a0b9c18fc5b78660"
+    )
+    assert (proof["weights_set_record_index"], proof["reveal_record_index"]) == (53, 54)
+    assert proof["uid"] == 0
+    assert proof["account_id_hex"] == (
+        "924620afb270acb1ee27bd034aa9e97108ef276da5079db982883cd70294741a"
+    )
+    wrong_owner = copy.deepcopy(fixture)
+    wrong_owner["expected"]["account_id_hex"] = "00" * 32
+    with pytest.raises(SubtensorEventsV2Error, match="absent or ambiguous"):
+        _proof(validated, wrong_owner, events_raw, count_raw)
+    with pytest.raises(SubtensorEventsV2Error, match="EventCount"):
+        _proof(validated, fixture, events_raw, (263).to_bytes(4, "little"))
     with pytest.raises(SubtensorEventsV2Error, match="trailing"):
         _proof(validated, fixture, events_raw + b"\x00", count_raw)
 

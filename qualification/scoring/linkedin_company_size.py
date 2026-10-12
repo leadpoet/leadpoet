@@ -297,7 +297,10 @@ def _strict_linkedin_company_profile_url(value: Any) -> str:
     host = str(parsed.hostname or "").casefold().rstrip(".")
     if (
         parsed.scheme.casefold() != "https"
-        or host not in {"linkedin.com", "www.linkedin.com"}
+        or (
+            host not in {"linkedin.com", "www.linkedin.com"}
+            and re.fullmatch(r"[a-z]{2}\.linkedin\.com", host) is None
+        )
         or parsed.username is not None
         or parsed.password is not None
         or port not in {None, 443}

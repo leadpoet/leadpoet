@@ -21,6 +21,35 @@ from qualification.scoring.competition import (
 )
 
 
+@pytest.mark.parametrize("host", [
+    "ca.linkedin.com", "uk.linkedin.com", "in.linkedin.com",
+    "linkedin.com", "www.linkedin.com",
+])
+def test_regional_company_profile_uses_same_canonical_identity(host):
+    assert linkedin_company_size._strict_linkedin_company_profile_url(
+        f"https://{host}/company/acme/"
+    ) == "https://www.linkedin.com/company/acme"
+
+
+@pytest.mark.parametrize("url", [
+    "https://ca.linkedin.com/company/acme/life",
+    "https://ca.linkedin.com/in/acme",
+    "https://ca.linkedin.com.evil.example/company/acme",
+    "https://evil.linkedin.com/company/acme",
+    "https://ca.evil.linkedin.com/company/acme",
+    "https://u:p@ca.linkedin.com/company/acme",
+    "http://ca.linkedin.com/company/acme",
+    "https://ca.linkedin.com:444/company/acme",
+    "https://ca.linkedin.com/company/acme?q=1",
+    "https://ca.linkedin.com/company/acme#x",
+    " https://ca.linkedin.com/company/acme",
+    "https://ca.linkedin.com/company/",
+    "https://[malformed/company/acme",
+])
+def test_regional_company_profile_preserves_strict_url_guards(url):
+    assert linkedin_company_size._strict_linkedin_company_profile_url(url) == ""
+
+
 @pytest.fixture(autouse=True)
 def _no_live_structured_profile_key(monkeypatch):
     monkeypatch.delenv("DEEPLINE_API_KEY", raising=False)

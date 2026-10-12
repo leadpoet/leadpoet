@@ -56,6 +56,9 @@ AS $legacy_partial_bound$
 $legacy_partial_bound$;
 ALTER FUNCTION public.lab_arena__legacy_partial_bound(public.lab_arena_runs,JSONB,TEXT) OWNER TO lab_arena_owner;
 REVOKE ALL ON FUNCTION public.lab_arena__legacy_partial_bound(public.lab_arena_runs,JSONB,TEXT) FROM PUBLIC;
+-- Hosted default privileges can grant these roles EXECUTE at creation time.
+REVOKE ALL ON FUNCTION public.lab_arena__legacy_partial_bound(public.lab_arena_runs,JSONB,TEXT)
+  FROM anon, authenticated, service_role, lab_arena_service;
 
 -- Migration 465's quality allowance stays intact. The service injects this
 -- receipt after full-input validation; workers cannot submit result_doc fields.

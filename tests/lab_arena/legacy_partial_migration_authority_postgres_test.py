@@ -23,7 +23,8 @@ def _rpc_snapshot(cursor):
     return result
 
 
-def test_non_superuser_apply_replay_and_failed_old_migration_restore_authority():
+@pytest.mark.parametrize('existing_helper', [False, True])
+def test_non_superuser_apply_replay_and_failed_old_migration_restore_authority(existing_helper):
     generator = deployed.database.__wrapped__()
     psycopg, dsn = next(generator)
     control = psycopg.connect(**dsn)
@@ -33,6 +34,7 @@ def test_non_superuser_apply_replay_and_failed_old_migration_restore_authority()
             cursor.execute('CREATE ROLE arena_checkpoint_migrator NOLOGIN NOSUPERUSER INHERIT')
             cursor.execute('GRANT lab_arena_owner TO arena_checkpoint_migrator')
             cursor.execute('GRANT USAGE, CREATE ON SCHEMA public TO arena_checkpoint_migrator WITH GRANT OPTION')
+            cursor.execute('ALTER DEFAULT PRIVILEGES FOR ROLE arena_checkpoint_migrator IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO anon, authenticated, service_role')
             cursor.execute('REVOKE CREATE ON SCHEMA public FROM lab_arena_owner')
             cursor.execute("SELECT nspacl::text FROM pg_namespace WHERE nspname='public'")
             original_schema_acl = cursor.fetchone()[0]
@@ -56,6 +58,18 @@ def test_non_superuser_apply_replay_and_failed_old_migration_restore_authority()
             assert cursor.fetchone()[0] is None
             cursor.execute("SELECT nspacl::text FROM pg_namespace WHERE nspname='public'")
             assert cursor.fetchone()[0] == original_schema_acl
+
+            if existing_helper:
+                # Reproduce the already-created hosted helper's explicit
+                # default grants. The corrected migration must also repair it.
+                role_revoke = ('REVOKE ALL ON FUNCTION public.lab_arena__legacy_partial_bound(public.lab_arena_runs,JSONB,TEXT)\n'
+                               '  FROM anon, authenticated, service_role, lab_arena_service;')
+                assert literal.count(role_revoke) == 1
+                cursor.execute(literal.replace(role_revoke, ''))
+                for role in ('anon', 'authenticated', 'service_role'):
+                    cursor.execute('SELECT has_function_privilege(%s,%s,\'EXECUTE\')', (role, HELPER))
+                    assert cursor.fetchone()[0] is True
+                cursor.execute('GRANT EXECUTE ON FUNCTION '+HELPER+' TO lab_arena_service')
 
             first_rpcs = None
             first_helper = None

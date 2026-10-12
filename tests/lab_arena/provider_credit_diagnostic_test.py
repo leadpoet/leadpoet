@@ -1,11 +1,15 @@
 """Credit diagnostics must not change credential refusal or scoring policy."""
 from copy import deepcopy
+from dataclasses import replace
 import json
 import os
 
 import pytest
 
-from lab_arena import broker, contracts, public_dashboard, runner, runtime, scoring, shim
+from lab_arena import broker, contracts, provider_costs, public_dashboard, runner, runtime, scoring, shim, trajectory
+from tests.lab_arena.deepline_host_payment_status_test import REFUSAL, NATIVE, EDGE_TRACE
+from tests.lab_arena.deepline_terminal_error_test import RetainedErrorStore
+from tests.lab_arena.test_deepline_catalog import frozen, row
 from tests.lab_arena.test_lab_arena_broker import (
     CONTEXT, FakeTransport, HOST_KEYS, make_broker,
 )
@@ -51,6 +55,176 @@ def test_broker_direct_and_idempotent_credit_replay_keep_operational_error():
         assert broker.provider_credit_failure_reason(response.call) == "provider_credit_exhausted"
     assert replay.call["idempotent"] is True
     assert sum(item["method"] == "POST" for item in transport.sent) == 1
+
+
+class DiagnosticReplayStore(RetainedErrorStore):
+    def _view(self, call):
+        result = super()._view(call)
+        # The real call-state view exposes this from an uncertain head only.
+        # A later billing-only settlement requires the retained history read.
+        if call["kind"] == "settlement":
+            result.pop("account_failure_evidence", None)
+        return result
+
+
+def _unknown_fee_refusal(*, kind="execute", document=None, status=402,
+                         headers=None, funding="miner_key", missing_key=False):
+    transport = FakeTransport([
+        (status, deepcopy(REFUSAL if document is None else document), headers or {}),
+        (200, {"recent": {"entries": []}}),
+    ])
+    instance, store, _ = make_broker(
+        store=DiagnosticReplayStore(), transport=transport,
+        funding_source_for=lambda _: funding,
+        credential_for=lambda _, provider: "" if missing_key else HOST_KEYS[provider],
+    )
+    context = replace(CONTEXT, kind=kind,
+                      deepline_catalog=frozen(row("exa_search", provider="exa")))
+    arguments = dict(operation_id="deepline.execute",
+                     parameters={"tool": "exa_search", "payload": {"query": "example"}},
+                     action_sequence=0, timeout_ms=5000)
+    result = instance.execute(context, **arguments)
+    return result, instance, store, transport, context, arguments
+
+
+@pytest.mark.parametrize("kind", ["execute", "score"])
+@pytest.mark.parametrize("native", [False, True])
+def test_typed_credit_refusal_unknown_fee_is_diagnostic_only(monkeypatch, kind, native):
+    monkeypatch.setattr(broker, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
+    assert provider_costs.deepline_payment_refusal_cost(402, REFUSAL) is None
+    document = {**deepcopy(REFUSAL), **({"job_id": NATIVE} if native else {})}
+    first, instance, store, transport, context, arguments = _unknown_fee_refusal(
+        kind=kind, document=document, headers={"x-vercel-id": EDGE_TRACE},
+    )
+    assert first.status == 402
+    assert json.loads(first.body) == {"error": {"code": "miner_credentials_unavailable"}}
+    assert first.call["outcome"] == "uncertain"
+    assert "actual_microusd" not in first.call and "credit_failure_proof" not in first.call
+    evidence = first.call["account_failure_evidence"]
+    assert evidence["reason"] == "out_of_credit"
+    saved = store.calls[first.call["call_identity"]]
+    assert saved["uncertain_doc"]["account_failure_evidence"] == evidence
+    assert saved["uncertain_doc"]["call_succeeded"] is False
+    assert saved["kind"] == "uncertain" and saved["amount"] == 0
+    assert broker.provider_credit_failure_reason(first.call) == "provider_credit_exhausted"
+    projected = trajectory.provider_response_content(first.to_document(), elapsed_ms=10)
+    assert projected["call"]["account_failure_evidence"]["reason"] == "out_of_credit"
+    assert json.loads(json.dumps(first.to_document())) == first.to_document()
+    before = len(transport.sent)
+    replay = instance.execute(context, **arguments)
+    # Preserve the existing uncertain replay reply and paid-request behavior.
+    assert replay.status == 409 and replay.call["error_code"] == "call_uncertain"
+    assert replay.call["outcome"] == "uncertain"
+    assert broker.provider_credit_failure_reason(replay.call) == "provider_credit_exhausted"
+    assert "actual_microusd" not in replay.call and "credit_failure_proof" not in replay.call
+    assert len(transport.sent) == before
+    assert sum(item["method"] == "POST" for item in transport.sent) == 1
+
+
+@pytest.mark.parametrize("actual", [0, 2000])
+def test_unknown_fee_credit_diagnostic_survives_billing_only_settlement(monkeypatch, actual):
+    monkeypatch.setattr(broker, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
+    first, instance, store, transport, context, arguments = _unknown_fee_refusal()
+    saved = store.calls[first.call["call_identity"]]
+    saved.update(kind="settlement", actual=actual, terminal=broker._terminal_response_document(
+        502, {}, broker.operations.GENERIC_UNAVAILABLE_BODY, call_succeeded=False))
+    # Avoid inventing a replacement execution receipt in this billing-only test.
+    transport.responses = [(404, {})]
+    replay = instance.execute(context, **arguments)
+    assert replay.status == 502 and replay.call["outcome"] == "settled"
+    assert replay.call["actual_microusd"] == actual
+    assert "credit_failure_proof" not in replay.call
+    assert broker.provider_credit_failure_reason(replay.call) == "provider_credit_exhausted"
+    assert saved["actual"] == actual
+    assert sum(item["method"] == "POST" for item in transport.sent) == 1
+
+
+@pytest.mark.parametrize("kind", ["execute", "score"])
+def test_unknown_fee_broker_refusal_reaches_existing_runner_diagnostic(tmp_path, monkeypatch, kind):
+    monkeypatch.setattr(broker, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
+    response, _, _, transport, _, _ = _unknown_fee_refusal(kind=kind)
+
+    class Api(RefusingApi):
+        events = None
+
+        def provider(self, *args):
+            super().provider(*args)
+            return response.to_document()
+
+        def trajectory(self, _run_id, _lease_token, events):
+            self.events = (self.events or []) + events
+            return {"accepted": len(events)}
+
+    scoring_run = kind == "score"
+    api = Api([scoring_lease() if scoring_run else lease()], code="miner_credentials_unavailable")
+    (tmp_path / "work").mkdir()
+    failure = scoring.build_scoring_failure("r1", "judge_error", detail="private-detail")
+    sandbox = RefusedJudgeRuntime(output=failure)
+    assert runner.Runner(make_config(tmp_path, api, sandbox)).run_once() == 1
+    result = api.completions[0]["body"]["result"]
+    assert result["terminal_status"] == "credential_error"
+    assert result["failure_diagnostic"]["reason"] == "provider_credit_exhausted"
+    assert result["resource_summary"]["provider_refusal_count"] == 1
+    assert len(api.provider_frames) == 1
+    assert sum(item["method"] == "POST" for item in transport.sent) == 1
+
+
+@pytest.mark.parametrize("status,change,headers,funding,missing_key", [
+    (401, {}, {}, "miner_key", False),
+    (403, {}, {}, "miner_key", False),
+    (402, {"code": "OTHER_PAYMENT_ERROR"}, {}, "miner_key", False),
+    (402, {"billing": None}, {}, "miner_key", False),
+    (402, {"error": ""}, {}, "miner_key", False),
+    (402, {"billing": {"kind": "insufficient_credits", "required_credits": "NaN",
+                       "balance_credits": 0, "needed_credits": 1}}, {}, "miner_key", False),
+    (402, {"job_id": "invalid/id"}, {}, "miner_key", False),
+    (402, {"job_id": NATIVE, "request_id": "different-native"}, {}, "miner_key", False),
+    (402, {"job_id": NATIVE}, {"x-deepline-request-id": "different-native"}, "miner_key", False),
+    (402, {"job_id": NATIVE}, {"x-deepline-request-id": "invalid/id"}, "miner_key", False),
+    (402, {}, {}, "host", False),
+    (402, {}, {}, "miner_key", True),
+])
+def test_unknown_fee_credit_diagnostic_rejects_unbound_or_unrecognized_refusals(
+    monkeypatch, status, change, headers, funding, missing_key,
+):
+    monkeypatch.setattr(broker, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
+    document = {**deepcopy(REFUSAL), **change}
+    response, _, _, _, _, _ = _unknown_fee_refusal(
+        status=status, document=document, headers=headers,
+        funding=funding, missing_key=missing_key,
+    )
+    assert broker.provider_credit_failure_reason(response.call) is None
+    assert "reason" not in response.call.get("account_failure_evidence", {})
+
+
+@pytest.mark.parametrize("change", [
+    {"base_call_identity": "sha256:" + "f" * 64},
+    {"action_sequence": 1}, {"provider_attempt": 2},
+    {"reason": "unrecognized"}, {"reason": True},
+    {"provider_status": 401}, {"extra": "not_allowed"},
+])
+def test_unknown_fee_credit_replay_rejects_changed_evidence_binding(monkeypatch, change):
+    monkeypatch.setattr(broker, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
+    first, instance, store, transport, context, arguments = _unknown_fee_refusal()
+    evidence = store.calls[first.call["call_identity"]]["uncertain_doc"]["account_failure_evidence"]
+    evidence.update(change)
+    before = len(transport.sent)
+    replay = instance.execute(context, **arguments)
+    assert replay.status == 503 and replay.call["error_code"] == "broker_unavailable"
+    assert broker.provider_credit_failure_reason(replay.call) is None
+    assert len(transport.sent) == before
+
+
+def test_old_unknown_fee_account_evidence_cannot_be_inferred_as_credit(monkeypatch):
+    monkeypatch.setattr(broker, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
+    first, instance, store, transport, context, arguments = _unknown_fee_refusal()
+    evidence = store.calls[first.call["call_identity"]]["uncertain_doc"]["account_failure_evidence"]
+    evidence.pop("reason")
+    before = len(transport.sent)
+    replay = instance.execute(context, **arguments)
+    assert replay.status == 409 and replay.call["error_code"] == "call_uncertain"
+    assert broker.provider_credit_failure_reason(replay.call) is None
+    assert len(transport.sent) == before
 
 
 @pytest.mark.parametrize("change", [

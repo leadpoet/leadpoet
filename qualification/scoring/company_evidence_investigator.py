@@ -506,12 +506,14 @@ statement that the old and new names are the same entity, and must identify
 both names. A domain-changing rebrand must identify both domains. A
 server-observed redirect can bind those domains only when its already fetched
 body explicitly proves the old and new names are the same operating company.
-A same-domain legal or trading-name alias may use an independently verified
-homepage name, same company domain, and exact LinkedIn company slug. It may
-also use `server_verified_structured_alias_locator` when provided. This
-server-verified profile locator is a search aid, not proof: that route needs
-an exact legal-name (“trading name”) parenthetical in a fetched first-party
-quote that explicitly identifies both names as the same company.
+A same-domain legal or trading-name alias may instead use an independently
+verified homepage name plus the same company domain and exact LinkedIn company
+slug, together with a fetched first-party quote that names the observed legal
+or trading name. Alternatively, it may use
+`server_verified_structured_alias_locator` when provided. This server-verified
+profile locator is a search aid, not proof: that route needs an exact
+legal-name (“trading name”) parenthetical in a fetched first-party quote that
+explicitly identifies both names as the same company.
 A merger, acquisition, ownership change, parent, subsidiary, or replacement
 business alone does not prove that the old and new brands are the same
 operating company. A true rebrand can coexist with separate ownership history,
@@ -3225,7 +3227,8 @@ async def investigate_company_evidence(
         (prior_observations or {}).get("observed_company_website")
     )
     if (
-        structured_alias_slug
+        "rebrand" in requested_targets
+        and structured_alias_slug
         and len(structured_alias_slug) <= 200
         and re.fullmatch(r"[a-z0-9][a-z0-9-]*", structured_alias_slug)
         and submitted_domain

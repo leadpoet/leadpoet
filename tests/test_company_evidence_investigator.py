@@ -8095,6 +8095,7 @@ def test_structured_legal_brand_alias_rejects_submitted_slug_conflict():
         ("wrong_slug", False),
         ("wrong_domain", False),
         ("overlong_slug", False),
+        ("no_rebrand_target", False),
     ],
 )
 @pytest.mark.parametrize(
@@ -8108,6 +8109,7 @@ def test_alias_locator_in_actual_investigator_input(
     monkeypatch, mode, expected_locator, legal_name, brand, domain, slug,
 ):
     requests = []
+    target = "headcount" if mode == "no_rebrand_target" else "rebrand"
 
     async def model(_session, _url, *, headers, payload):
         assert headers["Authorization"] == "Bearer test-openrouter-key"
@@ -8116,7 +8118,7 @@ def test_alias_locator_in_actual_investigator_input(
             "id": "call-1", "type": "function",
             "function": {"name": "submit_findings", "arguments": json.dumps({
                 "findings": [_finding(
-                    "rebrand", status="UNPROVEN", observed_value=None,
+                    target, status="UNPROVEN", observed_value=None,
                     evidence_url="", evidence_quote="",
                 )],
             })},
@@ -8142,7 +8144,7 @@ def test_alias_locator_in_actual_investigator_input(
     supplied_slug = (
         f"{slug}-lookalike" if mode == "wrong_slug"
         else slug * 30 if mode == "overlong_slug"
-        else slug if mode in {"structured", "wrong_domain"}
+        else slug if mode in {"structured", "wrong_domain", "no_rebrand_target"}
         else ""
     )
     asyncio.run(investigator.investigate_company_evidence(
@@ -8151,7 +8153,7 @@ def test_alias_locator_in_actual_investigator_input(
             "website": f"https://{domain}/",
             "linkedin": "",
         },
-        targets=("rebrand",),
+        targets=(target,),
         prior_observations=prior,
         verified_homepage_identity=homepage_anchor,
         verified_structured_alias_slug=supplied_slug,
@@ -8161,6 +8163,10 @@ def test_alias_locator_in_actual_investigator_input(
     assert "server_verified_structured_alias_locator" in prompt
     assert "search aid, not proof" in prompt
     assert "fetched first-party" in prompt
+    assert (
+        "together with a fetched first-party quote that names the observed legal\n"
+        "or trading name"
+    ) in prompt
     document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
     assert document["verified_homepage_identity"] == homepage_anchor
     assert "server_verified_structured_alias_locator" not in document["prior_observations"]

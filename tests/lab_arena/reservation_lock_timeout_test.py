@@ -48,8 +48,9 @@ def test_persistent_lock_timeout_stops_at_existing_retry_bound(function):
     requests = []
     with httpx.Client(transport=httpx.MockTransport(lambda request: requests.append(request) or httpx.Response(500, json=LOCK_TIMEOUT))) as client:
         transport = PostgrestTransport("https://db.example", service_key="sb_secret_test", http_client=client)
-        with pytest.raises(ArenaStoreError, match="55P03"):
+        with pytest.raises(ArenaStoreUnavailable, match="55P03") as failed:
             transport.rpc(function, {})
+        assert failed.value.transaction_rolled_back is True
         assert transport.deadlock_retries == DEADLOCK_RETRIES
     assert len(requests) == DEADLOCK_RETRIES + 1
 
@@ -156,8 +157,9 @@ def test_transport_to_broker_reserves_dispatches_and_charges_once(monkeypatch, j
         broker = br.Broker(store=Store(ArenaStore(database)), key_for=lambda provider: HOST_KEYS[provider],
             price_table=table, judge_models=[model], transport=provider)
         if persistent:
-            with pytest.raises(ArenaStoreError, match="55P03"):
+            with pytest.raises(ArenaStoreUnavailable, match="55P03") as failed:
                 broker.execute(context, operation_id="openrouter.chat", parameters={**CHAT, "model": model}, action_sequence=36, timeout_ms=30_000)
+            assert failed.value.transaction_rolled_back is True
             assert ledger.calls == {} and provider.sent == []
             assert clock.now == pytest.approx(20.06)
         else:

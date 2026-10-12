@@ -69,12 +69,20 @@ def test_no_closed_candidate_performs_no_billing_read():
     assert service.reconcile_closed_provider_costs() == {"status": "none"}
 
 
-def test_failed_closed_candidate_keeps_cursor_and_next_driver_tick_recovers():
+@pytest.mark.parametrize("failure", ["transport", "55P03", "40P01"])
+def test_failed_closed_candidate_keeps_cursor_and_next_driver_tick_recovers(failure):
+    import httpx
+    from lab_arena.store import PostgrestTransport
     requests = []
 
     def candidate(**kwargs):
         requests.append(kwargs)
         if len(requests) == 1:
+            if failure != "transport":
+                with httpx.Client(transport=httpx.MockTransport(lambda request:
+                    httpx.Response(500, json={"code": failure, "message": "private SQL detail"}))) as client:
+                    database = PostgrestTransport("https://db.example", service_key="sb_secret_test", http_client=client)
+                    database.rpc("lab_arena_next_closed_provider_reconciliation_v1", {})
             raise ArenaStoreUnavailable("synthetic read timeout")
         return {"status": "ok", "provider": "openrouter", "uncertain_entry_id": 321,
                 "round_id": "arena-closed", "run_id": "failed-score"}

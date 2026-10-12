@@ -12,6 +12,7 @@ from lab_arena import (
     scoring_provider_compat,
 )
 from lab_arena.service import DEFAULT_BASELINE_SOURCE_URL
+from lab_arena.store import ArenaStoreError
 from scripts import verify_arena_parallel_round as verification
 
 
@@ -1491,8 +1492,10 @@ def _serve_test_runtime(monkeypatch):
 
 
 @pytest.mark.parametrize('outage_phase', ['tick', 'funding', 'evidence'])
-def test_serving_retries_temporary_store_outage_and_resamples_publication(monkeypatch, tmp_path, capsys, outage_phase):
-    from lab_arena.store import ArenaStoreUnavailable
+@pytest.mark.parametrize('failure', ['transport', '55P03', '40P01'])
+def test_serving_retries_temporary_store_outage_and_resamples_publication(monkeypatch, tmp_path, capsys, outage_phase, failure):
+    import httpx
+    from lab_arena.store import ArenaStoreUnavailable, PostgrestTransport
     service = Service()
     service.store.row['status'] = 'stage1_scoring'
     servers, waits = _serve_test_runtime(monkeypatch)
@@ -1507,6 +1510,11 @@ def test_serving_retries_temporary_store_outage_and_resamples_publication(monkey
         if phase == outage_phase and not initialization and counts[phase] <= (3 if phase != 'tick' else 2):
             assert servers[0].started and not servers[0].should_exit
             outages.append(phase)
+            if failure != 'transport':
+                with httpx.Client(transport=httpx.MockTransport(lambda request:
+                    httpx.Response(500, json={'code': failure, 'message': 'private-sql-detail'}))) as client:
+                    database = PostgrestTransport('https://db.example', service_key='sb_secret_test', http_client=client)
+                    database.rpc('lab_arena_transition_round', {})
             raise ArenaStoreUnavailable('private-request-detail-must-not-escape')
 
     def tick(service, round_id):
@@ -1534,12 +1542,15 @@ def test_serving_retries_temporary_store_outage_and_resamples_publication(monkey
     assert all(operation in ('advance', 'reconcile') for operation, _ in service.calls)
     logged = capsys.readouterr().err
     assert 'private-request-detail-must-not-escape' not in logged
+    assert 'private-sql-detail' not in logged
     retry_lines = [json.loads(line) for line in logged.splitlines()]
     assert [line['consecutive_failures'] for line in retry_lines] == [1, 2]
     assert all(line['phase'] == outage_phase and line['error_class'] == 'ArenaStoreUnavailable' and line['observed_at'] for line in retry_lines)
 
 
-@pytest.mark.parametrize('error', [verification.VerificationError('invalid frozen configuration'), ValueError('private unexpected validation error')])
+@pytest.mark.parametrize('error', [verification.VerificationError('invalid frozen configuration'), ValueError('private unexpected validation error'),
+    ArenaStoreError('rpc lab_arena_transition_round failed: HTTP 500 code=42501 message=private authorization detail'),
+    ArenaStoreError('private unknown store detail')])
 def test_serving_still_fails_closed_for_permanent_or_unknown_errors(monkeypatch, tmp_path, capsys, error):
     service = Service()
     service.store.row['status'] = 'stage1_scoring'
@@ -1555,3 +1566,11 @@ def test_serving_still_fails_closed_for_permanent_or_unknown_errors(monkeypatch,
     logged = capsys.readouterr().err
     assert 'parallel round driver failed: '+type(error).__name__ in logged
     assert str(error) not in logged and 'parallel_round_driver_retry' not in logged
+    diagnostic = json.loads(logged.splitlines()[0])
+    assert diagnostic['event'] == 'parallel_round_driver_failed' and diagnostic['phase'] == 'tick'
+    if str(error).startswith('rpc lab_arena_transition_round'):
+        assert diagnostic['rpc'] == 'lab_arena_transition_round'
+        assert diagnostic['http_status'] == 500 and diagnostic['sqlstate'] == '42501'
+        assert 'private authorization detail' not in logged
+    else:
+        assert 'rpc' not in diagnostic and 'sqlstate' not in diagnostic

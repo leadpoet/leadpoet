@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: October 12 full-cycle monitoring
+
+The user authorized monitoring both baseline and all miner work through
+execution, scoring, publication, promotion, rewards, and on-chain weights.
+Use the overnight skills for protected inspection, narrow fixes for confirmed
+faults, focused tests, safe push and merge, canonical scorer-image publication
+and gateway/normal-validator restarts, and bounded reward-disabled production
+verification. Preserve completed work, frozen round configuration and evidence,
+qualification and scoring rules, provider accounting, credentials, operator
+controls, and concurrent work. Do not rewrite published results or alter the
+active round's scorer. This authority ends after deployment and live verification.
+
 ## Scoped production authorization: Tyche PR 118 compatibility
 
 The user's current explicit Tyche PR 118 compatibility request authorizes

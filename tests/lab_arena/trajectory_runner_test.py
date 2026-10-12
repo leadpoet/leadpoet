@@ -148,8 +148,9 @@ def test_judge_summary_projector_failure_does_not_change_completion_or_cleanup(
     failed, actual_completion = _run_judge_with_detail(tmp_path / "failed", detail)
     assert "judge_failure_summary" not in failed
     assert actual_completion == expected_completion
-    assert list((tmp_path / "normal" / "work").iterdir()) == []
-    assert list((tmp_path / "failed" / "work").iterdir()) == []
+    for directory in (tmp_path / "normal" / "work", tmp_path / "failed" / "work"):
+        assert [path.name for path in directory.iterdir()] == ["pending-completions"]
+        assert list((directory / "pending-completions").iterdir()) == []
 
 
 def test_runner_judge_summary_passes_gateway_validation_and_append(tmp_path):

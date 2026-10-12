@@ -1483,6 +1483,7 @@ def _tick(service: Any, round_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
 
 def _serve(args: argparse.Namespace, service: Any, app: Any) -> int:
     import uvicorn
+    from lab_arena.store import ArenaStoreUnavailable
 
     state = _create_or_resume(service, args.round_id, now=_utc_now())
     status_path = _status_path(args)
@@ -1530,16 +1531,34 @@ def _serve(args: argparse.Namespace, service: Any, app: Any) -> int:
 
     def driver() -> None:
         nonlocal final_document
+        availability_failures = 0
         while not stop.is_set() and not server.started:
             stop.wait(0.05)
         while not stop.is_set():
+            phase = "tick"
             try:
                 advance, reconciliation = _tick(service, args.round_id)
+                phase = "funding"
                 _verify_host_funding(service, args.round_id, verified_run_ids)
+                phase = "evidence"
                 final_document = _evidence(service, args.round_id)
                 final_document["last_transition"] = advance
                 final_document["last_reconciliation"] = reconciliation
+                phase = "artifact"
                 _write_artifact(status_path, final_document)
+            except ArenaStoreUnavailable as exc:
+                # Keep authenticated completions reachable during a temporary
+                # database outage. Resample through the same idempotent tick;
+                # never infer a result from the last successful evidence read.
+                availability_failures += 1
+                print(json.dumps({
+                    "event": "parallel_round_driver_retry", "round_id": args.round_id,
+                    "phase": phase, "error_class": type(exc).__name__,
+                    "consecutive_failures": availability_failures,
+                    "observed_at": _utc_now().isoformat(),
+                }, sort_keys=True), file=sys.stderr, flush=True)
+                stop.wait(min(60, args.tick_seconds * min(availability_failures, 12)))
+                continue
             except Exception as exc:
                 driver_failure[:] = [type(exc).__name__]
                 print(
@@ -1550,6 +1569,7 @@ def _serve(args: argparse.Namespace, service: Any, app: Any) -> int:
                 stop.set()
                 server.should_exit = True
                 return
+            availability_failures = 0
             round_status = final_document["round"]["status"]
             if round_status == "cancelled" or (
                 round_status == "published"

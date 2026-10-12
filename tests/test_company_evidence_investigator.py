@@ -10964,6 +10964,57 @@ def test_range_conflict_resolution_rejects_malformed_or_different_identity(
     )
 
 
+@pytest.mark.parametrize("audience", ["followers", "associated members", "alumni"])
+def test_company_size_field_is_separate_from_profile_audience(audience):
+    url = "https://www.linkedin.com/company/acme"
+    quote = f"Acme | LinkedIn. 29,884 {audience}. Company size 51-200 employees"
+    finding = _finding(
+        "headcount", observed_value="51-200", evidence_url=url,
+        evidence_quote=quote,
+    )
+    result = _validated_findings(
+        {"findings": [finding]}, targets=("headcount",),
+        fetched_pages={url: quote}, first_party_domains={"acme.example"},
+        identity_names={"acme"},
+    )
+    assert result["headcount"]["status"] == "VERIFIED"
+    # The accepted span does not bypass source, identity, or value binding.
+    for change, source in (
+        ({"observed_value": "11-50"}, quote),
+        ({"evidence_quote": quote.replace("Acme", "Other")}, quote),
+        ({}, quote.replace("51-200", "11-50")),
+    ):
+        rejected = _validated_findings(
+            {"findings": [dict(finding, **change)]}, targets=("headcount",),
+            fetched_pages={url: source}, first_party_domains={"acme.example"},
+            identity_names={"acme"},
+        )
+        assert rejected is None or rejected["headcount"]["status"] == "UNPROVEN"
+
+
+@pytest.mark.parametrize("quote", [
+    "Acme has 51-200 followers.",
+    "Acme has 51-200 associated members.",
+    "Acme Company size 51-200 followers.",
+    "Acme department Company size 51-200 employees.",
+    "Acme division Company size 51-200 employees.",
+    "Acme has 900 followers. Acme team Company size 51-200 employees.",
+    "Acme office Company size 51-200 employees.",
+    "Acme Company size 51-200 former employees.",
+    "Acme Company size 51-200 alumni employees.",
+    "Acme Company size approximately 51 employees; 900 followers.",
+])
+def test_profile_size_disambiguation_preserves_noncompany_count_rejection(quote):
+    value = 51 if "approximately" in quote else "51-200"
+    assert not investigator._quote_supports_headcount(quote, value)
+
+
+def test_company_size_exception_does_not_tighten_unrelated_team_word():
+    assert investigator._quote_supports_headcount(
+        "Acme team has 51-200 employees.", "51-200",
+    )
+
+
 def test_headcount_finding_binds_value_and_rejects_scoped_counts():
     url = "https://acme.example/about"
     finding = _finding(

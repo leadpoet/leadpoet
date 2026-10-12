@@ -2216,15 +2216,34 @@ def _validated_credit_failure_proof(value: Any) -> Optional[Mapping[str, Any]]:
 
 
 def provider_credit_failure_reason(call: Mapping[str, Any]) -> Optional[str]:
-    """Expose only a bound, settled miner-credit refusal as a safe diagnostic.
+    """Expose a bound miner-credit refusal independently of its charge.
 
-    The operational error and its retry behavior remain unchanged. Missing
-    credentials and unpriced or upstream account errors have no such proof.
+    Typed Deepline payment refusals can have unknown fees. Their diagnostic
+    evidence does not grant the settled-zero proof used for paid retries.
     """
     try:
         proof = _validated_credit_failure_proof(call.get("credit_failure_proof"))
+        account_failure = _validated_account_failure_evidence(
+            call.get("account_failure_evidence")
+        )
     except BrokerError:
         return None
+    if (
+        account_failure is not None
+        and account_failure.get("reason") == "out_of_credit"
+        and call.get("provider") == "deepline"
+        and call.get("funding_source") == "miner_key"
+        and call.get("outcome") in ("uncertain", "settled")
+        and type(call.get("provider_attempt")) is int
+        and type(call.get("action_sequence")) is int
+        and _account_failure_matches_call(
+            account_failure,
+            base_call_identity=call.get("base_call_identity"),
+            provider_attempt=call.get("provider_attempt"),
+            action_sequence=call.get("action_sequence"),
+        )
+    ):
+        return "provider_credit_exhausted"
     if (
         proof is not None
         and call.get("funding_source") == "miner_key"
@@ -2690,13 +2709,20 @@ def _validated_account_failure_evidence(
         return None
     if (
         not isinstance(account_failure, Mapping)
-        or set(account_failure) != {
+        or set(account_failure) not in ({
             "error_class",
             "provider_status",
             "base_call_identity",
             "provider_attempt",
             "action_sequence",
-        }
+        }, {
+            "error_class", "provider_status", "base_call_identity",
+            "provider_attempt", "action_sequence", "reason",
+        })
+        or ("reason" in account_failure and (
+            account_failure["reason"] != "out_of_credit"
+            or account_failure.get("provider_status") != 402
+        ))
         or account_failure.get("error_class")
         != "account_credential_failure"
         or isinstance(account_failure.get("provider_status"), bool)
@@ -4569,6 +4595,25 @@ class Broker:
                         continue
                     entry_doc = entry.get("entry_doc")
                     saved_call = entry_doc.get("call") if isinstance(entry_doc, Mapping) else None
+                    if isinstance(saved_call, Mapping):
+                        try:
+                            evidence = _validated_account_failure_evidence(
+                                saved_call.get("account_failure_evidence")
+                            )
+                        except BrokerError:
+                            return _error_result("broker_unavailable", summary)
+                        if evidence is not None and evidence.get("reason") == "out_of_credit":
+                            if (saved_call.get("call_succeeded") is not False
+                                or saved_call.get("provider_status") != 402
+                                or not _account_failure_matches_call(
+                                    evidence, base_call_identity=base_call_identity,
+                                    provider_attempt=provider_attempt,
+                                    action_sequence=action_sequence,
+                                )):
+                                return _error_result("broker_unavailable", summary)
+                            # Preserve only the diagnostic from bound history.
+                            # Billing-only settlement still owns the reply/cost.
+                            summary["account_failure_evidence"] = dict(evidence)
                     if not isinstance(saved_call, Mapping) or "deepline_terminal_response" not in saved_call:
                         continue
                     saved_terminal = saved_call["deepline_terminal_response"]
@@ -4663,6 +4708,16 @@ class Broker:
                     "response_hash": contracts.hash_bytes(terminal_body),
                 })
             summary.update({"outcome": "settled", "idempotent": True, "actual_microusd": reserved.get("amount_microusd")})
+            evidence = _validated_account_failure_evidence(
+                terminal_document.get("account_failure_evidence")
+            )
+            if evidence is not None and evidence.get("reason") == "out_of_credit":
+                if not _account_failure_matches_call(
+                    evidence, base_call_identity=base_call_identity,
+                    provider_attempt=provider_attempt, action_sequence=action_sequence,
+                ):
+                    return _error_result("broker_unavailable", summary)
+                summary["account_failure_evidence"] = dict(evidence)
             credit_failure_proof = _validated_credit_failure_proof(
                 terminal_document.get("credit_failure_proof")
                 if isinstance(terminal_document, Mapping) else None
@@ -4716,6 +4771,19 @@ class Broker:
             return BrokerResult(terminal_status, terminal_headers, terminal_body, summary)
         if status in ("dispatched", "uncertain") and not deepline_response_recovery:
             summary["outcome"] = "uncertain"
+            try:
+                evidence = _validated_account_failure_evidence(
+                    reserved.get("account_failure_evidence")
+                )
+            except BrokerError:
+                return _error_result("broker_unavailable", summary)
+            if evidence is not None and evidence.get("reason") == "out_of_credit":
+                if not _account_failure_matches_call(
+                    evidence, base_call_identity=base_call_identity,
+                    provider_attempt=provider_attempt, action_sequence=action_sequence,
+                ):
+                    return _error_result("broker_unavailable", summary)
+                summary["account_failure_evidence"] = dict(evidence)
             terminal_document = reserved.get("terminal_response")
             if (effective_operation.provider == "deepline"
                 and isinstance(terminal_document, Mapping)
@@ -5424,6 +5492,19 @@ class Broker:
                     and response.status in (401, 402, 403)
                 )
             )
+            account_failure_evidence = None
+            if retain_account_failure_evidence:
+                account_failure_evidence = {
+                    "error_class": "account_credential_failure",
+                    "provider_status": int(response.status),
+                    "base_call_identity": base_call_identity,
+                    "provider_attempt": provider_attempt,
+                    "action_sequence": action_sequence,
+                }
+                if (effective_operation.provider == "deepline"
+                    and _deepline_insufficient_credit_response(response, raw_document)):
+                    account_failure_evidence["reason"] = "out_of_credit"
+                    summary["account_failure_evidence"] = dict(account_failure_evidence)
             missing_deepline_cost = (
                 effective_operation.provider == "deepline" and raw_actual is None
             )
@@ -5501,15 +5582,6 @@ class Broker:
                 )
             )
             if missing_deepline_cost or missing_openrouter_cost:
-                account_failure_evidence = None
-                if retain_account_failure_evidence:
-                    account_failure_evidence = {
-                        "error_class": "account_credential_failure",
-                        "provider_status": int(response.status),
-                        "base_call_identity": base_call_identity,
-                        "provider_attempt": provider_attempt,
-                        "action_sequence": action_sequence,
-                    }
                 uncertain_doc = _missing_provider_cost_call_doc(
                     response,
                     raw_document,
@@ -5686,17 +5758,7 @@ class Broker:
                 provider_cost=cost_record,
                 credit_failure_proof=credit_failure_proof,
                 judgment_cache_eligible=judgment_cache_eligible,
-                account_failure_evidence=(
-                    {
-                        "error_class": "account_credential_failure",
-                        "provider_status": int(response.status),
-                        "base_call_identity": base_call_identity,
-                        "provider_attempt": provider_attempt,
-                        "action_sequence": action_sequence,
-                    }
-                    if retain_account_failure_evidence
-                    else None
-                ),
+                account_failure_evidence=account_failure_evidence,
             )
             if deepline_lost_response:
                 terminal["deepline_response_missing"] = True

@@ -358,6 +358,41 @@ def _structured_provider_reported_error(value: Any, *, depth: int = 0) -> bool:
     )
 
 
+def _structured_profile_explicitly_not_found(value: Any) -> bool:
+    """Recognize the requested profile's explicit absence, without credit."""
+    current = value
+    wrappers = ("toolResponse", "rawV2", "raw", "result", "data", "output")
+    for _ in range(8):
+        if not isinstance(current, Mapping):
+            return False
+        if (set(current) == {"error", "status", "element"}
+            and current["error"] is None and type(current["status"]) is int
+            and current["status"] == 404 and current["element"] is None):
+            return True
+        status = current.get("status")
+        if ("status" in current and not (
+            (type(status) is int and status == 200)
+            or status in ("completed", "success")
+        )) or ("job_id" in current and "status" not in current):
+            return False
+        # An outer account, request or job failure takes precedence over a
+        # nested not-found payload. Empty/malformed success is not absence.
+        if _structured_provider_reported_error({
+            key: item for key, item in current.items() if key not in wrappers
+        }):
+            return False
+        if sum(isinstance(current.get(key), Mapping) for key in wrappers) > 1:
+            return False
+        for key in wrappers:
+            child = current.get(key)
+            if isinstance(child, Mapping) and child is not current:
+                current = child
+                break
+        else:
+            return False
+    return False
+
+
 def _canonical_employee_range(value: Any) -> str:
     if not isinstance(value, Mapping):
         return ""
@@ -738,6 +773,10 @@ async def fetch_structured_linkedin_company_size(
         return None
     except Exception:  # noqa: BLE001
         _set_failure_reason(diagnostic, UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON)
+        return None
+    if _structured_profile_explicitly_not_found(body):
+        # A completed exact-profile lookup found no profile. Keep the
+        # caller's insufficient-evidence outcome; supply no identity or size.
         return None
     if _structured_provider_reported_error(body):
         _set_failure_reason(diagnostic, PROVIDER_ERROR_FAILURE_REASON)

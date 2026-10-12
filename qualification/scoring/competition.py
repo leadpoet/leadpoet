@@ -8,7 +8,7 @@ import json
 import logging
 import math
 import os
-from typing import Any, Mapping, MutableMapping, Sequence
+from typing import Any, Callable, Mapping, MutableMapping, Sequence
 from urllib.parse import urlsplit
 
 from leadpoet_verifier.aggregation import per_icp_normalized_score
@@ -954,6 +954,8 @@ class CompetitionCompanyScorer:
         *,
         retry_evidence_scope: MutableMapping[str, Any] | None = None,
         original_company_indexes: Sequence[int] | None = None,
+        prior_terminal_breakdowns: Sequence[Mapping[str, Any]] | None = None,
+        on_company_breakdown: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]]:
         indexes = (
             list(range(len(companies))) if original_company_indexes is None
@@ -970,6 +972,9 @@ class CompetitionCompanyScorer:
                 is_reference_model,
                 retry_evidence_scope=retry_evidence_scope,
                 original_company_indexes=indexes,
+                **({"prior_terminal_breakdowns": prior_terminal_breakdowns,
+                    "on_company_breakdown": on_company_breakdown}
+                   if on_company_breakdown is not None else {}),
             )
         sliced = list(companies)[:_company_goal(icp)]
         raw = []
@@ -992,6 +997,8 @@ class CompetitionCompanyScorer:
         *,
         retry_evidence_scope: MutableMapping[str, Any] | None = None,
         original_company_indexes: Sequence[int],
+        prior_terminal_breakdowns: Sequence[Mapping[str, Any]] | None = None,
+        on_company_breakdown: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]]:
         models = import_module("gateway.qualification.models")
         scorer_module = import_module("qualification.scoring.lead_scorer")
@@ -1005,6 +1012,14 @@ class CompetitionCompanyScorer:
         seen_companies: set[str] = set()
         verified_identity_key_by_alias: dict[str, str] = {}
         breakdowns: list[dict[str, Any]] = []
+        prior_by_index = {row["company_index"]: dict(row)
+                          for row in (prior_terminal_breakdowns or [])}
+
+        def retain_row(row):
+            breakdowns.append(row)
+            if on_company_breakdown is not None:
+                on_company_breakdown(dict(row))
+
         for company_index, company in enumerate(
             list(companies)[: _company_goal(icp)]
         ):
@@ -1014,6 +1029,30 @@ class CompetitionCompanyScorer:
             ) or normalize_observed_employee_count_bucket(observed, default=None)
             if not bucket or bucket not in allowed_buckets:
                 continue
+            if company_index in prior_by_index:
+                # Walk the original group in order. A retained negative can
+                # still reserve its independently verified identity and fit.
+                prior = dict(prior_by_index[company_index])
+                aliases = prior.get("company_identity_alias_keys") or [prior["company_identity_key"]]
+                if (company_fit_verified(prior) and _intent_details_gate_passed(prior)
+                    and not prior.get("duplicate_company")):
+                    ancestor = next((verified_identity_key_by_alias[alias] for alias in aliases
+                                     if alias in verified_identity_key_by_alias), None)
+                    if ancestor is not None:
+                        # An earlier unresolved slot has now verified the same
+                        # identity. Reapply the ordinary duplicate projection.
+                        for field, value in (("icp_fit", 0.0), ("decision_maker", 0.0),
+                            ("intent_signal_raw", 0.0), ("time_decay_multiplier", 1.0),
+                            ("intent_signal_final", 0.0), ("cost_penalty", 0.0),
+                            ("time_penalty", 0.0), ("final_score", 0.0)):
+                            prior[field] = value
+                        prior.update(company_identity_key=ancestor, company_qualified=False,
+                                     duplicate_company=True, failure_reason="Duplicate company identity")
+                    else:
+                        for alias in aliases:
+                            verified_identity_key_by_alias[alias] = prior["company_identity_key"]
+                retain_row(prior)
+                continue
             if self.company_quality:
                 from qualification.company_quality import normalize_company_claim
                 company, errors = normalize_company_claim(company)
@@ -1022,7 +1061,7 @@ class CompetitionCompanyScorer:
                     invalid["failure_reason"] = ";".join(errors)
                     if self.contacts_required:
                         _merge_contact_breakdown(invalid, _not_evaluated_contact(company))
-                    breakdowns.append(invalid)
+                    retain_row(invalid)
                     continue
             normalized_company = _normalized_company(
                 company,
@@ -1058,7 +1097,7 @@ class CompetitionCompanyScorer:
                     _merge_contact_breakdown(
                         duplicate, _not_evaluated_contact(company)
                     )
-                breakdowns.append(duplicate)
+                retain_row(duplicate)
                 continue
             try:
                 company_model = company_type(**normalized_company)
@@ -1076,7 +1115,7 @@ class CompetitionCompanyScorer:
                     _merge_contact_breakdown(
                         incompatible, _not_evaluated_contact(company)
                     )
-                breakdowns.append(incompatible)
+                retain_row(incompatible)
                 continue
             required_attribute_retry_source_cache = None
             matched_company_retry_source_cache = None
@@ -1234,7 +1273,7 @@ class CompetitionCompanyScorer:
                 )
                 if not breakdown["company_qualified"]:
                     breakdown["final_score"] = 0.0
-            breakdowns.append(breakdown)
+            retain_row(breakdown)
         return breakdowns
 
 

@@ -29,6 +29,7 @@ PLACEHOLDER_CREDENTIALS = {name: "arena-placeholder-" + name.lower() for name in
 def score_input(
     document: Dict[str, Any], *,
     on_company_judgments: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+    on_terminal_breakdowns: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
 ) -> Dict[str, Any]:
     if document.get("schema_version") != scoring.SCORING_INPUT_SCHEMA_VERSION:
         raise scoring.ScoringError("scoring input schema is invalid")
@@ -65,6 +66,22 @@ def score_input(
     )
     item = {"scored_run_id": scored_run_id}
     completed_judgments = []
+    completed_breakdowns = []
+
+    def retain_terminal_breakdowns(rows):
+        # Preserve runtime scoring semantics for non-resumable rows. Only
+        # independently terminal, original-group-valid rows cross the seam.
+        durable = []
+        for row in rows:
+            try:
+                durable = scoring.validate_terminal_breakdowns_for_work_item(
+                    durable + [row], icp=icp, companies=companies, policy=policy,
+                )
+            except scoring.ScoringError:
+                continue
+        completed_breakdowns[:] = durable
+        if durable and on_terminal_breakdowns is not None:
+            on_terminal_breakdowns(durable)
 
     def retain_company_judgments(rows):
         completed_judgments[:] = rows
@@ -89,12 +106,20 @@ def score_input(
                     on_company_judgments=retain_company_judgments,
                 )
             else:
+                prior = document.get("prior_terminal_breakdowns")
+                if prior is not None:
+                    prior = scoring.validate_terminal_breakdowns_for_work_item(
+                        prior, icp=icp, companies=companies, policy=policy,
+                    )
                 breakdowns = scoring.score_work_item(
                     item,
                     icp=icp,
                     companies=companies,
                     scorer=scorer,
                     max_scored_companies=int(policy["max_scored_companies"]),
+                    **({"prior_terminal_breakdowns": prior,
+                        "on_terminal_breakdowns": retain_terminal_breakdowns}
+                       if getattr(scorer, "integrity_policy", False) else {}),
                 )
     except (scoring.ScoringError, ValueError) as exc:
         return scoring.build_scoring_failure(
@@ -108,6 +133,8 @@ def score_input(
             ),
             **({"company_judgments": completed_judgments}
                if quality_policy.scorer_enabled(policy) else {}),
+            **({"terminal_breakdowns": completed_breakdowns}
+               if completed_breakdowns else {}),
         )
     return scoring.build_scoring_output(
         scored_run_id,
@@ -136,7 +163,17 @@ def main(argv: Any = None) -> int:
             document["scored_run_id"], "judge_error", company_judgments=rows,
         ))
 
-    result = score_input(document, on_company_judgments=checkpoint)
+    def terminal_checkpoint(rows):
+        write_output(scoring.build_scoring_failure(
+            document["scored_run_id"], "judge_error", terminal_breakdowns=rows,
+        ))
+
+    from lab_arena import quality_policy
+    result = score_input(
+        document, **({"on_company_judgments": checkpoint}
+                     if quality_policy.scorer_enabled(document["scorer_policy"])
+                     else {"on_terminal_breakdowns": terminal_checkpoint}),
+    )
     write_output(result)
     return 0
 

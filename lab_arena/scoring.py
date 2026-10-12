@@ -330,6 +330,8 @@ def lab_scorer(
         retry_evidence_scope: MutableMapping[str, Any],
         *,
         original_company_indexes: Sequence[int],
+        prior_terminal_breakdowns: Optional[Sequence[Mapping[str, Any]]] = None,
+        on_company_breakdown: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Any:
         return scorer.score_with_breakdowns(
             list(companies),
@@ -337,6 +339,9 @@ def lab_scorer(
             bool(is_reference_model),
             retry_evidence_scope=retry_evidence_scope,
             original_company_indexes=original_company_indexes,
+            **({"prior_terminal_breakdowns": prior_terminal_breakdowns,
+                "on_company_breakdown": on_company_breakdown}
+               if on_company_breakdown is not None else {}),
         )
 
     score.integrity_policy = contact_policy.integrity_adapter(adapter)
@@ -362,11 +367,16 @@ def _run_scorer(
     *,
     retry_evidence_scope: MutableMapping[str, Any],
     original_company_indexes: Sequence[int],
+    prior_terminal_breakdowns: Optional[Sequence[Mapping[str, Any]]] = None,
+    on_company_breakdown: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> List[Dict[str, Any]]:
     scoped_runner = getattr(scorer, _SCOPED_RETRY_EVIDENCE_RUNNER, None)
     result = (
         scoped_runner(companies, icp, False, retry_evidence_scope,
-                      original_company_indexes=original_company_indexes)
+                      original_company_indexes=original_company_indexes,
+                      **({"prior_terminal_breakdowns": prior_terminal_breakdowns,
+                          "on_company_breakdown": on_company_breakdown}
+                         if on_company_breakdown is not None else {}))
         if callable(scoped_runner)
         else scorer(companies, icp, False)
     )
@@ -529,6 +539,8 @@ def score_work_item(
     max_retries: int = MAX_JUDGE_RETRIES,
     max_scored_companies: int = 0,
     _original_company_indexes: Optional[Sequence[int]] = None,
+    prior_terminal_breakdowns: Optional[Sequence[Mapping[str, Any]]] = None,
+    on_terminal_breakdowns: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
 ) -> List[Dict[str, Any]]:
     """Score one distinct output once: the first-N slice in model order.
 
@@ -539,7 +551,9 @@ def score_work_item(
     explicit company zero. Systemic exhaustion raises ``ScoringError``. The
     scorer must return exactly one breakdown per company it scores under the
     bucket-skip rule the verifier recomputes; any other count is a scorer
-    contract failure before any result is retained.
+    contract failure. The legacy integrity checkpoint callback retains
+    terminal rows during the first grouped invocation. Its retries walk the
+    same ordered group and restore prior alias context without paid rejudging.
     """
 
     from qualification.scoring.competition import (
@@ -563,7 +577,41 @@ def score_work_item(
     integrity_policy = bool(getattr(scorer, "integrity_policy", False))
     retain_terminal = integrity_policy or _has_unique_scored_company_names(sliced, scored_indexes)
     retained: List[Optional[Dict[str, Any]]] = [None] * len(scored_indexes)
-    unresolved = list(range(len(scored_indexes)))
+    checkpoint_mode = bool(
+        integrity_policy and not getattr(scorer, "company_quality", False)
+        and callable(getattr(scorer, _SCOPED_RETRY_EVIDENCE_RUNNER, None))
+        and (on_terminal_breakdowns is not None or prior_terminal_breakdowns is not None)
+    )
+    if prior_terminal_breakdowns is not None and not checkpoint_mode:
+        raise ScoringError("terminal breakdown resume requires legacy integrity scoring")
+    position_by_index = {index: position for position, index in enumerate(scored_indexes)}
+    for row in prior_terminal_breakdowns or []:
+        index = row.get("company_index")
+        if index not in position_by_index or retained[position_by_index[index]] is not None:
+            raise ScoringError("terminal breakdown resume index is invalid")
+        if scorer_breakdown_has_retryable_infrastructure_failure(row, integrity_policy=True):
+            raise ScoringError("terminal breakdown resume is retryable")
+        retained[position_by_index[index]] = dict(row)
+
+    def checkpoint():
+        if on_terminal_breakdowns is not None:
+            on_terminal_breakdowns([dict(row) for row in retained if row is not None])
+
+    def retain_completed(row):
+        index = row.get("company_index")
+        if type(index) is not int or index not in position_by_index:
+            raise ScoringError("integrity breakdown company index mismatch")
+        position = position_by_index[index]
+        if ((retained[position] is None or (
+                row.get("duplicate_company") is True
+                and retained[position].get("duplicate_company") is not True))
+            and not scorer_breakdown_has_retryable_infrastructure_failure(row, integrity_policy=True)):
+            retained[position] = dict(row)
+            checkpoint()
+
+    unresolved = [position for position, row in enumerate(retained) if row is None]
+    if prior_terminal_breakdowns:
+        checkpoint()
     last_failure_reason = ""
     last_private_diagnostic = "origin=exception"
     # This private dictionary is the complete lifetime boundary for source text
@@ -572,7 +620,7 @@ def score_work_item(
     retry_evidence_scope: Dict[str, Any] = {}
     attempts = max(1, int(max_retries))
     for attempt in range(attempts):
-        if retain_terminal and attempt > 0:
+        if retain_terminal and attempt > 0 and not checkpoint_mode:
             invoked_positions = list(unresolved)
             invoked_companies = [
                 sliced[scored_indexes[position]] for position in invoked_positions
@@ -592,6 +640,8 @@ def score_work_item(
                 icp,
                 retry_evidence_scope=retry_evidence_scope,
                 original_company_indexes=invoked_indexes,
+                **({"prior_terminal_breakdowns": [dict(row) for row in retained if row is not None],
+                    "on_company_breakdown": retain_completed} if checkpoint_mode else {}),
             )
         except Exception as exc:  # judge/provider failure: retry unresolved input
             last_failure_reason = _validated_failure_reason(
@@ -638,7 +688,7 @@ def score_work_item(
             if integrity_policy:
                 # Initial sparse indexes refer to the full first-N slice;
                 # subsequent invocations contain only unresolved companies.
-                expected_index = scored_indexes[position] if attempt == 0 else relative_index
+                expected_index = scored_indexes[position] if attempt == 0 or checkpoint_mode else relative_index
                 if breakdown.get("company_index") != expected_index:
                     raise ScoringError("integrity breakdown company index mismatch")
                 breakdown = {**breakdown, "company_index": scored_indexes[position]}
@@ -646,7 +696,9 @@ def score_work_item(
                 breakdown, integrity_policy=integrity_policy
             )
             if not retryable:
-                retained[position] = breakdown
+                if retained[position] is None:
+                    retained[position] = breakdown
+                    checkpoint()
             elif (
                 attempt == attempts - 1
                 and scorer_breakdown_has_company_local_verification_failure(
@@ -656,6 +708,7 @@ def score_work_item(
                 retained[position] = terminal_company_verification_breakdown(
                     breakdown
                 )
+                checkpoint()
         unresolved = [
             position for position, breakdown in enumerate(retained)
             if breakdown is None
@@ -904,6 +957,7 @@ def build_scoring_input(
     contact_source_evidence: Optional[Mapping[str, Any]] = None,
     provider_observations: Optional[Sequence[Mapping[str, Any]]] = None,
     company_judgment_cache: Optional[Mapping[str, Any]] = None,
+    prior_terminal_breakdowns: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """The judge sandbox's input: one ICP, one output, and the scorer policy."""
 
@@ -926,6 +980,10 @@ def build_scoring_input(
         if not quality_policy.scorer_enabled(policy):
             raise ScoringError("company judgments require company quality policy")
         document["company_judgment_cache"] = company_judgments.validate_lease_context(company_judgment_cache)
+    if prior_terminal_breakdowns is not None:
+        document["prior_terminal_breakdowns"] = validate_terminal_breakdowns_for_work_item(
+            prior_terminal_breakdowns, icp=icp, companies=companies, policy=policy,
+        )
     return document
 
 
@@ -946,6 +1004,7 @@ def build_scoring_failure(
     *,
     reason: str = "",
     company_judgments: Optional[Sequence[Mapping[str, Any]]] = None,
+    terminal_breakdowns: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """A failure document; ``detail`` is a bounded operator-facing reason, never a payload."""
 
@@ -960,6 +1019,8 @@ def build_scoring_failure(
         document["reason"] = safe_reason
     if company_judgments is not None:
         document["company_judgments"] = [dict(item) for item in company_judgments]
+    if terminal_breakdowns is not None:
+        document["terminal_breakdowns"] = [dict(item) for item in terminal_breakdowns]
     return document
 
 
@@ -985,7 +1046,7 @@ def validate_scoring_output_document(document: Any) -> Dict[str, Any]:
     scored_run_id = _require_run_id(document.get("scored_run_id"))
     keys = set(document)
     if "failure" in document:
-        if keys - {"detail", "reason", "company_judgments"} != {"schema_version", "scored_run_id", "failure"} or document["failure"] not in SCORING_FAILURES:
+        if keys - {"detail", "reason", "company_judgments", "terminal_breakdowns"} != {"schema_version", "scored_run_id", "failure"} or document["failure"] not in SCORING_FAILURES:
             raise ScoringError("scoring failure document is invalid")
         detail = document.get("detail", "")
         if not isinstance(detail, str) or len(detail) > MAX_FAILURE_DETAIL_CHARS:
@@ -998,6 +1059,10 @@ def validate_scoring_output_document(document: Any) -> Dict[str, Any]:
             failure_document["reason"] = reason
         if "company_judgments" in document:
             failure_document["company_judgments"] = _validate_output_company_judgments(document["company_judgments"])
+        if "terminal_breakdowns" in document:
+            if "company_judgments" in document:
+                raise ScoringError("scoring failure mixes checkpoint policies")
+            failure_document["terminal_breakdowns"] = _validate_terminal_breakdown_shape(document["terminal_breakdowns"])
         return failure_document
     if keys - {"company_judgments"} != {"schema_version", "scored_run_id", "breakdowns"} or not isinstance(document["breakdowns"], list):
         raise ScoringError("scoring output document is invalid")
@@ -1025,6 +1090,104 @@ def _validate_output_company_judgments(judgments: Any) -> List[Dict[str, Any]]:
     return [dict(row) for row in judgments]
 
 
+def _validate_terminal_breakdown_shape(rows: Any) -> List[Dict[str, Any]]:
+    if not isinstance(rows, list) or len(rows) > verify.MAX_COMPANIES_PER_ICP:
+        raise ScoringError("terminal breakdowns must be a bounded list")
+    indexes = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ScoringError("terminal breakdown is not an object")
+        score = row.get(BREAKDOWN_SCORE_FIELD)
+        index = row.get("company_index")
+        if (type(index) is not int or not 0 <= index < verify.MAX_COMPANIES_PER_ICP
+            or isinstance(score, bool) or not isinstance(score, (int, float))
+            or not 0 <= float(score) <= 100):
+            raise ScoringError("terminal breakdown score or index is invalid")
+        indexes.append(index)
+    if indexes != sorted(set(indexes)):
+        raise ScoringError("terminal breakdown indexes must be unique and ordered")
+    return [dict(row) for row in rows]
+
+
+def validate_terminal_breakdowns_for_work_item(
+    rows: Sequence[Mapping[str, Any]], *, icp: Mapping[str, Any],
+    companies: Sequence[Mapping[str, Any]], policy: Mapping[str, Any],
+) -> List[Dict[str, Any]]:
+    """Validate terminal sparse rows against their full immutable group."""
+    from lab_arena import contact_policy, quality_policy
+    from qualification.scoring.arena_integrity import company_fit_verified
+    from qualification.scoring.competition import (
+        has_verified_primary_intent, _intent_details_gate_passed,
+        scorer_breakdown_has_retryable_infrastructure_failure,
+    )
+    validated_policy = contracts.validate_scorer_policy(policy)
+    if (not contact_policy.integrity_adapter(validated_policy["scoring_adapter_version"])
+        or quality_policy.scorer_enabled(validated_policy)):
+        raise ScoringError("terminal breakdowns require legacy integrity scoring")
+    try:
+        contracts.check_strict_document(rows, contracts.PUBLICATION_LIMITS)
+    except contracts.ArenaContractError:
+        raise ScoringError("terminal breakdowns exceed structural limits") from None
+    copied = _validate_terminal_breakdown_shape(rows)
+    sliced = verify.slice_first_n(companies, verify.icp_company_goal(icp))
+    scored, _ = verify.bucket_skip(icp, sliced, max_scored_companies=int(validated_policy["max_scored_companies"]))
+    indexes = [row["company_index"] for row in copied]
+    if not set(indexes).issubset(scored):
+        raise ScoringError("terminal breakdown index is outside the scored group")
+    _validate_integrity_breakdown_rows(copied, indexes, contacts_required=contact_policy.scorer_enabled(validated_policy))
+    aliases_seen = set()
+    for row in copied:
+        if (scorer_breakdown_has_retryable_infrastructure_failure(row, integrity_policy=True)
+            or not isinstance(row.get("verifier_gate_receipts"), list)
+            or not any(isinstance(receipt, Mapping)
+                       and receipt.get("gate") == "company_fit"
+                       and receipt.get("decision") in {"match", "mismatch", "unavailable"}
+                       for receipt in row["verifier_gate_receipts"])):
+            raise ScoringError("terminal breakdown lacks a terminal verifier decision")
+        aliases = row.get("company_identity_alias_keys") or [row["company_identity_key"]]
+        fit = company_fit_verified(row)
+        if float(row[BREAKDOWN_SCORE_FIELD]) > 0 and not (
+            row["company_qualified"] and fit
+            and has_verified_primary_intent(row.get("intent_signals_detail") or [])
+            and _intent_details_gate_passed(row)
+        ):
+            raise ScoringError("terminal positive breakdown lacks verified qualification")
+        if row["duplicate_company"] and not aliases_seen.intersection(aliases):
+            raise ScoringError("terminal duplicate lacks its completed original-group ancestor")
+        if fit and _intent_details_gate_passed(row) and not row["duplicate_company"]:
+            if aliases_seen.intersection(aliases):
+                raise ScoringError("terminal breakdown duplicate context is inconsistent")
+            aliases_seen.update(aliases)
+    return copied
+
+
+def _validate_integrity_breakdown_rows(breakdowns, indexes, *, contacts_required=False):
+    seen = set()
+    for index, row in zip(indexes, breakdowns):
+        key = row.get("company_identity_key")
+        qualified = row.get("company_qualified")
+        duplicate = row.get("duplicate_company")
+        aliases = row.get("company_identity_alias_keys") or [key]
+        if (type(row.get("company_index")) is not int or row["company_index"] != index
+            or not isinstance(key, str) or not key or len(key) > 1024
+            or type(qualified) is not bool or type(duplicate) is not bool):
+            raise ScoringError("invalid integrity qualification receipt")
+        if not isinstance(aliases, list) or not 1 <= len(aliases) <= 4 or any(not isinstance(alias, str) or not alias or len(alias) > 1024 for alias in aliases):
+            raise ScoringError("invalid integrity identity aliases")
+        if duplicate and (qualified or float(row[BREAKDOWN_SCORE_FIELD]) != 0):
+            raise ScoringError("duplicate company cannot receive credit")
+        if qualified and (seen.intersection(aliases) or float(row[BREAKDOWN_SCORE_FIELD]) <= 0):
+            raise ScoringError("qualified companies must be positive and unique")
+        if contacts_required:
+            from lab_arena.contact_policy import validate_contact_breakdown
+            try:
+                validate_contact_breakdown(row)
+            except contracts.ArenaContractError as exc:
+                raise ScoringError(str(exc)) from exc
+        if qualified:
+            seen.update(aliases)
+
+
 def validate_breakdowns_for_item(breakdowns: Sequence[Mapping[str, Any]], *, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], max_scored_companies: int = 0, integrity_policy: bool = False, contacts_required: bool = False, company_quality: bool = False) -> List[Dict[str, Any]]:
     """A breakdown list is acceptable for a work item only when it covers exactly the scored companies."""
 
@@ -1034,30 +1197,7 @@ def validate_breakdowns_for_item(breakdowns: Sequence[Mapping[str, Any]], *, icp
     if len(breakdowns) != len(scored):
         raise ScoringError("breakdown count %d differs from the %d scored companies" % (len(breakdowns), len(scored)))
     if integrity_policy:
-        seen = set()
-        for index, row in zip(scored, breakdowns):
-            key = row.get("company_identity_key")
-            qualified = row.get("company_qualified")
-            duplicate = row.get("duplicate_company")
-            aliases = row.get("company_identity_alias_keys") or [key]
-            if (type(row.get("company_index")) is not int or row["company_index"] != index
-                or not isinstance(key, str) or not key or len(key) > 1024
-                or type(qualified) is not bool or type(duplicate) is not bool):
-                raise ScoringError("invalid integrity qualification receipt")
-            if not isinstance(aliases, list) or not 1 <= len(aliases) <= 4 or any(not isinstance(alias, str) or not alias or len(alias) > 1024 for alias in aliases):
-                raise ScoringError("invalid integrity identity aliases")
-            if duplicate and (qualified or float(row[BREAKDOWN_SCORE_FIELD]) != 0):
-                raise ScoringError("duplicate company cannot receive credit")
-            if qualified and (seen.intersection(aliases) or float(row[BREAKDOWN_SCORE_FIELD]) <= 0):
-                raise ScoringError("qualified companies must be positive and unique")
-            if contacts_required:
-                from lab_arena.contact_policy import validate_contact_breakdown
-                try:
-                    validate_contact_breakdown(row)
-                except contracts.ArenaContractError as exc:
-                    raise ScoringError(str(exc)) from exc
-            if qualified:
-                seen.update(aliases)
+        _validate_integrity_breakdown_rows(breakdowns, scored, contacts_required=contacts_required)
         if company_quality:
             from qualification.scoring.competition import apply_company_judgment_context, raw_company_judgment, bucket_skipped_judgment
             # Recompute identity and qualification from evidence, not the

@@ -2273,7 +2273,21 @@ async def _fetch_exa_exact_page(
         return {"ok": False, "error": "contents_provider_unavailable"}
     if status != 200:
         return {"ok": False, "error": f"http_{status}"}
-    results = body.get("results") if isinstance(body, Mapping) else None
+    if not isinstance(body, Mapping) or body.get("error") or body.get("errors"):
+        return {"ok": False, "error": "contents_provider_error"}
+    statuses = body.get("statuses")
+    if statuses is not None:
+        if not isinstance(statuses, list) or any(
+            not isinstance(item, Mapping) for item in statuses
+        ):
+            return {"ok": False, "error": "invalid_contents_status"}
+        if any(
+            item.get("id", item.get("url")) == canonical_url
+            and (item.get("status") == "error" or item.get("error"))
+            for item in statuses
+        ):
+            return {"ok": False, "error": "contents_crawl_error"}
+    results = body.get("results")
     if not isinstance(results, list) or len(results) != 1:
         return {"ok": False, "error": "invalid_contents_result"}
     page = results[0]
@@ -3321,6 +3335,7 @@ async def investigate_company_evidence(
                     and not result.get("ok")
                     and os.environ.get("EXA_API_KEY")
                     and not archive_targets
+                    and not _strict_linkedin_company_profile_url(url)
                     and fetch_calls < MAX_FETCH_CALLS
                     and time.monotonic() - started < ADMISSION_DEADLINE_SECONDS
                 ):

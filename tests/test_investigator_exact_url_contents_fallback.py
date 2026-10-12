@@ -128,3 +128,30 @@ def test_contents_uses_existing_deepline_accounted_gateway_route():
     assert operations.OPERATIONS["exa.contents"].provider == "deepline"
     assert request.url == "https://code.deepline.com/api/v2/integrations/exa_contents/execute"
     assert json.loads(request.body) == {"provider": "exa", "operation": "exa_contents", "payload": parameters}
+
+
+@pytest.mark.parametrize("extra", [
+    {"error": "crawl failed"}, {"errors": ["crawl failed"]},
+    {"statuses": [{"id": URL, "status": "error"}]},
+])
+def test_contents_rejects_failure_even_with_cached_result_text(monkeypatch, extra):
+    monkeypatch.setenv("EXA_API_KEY", "test-exa")
+    monkeypatch.setattr(investigator, "_post_json", AsyncMock(return_value=(
+        200, {"results": [{"url": URL, "text": QUOTE}], **extra})))
+    assert not asyncio.run(investigator._fetch_exa_exact_page(object(), URL))["ok"]
+
+
+@pytest.mark.parametrize("extra", [{}, {"statuses": [{"id": URL, "status": "success"}]}])
+def test_contents_accepts_optional_success_status(monkeypatch, extra):
+    monkeypatch.setenv("EXA_API_KEY", "test-exa")
+    monkeypatch.setattr(investigator, "_post_json", AsyncMock(return_value=(
+        200, {"results": [{"url": URL, "text": QUOTE}], **extra})))
+    assert asyncio.run(investigator._fetch_exa_exact_page(object(), URL))["ok"]
+
+
+def test_linkedin_timeout_cannot_admit_contents_fallback(monkeypatch):
+    monkeypatch.setattr(__import__(__name__, fromlist=["URL"]), "URL",
+                        "https://www.linkedin.com/company/acme/")
+    result, calls = _review(monkeypatch, timeout=True)
+    assert calls == [("primary", "https://www.linkedin.com/company/acme/")]
+    assert "usage" not in result  # Existing timeout result stays unchanged.

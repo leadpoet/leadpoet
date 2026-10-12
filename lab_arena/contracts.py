@@ -1414,6 +1414,8 @@ def validate_checkpoint_transition(document: Any) -> Dict[str, Any]:
 
 RUN_RESULT_FIELDS = (
     F("schema_version", "str", choices=(RUN_RESULT_SCHEMA_VERSION,)),
+    # The completion RPC stamps this binding for failed partial judgments.
+    F("company_judgment_completion_request_hash", "sha256", required=False),
     F(
         "resource_summary",
         "object",

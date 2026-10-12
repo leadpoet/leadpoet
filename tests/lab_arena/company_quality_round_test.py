@@ -105,13 +105,15 @@ def database():
 
 
 @pytest.mark.parametrize(
-    "with_contacts", [False, True, "exhausted"]
+    "with_contacts", [False, True, "exhausted", "partial"]
 )
 def test_quality_round_publishes_coverage_winner_after_restart(
     database, tmp_path, with_contacts
 ):
+    partial_recovery = with_contacts == "partial"
+    partial_events = []
     exhausted_company = "Padded Company 3" if with_contacts == "exhausted" else ""
-    with_contacts = bool(with_contacts)
+    with_contacts = with_contacts not in (False, "partial")
     psycopg2, dsn = database
     challengers = ["Broad", "Sparse", "Padded"]
     harness = QualityHarness(lambda: psycopg2.connect(**dsn), tmp_path, challengers=challengers, runners=["alpha", "beta"])
@@ -174,6 +176,8 @@ def test_quality_round_publishes_coverage_winner_after_restart(
         def judge(companies, buyer, _reference):
             c = companies[0]
             name = c["company_name"]
+            if partial_recovery and not partial_events and name == "Broad Company 1":
+                raise scoring.ScoringError("provider timeout", failure_reason="provider_error")
             flavor = name.split(" Company ", 1)[0]
             score = 20 if flavor == "PublicBaseline" else 35
             if name in ("Sparse Company 0", "Sparse Company 1"):
@@ -216,7 +220,16 @@ def test_quality_round_publishes_coverage_winner_after_restart(
             return apply_company_judgment_context(companies, [raw], contacts_required=with_contacts)
         judge.company_quality = judge.integrity_policy = True
         judge.contacts_required = with_contacts
-        full, new = scoring.score_quality_work_item({"scored_run_id": document["scored_run_id"]}, icp=icp, companies=document["companies"], scorer=judge, cache_context=document["company_judgment_cache"])
+        completed = []
+        def retain_completed(rows):
+            completed[:] = rows
+        try:
+            full, new = scoring.score_quality_work_item({"scored_run_id": document["scored_run_id"]}, icp=icp, companies=document["companies"], scorer=judge, cache_context=document["company_judgment_cache"], on_company_judgments=retain_completed)
+        except scoring.ScoringError:
+            assert partial_recovery and not partial_events
+            assert [row["company_index"] for row in completed] == [0, 2, 3, 4]
+            partial_events.append(document["scored_run_id"])
+            return runtime.fake_result(exit_code=0, output_bytes=json.dumps(scoring.build_scoring_failure(document["scored_run_id"], "judge_error", company_judgments=completed)).encode())
         return runtime.fake_result(exit_code=0, output_bytes=json.dumps(scoring.build_scoring_output(document["scored_run_id"], full, company_judgments=new)).encode())
 
     harness.sandbox.run_icp = run_icp
@@ -240,6 +253,14 @@ def test_quality_round_publishes_coverage_winner_after_restart(
     padded = harness.submit("Padded", round_id)
     harness.clock.advance_to(harness.schedule()["submission_cutoff"])
     harness.advance_until("scored", runners=2, max_steps=120)
+
+    if partial_recovery:
+        assert len(partial_events) == 1
+        partial_run = next(run for run in harness.service.store.list_runs(round_id, kind="score") if run["status"] == "failed" and run["scored_run_id"] == partial_events[0])
+        assert partial_run["per_icp_score"] is None
+        assert partial_run["result_doc"]["company_judgment_completion_request_hash"]
+        partial_hits = [hit for run in harness.service.store.list_runs(round_id, kind="score") for hit in (run.get("claim_response") or {}).get("company_judgment_cache", {}).get("hits", []) if hit["evidence_doc"]["source_score_run_id"] == partial_run["run_id"]]
+        assert partial_hits
 
     persisted = harness.service.store.list_runs(round_id, kind="execute")
     main_positions = set(range(contracts.BENCHMARK_ICP_COUNT))

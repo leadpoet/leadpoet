@@ -2740,7 +2740,7 @@ class ArenaService:
         if (
             source is None
             or source.get("kind") != "score"
-            or source.get("status") != "accepted"
+            or source.get("status") not in ("accepted", "failed")
             or source.get("runner_hotkey") != evidence["source_runner_hotkey"]
             or source.get("scored_run_id") != evidence["source_scored_run_id"]
             or source.get("output_ref") != evidence["source_output_ref"]
@@ -2786,6 +2786,28 @@ class ArenaService:
             raise scoring.ScoringError(
                 "accepted company judgment source output is invalid"
             ) from exc
+        if source.get("status") == "failed":
+            result = source.get("result_doc") or {}
+            terminal = result.get("terminal_status")
+            if (terminal not in ("judge_error", "judge_timeout", "credential_error")
+                or (source.get("terminal_cause") != terminal
+                    and not (terminal == "judge_timeout" and source.get("terminal_cause") == "judge_error"))
+                or result.get("company_judgment_completion_request_hash")
+                != evidence["source_completion_request_hash"]
+                or "failure" not in validated_output
+                or (terminal != "credential_error"
+                    and validated_output["failure"] != terminal)):
+                raise scoring.ScoringError("partial company judgment completion is invalid")
+            try:
+                company_judgments.validate_new_company_judgments(
+                    validated_output.get("company_judgments") or [],
+                    lease_context=(source.get("claim_response") or {}).get("company_judgment_cache") or {},
+                    require_complete=False,
+                )
+            except company_judgments.CompanyJudgmentError as exc:
+                raise scoring.ScoringError("partial company judgment source lease is invalid") from exc
+        elif "failure" in validated_output:
+            raise scoring.ScoringError("accepted company judgment contains a failure")
         matching_rows = [
             row for row in validated_output.get("company_judgments") or []
             if row.get("cache_key") == cache_key
@@ -5065,14 +5087,26 @@ class ArenaService:
         if company_quality_run:
             company_judgment_evidence = []
             completion_request_hash = contracts.request_bytes_hash(validated)
-        if terminal_status == "accepted" and kind == "score":
+        partial_quality_output = (
+            kind == "score" and company_quality_run
+            and terminal_status in ("judge_error", "judge_timeout", "credential_error")
+            and body.get("output") is not None
+        )
+        if kind == "score" and (terminal_status == "accepted" or partial_quality_output):
             try:
                 output = scoring.validate_scoring_output_document(body.get("output"))
             except scoring.ScoringError:
                 raise ServiceError("output_invalid", 400)
-            if "failure" in output or output["scored_run_id"] != run.get("scored_run_id"):
+            if (output["scored_run_id"] != run.get("scored_run_id")
+                or (terminal_status == "accepted" and "failure" in output)
+                or (partial_quality_output and (
+                    "failure" not in output
+                    or not output.get("company_judgments")
+                    or (terminal_status != "credential_error"
+                        and output["failure"] != terminal_status)
+                ))):
                 raise ServiceError("output_invalid", 400)
-            if (
+            if terminal_status == "accepted" and (
                 contact_policy.enabled(round_row["configuration_doc"])
                 or company_quality_run
             ):
@@ -5120,44 +5154,46 @@ class ArenaService:
                         company_judgments.validate_new_company_judgments(
                             output.get("company_judgments") or [],
                             lease_context=validated_context,
+                            require_complete=not partial_quality_output,
                         )
                     )
-                    new_by_key = {
-                        item["cache_key"]: item["raw_judgment"]
-                        for item in new_judgments
-                    }
-                    hit_by_key = {
-                        item["cache_key"]: item["evidence_doc"]["raw_judgment"]
-                        for item in validated_context["hits"]
-                    }
-                    lease_rows = sorted(
-                        validated_context["hits"]
-                        + validated_context["misses"],
-                        key=lambda item: item["company_index"],
-                    )
-                    raw_rows = [
-                        (
-                            hit_by_key[item["cache_key"]]
-                            if item["cache_key"] in hit_by_key
-                            else new_by_key[item["cache_key"]]
+                    if not partial_quality_output:
+                        new_by_key = {
+                            item["cache_key"]: item["raw_judgment"]
+                            for item in new_judgments
+                        }
+                        hit_by_key = {
+                            item["cache_key"]: item["evidence_doc"]["raw_judgment"]
+                            for item in validated_context["hits"]
+                        }
+                        lease_rows = sorted(
+                            validated_context["hits"]
+                            + validated_context["misses"],
+                            key=lambda item: item["company_index"],
                         )
-                        for item in lease_rows
-                    ]
-                    from qualification.scoring.competition import (
-                        apply_company_judgment_context,
-                    )
+                        raw_rows = [
+                            (
+                                hit_by_key[item["cache_key"]]
+                                if item["cache_key"] in hit_by_key
+                                else new_by_key[item["cache_key"]]
+                            )
+                            for item in lease_rows
+                        ]
+                        from qualification.scoring.competition import (
+                            apply_company_judgment_context,
+                        )
 
-                    expected_breakdowns = apply_company_judgment_context(
-                        companies[:len(lease_rows)],
-                        raw_rows,
-                        contacts_required=contact_policy.enabled(
-                            round_row["configuration_doc"]
-                        ),
-                    )
-                    if output["breakdowns"] != expected_breakdowns:
-                        raise company_judgments.CompanyJudgmentError(
-                            "company judgment destination context mismatch"
+                        expected_breakdowns = apply_company_judgment_context(
+                            companies[:len(lease_rows)],
+                            raw_rows,
+                            contacts_required=contact_policy.enabled(
+                                round_row["configuration_doc"]
+                            ),
                         )
+                        if output["breakdowns"] != expected_breakdowns:
+                            raise company_judgments.CompanyJudgmentError(
+                                "company judgment destination context mismatch"
+                            )
                     refs = [
                         company_judgments.validate_company_ref(ref)
                         for ref in run.get("company_judgment_refs") or []
@@ -5210,7 +5246,7 @@ class ArenaService:
                             "evidence_hash": contracts.document_hash(evidence),
                             "evidence_doc": evidence,
                         })
-                except company_judgments.CompanyJudgmentError as exc:
+                except (company_judgments.CompanyJudgmentError, scoring.ScoringError) as exc:
                     raise ServiceError(
                         "company_judgment_output_invalid", 400
                     ) from exc
@@ -6016,6 +6052,7 @@ class ArenaService:
         execution_run: Mapping[str, Any],
         *,
         round_id: str,
+        completed_company: bool = False,
     ) -> bool:
         """Bind one accepted judgment to its accepted execution without leaking ids."""
 
@@ -6025,7 +6062,8 @@ class ArenaService:
         execution_position = execution_run.get("icp_position")
         return (
             score_run.get("kind") == "score"
-            and score_run.get("status") == "accepted"
+            and (score_run.get("status") == "accepted"
+                 or (completed_company and score_run.get("status") == "failed"))
             and execution_run.get("kind") == "execute"
             and execution_run.get("status") == "accepted"
             and type(score_stage) is int
@@ -6050,17 +6088,29 @@ class ArenaService:
         source_runner_hotkey: str,
         round_id: str,
         runs_by_id: Mapping[str, Mapping[str, Any]],
+        company_evidence: Optional[Mapping[str, Any]] = None,
     ) -> str:
         """Return the judge hotkey only for a complete stored source binding."""
 
         source_score = runs_by_id.get(source_score_run_id)
         source_execution = runs_by_id.get(source_scored_run_id)
+        completed_company = False
+        if company_evidence is not None and (source_score or {}).get("status") == "failed":
+            evidence = self._company_judgment_evidence(
+                cache_key=str(company_evidence["cache_key"]),
+                company_input_hash=str(company_evidence["company_input_hash"]),
+                authority_slot=int(company_evidence["authority_slot"]),
+            )
+            if evidence != company_evidence:
+                raise scoring.ScoringError("company scoring attribution evidence differs")
+            completed_company = True
         if (
             source_score is None
             or source_execution is None
             or source_score.get("runner_hotkey") != source_runner_hotkey
             or not self._same_scoring_membership(
-                source_score, source_execution, round_id=round_id
+                source_score, source_execution, round_id=round_id,
+                completed_company=completed_company,
             )
         ):
             raise scoring.ScoringError("scoring attribution source is invalid")
@@ -6147,6 +6197,7 @@ class ArenaService:
                     source_runner_hotkey=str(evidence["source_runner_hotkey"]),
                     round_id=round_id,
                     runs_by_id=runs_by_id,
+                    company_evidence=evidence,
                 )
                 if source_ids is not None:
                     source_ids.add(str(evidence["source_score_run_id"]))

@@ -3645,6 +3645,21 @@ class AssignmentExecutor:
                         "stage": "sandbox",
                         "error_class": "judge_timeout",
                     }
+                    if not result.output_error and result.output_bytes is not None:
+                        try:
+                            checkpoint = scoring.scoring_output_from_bytes(result.output_bytes)
+                        except scoring.ScoringError:
+                            checkpoint = None
+                        output_document = _partial_company_judgment_output(checkpoint, lease)
+                        if output_document is not None:
+                            output_document = scoring.build_scoring_failure(
+                                output_document["scored_run_id"], "judge_timeout",
+                                detail=output_document.get("detail", ""),
+                                reason=output_document.get("reason", ""),
+                                company_judgments=output_document["company_judgments"],
+                            )
+                            if "reason" in output_document:
+                                failure_diagnostic["reason"] = output_document["reason"]
             else:
                 if result.output_error or result.output_bytes is None:
                     terminal = "judge_error" if scoring_run else ("invalid_output" if result.output_error else "model_error")
@@ -3688,7 +3703,7 @@ class AssignmentExecutor:
                                 ),
                             }
                             failure_detail = output_document.get("detail", "")
-                            output_document = None
+                            output_document = _partial_company_judgment_output(output_document, lease)
                         else:
                             terminal = "accepted"
                 else:
@@ -3784,7 +3799,7 @@ class AssignmentExecutor:
                 miner_credentials_failed or miner_scoring_funding_failed
             ) and terminal != "accepted":
                 terminal = "credential_error"
-                output_document = None
+                output_document = _partial_company_judgment_output(output_document, lease) if scoring_run else None
             elif not scoring_run and trusted_quota_failure and terminal != "accepted":
                 terminal = "provider_error"
                 output_document = None
@@ -3793,7 +3808,7 @@ class AssignmentExecutor:
                 output_document = None
             elif provider_infrastructure_failed and terminal != "accepted":
                 terminal = "judge_error" if scoring_run else "provider_error"
-                output_document = None
+                output_document = _partial_company_judgment_output(output_document, lease) if scoring_run else None
                 if scoring_run and failure_diagnostic is None:
                     # A previous page-fetch failure must not replace the
                     # trusted scorer's more specific terminal diagnostic.
@@ -4061,6 +4076,10 @@ class AssignmentExecutor:
             except Exception:
                 # Optional telemetry cannot change a completed score run.
                 pass
+        if scoring_run and output_document is not None and terminal in ("judge_error", "judge_timeout"):
+            # Provider accounting can refine a timeout to infrastructure error.
+            # Its retained partial envelope must name the final signed cause.
+            output_document = dict(output_document, failure=terminal)
         body = {"run_id": lease["run_id"], "result": run_result, "output": output_document, "lease_token": lease_token}
         _record_trajectory(config, lease, lease_token, [
             *_provider_error_events(state), *(
@@ -4085,6 +4104,26 @@ class AssignmentExecutor:
             timestamp=int(config.clock().timestamp()),
             sign_message=config.identity.sign,
         )
+
+
+def _partial_company_judgment_output(document, lease):
+    """Keep only a failed, lease-bound subset; never infer an accepted ICP."""
+    from lab_arena import company_judgments
+
+    if (not isinstance(document, dict) or "failure" not in document
+        or document.get("scored_run_id") != lease.get("scored_run_id")
+        or not document.get("company_judgments")):
+        return None
+    try:
+        output = scoring.validate_scoring_output_document(document)
+        company_judgments.validate_new_company_judgments(
+            output["company_judgments"],
+            lease_context=lease.get("company_judgment_cache") or {},
+            require_complete=False,
+        )
+    except (scoring.ScoringError, company_judgments.CompanyJudgmentError):
+        return None
+    return output
 
 
 def _check_runtime_image(image_reference: str, image_digest: str) -> None:

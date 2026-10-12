@@ -1643,6 +1643,14 @@ class ArenaService:
                     raise scoring.ScoringError("partial credit retry source is unbound")
             except (company_judgments.CompanyJudgmentError, scoring.ScoringError) as exc:
                 raise ServiceError("credit_retry_source_unavailable", 503) from exc
+        if not quality_policy.enabled(round_row.get("configuration_doc") or {}):
+            for source in self._store.list_runs(round_row["round_id"], kind="score", submission_id=submission_id):
+                if (source.get("status") == "failed" and source.get("terminal_cause") == "credential_error"
+                    and source.get("output_ref") and (source.get("result_doc") or {}).get("legacy_partial_checkpoint")):
+                    try:
+                        self._validated_legacy_partial(source, round_row)
+                    except (scoring.ScoringError, ServiceError, ValueError, OutputInvalid) as exc:
+                        raise ServiceError("credit_retry_source_unavailable", 503) from exc
         # SQL repeats authorization and checks the deadline, proof, budget
         # ledger and attempt limit under locks. A signature is not cost proof.
         receipt = self._store.retry_credit_failures(
@@ -2861,6 +2869,106 @@ class ArenaService:
                 "accepted company judgment source output is not bound"
             )
         return evidence
+
+    def _legacy_partial_input(self, run, round_row):
+        """Reconstruct the immutable full-group input, never a sparse subset."""
+        configuration = round_row.get("configuration_doc") or {}
+        policy = configuration.get("scorer_policy") or {}
+        if (not integrity.enabled(configuration) or quality_policy.enabled(configuration)
+            or quality_policy.scorer_enabled(policy)):
+            raise scoring.ScoringError("legacy checkpoint policy is invalid")
+        executed = self._store.get_run(str(run.get("scored_run_id") or ""))
+        if (executed is None or executed.get("kind") != "execute"
+            or executed.get("status") != "accepted" or not executed.get("output_ref")
+            or any(executed.get(key) != run.get(key) for key in
+                   ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position"))):
+            raise scoring.ScoringError("legacy checkpoint execution is invalid")
+        output = validate_output_document(
+            json.loads(self._objects.get_bounded(str(executed["output_ref"]), MAX_OUTPUT_BYTES)),
+            expected_schema_version=contact_policy.output_schema(configuration),
+        )
+        companies = output["companies"]
+        icp = integrity.agent_visible_icp(
+            self.evaluation_icps(str(round_row["round_id"]))[int(run["icp_position"])],
+            contacts_required=contact_policy.enabled(configuration),
+        )
+        document = scoring.build_scoring_input(
+            scored_run_id=str(run["scored_run_id"]), icp=icp,
+            companies=companies, policy=policy,
+            evaluation_date=str(round_row.get("evaluation_date") or ""),
+            contact_source_evidence=(contact_evidence.resolve_sources(self._store, executed, companies)
+                                     if contact_policy.enabled(configuration) else None),
+            provider_observations=(provider_observations.resolve_observations(
+                self._store, executed, companies, str(round_row.get("evaluation_date") or ""))
+                if intent_details_policy.enabled(configuration) and provider_observations.enabled(policy) else None),
+        )
+        return document, contracts.document_hash(output)
+
+    @staticmethod
+    def _legacy_partial_receipt(run, round_row, scoring_input, execution_hash, output, completion_hash):
+        configuration = round_row.get("configuration_doc") or {}
+        return {
+            "schema_version": "leadpoet.lab_arena.legacy_partial.v1",
+            **{key: run.get(key) for key in ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position", "scored_run_id")},
+            "source_score_run_id": run["run_id"],
+            "source_runner_hotkey": run.get("runner_hotkey"),
+            "source_claim_request_id": run.get("claim_request_id"),
+            "source_claim_request_hash": run.get("claim_request_hash"),
+            "source_lease_generation": int(run.get("lease_generation") or 0),
+            "runner_authority_exclusions": (run.get("claim_response") or {}).get("runner_authority_exclusions"),
+            "source_output_ref": "arena/%s/scores/items/%s.json" % (round_row["round_id"], run["run_id"]),
+            "source_output_hash": contracts.document_hash(output),
+            "scoring_input_hash": contracts.document_hash(scoring_input),
+            "execution_output_hash": execution_hash,
+            "scorer_image_digest": configuration.get("scorer_image_digest"),
+            "scorer_image_reference": configuration.get("scorer_image_reference"),
+            "scorer_policy": configuration.get("scorer_policy"),
+            "evaluation_date": str(round_row.get("evaluation_date") or ""),
+            "terminal_count": len(output.get("terminal_breakdowns") or []),
+            "source_completion_request_hash": completion_hash,
+        }
+
+    def _validated_legacy_partial(self, source, round_row):
+        receipt = (source.get("result_doc") or {}).get("legacy_partial_checkpoint")
+        if (source.get("kind") != "score" or source.get("status") != "failed"
+            or source.get("terminal_cause") not in ("judge_error", "judge_timeout", "credential_error")
+            or (source.get("result_doc") or {}).get("terminal_status") != source.get("terminal_cause")
+            or not isinstance(receipt, dict) or not source.get("output_ref")):
+            raise scoring.ScoringError("legacy checkpoint source is not committed")
+        completion_hash = receipt.get("source_completion_request_hash")
+        if not isinstance(completion_hash, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", completion_hash):
+            raise scoring.ScoringError("legacy checkpoint completion is unbound")
+        self._require_validator_authority(str(source.get("runner_hotkey") or ""))
+        submission = self._store.get_submission(str(source.get("submission_id") or "")) or {}
+        exclusions = receipt.get("runner_authority_exclusions")
+        if (source.get("runner_hotkey") in self._banned_hotkeys(round_row)
+            or not isinstance(exclusions, list)
+            or (not submission.get("is_king") and source.get("miner_hotkey") in exclusions)):
+            raise scoring.ScoringError("legacy checkpoint authority is invalid")
+        output = scoring.validate_scoring_output_document(json.loads(
+            self._objects.get_bounded(str(source["output_ref"]), scoring.MAX_SCORING_OUTPUT_BYTES)))
+        document, execution_hash = self._legacy_partial_input(source, round_row)
+        expected = self._legacy_partial_receipt(source, round_row, document, execution_hash, output, completion_hash)
+        if (receipt != expected or source["output_ref"] != expected["source_output_ref"]
+            or output.get("scored_run_id") != source.get("scored_run_id")
+            or "failure" not in output or not output.get("terminal_breakdowns")
+            or (source.get("terminal_cause") != "credential_error" and output["failure"] != source["terminal_cause"])):
+            raise scoring.ScoringError("legacy checkpoint input or artifact changed")
+        return scoring.validate_terminal_breakdowns_for_work_item(
+            output["terminal_breakdowns"], icp=document["icp"], companies=document["companies"], policy=document["scorer_policy"],
+        )
+
+    def _prior_legacy_terminal_breakdowns(self, run, round_row):
+        sources = self._store.list_runs(str(round_row["round_id"]), kind="score", submission_id=str(run["submission_id"]))
+        sources = [source for source in sources
+                   if source.get("scored_run_id") == run.get("scored_run_id")
+                   and source.get("assignment_id") == run.get("assignment_id")
+                   and int(source.get("attempt") or 0) < int(run.get("attempt") or 0)
+                   and (source.get("result_doc") or {}).get("legacy_partial_checkpoint")]
+        if not sources:
+            return []
+        source = max(sources, key=lambda item: int(item.get("attempt") or 0))
+        return self._validated_legacy_partial(source, round_row)
 
     def _validated_company_judgment_lease(
         self,
@@ -4423,6 +4531,14 @@ class ArenaService:
                         str(round_row.get("evaluation_date") or ""),
                     ),
                 )
+            if not quality_policy.enabled(configuration) and integrity.enabled(configuration):
+                try:
+                    current = self._store.get_run(str(response["run_id"])) or response
+                    prior = self._prior_legacy_terminal_breakdowns(current, round_row)
+                    if prior:
+                        lease["prior_terminal_breakdowns"] = prior
+                except (scoring.ScoringError, ServiceError, ValueError, OutputInvalid) as exc:
+                    raise ServiceError("legacy_checkpoint_invalid", 503) from exc
             return lease
         # An execution uses the participant's private source archive under the
         # same trusted Python image as every other agent.
@@ -5128,7 +5244,13 @@ class ArenaService:
             and terminal_status in ("judge_error", "judge_timeout", "credential_error")
             and body.get("output") is not None
         )
-        if kind == "score" and (terminal_status == "accepted" or partial_quality_output):
+        partial_legacy_output = (
+            kind == "score" and not company_quality_run
+            and integrity.enabled(round_row.get("configuration_doc") or {})
+            and terminal_status in ("judge_error", "judge_timeout", "credential_error")
+            and isinstance(body.get("output"), dict) and bool(body["output"].get("terminal_breakdowns"))
+        )
+        if kind == "score" and (terminal_status == "accepted" or partial_quality_output or partial_legacy_output):
             try:
                 output = scoring.validate_scoring_output_document(body.get("output"))
             except scoring.ScoringError:
@@ -5167,6 +5289,20 @@ class ArenaService:
                     )
                 except scoring.ScoringError as exc:
                     raise ServiceError("score_invalid", 400) from exc
+            if partial_legacy_output:
+                try:
+                    document, execution_hash = self._legacy_partial_input(run, round_row)
+                    if ("failure" not in output or "company_judgments" in output
+                        or (terminal_status != "credential_error" and output["failure"] != terminal_status)):
+                        raise scoring.ScoringError("legacy partial output is invalid")
+                    output["terminal_breakdowns"] = scoring.validate_terminal_breakdowns_for_work_item(
+                        output["terminal_breakdowns"], icp=document["icp"], companies=document["companies"], policy=document["scorer_policy"],
+                    )
+                    run_result["legacy_partial_checkpoint"] = self._legacy_partial_receipt(
+                        run, round_row, document, execution_hash, output, contracts.request_bytes_hash(validated),
+                    )
+                except (scoring.ScoringError, ValueError, OutputInvalid) as exc:
+                    raise ServiceError("legacy_checkpoint_output_invalid", 400) from exc
             output_ref = "arena/%s/scores/items/%s.json" % (round_id, run_id)
             output_bytes = contracts.canonical_json(output).encode("utf-8")
             self._objects.put(output_ref, output_bytes)
@@ -5286,7 +5422,7 @@ class ArenaService:
                     raise ServiceError(
                         "company_judgment_output_invalid", 400
                     ) from exc
-            elif run.get("judgment_cache_key"):
+            elif run.get("judgment_cache_key") and not partial_legacy_output:
                 scope = dict(run.get("judgment_scope_doc") or {})
                 scope["cache_key"] = str(run["judgment_cache_key"])
                 try:

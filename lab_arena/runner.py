@@ -3485,6 +3485,7 @@ class AssignmentExecutor:
                     policy=lease["scorer_policy"], evaluation_date=evaluation_date,
                     contact_source_evidence=lease.get("contact_source_evidence"),
                     company_judgment_cache=lease.get("company_judgment_cache"),
+                    prior_terminal_breakdowns=lease.get("prior_terminal_breakdowns"),
                 )
                 extra_environment = {shim.TRUSTED_SCORER_ENV: "1"}
             else:
@@ -3661,7 +3662,9 @@ class AssignmentExecutor:
                                 output_document["scored_run_id"], "judge_timeout",
                                 detail=output_document.get("detail", ""),
                                 reason=output_document.get("reason", ""),
-                                company_judgments=output_document["company_judgments"],
+                                **{key: output_document[key] for key in
+                                   ("company_judgments", "terminal_breakdowns")
+                                   if key in output_document},
                             )
                             if "reason" in output_document:
                                 failure_diagnostic["reason"] = output_document["reason"]
@@ -4140,20 +4143,32 @@ class AssignmentExecutor:
 
 def _partial_company_judgment_output(document, lease):
     """Keep only a failed, lease-bound subset; never infer an accepted ICP."""
-    from lab_arena import company_judgments
+    from lab_arena import company_judgments, quality_policy
 
     if (not isinstance(document, dict) or "failure" not in document
         or document.get("scored_run_id") != lease.get("scored_run_id")
-        or not document.get("company_judgments")):
+        or not (document.get("company_judgments") or document.get("terminal_breakdowns"))):
         return None
     try:
         output = scoring.validate_scoring_output_document(document)
-        company_judgments.validate_new_company_judgments(
-            output["company_judgments"],
-            lease_context=lease.get("company_judgment_cache") or {},
-            require_complete=False,
-        )
-    except (scoring.ScoringError, company_judgments.CompanyJudgmentError):
+        if "terminal_breakdowns" in output:
+            if (lease.get("kind") != "score"
+                or quality_policy.enabled(lease)):
+                return None
+            scoring.validate_terminal_breakdowns_for_work_item(
+                output["terminal_breakdowns"],
+                icp=lease["icp"],
+                companies=(lease.get("scored_output") or {}).get("companies") or [],
+                policy=lease["scorer_policy"],
+            )
+        else:
+            company_judgments.validate_new_company_judgments(
+                output["company_judgments"],
+                lease_context=lease.get("company_judgment_cache") or {},
+                require_complete=False,
+            )
+    except (scoring.ScoringError, company_judgments.CompanyJudgmentError,
+            contracts.ArenaContractError, KeyError, TypeError, ValueError):
         return None
     return output
 

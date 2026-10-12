@@ -21,6 +21,9 @@ def absent():
 
 @pytest.mark.parametrize("body,reason", [
     (absent(), None),
+    (dict(absent(), status=200), None),
+    (dict(absent(), status="success"), None),
+    ({key: value for key, value in absent().items() if key != "status"}, "provider_error"),
     ({"error": None, "status": 404, "element": None}, None),
     ({"status": 404, "element": None}, "provider_error"),
     ({"error": None, "status": "404", "element": None}, "malformed_response"),
@@ -31,6 +34,8 @@ def absent():
     ({"error": None, "status": 502, "element": None}, "provider_error"),
     ({"error": None, "status": 503, "element": None}, "provider_error"),
     (dict(absent(), status="failed"), "provider_error"),
+    *[(dict(absent(), status=status), "provider_error")
+      for status in ("pending", "running", "queued", "unknown", "", None)],
     (dict(absent(), status=429), "provider_error"),
     (dict(absent(), error="account unavailable"), "provider_error"),
     ({"status": "completed", "result": absent()["result"],

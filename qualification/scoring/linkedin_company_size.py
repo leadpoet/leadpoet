@@ -369,6 +369,12 @@ def _structured_profile_explicitly_not_found(value: Any) -> bool:
             and current["error"] is None and type(current["status"]) is int
             and current["status"] == 404 and current["element"] is None):
             return True
+        status = current.get("status")
+        if ("status" in current and not (
+            (type(status) is int and status == 200)
+            or status in ("completed", "success")
+        )) or ("job_id" in current and "status" not in current):
+            return False
         # An outer account, request or job failure takes precedence over a
         # nested not-found payload. Empty/malformed success is not absence.
         if _structured_provider_reported_error({

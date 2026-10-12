@@ -953,22 +953,33 @@ class CompetitionCompanyScorer:
         is_reference_model: bool,
         *,
         retry_evidence_scope: MutableMapping[str, Any] | None = None,
+        original_company_indexes: Sequence[int] | None = None,
     ) -> list[dict[str, Any]]:
+        indexes = (
+            list(range(len(companies))) if original_company_indexes is None
+            else list(original_company_indexes)
+        )
+        if len(indexes) != len(companies) or any(
+            type(index) is not int or index < 0 for index in indexes
+        ):
+            raise CompetitionScorerInputError("original company index mapping is invalid")
         if not self.company_quality:
             return await self._score_with_breakdowns(
                 companies,
                 icp,
                 is_reference_model,
                 retry_evidence_scope=retry_evidence_scope,
+                original_company_indexes=indexes,
             )
         sliced = list(companies)[:_company_goal(icp)]
         raw = []
-        for company in sliced:
+        for index, company in enumerate(sliced):
             rows = await self._score_with_breakdowns(
                 [company],
                 icp,
                 is_reference_model,
                 retry_evidence_scope=retry_evidence_scope,
+                original_company_indexes=[indexes[index]],
             )
             raw.append(raw_company_judgment(rows[0]) if rows else bucket_skipped_judgment())
         return apply_company_judgment_context(sliced, raw, contacts_required=self.contacts_required)
@@ -980,6 +991,7 @@ class CompetitionCompanyScorer:
         is_reference_model: bool,
         *,
         retry_evidence_scope: MutableMapping[str, Any] | None = None,
+        original_company_indexes: Sequence[int],
     ) -> list[dict[str, Any]]:
         models = import_module("gateway.qualification.models")
         scorer_module = import_module("qualification.scoring.lead_scorer")
@@ -1095,7 +1107,9 @@ class CompetitionCompanyScorer:
                 if isinstance(intent_cache, MutableMapping):
                     intent_terminal_retry_cache = intent_cache
             provider_observation = _effective_provider_observation(
-                self.provider_observations, company_index
+                # Retries and quality splits can change the local list index.
+                # Keep its output index local, but select the original witness.
+                self.provider_observations, original_company_indexes[company_index]
             )
             result = await score_company(
                 company=company_model,

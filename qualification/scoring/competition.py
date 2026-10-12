@@ -1048,6 +1048,8 @@ class CompetitionCompanyScorer:
                             prior[field] = value
                         prior.update(company_identity_key=ancestor, company_qualified=False,
                                      duplicate_company=True, failure_reason="Duplicate company identity")
+                        if self.contacts_required:
+                            _merge_contact_breakdown(prior, _not_evaluated_contact(company))
                     else:
                         for alias in aliases:
                             verified_identity_key_by_alias[alias] = prior["company_identity_key"]

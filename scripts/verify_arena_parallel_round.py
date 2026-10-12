@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -1483,7 +1484,7 @@ def _tick(service: Any, round_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
 
 def _serve(args: argparse.Namespace, service: Any, app: Any) -> int:
     import uvicorn
-    from lab_arena.store import ArenaStoreUnavailable
+    from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable, FUNCTION_SIGNATURES
 
     state = _create_or_resume(service, args.round_id, now=_utc_now())
     status_path = _status_path(args)
@@ -1561,6 +1562,21 @@ def _serve(args: argparse.Namespace, service: Any, app: Any) -> int:
                 continue
             except Exception as exc:
                 driver_failure[:] = [type(exc).__name__]
+                diagnostic = {
+                    "event": "parallel_round_driver_failed", "round_id": args.round_id,
+                    "phase": phase, "error_class": type(exc).__name__,
+                    "observed_at": _utc_now().isoformat(),
+                }
+                if isinstance(exc, ArenaStoreError):
+                    matched = re.match(
+                        r"^rpc (lab_arena_[a-z0-9_]+) failed: HTTP ([45][0-9]{2}) "
+                        r"code=([A-Z0-9]{5})(?: |$)", str(exc),
+                    )
+                    if matched and matched[1] in FUNCTION_SIGNATURES:
+                        diagnostic.update(
+                            rpc=matched[1], http_status=int(matched[2]), sqlstate=matched[3],
+                        )
+                print(json.dumps(diagnostic, sort_keys=True), file=sys.stderr, flush=True)
                 print(
                     "parallel round driver failed: %s" % type(exc).__name__,
                     file=sys.stderr,

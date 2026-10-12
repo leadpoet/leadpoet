@@ -4310,8 +4310,10 @@ class Broker:
                     if judgment_cache_key else
                     self._store.reserve_call(**reservation_arguments)
                 )
-            except ArenaStoreUnavailable:
-                if reserve_readback_used:
+            except ArenaStoreUnavailable as exc:
+                if getattr(exc, "transaction_rolled_back", False) is True or reserve_readback_used:
+                    # The RPC already exhausted its bounded rollback retries;
+                    # only an ambiguous response needs reservation readback.
                     raise
                 # The RPC can commit even when its HTTP response times out.
                 # Repeating the exact deterministic call identity serializes

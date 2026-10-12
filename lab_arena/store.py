@@ -370,7 +370,11 @@ class ArenaStoreError(RuntimeError):
 
 
 class ArenaStoreUnavailable(ArenaStoreError):
-    """A transient database transport failure; RPC transport errors are not replayed."""
+    """Temporary database failure; distinguish a proved rollback from lost response."""
+
+    def __init__(self, message: str, *, transaction_rolled_back: bool = False) -> None:
+        super().__init__(message)
+        self.transaction_rolled_back = transaction_rolled_back
 
 
 class ArenaRoleError(ArenaStoreError):
@@ -483,12 +487,19 @@ class PostgrestTransport(StoreTransport):
         if 200 <= response.status_code < 300:
             return
         detail = ""
+        code = None
         try:
             body = response.json()
             if isinstance(body, dict):
+                code = body.get("code")
                 detail = " code=%s message=%s" % (body.get("code"), str(body.get("message") or "")[:200])
         except ValueError:
             detail = ""
+        if response.status_code == 500 and isinstance(code, str) and code in {"55P03", DEADLOCK_SQLSTATE}:
+            raise ArenaStoreUnavailable(
+                "%s failed: HTTP %d%s" % (context, response.status_code, detail),
+                transaction_rolled_back=True,
+            )
         raise ArenaStoreError("%s failed: HTTP %d%s" % (context, response.status_code, detail))
 
     def rpc(self, function: str, params: Mapping[str, Any]) -> Any:

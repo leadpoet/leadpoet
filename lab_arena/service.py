@@ -1607,6 +1607,42 @@ class ArenaService:
             or row.get("miner_hotkey") != validated["hotkey"]
         ):
             raise ServiceError("credit_retry_owner_required", 403)
+        # A nonempty failed output is eligible only as an authenticated partial
+        # company judgment. Reprove its immutable source bytes and evidence
+        # before SQL admits the owner-requested retry under the existing gates.
+        partial_sources = (
+            self._store.list_runs(round_row["round_id"], kind="score", submission_id=submission_id)
+            if quality_policy.enabled(round_row.get("configuration_doc") or {}) else ()
+        )
+        for source in partial_sources:
+            if (source.get("status") != "failed"
+                or source.get("terminal_cause") != "credential_error"
+                or not source.get("output_ref")
+                or not (source.get("result_doc") or {}).get("company_judgment_completion_request_hash")):
+                continue
+            try:
+                lease = company_judgments.validate_lease_context(
+                    (source.get("claim_response") or {}).get("company_judgment_cache") or {},
+                )
+                bound = False
+                seen = set()
+                for miss in lease["misses"]:
+                    identity = (miss["cache_key"], miss["authority_slot"])
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    cached = self._store.get_company_judgment(*identity)
+                    if cached is None or cached.get("source_score_run_id") != source["run_id"]:
+                        continue
+                    self._company_judgment_evidence(
+                        cache_key=miss["cache_key"], company_input_hash=miss["company_input_hash"],
+                        authority_slot=miss["authority_slot"],
+                    )
+                    bound = True
+                if not bound:
+                    raise scoring.ScoringError("partial credit retry source is unbound")
+            except (company_judgments.CompanyJudgmentError, scoring.ScoringError) as exc:
+                raise ServiceError("credit_retry_source_unavailable", 503) from exc
         # SQL repeats authorization and checks the deadline, proof, budget
         # ledger and attempt limit under locks. A signature is not cost proof.
         receipt = self._store.retry_credit_failures(

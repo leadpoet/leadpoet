@@ -24,7 +24,7 @@ MIGRATION = "465-lab-arena-partial-company-judgments.sql"
 @pytest.fixture(scope="module")
 def database():
     # The exact numbered migration must also be safe on a second application.
-    yield from database_with_lab_arena_migration(POSTGREST_MIGRATIONS + (MIGRATION, MIGRATION))
+    yield from database_with_lab_arena_migration(POSTGREST_MIGRATIONS + ("403-lab-arena-credit-failure-retry.sql", MIGRATION, MIGRATION))
 
 
 @pytest.fixture()

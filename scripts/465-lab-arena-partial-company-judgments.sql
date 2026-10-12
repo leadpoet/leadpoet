@@ -253,5 +253,75 @@ ALTER FUNCTION public.lab_arena_complete_attempt_v3(
   TEXT, TEXT, JSONB, TEXT, TEXT, TEXT, JSONB, TEXT
 ) OWNER TO lab_arena_owner;
 
+-- An owner may replenish proved exhausted credit after a partial score.
+-- Preserve every existing owner, stage, deadline, ledger and attempt gate.
+-- Only the immutable cache rows written by the signed v3 completion can
+-- establish the new nonempty failed-output alternative.
+DO $partial_company_credit_retry$
+DECLARE
+  v_definition TEXT;
+  v_old TEXT := 'AND previous.output_ref IS NULL';
+  v_leader_old TEXT := 'v_group_leader := COALESCE(v_candidate.judgment_group_leader,FALSE);';
+  v_leader_new TEXT := $leader$v_group_leader := CASE
+      WHEN v_kind = 'score' AND v_candidate.company_judgment_refs IS NOT NULL
+        AND v_candidate.judgment_cache_key IS NULL THEN NULL
+      ELSE COALESCE(v_candidate.judgment_group_leader,FALSE) END;$leader$;
+  v_new TEXT := $new$AND (
+        previous.output_ref IS NULL
+        OR (
+          previous.kind = 'score'
+          AND v_round.configuration_doc ->> 'company_quality_policy' = 'company_quality_v1'
+          AND pg_catalog.jsonb_typeof(previous.company_judgment_refs) = 'array'
+          AND previous.result_doc ->> 'company_judgment_completion_request_hash'
+            ~ '^sha256:[0-9a-f]{64}$'
+          AND EXISTS (
+            SELECT 1 FROM public.lab_arena_company_judgments AS partial_credit_source
+            WHERE partial_credit_source.source_score_run_id = previous.run_id
+              AND partial_credit_source.source_scored_run_id = previous.scored_run_id
+              AND partial_credit_source.source_runner_hotkey = previous.runner_hotkey
+              AND partial_credit_source.evidence_doc ->> 'source_output_ref' = previous.output_ref
+              AND partial_credit_source.evidence_doc ->> 'source_completion_request_hash' =
+                  previous.result_doc ->> 'company_judgment_completion_request_hash'
+              AND partial_credit_source.evidence_doc ->> 'source_claim_request_id' = previous.claim_request_id
+              AND partial_credit_source.evidence_doc ->> 'source_claim_request_hash' = previous.claim_request_hash
+              AND partial_credit_source.evidence_doc ->> 'source_lease_generation' = previous.lease_generation::TEXT
+              AND partial_credit_source.evidence_doc -> 'runner_authority_exclusions' =
+                  previous.claim_response -> 'runner_authority_exclusions'
+              AND EXISTS (
+                SELECT 1 FROM pg_catalog.jsonb_array_elements(previous.company_judgment_refs) AS refs(ref)
+                WHERE ref ->> 'cache_key' = partial_credit_source.cache_key
+                  AND ref ->> 'company_input_hash' = partial_credit_source.company_input_hash
+                  AND ref -> 'scope_doc' = partial_credit_source.scope_doc
+              )
+          )
+        )
+      )$new$;
+BEGIN
+  IF pg_catalog.to_regprocedure(
+    'public.lab_arena_retry_credit_failures_v1(text,text,text,text)'
+  ) IS NULL THEN
+    RAISE EXCEPTION 'lab_arena_partial_company_credit_retry_requires_403';
+  END IF;
+  SELECT pg_catalog.pg_get_functiondef(
+    'public.lab_arena_retry_credit_failures_v1(text,text,text,text)'::regprocedure
+  ) INTO v_definition;
+  IF pg_catalog.strpos(v_definition, 'partial_credit_source.source_score_run_id') = 0 THEN
+    IF pg_catalog.strpos(v_definition, v_old) = 0 THEN
+      RAISE EXCEPTION 'lab_arena_partial_company_credit_retry_patch_missing';
+    END IF;
+    v_definition := pg_catalog.replace(v_definition, v_old, v_new);
+  END IF;
+  -- Company-quality claims use per-company reservations rather than the
+  -- legacy whole-item group. Keep their original NULL leader admission.
+  IF pg_catalog.strpos(v_definition, v_leader_new) = 0 THEN
+    IF pg_catalog.strpos(v_definition, v_leader_old) = 0 THEN
+      RAISE EXCEPTION 'lab_arena_partial_company_credit_leader_patch_missing';
+    END IF;
+    v_definition := pg_catalog.replace(v_definition, v_leader_old, v_leader_new);
+  END IF;
+  EXECUTE v_definition;
+END;
+$partial_company_credit_retry$;
+
 NOTIFY pgrst, 'reload schema';
 COMMIT;

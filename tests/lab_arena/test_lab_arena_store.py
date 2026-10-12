@@ -576,6 +576,7 @@ def test_recover_claim_response_rejects_empty_or_malformed_rows(rows):
 def test_store_boundary_contains_only_current_arena_durable_state():
     assert TABLES == (
         "lab_arena_rounds",
+        "lab_arena_published_results_v1",
         "lab_arena_submissions",
         "lab_arena_runs",
         "lab_arena_ledger",

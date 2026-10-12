@@ -3950,6 +3950,51 @@ async def investigate_company_evidence(
                     in {"error", "failed", "failure"}
                 ):
                     raise RuntimeError("reasoning_provider_unavailable")
+                choices = body.get("choices")
+                empty_submit_message = (
+                    choices[0].get("message")
+                    if isinstance(choices, list)
+                    and len(choices) == 1
+                    and isinstance(choices[0], Mapping)
+                    else None
+                )
+                if (
+                    (force_submit or required_tool == "submit_findings")
+                    and isinstance(empty_submit_message, Mapping)
+                    and empty_submit_message.get("tool_calls") in (None, [])
+                    and empty_submit_message.get("content") in (None, "")
+                    and not correction_turn
+                    and _turn + 1 < MAX_REASONING_TURNS
+                    and incomplete_submit_retries < MAX_INCOMPLETE_SUBMIT_RETRIES
+                    and time.monotonic() - started < (
+                        ADMISSION_DEADLINE_SECONDS
+                        + (
+                            SERIALIZATION_REPAIR_GRACE_SECONDS
+                            if positive_semantic_review else 0.0
+                        )
+                    )
+                    and _response_exhausted_output_budget(
+                        body, max_tokens=REASONING_MAX_TOKENS
+                    )
+                ):
+                    # Output exhaustion can consume the whole reply before a
+                    # tool call starts. Share the existing serialization retry;
+                    # do not invent a tool call or reopen research.
+                    incomplete_submit_retries += 1
+                    forced_next_tool = "submit_findings"
+                    incomplete_submit_retry_pending = True
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "The prior submit-only response exhausted its output "
+                            "budget without returning a tool call. Retry "
+                            "submit_findings once with complete JSON from already "
+                            "fetched evidence. Do not search or fetch. Return one "
+                            "finding for each active target and no other target: "
+                            + ", ".join(active_submit_targets) + "."
+                        ),
+                    })
+                    continue
                 try:
                     message = body["choices"][0]["message"]
                     tool_calls = message["tool_calls"]
@@ -4092,6 +4137,45 @@ async def investigate_company_evidence(
                         ),
                     )
                     if claims is None:
+                        if (
+                            not correction_turn
+                            and _turn + 1 < MAX_REASONING_TURNS
+                            and incomplete_submit_retries < MAX_INCOMPLETE_SUBMIT_RETRIES
+                            and time.monotonic() - started < (
+                                ADMISSION_DEADLINE_SECONDS
+                                + (
+                                    SERIALIZATION_REPAIR_GRACE_SECONDS
+                                    if positive_semantic_review else 0.0
+                                )
+                            )
+                        ):
+                            # Repair only the findings envelope/target contract.
+                            # Facts and evidence still pass the same validators.
+                            incomplete_submit_retries += 1
+                            forced_next_tool = "submit_findings"
+                            incomplete_submit_retry_pending = True
+                            messages.extend([
+                                {"role": "assistant", "tool_calls": [canonical_call]},
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": call_id,
+                                    "name": "submit_findings",
+                                    "content": _bounded_message_json({
+                                        "ok": False,
+                                        "error": "malformed_submit_findings",
+                                        "instruction": (
+                                            "Retry submit_findings once with exactly one "
+                                            "complete finding for each active target and "
+                                            "no duplicate or additional target: "
+                                            + ", ".join(active_submit_targets) + ". "
+                                            "Use only already fetched evidence. Do not "
+                                            "search or fetch. Do not change facts to "
+                                            "satisfy the requested criteria."
+                                        ),
+                                    }),
+                                },
+                            ])
+                            continue
                         raise ValueError("reasoning_findings_malformed")
                     submitted_findings = {
                         item.get("target"): item

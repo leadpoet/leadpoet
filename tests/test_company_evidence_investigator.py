@@ -17342,3 +17342,195 @@ def test_saved_soneil_count_unit_findings_preserve_identity_binding():
                     existing_conflict=False,
                 )
                 assert projected["employee_size_matches"] is expected
+
+
+@pytest.mark.parametrize("mode,expected_calls,completed", [
+    ("captured_length", 3, True),
+    ("empty_tool_list", 3, True),
+    ("non_length", 2, False),
+    ("research_turn", 2, False),
+    ("expired", 2, False),
+    ("second_empty", 3, False),
+    ("second_arguments", 3, False),
+    ("second_contract", 3, False),
+    ("ambiguous_choices", 2, False),
+])
+def test_empty_output_exhausted_submit_shares_one_serialization_repair(
+    monkeypatch, mode, expected_calls, completed,
+):
+    clock = SimpleNamespace(now=0.0)
+    clock.monotonic = lambda: clock.now
+    calls = []
+    url = "https://www.linkedin.com/company/acme"
+    quote = "Acme | LinkedIn. Company size 51-200 employees."
+
+    async def post(_session, _url, *, headers, payload):
+        del headers
+        calls.append(payload)
+        if len(calls) == 1:
+            name, args = "search_web", {"query": "Acme current company size"}
+        elif len(calls) == 2 or mode == "second_empty":
+            if mode != "research_turn":
+                assert payload["tool_choice"] == {
+                    "type": "function", "function": {"name": "submit_findings"},
+                }
+            if mode == "expired":
+                clock.now = (
+                    investigator.ADMISSION_DEADLINE_SECONDS
+                    + investigator.SERIALIZATION_REPAIR_GRACE_SECONDS
+                )
+            # Captured production shape: reasoning consumed all 3,000 output
+            # tokens, with no content or tool call emitted before length stop.
+            choice = {"finish_reason": "length", "message": {"content": None}}
+            if mode == "non_length":
+                choice["finish_reason"] = "stop"
+            if mode == "empty_tool_list":
+                choice["message"]["tool_calls"] = []
+            return 200, {
+                "choices": [choice, dict(choice)] if mode == "ambiguous_choices" else [choice],
+                "usage": {
+                    "completion_tokens": 1 if mode == "non_length" else 3000,
+                    "completion_tokens_details": {"reasoning_tokens": 3000},
+                },
+            }
+        elif mode == "second_contract":
+            return 200, {"choices": [{"message": {"tool_calls": [{
+                "id": "wrong-targets", "type": "function", "function": {
+                    "name": "submit_findings", "arguments": '{"findings":[]}',
+                },
+            }]}}]}
+        elif mode == "second_arguments":
+            return 200, {"choices": [{"finish_reason": "length", "message": {
+                "tool_calls": [{"id": "truncated", "type": "function", "function": {
+                    "name": "submit_findings", "arguments": '{"findings":[',
+                }}],
+            }}], "usage": {"completion_tokens": 3000}}
+        else:
+            assert payload["tool_choice"] == {
+                "type": "function", "function": {"name": "submit_findings"},
+            }
+            assert payload["reasoning"] == {"effort": "low"}
+            assert payload["messages"][-1]["role"] == "user"
+            assert "Do not search or fetch" in payload["messages"][-1]["content"]
+            name, args = "submit_findings", {"findings": [_finding(
+                "headcount", observed_value="51-200", evidence_url=url,
+                evidence_quote=quote,
+            )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(len(calls)), "type": "function", "function": {
+                "name": name, "arguments": json.dumps(args),
+            },
+        }]}}]}
+
+    async def search(*_args, **_kwargs):
+        clock.now = 0.0 if mode == "research_turn" else 80.0
+        return {"results": [], "notice": "discovery_only_not_evidence"}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "time", clock)
+    monkeypatch.setattr(investigator, "_post_json", post)
+    monkeypatch.setattr(investigator, "_search_web", search)
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example", "linkedin": url},
+        targets=("headcount",), positive_semantic_review=True,
+        requested_employee_buckets=["51-200"],
+        prior_observations={"submitted_source_urls": [url]},
+        prefetched_pages={url: {"text": quote, "final_url": url}},
+    ))
+    assert len(calls) == expected_calls
+    assert (result.get("_completed_submit") is True) is completed
+    assert result["failure_reason"] == ("" if completed else MALFORMED_RESPONSE_FAILURE_REASON)
+    if completed:
+        assert set(result["claims"]) == {"headcount"}
+        assert result["claims"]["headcount"]["status"] == "VERIFIED"
+        assert result["usage"]["search_calls"] == 1
+        assert result["usage"]["fetch_calls"] == 0
+
+
+@pytest.mark.parametrize("mode,expected_calls,completed", [
+    ("duplicate_target", 3, True),
+    ("missing_target", 3, True),
+    ("extra_target", 3, True),
+    ("invalid_status", 3, True),
+    ("wrong_envelope", 3, True),
+    ("repeated_malformed", 3, False),
+    ("expired", 2, False),
+])
+def test_malformed_submit_target_contract_shares_bounded_serialization_repair(
+    monkeypatch, mode, expected_calls, completed,
+):
+    clock = SimpleNamespace(now=0.0)
+    clock.monotonic = lambda: clock.now
+    calls = []
+    url = "https://acme.example/product"
+    quote = "Acme sells subscription software."
+    valid = [
+        _attribute_finding("VERIFIED", url=url, quote=quote),
+        _finding("geography", status="UNPROVEN", observed_value=None,
+                 evidence_url="", evidence_quote=""),
+    ]
+
+    async def post(_session, _url, *, headers, payload):
+        del headers
+        calls.append(payload)
+        if len(calls) == 1:
+            name, args = "search_web", {"query": "Acme subscription software headquarters"}
+        else:
+            name = "submit_findings"
+            args = {"findings": valid}
+            if len(calls) == 2 or mode == "repeated_malformed":
+                if mode in {"duplicate_target", "repeated_malformed", "expired"}:
+                    # Production body328 repeated required_attribute instead of
+                    # supplying exactly one finding for each requested target.
+                    args = {"findings": [valid[0], dict(valid[0])]}
+                elif mode == "missing_target":
+                    args = {"findings": valid[:1]}
+                elif mode == "extra_target":
+                    args = {"findings": valid + [_finding("stage")]}
+                elif mode == "invalid_status":
+                    args = {"findings": [dict(valid[0], status="MATCH"), valid[1]]}
+                elif mode == "wrong_envelope":
+                    args = {"findings": valid, "extra": True}
+                if mode == "expired":
+                    clock.now = (
+                        investigator.ADMISSION_DEADLINE_SECONDS
+                        + investigator.SERIALIZATION_REPAIR_GRACE_SECONDS
+                    )
+            else:
+                assert payload["tool_choice"] == {
+                    "type": "function", "function": {"name": "submit_findings"},
+                }
+                feedback = json.loads(payload["messages"][-1]["content"])
+                assert feedback["error"] == "malformed_submit_findings"
+                assert "required_attribute, geography" in feedback["instruction"]
+                assert "Do not search or fetch" in feedback["instruction"]
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(len(calls)), "type": "function", "function": {
+                "name": name, "arguments": json.dumps(args),
+            },
+        }]}}]}
+
+    async def search(*_args, **_kwargs):
+        return {"results": [], "notice": "discovery_only_not_evidence"}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "time", clock)
+    monkeypatch.setattr(investigator, "_post_json", post)
+    monkeypatch.setattr(investigator, "_search_web", search)
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("required_attribute", "geography"),
+        requested_attribute="Sells subscription software", positive_semantic_review=True,
+        prior_observations={"submitted_source_urls": [url]},
+        prefetched_pages={url: {"text": quote, "final_url": url}},
+    ))
+    assert len(calls) == expected_calls
+    assert (result.get("_completed_submit") is True) is completed
+    assert result["failure_reason"] == ("" if completed else MALFORMED_RESPONSE_FAILURE_REASON)
+    if completed:
+        assert result["claims"]["required_attribute"]["status"] == "VERIFIED"
+        assert result["claims"]["geography"]["status"] == "UNPROVEN"
+        assert result["usage"]["search_calls"] == 1
+        assert result["usage"]["fetch_calls"] == 0

@@ -8719,14 +8719,72 @@ async def _llm_reverify_company(
         # The bounded investigator already exhausted the allowed research for
         # these disputes. Keep its UNPROVEN result instead of asking the broad
         # schema repair to re-run otherwise complete dimensions.
+        refresh_outcome = str(current_profile_cache.get("refresh_outcome") or "")
+        receipt = result.details.get("investigation_receipt")
+        receipt = receipt if isinstance(receipt, Mapping) else {}
+        review_claims = receipt.get("claims")
+        review_claims = review_claims if isinstance(review_claims, Mapping) else {}
+        review_usage = receipt.get("usage")
+        review_usage = review_usage if isinstance(review_usage, Mapping) else {}
+        review_fetches = review_usage.get("fetch_outcomes")
+        review_fetches = review_fetches if isinstance(review_fetches, list) else []
+        current_profile = current_profile_cache.get("evidence")
+        # A malformed optional structured profile supplies no evidence. A later
+        # independently completed search can exhaust every disputed fact without
+        # recovering that profile. This cannot clear a transport/provider fault,
+        # an unfinished search, or a positive finding's missing proof.
+        malformed_profile_exhausted = bool(
+            refresh_outcome == "retryable_failure"
+            and current_profile_cache.get("structured_failure") is True
+            and current_profile_cache.get("structured_failure_reason")
+            == MALFORMED_RESPONSE_FAILURE_REASON
+            and current_profile_cache.get(VERIFIER_FAILURE_DETAIL_KEY)
+            == MALFORMED_RESPONSE_FAILURE_REASON
+            and isinstance(current_profile, Mapping)
+            and current_profile.get("outcome")
+            == CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
+            and "employee_size" in incomplete
+            and receipt.get("gate") == "company_evidence_investigation"
+            and receipt.get("completed_submitted_findings") is True
+            and receipt.get("failure_reason") == ""
+            and all(
+                isinstance(outcome, Mapping)
+                and isinstance(outcome.get("url_sha256"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", outcome["url_sha256"])
+                for outcome in review_fetches
+            )
+            and any(
+                outcome.get("ok") is True
+                and type(outcome.get("loaded_text_length")) is int
+                and outcome["loaded_text_length"] > 0
+                for outcome in review_fetches
+            )
+            and all(
+                target is not None
+                and target in (receipt.get("targets") or ())
+                and isinstance(review_claims.get(target), Mapping)
+                and review_claims[target].get("target") == target
+                and review_claims[target].get("status") == "UNPROVEN"
+                and review_claims[target].get("evidence_url") == ""
+                and review_claims[target].get("evidence_quote") == ""
+                for target in (
+                    {"identity": "rebrand", "employee_size": "headcount",
+                     "stage": "stage", "industry": "industry",
+                     "required_attribute": "required_attribute",
+                     "geography": "geography"}.get(dimension)
+                    for dimension in incomplete
+                )
+            )
+        )
         if (
             result.decision == COMPANY_FIT_UNAVAILABLE
             and _has_explicitly_unproven_fit_dimensions(
                 verdict,
                 incomplete,
                 icp=icp,
-                linkedin_refresh_outcome=str(
-                    current_profile_cache.get("refresh_outcome") or ""
+                linkedin_refresh_outcome=(
+                    CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
+                    if malformed_profile_exhausted else refresh_outcome
                 ),
                 identity_receipt=(
                     result.details.get("identity_receipt")
@@ -8747,7 +8805,22 @@ async def _llm_reverify_company(
                     "failure_class": (
                         INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS
                     ),
+                    **({"investigation_receipt": {
+                        **receipt,
+                        "prior_linkedin_refresh_failure_reason": (
+                            MALFORMED_RESPONSE_FAILURE_REASON
+                        ),
+                    }} if malformed_profile_exhausted else {}),
                 },
+            )
+        if "employee_size" in incomplete and refresh_outcome == "retryable_failure":
+            return _with_verifier_failure_reason(
+                company_fit_unavailable(
+                    result.reason,
+                    details={**result.details,
+                             "failure_class": EMPLOYEE_SIZE_VERIFICATION_FAILURE_CLASS},
+                ),
+                current_profile_cache.get(VERIFIER_FAILURE_DETAIL_KEY),
             )
         return result
 

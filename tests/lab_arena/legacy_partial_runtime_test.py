@@ -8,20 +8,54 @@ from pathlib import Path
 
 import pytest
 
-from lab_arena import contracts, runner, runtime, scorer_entrypoint, scoring
-from qualification.scoring import lead_scorer
+from lab_arena import contact_policy, contracts, runner, runtime, scorer_entrypoint, scoring
+from qualification.scoring import contact_verification, lead_scorer
 from tests.test_arena_score_integrity import _icp, _positive_breakdown, _public_company
 from tests.lab_arena.test_lab_arena_runner import BridgingRuntime, scoring_lease
 from tests.lab_arena.trajectory_runner_test import LoggingApi, run_model
 
 
-def _input(companies=None):
-    policy = scoring.build_scorer_policy(scoring_adapter_version="qualification_integrity_v2")
+def _input(companies=None, *, contacts=False):
+    policy = scoring.build_scorer_policy(scoring_adapter_version=(
+        "qualification_contacts_v3" if contacts else "qualification_integrity_v2"
+    ))
+    companies = copy.deepcopy(companies or [_public_company("A", domain="a.example"), _public_company("B", domain="b.example")])
+    icp = _icp()
+    if contacts:
+        icp.update(contact_policy="contacts_v1", target_roles=["VP Engineering"],
+                   target_seniority="VP+", contact_geography={"countries": ["US"], "regions": [], "cities": []})
+        for index, company in enumerate(companies):
+            company["contact"] = {
+                "full_name": "Ada Lovelace", "role": "VP Engineering",
+                "linkedin_url": f"https://www.linkedin.com/in/contact-{index}/",
+                "location": {"country": "US"}, "email": f"ada@company-{index}.example",
+                "email_source": {"provider": "harvestapi", "tool": "harvestapi_get_profile",
+                                 "record_id": f"profile-{index}"},
+            }
     return scoring.build_scoring_input(
-        scored_run_id="r1", icp=_icp(),
-        companies=companies or [_public_company("A", domain="a.example"), _public_company("B", domain="b.example")],
+        scored_run_id="r1", icp=icp, companies=companies,
         policy=policy, evaluation_date="2026-10-12",
     )
+
+
+def _install_verified_contacts(monkeypatch):
+    attempted = []
+
+    async def verified(company, *_args, **_kwargs):
+        attempted.append(company["company_name"])
+        return {
+            "contact_qualified": True,
+            "contact_identity_key": contact_verification.contact_identity_key(company["contact"]),
+            "email_status": "valid",
+            "contact_verification": {"decision": "verified", "subchecks": {
+                key: {"status": "pass"} for key in
+                ("claim", "identity", "source", "company", "role", "location", "email_attribution", "email_verification")
+            }},
+            "verifier_gate_receipts": [{"gate": "contact", "decision": "verified"}],
+        }
+
+    monkeypatch.setattr(contact_verification, "verify_contact", verified)
+    return attempted
 
 
 def _row(name="A", index=0, *, negative=False):
@@ -235,8 +269,10 @@ def test_runner_timeout_keeps_terminal_rows_and_trusted_resume_input(tmp_path):
     assert "breakdowns" not in body["output"]
 
 
-def test_earlier_recovered_alias_reprojects_retained_later_positive_without_paid_retry(monkeypatch):
-    document = _input([_public_company(name, domain=name.lower() + ".example") for name in ("A", "B", "C")])
+@pytest.mark.parametrize("contacts", [False, True])
+def test_earlier_recovered_alias_reprojects_retained_later_positive_without_paid_retry(monkeypatch, contacts):
+    document = _input([_public_company(name, domain=name.lower() + ".example") for name in ("A", "B", "C")], contacts=contacts)
+    contact_attempted = _install_verified_contacts(monkeypatch) if contacts else []
     phase = {"value": 0}
     attempted = []
 
@@ -259,11 +295,18 @@ def test_earlier_recovered_alias_reprojects_retained_later_positive_without_paid
     document["prior_terminal_breakdowns"] = first["terminal_breakdowns"]
     phase["value"] = 1
     attempted.clear()
+    contact_attempted.clear()
     second = scorer_entrypoint.score_input(document)
     assert "B" not in attempted
     assert [row["company_index"] for row in second["terminal_breakdowns"]] == [0, 1]
     assert second["terminal_breakdowns"][1]["duplicate_company"] is True
     assert second["terminal_breakdowns"][1]["final_score"] == 0.0
+    if contacts:
+        assert contact_attempted == ["A"]
+        duplicate = second["terminal_breakdowns"][1]
+        assert duplicate["contact_qualified"] is False
+        assert duplicate["contact_verification"]["decision"] == "not_evaluated"
+        contact_policy.validate_contact_breakdown(duplicate)
     document["prior_terminal_breakdowns"] = second["terminal_breakdowns"]
     phase["value"] = 2
     attempted.clear()
@@ -273,6 +316,41 @@ def test_earlier_recovered_alias_reprojects_retained_later_positive_without_paid
     full = scorer_entrypoint.score_input(document)
     fields = ("final_score", "company_qualified", "duplicate_company", "company_identity_key")
     assert [[row[field] for field in fields] for row in resumed["breakdowns"]] == [[row[field] for field in fields] for row in full["breakdowns"]]
+    scoring.validate_breakdowns_for_item(
+        resumed["breakdowns"], icp=document["icp"], companies=document["companies"],
+        integrity_policy=True, contacts_required=contacts,
+    )
+
+
+def test_resumed_nonduplicate_keeps_verified_contact_without_rechecking(monkeypatch):
+    document = _input(contacts=True)
+    attempted = []
+    contact_attempted = _install_verified_contacts(monkeypatch)
+    ready = {"A"}
+
+    async def judge(**kwargs):
+        name = kwargs["company"].company_name
+        attempted.append(name)
+        if name not in ready:
+            raise RuntimeError("provider timeout")
+        return _positive_breakdown(name, name.lower() + ".example")
+
+    monkeypatch.setattr(lead_scorer, "score_company_competition_intent", judge)
+    failed = scorer_entrypoint.score_input(document)
+    prior = copy.deepcopy(failed["terminal_breakdowns"])
+    assert prior[0]["contact_qualified"] is True
+    document["prior_terminal_breakdowns"] = prior
+    ready.add("B")
+    attempted.clear()
+    contact_attempted.clear()
+    resumed = scorer_entrypoint.score_input(document)
+    assert attempted == ["B"]
+    assert contact_attempted == ["B"]
+    assert resumed["breakdowns"][0] == prior[0]
+    scoring.validate_breakdowns_for_item(
+        resumed["breakdowns"], icp=document["icp"], companies=document["companies"],
+        integrity_policy=True, contacts_required=True,
+    )
 
 
 @pytest.mark.parametrize("change", ["valid", "stale", "cleanup", "worker_cleanup"])

@@ -1693,7 +1693,11 @@ def _quote_proves_same_domain_alias(
         return bool(
             exact_legal_brand_parenthetical
             and not re.search(
-                r"\b(?:parent|subsidiar(?:y|ies))\b", normalized_quote
+                r"\b(?:parent|subsidiar(?:y|ies)|not|never|"
+                r"den(?:y|ied|ies)|plan(?:s|ned)?|intend(?:s|ed)?|"
+                r"propos(?:e|ed)|consider(?:s|ed)?|may|might|could|"
+                r"will|would|hypothetical)\b",
+                normalized_quote,
             )
         )
     verified_homepage_anchor = bool(

@@ -16739,3 +16739,89 @@ def test_final_invalid_target_does_not_erase_independent_valid_stage(monkeypatch
     assert result["claims"]["industry"]["status"] == "UNPROVEN"
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["_validated_stage_finding"] == result["claims"]["stage"]
+
+
+@pytest.mark.parametrize("unit", ["employee", "employees", "worker", "workers", "people"])
+def test_headcount_observed_value_trailing_count_unit(unit):
+    assert investigator._quote_supports_headcount(
+        f"Acme Company size 11-50 {unit}.", f"11-50 {unit}",
+    )
+    assert investigator._quote_supports_headcount(
+        f"Acme has 27 {unit} company-wide.", f"27 {unit}",
+    )
+    assert not investigator._quote_supports_headcount(
+        f"Acme Company size 51-200 {unit}.", f"11-50 {unit}",
+    )
+
+
+@pytest.mark.parametrize("quote,value", [
+    ("Acme has approximately 27 employees.", "27 employees"),
+    ("Acme has 27-50 employees.", "27 employees"),
+    ("Acme has 27+ employees.", "27 employees"),
+    ("Acme has 27 followers.", "27 employees"),
+    ("Acme department has 27 employees.", "27 employees"),
+    ("Acme Company size 11-50 former employees; 749 followers.", "11-50 employees"),
+    ("Acme Company size 11-50 employees.", "about 11-50 employees"),
+    ("Acme Company size 11-50 employees.", "11-50 former employees"),
+    ("Acme Company size 11-50 employees.", "11-50 followers"),
+])
+def test_headcount_count_unit_preserves_exact_company_count_guards(quote, value):
+    assert not investigator._quote_supports_headcount(quote, value)
+
+
+@pytest.mark.parametrize("status", ["VERIFIED", "CONTRADICTED"])
+@pytest.mark.parametrize("bands,expected", [("11-50", True), ("51-200", False)])
+def test_headcount_count_unit_grounding_and_deterministic_range(status, bands, expected):
+    url = "https://ca.linkedin.com/company/acme"
+    quote = "Acme | LinkedIn. 749 followers. Company size 11-50 employees"
+    finding = _finding("headcount", observed_value="11-50 employees", status=status,
+                       evidence_url=url, evidence_quote=quote)
+    grounded = _validated_findings(
+        {"findings": [finding]}, targets=("headcount",), fetched_pages={url: quote},
+        first_party_domains={"acme.example"}, identity_names={"acme"},
+    )
+    assert grounded["headcount"]["status"] == status
+    projected = _project_investigator_headcount(
+        {}, grounded["headcount"], icp=_icp(employee_count=bands), existing_conflict=False,
+    )
+    assert projected["employee_size_matches"] is expected
+    wrong_company = _validated_findings(
+        {"findings": [finding]}, targets=("headcount",),
+        fetched_pages={url: quote}, first_party_domains={"acme.example"},
+        identity_names={"other"},
+    )
+    assert wrong_company is None or wrong_company["headcount"]["status"] == "UNPROVEN"
+
+
+def test_saved_soneil_count_unit_findings_preserve_identity_binding():
+    # Saved Exa source115 and submitted headcount quotes119-122.
+    source = 'Soneil Investments | LinkedIn\n\n \n\n \n\n### Brampton, ON 749 followers \n\n#### Building Strong Relationships \n\n## About us \n\n Trusted For More Than 30 Years Soneil Investments has been a trusted name in property ownership, management, and development in the Greater Toronto Area (GTA) for more than 30 years. We own and manage a diverse portfolio of 40-plus commercial properties equaling more than $1 billion in assets, including industrial, office, and retail spaces, carefully selected to drive value and long-term stability in high-demand markets. Building Strong Relationships Our success is driven by a strategic blend of data-driven investments and hands-on management, allowing us to identify high-return opportunities and navigate market shifts with confidence. What sets us apart is our collaborative approach—we build strong, trust-based relationships with lenders, tenants, and partners, ensuring sustained growth and value creation. Looking ahead, we continue to expand our commercial real estate portfolio while actively pursuing land acquisitions for future residential and commercial development. \n\n Website \n\n http://www.soneilinvestments.com \n\nExternal link for Soneil Investments\n\n Industry \n\n Real Estate \n\n Company size \n\n 11-50 employees \n\n Headquarters \n\n Brampton, ON \n\n Type \n\n Privately Held \n\n Founded \n\n 1994 \n\n Specialties \n\n Real Estate, Leasing, Investment, Development, and Property Management \n\n## Locations \n\n- Primary \n\n 46 West Dr. \n\n Brampton, ON L6T3T6, CA \n\n Get directions \n\n## Employees at Soneil Investments \n\n- ### Neil Jain \n- ### Bhavik Patel \n- ### Nilesh Shukla \n- ### Jay Manseta'
+    quotes = [
+        'Company size \n\n 11-50 employees',
+        'Company size \n\n 11-50 employees \n\n Headquarters',
+        source,
+        'Company size \n\n 11-50 employees',
+    ]
+    url = "https://ca.linkedin.com/company/soneil-investments"
+    for index, quote in enumerate(quotes):
+        finding = _finding(
+            "headcount", status="CONTRADICTED", observed_value="11-50 employees",
+            evidence_url=url, evidence_quote=quote,
+        )
+        result = _validated_findings(
+            {"findings": [finding]}, targets=("headcount",),
+            fetched_pages={url: source},
+            fetched_final_urls={url: "https://www.linkedin.com/company/soneil-investments"},
+            first_party_domains={"soneilinvestments.com"},
+            identity_names={"soneilinvestments"},
+        )
+        assert result["headcount"]["status"] == (
+            "CONTRADICTED" if index == 2 else "UNPROVEN"
+        )
+        if index == 2:
+            for bands, expected in (("11-50", True), ("51-200", False)):
+                projected = _project_investigator_headcount(
+                    {}, result["headcount"], icp=_icp(employee_count=bands),
+                    existing_conflict=False,
+                )
+                assert projected["employee_size_matches"] is expected

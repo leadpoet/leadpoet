@@ -2371,8 +2371,15 @@ def _fetch_outcome(url: str, result: Mapping[str, Any]) -> dict[str, Any]:
     else:
         error_class = "fetch_failed"
     text = str(result.get("text") or "") if result.get("ok") else ""
+    try:
+        normalized_url = public_http_url(url)
+    except ValueError:
+        normalized_url = ""
     return {
-        "url_sha256": hashlib.sha256(str(url or "").encode("utf-8")).hexdigest(),
+        "url_sha256": (
+            hashlib.sha256(normalized_url.encode("utf-8")).hexdigest()
+            if normalized_url else ""
+        ),
         "ok": bool(result.get("ok")),
         "error_class": error_class,
         "loaded_text_length": len(text),

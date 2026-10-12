@@ -3759,11 +3759,17 @@ def _web_identity_receipt(
     verified_alias_slug = str(
         verified_alias_anchor.get("linkedin_company_slug") or ""
     ).casefold()
+    profile_alias_slug = _bound_structured_legal_brand_alias_slug(
+        receipt, verified_structured_identity,
+        verified_homepage_transport_domain,
+    )
+    if verified_alias_slug and verified_alias_slug != profile_alias_slug:
+        profile_alias_slug = ""
     alias_anchor = {
         **receipt,
         "verified_name": verified_alias_name,
         "verified_domain": verified_alias_domain,
-        "verified_linkedin_slug": verified_alias_slug,
+        "verified_linkedin_slug": verified_alias_slug or profile_alias_slug,
     }
     same_domain_name_alias = bool(
         receipt.get("evidence_source") == "company_web_reverification"
@@ -3820,7 +3826,7 @@ def _web_identity_receipt(
         old_domain = str(rebrand.get("old_domain") or "").casefold()
         new_domain = str(rebrand.get("new_domain") or "").casefold()
         shared_slug = str(rebrand.get("shared_linkedin_slug") or "").casefold()
-        submitted_slug = receipt_submitted_slug or (
+        submitted_slug = receipt_submitted_slug or profile_alias_slug or (
             verified_alias_slug
             if verified_alias_name == submitted_raw_name
             and verified_alias_domain == receipt_submitted_domain
@@ -5602,6 +5608,43 @@ def _structured_profile_alias_identity_receipt(
     return resolved
 
 
+def _bound_structured_legal_brand_alias_slug(
+    web_identity: Mapping[str, Any],
+    structured_identity: Optional[Mapping[str, Any]],
+    transport_domain: str,
+) -> str:
+    """Use an exact independently fetched profile only as an alias anchor."""
+
+    evidence = structured_identity if isinstance(structured_identity, Mapping) else {}
+    observed_slug = str(web_identity.get("observed_linkedin_slug") or "").casefold()
+    submitted_slug = str(web_identity.get("submitted_linkedin_slug") or "").casefold()
+    observed_name = str(web_identity.get("observed_name") or "").strip()
+    profile_name = str(evidence.get("name") or "").strip()
+    try:
+        profile_domain = _registrable_domain(str(evidence.get("website") or ""))
+    except (NormalizationError, TypeError, ValueError):
+        return ""
+    if (
+        set(evidence) != {"name", "provider", "source_field", "url", "website"}
+        or evidence.get("provider") != STRUCTURED_PROFILE_PROVIDER
+        or evidence.get("source_field") != STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
+        or web_identity.get("evidence_source") != "company_web_reverification"
+        or web_identity.get("decision") != COMPANY_FIT_UNAVAILABLE
+        or not transport_domain
+        or web_identity.get("submitted_domain") != transport_domain
+        or web_identity.get("observed_domain") != transport_domain
+        or not observed_slug
+        or (submitted_slug and submitted_slug != observed_slug)
+        or not observed_name
+        or observed_name.casefold()
+        != re.sub(r"[^a-z0-9]+", "", profile_name.casefold())
+        or linkedin_company_page_slug(evidence.get("url")) != observed_slug
+        or profile_domain != transport_domain
+    ):
+        return ""
+    return observed_slug
+
+
 def _reverify_decision(
     verdict: dict,
     icp_attribute: str,
@@ -6514,6 +6557,8 @@ def _targeted_company_investigation_dimensions(
     company: Optional[CompanyOutput] = None,
     verified_rebrand_redirect: Optional[Mapping[str, str]] = None,
     verified_homepage_identity: Optional[Mapping[str, Any]] = None,
+    verified_structured_identity: Optional[Mapping[str, Any]] = None,
+    verified_transport_domain: str = "",
     homepage_navigation_locators: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[str, ...]:
     """Select only fact gaps and unsupported semantic company disputes."""
@@ -6554,6 +6599,17 @@ def _targeted_company_investigation_dimensions(
     ):
         targets.append("stage")
     identity = details.get("identity_receipt")
+    homepage_alias_slug = str(
+        (verified_homepage_identity or {}).get("linkedin_company_slug") or ""
+    ).casefold()
+    structured_alias_slug = (
+        _bound_structured_legal_brand_alias_slug(
+            identity, verified_structured_identity, verified_transport_domain,
+        )
+        if isinstance(identity, Mapping) else ""
+    )
+    if homepage_alias_slug and homepage_alias_slug != structured_alias_slug:
+        structured_alias_slug = ""
     if details.get("identity_decision") != COMPANY_FIT_MATCH and (
         bool(verified_rebrand_redirect)
         or (
@@ -6568,7 +6624,12 @@ def _targeted_company_investigation_dimensions(
                 or (
                     identity.get("evidence_source")
                     == "company_web_reverification"
-                    and _same_domain_name_alias(identity)
+                    and _same_domain_name_alias({
+                        **identity,
+                        "verified_linkedin_slug": (
+                            homepage_alias_slug or structured_alias_slug
+                        ),
+                    })
                 )
             )
         )
@@ -7198,6 +7259,7 @@ async def _run_targeted_company_evidence_investigation(
     employee_size_conflict: bool,
     company_quality: bool,
     structured_profile_identity_evidence: Optional[Mapping[str, Any]] = None,
+    structured_profile_invocation_cache: Optional[dict[str, Any]] = None,
     structured_profile_description_evidence: Optional[Mapping[str, Any]] = None,
     prior_result: Optional[CompanyFitDecisionResult] = None,
     required_attribute_source_cache: Optional[
@@ -7347,6 +7409,11 @@ async def _run_targeted_company_evidence_investigation(
         verified_homepage_navigation_locators=homepage_navigation_locators,
         verified_structured_identity=structured_profile_identity_evidence,
         company_quality=company_quality,
+    )
+    structured_alias_slug = _bound_structured_legal_brand_alias_slug(
+        investigation_web_identity,
+        structured_profile_identity_evidence,
+        verified_transport_domain,
     )
     investigation_verified_identity, investigation_linkedin = (
         _investigator_identity_context(
@@ -7564,6 +7631,7 @@ async def _run_targeted_company_evidence_investigation(
             ),
         },
         verified_homepage_identity=investigation_verified_identity,
+        verified_structured_alias_slug=structured_alias_slug,
         verified_navigation_identity=(
             {
                 "normalized_name": company.company_name,
@@ -7857,6 +7925,40 @@ async def _run_targeted_company_evidence_investigation(
     verified_rebrand_identity = (
         rebrand_claim if isinstance(rebrand_claim, Mapping) else {}
     )
+    # The structured range was fetched for identity lookup, but remains
+    # unavailable until the fetched first-party alias quote is validated.
+    if (
+        structured_alias_slug
+        and verified_rebrand_identity.get("status") == "VERIFIED"
+        and isinstance(structured_profile_invocation_cache, dict)
+    ):
+        alias_receipt = _web_identity_receipt(
+            company, projected,
+            verified_homepage_identity=verified_identity,
+            verified_homepage_transport_domain=verified_transport_domain,
+            verified_homepage_navigation_locators=homepage_navigation_locators,
+            verified_rebrand_identity=verified_rebrand_identity,
+            verified_structured_identity=structured_profile_identity_evidence,
+            company_quality=company_quality,
+        )
+        candidate_size = structured_profile_invocation_cache.get(
+            "structured_evidence"
+        )
+        if (
+            alias_receipt.get("decision") == COMPANY_FIT_MATCH
+            and alias_receipt.get("reason_code") == "verified_same_domain_alias"
+            and isinstance(candidate_size, Mapping)
+            and _structured_employee_size_decision(candidate_size, icp)
+            != COMPANY_FIT_UNAVAILABLE
+            and linkedin_company_page_slug(candidate_size.get("url"))
+            == structured_alias_slug
+            and _canonical_company_domain(candidate_size.get("website"))
+            == verified_transport_domain
+        ):
+            structured_employee_size_evidence = candidate_size
+            structured_profile_invocation_cache[
+                "structured_employee_size_applicable"
+            ] = True
     projected_result = _reverify_decision(
         projected,
         icp_attribute,
@@ -8430,6 +8532,8 @@ async def _llm_reverify_company(
             company=company,
             verified_rebrand_redirect=verified_rebrand_redirect,
             verified_homepage_identity=verified_identity,
+            verified_structured_identity=structured_profile_identity_evidence,
+            verified_transport_domain=verified_transport_domain,
             homepage_navigation_locators=verified_homepage_navigation_locators,
         )
         if require_company_fit_dimensions and evidence_investigator
@@ -8516,6 +8620,7 @@ async def _llm_reverify_company(
             structured_profile_identity_evidence=(
                 structured_profile_identity_evidence
             ),
+            structured_profile_invocation_cache=current_profile_cache,
             structured_profile_description_evidence=(
                 current_profile_cache.get(
                     "structured_profile_description_evidence"
@@ -8546,6 +8651,11 @@ async def _llm_reverify_company(
         )
         if not claims:
             return result
+        structured_employee_size_evidence = (
+            current_profile_cache.get("structured_evidence")
+            if current_profile_cache.get("structured_employee_size_applicable")
+            else None
+        )
         if _incomplete_targeted_investigation(result):
             # Preserve valid partial findings, but retry an unresolved fact
             # after its required research failed or was refused for time.
@@ -8920,6 +9030,8 @@ async def _llm_reverify_company(
                 company=company,
                 verified_rebrand_redirect=verified_rebrand_redirect,
                 verified_homepage_identity=verified_identity,
+                verified_structured_identity=structured_profile_identity_evidence,
+                verified_transport_domain=verified_transport_domain,
                 homepage_navigation_locators=verified_homepage_navigation_locators,
             )
         )
@@ -8965,6 +9077,7 @@ async def _llm_reverify_company(
                 structured_profile_identity_evidence=(
                     structured_profile_identity_evidence
                 ),
+                structured_profile_invocation_cache=current_profile_cache,
                 structured_profile_description_evidence=(
                     current_profile_cache.get(
                         "structured_profile_description_evidence"

@@ -1675,6 +1675,31 @@ def _quote_proves_same_domain_alias(
         r"\(\s*[\"']?[a-z0-9][^)]{0,100}\)",
         normalized_quote,
     )
+    submitted_name = str(identity_anchor.get("submitted_name") or "").strip()
+    observed_name_text = str(observed_name or "").strip()
+    # A first-party issuer may state its exact legal and trading names as
+    # `The Legal Company (“Brand”)` without using "trades as" prose.
+    exact_legal_brand_parenthetical = bool(
+        submitted_name
+        and observed_name_text
+        and re.search(
+            rf"(?<!\w){re.escape(submitted_name)}\s*\(\s*[\"“‘']"
+            rf"{re.escape(observed_name_text)}[\"”’']\s*\)",
+            quote,
+            re.I,
+        )
+    )
+    if identity_anchor.get("verified_structured_alias_slug"):
+        return bool(
+            exact_legal_brand_parenthetical
+            and not re.search(
+                r"\b(?:parent|subsidiar(?:y|ies)|not|never|"
+                r"den(?:y|ied|ies)|plan(?:s|ned)?|intend(?:s|ed)?|"
+                r"propos(?:e|ed)|consider(?:s|ed)?|may|might|could|"
+                r"will|would|hypothetical)\b",
+                normalized_quote,
+            )
+        )
     verified_homepage_anchor = bool(
         _normalized_span(identity_anchor.get("verified_name"))
         == _normalized_span(identity_anchor.get("submitted_name"))
@@ -3006,6 +3031,7 @@ async def investigate_company_evidence(
     homepage_navigation_locators: Optional[Sequence[Mapping[str, Any]]] = None,
     prefetched_pages: Optional[Mapping[str, Any]] = None,
     verified_navigation_identity: Optional[Mapping[str, Any]] = None,
+    verified_structured_alias_slug: str = "",
     diagnostic: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     """Run one bounded tool loop and return validated tri-state findings."""
@@ -3286,9 +3312,11 @@ async def investigate_company_evidence(
             (verified_homepage_identity or {}).get("registrable_dns_domain")
         ),
         "verified_name": (verified_homepage_identity or {}).get("normalized_name"),
-        "verified_linkedin_slug": str(
-            (verified_homepage_identity or {}).get("linkedin_company_slug") or ""
+        "verified_linkedin_slug": (
+            str((verified_homepage_identity or {}).get("linkedin_company_slug") or "")
+            or verified_structured_alias_slug
         ).casefold(),
+        "verified_structured_alias_slug": verified_structured_alias_slug,
         "observed_linkedin_slug": linkedin_company_page_slug(
             (prior_observations or {}).get("observed_company_linkedin")
         ),

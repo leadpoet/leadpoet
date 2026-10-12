@@ -32,6 +32,7 @@ from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_UNAVAILABLE,
     company_fit_match,
     company_fit_mismatch,
+    company_fit_unavailable,
 )
 from qualification.scoring.evaluation_clock import use_evaluation_date
 from qualification.scoring.linkedin_company_size import (
@@ -7912,6 +7913,522 @@ def test_same_domain_alias_flows_from_selector_through_evidence_to_identity():
     assert projected.details["identity_receipt"]["reason_code"] == (
         "verified_same_domain_alias"
     )
+
+
+def test_exact_first_party_legal_brand_quote_binds_fetched_profile():
+    company = _company(
+        name="The Western Union Company", website="https://westernunion.com/",
+        linkedin="",
+    )
+    verdict = _complete_verdict(
+        observed_company_name="Western Union",
+        observed_company_website="https://westernunion.com/",
+        observed_company_linkedin="https://www.linkedin.com/company/western-union",
+    )
+    profile = {
+        "name": "Western Union", "provider": "harvestapi_get_company",
+        "source_field": "name",
+        "url": "https://www.linkedin.com/company/western-union",
+        "website": "https://westernunion.com/",
+    }
+    original_verdict = dict(verdict, observed_company_name=company.company_name)
+    original = _reverify_decision(
+        original_verdict, "", "", icp=_icp(), company=company,
+        company_quality=True,
+    )
+    assert original.details["identity_decision"] == COMPANY_FIT_MATCH
+    assert "rebrand" not in _targeted_company_investigation_dimensions(
+        original, icp_stage="", employee_size_conflict=False,
+    )
+    initial = _reverify_decision(
+        verdict, "", "", icp=_icp(), company=company,
+        verified_homepage_transport_domain="westernunion.com",
+        structured_profile_identity_evidence=profile, company_quality=True,
+    )
+    assert initial.details["identity_decision"] == COMPANY_FIT_UNAVAILABLE
+    assert _targeted_company_investigation_dimensions(
+        initial, icp_stage="", employee_size_conflict=False,
+        verified_structured_identity=profile,
+        verified_transport_domain="westernunion.com",
+    ) == ("rebrand",)
+    quote = "The Western Union Company (“Western Union”) (NYSE: WU)"
+    url = (
+        "https://ir.westernunion.com/news/archived-press-releases/"
+        "press-release-details/2026/Western-Union-and-Intermex-Provide-an-"
+        "Update-on-Pending-Acquisition-of-Intermex/default.aspx"
+    )
+    anchor = {
+        "submitted_name": company.company_name,
+        "submitted_domain": "westernunion.com",
+        "submitted_linkedin_slug": "",
+        "observed_name": "Western Union",
+        "observed_domain": "westernunion.com",
+        "observed_linkedin_slug": "western-union",
+        "verified_linkedin_slug": "western-union",
+        "verified_structured_alias_slug": "western-union",
+    }
+    finding = _finding(
+        "rebrand", observed_value="Western Union", evidence_url=url,
+        evidence_quote=quote, old_name="The Western Union Company",
+        new_name="Western Union", old_domain="westernunion.com",
+        new_domain="westernunion.com", shared_linkedin_slug="western-union",
+    )
+    proof = _validated_findings(
+        {"findings": [finding]}, targets=("rebrand",),
+        fetched_pages={url: quote}, first_party_domains={"westernunion.com"},
+        identity_anchor=anchor,
+    )["rebrand"]
+    assert proof["status"] == "VERIFIED"
+    resolved = _reverify_decision(
+        verdict, "", "", icp=_icp(), company=company,
+        verified_homepage_transport_domain="westernunion.com",
+        verified_rebrand_identity=proof,
+        structured_profile_identity_evidence=profile, company_quality=True,
+    )
+    assert resolved.details["identity_decision"] == COMPANY_FIT_MATCH
+    assert resolved.details["identity_receipt"]["reason_code"] == (
+        "verified_same_domain_alias"
+    )
+
+
+@pytest.mark.parametrize("mutate", [
+    {"quote": 'The Western Union Company (“Unknown”) (NYSE: WU).'},
+    {"quote": 'The Western Union Company (“Western Union”) is a subsidiary.'},
+    {"quote": 'We are not The Western Union Company (“Western Union”).'},
+    {"quote": 'We propose The Western Union Company (“Western Union”) as a future name.'},
+    {"quote": 'The Western Union Companies (“Western Union”) (NYSE: WU).'},
+    {"fetched": 'The Western Union Company (“Western Union”) was not here.'},
+    {"url": "https://other.example/western-union"},
+    {"slug": "western-union-lookalike"},
+    {"domain": "westernunion-lookalike.com"},
+])
+def test_structured_legal_brand_alias_rejects_unbound_source_or_profile(mutate):
+    quote = mutate.get(
+        "quote", 'The Western Union Company (“Western Union”) (NYSE: WU).'
+    )
+    url = mutate.get("url", "https://ir.westernunion.com/news/update")
+    anchor = {
+        "submitted_name": "The Western Union Company",
+        "submitted_domain": "westernunion.com",
+        "observed_name": "Western Union",
+        "observed_domain": mutate.get("domain", "westernunion.com"),
+        "observed_linkedin_slug": "western-union",
+        "verified_linkedin_slug": mutate.get("slug", "western-union"),
+        "verified_structured_alias_slug": mutate.get("slug", "western-union"),
+    }
+    finding = _finding(
+        "rebrand", evidence_url=url, evidence_quote=quote,
+        old_name="The Western Union Company", new_name="Western Union",
+        old_domain="westernunion.com", new_domain="westernunion.com",
+        shared_linkedin_slug="western-union",
+    )
+    proof = _validated_findings(
+        {"findings": [finding]}, targets=("rebrand",),
+        fetched_pages={url: mutate.get("fetched", quote)},
+        first_party_domains={"westernunion.com"}, identity_anchor=anchor,
+    )["rebrand"]
+    assert proof["status"] == "UNPROVEN"
+
+
+@pytest.mark.parametrize("change", [
+    {"name": "Western Union Company"},
+    {"url": "https://www.linkedin.com/company/western-union-lookalike"},
+    {"website": "https://westernunion-lookalike.com/"},
+    {"source_field": "description"},
+    {"provider": "unknown"},
+    {"extra": "untrusted"},
+])
+def test_structured_legal_brand_alias_requires_exact_profile_identity(change):
+    company = _company(
+        name="The Western Union Company", website="https://westernunion.com/",
+        linkedin="",
+    )
+    receipt = _web_identity_receipt(
+        company, _complete_verdict(
+            observed_company_name="Western Union",
+            observed_company_website="https://westernunion.com/",
+            observed_company_linkedin=(
+                "https://www.linkedin.com/company/western-union"
+            ),
+        ), company_quality=True,
+    )
+    profile = {
+        "name": "Western Union", "provider": "harvestapi_get_company",
+        "source_field": "name",
+        "url": "https://www.linkedin.com/company/western-union",
+        "website": "https://westernunion.com/",
+        **change,
+    }
+    assert not lead_scorer._bound_structured_legal_brand_alias_slug(
+        receipt, profile, "westernunion.com"
+    )
+
+
+def test_structured_legal_brand_alias_rejects_submitted_slug_conflict():
+    profile = {
+        "name": "Western Union", "provider": "harvestapi_get_company",
+        "source_field": "name",
+        "url": "https://www.linkedin.com/company/western-union",
+        "website": "https://westernunion.com/",
+    }
+    web_identity = {
+        "evidence_source": "company_web_reverification",
+        "decision": COMPANY_FIT_UNAVAILABLE,
+        "submitted_domain": "westernunion.com",
+        "observed_domain": "westernunion.com",
+        "submitted_linkedin_slug": "western-union-lookalike",
+        "observed_linkedin_slug": "western-union",
+        "observed_name": "westernunion",
+    }
+    assert not lead_scorer._bound_structured_legal_brand_alias_slug(
+        web_identity, profile, "westernunion.com"
+    )
+
+
+@pytest.mark.parametrize("quote_valid", [True, False])
+def test_legal_brand_alias_admits_size_only_after_validated_investigation(
+    monkeypatch,
+    quote_valid,
+):
+    company = _company(
+        name="The Western Union Company", website="https://westernunion.com/",
+        linkedin="",
+    ).model_copy(update={"employee_count": "5,001-10,000"})
+    icp = _icp(employee_count="5,001-10,000")
+    verdict = _complete_verdict(
+        observed_company_name="Western Union",
+        observed_company_website="https://westernunion.com/",
+        observed_company_linkedin="https://www.linkedin.com/company/western-union",
+        observed_employee_count=None, employee_size_matches=None,
+        employee_size_evidence_url="", employee_size_evidence_quote="",
+    )
+    profile = {
+        "name": "Western Union", "provider": "harvestapi_get_company",
+        "source_field": "name",
+        "url": "https://www.linkedin.com/company/western-union",
+        "website": "https://westernunion.com/",
+    }
+    size = {
+        "employee_count": "5,001-10,000", "provider": "harvestapi_get_company",
+        "source_field": "employeeCountRange",
+        "url": profile["url"], "website": profile["website"],
+    }
+    cache = {"structured_evidence": size}
+    initial = _reverify_decision(
+        verdict, "", "", icp=icp, company=company,
+        verified_homepage_transport_domain="westernunion.com",
+        structured_profile_identity_evidence=profile, company_quality=True,
+    )
+    assert initial.details["dimension_decisions"]["employee_size"] == (
+        COMPANY_FIT_UNAVAILABLE
+    )
+    assert not cache.get("structured_employee_size_applicable")
+    quote = 'The Western Union Company (“Western Union”) (NYSE: WU).'
+    url = "https://ir.westernunion.com/news/update"
+
+    async def fake_investigator(**kwargs):
+        assert kwargs["targets"] == ("rebrand",)
+        assert kwargs["verified_structured_alias_slug"] == "western-union"
+        anchor = {
+            "submitted_name": company.company_name,
+            "submitted_domain": "westernunion.com",
+            "observed_name": "Western Union",
+            "observed_domain": "westernunion.com",
+            "observed_linkedin_slug": "western-union",
+            "verified_linkedin_slug": "western-union",
+            "verified_structured_alias_slug": "western-union",
+        }
+        proof = _validated_findings(
+            {"findings": [_finding(
+                "rebrand", evidence_url=url, evidence_quote=quote,
+                old_name=company.company_name, new_name="Western Union",
+                old_domain="westernunion.com", new_domain="westernunion.com",
+                shared_linkedin_slug="western-union",
+            )]},
+            targets=("rebrand",), fetched_pages={
+                url: quote if quote_valid else "This source has no alias quote."
+            },
+            first_party_domains={"westernunion.com"}, identity_anchor=anchor,
+        )["rebrand"]
+        return {
+            "claims": {"rebrand": proof}, "_completed_submit": True,
+            "failure_reason": "", "usage": {},
+        }
+
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", fake_investigator)
+    _, result, _, _, _ = asyncio.run(
+        lead_scorer._run_targeted_company_evidence_investigation(
+            company=company, icp=icp, verdict=verdict,
+            investigation_targets=("rebrand",), icp_attribute="", icp_stage="",
+            verified_identity={}, verified_transport_domain="westernunion.com",
+            structured_employee_size_evidence=None,
+            structured_public_company_evidence=None,
+            structured_profile_identity_evidence=profile,
+            structured_profile_invocation_cache=cache,
+            employee_size_conflict=False, company_quality=True,
+            prior_result=initial,
+        )
+    )
+    assert result.details["identity_decision"] == (
+        COMPANY_FIT_MATCH if quote_valid else COMPANY_FIT_UNAVAILABLE
+    )
+    assert result.details["dimension_decisions"]["employee_size"] == (
+        COMPANY_FIT_MATCH if quote_valid else COMPANY_FIT_UNAVAILABLE
+    )
+    if quote_valid:
+        assert result.decision == COMPANY_FIT_MATCH
+    assert cache.get("structured_employee_size_applicable") is (
+        True if quote_valid else None
+    )
+
+
+@pytest.mark.parametrize("quote_valid", [True, False])
+def test_legacy_western_union_alias_uses_real_investigator_and_cached_size(
+    monkeypatch, quote_valid,
+):
+    company = _company(
+        name="The Western Union Company", website="https://westernunion.com/",
+        linkedin="",
+    ).model_copy(update={"employee_count": "5,001-10,000"})
+    icp = _icp(employee_count="5,001-10,000")
+    profile_url = "https://www.linkedin.com/company/western-union"
+    source_url = (
+        "https://ir.westernunion.com/news/archived-press-releases/"
+        "press-release-details/2026/Western-Union-and-Intermex-Provide-an-"
+        "Update-on-Pending-Acquisition-of-Intermex/default.aspx"
+    )
+    source_quote = "The Western Union Company (“Western Union”) (NYSE: WU)"
+    calls = {"profile": 0, "search": 0, "fetch": 0, "model": 0}
+    source_state = {"quote_valid": quote_valid}
+    cached_before_alias = []
+    real_fetch_once = lead_scorer._fetch_structured_linkedin_profile_once
+
+    async def fetch_once(anchor, cache, **kwargs):
+        assert kwargs["collect_employee_size"] is False
+        await real_fetch_once(anchor, cache, **kwargs)
+        cached_before_alias.append({
+            "size": dict(cache.get("structured_evidence") or {}),
+            "applicable": cache.get("structured_employee_size_applicable"),
+        })
+
+    async def sonar(**_kwargs):
+        return _complete_verdict(
+            observed_company_name="Western Union",
+            observed_company_website="https://westernunion.com/",
+            observed_company_linkedin=profile_url,
+            observed_employee_count=None, employee_size_matches=None,
+            employee_size_evidence_url="", employee_size_evidence_quote="",
+        ), ""
+
+    async def structured(domain, url, *, company_identity_evidence, **_kwargs):
+        calls["profile"] += 1
+        assert (domain, url) == ("westernunion.com", profile_url)
+        company_identity_evidence.update({
+            "name": "Western Union", "provider": "harvestapi_get_company",
+            "source_field": "name", "url": profile_url,
+            "website": "https://westernunion.com/",
+        })
+        return {
+            "employee_count": "5,001-10,000",
+            "provider": "harvestapi_get_company",
+            "source_field": "employeeCountRange",
+            "url": profile_url, "website": "https://westernunion.com/",
+        }
+
+    async def search(_session, query, *, key):
+        assert key == "test-exa-key"
+        assert "westernunion.com" in query
+        calls["search"] += 1
+        return {"results": [{"url": source_url, "title": "Western Union issuer"}]}
+
+    async def fetch(_session, url, **_kwargs):
+        assert url == source_url
+        calls["fetch"] += 1
+        return {
+            "ok": True, "url": url, "final_url": url,
+            "text": (
+                source_quote if source_state["quote_valid"]
+                else "No legal-to-brand quote here."
+            ),
+        }
+
+    async def model(_session, _url, *, headers, payload):
+        assert headers["Authorization"] == "Bearer test-openrouter-key"
+        arena_operations.validate_operation_request("openrouter.chat", payload)
+        calls["model"] += 1
+        forced = payload["tool_choice"]
+        forced_name = (
+            forced["function"]["name"] if isinstance(forced, dict) else ""
+        )
+        if forced_name == "search_web" or calls["search"] == 0:
+            name, arguments = "search_web", {
+                "query": "The Western Union Company westernunion.com legal brand",
+            }
+        elif forced_name == "fetch_page" or calls["fetch"] == 0:
+            name, arguments = "fetch_page", {"url": source_url}
+        else:
+            name, arguments = "submit_findings", {"findings": [
+                _finding(
+                    "rebrand", evidence_url=source_url,
+                    evidence_quote=source_quote,
+                    old_name="The Western Union Company",
+                    new_name="Western Union",
+                    old_domain="westernunion.com",
+                    new_domain="westernunion.com",
+                    shared_linkedin_slug="western-union",
+                ),
+                _finding(
+                    "headcount", status="UNPROVEN", observed_value=None,
+                    evidence_url="", evidence_quote="",
+                ),
+            ]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"call-{calls['model']}", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", sonar)
+    monkeypatch.setattr(
+        lead_scorer, "_fetch_structured_linkedin_profile_once", fetch_once,
+    )
+    monkeypatch.setattr(
+        lead_scorer, "fetch_structured_linkedin_company_size", structured,
+    )
+    monkeypatch.setattr(investigator, "_search_web", search)
+    monkeypatch.setattr(investigator, "_fetch_page", fetch)
+    monkeypatch.setattr(investigator, "_post_json", model)
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        company, icp, require_company_fit_dimensions=True,
+        verified_homepage_identity=company_fit_unavailable(
+            "homepage identity unavailable", details={
+                "verified_homepage_transport_domain": "westernunion.com",
+            },
+        ),
+        company_quality=False, evidence_investigator=True,
+    ))
+    assert calls["profile"] == 1
+    assert calls["fetch"] == 1
+    assert cached_before_alias[0] == {
+        "size": {
+            "employee_count": "5,001-10,000",
+            "provider": "harvestapi_get_company",
+            "source_field": "employeeCountRange",
+            "url": profile_url,
+            "website": "https://westernunion.com/",
+        },
+        "applicable": None,
+    }
+    assert result.details["identity_decision"] == (
+        COMPANY_FIT_MATCH if quote_valid else COMPANY_FIT_UNAVAILABLE
+    )
+    assert result.details["dimension_decisions"]["employee_size"] == (
+        COMPANY_FIT_MATCH if quote_valid else COMPANY_FIT_UNAVAILABLE
+    )
+    if quote_valid:
+        assert result.decision == COMPANY_FIT_MATCH
+    else:
+        # A narrowed scoring retry starts a fresh verifier and profile cache.
+        source_state["quote_valid"] = True
+        calls.update(search=0, fetch=0, model=0)
+        retry = asyncio.run(lead_scorer._llm_reverify_company(
+            company, icp, require_company_fit_dimensions=True,
+            verified_homepage_identity=company_fit_unavailable(
+                "homepage identity unavailable", details={
+                    "verified_homepage_transport_domain": "westernunion.com",
+                },
+            ),
+            company_quality=False, evidence_investigator=True,
+        ))
+        assert retry.decision == COMPANY_FIT_MATCH
+        assert retry.details["identity_receipt"]["reason_code"] == (
+            "verified_same_domain_alias"
+        )
+        assert retry.details["dimension_decisions"]["employee_size"] == (
+            COMPANY_FIT_MATCH
+        )
+        assert calls["profile"] == 2
+        assert calls["fetch"] == 1
+
+
+def test_legal_brand_alias_cannot_override_homepage_or_model_input():
+    company = _company(
+        name="The Western Union Company", website="https://westernunion.com/",
+        linkedin="",
+    )
+    verdict = _complete_verdict(
+        observed_company_name="Western Union",
+        observed_company_website="https://westernunion.com/",
+        observed_company_linkedin="https://www.linkedin.com/company/western-union",
+        verified_structured_alias_slug="western-union",
+    )
+    profile = {
+        "name": "Western Union", "provider": "harvestapi_get_company",
+        "source_field": "name",
+        "url": "https://www.linkedin.com/company/western-union",
+        "website": "https://westernunion.com/",
+    }
+    initial = _reverify_decision(
+        verdict, "", "", icp=_icp(), company=company,
+        verified_homepage_transport_domain="westernunion.com",
+        company_quality=False,
+    )
+    assert initial.details["identity_decision"] == COMPANY_FIT_UNAVAILABLE
+    assert "rebrand" not in _targeted_company_investigation_dimensions(
+        initial, icp_stage="", employee_size_conflict=False,
+        verified_transport_domain="westernunion.com",
+    )
+    conflicting_homepage = {
+        "normalized_name": "The Western Union Company",
+        "registrable_dns_domain": "westernunion.com",
+        "linkedin_company_slug": "western-union-lookalike",
+    }
+    assert "rebrand" not in _targeted_company_investigation_dimensions(
+        initial, icp_stage="", employee_size_conflict=False,
+        verified_structured_identity=profile,
+        verified_transport_domain="westernunion.com",
+        verified_homepage_identity=conflicting_homepage,
+    )
+    forged_proof = _finding(
+        "rebrand", evidence_url="https://ir.westernunion.com/news/update",
+        evidence_quote='The Western Union Company (“Western Union”)',
+        old_name="The Western Union Company", new_name="Western Union",
+        old_domain="westernunion.com", new_domain="westernunion.com",
+        shared_linkedin_slug="western-union",
+    )
+    blocked = _reverify_decision(
+        verdict, "", "", icp=_icp(), company=company,
+        verified_homepage_identity=conflicting_homepage,
+        verified_homepage_transport_domain="westernunion.com",
+        verified_rebrand_identity=forged_proof,
+        structured_profile_identity_evidence=profile,
+        company_quality=False,
+    )
+    assert blocked.details["identity_decision"] != COMPANY_FIT_MATCH
+    no_profile = _reverify_decision(
+        verdict, "", "", icp=_icp(), company=company,
+        verified_homepage_transport_domain="westernunion.com",
+        verified_rebrand_identity=forged_proof,
+        company_quality=False,
+    )
+    assert no_profile.details["identity_decision"] != COMPANY_FIT_MATCH
+    submitted_slug_anchor = {
+        "submitted_name": company.company_name,
+        "submitted_domain": "westernunion.com",
+        "submitted_linkedin_slug": "western-union",
+        "observed_name": "Western Union",
+        "observed_domain": "westernunion.com",
+        "observed_linkedin_slug": "western-union",
+    }
+    quote = forged_proof["evidence_quote"]
+    url = forged_proof["evidence_url"]
+    untrusted_slug_proof = _validated_findings(
+        {"findings": [forged_proof]}, targets=("rebrand",),
+        fetched_pages={url: quote}, first_party_domains={"westernunion.com"},
+        identity_anchor=submitted_slug_anchor,
+    )["rebrand"]
+    assert untrusted_slug_proof["status"] == "UNPROVEN"
 
 
 @pytest.mark.parametrize(

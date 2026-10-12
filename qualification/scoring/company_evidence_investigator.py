@@ -2190,6 +2190,16 @@ async def _fetch_page(
             )
             final_profile = _strict_linkedin_company_profile_url(source.get("url"))
             text = source.get("text", "")
+            if (
+                isinstance(current, Mapping)
+                and current.get("outcome") == "insufficient_evidence"
+                and _strict_linkedin_company_profile_url(current.get("url"))
+                == linkedin_profile
+                and final_profile == linkedin_profile
+                and text == ""
+                and source.get("http_status") in {"404", "410"}
+            ):
+                return {"ok": False, "error": "http_" + source["http_status"]}
             if not (
                 isinstance(current, Mapping)
                 and final_profile == linkedin_profile

@@ -956,8 +956,8 @@ async def fetch_current_linkedin_company_size(
     the provider's exact-profile ``CRAWL_NOT_FOUND`` result, returns the explicit
     insufficient-evidence outcome. Authentication or block walls, transport
     failures, other status failures, and malformed results return ``None``.
-    An optional caller-owned sink receives only one bounded safe response body;
-    it is never included in this function's public result or diagnostics.
+    An optional caller-owned sink receives one bounded safe response body or
+    exact-source absence metadata; neither enters public results or diagnostics.
     """
 
     requested_slug = linkedin_company_page_slug(profile_url)
@@ -1040,11 +1040,23 @@ async def fetch_current_linkedin_company_size(
         if (
             isinstance(status_item, Mapping)
             and str(status_item.get("status") or "").casefold() == "error"
-            and status_error.get("httpStatusCode") == 404
+            and type(status_error.get("httpStatusCode")) is int
+            and status_error["httpStatusCode"] in {404, 410}
             and status_error.get("tag") == "CRAWL_NOT_FOUND"
             and status_slug == requested_slug
+            and _strict_linkedin_company_profile_url(profile_url)
+            and _strict_linkedin_company_profile_url(status_item.get("id"))
+            == _strict_linkedin_company_profile_url(profile_url)
             and results == []
         ):
+            if isinstance(source_text_sink, dict):
+                # Retain only this exact requested source's explicit absence.
+                # The investigator must not turn it into an empty-page fault.
+                source_text_sink.clear()
+                source_text_sink.update({
+                    "url": str(status_item["id"]), "text": "",
+                    "http_status": str(status_error["httpStatusCode"]),
+                })
             return {
                 "outcome": CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE,
                 "url": str(status_item["id"]),

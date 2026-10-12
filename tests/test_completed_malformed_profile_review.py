@@ -152,7 +152,8 @@ def test_valid_profile_still_supplies_bound_employee_size(monkeypatch):
     assert result["employee_count"] == "11-50" and diagnostic == {}
 
 
-def test_exact_captured_review_with_recorded_timing(monkeypatch):
+@pytest.mark.parametrize("target", [2, 3])
+def test_exact_captured_review_with_recorded_timing(monkeypatch, target):
     """Opt-in private packet replay; no customer bodies enter source control."""
     import base64
     import os
@@ -168,15 +169,23 @@ def test_exact_captured_review_with_recorded_timing(monkeypatch):
     if not capture_root:
         pytest.skip("Private capture replay is opt-in")
     root = Path(capture_root)
-    packets = json.loads((root / "recovery46c-target3-score1-bodies-private.json").read_text())
-    events = json.loads((root / "recovery46c-target3-score1-events-private.json").read_text())
+    prefix = "recovery46c-target2-score2" if target == 2 else "recovery46c-target3-score1"
+    packets = json.loads((root / (prefix + "-bodies-private.json")).read_text())
+    events = json.loads((root / (prefix + "-events-private.json")).read_text())
     requests = [event["content"] for event in events if event["event_kind"] == "provider.request"]
     responses = [event for event in events if event["event_kind"] == "provider.response"]
-    bundle = json.loads((root / "recovery46c-validation-bundle-2226-private.json").read_text())
-    benchmark = next(obj["document"] for obj in bundle["objects"] if obj["ref"].endswith("/benchmark.json"))
-    source = json.loads((root / "target3-original-execute-private.json").read_text())[0]["document"]["companies"][0]
+    if target == 2:
+        documents = json.loads((root / "recovery46c-target2-exact-input-partial-private.json").read_text())
+        source = documents[0]["document"]["companies"][4]
+        icp_doc = json.loads((root / "recovery46c-target2-exact-icp-policy-private.json").read_text())["icp"]
+    else:
+        bundle = json.loads((root / "recovery46c-validation-bundle-2226-private.json").read_text())
+        benchmark = next(obj["document"] for obj in bundle["objects"] if obj["ref"].endswith("/benchmark.json"))
+        icp_doc = benchmark["icps"][2]
+        source = json.loads((root / "target3-original-execute-private.json").read_text())[0]["document"]["companies"][0]
     company = CompanyOutput(**_normalized_company(source, integrity_policy=True))
-    icp = ICPPrompt(**_normalized_icp(benchmark["icps"][2]))
+    icp = ICPPrompt(**_normalized_icp(icp_doc))
+    first = 35 if target == 2 else 45
 
     def raw(index): return base64.b64decode(packets[index]["body_b64"]).decode()
     def body(index): return json.loads(raw(index))
@@ -185,15 +194,16 @@ def test_exact_captured_review_with_recorded_timing(monkeypatch):
         return datetime.strptime(date + "." + fraction.ljust(6, "0"), "%Y-%m-%d %H:%M:%S.%f").timestamp()
 
     start = timestamp(next(event["occurred_at"] for event in events
-        if event["event_kind"] == "provider.request" and event["content"] is requests[45]))
+        if event["event_kind"] == "provider.request" and event["content"] is requests[first]))
     clock = SimpleNamespace(now=0.0)
     clock.monotonic = lambda: clock.now
     def advance(index):
-        if index >= 45: clock.now = timestamp(responses[index]["occurred_at"]) - start
-    exa = [42, 43]
-    model = [47, 49, 51, 53, 55, 56, 57]
-    search = [46, 50]
-    html = {requests[index]["parameters"]["url"]: index for index in (39, 41, 45, 48, 52, 54)}
+        if index >= first: clock.now = timestamp(responses[index]["occurred_at"]) - start
+    exa = [32, 33, 39] if target == 2 else [42, 43]
+    model = [36, 38, 40, 42, 44, 45] if target == 2 else [47, 49, 51, 53, 55, 56, 57]
+    search = [35] if target == 2 else [46, 50]
+    html_indexes = (30, 2, 37, 41, 43) if target == 2 else (39, 41, 45, 48, 52, 54)
+    html = {requests[index]["parameters"]["url"]: index for index in html_indexes}
 
     class Response:
         status = 200
@@ -207,7 +217,7 @@ def test_exact_captured_review_with_recorded_timing(monkeypatch):
         async def __aenter__(self): return self
         async def __aexit__(self, *args): return False
         def post(self, url, **kwargs):
-            return Response(body(exa.pop(0) if url == "https://api.exa.ai/contents" else 44))
+            return Response(body(exa.pop(0) if url == "https://api.exa.ai/contents" else (34 if target == 2 else 44)))
 
     async def captured_html(_session, url, **kwargs):
         target = kwargs.get("params", {}).get("url", url)
@@ -217,13 +227,13 @@ def test_exact_captured_review_with_recorded_timing(monkeypatch):
 
     async def captured_post(_session, url, *, headers, payload):
         index = (model if "openrouter" in url else search).pop(0)
-        if index == 57:
+        if target == 3 and index == 57:
             assert len(payload["tools"]) == 1
             assert "single final submit-only correction" in payload["messages"][-1]["content"]
         advance(index)
         return 200, body(index)
 
-    async def broad(**kwargs): return json.loads(body(40)["choices"][0]["message"]["content"]), ""
+    async def broad(**kwargs): return json.loads(body(31 if target == 2 else 40)["choices"][0]["message"]["content"]), ""
     actual_investigation = investigator.investigate_company_evidence
     completed = []
     async def investigate(**kwargs):
@@ -232,8 +242,10 @@ def test_exact_captured_review_with_recorded_timing(monkeypatch):
             result = await actual_investigation(**kwargs)
         assert result["_completed_submit"] is True and result["failure_reason"] == ""
         assert result["usage"]["fetch_calls"] == 4
-        assert all(row["ok"] is True and row["loaded_text_length"] > 0
-                   for row in result["usage"]["fetch_outcomes"])
+        outcomes = result["usage"]["fetch_outcomes"]
+        assert sum(row["ok"] is True and row["loaded_text_length"] > 0 for row in outcomes) == (3 if target == 2 else 4)
+        if target == 2:
+            assert [row["error_class"] for row in outcomes if not row["ok"]] == ["source_not_found"]
         completed.append(result)
         return result
 
@@ -252,6 +264,19 @@ def test_exact_captured_review_with_recorded_timing(monkeypatch):
     assert result.details["failure_class"] == "insufficient_fit_evidence"
     assert result.details["required_attribute_decision"] == "unavailable"
     assert result.details["company_fit_dimensions"]["employee_size"] == "unavailable"
+
+    if target == 2:
+        from lab_arena import scoring
+        prior = documents[1]["document"]["terminal_breakdowns"]
+        assert [row["company_index"] for row in prior] == [0, 1, 2, 3]
+        async def completed_fit(*args, **kwargs): return result
+        monkeypatch.setattr(s, "_verify_company_fit", completed_fit)
+        policy = json.loads((root / "recovery46c-target2-exact-icp-policy-private.json").read_text())["scorer_policy"]
+        rows = scoring.score_work_item({"scored_run_id": "captured-target2"}, icp=icp_doc,
+            companies=documents[0]["document"]["companies"], scorer=scoring.lab_scorer(policy),
+            prior_terminal_breakdowns=prior, on_terminal_breakdowns=lambda rows: None)
+        assert len(rows) == 5 and rows[:4] == prior
+        assert rows[4]["company_qualified"] is False and rows[4]["final_score"] == 0
 
 
 def test_independently_verified_company_still_matches(monkeypatch):

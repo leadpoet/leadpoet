@@ -387,6 +387,34 @@ def _retryable_breakdown_failure_reason(breakdown: Mapping[str, Any]) -> str:
             )
             if reason and reason != "unknown":
                 return reason
+        # A completed investigation can still lack usable evidence because a
+        # fetched page was only a provider diagnostic. Keep explicit verifier
+        # reasons above; this fallback names the transport fault, not credit.
+        for receipt in receipts:
+            if not isinstance(receipt, Mapping) or (
+                receipt.get("gate") != "company_fit"
+                or receipt.get("decision") != "unavailable"
+            ):
+                continue
+            supporting = receipt.get("supporting_receipts")
+            if not isinstance(supporting, list):
+                continue
+            for investigation in supporting:
+                if not isinstance(investigation, Mapping) or (
+                    investigation.get("gate") != "company_evidence_investigation"
+                    or investigation.get("completed_submitted_findings") is not True
+                    or investigation.get("failure_reason") not in (None, "")
+                ):
+                    continue
+                usage = investigation.get("usage")
+                outcomes = usage.get("fetch_outcomes") if isinstance(usage, Mapping) else None
+                if isinstance(outcomes, list) and any(
+                    isinstance(outcome, Mapping)
+                    and outcome.get("ok") is False
+                    and outcome.get("error_class") == "provider_diagnostic_body"
+                    for outcome in outcomes
+                ):
+                    return "provider_error"
     return "unknown"
 
 

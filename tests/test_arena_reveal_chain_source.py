@@ -74,6 +74,11 @@ SPEC475_FIXTURE = (
     / "fixtures"
     / "subtensor_events_spec475_block9234048.json"
 )
+SPEC477_FIXTURE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "subtensor_events_spec477_block9267887.json"
+)
 
 
 def _compact(value: int) -> bytes:
@@ -400,6 +405,7 @@ def test_historical_reveal_succeeds_after_latest_head_passed_deadline(monkeypatc
         (SPEC470_FIXTURE, 470),
         (SPEC472_FIXTURE, 472),
         (SPEC475_FIXTURE, 475),
+        (SPEC477_FIXTURE, 477),
     ],
 )
 def test_exact_parent_runtime_and_transition_events_prove_reveal(
@@ -443,12 +449,13 @@ def test_exact_parent_runtime_and_transition_events_prove_reveal(
     ) in fixture.calls
 
 
+@pytest.mark.parametrize(("fixture_path", "spec_version"), [(SPEC475_FIXTURE, 475), (SPEC477_FIXTURE, 477)])
 @pytest.mark.parametrize("control", ["exact", "wrong_vector", "wrong_owner"])
-def test_spec475_chain_source_binds_published_vector_and_recipient(control):
-    fixture = MeasuredArchiveFixture(SPEC475_FIXTURE, 475)
+def test_measured_chain_source_binds_published_vector_and_recipient(fixture_path, spec_version, control):
+    fixture = MeasuredArchiveFixture(fixture_path, spec_version)
     measured = fixture.fixture
     fixture.accounts = [
-        hashlib.sha256(("spec475-control:%d" % uid).encode()).digest()
+        hashlib.sha256(("spec%d-control:%d" % (spec_version, uid)).encode()).digest()
         for uid in range(measured["last_update_count"])
     ]
     for uid, account_hex in measured["recipient_account_ids"].items():
@@ -499,14 +506,18 @@ def test_spec475_chain_source_binds_published_vector_and_recipient(control):
             prove()
         return
     result = prove()
-    assert result["weights"] == [(0, 65535), (122, 28086)]
-    assert result["reveal_block"] == 9234048
-    assert result["last_update"] == 9234041
+    expected = {
+        475: ([(0, 65535), (122, 28086)], 9234048, 9234041, 72),
+        477: ([(0, 65535), (15, 6939), (210, 4626)], 9267887, 9267881, 54),
+    }[spec_version]
+    assert result["weights"] == expected[0]
+    assert result["reveal_block"] == expected[1]
+    assert result["last_update"] == expected[2]
     assert result["event_witness"]["account_id_hex"] == measured["expected"]["account_id_hex"]
-    assert result["event_witness"]["reveal_record_index"] == 72
+    assert result["event_witness"]["reveal_record_index"] == expected[3]
 
 
-@pytest.mark.parametrize("spec_version", [456, 457, 458, 459, 464, 466, 467, 468, 469, 470, 472, 475])
+@pytest.mark.parametrize("spec_version", [456, 457, 458, 459, 464, 466, 467, 468, 469, 470, 472, 475, 477])
 def test_historical_reveal_selects_observed_runtime_profile(
     monkeypatch, spec_version
 ):

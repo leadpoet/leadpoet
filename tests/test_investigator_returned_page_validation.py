@@ -214,7 +214,9 @@ def test_outer_retry_reuses_matched_source_and_rejudges_same_quality(monkeypatch
 
     monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
 
-    def scoped_runner(batch, _icp, _reference, retry_evidence_scope):
+    def scoped_runner(batch, _icp, _reference, retry_evidence_scope,
+                      *, original_company_indexes):
+        assert original_company_indexes == [0]
         retry = retry_evidence_scope.setdefault("same-frozen-company", {})
         sink = {}
         _, result, *_ = asyncio.run(

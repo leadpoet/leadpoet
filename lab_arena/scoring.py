@@ -328,12 +328,15 @@ def lab_scorer(
         icp: Mapping[str, Any],
         is_reference_model: bool,
         retry_evidence_scope: MutableMapping[str, Any],
+        *,
+        original_company_indexes: Sequence[int],
     ) -> Any:
         return scorer.score_with_breakdowns(
             list(companies),
             dict(icp),
             bool(is_reference_model),
             retry_evidence_scope=retry_evidence_scope,
+            original_company_indexes=original_company_indexes,
         )
 
     score.integrity_policy = contact_policy.integrity_adapter(adapter)
@@ -358,10 +361,12 @@ def _run_scorer(
     icp: Mapping[str, Any],
     *,
     retry_evidence_scope: MutableMapping[str, Any],
+    original_company_indexes: Sequence[int],
 ) -> List[Dict[str, Any]]:
     scoped_runner = getattr(scorer, _SCOPED_RETRY_EVIDENCE_RUNNER, None)
     result = (
-        scoped_runner(companies, icp, False, retry_evidence_scope)
+        scoped_runner(companies, icp, False, retry_evidence_scope,
+                      original_company_indexes=original_company_indexes)
         if callable(scoped_runner)
         else scorer(companies, icp, False)
     )
@@ -523,6 +528,7 @@ def score_work_item(
     scorer: Scorer,
     max_retries: int = MAX_JUDGE_RETRIES,
     max_scored_companies: int = 0,
+    _original_company_indexes: Optional[Sequence[int]] = None,
 ) -> List[Dict[str, Any]]:
     """Score one distinct output once: the first-N slice in model order.
 
@@ -543,6 +549,16 @@ def score_work_item(
     )
 
     sliced = verify.slice_first_n(companies, verify.icp_company_goal(icp))
+    original_indexes = (
+        list(range(len(companies))) if _original_company_indexes is None
+        else list(_original_company_indexes)
+    )
+    # This private map selects execution-owned observation metadata only.
+    # Breakdown indexes still use the invocation's relative numbering below.
+    if len(original_indexes) != len(companies) or any(
+        type(index) is not int or index < 0 for index in original_indexes
+    ):
+        raise ScoringError("original company index mapping is invalid")
     scored_indexes, _skipped = verify.bucket_skip(icp, sliced, max_scored_companies=max_scored_companies)
     integrity_policy = bool(getattr(scorer, "integrity_policy", False))
     retain_terminal = integrity_policy or _has_unique_scored_company_names(sliced, scored_indexes)
@@ -561,15 +577,21 @@ def score_work_item(
             invoked_companies = [
                 sliced[scored_indexes[position]] for position in invoked_positions
             ]
+            invoked_indexes = [
+                original_indexes[scored_indexes[position]]
+                for position in invoked_positions
+            ]
         else:
             invoked_positions = list(range(len(scored_indexes)))
             invoked_companies = sliced
+            invoked_indexes = original_indexes[:len(sliced)]
         try:
             breakdowns = _run_scorer(
                 scorer,
                 invoked_companies,
                 icp,
                 retry_evidence_scope=retry_evidence_scope,
+                original_company_indexes=invoked_indexes,
             )
         except Exception as exc:  # judge/provider failure: retry unresolved input
             last_failure_reason = _validated_failure_reason(
@@ -718,7 +740,10 @@ def score_quality_work_item(
         if key in raw_by_key:
             continue
         company = sliced[miss["company_index"]]
-        rows = score_work_item(item, icp=icp, companies=[company], scorer=scorer)
+        rows = score_work_item(
+            item, icp=icp, companies=[company], scorer=scorer,
+            _original_company_indexes=[miss["company_index"]],
+        )
         raw = raw_company_judgment(rows[0]) if rows else bucket_skipped_judgment()
         raw_by_key[key] = raw
         new_judgments.append({**miss, "raw_judgment": raw})

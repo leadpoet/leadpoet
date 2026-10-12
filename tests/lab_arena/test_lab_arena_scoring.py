@@ -979,7 +979,9 @@ def test_retry_evidence_scope_is_shared_only_within_one_work_item():
     def scorer(batch, _icp, _is_reference_model):
         raise AssertionError("the scoped Lab runner must be used")
 
-    def scoped_runner(batch, _icp, _is_reference_model, retry_evidence_scope):
+    def scoped_runner(batch, _icp, _is_reference_model, retry_evidence_scope,
+                      *, original_company_indexes):
+        assert original_company_indexes == ([0, 1] if len(batch) == 2 else [1])
         scopes.append(retry_evidence_scope)
         calls.append([row["company_name"] for row in batch])
         retry_evidence_scope.setdefault("private_source", {})[

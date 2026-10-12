@@ -888,3 +888,58 @@ def test_namespace_cleanup_failure_and_repeated_mounts_fail_closed(tmp_path, mon
     with pytest.raises(rt.ArenaRuntimeError, match="mounts remain"):
         rt.cleanup_runsc_namespace(tmp_path, object(), timeout=5)
     assert len(commands) == 8
+
+
+@pytest.mark.parametrize("checkpoint_kind", ["valid", "absent", "oversized", "symlink", "execute"])
+def test_signaled_scorer_keeps_only_bounded_private_checkpoint(tmp_path, checkpoint_kind):
+    from dataclasses import replace
+    from lab_arena.runtime_host import runtime_host_private_diagnostic
+    config = make_config(tmp_path)
+    spec = make_spec(tmp_path)
+    if checkpoint_kind != "execute":
+        spec = replace(spec, entry_command=rt.SCORER_ENTRY_COMMAND)
+    clock = FakeClock()
+    private_bytes = b'{"private":"checkpoint payload"}'
+
+    def launch(argv):
+        if checkpoint_kind == "oversized":
+            spec.output_path.write_bytes(b"x" * (rt.MAX_OUTPUT_BYTES + 1))
+        elif checkpoint_kind == "symlink":
+            spec.output_path.symlink_to(spec.input_dir / rt.INPUT_FILE_NAME)
+        elif checkpoint_kind != "absent":
+            spec.output_path.write_bytes(private_bytes)
+        return FakeProcess(argv, clock=clock, finish_at=clock(), returncode=-signal.SIGINT)
+
+    with pytest.raises(rt.RuntimeHostError) as failure:
+        rt.run_sandbox(
+            config, spec, process_runner=FakeRunner(clock, run_process=launch),
+            clock=clock, sleep=clock.sleep, rusage=lambda: (0.0, 0),
+        )
+    error = failure.value
+    assert error.reason == "sandbox_launcher_signaled"
+    assert error.launch_exit_code == -signal.SIGINT
+    assert error.checkpoint_bytes == (private_bytes if checkpoint_kind == "valid" else None)
+    assert "checkpoint payload" not in repr(error)
+    assert "checkpoint payload" not in runtime_host_private_diagnostic(error)
+    assert not spec.output_path.exists()
+
+
+@pytest.mark.parametrize("failed_cleanup", ["delete", "umount"])
+def test_signaled_scorer_checkpoint_does_not_bypass_cleanup_failure(tmp_path, failed_cleanup):
+    from dataclasses import replace
+    config = make_config(tmp_path)
+    spec = replace(make_spec(tmp_path), entry_command=rt.SCORER_ENTRY_COMMAND)
+    clock = FakeClock()
+
+    def launch(argv):
+        spec.output_path.write_bytes(b'{"private":"checkpoint payload"}')
+        return FakeProcess(argv, clock=clock, finish_at=clock(), returncode=-signal.SIGINT)
+
+    with pytest.raises(rt.SandboxCleanupError) as failure:
+        rt.run_sandbox(
+            config, spec,
+            process_runner=FakeRunner(clock, fail={failed_cleanup}, run_process=launch),
+            clock=clock, sleep=clock.sleep, rusage=lambda: (0.0, 0),
+        )
+    assert failure.value.result is None
+    assert not isinstance(failure.value, rt.RuntimeHostError)

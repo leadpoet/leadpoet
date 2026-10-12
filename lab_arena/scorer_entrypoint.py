@@ -18,7 +18,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Callable, Dict, List, Optional
 
 from lab_arena import contracts, provider_observations, scoring, shim
 from qualification.scoring.evaluation_clock import use_evaluation_date
@@ -26,7 +26,10 @@ from qualification.scoring.evaluation_clock import use_evaluation_date
 PLACEHOLDER_CREDENTIALS = {name: "arena-placeholder-" + name.lower() for name in scoring.CREDENTIAL_ENV_NAMES}
 
 
-def score_input(document: Dict[str, Any]) -> Dict[str, Any]:
+def score_input(
+    document: Dict[str, Any], *,
+    on_company_judgments: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+) -> Dict[str, Any]:
     if document.get("schema_version") != scoring.SCORING_INPUT_SCHEMA_VERSION:
         raise scoring.ScoringError("scoring input schema is invalid")
     scored_run_id = str(document.get("scored_run_id") or "")
@@ -61,6 +64,13 @@ def score_input(document: Dict[str, Any]) -> Dict[str, Any]:
         ),
     )
     item = {"scored_run_id": scored_run_id}
+    completed_judgments = []
+
+    def retain_company_judgments(rows):
+        completed_judgments[:] = rows
+        if on_company_judgments is not None:
+            on_company_judgments(rows)
+
     try:
         with use_evaluation_date(str(document.get("evaluation_date") or "")):
             if quality_policy.scorer_enabled(policy):
@@ -76,6 +86,7 @@ def score_input(document: Dict[str, Any]) -> Dict[str, Any]:
                     scorer=scorer,
                     cache_context=cache_context,
                     max_scored_companies=int(policy["max_scored_companies"]),
+                    on_company_judgments=retain_company_judgments,
                 )
             else:
                 breakdowns = scoring.score_work_item(
@@ -95,6 +106,8 @@ def score_input(document: Dict[str, Any]) -> Dict[str, Any]:
                 if isinstance(exc, scoring.ScoringError)
                 else ""
             ),
+            **({"company_judgments": completed_judgments}
+               if quality_policy.scorer_enabled(policy) else {}),
         )
     return scoring.build_scoring_output(
         scored_run_id,
@@ -111,8 +124,20 @@ def main(argv: Any = None) -> int:
     input_path = Path(os.environ.get("LAB_ARENA_INPUT_PATH") or "/input/input.json")
     output_path = Path(os.environ.get("LAB_ARENA_OUTPUT_PATH") or "/output/output.json")
     document = json.loads(input_path.read_text(encoding="utf-8"))
-    result = score_input(document)
-    output_path.write_text(json.dumps(result, sort_keys=True), encoding="utf-8")
+    def write_output(result):
+        # The runtime reads this same bounded output after a hard timeout.
+        # Atomic replacement never exposes a partly written JSON document.
+        temporary_path = output_path.with_name(output_path.name + ".tmp")
+        temporary_path.write_text(json.dumps(result, sort_keys=True), encoding="utf-8")
+        os.replace(temporary_path, output_path)
+
+    def checkpoint(rows):
+        write_output(scoring.build_scoring_failure(
+            document["scored_run_id"], "judge_error", company_judgments=rows,
+        ))
+
+    result = score_input(document, on_company_judgments=checkpoint)
+    write_output(result)
     return 0
 
 

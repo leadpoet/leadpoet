@@ -6186,16 +6186,36 @@ def _has_explicitly_unproven_fit_dimensions(
     fetch_outcomes = (
         usage.get("fetch_outcomes") if isinstance(usage, Mapping) else None
     )
-    review_has_transport_fault = bool(
-        isinstance(fetch_outcomes, list)
-        and any(
-            isinstance(outcome, Mapping)
-            and outcome.get("ok") is False
+    # Outcomes belong to this company's investigation. A later evidenced fetch
+    # can recover the same source; another source cannot clear its failure.
+    latest_source_outcomes = {}
+    unbound_transport_fault = False
+    for outcome in fetch_outcomes if isinstance(fetch_outcomes, list) else ():
+        if not isinstance(outcome, Mapping):
+            continue
+        transport_fault = (
+            outcome.get("ok") is False
             and outcome.get("error_class") not in {
                 "provider_request_refused", "source_not_found", "source_gone",
             }
-            for outcome in fetch_outcomes
         )
+        source_hash = outcome.get("url_sha256")
+        if (
+            not isinstance(source_hash, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", source_hash)
+        ):
+            unbound_transport_fault |= transport_fault
+            continue
+        if outcome.get("ok") is False:
+            latest_source_outcomes[source_hash] = transport_fault
+        elif (
+            outcome.get("ok") is True
+            and type(outcome.get("loaded_text_length")) is int
+            and outcome["loaded_text_length"] > 0
+        ):
+            latest_source_outcomes[source_hash] = False
+    review_has_transport_fault = (
+        unbound_transport_fault or any(latest_source_outcomes.values())
     )
     investigation_claims = (
         investigation_receipt.get("claims")

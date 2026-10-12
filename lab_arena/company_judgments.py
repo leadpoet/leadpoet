@@ -319,9 +319,10 @@ def validate_lease_context(document: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def validate_new_company_judgments(
-    rows: Sequence[Mapping[str, Any]], *, lease_context: Mapping[str, Any]
+    rows: Sequence[Mapping[str, Any]], *, lease_context: Mapping[str, Any],
+    require_complete: bool = True,
 ) -> list[Dict[str, Any]]:
-    """Bind one returned raw judgment to every unique cache miss."""
+    """Bind terminal judgments to leased misses; require full coverage by default."""
 
     lease = validate_lease_context(lease_context)
     if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes, bytearray)):
@@ -355,7 +356,7 @@ def validate_new_company_judgments(
             )
         seen.add(cache_key)
         result.append(copied)
-    if seen != set(expected):
+    if require_complete and seen != set(expected):
         raise CompanyJudgmentError("new company judgments do not cover every miss")
     return sorted(result, key=lambda item: item["company_index"])
 
@@ -375,7 +376,7 @@ def build_evidence_snapshot(
     source_completion_request_hash: str,
     runner_authority_exclusions: Sequence[str] | None,
 ) -> Dict[str, Any]:
-    """Freeze one accepted raw verdict with its signed run provenance."""
+    """Freeze one terminal raw verdict with its signed run provenance."""
 
     ref = validate_company_ref(company_ref)
     row = _json_copy(new_judgment)

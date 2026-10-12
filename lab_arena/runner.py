@@ -3456,6 +3456,7 @@ class AssignmentExecutor:
         failure_diagnostic: Optional[Dict[str, str]] = None
         execution_output_diagnostic: Optional[Dict[str, str]] = None
         failure_detail: Any = ""
+        provider_classification_ready = False
         output_document: Optional[Dict[str, Any]] = None
         result: Optional[runtime.SandboxResult] = None
         execution_diagnostic: Optional[Dict[str, Any]] = None
@@ -3645,6 +3646,21 @@ class AssignmentExecutor:
                         "stage": "sandbox",
                         "error_class": "judge_timeout",
                     }
+                    if not result.output_error and result.output_bytes is not None:
+                        try:
+                            checkpoint = scoring.scoring_output_from_bytes(result.output_bytes)
+                        except scoring.ScoringError:
+                            checkpoint = None
+                        output_document = _partial_company_judgment_output(checkpoint, lease)
+                        if output_document is not None:
+                            output_document = scoring.build_scoring_failure(
+                                output_document["scored_run_id"], "judge_timeout",
+                                detail=output_document.get("detail", ""),
+                                reason=output_document.get("reason", ""),
+                                company_judgments=output_document["company_judgments"],
+                            )
+                            if "reason" in output_document:
+                                failure_diagnostic["reason"] = output_document["reason"]
             else:
                 if result.output_error or result.output_bytes is None:
                     terminal = "judge_error" if scoring_run else ("invalid_output" if result.output_error else "model_error")
@@ -3688,7 +3704,7 @@ class AssignmentExecutor:
                                 ),
                             }
                             failure_detail = output_document.get("detail", "")
-                            output_document = None
+                            output_document = _partial_company_judgment_output(output_document, lease)
                         else:
                             terminal = "accepted"
                 else:
@@ -3709,6 +3725,134 @@ class AssignmentExecutor:
                         }
                     else:
                         terminal = "accepted"
+            provider_classification_ready = True
+        except DependencyInstallInfrastructureError as exc:
+            if scoring_run:  # the trusted scorer has no submitted dependency tree
+                primary_exception = exc
+                _record_runtime_failure(
+                    config,
+                    lease,
+                    lease_token,
+                    state,
+                    exc,
+                    failure_stage="setup",
+                )
+                raise
+            terminal = "provider_error"
+            output_document = None
+            failure_diagnostic = {
+                "stage": "provider_call",
+                "error_class": "provider_unavailable",
+                "reason": "provider_error",
+            }
+            _log_dependency_failure(str(lease["run_id"]), exc)
+            _record_trajectory(config, lease, lease_token, [trajectory.event(
+                "runtime.error",
+                {"status": terminal, "failure_stage": "setup",
+                 "error_class": type(exc).__name__},
+                occurred_at=_timestamp(config.clock),
+            )])
+        except AgentDependencyError as exc:
+            if scoring_run:  # the trusted scorer has no submitted dependency tree
+                primary_exception = exc
+                _record_runtime_failure(
+                    config,
+                    lease,
+                    lease_token,
+                    state,
+                    exc,
+                    failure_stage="setup",
+                )
+                raise
+            terminal = "model_error"
+            output_document = None
+            _log_dependency_failure(str(lease["run_id"]), exc)
+            _record_trajectory(config, lease, lease_token, [trajectory.event(
+                "runtime.error",
+                {"status": terminal, "failure_stage": "setup",
+                 "error_class": type(exc).__name__},
+                occurred_at=_timestamp(config.clock),
+            )])
+        except Exception as exc:
+            primary_exception = exc
+            if (
+                isinstance(exc, runtime.SandboxCleanupError)
+                and exc.result is not None
+            ):
+                result = exc.result
+            _record_runtime_failure(
+                config,
+                lease,
+                lease_token,
+                state,
+                exc,
+                failure_stage=(
+                    "cleanup"
+                    if isinstance(exc, runtime.SandboxCleanupError)
+                    else "runtime" if runtime_entered else "setup"
+                ),
+                result=result,
+            )
+            interrupted_partial = None
+            if (
+                scoring_run
+                and isinstance(exc, RuntimeHostError)
+                and exc.reason == "sandbox_launcher_signaled"
+                and exc.launch_exit_code is not None
+                and exc.launch_exit_code < 0
+                and not exc.launch_timed_out
+                and isinstance(exc.checkpoint_bytes, bytes)
+                and len(exc.checkpoint_bytes) <= runtime.MAX_OUTPUT_BYTES
+            ):
+                try:
+                    checkpoint = scoring.scoring_output_from_bytes(exc.checkpoint_bytes)
+                except (scoring.ScoringError, RecursionError):
+                    checkpoint = None
+                interrupted_partial = _partial_company_judgment_output(checkpoint, lease)
+            if interrupted_partial is None:
+                raise
+            # The host error was recorded above. Report only its failed,
+            # lease-bound terminal company subset through normal completion.
+            # A later worker cleanup failure must still raise, never complete.
+            primary_exception = None
+            terminal = "judge_error"
+            output_document = interrupted_partial
+            provider_classification_ready = True
+            failure_diagnostic = {"stage": "sandbox", "error_class": "judge_error"}
+        finally:
+            pending_exception = primary_exception
+            stop_exception = None
+            try:
+                server.stop()
+            except Exception as exc:
+                stop_exception = exc
+            shutil.rmtree(run_dir, ignore_errors=True)
+            shutil.rmtree(socket_dir, ignore_errors=True)
+            if stop_exception is not None:
+                if pending_exception is None:
+                    _record_runtime_failure(
+                        config,
+                        lease,
+                        lease_token,
+                        state,
+                        stop_exception,
+                        failure_stage="cleanup",
+                        result=result,
+                    )
+                    raise stop_exception
+                _record_cleanup_failure(
+                    config, lease, lease_token, stop_exception
+                )
+                try:
+                    print(
+                        "Arena worker cleanup failed: %s"
+                        % type(stop_exception).__name__,
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                except Exception:
+                    pass
+        if provider_classification_ready:
             # A shared host key or account failure is infrastructure when it
             # prevents an output. An agent that handles the failure and still
             # returns a valid output has completed the assignment.
@@ -3784,7 +3928,7 @@ class AssignmentExecutor:
                 miner_credentials_failed or miner_scoring_funding_failed
             ) and terminal != "accepted":
                 terminal = "credential_error"
-                output_document = None
+                output_document = _partial_company_judgment_output(output_document, lease) if scoring_run else None
             elif not scoring_run and trusted_quota_failure and terminal != "accepted":
                 terminal = "provider_error"
                 output_document = None
@@ -3793,7 +3937,7 @@ class AssignmentExecutor:
                 output_document = None
             elif provider_infrastructure_failed and terminal != "accepted":
                 terminal = "judge_error" if scoring_run else "provider_error"
-                output_document = None
+                output_document = _partial_company_judgment_output(output_document, lease) if scoring_run else None
                 if scoring_run and failure_diagnostic is None:
                     # A previous page-fetch failure must not replace the
                     # trusted scorer's more specific terminal diagnostic.
@@ -3851,107 +3995,6 @@ class AssignmentExecutor:
                 else:
                     # Other provider and credential overrides own the final failure.
                     failure_diagnostic = None
-        except DependencyInstallInfrastructureError as exc:
-            if scoring_run:  # the trusted scorer has no submitted dependency tree
-                primary_exception = exc
-                _record_runtime_failure(
-                    config,
-                    lease,
-                    lease_token,
-                    state,
-                    exc,
-                    failure_stage="setup",
-                )
-                raise
-            terminal = "provider_error"
-            output_document = None
-            failure_diagnostic = {
-                "stage": "provider_call",
-                "error_class": "provider_unavailable",
-                "reason": "provider_error",
-            }
-            _log_dependency_failure(str(lease["run_id"]), exc)
-            _record_trajectory(config, lease, lease_token, [trajectory.event(
-                "runtime.error",
-                {"status": terminal, "failure_stage": "setup",
-                 "error_class": type(exc).__name__},
-                occurred_at=_timestamp(config.clock),
-            )])
-        except AgentDependencyError as exc:
-            if scoring_run:  # the trusted scorer has no submitted dependency tree
-                primary_exception = exc
-                _record_runtime_failure(
-                    config,
-                    lease,
-                    lease_token,
-                    state,
-                    exc,
-                    failure_stage="setup",
-                )
-                raise
-            terminal = "model_error"
-            output_document = None
-            _log_dependency_failure(str(lease["run_id"]), exc)
-            _record_trajectory(config, lease, lease_token, [trajectory.event(
-                "runtime.error",
-                {"status": terminal, "failure_stage": "setup",
-                 "error_class": type(exc).__name__},
-                occurred_at=_timestamp(config.clock),
-            )])
-        except Exception as exc:
-            primary_exception = exc
-            if (
-                isinstance(exc, runtime.SandboxCleanupError)
-                and exc.result is not None
-            ):
-                result = exc.result
-            _record_runtime_failure(
-                config,
-                lease,
-                lease_token,
-                state,
-                exc,
-                failure_stage=(
-                    "cleanup"
-                    if isinstance(exc, runtime.SandboxCleanupError)
-                    else "runtime" if runtime_entered else "setup"
-                ),
-                result=result,
-            )
-            raise
-        finally:
-            pending_exception = primary_exception
-            stop_exception = None
-            try:
-                server.stop()
-            except Exception as exc:
-                stop_exception = exc
-            shutil.rmtree(run_dir, ignore_errors=True)
-            shutil.rmtree(socket_dir, ignore_errors=True)
-            if stop_exception is not None:
-                if pending_exception is None:
-                    _record_runtime_failure(
-                        config,
-                        lease,
-                        lease_token,
-                        state,
-                        stop_exception,
-                        failure_stage="cleanup",
-                        result=result,
-                    )
-                    raise stop_exception
-                _record_cleanup_failure(
-                    config, lease, lease_token, stop_exception
-                )
-                try:
-                    print(
-                        "Arena worker cleanup failed: %s"
-                        % type(stop_exception).__name__,
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                except Exception:
-                    pass
         finished_at = _timestamp(config.clock)
         round_id = str(lease.get("round_id") or config.round_id or "")
         with state.lock:
@@ -4061,6 +4104,10 @@ class AssignmentExecutor:
             except Exception:
                 # Optional telemetry cannot change a completed score run.
                 pass
+        if scoring_run and output_document is not None and terminal in ("judge_error", "judge_timeout"):
+            # Provider accounting can refine a timeout to infrastructure error.
+            # Its retained partial envelope must name the final signed cause.
+            output_document = dict(output_document, failure=terminal)
         body = {"run_id": lease["run_id"], "result": run_result, "output": output_document, "lease_token": lease_token}
         _record_trajectory(config, lease, lease_token, [
             *_provider_error_events(state), *(
@@ -4085,6 +4132,26 @@ class AssignmentExecutor:
             timestamp=int(config.clock().timestamp()),
             sign_message=config.identity.sign,
         )
+
+
+def _partial_company_judgment_output(document, lease):
+    """Keep only a failed, lease-bound subset; never infer an accepted ICP."""
+    from lab_arena import company_judgments
+
+    if (not isinstance(document, dict) or "failure" not in document
+        or document.get("scored_run_id") != lease.get("scored_run_id")
+        or not document.get("company_judgments")):
+        return None
+    try:
+        output = scoring.validate_scoring_output_document(document)
+        company_judgments.validate_new_company_judgments(
+            output["company_judgments"],
+            lease_context=lease.get("company_judgment_cache") or {},
+            require_complete=False,
+        )
+    except (scoring.ScoringError, company_judgments.CompanyJudgmentError):
+        return None
+    return output
 
 
 def _check_runtime_image(image_reference: str, image_digest: str) -> None:

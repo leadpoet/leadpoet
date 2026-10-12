@@ -716,6 +716,7 @@ def score_quality_work_item(
     item: Mapping[str, Any], *, icp: Mapping[str, Any],
     companies: Sequence[Mapping[str, Any]], scorer: Scorer,
     cache_context: Mapping[str, Any], max_scored_companies: int = 0,
+    on_company_judgments: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Judge only missing company inputs, then apply this list's duplicate rules."""
     from lab_arena import company_judgments
@@ -735,18 +736,34 @@ def score_quality_work_item(
         for hit in lease["hits"]
     }
     new_judgments = []
+    first_failure = None
     for miss in sorted(lease["misses"], key=lambda ref: ref["company_index"]):
         key = miss["cache_key"]
         if key in raw_by_key:
             continue
         company = sliced[miss["company_index"]]
-        rows = score_work_item(
-            item, icp=icp, companies=[company], scorer=scorer,
-            _original_company_indexes=[miss["company_index"]],
-        )
-        raw = raw_company_judgment(rows[0]) if rows else bucket_skipped_judgment()
+        try:
+            rows = score_work_item(
+                item, icp=icp, companies=[company], scorer=scorer,
+                _original_company_indexes=[miss["company_index"]],
+            )
+            raw = raw_company_judgment(rows[0]) if rows else bucket_skipped_judgment()
+            if not company_judgments.raw_judgment_is_cacheable(raw):
+                raise ScoringError("company judgment is not terminal")
+        except ScoringError as exc:
+            # Independent companies can still finish within the same sandbox
+            # deadline. The ICP remains failed while any company is unresolved.
+            if first_failure is None:
+                first_failure = exc
+            continue
         raw_by_key[key] = raw
         new_judgments.append({**miss, "raw_judgment": raw})
+        if on_company_judgments is not None:
+            on_company_judgments(company_judgments.validate_new_company_judgments(
+                new_judgments, lease_context=lease, require_complete=False,
+            ))
+    if first_failure is not None:
+        raise first_failure
     new_judgments = company_judgments.validate_new_company_judgments(new_judgments, lease_context=lease)
     full = apply_company_judgment_context(
         sliced, [raw_by_key[ref["cache_key"]] for ref in refs],
@@ -928,6 +945,7 @@ def build_scoring_failure(
     detail: str = "",
     *,
     reason: str = "",
+    company_judgments: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """A failure document; ``detail`` is a bounded operator-facing reason, never a payload."""
 
@@ -940,6 +958,8 @@ def build_scoring_failure(
     safe_reason = _validated_failure_reason(reason)
     if safe_reason:
         document["reason"] = safe_reason
+    if company_judgments is not None:
+        document["company_judgments"] = [dict(item) for item in company_judgments]
     return document
 
 
@@ -965,7 +985,7 @@ def validate_scoring_output_document(document: Any) -> Dict[str, Any]:
     scored_run_id = _require_run_id(document.get("scored_run_id"))
     keys = set(document)
     if "failure" in document:
-        if keys - {"detail", "reason"} != {"schema_version", "scored_run_id", "failure"} or document["failure"] not in SCORING_FAILURES:
+        if keys - {"detail", "reason", "company_judgments"} != {"schema_version", "scored_run_id", "failure"} or document["failure"] not in SCORING_FAILURES:
             raise ScoringError("scoring failure document is invalid")
         detail = document.get("detail", "")
         if not isinstance(detail, str) or len(detail) > MAX_FAILURE_DETAIL_CHARS:
@@ -976,6 +996,8 @@ def validate_scoring_output_document(document: Any) -> Dict[str, Any]:
             failure_document["detail"] = detail
         if reason:
             failure_document["reason"] = reason
+        if "company_judgments" in document:
+            failure_document["company_judgments"] = _validate_output_company_judgments(document["company_judgments"])
         return failure_document
     if keys - {"company_judgments"} != {"schema_version", "scored_run_id", "breakdowns"} or not isinstance(document["breakdowns"], list):
         raise ScoringError("scoring output document is invalid")
@@ -989,15 +1011,18 @@ def validate_scoring_output_document(document: Any) -> Dict[str, Any]:
         breakdowns.append(dict(item))
     result = {"schema_version": SCORING_OUTPUT_SCHEMA_VERSION, "scored_run_id": scored_run_id, "breakdowns": breakdowns}
     if "company_judgments" in document:
-        from lab_arena.company_judgments import raw_judgment_is_cacheable
-        judgments = document["company_judgments"]
-        if not isinstance(judgments, list) or len(judgments) > 5:
-            raise ScoringError("company judgments must be a bounded list")
-        for row in judgments:
-            if not isinstance(row, Mapping) or set(row) != {"company_index", "cache_key", "company_input_hash", "authority_slot", "raw_judgment"} or not raw_judgment_is_cacheable(row["raw_judgment"]):
-                raise ScoringError("company judgment is invalid")
-        result["company_judgments"] = [dict(row) for row in judgments]
+        result["company_judgments"] = _validate_output_company_judgments(document["company_judgments"])
     return result
+
+
+def _validate_output_company_judgments(judgments: Any) -> List[Dict[str, Any]]:
+    from lab_arena.company_judgments import raw_judgment_is_cacheable
+    if not isinstance(judgments, list) or len(judgments) > 5:
+        raise ScoringError("company judgments must be a bounded list")
+    for row in judgments:
+        if not isinstance(row, Mapping) or set(row) != {"company_index", "cache_key", "company_input_hash", "authority_slot", "raw_judgment"} or not raw_judgment_is_cacheable(row["raw_judgment"]):
+            raise ScoringError("company judgment is invalid")
+    return [dict(row) for row in judgments]
 
 
 def validate_breakdowns_for_item(breakdowns: Sequence[Mapping[str, Any]], *, icp: Mapping[str, Any], companies: Sequence[Mapping[str, Any]], max_scored_companies: int = 0, integrity_policy: bool = False, contacts_required: bool = False, company_quality: bool = False) -> List[Dict[str, Any]]:

@@ -338,3 +338,117 @@ def test_real_signaled_runtime_checkpoint_reaches_only_failed_completion(
             and event["content"].get("runtime_host_reason") == "sandbox_launcher_signaled"
             for batch in api.batches for event in batch["events"]
         )
+
+
+@pytest.mark.parametrize("funding,error_code,provider_status,expected", [
+    ("miner_key", "miner_credentials_unavailable", 401, "credential_error"),
+    ("miner_key", "budget_refused", None, "credential_error"),
+    ("miner_key", "budget_exhausted", None, "credential_error"),
+    ("host", "provider_unavailable", 502, "judge_error"),
+    ("host", "budget_refused", None, "judge_error"),
+])
+def test_interrupted_partial_uses_existing_provider_failure_classification(
+    tmp_path, funding, error_code, provider_status, expected,
+):
+    import os
+    import signal
+    from lab_arena import runtime, shim
+    from tests.lab_arena.test_lab_arena_runner import RefusingApi
+
+    document = _input()
+    lease = scoring_lease()
+    lease.update(
+        scorer_policy=document["scorer_policy"], company_quality_policy="company_quality_v1",
+        company_judgment_cache=_lease(document), scored_output={"companies": document["companies"]},
+    )
+    rows = [_new(_refs(document)[0])]
+    output = scoring.build_scoring_failure("r1", "judge_error", company_judgments=rows)
+
+    class Api(LoggingApi):
+        def provider(self, run_id, lease_token, frame):
+            response = RefusingApi.provider(self, run_id, lease_token, frame)
+            response["call"].update(funding_source=funding, provider_status=provider_status)
+            return response
+
+    class Interrupted:
+        def run_icp(self, spec, **_kwargs):
+            os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
+            try:
+                status, _headers, _body = shim.dispatch(
+                    "openrouter.chat", {"model": "openai/gpt-4o-mini", "messages": [
+                        {"role": "user", "content": "judge"},
+                    ]}, 5000,
+                )
+                assert status == 402
+            finally:
+                os.environ.pop(shim.WORKER_SOCKET_ENV, None)
+            raise runtime.RuntimeHostError(
+                reason="sandbox_launcher_signaled", launch_exit_code=-signal.SIGINT,
+                checkpoint_bytes=json.dumps(output).encode(),
+            )
+
+    api = Api()
+    api.code = error_code
+    api.leases = [lease]
+    worker = run_model(tmp_path, api, Interrupted())
+    assert worker.abandoned == 0
+    body = api.completions[0]["body"]
+    assert body["result"]["terminal_status"] == expected
+    assert body["output"]["failure"] == "judge_error"
+    assert body["output"]["company_judgments"] == rows
+    assert body["result"]["resource_summary"]["provider_call_count"] == 1
+    assert any(
+        event["kind"] == "runtime.error"
+        and event["content"].get("runtime_host_reason") == "sandbox_launcher_signaled"
+        for batch in api.batches for event in batch["events"]
+    )
+
+
+def test_interrupted_partial_preserves_successful_later_provider_call(tmp_path):
+    import os
+    import signal
+    from lab_arena import runtime, shim
+    from tests.lab_arena.codex_rate_limit_retry_test import identified_document, PARAMETERS
+
+    document = _input()
+    lease = scoring_lease()
+    lease.update(
+        scorer_policy=document["scorer_policy"], company_quality_policy="company_quality_v1",
+        company_judgment_cache=_lease(document), scored_output={"companies": document["companies"]},
+    )
+    rows = [_new(_refs(document)[0])]
+    output = scoring.build_scoring_failure("r1", "judge_error", company_judgments=rows)
+
+    class Interrupted:
+        def run_icp(self, spec, **_kwargs):
+            os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
+            try:
+                # Scorers do not use execute-only transparent Responses retries.
+                # A later successful scorer request clears the latest unresolved
+                # failure; the original host interruption still remains failed.
+                for expected in (502, 200):
+                    status, _headers, _body = shim.dispatch("openrouter.responses", PARAMETERS, 120_000)
+                    assert status == expected
+            finally:
+                os.environ.pop(shim.WORKER_SOCKET_ENV, None)
+            raise runtime.RuntimeHostError(
+                reason="sandbox_launcher_signaled", launch_exit_code=-signal.SIGINT,
+                checkpoint_bytes=json.dumps(output).encode(),
+            )
+
+    api = LoggingApi()
+    api.leases = [lease]
+    api.broker_documents = [
+        identified_document(0, retry_after=0),
+        identified_document(1, provider_status=200, actual=7, status=200, error_code=None, idempotent=False),
+    ]
+    run_model(tmp_path, api, Interrupted())
+    body = api.completions[0]["body"]
+    assert body["result"]["terminal_status"] == "judge_error"
+    assert body["output"]["company_judgments"] == rows
+    summary = body["result"]["resource_summary"]
+    assert summary["provider_call_count"] == 2
+    assert summary["provider_unresolved_failure_count"] == 0
+    assert body["result"]["failure_diagnostic"] == {
+        "stage": "sandbox", "error_class": "judge_error",
+    }

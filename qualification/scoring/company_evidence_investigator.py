@@ -1902,6 +1902,14 @@ def _quote_supports_headcount(quote: str, observed_value: Any) -> bool:
     token = str(observed_value).strip().replace("\u2013", "-").replace("\u2014", "-")
     if not token:
         return False
+    # A submitted count may retain its trailing unit. Bind the count itself
+    # to the source's count noun; do not require the unit twice.
+    count_with_unit = re.fullmatch(
+        r"(\d[\d,]*(?:\s*-\s*\d[\d,]*|\+)?)\s+"
+        r"(?:employees?|workers?|people)", token, flags=re.I,
+    )
+    if count_with_unit:
+        token = count_with_unit.group(1)
     normalized_quote = normalized.replace(",", "")
     compact_token = re.sub(r"\s+", "", token.casefold()).replace(",", "")
     if re.fullmatch(r"\d+", compact_token):

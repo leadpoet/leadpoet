@@ -8,9 +8,12 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
-from lab_arena import runner, runtime, shim, trajectory
+from lab_arena import contracts, runner, runtime, scoring, shim, trajectory
+from lab_arena.service import ArenaService
+from lab_arena.store import hash_lease_token
 from tests.lab_arena.test_lab_arena_runner import (
     BridgingRuntime, FakeApi, lease, make_config, scoring_lease, valid_company,
+    verify,
 )
 
 
@@ -89,6 +92,151 @@ def run_model(tmp_path, api, sandbox):
     return worker
 
 
+def _run_judge_with_detail(tmp_path, detail=None):
+    tmp_path.mkdir(exist_ok=True)
+    api = LoggingApi()
+    api.leases = [scoring_lease()]
+    output = scoring.build_scoring_failure(
+        "r1", "judge_error", detail or "", reason="malformed_response",
+    )
+    run_model(tmp_path, api, BridgingRuntime(output=output, calls=0))
+    finished = next(event for batch in api.batches for event in batch["events"]
+                    if event["kind"] == "runtime.finished")
+    envelope = api.completions[0]
+    assert verify(envelope["hotkey"], envelope["signature"],
+                  contracts.signed_request_message(envelope))
+    return finished["content"], envelope["body"]
+
+
+def test_judge_exhaustion_summary_crosses_existing_trajectory_only(tmp_path):
+    summary = (
+        "judge_exhausted attempts=3 reason=malformed_response "
+        "fit_dims=employee_size,required_attribute fit_class=insufficient_fit_evidence "
+        "fit_reason=malformed_response inv_complete=no "
+        "inv_reason=malformed_response fetch=ok:1,fetch_failed:2"
+    )
+    finished, completion = _run_judge_with_detail(tmp_path / "valid", summary)
+    assert finished["judge_failure_summary"] == summary
+    assert finished["failure_diagnostic"] == {
+        "stage": "[DERIVED_BY_GATEWAY]", "error_class": "judge_error",
+        "reason": "malformed_response",
+    }
+    assert "judge_failure_summary" not in json.dumps(completion)
+    assert contracts.validate_run_result(completion["result"])[
+        "failure_diagnostic"
+    ] == {"stage": "scorer", "error_class": "judge_error",
+          "reason": "malformed_response"}
+
+    invalid_finished, invalid_completion = _run_judge_with_detail(
+        tmp_path / "invalid", "private arbitrary detail",
+    )
+    assert "judge_failure_summary" not in invalid_finished
+    assert completion == invalid_completion
+
+
+def test_judge_summary_projector_failure_does_not_change_completion_or_cleanup(
+    tmp_path, monkeypatch,
+):
+    detail = "judge_exhausted attempts=3 reason=malformed_response fit=absent"
+    normal, expected_completion = _run_judge_with_detail(tmp_path / "normal", detail)
+    assert normal["judge_failure_summary"] == detail
+
+    def broken_projector(_detail):
+        raise ValueError("private telemetry failure")
+
+    monkeypatch.setattr(runner, "_judge_exhausted_summary", broken_projector)
+    failed, actual_completion = _run_judge_with_detail(tmp_path / "failed", detail)
+    assert "judge_failure_summary" not in failed
+    assert actual_completion == expected_completion
+    assert list((tmp_path / "normal" / "work").iterdir()) == []
+    assert list((tmp_path / "failed" / "work").iterdir()) == []
+
+
+def test_runner_judge_summary_passes_gateway_validation_and_append(tmp_path):
+    summary = "judge_exhausted attempts=3 reason=malformed_response fit=absent"
+    claimed = scoring_lease()
+    persisted = []
+
+    class RecordingStore:
+        @staticmethod
+        def get_run(run_id):
+            return {
+                **claimed, "runner_hotkey": "host-runner",
+            } if run_id == claimed["run_id"] else None
+
+        @staticmethod
+        def append_trajectory_events(run_id, lease_hash, events):
+            assert run_id == claimed["run_id"]
+            assert lease_hash == hash_lease_token(claimed["lease_token"])
+            persisted.extend(events)
+            return {"status": "accepted", "accepted": len(events),
+                    "inserted": len(events), "existing": 0}
+
+    gateway = object.__new__(ArenaService)
+    gateway._store = RecordingStore()
+    gateway._require_round_ownership = lambda _round_id: None
+
+    class GatewayApi(LoggingApi):
+        def trajectory(self, run_id, lease_token, events):
+            result = gateway.handle_trajectory(run_id, lease_token, {"events": list(events)})
+            super().trajectory(run_id, lease_token, events)
+            return result
+
+    api = GatewayApi()
+    api.leases = [claimed]
+    output = scoring.build_scoring_failure(
+        "r1", "judge_error", summary, reason="malformed_response",
+    )
+    run_model(tmp_path, api, BridgingRuntime(output=output, calls=0))
+    finished = next(event for event in persisted if event["kind"] == "runtime.finished")
+    assert finished["content"]["judge_failure_summary"] == summary
+    envelope = api.completions[0]
+    assert verify(envelope["hotkey"], envelope["signature"],
+                  contracts.signed_request_message(envelope))
+    assert "judge_failure_summary" not in json.dumps(envelope["body"])
+
+
+@pytest.mark.parametrize("detail", [
+    "private arbitrary detail",
+    "judge_exhausted attempts=3 reason=malformed_response fit=absent\nsecret",
+    "judge_exhausted attempts=3 reason=malformed_response fit=absent https://x.example/key",
+    "judge_exhausted attempts=3 reason=malformed_response fit=absent api_key=secret",
+    "judge_exhausted attempts=3 reason=malformed_response fit=absent" + "x" * 300,
+    "judge_exhausted attempts=3 reason=malformed_response fit_dims=identity "
+    "fit_class=secret fit_reason=malformed_response inv_complete=no "
+    "inv_reason=none fetch=none",
+    "judge_exhausted attempts=3 reason=malformed_response fit_dims=identity "
+    "fit_class=missing fit_reason=missing inv_complete=no inv_reason=none "
+    "fetch=fetch_failed:100",
+])
+def test_judge_summary_rejects_untrusted_or_truncated_detail(detail):
+    assert runner._judge_exhausted_summary(detail) is None
+
+
+@pytest.mark.parametrize("detail", ["", "judge_exhausted attempts=2 reason=unknown fit=absent",
+                                    "judge_exhausted attempts=2 reason=unknown origin=exception"])
+def test_judge_summary_missing_or_fixed_fallback_detail(tmp_path, detail):
+    finished, _ = _run_judge_with_detail(tmp_path, detail)
+    if detail:
+        assert finished["judge_failure_summary"] == detail
+    else:
+        assert "judge_failure_summary" not in finished
+
+
+def test_accepted_scoring_run_has_no_judge_failure_summary(tmp_path):
+    api = LoggingApi()
+    api.leases = [scoring_lease()]
+    output = scoring.build_scoring_output(
+        "r1", [{"final_score": 71.0, "failure_reason": ""},
+               {"final_score": 44.5, "failure_reason": ""}],
+    )
+    run_model(tmp_path, api, BridgingRuntime(output=output, calls=0))
+    finished = next(event for batch in api.batches for event in batch["events"]
+                    if event["kind"] == "runtime.finished")
+    assert finished["content"]["status"] == "accepted"
+    assert "judge_failure_summary" not in finished["content"]
+
+
 def test_runtime_events_precede_accepted_completion_and_retry_same_ids(tmp_path):
     api = LoggingApi(failures=1)
     run_model(tmp_path, api, BridgingRuntime(output={"companies": [valid_company(1)]}))
@@ -103,6 +251,7 @@ def test_runtime_events_precede_accepted_completion_and_retry_same_ids(tmp_path)
     }
     finished = events[2]["content"]
     assert finished["status"] == "accepted"
+    assert "judge_failure_summary" not in finished
     assert finished["company_count"] == 1
     assert finished["resource_summary"]["provider_call_count"] == 1
     assert events[3]["content"]["text"] == "model log line\n"

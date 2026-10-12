@@ -371,6 +371,54 @@ def _log_judge_failure(
     )
 
 
+_JUDGE_EXHAUSTED_DETAIL_RE = re.compile(
+    r"judge_exhausted attempts=([1-9][0-9]?) reason=([a-z_]+) "
+    r"(?:fit=absent|origin=exception|"
+    r"fit_dims=([a-z_,]+) fit_class=([a-z_]+) fit_reason=([a-z_]+) "
+    r"inv_complete=(yes|no|missing) inv_reason=([a-z_]+) "
+    r"fetch=(none|[a-z_0-9:,]+))"
+)
+
+
+def _judge_exhausted_summary(detail: Any) -> Optional[str]:
+    """Admit only the scorer's fixed labels to the private trajectory."""
+
+    if not isinstance(detail, str) or len(detail) >= scoring.MAX_FAILURE_DETAIL_CHARS:
+        return None  # A full-length detail may have been truncated by the scorer.
+    match = _JUDGE_EXHAUSTED_DETAIL_RE.fullmatch(detail)
+    if match is None or match[2] not in scoring.FAILURE_REASON_CODES:
+        return None
+    if match[3] is None:
+        suffix = "fit=absent" if detail.endswith("fit=absent") else "origin=exception"
+    else:
+        dimensions = match[3].split(",")
+        if dimensions != ["none"] and dimensions != [
+            name for name in scoring._PRIVATE_FIT_DIMENSIONS if name in dimensions
+        ]:
+            return None
+        if match[4] not in scoring._PRIVATE_FIT_CLASSES | {"missing"}:
+            return None
+        if match[5] not in scoring.FAILURE_REASON_CODES | {"missing"}:
+            return None
+        if match[7] not in scoring.FAILURE_REASON_CODES | {"none", "missing"}:
+            return None
+        fetch = match[8]
+        if fetch != "none":
+            parts = fetch.split(",")
+            labels = ("ok", *scoring._PRIVATE_FETCH_CLASSES, "other")
+            parsed = [re.fullmatch(r"([a-z_]+):([1-9][0-9]?)", part) for part in parts]
+            if any(part is None for part in parsed):
+                return None
+            names = [part[1] for part in parsed if part is not None]
+            if names != [name for name in labels if name in names]:
+                return None
+        suffix = (
+            f"fit_dims={match[3]} fit_class={match[4]} fit_reason={match[5]} "
+            f"inv_complete={match[6]} inv_reason={match[7]} fetch={fetch}"
+        )
+    return f"judge_exhausted attempts={int(match[1])} reason={match[2]} {suffix}"
+
+
 def _log_dependency_failure(
     run_id: str,
     failure: AgentDependencyError | DependencyInstallInfrastructureError,
@@ -4002,6 +4050,17 @@ class AssignmentExecutor:
             _log_execution_diagnostic(
                 str(lease["run_id"]), execution_diagnostic, result
             )
+        judge_summary = None
+        if (
+            scoring_run and terminal == "judge_error"
+            and failure_diagnostic is not None
+            and failure_diagnostic.get("stage") == "scorer"
+        ):
+            try:
+                judge_summary = _judge_exhausted_summary(failure_detail)
+            except Exception:
+                # Optional telemetry cannot change a completed score run.
+                pass
         body = {"run_id": lease["run_id"], "result": run_result, "output": output_document, "lease_token": lease_token}
         _record_trajectory(config, lease, lease_token, [
             *_provider_error_events(state), *(
@@ -4014,7 +4073,8 @@ class AssignmentExecutor:
              "exit_code": result.exit_code if result else None,
              "timed_out": bool(result and result.timed_out),
              "company_count": len((output_document or {}).get("companies") or []),
-             "failure_diagnostic": failure_diagnostic},
+             "failure_diagnostic": failure_diagnostic,
+             **({"judge_failure_summary": judge_summary} if judge_summary else {})},
             occurred_at=finished_at,
         ), *_runtime_log_events(result, lease_token, finished_at)])
         return contracts.build_signed_request(

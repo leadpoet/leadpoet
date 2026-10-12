@@ -2252,6 +2252,60 @@ async def _fetch_page(
     }
 
 
+async def _fetch_exa_exact_page(
+    session: aiohttp.ClientSession, url: str,
+) -> dict[str, Any]:
+    """One brokered contents read; a different source cannot repair this URL."""
+    key = os.environ.get("EXA_API_KEY")
+    safe_url = _safe_https_url(url)
+    if not key or not safe_url:
+        return {"ok": False, "error": "provider_key_unavailable"}
+    canonical_url = public_http_url(safe_url)
+    try:
+        status, body = await _post_json(
+            session, "https://api.exa.ai/contents",
+            headers={"x-api-key": key, "Content-Type": "application/json"},
+            payload={"ids": [canonical_url],
+                     "text": {"maxCharacters": MAX_PAGE_CHARACTERS},
+                     "maxAgeHours": 0},
+        )
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return {"ok": False, "error": "contents_provider_unavailable"}
+    if status != 200:
+        return {"ok": False, "error": f"http_{status}"}
+    if not isinstance(body, Mapping) or body.get("error") or body.get("errors"):
+        return {"ok": False, "error": "contents_provider_error"}
+    statuses = body.get("statuses")
+    if statuses is not None:
+        if not isinstance(statuses, list) or any(
+            not isinstance(item, Mapping) for item in statuses
+        ):
+            return {"ok": False, "error": "invalid_contents_status"}
+        if any(
+            item.get("id", item.get("url")) == canonical_url
+            and (item.get("status") == "error" or item.get("error"))
+            for item in statuses
+        ):
+            return {"ok": False, "error": "contents_crawl_error"}
+    results = body.get("results")
+    if not isinstance(results, list) or len(results) != 1:
+        return {"ok": False, "error": "invalid_contents_result"}
+    page = results[0]
+    if (
+        not isinstance(page, Mapping) or page.get("url") != canonical_url
+        or page.get("error") is not None or page.get("status") == "error"
+    ):
+        return {"ok": False, "error": "contents_source_mismatch"}
+    raw = page.get("text")
+    if not isinstance(raw, str) or _is_known_binary_document(raw):
+        return {"ok": False, "error": "unsupported_binary_content"}
+    text = _plain_text(raw)
+    if not text or _is_known_provider_diagnostic_only(text):
+        return {"ok": False, "error": "empty_or_diagnostic_contents"}
+    return {"ok": True, "url": canonical_url,
+            "final_url": canonical_url, "text": text}
+
+
 def _fetch_outcome(url: str, result: Mapping[str, Any]) -> dict[str, Any]:
     """Return a bounded, non-content diagnostic for one fresh fetch."""
 
@@ -3269,8 +3323,29 @@ async def investigate_company_evidence(
                     }
                     if archive_targets else {}
                 )
-                result = await _fetch_page(session, url, **fetch_options)
+                primary_timeout = None
+                try:
+                    result = await _fetch_page(session, url, **fetch_options)
+                except asyncio.TimeoutError as exc:
+                    primary_timeout = exc
+                    result = {"ok": False, "error": "timeout"}
                 fetch_outcomes.append(_fetch_outcome(url, result))
+                if (
+                    result.get("error") in {"http_502", "http_503", "timeout"}
+                    and not result.get("ok")
+                    and os.environ.get("EXA_API_KEY")
+                    and not archive_targets
+                    and not _strict_linkedin_company_profile_url(url)
+                    and fetch_calls < MAX_FETCH_CALLS
+                    and time.monotonic() - started < ADMISSION_DEADLINE_SECONDS
+                ):
+                    # Admission counts both calls. An admitted fallback settles
+                    # under the unchanged broker bound, not a new cancellation.
+                    fetch_calls += 1
+                    result = await _fetch_exa_exact_page(session, url)
+                    fetch_outcomes.append(_fetch_outcome(url, result))
+                if primary_timeout is not None and not result.get("ok"):
+                    raise primary_timeout
                 retry_with_stealth = bool(result.pop("_retry_with_stealth", False))
                 if (
                     retry_with_stealth

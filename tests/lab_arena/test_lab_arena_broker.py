@@ -884,19 +884,6 @@ def test_fallback_race_at_reservation_marks_run_before_returning():
     assert marked[0][1] == "openrouter"
 
 
-@pytest.fixture
-def legacy_no_key_deepline_call(monkeypatch):
-    """Exercise retained pre-key recovery independently of the new dispatch contract."""
-    monkeypatch.setattr(br, "_DEEPLINE_UNKEYED_TOOLS", frozenset(operations.DEEPLINE_TOOLS))
-    def legacy_readback(**arguments):
-        return arguments["request_id"], br._deepline_billing_readback(
-            transport=arguments["transport"], secret=arguments["secret"],
-            request_id=arguments["request_id"], operation=arguments["operation"],
-            reconciliation_deadline=arguments["reconciliation_deadline"],
-        )
-    monkeypatch.setattr(br, "_deepline_exact_readback", legacy_readback)
-
-
 def deepline_history_entry(
     request_id,
     operation,
@@ -5028,19 +5015,12 @@ def test_deepline_missing_native_billing_recovers_full_positive_history_charge()
     assert 0 < transport.sent[1]["timeout"] <= 30.0
 
 
-@pytest.mark.usefixtures("legacy_no_key_deepline_call")
-def test_deepline_large_unrelated_history_group_releases_dynamic_reservation():
+def test_deepline_exact_free_charge_releases_dynamic_reservation():
     job_id = "iad1::free-history-after-large-group"
     envelope = {
         "job_id": job_id,
         "result": {"data": {"results": []}},
         "status": "completed",
-    }
-    unrelated = deepline_history_entry(
-        "iad1::unrelated", "exa_search", 0.2
-    )
-    unrelated["metadata"] = {
-        "chargeGroupIds": ["unrelated-%d" % index for index in range(147)]
     }
     exact_free = deepline_history_entry(job_id, "exa_search", 0)
     exact_free["charge_state"] = "free"
@@ -5056,7 +5036,7 @@ def test_deepline_large_unrelated_history_group_releases_dynamic_reservation():
         transport=FakeTransport(
             [
                 (200, json.dumps(envelope).encode()),
-                (200, deepline_history(unrelated, exact_free)),
+                (200, deepline_history(exact_free)),
                 (200, openrouter_response),
             ]
         ),
@@ -5081,9 +5061,11 @@ def test_deepline_large_unrelated_history_group_releases_dynamic_reservation():
     assert deepline_result.call["reserved_microusd"] == 20_000
     assert deepline_result.call["actual_microusd"] == 0
     assert deepline_result.call["outcome"] == "settled"
+    assert deepline_result.call["cost_basis"] == "deepline_exact_request_credits_x_0.10_usd"
     assert openrouter_result.status == 200
     assert openrouter_result.call["outcome"] == "settled"
     assert [sent["method"] for sent in transport.sent] == ["POST", "GET", "POST"]
+    assert transport.sent[1]["url"] == br.DEEPLINE_EXACT_BILLING_URL + quote(job_id, safe="")
     assert store.log == ["reserve", "dispatch", "settle"] * 2
 
 
@@ -5252,270 +5234,38 @@ def test_deepline_shared_history_cost_never_settles_one_request():
     assert len(transport.sent) == 2
 
 
-@pytest.mark.usefixtures("legacy_no_key_deepline_call")
-def test_deepline_billing_history_follows_forward_offset_without_poll_delay(monkeypatch):
-    monkeypatch.setattr(
-        br.time,
-        "sleep",
-        lambda _seconds: pytest.fail("cursor pagination must not wait for a poll"),
-    )
-    job_id = "iad1::second-page"
-    envelope = {
-        "job_id": job_id,
-        "result": {"data": {"results": []}},
-        "status": "completed",
-    }
-    next_offset = 50
-    broker, store, transport = make_broker(
-        transport=FakeTransport(
-            [
-                (200, json.dumps(envelope).encode()),
-                (
-                    200,
-                    deepline_history(
-                        deepline_history_entry("unrelated", "exa_search", 0),
-                        has_more=True,
-                        next_offset=next_offset,
-                    ),
-                ),
-                (
-                    200,
-                    deepline_history(
-                        deepline_history_entry(job_id, "exa_search", 0.14)
-                    ),
-                ),
-            ]
-        )
-    )
-    result = broker.execute(
-        CONTEXT,
-        operation_id="deepline.execute",
-        parameters={"tool": "exa_search", "payload": {"query": "x"}},
-        action_sequence=0,
-        timeout_ms=30_000,
-    )
-    assert result.status == 200 and result.call["actual_microusd"] == 14_000
-    assert transport.sent[2]["url"] == (
-        br.DEEPLINE_BILLING_HISTORY_URL
-        + "&recent_offset=50"
-    )
-    assert store.calls[result.call["call_identity"]]["actual"] == 14_000
-
-
-@pytest.mark.usefixtures("legacy_no_key_deepline_call")
-def test_deepline_billing_history_keeps_polling_after_old_four_read_window(monkeypatch):
-    elapsed = [0.0]
-    monkeypatch.setattr(br.time, "monotonic", lambda: elapsed[0])
-    monkeypatch.setattr(
-        br.time, "sleep", lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)
-    )
-    job_id = "iad1::lagged-history"
-    envelope = {
-        "job_id": job_id,
-        "result": {"data": {"results": []}},
-        "status": "completed",
-    }
-
-    class DelayedFullHistory(FakeTransport):
-        def send(self, **kwargs):
-            if kwargs["url"].startswith(br.DEEPLINE_BILLING_HISTORY_URL):
-                self.sent.append({
-                    "method": kwargs["method"], "url": kwargs["url"],
-                    "headers": dict(kwargs["headers"]), "body": kwargs["body"],
-                    "timeout": kwargs["timeout_seconds"],
-                })
-                if kwargs["url"] == br.DEEPLINE_BILLING_HISTORY_URL and elapsed[0] >= 6.0:
-                    history = deepline_history(
-                        deepline_history_entry(job_id, "exa_search", 0.03),
-                        has_more=True, next_offset=50,
-                    )
-                else:
-                    offset = int(kwargs["url"].rsplit("=", 1)[-1]) if "recent_offset=" in kwargs["url"] else 0
-                    history = deepline_history(
-                        deepline_history_entry("older", "exa_search", 0.01),
-                        has_more=True, next_offset=offset + 50,
-                    )
-                return br.ProviderResponse(200, {}, json.dumps(history).encode())
-            return super().send(**kwargs)
-
-    broker, store, transport = make_broker(
-        transport=DelayedFullHistory([(200, json.dumps(envelope).encode())])
-    )
-    result = broker.execute(
-        CONTEXT,
-        operation_id="deepline.execute",
-        parameters={"tool": "exa_search", "payload": {"query": "x"}},
-        action_sequence=0,
-        timeout_ms=30_000,
-    )
-    assert result.status == 200 and result.call["actual_microusd"] == 3_000
-    assert elapsed[0] == 6.0
-    assert [sent["url"] for sent in transport.sent[1:]].count(
-        br.DEEPLINE_BILLING_HISTORY_URL
-    ) == 4
-    assert store.calls[result.call["call_identity"]]["actual"] == 3_000
-
-
-@pytest.mark.usefixtures("legacy_no_key_deepline_call")
-def test_deepline_billing_history_stops_on_equal_nonadvancing_offset():
-    job_id = "iad1::missing-after-equal-offset"
-    envelope = {"job_id": job_id, "result": {"data": []}, "status": "completed"}
-    broker, store, transport = make_broker(transport=FakeTransport([
-        (200, json.dumps(envelope).encode()),
-        (200, deepline_history(has_more=True, next_offset=50)),
-        (200, deepline_history(has_more=True, next_offset=50)),
-    ]))
-    result = broker.execute(
-        CONTEXT, operation_id="deepline.execute",
-        parameters={"tool": "exa_search", "payload": {"query": "x"}},
-        action_sequence=0, timeout_ms=30_000,
-    )
-    assert result.status == 200
-    assert_unpriced_uncertain(result)
-    assert [request["url"] for request in transport.sent[1:]] == [
-        br.DEEPLINE_BILLING_HISTORY_URL,
-        br.DEEPLINE_BILLING_HISTORY_URL + "&recent_offset=50",
-    ]
-    assert store.log == ["reserve", "dispatch", "uncertain"]
-
-
-@pytest.mark.usefixtures("legacy_no_key_deepline_call")
-def test_deepline_billing_history_scans_deeper_than_old_offset_limit(monkeypatch):
-    sleeps = []
-    monkeypatch.setattr(br.time, "sleep", sleeps.append)
-    job_id = "iad1::new-charge-arrived"
-    envelope = {"job_id": job_id, "result": {"data": []}, "status": "completed"}
-    older_pages = [
-        (200, deepline_history(has_more=True, next_offset=50)),
-        (200, deepline_history(has_more=True, next_offset=100)),
-        (200, deepline_history(has_more=True, next_offset=50)),
-        (200, deepline_history(has_more=True, next_offset=150)),
-        (200, deepline_history(has_more=True, next_offset=50)),
-    ]
-    broker, store, transport = make_broker(transport=FakeTransport([
-        (200, json.dumps(envelope).encode()),
-        *older_pages,
-        (200, deepline_history(
-            deepline_history_entry(job_id, "exa_search", 0.03),
-            has_more=True, next_offset=50,
-        )),
-    ]))
-    result = broker.execute(
-        CONTEXT, operation_id="deepline.execute",
-        parameters={"tool": "exa_search", "payload": {"query": "x"}},
-        action_sequence=0, timeout_ms=30_000,
-    )
-    assert result.status == 200
-    assert result.call["actual_microusd"] == 3_000
-    assert store.log == ["reserve", "dispatch", "settle"]
-    assert [request["url"] for request in transport.sent[1:]] == [
-        br.DEEPLINE_BILLING_HISTORY_URL,
-        br.DEEPLINE_BILLING_HISTORY_URL + "&recent_offset=50",
-        br.DEEPLINE_BILLING_HISTORY_URL,
-        br.DEEPLINE_BILLING_HISTORY_URL + "&recent_offset=100",
-        br.DEEPLINE_BILLING_HISTORY_URL,
-        br.DEEPLINE_BILLING_HISTORY_URL + "&recent_offset=150",
-    ]
-    assert sleeps == [2.0, 2.0]
-
-
-@pytest.mark.usefixtures("legacy_no_key_deepline_call")
-def test_deepline_nonterminal_older_match_resets_offset_before_newest_refresh(monkeypatch):
-    sleeps = []
-    monkeypatch.setattr(br.time, "sleep", sleeps.append)
-    job_id = "iad1::becomes-terminal-on-newest"
-    nonterminal = deepline_history_entry(job_id, "exa_search", 0.03, charge_state="temporary_hold")
-    envelope = {"job_id": job_id, "result": {"data": []}, "status": "completed"}
-    broker, store, transport = make_broker(transport=FakeTransport([
-        (200, json.dumps(envelope).encode()),
-        (200, deepline_history(has_more=True, next_offset=50)),
-        (200, deepline_history(nonterminal, has_more=True, next_offset=100)),
-        (200, deepline_history(has_more=True, next_offset=50)),
-        (200, deepline_history(deepline_history_entry(job_id, "exa_search", 0.03))),
-    ]))
-    result = broker.execute(
-        CONTEXT, operation_id="deepline.execute",
-        parameters={"tool": "exa_search", "payload": {"query": "x"}},
-        action_sequence=0, timeout_ms=30_000,
-    )
-    assert result.status == 200 and result.call["actual_microusd"] == 3_000
-    assert [request["url"] for request in transport.sent[1:]] == [
-        br.DEEPLINE_BILLING_HISTORY_URL,
-        br.DEEPLINE_BILLING_HISTORY_URL + "&recent_offset=50",
-        br.DEEPLINE_BILLING_HISTORY_URL,
-        br.DEEPLINE_BILLING_HISTORY_URL + "&recent_offset=50",
-    ]
-    assert sleeps == [2.0]
-    assert store.log == ["reserve", "dispatch", "settle"]
-
-
-@pytest.mark.usefixtures("legacy_no_key_deepline_call")
-def test_deepline_billing_history_accepts_exact_match_without_exhausting_pages():
-    job_id = "iad1::match-on-full-account"
-    envelope = {
-        "job_id": job_id,
-        "result": {"data": {"results": []}},
-        "status": "completed",
-    }
-    broker, store, transport = make_broker(
-        transport=FakeTransport(
-            [
-                (200, json.dumps(envelope).encode()),
-                (
-                    200,
-                    deepline_history(
-                        deepline_history_entry(job_id, "exa_search", 0.14),
-                        has_more=True,
-                        next_offset=50,
-                    ),
-                ),
-            ]
-        )
-    )
-    result = broker.execute(
-        CONTEXT,
-        operation_id="deepline.execute",
-        parameters={"tool": "exa_search", "payload": {"query": "x"}},
-        action_sequence=0,
-        timeout_ms=30_000,
-    )
-    assert result.status == 200 and result.call["actual_microusd"] == 14_000
-    assert len(transport.sent) == 2
-    assert store.calls[result.call["call_identity"]]["actual"] == 14_000
-
-
 @pytest.mark.parametrize("request_seconds", [2.0, 20.0, 45.0])
-def test_deepline_history_refresh_keeps_reconciliation_time_bound(monkeypatch, request_seconds):
+def test_deepline_exact_lookup_keeps_reconciliation_time_bound(monkeypatch, request_seconds):
     elapsed = [0.0]
     monkeypatch.setattr(br.time, "monotonic", lambda: elapsed[0])
     monkeypatch.setattr(br.time, "sleep", lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds))
 
-    class SlowHistory:
+    class SlowExactLookup:
         def __init__(self):
             self.timeouts = []
 
         def send(self, **kwargs):
+            assert kwargs["method"] == "GET"
+            assert kwargs["url"] == br.DEEPLINE_EXACT_BILLING_URL + "new-job"
             timeout = kwargs["timeout_seconds"]
             self.timeouts.append(timeout)
             elapsed[0] += min(1.5, timeout)
-            next_offset = len(self.timeouts) * 50
-            return br.ProviderResponse(200, {}, json.dumps(deepline_history(
-                deepline_history_entry("older", "exa_search", 0.01),
-                has_more=True, next_offset=next_offset,
-            )).encode())
+            return br.ProviderResponse(200, {}, json.dumps({
+                "recent": {"request_id": "new-job", "entries": []},
+            }).encode())
 
-    transport = SlowHistory()
-    cost = br._deepline_billing_readback(
+    transport = SlowExactLookup()
+    request_id, cost = br._deepline_exact_readback(
         transport=transport, secret="test-key", request_id="new-job",
-        operation="exa_search", reconciliation_deadline=request_seconds,
+        execution_key=None, operation="exa_search",
+        reconciliation_deadline=request_seconds,
     )
-    assert cost is None
+    assert request_id == "new-job" and cost is None
     assert elapsed[0] == min(request_seconds, 30.0)
     assert 1 <= len(transport.timeouts) <= br._DEEPLINE_BILLING_MAX_ATTEMPTS
     assert all(0 < value <= min(request_seconds, 30.0) for value in transport.timeouts)
 
 
-@pytest.mark.usefixtures("legacy_no_key_deepline_call")
 def test_deepline_reconciles_after_paid_request_uses_full_provider_window(monkeypatch):
     elapsed = [0.0]
     monkeypatch.setattr(br.time, "monotonic", lambda: elapsed[0])
@@ -5562,8 +5312,9 @@ def test_deepline_reconciles_after_paid_request_uses_full_provider_window(monkey
 
     assert result.status == 200 and result.call["outcome"] == "settled"
     assert result.call["actual_microusd"] == 0
-    assert result.call["cost_basis"] == "deepline_billing_history_credits_x_0.10_usd"
+    assert result.call["cost_basis"] == "deepline_exact_request_credits_x_0.10_usd"
     assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
+    assert transport.sent[1]["url"] == br.DEEPLINE_EXACT_BILLING_URL + quote(job_id, safe="")
     assert transport.sent[0]["timeout"] == pytest.approx(30.0)
     assert transport.sent[1]["timeout"] == pytest.approx(
         operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
@@ -5572,7 +5323,6 @@ def test_deepline_reconciles_after_paid_request_uses_full_provider_window(monkey
     assert store.log == ["reserve", "dispatch", "settle"]
 
 
-@pytest.mark.usefixtures("legacy_no_key_deepline_call")
 def test_deepline_unresolved_reconciliation_stays_uncertain_after_bounded_extra_window(
     monkeypatch,
 ):
@@ -5618,6 +5368,8 @@ def test_deepline_unresolved_reconciliation_stays_uncertain_after_bounded_extra_
     )
     assert [sent["method"] for sent in transport.sent].count("POST") == 1
     assert [sent["method"] for sent in transport.sent].count("GET") > 1
+    assert all(sent["url"] == br.DEEPLINE_EXACT_BILLING_URL + quote(job_id, safe="")
+               for sent in transport.sent[1:])
     assert store.log == ["reserve", "dispatch", "uncertain"]
 
 
@@ -5747,8 +5499,7 @@ def test_deepline_invalid_or_conflicting_history_fails_closed(entries):
     assert sentinel.encode() not in result.body
 
 
-@pytest.mark.usefixtures("legacy_no_key_deepline_call")
-def test_deepline_pending_history_exhausts_bounded_reads_then_fails_closed(monkeypatch):
+def test_deepline_pending_exact_bill_exhausts_bounded_reads_then_fails_closed(monkeypatch):
     monkeypatch.setattr(br.time, "sleep", lambda seconds: None)
     job_id = "iad1::pending-history"
     envelope = {
@@ -5779,20 +5530,19 @@ def test_deepline_pending_history_exhausts_bounded_reads_then_fails_closed(monke
     assert_unpriced_uncertain(result)
     assert len(transport.sent) == 1 + br._DEEPLINE_BILLING_MAX_ATTEMPTS
     assert all(
-        sent["url"] == br.DEEPLINE_BILLING_HISTORY_URL
+        sent["url"] == br.DEEPLINE_EXACT_BILLING_URL + quote(job_id, safe="")
         for sent in transport.sent[1:]
     )
     assert "actual" not in store.calls[result.call["call_identity"]]
 
 
-@pytest.mark.usefixtures("legacy_no_key_deepline_call")
-def test_deepline_billing_history_transport_timeout_polls_then_fails_closed(monkeypatch):
+def test_deepline_exact_lookup_transport_timeout_polls_then_fails_closed(monkeypatch):
     monkeypatch.setattr(br.time, "sleep", lambda seconds: None)
     job_id = "iad1::history-timeout"
 
-    class HistoryTimeoutTransport(FakeTransport):
+    class ExactLookupTimeoutTransport(FakeTransport):
         def send(self, **kwargs):
-            if kwargs["url"] == br.DEEPLINE_BILLING_HISTORY_URL:
+            if kwargs["url"] == br.DEEPLINE_EXACT_BILLING_URL + quote(job_id, safe=""):
                 self.sent.append(
                     {
                         "method": kwargs["method"],
@@ -5812,7 +5562,7 @@ def test_deepline_billing_history_transport_timeout_polls_then_fails_closed(monk
         "billing": {"credits_charged": "not-a-number"},
     }
     broker, store, transport = make_broker(
-        transport=HistoryTimeoutTransport([(200, json.dumps(envelope).encode())])
+        transport=ExactLookupTimeoutTransport([(200, json.dumps(envelope).encode())])
     )
     result = broker.execute(
         CONTEXT,
@@ -5983,7 +5733,6 @@ def test_dynamic_deepline_budget_busy_stops_at_the_reserve_deadline(monkeypatch)
     assert elapsed[0] == pytest.approx(operations.BUDGET_ADMISSION_MAX_SECONDS)
 
 
-@pytest.mark.usefixtures("legacy_no_key_deepline_call")
 def test_dynamic_deepline_admission_wait_does_not_consume_operation_window(monkeypatch):
     elapsed = [0.0]
     monkeypatch.setattr(br.time, "monotonic", lambda: elapsed[0])
@@ -6019,11 +5768,14 @@ def test_dynamic_deepline_admission_wait_does_not_consume_operation_window(monke
         timeout_ms=60_000,
     )
     assert result.status == 200 and result.call["actual_microusd"] == 10_000
+    assert result.call["cost_basis"] == "deepline_exact_request_credits_x_0.10_usd"
     assert store.log.count("reserve") == 66
     assert store.log[65:67] == ["reserve", "dispatch"]
     assert elapsed[0] == pytest.approx(39.0)
     assert transport.sent[0]["method"] == "POST"
     assert transport.sent[0]["timeout"] == pytest.approx(60.0)
+    assert all(sent["url"] == br.DEEPLINE_EXACT_BILLING_URL + quote(job_id, safe="")
+               for sent in transport.sent[1:])
     assert transport.sent[1]["timeout"] == pytest.approx(30.0)
     assert transport.sent[-1]["timeout"] == pytest.approx(24.0)
 

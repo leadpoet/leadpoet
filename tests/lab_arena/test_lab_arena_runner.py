@@ -3720,3 +3720,56 @@ def test_after_repeated_refusals_the_worker_answers_frames_locally(tmp_path):
     assert all(status == 402 for status in runtime_.statuses[:rn.MAX_REFUSED_FRAMES])
     assert all("budget_exhausted" in str(status) for status in runtime_.statuses[rn.MAX_REFUSED_FRAMES:])
     assert api.completions[0]["body"]["result"]["resource_summary"]["provider_call_count"] == rn.MAX_REFUSED_FRAMES
+
+
+def test_empty_image_cache_fails_runner_startup_before_api_or_claim(tmp_path, monkeypatch):
+    from lab_arena import wiring, proxy_workers
+    root = tmp_path / "runner"
+    root.mkdir()
+    api_calls = []
+    exports = []
+    monkeypatch.setattr(
+        wiring, "prepare_validator_scoring",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            parallelism=1, verified_proxies=SimpleNamespace(webshare_worker_count=0),
+        ),
+    )
+    monkeypatch.setattr(proxy_workers, "ProxyWorkerPool", lambda _value: object())
+    monkeypatch.setattr(wiring.runtime, "RunscRuntime", lambda _config: object())
+    monkeypatch.setattr(wiring, "registry_client_from_environment", lambda: object())
+    monkeypatch.setattr(rn, "registry_image_exporter", lambda _client: lambda *_args: exports.append(True))
+    monkeypatch.setattr(rn, "HttpArenaApiClient", lambda *_args: api_calls.append(True))
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
+    keypair = SimpleNamespace(ss58_address=RUNNER.ss58_address, sign=lambda _message: b"signature")
+    args = SimpleNamespace(round_id=None, work_dir=str(root), runsc_path="/usr/local/bin/runsc")
+    with pytest.raises(rn.RunnerError, match="insufficient disk space for image export"):
+        wiring.build_runner_from_environment(args, keypair=keypair)
+    assert api_calls == []
+    assert exports == []
+    # Failed startup releases its shared cache lease for normal maintenance.
+    from lab_arena.cache_retention import workspace_cache_lock
+    with workspace_cache_lock(root, exclusive=True):
+        pass
+
+
+def test_empty_image_cache_accepts_existing_export_space_requirement(tmp_path, monkeypatch):
+    exports = []
+    required = min(rn.DEFAULT_IMAGE_CACHE_MAX_BYTES, rn.images.DEFAULT_MAX_ROOTFS_BYTES) + rn.images.DEFAULT_MAX_IMAGE_BYTES
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=required))
+    cache = rn.ImageCache(tmp_path / "images", lambda *_args: exports.append(True))
+    assert cache._ready == {}
+    assert exports == []
+
+
+def test_warm_image_cache_needs_no_cold_export_reserve(tmp_path, monkeypatch):
+    digest = "sha256:" + "a" * 64
+    root = tmp_path / "images"
+    entry = root / digest.replace(":", "-")
+    (entry / "rootfs").mkdir(parents=True)
+    (entry / ".exported").write_text(digest)
+    exports = []
+    monkeypatch.setattr(rn.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
+    cache = rn.ImageCache(root, lambda *_args: exports.append(True))
+    assert cache.rootfs_for(digest) == entry / "rootfs"
+    assert exports == []
+    assert entry.exists()

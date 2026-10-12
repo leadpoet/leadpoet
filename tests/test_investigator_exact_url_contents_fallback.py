@@ -133,6 +133,7 @@ def test_contents_uses_existing_deepline_accounted_gateway_route():
 @pytest.mark.parametrize("extra", [
     {"error": "crawl failed"}, {"errors": ["crawl failed"]},
     {"statuses": [{"id": URL, "status": "error"}]},
+    {"statuses": [{"id": "opaque-document-id", "status": "error"}]},
 ])
 def test_contents_rejects_failure_even_with_cached_result_text(monkeypatch, extra):
     monkeypatch.setenv("EXA_API_KEY", "test-exa")

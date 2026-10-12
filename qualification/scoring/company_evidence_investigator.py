@@ -2282,8 +2282,7 @@ async def _fetch_exa_exact_page(
         ):
             return {"ok": False, "error": "invalid_contents_status"}
         if any(
-            item.get("id", item.get("url")) == canonical_url
-            and (item.get("status") == "error" or item.get("error"))
+            item.get("status") == "error" or item.get("error")
             for item in statuses
         ):
             return {"ok": False, "error": "contents_crawl_error"}

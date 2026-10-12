@@ -3239,7 +3239,8 @@ def test_completed_unproven_stale_stage_keeps_valid_scoring_sibling(
         with pytest.raises(arena_scoring.ScoringError):
             run_score()
         assert calls["investigator"] == arena_scoring.MAX_JUDGE_RETRIES
-        assert calls["good"] == (0 if company_quality else 1)
+        # An unresolved company must not prevent its valid sibling from finishing.
+        assert calls["good"] == 1
     else:
         rows = run_score()
         assert [row["final_score"] for row in rows] == [0.0, 77.0], rows

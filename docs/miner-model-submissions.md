@@ -50,6 +50,7 @@ The miner pays those upstream charges. There is no organizer-key fallback.
 | `openrouter_api_key_no_credit` | Add credit or increase the runtime key's exhausted limit. |
 | `openrouter_management_key_invalid` | Supply the management key that controls this exact runtime key. |
 | `deepline_api_key_invalid` | Check that the Deepline key is active and correct. |
+| `deepline_api_key_no_credit` | Add Deepline credit; the workspace balance is exhausted. |
 | `credential_validation_unavailable` / `credential_kms_unavailable` | Retry later; a dependency could not complete the check. |
 
 Rejected admission codes can have the prefix `submission_rejected:`.

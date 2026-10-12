@@ -13,6 +13,7 @@ import binascii
 import hashlib
 import json
 import re
+from decimal import Decimal
 from typing import Any, Callable, Mapping, Optional
 from urllib.parse import urlencode
 from urllib import request as urlrequest
@@ -26,6 +27,7 @@ SCRAPINGDOG_ACCOUNT_URL = "https://api.scrapingdog.com/account"
 MAX_PROBE_RESPONSE_BYTES = 1_048_576
 MAX_CREDENTIAL_BYTES = 4096
 
+_DECIMAL_RE = re.compile(r"^-?[0-9]+(?:\.[0-9]+)?(?:[eE]-?[0-9]+)?$")
 _OPENROUTER_KEY_RE = re.compile(r"^sk-or-v1-[A-Za-z0-9_-]{24,}$")
 _SUBMISSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 _HOTKEY_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{46,48}$")
@@ -60,6 +62,35 @@ class CredentialError(RuntimeError):
         self.code = str(code)
         self.retryable = bool(retryable)
         super().__init__(self.code)
+
+
+def _deepline_balance_amount(document: Mapping[str, Any]) -> Optional[Decimal]:
+    """Read the remaining credit from a Deepline billing-balance response.
+
+    Returns None when no typed balance field is present, which keeps an
+    unexpected response shape from rejecting a working key.
+    """
+
+    scopes: list[Any] = [document]
+    for container in ("billing", "data"):
+        nested = document.get(container)
+        if isinstance(nested, Mapping):
+            scopes.append(nested)
+    for scope in scopes:
+        for name in ("balance", "balance_credits", "credits", "remaining_credits"):
+            value = scope.get(name)
+            if type(value) not in (str, int, float):
+                continue
+            text = str(value)
+            if len(text) > 100 or _DECIMAL_RE.fullmatch(text) is None:
+                continue
+            try:
+                amount = Decimal(text)
+            except ArithmeticError:
+                continue
+            if amount.is_finite():
+                return amount
+    return None
 
 
 class _ProbeError(Exception):
@@ -216,7 +247,19 @@ class CredentialManager:
             raise CredentialError("openrouter_management_key_invalid")
 
     def _validate_deepline(self, deepline_key: str) -> None:
-        self._probe(DEEPLINE_BALANCE_URL, deepline_key, "deepline_api_key_invalid")
+        balance = self._probe(
+            DEEPLINE_BALANCE_URL, deepline_key, "deepline_api_key_invalid"
+        )
+        # A funded key is what the entry actually needs: the runtime pays every
+        # Deepline call from this balance and has no organizer-key fallback, so
+        # an exhausted key is admitted and then burns the whole entry on 402
+        # `miner_credentials_unavailable`. Mirror the OpenRouter rule and reject
+        # it at admission instead. Only a typed, clearly non-positive balance
+        # rejects; an unreadable or absent field still passes, so a change in
+        # the billing response shape cannot lock miners out.
+        remaining = _deepline_balance_amount(balance)
+        if remaining is not None and remaining <= 0:
+            raise CredentialError("deepline_api_key_no_credit")
 
     def _validate_scrapingdog(self, scrapingdog_key: str) -> None:
         account = self._probe(

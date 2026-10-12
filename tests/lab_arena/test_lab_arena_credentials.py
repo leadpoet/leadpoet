@@ -195,3 +195,54 @@ def test_malformed_ciphertext_is_a_nonretryable_miner_credential_error():
         manager.runtime_key(row, "deepline")
     assert caught.value.code == "miner_credentials_unavailable"
     assert caught.value.retryable is False
+
+
+def _probe_with_deepline_balance(balance):
+    def probe(url, bearer_token, timeout_seconds):
+        if url == cr.DEEPLINE_BALANCE_URL:
+            assert bearer_token == DEEPLINE_KEY
+            return dict(balance)
+        return valid_probe(url, bearer_token, timeout_seconds)
+
+    return probe
+
+
+@pytest.mark.parametrize(
+    "balance",
+    [{"balance": 0}, {"balance": "-1.5"}, {"billing": {"balance_credits": 0}}],
+)
+def test_exhausted_deepline_balance_is_rejected_at_admission(balance):
+    manager = cr.CredentialManager(
+        kms_key_id="alias/key",
+        kms_client=FakeKms(),
+        http_get=_probe_with_deepline_balance(balance),
+        timeout_seconds=7,
+    )
+
+    with pytest.raises(cr.CredentialError, match="deepline_api_key_no_credit"):
+        manager.validate_and_encrypt(
+            submitted_credentials(),
+            submission_id=SUBMISSION_ID,
+            miner_hotkey=MINER_HOTKEY,
+        )
+
+
+@pytest.mark.parametrize(
+    "balance",
+    [{"balance": 0.01}, {"balance": "12"}, {"unexpected": "shape"}, {"balance": None}],
+)
+def test_funded_or_unreadable_deepline_balance_still_admits(balance):
+    manager = cr.CredentialManager(
+        kms_key_id="alias/lab-arena-miner-keys",
+        kms_client=FakeKms(),
+        http_get=_probe_with_deepline_balance(balance),
+        timeout_seconds=7,
+    )
+
+    encrypted = manager.validate_and_encrypt(
+        submitted_credentials(),
+        submission_id=SUBMISSION_ID,
+        miner_hotkey=MINER_HOTKEY,
+    )
+
+    assert set(encrypted) == {"openrouter", "deepline"}

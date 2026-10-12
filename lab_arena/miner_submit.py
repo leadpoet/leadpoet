@@ -214,6 +214,7 @@ _SAFE_ADMISSION_ERRORS = frozenset({
     "submission_rejected:openrouter_api_key_no_credit",
     "submission_rejected:openrouter_management_key_invalid",
     "submission_rejected:deepline_api_key_invalid",
+    "submission_rejected:deepline_api_key_no_credit",
     "submission_rejected:scrapingdog_api_key_invalid",
     "submission_rejected:submission_credentials_invalid",
     "submission_credentials_immutable",

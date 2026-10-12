@@ -1887,10 +1887,11 @@ def _quote_supports_headcount(quote: str, observed_value: Any) -> bool:
     """Bind the submitted count to company-wide text without inventing freshness."""
 
     normalized = _normalized_span(quote).replace("\u2013", "-").replace("\u2014", "-")
-    if re.search(
+    excluded_count = re.search(
         r"\b(?:associated members?|followers?|alumni|former employees?)\b",
         normalized,
-    ) or re.search(
+    )
+    if re.search(
         r"\b(?:department|division|office|location)\b.{0,40}"
         r"\b(?:has|had|employs?|employees?|headcount)\b",
         normalized,
@@ -1918,6 +1919,18 @@ def _quote_supports_headcount(quote: str, observed_value: Any) -> bool:
     else:
         token_pattern = re.escape(compact_token)
     count_noun = r"(?:employees?|workers?|people)"
+    # A profile may show followers above its separate Company size field.
+    # Only an explicit employee-size span can disambiguate those counts.
+    company_size_span = re.search(
+        rf"\bcompany size\b\s*:?\s*{token_pattern}"
+        rf"\s+{count_noun}\b",
+        normalized_quote,
+    )
+    if excluded_count:
+        if not company_size_span or re.search(
+            r"\bteam\b.{0,40}$", normalized_quote[:company_size_span.start()]
+        ):
+            return False
     return bool(
         re.search(
             rf"{token_pattern}(?:\s+[a-z-]+){{0,3}}\s+{count_noun}\b",

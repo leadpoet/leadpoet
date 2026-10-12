@@ -198,3 +198,143 @@ def test_timeout_partial_survives_provider_or_credential_override(tmp_path, cred
     assert body["output"]["failure"] == ("judge_timeout" if credential_failure else "judge_error")
     assert body["output"]["reason"] == "malformed_response"
     assert body["output"]["company_judgments"] == rows
+
+
+@pytest.mark.parametrize("change", [
+    "valid", "execute", "accepted", "wrong_run", "wrong_slot", "absent",
+    "malformed", "nested", "oversized", "cleanup", "worker_cleanup", "stale",
+])
+def test_signaled_scorer_reports_only_strict_failed_company_checkpoint(
+    tmp_path, monkeypatch, change,
+):
+    import signal
+    from lab_arena import runner, runtime
+    from tests.lab_arena.test_lab_arena_runner import lease as execute_lease
+
+    document = _input()
+    lease = scoring_lease()
+    lease.update(
+        scorer_policy=document["scorer_policy"], company_quality_policy="company_quality_v1",
+        company_judgment_cache=_lease(document), scored_output={"companies": document["companies"]},
+    )
+    rows = [_new(_refs(document)[0])]
+    output = scoring.build_scoring_failure("r1", "judge_error", company_judgments=rows)
+    if change == "execute":
+        lease = execute_lease()
+    elif change == "accepted":
+        output = scoring.build_scoring_output("r1", [], company_judgments=rows)
+    elif change == "wrong_run":
+        output["scored_run_id"] = "another-execution"
+    elif change == "wrong_slot":
+        output["company_judgments"][0]["authority_slot"] += 1
+    checkpoint_bytes = json.dumps(output).encode()
+    if change == "absent":
+        checkpoint_bytes = None
+    elif change == "malformed":
+        checkpoint_bytes = b'{"unfinished":'
+    elif change == "nested":
+        checkpoint_bytes = b"[" * 2000 + b"]" * 2000
+    elif change == "oversized":
+        checkpoint_bytes = b"x" * (runtime.MAX_OUTPUT_BYTES + 1)
+
+    class Interrupted:
+        def run_icp(self, spec, **_kwargs):
+            assert (spec.entry_command == runtime.SCORER_ENTRY_COMMAND) is (change != "execute")
+            error = runtime.RuntimeHostError(
+                reason="sandbox_launcher_signaled", launch_exit_code=-signal.SIGINT,
+                checkpoint_bytes=checkpoint_bytes,
+            )
+            if change == "cleanup":
+                raise runtime.SandboxCleanupError("cleanup incomplete", result=None) from error
+            raise error
+
+    class Api(LoggingApi):
+        def complete(self, envelope):
+            result = super().complete(envelope)
+            return {"status": "stale"} if change == "stale" else result
+
+    api = Api()
+    api.leases = [lease]
+    if change == "worker_cleanup":
+        original_stop = runner.WorkerSocketServer.stop
+
+        def failed_stop(server):
+            original_stop(server)
+            raise RuntimeError("worker cleanup failed")
+
+        monkeypatch.setattr(runner.WorkerSocketServer, "stop", failed_stop)
+    worker = run_model(tmp_path, api, Interrupted())
+    events = [event for batch in api.batches for event in batch["events"]]
+    host_errors = [event for event in events if event["kind"] == "runtime.error"]
+    assert host_errors
+    if change != "cleanup":
+        assert any(event["content"].get("runtime_host_reason") == "sandbox_launcher_signaled"
+                   and event["content"].get("status") == "abandoned" for event in host_errors)
+    if change in {"valid", "stale"}:
+        assert worker.abandoned == 0
+        assert len(api.completions) == 1
+        body = api.completions[0]["body"]
+        assert body["result"]["terminal_status"] == "judge_error"
+        assert body["output"]["failure"] == "judge_error"
+        assert body["output"]["company_judgments"] == rows
+        assert "breakdowns" not in body["output"]
+        if change == "stale":
+            assert worker.completed[0]["result"]["status"] == "stale"
+    else:
+        assert worker.abandoned == 1
+        assert api.completions == []
+    assert "company_judgments" not in json.dumps(api.batches)
+
+
+@pytest.mark.parametrize("failed_cleanup", [None, "delete", "umount"])
+def test_real_signaled_runtime_checkpoint_reaches_only_failed_completion(
+    tmp_path, failed_cleanup,
+):
+    import signal
+    from lab_arena import runtime
+    from tests.lab_arena.test_lab_arena_runtime import FakeClock, FakeProcess, FakeRunner, make_config
+
+    document = _input()
+    lease = scoring_lease()
+    lease.update(
+        scorer_policy=document["scorer_policy"], company_quality_policy="company_quality_v1",
+        company_judgment_cache=_lease(document), scored_output={"companies": document["companies"]},
+    )
+    rows = [_new(_refs(document)[0])]
+    output = scoring.build_scoring_failure("r1", "judge_error", company_judgments=rows)
+    host_dir = tmp_path / "host"
+    host_dir.mkdir()
+    host_config = make_config(host_dir)
+    clock = FakeClock()
+
+    class SignaledRuntime:
+        def run_icp(self, spec, **_kwargs):
+            assert spec.entry_command == runtime.SCORER_ENTRY_COMMAND
+
+            def launch(argv):
+                spec.output_path.write_bytes(json.dumps(output).encode())
+                return FakeProcess(argv, clock=clock, finish_at=clock(), returncode=-signal.SIGINT)
+
+            return runtime.run_sandbox(
+                host_config, spec,
+                process_runner=FakeRunner(clock, fail={failed_cleanup} if failed_cleanup else (), run_process=launch),
+                clock=clock, sleep=clock.sleep, rusage=lambda: (0.0, 0),
+            )
+
+    api = LoggingApi()
+    api.leases = [lease]
+    worker = run_model(tmp_path, api, SignaledRuntime())
+    if failed_cleanup:
+        assert worker.abandoned == 1
+        assert api.completions == []
+    else:
+        assert worker.abandoned == 0
+        body = api.completions[0]["body"]
+        assert body["result"]["terminal_status"] == "judge_error"
+        assert body["output"]["company_judgments"] == rows
+        assert "breakdowns" not in body["output"]
+        assert any(
+            event["kind"] == "runtime.error"
+            and event["content"].get("runtime_host_reason") == "sandbox_launcher_signaled"
+            for batch in api.batches for event in batch["events"]
+        )

@@ -92,6 +92,7 @@ class RuntimeHostError(ArenaRuntimeError):
         self, message="", *, reason="runtime_host_error", runsc_path=None, work_dir=None,
         launch_exit_code=None, launch_timed_out=False, launch_stderr=b"",
         launch_stderr_truncated=False, diagnostic_secrets: Sequence[str] = (),
+        checkpoint_bytes: bytes | None = None,
     ):
         # Preserve existing callers' exception text, but never log that text.
         super().__init__(
@@ -106,6 +107,10 @@ class RuntimeHostError(ArenaRuntimeError):
             else None
         )
         self.launch_timed_out = bool(launch_timed_out)
+        # Private bounded runtime output; never include it in diagnostics.
+        self.checkpoint_bytes = (
+            checkpoint_bytes if isinstance(checkpoint_bytes, bytes) else None
+        )
         self.launch_stderr, self.launch_stderr_truncated = _safe_launch_stderr(
             launch_stderr, truncated=bool(launch_stderr_truncated),
             secrets=diagnostic_secrets,

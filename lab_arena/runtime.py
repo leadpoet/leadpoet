@@ -1051,7 +1051,9 @@ def run_sandbox(
             raise ArenaRuntimeError("sandbox pipes did not close")
         if stdout_capture.failed or stderr_capture.failed:
             raise ArenaRuntimeError("sandbox pipe read failed")
-        def launch_failure(reason: str) -> RuntimeHostError:
+        def launch_failure(
+            reason: str, *, checkpoint_bytes: Optional[bytes] = None,
+        ) -> RuntimeHostError:
             return RuntimeHostError(
                 reason=reason, runsc_path=config.runsc_path,
                 launch_exit_code=process.returncode,
@@ -1059,6 +1061,7 @@ def run_sandbox(
                 launch_stderr=stderr_capture.value(),
                 launch_stderr_truncated=stderr_capture.truncated,
                 diagnostic_secrets=tuple(spec.extra_environment.values()),
+                checkpoint_bytes=checkpoint_bytes,
             )
 
         if startup_timed_out:
@@ -1074,7 +1077,17 @@ def run_sandbox(
         # A negative Popen return code means the host runsc process was
         # signaled. runsc reports a signaled sandbox process as 128 + signal.
         if not timed_out and process.returncode < 0:
-            raise launch_failure("sandbox_launcher_signaled")
+            interrupted_checkpoint = None
+            if spec.entry_command == SCORER_ENTRY_COMMAND:
+                try:
+                    interrupted_checkpoint = read_output(spec)
+                except SandboxOutputError:
+                    pass
+            # Preserve only bytes for strict failed scorer-checkpoint validation.
+            # The original host failure and cleanup dominance remain unchanged.
+            raise launch_failure(
+                "sandbox_launcher_signaled", checkpoint_bytes=interrupted_checkpoint,
+            )
         cpu_seconds, max_rss = _completed_process_rusage(
             process,
             injected_rusage=rusage,

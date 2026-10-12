@@ -3933,7 +3933,31 @@ class AssignmentExecutor:
                 ),
                 result=result,
             )
-            raise
+            interrupted_partial = None
+            if (
+                scoring_run
+                and isinstance(exc, RuntimeHostError)
+                and exc.reason == "sandbox_launcher_signaled"
+                and exc.launch_exit_code is not None
+                and exc.launch_exit_code < 0
+                and not exc.launch_timed_out
+                and isinstance(exc.checkpoint_bytes, bytes)
+                and len(exc.checkpoint_bytes) <= runtime.MAX_OUTPUT_BYTES
+            ):
+                try:
+                    checkpoint = scoring.scoring_output_from_bytes(exc.checkpoint_bytes)
+                except (scoring.ScoringError, RecursionError):
+                    checkpoint = None
+                interrupted_partial = _partial_company_judgment_output(checkpoint, lease)
+            if interrupted_partial is None:
+                raise
+            # The host error was recorded above. Report only its failed,
+            # lease-bound terminal company subset through normal completion.
+            # A later worker cleanup failure must still raise, never complete.
+            primary_exception = None
+            terminal = "judge_error"
+            output_document = interrupted_partial
+            failure_diagnostic = {"stage": "sandbox", "error_class": "judge_error"}
         finally:
             pending_exception = primary_exception
             stop_exception = None

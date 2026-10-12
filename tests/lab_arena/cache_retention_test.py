@@ -246,3 +246,21 @@ def test_recent_run_activity_preserves_old_cache_until_workspace_is_retired(tmp_
     rows = prune_workspace_root(root, active_workspaces=(active,), now=NOW, apply=True, proc_root=proc)
     assert rows == [{"workspace": "old-test", "status": "recent_workspace"}]
     assert image.exists()
+
+
+def test_deployed_retention_service_covers_both_owned_workspace_roots():
+    import shlex
+    service = (Path(__file__).resolve().parents[2] / "deploy/leadpoet-arena-cache-retention.service").read_text()
+    commands = [shlex.split(line.split("=", 1)[1]) for line in service.splitlines() if line.startswith("ExecStart=")]
+    scopes = {}
+    for command in commands:
+        assert command[0].endswith("/arena-validator-venv311/bin/python3")
+        assert command[1] == "scripts/prune_arena_workspace_caches.py"
+        assert command[command.index("--older-than-days") + 1] == "7"
+        assert "--apply" in command
+        root = command[command.index("--workspace-root") + 1]
+        scopes[root] = [command[index + 1] for index, value in enumerate(command) if value == "--active-work-dir"]
+    assert set(scopes) == {"/var/lib/lab-arena", "/var/lib/leadpoet"}
+    assert "/var/lib/lab-arena/runner" in scopes["/var/lib/lab-arena"]
+    assert scopes["/var/lib/leadpoet"] == ["/var/lib/leadpoet/arena-validator"]
+    assert "Type=oneshot" in service

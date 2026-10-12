@@ -1146,6 +1146,10 @@ class ImageCache:
         self._root.mkdir(parents=True, exist_ok=True)
         with self._lock:
             self._load_existing_locked()
+            if not self._ready:
+                # An empty cache guarantees a cold export. Check its existing
+                # space requirement before the runner can claim any leases.
+                self._reserve_export_space_locked()
 
     def _load_existing_locked(self) -> None:
         existing = []

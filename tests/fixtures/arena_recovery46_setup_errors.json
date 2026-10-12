@@ -1,0 +1,72 @@
+[
+  {
+    "run_id": "arena-2026-10-12-recovery46:baseline-2026-10-12-recovery46:1:0:1",
+    "occurred_at": "2026-10-12 17:01:37+00",
+    "error_class": "RunnerError",
+    "runtime_host_reason": null,
+    "launch_exit_code": null,
+    "launch_timed_out": null,
+    "failure_stage": "setup",
+    "status": "abandoned"
+  },
+  {
+    "run_id": "arena-2026-10-12-recovery46:baseline-2026-10-12-recovery46:1:1:1",
+    "occurred_at": "2026-10-12 17:01:38+00",
+    "error_class": "RunnerError",
+    "runtime_host_reason": null,
+    "launch_exit_code": null,
+    "launch_timed_out": null,
+    "failure_stage": "setup",
+    "status": "abandoned"
+  },
+  {
+    "run_id": "arena-2026-10-12-recovery46:baseline-2026-10-12-recovery46:1:2:1",
+    "occurred_at": "2026-10-12 17:01:39+00",
+    "error_class": "RunnerError",
+    "runtime_host_reason": null,
+    "launch_exit_code": null,
+    "launch_timed_out": null,
+    "failure_stage": "setup",
+    "status": "abandoned"
+  },
+  {
+    "run_id": "arena-2026-10-12-recovery46:baseline-2026-10-12-recovery46:1:3:1",
+    "occurred_at": "2026-10-12 17:01:41+00",
+    "error_class": "RunnerError",
+    "runtime_host_reason": null,
+    "launch_exit_code": null,
+    "launch_timed_out": null,
+    "failure_stage": "setup",
+    "status": "abandoned"
+  },
+  {
+    "run_id": "arena-2026-10-12-recovery46:baseline-2026-10-12-recovery46:1:4:1",
+    "occurred_at": "2026-10-12 17:01:42+00",
+    "error_class": "RunnerError",
+    "runtime_host_reason": null,
+    "launch_exit_code": null,
+    "launch_timed_out": null,
+    "failure_stage": "setup",
+    "status": "abandoned"
+  },
+  {
+    "run_id": "arena-2026-10-12-recovery46:baseline-2026-10-12-recovery46:1:5:1",
+    "occurred_at": "2026-10-12 17:01:43+00",
+    "error_class": "RunnerError",
+    "runtime_host_reason": null,
+    "launch_exit_code": null,
+    "launch_timed_out": null,
+    "failure_stage": "setup",
+    "status": "abandoned"
+  },
+  {
+    "run_id": "arena-2026-10-12-recovery46:baseline-2026-10-12-recovery46:1:6:1",
+    "occurred_at": "2026-10-12 17:01:44+00",
+    "error_class": "RunnerError",
+    "runtime_host_reason": null,
+    "launch_exit_code": null,
+    "launch_timed_out": null,
+    "failure_stage": "setup",
+    "status": "abandoned"
+  }
+]

@@ -3958,18 +3958,20 @@ async def investigate_company_evidence(
                 ):
                     raise RuntimeError("reasoning_provider_unavailable")
                 choices = body.get("choices")
-                empty_submit_message = (
+                empty_tool_message = (
                     choices[0].get("message")
                     if isinstance(choices, list)
                     and len(choices) == 1
                     and isinstance(choices[0], Mapping)
                     else None
                 )
+                submit_only_response = bool(
+                    force_submit or required_tool == "submit_findings"
+                )
                 if (
-                    (force_submit or required_tool == "submit_findings")
-                    and isinstance(empty_submit_message, Mapping)
-                    and empty_submit_message.get("tool_calls") in (None, [])
-                    and empty_submit_message.get("content") in (None, "")
+                    isinstance(empty_tool_message, Mapping)
+                    and empty_tool_message.get("tool_calls") in (None, [])
+                    and empty_tool_message.get("content") in (None, "")
                     and not correction_turn
                     and _turn + 1 < MAX_REASONING_TURNS
                     and incomplete_submit_retries < MAX_INCOMPLETE_SUBMIT_RETRIES
@@ -3977,7 +3979,7 @@ async def investigate_company_evidence(
                         ADMISSION_DEADLINE_SECONDS
                         + (
                             SERIALIZATION_REPAIR_GRACE_SECONDS
-                            if positive_semantic_review else 0.0
+                            if positive_semantic_review and submit_only_response else 0.0
                         )
                     )
                     and _response_exhausted_output_budget(
@@ -3986,10 +3988,12 @@ async def investigate_company_evidence(
                 ):
                     # Output exhaustion can consume the whole reply before a
                     # tool call starts. Share the existing serialization retry;
-                    # do not invent a tool call or reopen research.
+                    # do not invent a tool call or expand research bounds.
                     incomplete_submit_retries += 1
-                    forced_next_tool = "submit_findings"
-                    incomplete_submit_retry_pending = True
+                    forced_next_tool = (
+                        "submit_findings" if submit_only_response else required_tool
+                    )
+                    incomplete_submit_retry_pending = submit_only_response
                     messages.append({
                         "role": "user",
                         "content": (
@@ -3999,6 +4003,12 @@ async def investigate_company_evidence(
                             "fetched evidence. Do not search or fetch. Return one "
                             "finding for each active target and no other target: "
                             + ", ".join(active_submit_targets) + "."
+                            if submit_only_response else (
+                                "The prior tool response exhausted its output budget "
+                                "before returning a tool call. Return one complete "
+                                "tool call using the currently allowed tools and "
+                                "required tool choice. Do not emit prose."
+                            )
                         ),
                     })
                     continue

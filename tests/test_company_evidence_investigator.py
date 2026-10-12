@@ -17348,7 +17348,10 @@ def test_saved_soneil_count_unit_findings_preserve_identity_binding():
     ("captured_length", 3, True),
     ("empty_tool_list", 3, True),
     ("non_length", 2, False),
-    ("research_turn", 2, False),
+    ("research_turn", 3, True),
+    ("research_expired", 2, False),
+    ("research_second_empty", 3, False),
+    ("turn_budget", 2, False),
     ("expired", 2, False),
     ("second_empty", 3, False),
     ("second_arguments", 3, False),
@@ -17369,15 +17372,16 @@ def test_empty_output_exhausted_submit_shares_one_serialization_repair(
         calls.append(payload)
         if len(calls) == 1:
             name, args = "search_web", {"query": "Acme current company size"}
-        elif len(calls) == 2 or mode == "second_empty":
-            if mode != "research_turn":
+        elif len(calls) == 2 or mode in {"second_empty", "research_second_empty"}:
+            if not mode.startswith("research"):
                 assert payload["tool_choice"] == {
                     "type": "function", "function": {"name": "submit_findings"},
                 }
-            if mode == "expired":
+            if mode in {"expired", "research_expired"}:
                 clock.now = (
                     investigator.ADMISSION_DEADLINE_SECONDS
-                    + investigator.SERIALIZATION_REPAIR_GRACE_SECONDS
+                    + (0.0 if mode == "research_expired" else
+                       investigator.SERIALIZATION_REPAIR_GRACE_SECONDS)
                 )
             # Captured production shape: reasoning consumed all 3,000 output
             # tokens, with no content or tool call emitted before length stop.
@@ -17406,12 +17410,17 @@ def test_empty_output_exhausted_submit_shares_one_serialization_repair(
                 }}],
             }}], "usage": {"completion_tokens": 3000}}
         else:
-            assert payload["tool_choice"] == {
-                "type": "function", "function": {"name": "submit_findings"},
-            }
-            assert payload["reasoning"] == {"effort": "low"}
+            if mode == "research_turn":
+                assert payload["tool_choice"] == "required"
+                assert "reasoning" not in payload
+                assert "currently allowed tools" in payload["messages"][-1]["content"]
+            else:
+                assert payload["tool_choice"] == {
+                    "type": "function", "function": {"name": "submit_findings"},
+                }
+                assert payload["reasoning"] == {"effort": "low"}
+                assert "Do not search or fetch" in payload["messages"][-1]["content"]
             assert payload["messages"][-1]["role"] == "user"
-            assert "Do not search or fetch" in payload["messages"][-1]["content"]
             name, args = "submit_findings", {"findings": [_finding(
                 "headcount", observed_value="51-200", evidence_url=url,
                 evidence_quote=quote,
@@ -17423,11 +17432,13 @@ def test_empty_output_exhausted_submit_shares_one_serialization_repair(
         }]}}]}
 
     async def search(*_args, **_kwargs):
-        clock.now = 0.0 if mode == "research_turn" else 80.0
+        clock.now = 0.0 if mode.startswith("research") else 80.0
         return {"results": [], "notice": "discovery_only_not_evidence"}
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("EXA_API_KEY", "test-key")
+    if mode == "turn_budget":
+        monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 2)
     monkeypatch.setattr(investigator, "time", clock)
     monkeypatch.setattr(investigator, "_post_json", post)
     monkeypatch.setattr(investigator, "_search_web", search)
@@ -17534,3 +17545,76 @@ def test_malformed_submit_target_contract_shares_bounded_serialization_repair(
         assert result["claims"]["geography"]["status"] == "UNPROVEN"
         assert result["usage"]["search_calls"] == 1
         assert result["usage"]["fetch_calls"] == 0
+
+
+@pytest.mark.parametrize("obey_search_contract", [True, False])
+def test_empty_exhausted_forced_search_preserves_original_tool_contract(
+    monkeypatch, obey_search_contract,
+):
+    calls = []
+    searches = []
+    url = "https://www.linkedin.com/company/acme"
+    quote = "Acme | LinkedIn. Company size 51-200 employees."
+
+    async def post(_session, _url, *, headers, payload):
+        del headers
+        calls.append(payload)
+        turn = len(calls)
+        if turn == 1:
+            name, args = "submit_findings", {"findings": [_finding(
+                "headcount", status="UNPROVEN", observed_value=None,
+                evidence_url="", evidence_quote="",
+            )]}
+        elif turn == 2:
+            assert payload["tool_choice"] == {
+                "type": "function", "function": {"name": "search_web"},
+            }
+            return 200, {"choices": [{"finish_reason": "length", "message": {
+                "content": None,
+            }}], "usage": {"completion_tokens": 3000,
+                           "completion_tokens_details": {"reasoning_tokens": 3000}}}
+        elif turn == 3:
+            assert payload["tool_choice"] == {
+                "type": "function", "function": {"name": "search_web"},
+            }
+            assert "reasoning" not in payload
+            assert "currently allowed tools" in payload["messages"][-1]["content"]
+            if obey_search_contract:
+                name, args = "search_web", {"query": "Acme current company size"}
+            else:
+                name, args = "submit_findings", {"findings": [_finding(
+                    "headcount", observed_value="51-200", evidence_url=url,
+                    evidence_quote=quote,
+                )]}
+        else:
+            name, args = "submit_findings", {"findings": [_finding(
+                "headcount", observed_value="51-200", evidence_url=url,
+                evidence_quote=quote,
+            )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(turn), "type": "function", "function": {
+                "name": name, "arguments": json.dumps(args),
+            },
+        }]}}]}
+
+    async def search(_session, query, **_kwargs):
+        searches.append(query)
+        return {"results": [], "notice": "discovery_only_not_evidence"}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "_post_json", post)
+    monkeypatch.setattr(investigator, "_search_web", search)
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example", "linkedin": url},
+        targets=("headcount",), positive_semantic_review=True,
+        requested_employee_buckets=["51-200"],
+        prior_observations={"submitted_source_urls": [url]},
+        prefetched_pages={url: {"text": quote, "final_url": url}},
+    ))
+    assert len(calls) == (4 if obey_search_contract else 3)
+    assert len(searches) == (1 if obey_search_contract else 0)
+    assert (result.get("_completed_submit") is True) is obey_search_contract
+    assert result["failure_reason"] == (
+        "" if obey_search_contract else MALFORMED_RESPONSE_FAILURE_REASON
+    )

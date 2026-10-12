@@ -535,7 +535,15 @@ class PostgrestTransport(StoreTransport):
                     code = response.json().get("code")
                 except ValueError:
                     code = None
-                if code == DEADLOCK_SQLSTATE:
+                if code == DEADLOCK_SQLSTATE or (
+                    response.status_code == 500
+                    and code == "55P03"
+                    and function in {
+                        "lab_arena_reserve_call", "lab_arena_reserve_judgment_call",
+                    }
+                ):
+                    # An explicit reservation lock timeout rolls back the RPC.
+                    # Repeat its exact identity before any provider dispatch.
                     self.deadlock_retries += 1
                     time.sleep(0.01 * (attempt + 1))
                     continue

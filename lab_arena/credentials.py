@@ -64,13 +64,15 @@ class CredentialError(RuntimeError):
         super().__init__(self.code)
 
 
-def _deepline_balance_amount(document: Mapping[str, Any]) -> Optional[Decimal]:
+def _deepline_balance_amount(document: Any) -> Optional[Decimal]:
     """Read the remaining credit from a Deepline billing-balance response.
 
     Returns None when no typed balance field is present, which keeps an
     unexpected response shape from rejecting a working key.
     """
 
+    if not isinstance(document, Mapping):
+        return None
     scopes: list[Any] = [document]
     for container in ("billing", "data"):
         nested = document.get(container)

@@ -229,7 +229,14 @@ def test_exhausted_deepline_balance_is_rejected_at_admission(balance):
 
 @pytest.mark.parametrize(
     "balance",
-    [{"balance": 0.01}, {"balance": "12"}, {"unexpected": "shape"}, {"balance": None}],
+    [
+        {"balance": 0.01},
+        {"balance": "12"},
+        {"unexpected": "shape"},
+        {"balance": None},
+        ["unexpected list"],
+        "unexpected string",
+    ],
 )
 def test_funded_or_unreadable_deepline_balance_still_admits(balance):
     manager = cr.CredentialManager(

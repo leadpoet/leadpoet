@@ -2190,6 +2190,16 @@ async def _fetch_page(
             )
             final_profile = _strict_linkedin_company_profile_url(source.get("url"))
             text = source.get("text", "")
+            if (
+                isinstance(current, Mapping)
+                and current.get("outcome") == "insufficient_evidence"
+                and _strict_linkedin_company_profile_url(current.get("url"))
+                == linkedin_profile
+                and final_profile == linkedin_profile
+                and text == ""
+                and source.get("http_status") in {"404", "410"}
+            ):
+                return {"ok": False, "error": "http_" + source["http_status"]}
             if not (
                 isinstance(current, Mapping)
                 and final_profile == linkedin_profile
@@ -3730,9 +3740,6 @@ async def investigate_company_evidence(
             industry_followup_fetched_urls: set[str] = set()
             quote_repair_targets: set[str] = set()
             public_stage_unproven_rereviewed = False
-            # Time must remove an available research step before a later
-            # UNPROVEN submission is incomplete. Voluntary UNPROVEN is final.
-            research_denied_for_time = False
             scoped_correction_targets: tuple[str, ...] = ()
             scoped_correction_preserved: dict[str, dict[str, Any]] = {}
             scoped_correction_candidate_targets: tuple[str, ...] = ()
@@ -3846,17 +3853,6 @@ async def investigate_company_evidence(
                     # Use the already loaded evidence for one final judgment.
                     # Any required proof that is still missing remains
                     # UNPROVEN under the unchanged deterministic validators.
-                    if (
-                        not turn_forced_submit
-                        and required_tool != "submit_findings"
-                        and (
-                            search_calls < MAX_SEARCH_CALLS
-                            or fetch_calls < MAX_FETCH_CALLS
-                        )
-                    ):
-                        # Time, rather than a completed research budget or a
-                        # pending submit repair, removed an available step.
-                        research_denied_for_time = True
                     required_tool = "submit_findings"
                 force_submit = bool(
                     judgment_reserve_active
@@ -4729,26 +4725,41 @@ async def investigate_company_evidence(
                                 for target in requested_targets
                             }
                         stage_finding = claims.get("stage") or {}
-                        budget_interrupted = bool(
-                            research_denied_for_time
-                            and any(
-                                finding.get("status") == "UNPROVEN"
-                                for finding in claims.values()
-                            )
-                        )
                         required_stage_incomplete = bool(
                             required_stage_discovery_failure_reason
                             and not current_stage_search_succeeded
                             and (claims.get("stage") or {}).get("status")
                             == "UNPROVEN"
                         )
+                        # Only a later outcome for the same source can recover
+                        # its transport failure; other pages cannot clear it.
+                        latest_source_faults: dict[str, bool] = {}
+                        for outcome in fetch_outcomes:
+                            latest_source_faults[outcome["url_sha256"]] = (
+                                outcome["ok"] is False
+                                and outcome["error_class"] not in {
+                                    "provider_request_refused", "source_not_found",
+                                    "source_gone",
+                                }
+                            )
+                        unresolved_source = bool(
+                            any(latest_source_faults.values())
+                            and any(
+                                finding.get("status") == "UNPROVEN"
+                                for finding in claims.values()
+                            )
+                        )
                         failure_reason = (
-                            ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
-                            if budget_interrupted
-                            else required_stage_discovery_failure_reason
+                            required_stage_discovery_failure_reason
                             if required_stage_incomplete
+                            else PROVIDER_ERROR_FAILURE_REASON
+                            if unresolved_source
                             else ""
                         )
+                        # A complete validated judgment may finish UNPROVEN
+                        # within bounded research. Missing submissions and
+                        # required discovery failures remain incomplete;
+                        # source transport faults remain in fetch_outcomes.
                         if failure_reason:
                             _record_failure(diagnostic, failure_reason)
                         return {
@@ -4786,8 +4797,6 @@ async def investigate_company_evidence(
                         elapsed >= ADMISSION_DEADLINE_SECONDS
                         - JUDGMENT_ADMISSION_RESERVE_SECONDS
                     ):
-                        if search_calls < MAX_SEARCH_CALLS:
-                            research_denied_for_time = True
                         forced_next_tool = "submit_findings"
                         tool_result = {
                             "ok": False,
@@ -4847,8 +4856,6 @@ async def investigate_company_evidence(
                         elapsed >= ADMISSION_DEADLINE_SECONDS
                         - JUDGMENT_ADMISSION_RESERVE_SECONDS
                     ):
-                        if fetch_calls < MAX_FETCH_CALLS:
-                            research_denied_for_time = True
                         forced_next_tool = "submit_findings"
                         tool_result = {
                             "ok": False,

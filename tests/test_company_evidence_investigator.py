@@ -16449,17 +16449,34 @@ def test_time_interrupted_review_recovers_on_second_scoring_attempt(monkeypatch)
     assert rows[0]["final_score"] == 54
 
 
-def test_real_reserve_forced_unproven_retries_with_retained_source(monkeypatch):
+@pytest.mark.parametrize("company_quality", [False, True])
+@pytest.mark.parametrize("review", [
+    "unproven", "positive", "401", "403", "429", "502", "503", "timeout",
+    "empty_page", "provider_diagnostic_body", "unknown_fetch_error",
+    "502_recovered",
+    "missing_submit", "malformed_submit",
+])
+def test_real_reserve_completed_judgment_and_faults_through_arena_score(
+    monkeypatch, company_quality, review,
+):
     product_url = "https://acme.example/student-plans"
     product_quote = "Acme supplies schools with student planning software."
     calls = {
         "provider": 0, "investigator": 0, "model": 0,
         "search": 0, "investigator_fetch": 0, "grounding_fetch": 0,
-        "intent": 0, "first_interrupted_returned": 0,
+        "intent": 0, "completed_returned": 0,
     }
     clock = SimpleNamespace(now=0.0)
     clock.monotonic = lambda: clock.now
     real_investigate = investigator.investigate_company_evidence
+    real_fetch = investigator._fetch_page
+    transport_fault = review not in {
+        "unproven", "positive", "502_recovered", "missing_submit",
+        "malformed_submit",
+    }
+    attempted_fetch = transport_fault or review == "502_recovered"
+    incomplete = review in {"missing_submit", "malformed_submit"}
+    model_turn = 0
 
     async def prechecks(*_args, **_kwargs):
         return lead_scorer.company_fit_match("prechecks passed")
@@ -16489,24 +16506,41 @@ def test_real_reserve_forced_unproven_retries_with_retained_source(monkeypatch):
         ), ""
 
     async def model(_session, _url, *, headers, payload):
+        nonlocal model_turn
         del headers
         calls["model"] += 1
-        if calls["model"] == 1:
+        model_turn += 1
+        if attempted_fetch and model_turn == 1:
+            name, arguments = "fetch_page", {
+                "url": "https://acme.example/current-evidence",
+            }
+        elif model_turn == (2 if attempted_fetch else 1):
             name, arguments = "search_web", {"query": "Acme school software"}
         else:
-            assert calls["model"] <= 3
             assert payload["tool_choice"] == {
                 "type": "function",
                 "function": {"name": "submit_findings"},
             }
             name, arguments = "submit_findings", {"findings": [
                 _finding(
+                    "industry", observed_value="school planning software",
+                    observed_industry="Education",
+                    observed_subindustry="school planning software",
+                    activity_role="supplier_operator",
+                    evidence_url=product_url, evidence_quote=product_quote,
+                ) if review == "positive" else _finding(
                     "industry", status="UNPROVEN", observed_value=None,
                     evidence_url="", evidence_quote="",
                     reason="No complete company-bound industry proof.",
                 ),
-                _attribute_finding("UNPROVEN"),
+                _attribute_finding(
+                    "VERIFIED", url=product_url, quote=product_quote,
+                ) if review == "positive" else _attribute_finding("UNPROVEN"),
             ]}
+            if review == "missing_submit":
+                return 200, {"choices": [{"message": {"content": "No findings."}}]}
+            if review == "malformed_submit":
+                arguments = {"findings": []}
         return 200, {"choices": [{"message": {"tool_calls": [{
             "id": f"call-{calls['model']}", "type": "function",
             "function": {"name": name, "arguments": json.dumps(arguments)},
@@ -16522,10 +16556,30 @@ def test_real_reserve_forced_unproven_retries_with_retained_source(monkeypatch):
         return {"results": [], "notice": "discovery_only_not_evidence"}
 
     async def investigator_fetch(_session, url, **_kwargs):
-        assert url == product_url
+        assert url == "https://acme.example/current-evidence"
         calls["investigator_fetch"] += 1
-        return {"ok": True, "url": url, "final_url": url,
-                "text": product_quote}
+        if review == "timeout":
+            raise asyncio.TimeoutError()
+        if review in {"empty_page", "provider_diagnostic_body"}:
+            return await real_fetch(_session, url)
+        return {"ok": False, "error": (
+            "http_502" if review == "502_recovered"
+            else f"http_{review}" if review.isdigit()
+            else review
+        )}
+
+    async def fallback(_session, url):
+        if review == "502_recovered":
+            return {"ok": True, "url": url, "final_url": url,
+                    "text": product_quote}
+        return {"ok": False, "error": "contents_provider_unavailable"}
+
+    async def raw_source(_session, url, **_kwargs):
+        assert review in {"empty_page", "provider_diagnostic_body"}
+        return 200, url, (
+            "" if review == "empty_page" else
+            "Robot Challenge Screen acme.example Checking the site connection security"
+        )
 
     async def grounding_fetch(_session, url):
         assert url == product_url
@@ -16533,44 +16587,30 @@ def test_real_reserve_forced_unproven_retries_with_retained_source(monkeypatch):
         return 200, url, product_quote
 
     async def investigate(**kwargs):
+        nonlocal model_turn
         calls["investigator"] += 1
+        clock.now = 0.0
+        model_turn = 0
         assert kwargs["targets"] == ("industry", "required_attribute")
         assert kwargs["positive_semantic_review"] is True
-        if calls["investigator"] == 1:
-            result = await real_investigate(**kwargs)
-            assert result["_completed_submit"] is False
-            assert result["failure_reason"] == (
-                investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+        result = await real_investigate(**kwargs)
+        if not (transport_fault or incomplete):
+            assert calls["investigator"] == 1
+            assert result["_completed_submit"] is True
+            assert result["failure_reason"] == ""
+            assert result["claims"]["industry"]["status"] == (
+                "VERIFIED" if review == "positive" else "UNPROVEN"
             )
-            assert result["claims"]["industry"]["status"] == "UNPROVEN"
             assert result[investigator.PRIVATE_FETCHED_PAGES_KEY][product_url][
                 "text"
             ] == product_quote
-            calls["first_interrupted_returned"] += 1
-            return result
-        assert calls["investigator"] == 2
-        assert kwargs["prefetched_pages"][product_url] == {
-            "final_url": product_url, "text": product_quote,
-        }
-        return {
-            "claims": {
-                "industry": _finding(
-                    "industry", observed_value="school planning software",
-                    observed_industry="Education",
-                    observed_subindustry="school planning software",
-                    activity_role="supplier_operator",
-                    evidence_url=product_url, evidence_quote=product_quote,
-                ),
-                "required_attribute": _attribute_finding(
-                    "VERIFIED", url=product_url, quote=product_quote,
-                ),
-            },
-            investigator.PRIVATE_FETCHED_PAGES_KEY: {
-                product_url: {"final_url": product_url, "text": product_quote},
-            },
-            "_completed_submit": True,
-            "failure_reason": "",
-        }
+            calls["completed_returned"] += 1
+        elif transport_fault:
+            assert result.get("_completed_submit") is not True
+            assert result["failure_reason"] == "provider_error"
+        else:
+            assert result.get("_completed_submit") is not True
+        return result
 
     async def keep_observation(verdict, *_args, **_kwargs):
         return verdict
@@ -16589,9 +16629,12 @@ def test_real_reserve_forced_unproven_retries_with_retained_source(monkeypatch):
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", "test-key")
     monkeypatch.setattr(investigator, "_post_json", model)
     monkeypatch.setattr(investigator, "_search_web", search)
     monkeypatch.setattr(investigator, "_fetch_page", investigator_fetch)
+    monkeypatch.setattr(investigator, "_fetch_exa_exact_page", fallback)
+    monkeypatch.setattr(investigator, "_fetch_bounded_html", raw_source)
     monkeypatch.setattr(investigator, "time", clock)
     monkeypatch.setattr(lead_scorer, "run_company_zero_checks", prechecks)
     monkeypatch.setattr(lead_scorer, "verify_company_exists", homepage)
@@ -16608,11 +16651,10 @@ def test_real_reserve_forced_unproven_retries_with_retained_source(monkeypatch):
     scorer = arena_scoring.lab_scorer(
         arena_scoring.build_scorer_policy(
             scoring_adapter_version="qualification_integrity_v2",
-            company_quality=True,
+            company_quality=company_quality,
         )
     )
-    rows = arena_scoring.score_work_item(
-        {"scored_run_id": "real-reserve-interrupted-source-recovery"},
+    score_kwargs = dict(
         icp=_icp(
             industry="Education",
             sub_industry="school planning software",
@@ -16624,14 +16666,25 @@ def test_real_reserve_forced_unproven_retries_with_retained_source(monkeypatch):
         scorer=scorer,
         max_retries=3,
     )
+    if transport_fault or incomplete:
+        with pytest.raises(arena_scoring.ScoringError, match="judge_exhausted"):
+            arena_scoring.score_work_item(
+                {"scored_run_id": "real-reserve-failed-review"}, **score_kwargs,
+            )
+        assert calls["provider"] == calls["investigator"] == 3
+        assert calls["intent"] == 0
+        return
+    rows = arena_scoring.score_work_item(
+        {"scored_run_id": "real-reserve-completed-review"}, **score_kwargs,
+    )
     assert calls == {
-        "provider": 2, "investigator": 2, "model": 2,
-        "search": 1, "investigator_fetch": 0, "grounding_fetch": 1,
-        "intent": 1, "first_interrupted_returned": 1,
+        "provider": 1, "investigator": 1, "model": 3 if attempted_fetch else 2,
+        "search": 1, "investigator_fetch": int(attempted_fetch), "grounding_fetch": 1,
+        "intent": int(review == "positive"), "completed_returned": 1,
     }
     assert len(rows) == 1
-    assert rows[0]["company_qualified"] is True
-    assert rows[0]["final_score"] == 54
+    assert rows[0]["company_qualified"] is (review == "positive")
+    assert rows[0]["final_score"] == (54 if review == "positive" else 0)
 
 
 @pytest.mark.parametrize(

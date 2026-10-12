@@ -13,6 +13,7 @@ credential, and never chooses a miner or ICP.
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import http.server
 import json
@@ -4207,6 +4208,8 @@ class Runner:
         self.abandoned = 0
         self._pinned = config.round_id is not None
         self._round_ids: List[str] = [config.round_id] if config.round_id else []
+        self._pending_completion_cursor = ""
+        self._pending_completion_next_poll = 0.0
 
     @property
     def round_id(self) -> Optional[str]:
@@ -4308,6 +4311,186 @@ class Runner:
             )
         return max(0, capacity)
 
+    def _pending_completion_dir(self, *, create: bool = False) -> Optional[Path]:
+        directory = self._config.work_dir / "pending-completions"
+        if create:
+            self._config.work_dir.mkdir(parents=True, exist_ok=True)
+            directory.mkdir(mode=0o700, exist_ok=True)
+        try:
+            details = directory.lstat()
+        except FileNotFoundError:
+            return None
+        if (not stat.S_ISDIR(details.st_mode) or details.st_uid != os.getuid()
+            or stat.S_IMODE(details.st_mode) != 0o700):
+            raise RunnerError("pending completion directory is not private")
+        return directory
+
+    @staticmethod
+    def _sync_completion_dir(directory: Path) -> None:
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @contextmanager
+    def _lock_completion(self, path: Path) -> Iterator[Optional[int]]:
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            yield None
+            return
+        try:
+            details = os.fstat(descriptor)
+            if (not stat.S_ISREG(details.st_mode) or details.st_uid != os.getuid()
+                or stat.S_IMODE(details.st_mode) != 0o600
+                or details.st_size > contracts.COMPLETION_REQUEST_LIMITS.max_total_bytes):
+                raise RunnerError("pending completion file is invalid")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield None
+                return
+            # A previous uploader can acknowledge/unlink after this file was
+            # opened. Do not upload its old inode after acquiring the lock.
+            try:
+                current = path.lstat()
+            except FileNotFoundError:
+                yield None
+                return
+            if (current.st_dev, current.st_ino) != (details.st_dev, details.st_ino):
+                yield None
+                return
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+    def _read_pending_completion(self, descriptor: int, path: Path) -> Dict[str, Any]:
+        from lab_arena.chain import wallet_signature_verifier
+        maximum = contracts.COMPLETION_REQUEST_LIMITS.max_total_bytes
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        with os.fdopen(os.dup(descriptor), "rb") as source:
+            raw = source.read(maximum + 1)
+        if len(raw) > maximum:
+            raise RunnerError("pending completion file is too large")
+        try:
+            envelope = json.loads(raw.decode("utf-8"))
+            envelope = contracts.validate_signed_request(
+                envelope, expected_scope=contracts.SCOPE_COMPLETE,
+                now=envelope["timestamp"], verify_signature=wallet_signature_verifier,
+                expected_round_id=self._config.round_id,
+            )
+            if (envelope["hotkey"] != self._config.identity.hotkey
+                or path.name != envelope["request_id"] + ".json"
+                or set(envelope["body"]) != {"run_id", "lease_token", "result", "output"}
+                or not isinstance(envelope["body"]["run_id"], str)
+                or not envelope["body"]["run_id"]
+                or not isinstance(envelope["body"]["lease_token"], str)
+                or not envelope["body"]["lease_token"]):
+                raise RunnerError("pending completion binding is invalid")
+            contracts.validate_run_result(envelope["body"]["result"])
+        except (ValueError, TypeError, KeyError, RecursionError, ArenaContractError):
+            raise RunnerError("pending completion document is invalid") from None
+        return envelope
+
+    @contextmanager
+    def _retain_completion(self, envelope: Mapping[str, Any]) -> Iterator[Path]:
+        contracts.check_strict_document(envelope, contracts.COMPLETION_REQUEST_LIMITS)
+        if (envelope.get("hotkey") != self._config.identity.hotkey
+            or envelope.get("scope") != contracts.SCOPE_COMPLETE
+            or (self._config.round_id is not None and envelope.get("round_id") != self._config.round_id)):
+            raise RunnerError("completion identity or round is invalid")
+        if not isinstance(envelope.get("request_id"), str) or not contracts.HEX32_RE.fullmatch(envelope["request_id"]):
+            raise RunnerError("completion request identity is invalid")
+        directory = self._pending_completion_dir(create=True)
+        path = directory / (envelope["request_id"] + ".json")
+        raw = json.dumps(envelope, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=False, allow_nan=False).encode("utf-8")
+        if len(raw) > contracts.COMPLETION_REQUEST_LIMITS.max_total_bytes:
+            raise RunnerError("completion document is too large")
+        descriptor, temporary = tempfile.mkstemp(prefix=".completion-", dir=directory)
+        try:
+            os.fchmod(descriptor, 0o600)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with os.fdopen(os.dup(descriptor), "wb") as destination:
+                destination.write(raw)
+                destination.flush()
+                os.fsync(destination.fileno())
+            try:
+                # Publish a fully written locked inode without overwriting an
+                # earlier immutable envelope or creating a separate lock file.
+                os.link(temporary, path, follow_symlinks=False)
+            except FileExistsError:
+                with self._lock_completion(path) as existing:
+                    if existing is None:
+                        raise RunnerError("completion delivery is already active")
+                    saved = self._read_pending_completion(existing, path)
+                    if any(saved[key] != envelope[key] for key in ("scope", "round_id", "hotkey", "request_id", "body")):
+                        raise RunnerError("completion request identity conflict")
+                    yield path
+            else:
+                os.unlink(temporary)
+                self._sync_completion_dir(directory)
+                yield path
+        finally:
+            os.close(descriptor)
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+    def _acknowledge_completion(self, path: Path, result: Mapping[str, Any]) -> bool:
+        status = result.get("status")
+        if status in {"accepted", "failed"}:
+            path.unlink()
+        elif status in {"stale", "rejected"}:
+            # Stale/denied leases cannot be replayed, but their completed paid
+            # evidence is not proved persisted. Keep it privately for audit.
+            archive = path.with_suffix("." + status + ".json")
+            try:
+                os.link(path, archive, follow_symlinks=False)
+            except FileExistsError:
+                source_details, saved_details = path.lstat(), archive.lstat()
+                if ((source_details.st_dev, source_details.st_ino)
+                    != (saved_details.st_dev, saved_details.st_ino)):
+                    raise RunnerError("completion archive already exists") from None
+            path.unlink()
+        else:
+            return False
+        self._sync_completion_dir(path.parent)
+        return True
+
+    def _replay_pending_completions(self) -> None:
+        if time.monotonic() < self._pending_completion_next_poll:
+            return
+        cadence = max(5.0, float(self._config.claim_poll_seconds))
+        self._pending_completion_next_poll = time.monotonic() + cadence
+        directory = self._pending_completion_dir()
+        if directory is None:
+            return
+        paths = sorted((path for path in directory.iterdir()
+                        if re.fullmatch(r"[0-9a-f]{32}\.json", path.name)), key=lambda path: path.name)
+        ordered = ([path for path in paths if path.name > self._pending_completion_cursor]
+                   + [path for path in paths if path.name <= self._pending_completion_cursor])
+        for path in ordered[:1]:
+            self._pending_completion_cursor = path.name
+            try:
+                with self._lock_completion(path) as descriptor:
+                    if descriptor is None:
+                        continue
+                    envelope = self._read_pending_completion(descriptor, path)
+                    refreshed = self._completion_envelope_for_attempt(envelope)
+                    result = self._config.api.complete(refreshed)
+                    if self._acknowledge_completion(path, result):
+                        self.completed.append({"run_id": envelope["body"]["run_id"], "result": result})
+            except Exception as exc:
+                # A bad file, denial or outage cannot erase the authenticated
+                # receipt, resign unverified data, or stop later replay items.
+                print("Lab Arena pending completion deferred: %s" % type(exc).__name__,
+                      file=sys.stderr, flush=True)
+            finally:
+                self._pending_completion_next_poll = time.monotonic() + cadence
+
     def _run_lease(self, lease: Mapping[str, Any]) -> None:
         log = self._config.operational_logger
         phase = "execution"
@@ -4353,6 +4536,12 @@ class Runner:
             self._slots.release()
 
     def _complete_with_retries(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
+        with self._retain_completion(envelope) as path:
+            result = self._deliver_completion_with_retries(envelope)
+            self._acknowledge_completion(path, result)
+            return result
+
+    def _deliver_completion_with_retries(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
         """Keep the exact completion through bounded availability failures.
 
         The envelope is idempotent, so a lost response or a transient object
@@ -4440,6 +4629,7 @@ class Runner:
 
         if stop_event is not None and stop_event.is_set():
             return 0
+        self._replay_pending_completions()
         log = self._config.operational_logger
         pickup_failed = False
         if not self._pinned:
@@ -4467,6 +4657,7 @@ class Runner:
                     timeout=self._config.claim_poll_seconds,
                     return_when=FIRST_COMPLETED,
                 )
+                self._replay_pending_completions()
                 if done:
                     futures.clear()
                     futures.update(pending)
@@ -4489,6 +4680,7 @@ class Runner:
             while taken < max_claims:
                 if stop_event is not None and stop_event.is_set():
                     break
+                self._replay_pending_completions()
                 done = {future for future in futures if future.done()}
                 futures.difference_update(done)
                 for future in done:
@@ -4580,8 +4772,13 @@ class Runner:
                 rescan_while_active = False
             elif round_index == len(round_ids):
                 break
-        for future in futures:
-            future.result()
+        # Keep servicing completed receipts while the last healthy sandbox
+        # runs. A busy run_once must not defer delivery until lease expiry.
+        while futures:
+            if not wait_for_completion():
+                for future in futures:
+                    future.result()
+                break
         if log is not None:
             log.state(scoring_state="unavailable" if pickup_failed else "idle", progress=not pickup_failed)
         return taken

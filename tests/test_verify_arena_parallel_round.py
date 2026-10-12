@@ -1450,3 +1450,108 @@ def test_round_id_requires_a_bounded_explicit_suffix(round_id):
 
 def test_round_id_accepts_the_operator_suffix():
     assert verification._validate_round_id(ROUND_ID) == ROUND_ID
+
+
+def _serve_test_runtime(monkeypatch):
+    import threading
+    import time
+    import uvicorn
+    waits = []
+    servers = []
+
+    class FastEvent:
+        def __init__(self):
+            self.event = threading.Event()
+        def is_set(self):
+            return self.event.is_set()
+        def set(self):
+            self.event.set()
+        def wait(self, delay):
+            waits.append(delay)
+            return self.event.wait(min(delay, 0.001))
+
+    class Server:
+        def __init__(self, config):
+            self.started = False
+            self.should_exit = False
+            self.heartbeats = 0
+            servers.append(self)
+        def run(self):
+            self.started = True
+            deadline = time.monotonic()+3
+            while not self.should_exit and time.monotonic() < deadline:
+                self.heartbeats += 1
+                time.sleep(0.001)
+            assert self.should_exit, 'verification driver did not finish'
+
+    monkeypatch.setattr(verification, 'threading', SimpleNamespace(Event=FastEvent, Thread=threading.Thread))
+    monkeypatch.setattr(uvicorn, 'Server', Server)
+    monkeypatch.setattr(verification, '_create_or_resume', lambda *_a, **_k: 'existing')
+    return servers, waits
+
+
+@pytest.mark.parametrize('outage_phase', ['tick', 'funding', 'evidence'])
+def test_serving_retries_temporary_store_outage_and_resamples_publication(monkeypatch, tmp_path, capsys, outage_phase):
+    from lab_arena.store import ArenaStoreUnavailable
+    service = Service()
+    service.store.row['status'] = 'stage1_scoring'
+    servers, waits = _serve_test_runtime(monkeypatch)
+    args = SimpleNamespace(round_id=ROUND_ID, port=18792, status_file=tmp_path/'status.json', tick_seconds=5)
+    original_evidence = verification._evidence
+    original_funding = verification._verify_host_funding
+    counts = {'tick': 0, 'funding': 0, 'evidence': 0}
+    outages = []
+
+    def unavailable(phase, *, initialization=False):
+        counts[phase] += 1
+        if phase == outage_phase and not initialization and counts[phase] <= (3 if phase != 'tick' else 2):
+            assert servers[0].started and not servers[0].should_exit
+            outages.append(phase)
+            raise ArenaStoreUnavailable('private-request-detail-must-not-escape')
+
+    def tick(service, round_id):
+        unavailable('tick')
+        service.store.row['status'] = 'published'
+        return service.advance_round(round_id), service.reconcile_closed_provider_costs()
+
+    def funding(service, round_id, verified):
+        unavailable('funding', initialization=not servers)
+        return original_funding(service, round_id, verified)
+
+    def evidence(service, round_id):
+        unavailable('evidence', initialization=not servers)
+        return original_evidence(service, round_id)
+
+    monkeypatch.setattr(verification, '_tick', tick)
+    monkeypatch.setattr(verification, '_verify_host_funding', funding)
+    monkeypatch.setattr(verification, '_evidence', evidence)
+    assert verification._serve(args, service, object()) == 0
+    artifact = json.loads(args.status_file.read_text())
+    assert artifact['round']['status'] == 'published' and artifact['proof']['complete']
+    assert outages == [outage_phase]*2
+    assert 5 in waits and 10 in waits
+    assert servers[0].heartbeats > 0
+    assert all(operation in ('advance', 'reconcile') for operation, _ in service.calls)
+    logged = capsys.readouterr().err
+    assert 'private-request-detail-must-not-escape' not in logged
+    retry_lines = [json.loads(line) for line in logged.splitlines()]
+    assert [line['consecutive_failures'] for line in retry_lines] == [1, 2]
+    assert all(line['phase'] == outage_phase and line['error_class'] == 'ArenaStoreUnavailable' and line['observed_at'] for line in retry_lines)
+
+
+@pytest.mark.parametrize('error', [verification.VerificationError('invalid frozen configuration'), ValueError('private unexpected validation error')])
+def test_serving_still_fails_closed_for_permanent_or_unknown_errors(monkeypatch, tmp_path, capsys, error):
+    service = Service()
+    service.store.row['status'] = 'stage1_scoring'
+    servers, _ = _serve_test_runtime(monkeypatch)
+    args = SimpleNamespace(round_id=ROUND_ID, port=18792, status_file=tmp_path/'status.json', tick_seconds=5)
+    attempts = []
+    def fail(*_):
+        attempts.append(1)
+        raise error
+    monkeypatch.setattr(verification, '_tick', fail)
+    assert verification._serve(args, service, object()) == 1
+    assert attempts == [1] and servers[0].should_exit
+    logged = capsys.readouterr().err
+    assert 'parallel round driver failed: '+type(error).__name__ in logged
+    assert str(error) not in logged and 'parallel_round_driver_retry' not in logged

@@ -506,10 +506,12 @@ statement that the old and new names are the same entity, and must identify
 both names. A domain-changing rebrand must identify both domains. A
 server-observed redirect can bind those domains only when its already fetched
 body explicitly proves the old and new names are the same operating company.
-A same-domain legal or trading-name alias may instead use an independently
-verified homepage name plus the same company domain and exact LinkedIn company
-slug, together with a fetched first-party quote that names the observed legal
-or trading name.
+A same-domain legal or trading-name alias may use an independently verified
+homepage name, same company domain, and exact LinkedIn company slug. It may
+also use `server_verified_structured_alias_locator` when provided. This
+server-verified profile locator is a search aid, not proof: that route needs
+an exact legal-name (“trading name”) parenthetical in a fetched first-party
+quote that explicitly identifies both names as the same company.
 A merger, acquisition, ownership change, parent, subsidiary, or replacement
 business alone does not prove that the old and new brands are the same
 operating company. A true rebrand can coexist with separate ownership history,
@@ -3077,6 +3079,7 @@ async def investigate_company_evidence(
     # argument. Never reuse a similarly named provider-controlled field.
     bounded_prior_observations.pop("prefetched_sources", None)
     bounded_prior_observations.pop(PRIVATE_FETCHED_PAGES_KEY, None)
+    bounded_prior_observations.pop("server_verified_structured_alias_locator", None)
     raw_submitted_urls = bounded_prior_observations.get("submitted_source_urls")
     submitted_source_urls: list[str] = []
     if isinstance(raw_submitted_urls, Sequence) and not isinstance(
@@ -3212,6 +3215,35 @@ async def investigate_company_evidence(
             "admission_deadline_seconds": ADMISSION_DEADLINE_SECONDS,
         },
     }
+    structured_alias_slug = (
+        verified_structured_alias_slug.strip().casefold()
+        if isinstance(verified_structured_alias_slug, str)
+        else ""
+    )
+    submitted_domain = _registrable_domain(company_locator.get("website"))
+    observed_domain = _registrable_domain(
+        (prior_observations or {}).get("observed_company_website")
+    )
+    if (
+        structured_alias_slug
+        and len(structured_alias_slug) <= 200
+        and re.fullmatch(r"[a-z0-9][a-z0-9-]*", structured_alias_slug)
+        and submitted_domain
+        and submitted_domain == observed_domain
+        and structured_alias_slug == linkedin_company_page_slug(
+            (prior_observations or {}).get("observed_company_linkedin")
+        )
+        and str(company_locator.get("name") or "").strip()
+        and str((prior_observations or {}).get("observed_company_name") or "").strip()
+    ):
+        input_document["server_verified_structured_alias_locator"] = {
+            "registrable_dns_domain": submitted_domain,
+            "linkedin_company_slug": structured_alias_slug,
+            "notice": (
+                "server_verified_profile_locator_only; an exact fetched "
+                "first-party quote must still prove legal-to-brand continuity"
+            ),
+        }
     if bounded_homepage_navigation_locators:
         input_document["untrusted_homepage_navigation_locators"] = (
             bounded_homepage_navigation_locators

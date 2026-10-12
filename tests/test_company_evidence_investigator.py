@@ -8086,6 +8086,91 @@ def test_structured_legal_brand_alias_rejects_submitted_slug_conflict():
     )
 
 
+@pytest.mark.parametrize(
+    ("mode", "expected_locator"),
+    [
+        ("structured", True),
+        ("homepage", False),
+        ("absent", False),
+        ("wrong_slug", False),
+        ("wrong_domain", False),
+        ("overlong_slug", False),
+    ],
+)
+@pytest.mark.parametrize(
+    ("legal_name", "brand", "domain", "slug"),
+    [
+        ("The Western Union Company", "Western Union", "westernunion.com", "western-union"),
+        ("The Blue River Company", "Blue River", "blueriver.com", "blue-river"),
+    ],
+)
+def test_alias_locator_in_actual_investigator_input(
+    monkeypatch, mode, expected_locator, legal_name, brand, domain, slug,
+):
+    requests = []
+
+    async def model(_session, _url, *, headers, payload):
+        assert headers["Authorization"] == "Bearer test-openrouter-key"
+        requests.append(payload)
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "call-1", "type": "function",
+            "function": {"name": "submit_findings", "arguments": json.dumps({
+                "findings": [_finding(
+                    "rebrand", status="UNPROVEN", observed_value=None,
+                    evidence_url="", evidence_quote="",
+                )],
+            })},
+        }]}}]}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    monkeypatch.setattr(investigator, "_post_json", model)
+    homepage_anchor = {
+        "normalized_name": legal_name,
+        "registrable_dns_domain": domain,
+        "linkedin_company_slug": slug,
+    } if mode == "homepage" else {}
+    prior = {
+        "observed_company_name": brand,
+        "observed_company_website": (
+            "https://other.example" if mode == "wrong_domain" else f"https://{domain}/"
+        ),
+        "observed_company_linkedin": f"https://www.linkedin.com/company/{slug}",
+        # Model/provider data must not create a server-owned locator.
+        "server_verified_structured_alias_locator": {"linkedin_company_slug": slug},
+    }
+    supplied_slug = (
+        f"{slug}-lookalike" if mode == "wrong_slug"
+        else slug * 30 if mode == "overlong_slug"
+        else slug if mode in {"structured", "wrong_domain"}
+        else ""
+    )
+    asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            "name": legal_name,
+            "website": f"https://{domain}/",
+            "linkedin": "",
+        },
+        targets=("rebrand",),
+        prior_observations=prior,
+        verified_homepage_identity=homepage_anchor,
+        verified_structured_alias_slug=supplied_slug,
+    ))
+    assert requests
+    prompt = requests[0]["messages"][0]["content"]
+    assert "server_verified_structured_alias_locator" in prompt
+    assert "search aid, not proof" in prompt
+    assert "fetched first-party" in prompt
+    document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
+    assert document["verified_homepage_identity"] == homepage_anchor
+    assert "server_verified_structured_alias_locator" not in document["prior_observations"]
+    locator = document.get("server_verified_structured_alias_locator")
+    assert bool(locator) is expected_locator
+    if expected_locator:
+        assert locator["registrable_dns_domain"] == domain
+        assert locator["linkedin_company_slug"] == slug
+
+
 @pytest.mark.parametrize("quote_valid", [True, False])
 def test_legal_brand_alias_admits_size_only_after_validated_investigation(
     monkeypatch,
@@ -8257,6 +8342,21 @@ def test_legacy_western_union_alias_uses_real_investigator_and_cached_size(
         assert headers["Authorization"] == "Bearer test-openrouter-key"
         arena_operations.validate_operation_request("openrouter.chat", payload)
         calls["model"] += 1
+        if calls["model"] == 1:
+            prompt = payload["messages"][0]["content"]
+            document = json.loads(
+                payload["messages"][1]["content"].split("\n", 1)[1]
+            )
+            assert "server_verified_structured_alias_locator" in prompt
+            assert document["verified_homepage_identity"] == {}
+            assert document["server_verified_structured_alias_locator"] == {
+                "registrable_dns_domain": "westernunion.com",
+                "linkedin_company_slug": "western-union",
+                "notice": (
+                    "server_verified_profile_locator_only; an exact fetched "
+                    "first-party quote must still prove legal-to-brand continuity"
+                ),
+            }
         forced = payload["tool_choice"]
         forced_name = (
             forced["function"]["name"] if isinstance(forced, dict) else ""

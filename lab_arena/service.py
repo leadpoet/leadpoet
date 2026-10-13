@@ -51,6 +51,11 @@ _DEEPLINE_BILLING_ABANDONED_SLOTS = 4
 _DEEPLINE_BILLING_EXECUTE_SLOTS = 1
 _DEEPLINE_BILLING_SCORE_SLOTS = 88
 _DEEPLINE_BILLING_GENERAL_SLOTS = 3
+# Waves to try before giving up on a batch that is settling nothing. Each wave
+# is _DEEPLINE_BILLING_WORKERS candidates and a candidate the provider has no
+# charge for costs the full ledger-read deadline, so the full 96-candidate
+# batch costs minutes once the provider stops answering.
+_DEEPLINE_BILLING_IDLE_WAVE_LIMIT = 2
 
 # Provider error codes that mean "the call was declined before or instead of
 # doing upstream work" versus "the call may have happened and we cannot tell"
@@ -5020,10 +5025,28 @@ class ArenaService:
                     return {"status": "unavailable"}
 
             with telemetry.stage("reconcile_active_deepline_costs") as observed:
+                candidates = list(unique.values())
+                results: List[Dict[str, Any]] = []
+                settled = 0
                 with ThreadPoolExecutor(max_workers=_DEEPLINE_BILLING_WORKERS,
                                         thread_name_prefix="arena-billing") as pool:
-                    results = list(pool.map(reconcile, unique.values()))
-                settled = sum(result.get("status") == "settled" for result in results)
+                    for start in range(0, len(candidates), _DEEPLINE_BILLING_WORKERS):
+                        wave = candidates[start:start + _DEEPLINE_BILLING_WORKERS]
+                        outcomes = list(pool.map(reconcile, wave))
+                        results.extend(outcomes)
+                        settled += sum(result.get("status") == "settled"
+                                       for result in outcomes)
+                        # A provider that is refusing calls has no charge to
+                        # find, so every candidate polls its ledger to the full
+                        # deadline and comes back pending. Stop once the opening
+                        # waves settle nothing: one provider outage must not
+                        # stretch this step, and the round advance it gates, by
+                        # minutes. Unsettled liabilities stay candidates and the
+                        # next driver pass retries them from the same lanes.
+                        if settled == 0 and len(results) >= (
+                            _DEEPLINE_BILLING_WORKERS * _DEEPLINE_BILLING_IDLE_WAVE_LIMIT
+                        ):
+                            break
                 observed.count = settled
                 observed.idle = settled == 0
             status = "settled" if settled else str(results[0].get("status") or "unavailable")

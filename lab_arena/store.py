@@ -1489,6 +1489,20 @@ class ArenaStore:
         rows = self._transport.select("lab_arena_rounds", filters={"round_id": round_id}, limit=1)
         return rows[0] if rows else None
 
+    def get_public_submissions_round(self, round_id: str) -> Optional[Dict[str, Any]]:
+        """Keep every ranking and disclosure authority without frozen catalogs."""
+
+        rows = self._transport.select(
+            "lab_arena_rounds", filters={"round_id": round_id}, limit=1,
+            columns=(
+                "round_id,status,status_generation,participants,publication_doc,published_at,"
+                "benchmark_ref,evaluation_date,icp_set_date,cancel_reason,"
+                + PUBLIC_CONFIGURATION_COLUMN
+                + ",cfg_scorer_policy:configuration_doc->scorer_policy::text"
+            ),
+        )
+        return rows[0] if rows else None
+
     def get_published_results_round(self, round_id: str) -> Optional[Dict[str, Any]]:
         """Read only published result authorities and the configuration they use."""
 

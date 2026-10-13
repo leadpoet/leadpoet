@@ -3431,7 +3431,9 @@ async def investigate_company_evidence(
                     result = {"ok": False, "error": "timeout"}
                 fetch_outcomes.append(_fetch_outcome(url, result))
                 if (
-                    result.get("error") in {"http_502", "http_503", "timeout"}
+                    result.get("error") in {
+                        "http_502", "http_503", "timeout", "provider_diagnostic_body",
+                    }
                     and not result.get("ok")
                     and os.environ.get("EXA_API_KEY")
                     and not archive_targets

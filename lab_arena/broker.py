@@ -4221,7 +4221,7 @@ class Broker:
         )
         gate_lease: Optional[OpenRouterGateLease] = None
         if (
-            effective_operation_id == "openrouter.responses"
+            effective_operation_id in {"openrouter.chat", "openrouter.responses"}
             and self._openrouter_shared_gate is not None
             and openrouter_credential_fingerprint is not None
         ):
@@ -4253,6 +4253,13 @@ class Broker:
                 + operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
                 + operations.PROVIDER_API_TIMEOUT_GRACE_SECONDS
             )
+            if effective_operation_id == "openrouter.chat":
+                # Chat judges commonly request 30 seconds. Share the existing
+                # admission allowance with reservation so they can wait for
+                # cooldown without reducing their provider or billing window.
+                gate_deadline = (
+                    api_started_at + operations.BUDGET_ADMISSION_MAX_SECONDS
+                )
             try:
                 gate_lease = self._openrouter_shared_gate.acquire(
                     openrouter_credential_fingerprint,
@@ -4299,6 +4306,8 @@ class Broker:
                 - operations.PROVIDER_BILLING_RECONCILIATION_SECONDS
                 - operations.PROVIDER_API_TIMEOUT_GRACE_SECONDS,
             )
+            if effective_operation_id == "openrouter.chat":
+                reserve_deadline = min(reserve_deadline, gate_deadline)
         reserve_readback_used = False
         while True:
             if judgment_cache_key and OpenRouterSharedGate._cancelled(cancel_requested):
@@ -4791,7 +4800,7 @@ class Broker:
                 else "remaining_budget_dynamic_deepline"
             )
 
-        # Only gated Responses calls share the worker API's absolute deadline.
+        # Gated OpenRouter calls share the worker API's absolute deadline.
         # Other providers retain their full post-admission request and billing
         # windows. Once reserve commits, preserve the existing accounting
         # sequence because no call-level pre-dispatch release transition exists.
@@ -4950,7 +4959,7 @@ class Broker:
                         response.headers
                     )
                     if (
-                        effective_operation_id == "openrouter.responses"
+                        effective_operation_id in {"openrouter.chat", "openrouter.responses"}
                         and gate_lease is not None
                         and openrouter_effective_response is not None
                         and openrouter_effective_response.status == 429

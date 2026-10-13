@@ -1,5 +1,16 @@
 # Agent Instructions
 
+## Scoped production authorization: October 14 full-cycle monitoring
+
+On 2026-10-13 the user authorized monitoring October 14 baseline and miner
+work through execution, scoring, publication, promotion, rewards and weights.
+This includes protected inspection, the smallest fixes for confirmed faults,
+focused tests, safe push and merge, and canonical deployment and verification.
+Preserve October 13 results, champion and rewards; do not rescore, rejudge or
+promote that day's partial results. Preserve frozen policies, accepted work,
+provider costs and credentials, call caps, operator controls and concurrent
+work. This authority ends when full-cycle monitoring and verification finish.
+
 ## Scoped production authorization: general unfinished judge recovery
 
 On 2026-10-13 the user authorized permanent recovery of unfinished baseline
